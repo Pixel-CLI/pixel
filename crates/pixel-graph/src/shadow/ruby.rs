@@ -56,7 +56,12 @@ pub fn shadow(root: &Path, examples: usize) -> Result<RubyShadow, BoxErr> {
     let scratch = tempfile::tempdir()?;
     let db = scratch.path().join("graph.db");
     let mvp = mvp_adapter::refresh(root, scratch.path())?;
-    crate::build::build_graph_from(root, &db, mvp_adapter::RustSource::V1)?;
+    crate::build::build_graph_sources(
+        root,
+        &db,
+        mvp_adapter::RustSource::V1,
+        mvp_adapter::ruby_switch::RubySource::V1,
+    )?;
     let store = GraphStore::open(&db)?;
     let plan = ruby::ruby_plan(&store, &mvp)?;
     compare(&store, &plan, examples)

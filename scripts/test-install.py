@@ -22,7 +22,7 @@ SYSTEM_TOOLS = ("awk", "chmod", "cp", "gzip", "mkdir", "mktemp", "mv", "python3"
 
 class InstallContract(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="pixel-install-contract-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="pixel-setup-contract-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.fake = self.root / "fake"

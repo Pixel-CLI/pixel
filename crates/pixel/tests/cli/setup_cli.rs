@@ -4,7 +4,7 @@
 //! `pixel setup` through the real CLI, with an isolated home directory.
 //!
 //! The golden files under `tests/setup/.agents/` are compared in-process by
-//! `crates/pixel-install/src/setup/goldens.rs`, because the two flags that
+//! `crates/pixel-setup/src/setup/goldens.rs`, because the two flags that
 //! drive the wizard from a script (`--selected-agents`,
 //! `--selected-features`) are removed before the release. What this file holds
 //! is what only the command can show: the `--print` contract, that a run
@@ -49,18 +49,15 @@ fn stdout_of(out: &Output) -> String {
 }
 
 #[test]
-fn print_prints_the_default_block_and_writes_nothing() {
+fn print_prints_the_pixel_skill_and_writes_nothing() {
     let home = Scratch::for_test("setup", "print-home");
     let repo = Scratch::for_test("setup", "print-repo");
 
     let text = stdout_of(&run(&home, &repo, &["setup", "--print"]));
 
-    assert!(text.starts_with("<!-- pixel:setup:start -->"), "{text}");
-    assert!(text.contains("## Pixel"), "{text}");
-    assert!(
-        text.trim_end().ends_with("<!-- pixel:setup:end -->"),
-        "{text}"
-    );
+    assert!(text.starts_with("---\nname: pixel"), "{text}");
+    assert!(text.contains("pixel brief"), "{text}");
+    assert!(text.contains("license: MIT"), "{text}");
     assert!(
         !home.join(".claude").exists() && !repo.join("AGENTS.md").exists(),
         "--print is a render, not a run"
@@ -70,7 +67,7 @@ fn print_prints_the_default_block_and_writes_nothing() {
 
 // TEMPORARY (dev-flags): drives the wizard with the two selection flags.
 #[test]
-fn print_is_the_same_block_a_machine_wide_run_writes() {
+fn print_is_the_same_skill_a_machine_wide_run_writes() {
     let home = Scratch::for_test("setup", "print-machine");
     let machine = Scratch::for_test("setup", "print-machine-run");
     let repo = Scratch::for_test("setup", "print-repo-run");
@@ -87,11 +84,11 @@ fn print_is_the_same_block_a_machine_wide_run_writes() {
         "{}",
         String::from_utf8_lossy(&written.stderr)
     );
-    let claude = fs::read_to_string(machine.join(".claude/CLAUDE.md")).unwrap();
+    let skill = fs::read_to_string(machine.join(".claude/skills/pixel/SKILL.md")).unwrap();
 
     assert_eq!(
         printed.trim_end(),
-        claude.trim_end(),
+        skill.trim_end(),
         "the preview has to be what the run writes, or it is a second truth"
     );
 }
@@ -120,8 +117,12 @@ fn without_a_terminal_setup_is_the_unattended_installer_and_never_asks() {
     );
     assert_eq!(settings(&yes), written, "--yes is the unattended run");
     assert!(
+        plain.join(".claude/skills/pixel/SKILL.md").is_file(),
+        "the unattended run deploys the pixel skill"
+    );
+    assert!(
         !plain.join(".claude/CLAUDE.md").exists() && !repo.join("AGENTS.md").exists(),
-        "the managed block belongs to the guided setup, which needs a person"
+        "the instruction-file block is retired: nothing writes one"
     );
 }
 
@@ -191,10 +192,9 @@ fn a_repository_run_writes_the_repository_files_and_not_the_home_ones() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    assert!(repo.join("CLAUDE.md").is_file(), "the repository file");
     assert!(
-        repo.join("AGENTS.md").is_file(),
-        "the shared repository file"
+        !repo.join("CLAUDE.md").exists() && !repo.join("AGENTS.md").exists(),
+        "the retired block is not written to the repository either"
     );
     assert!(
         !home.join(".claude").exists(),
@@ -204,8 +204,6 @@ fn a_repository_run_writes_the_repository_files_and_not_the_home_ones() {
         !home.join(".claude/settings.json").exists(),
         "and so do its hooks"
     );
-    let agents = fs::read_to_string(repo.join("AGENTS.md")).unwrap();
-    assert!(agents.starts_with("<!-- pixel:setup:start -->"), "{agents}");
 }
 
 // TEMPORARY (dev-flags): drives the wizard with the two selection flags.
@@ -228,11 +226,12 @@ fn an_index_outside_the_list_is_refused_with_the_range() {
 
 // TEMPORARY (dev-flags): drives the wizard with the two selection flags.
 #[test]
-fn a_second_run_leaves_the_file_byte_identical() {
+fn a_second_run_leaves_the_skill_byte_identical() {
     let home = Scratch::for_test("setup", "twice-home");
     let repo = Scratch::for_test("setup", "twice-repo");
     fs::create_dir_all(home.join(".claude")).unwrap();
     let args = ["setup", "--selected-agents=1", "--selected-features=1,2,4"];
+    let skill = ".claude/skills/pixel/SKILL.md";
 
     let first_run = run(&home, &repo, &args);
     assert!(
@@ -240,17 +239,17 @@ fn a_second_run_leaves_the_file_byte_identical() {
         "the first run: {}",
         String::from_utf8_lossy(&first_run.stderr)
     );
-    let first = fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap();
+    let first = fs::read_to_string(home.join(skill)).unwrap();
     let second_run = run(&home, &repo, &args);
     assert!(
         second_run.status.success(),
         "a second run must succeed on the state the first one left: {}",
         String::from_utf8_lossy(&second_run.stderr)
     );
-    let second = fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap();
+    let second = fs::read_to_string(home.join(skill)).unwrap();
 
-    assert_eq!(first, second, "the block must not grow on every re-run");
-    assert_eq!(first.matches("<!-- pixel:setup:start -->").count(), 1);
+    assert_eq!(first, second, "the skill is stable across re-runs");
+    assert!(first.contains("name: pixel"));
 }
 
 // TEMPORARY (dev-flags): drives the wizard with the two selection flags.
@@ -274,7 +273,7 @@ fn a_run_succeeds_on_a_machine_pixel_config_setup_already_configured() {
         &[
             "setup",
             "--selected-agents=1",
-            "--selected-features=1,2,4,5,7",
+            "--selected-features=1,2,3,4",
         ],
     );
 
@@ -319,7 +318,7 @@ fn a_dummy_run_leaves_the_real_global_configuration_alone() {
 
 // TEMPORARY (dev-flags): drives the wizard with the two selection flags.
 #[test]
-fn a_users_own_paragraph_survives_the_block() {
+fn a_users_own_paragraph_is_left_alone() {
     let home = Scratch::for_test("setup", "keep-home");
     let repo = Scratch::for_test("setup", "keep-repo");
     fs::create_dir_all(home.join(".claude")).unwrap();
@@ -336,9 +335,15 @@ fn a_users_own_paragraph_survives_the_block() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let content = fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap();
-    assert!(content.starts_with("# My rules\n\nKeep me.\n"), "{content}");
-    assert!(content.contains("<!-- pixel:setup:start -->"));
+    assert_eq!(
+        fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap(),
+        "# My rules\n\nKeep me.\n",
+        "setup no longer edits instruction files at all"
+    );
+    assert!(
+        home.join(".claude/skills/pixel/SKILL.md").is_file(),
+        "the skill carries the pixel content instead"
+    );
 }
 
 // TEMPORARY (dev-flags): drives the wizard with the two selection flags.
@@ -355,7 +360,8 @@ fn the_hooks_follow_the_agents_and_the_hook_features_that_were_picked() {
     let claude_hooks =
         |home: &Path| fs::read_to_string(home.join(".claude/settings.json")).unwrap_or_default();
     let task_event = "run-hook task-event --provider claude";
-    // The index of each feature in the picker: 1 prompt, 3 task hooks, 11 codex.
+    // 1 prompt, 2 metrics, 3 daemon, 4 classify. Task hooks ride with Prompt;
+    // Codex hooks are installed automatically when Codex is selected.
     let ok = |home: &Path, agents: &str, features: &str| {
         let out = run(
             home,
@@ -374,10 +380,10 @@ fn the_hooks_follow_the_agents_and_the_hook_features_that_were_picked() {
         String::from_utf8_lossy(&out.stderr).into_owned()
     };
 
-    let review = ok(&picked, "1", "1,3");
+    let review = ok(&picked, "1", "1");
     assert!(
         claude_hooks(&picked).contains(task_event),
-        "Claude Code and the task-hooks feature: the Claude hooks are written"
+        "Claude Code and Prompt: the Claude hooks are written"
     );
     assert!(
         review.contains("Hooks and agent configuration") && review.contains("hooks.claude"),
@@ -388,19 +394,19 @@ fn the_hooks_follow_the_agents_and_the_hook_features_that_were_picked() {
         "the review comes first"
     );
 
-    ok(&features_off, "1", "1");
+    ok(&features_off, "1", "2");
     assert!(
         !claude_hooks(&features_off).contains(task_event),
-        "task hooks left off: the instruction block is written, the hooks are not"
+        "task hooks left off: the skill is written, the hooks are not"
     );
-    assert!(features_off.join(".claude/CLAUDE.md").is_file());
+    assert!(features_off.join(".claude/skills/pixel/SKILL.md").is_file());
 
-    ok(&other_agent, "2", "1,3,11");
+    ok(&other_agent, "2", "1");
     assert!(
         fs::read_to_string(other_agent.join(".codex/hooks.json"))
             .unwrap()
             .contains("task-event --provider codex"),
-        "Codex was picked with its hook feature"
+        "Codex was picked; its hooks are installed automatically"
     );
     assert!(
         !claude_hooks(&other_agent).contains(task_event),
@@ -410,25 +416,29 @@ fn the_hooks_follow_the_agents_and_the_hook_features_that_were_picked() {
 
 // TEMPORARY (dev-flags): drives the wizard with the two selection flags.
 #[test]
-fn remove_takes_out_the_block_the_rules_and_the_hooks_a_guided_run_wrote() {
+fn remove_takes_out_the_block_the_skill_and_the_hooks_a_guided_run_wrote() {
     let home = Scratch::for_test("setup", "remove-home");
     let repo = Scratch::for_test("setup", "remove-repo");
     fs::create_dir_all(home.join(".claude")).unwrap();
-    fs::write(home.join(".claude/CLAUDE.md"), "# My rules\n\nKeep me.\n").unwrap();
+    // The state an older release left: the user's text, then the retired
+    // managed block.
+    fs::write(
+        home.join(".claude/CLAUDE.md"),
+        "# My rules\n\nKeep me.\n\n<!-- pixel:setup:start -->\nold guidance\n<!-- pixel:setup:end -->\n",
+    )
+    .unwrap();
 
-    // Prompt, task hooks and the per-agent rule file (feature 9).
+    // Prompt: the task hooks and the skill deploy.
     let out = run(
         &home,
         &repo,
-        &["setup", "--selected-agents=1", "--selected-features=1,3,9"],
+        &["setup", "--selected-agents=1", "--selected-features=1"],
     );
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let rule = home.join(".claude/rules/pixel-setup.md");
-    assert!(rule.is_file(), "fixture: the rule file was written");
     assert!(
         fs::read_to_string(home.join(".claude/settings.json"))
             .unwrap()
@@ -459,7 +469,10 @@ fn remove_takes_out_the_block_the_rules_and_the_hooks_a_guided_run_wrote() {
 
     let claude_md = fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap();
     assert_eq!(claude_md, "# My rules\n\nKeep me.\n", "only the block goes");
-    assert!(!rule.exists(), "the rule file goes");
+    assert!(
+        !home.join(".claude/skills/pixel").exists(),
+        "the managed skill copy is removed"
+    );
     let settings = fs::read_to_string(home.join(".claude/settings.json")).unwrap_or_default();
     assert!(
         !settings.contains("run-hook task-event"),

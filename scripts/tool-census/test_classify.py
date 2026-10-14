@@ -25,7 +25,7 @@ class NativeTools(unittest.TestCase):
         self.assertEqual(classify.classify("Read", {"file_path": "/r/src/lib.rs"}), ("read", "read-whole-file"))
         self.assertEqual(classify.classify("Read", {"file_path": "/r/src/lib.rs", "offset": 120, "limit": 80}),
                          ("read", "read-region"))
-        self.assertEqual(classify.classify("read", {"path": "crates/pixel-install/src/config.rs", "offset": 1, "limit": 2000}),
+        self.assertEqual(classify.classify("read", {"path": "crates/pixel-setup/src/config.rs", "offset": 1, "limit": 2000}),
                          ("read", "read-region"))
 
     def test_read_config_and_docs(self):

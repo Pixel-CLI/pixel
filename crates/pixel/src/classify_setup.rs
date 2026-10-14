@@ -66,13 +66,13 @@ const OLLAYA_ROOT: &str = ".local/share/pixel/ollaya";
 /// The bundled `pixel-classify` skill — how to shape bounded classify calls
 /// and wire them into a harness's routing, guards, and grading — deployed
 /// into each configured harness's skills dir as `pixel-classify/SKILL.md`.
-const CLASSIFY_SKILL: &str = include_str!("../../pixel-install/assets/pixel-classify-skill.md");
+const CLASSIFY_SKILL: &str = include_str!("../../pixel-setup/assets/pixel-classify-skill.md");
 /// The bundled pi extension: `ask_pixel_file_bool/choice/score`,
 /// `ask_pixel_files`, `pick_pixel_file` — file-level classify calls whose
 /// file text never enters the agent's context. It ships as Pixel's classify
-/// Pi package ([`pixel_install::ClassifyPiPackage`]), declared in Pi's
+/// Pi package ([`pixel_setup::ClassifyPiPackage`]), declared in Pi's
 /// settings like the impact package, never copied into Pi's `extensions/`.
-const PI_CLASSIFY_EXTENSION: &str = include_str!("../../pixel-install/assets/pi-classify-files.ts");
+const PI_CLASSIFY_EXTENSION: &str = include_str!("../../pixel-setup/assets/pi-classify-files.ts");
 /// The skills-dir name every harness copy of [`CLASSIFY_SKILL`] deploys to.
 const CLASSIFY_SKILL_NAME: &str = "pixel-classify";
 
@@ -220,6 +220,7 @@ pub fn install_step(
         stdin,
         stdout,
         stored_engine(),
+        crate::config_cmd::classify_remote_preset(),
         setup_local,
         propose_remote_key,
         propose_openai_key,
@@ -231,12 +232,36 @@ pub fn install_step(
     )
 }
 
+/// The menu row the stored engine lands on, for pre-highlighting: `local` is
+/// the local row; `remote` resolves through its stored preset (OpenAI, Jev
+/// and the two Clef routes have their own rows, every other remote preset is
+/// the generic one); `auto`, an unknown value, and nothing stored highlight
+/// nothing.
+fn current_row(
+    stored: Option<&str>,
+    preset: Option<crate::decide_remote::Preset>,
+) -> Option<usize> {
+    use crate::decide_remote::Preset;
+    match stored {
+        Some("local") => MENU.iter().position(|(_, kind)| *kind == SetupKind::Local),
+        Some("remote") => Some(match preset {
+            Some(Preset::Openai) => SetupKind::Openai,
+            Some(Preset::Jev) => SetupKind::Jev,
+            Some(p) if p.is_clef() => SetupKind::Clef,
+            _ => SetupKind::Remote,
+        })
+        .and_then(|kind| MENU.iter().position(|(_, k)| *k == kind)),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // the seams are the point: tests inject each collaborator
 fn install_step_with<FLocal, FRemote, FOpenai, FJev, FClef, FHelpers>(
     tty: bool,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
     stored: Option<String>,
+    stored_preset: Option<crate::decide_remote::Preset>,
     setup_local: FLocal,
     propose_remote_key: FRemote,
     propose_openai_key: FOpenai,
@@ -254,44 +279,88 @@ where
     FClef: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
     FHelpers: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
 {
-    if let Some(engine) = stored {
-        writeln!(stdout, "classify engine: already configured as {engine:?} (change with `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare|auto>`)")
-            .map_err(|e| e.to_string())?;
-        // An engine chosen on an earlier install still gets the helpers
-        // offer — the proposal itself is a no-op once every file it
-        // manages is current.
-        return propose_helpers(stdin, stdout);
-    }
+    // The menu is always offered (#863): a stored engine is pre-highlighted
+    // and marked `(current)`, and Enter on it keeps the setting instead of
+    // silently skipping the question.
+    let current = current_row(stored.as_deref(), stored_preset);
     let print_menu = |stdout: &mut dyn std::io::Write| -> Result<(), String> {
         for (index, (label, _)) in MENU.iter().enumerate() {
-            writeln!(stdout, "  [{}] {label}", index + 1).map_err(|e| e.to_string())?;
+            let marker = if Some(index) == current {
+                " · current"
+            } else {
+                ""
+            };
+            writeln!(stdout, "  [{}] {label}{marker}", index + 1).map_err(|e| e.to_string())?;
         }
         Ok(())
     };
     writeln!(stdout, "Classify engine:").map_err(|e| e.to_string())?;
     if !tty {
         print_menu(stdout)?;
-        writeln!(stdout, "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare>` or re-run `pixel setup` in a terminal")
-            .map_err(|e| e.to_string())?;
-        return Ok(());
+        let line = if let Some(engine) = stored.as_deref() {
+            format!(
+                "classify engine: configured as {engine:?} (change with `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare|auto>`)"
+            )
+        } else {
+            "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare>` or re-run `pixel setup` in a terminal".to_string()
+        };
+        return writeln!(stdout, "{line}").map_err(|e| e.to_string());
     }
     // TTY: the arrow picker paints the option rows itself; EOF falls back
     // to the numbered prompt so a piped answer still lands.
-    let labels: Vec<&str> = MENU.iter().map(|(label, _)| *label).collect();
-    let picked = crate::select::pick(&labels, stdin, stdout, raw, stdin_is_terminal)?;
+    let labels: Vec<String> = MENU
+        .iter()
+        .enumerate()
+        .map(|(index, (label, _))| {
+            if Some(index) == current {
+                format!("{label} · current")
+            } else {
+                (*label).to_string()
+            }
+        })
+        .collect();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let picked = crate::select::pick_at(
+        &refs,
+        current.unwrap_or(0),
+        stdin,
+        stdout,
+        raw,
+        stdin_is_terminal,
+    )?;
     let choice = match picked {
         Some(index) => Some(index),
         None => {
             print_menu(stdout)?;
-            write!(stdout, "Choice> ").map_err(|e| e.to_string())?;
+            match current {
+                Some(index) => {
+                    write!(stdout, "Choice [{}]> ", index + 1).map_err(|e| e.to_string())?
+                }
+                None => write!(stdout, "Choice> ").map_err(|e| e.to_string())?,
+            }
             stdout.flush().map_err(|e| e.to_string())?;
             let mut line = String::new();
             stdin
                 .read_line(&mut line)
                 .map_err(|e| format!("read choice: {e}"))?;
-            parse_choice(&line)
+            if line.trim().is_empty() {
+                current
+            } else {
+                parse_choice(&line)
+            }
         }
     };
+    if choice.is_some() && choice == current {
+        let engine = stored.as_deref().unwrap_or("auto");
+        writeln!(
+            stdout,
+            "classify engine: kept {engine:?} (change with `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare|auto>`)"
+        )
+        .map_err(|e| e.to_string())?;
+        // An unchanged engine still gets the helpers offer — the proposal
+        // itself is a no-op once every file it manages is current.
+        return propose_helpers(stdin, stdout);
+    }
     match choice.and_then(|index| MENU.get(index).map(|(_, kind)| *kind)) {
         Some(SetupKind::Local) => setup_local(stdout),
         Some(SetupKind::Remote) => propose_remote_key(stdin, stdout),
@@ -310,25 +379,25 @@ where
 
 /// What a "yes" to the helpers proposal writes: the `pixel-classify` skill
 /// into every configured harness's skills dir — the skill is
-/// harness-agnostic, not pi-only; [`pixel_install::config::SKILL_ROOTS`] is
+/// harness-agnostic, not pi-only; [`pixel_setup::config::SKILL_ROOTS`] is
 /// the single list of roots — and, when pi is set up, Pixel's classify Pi
 /// package with its `packages` entry. `.claude` is a target unconditionally
 /// (`pixel setup` writes its hooks there before this step runs); the rest
 /// join only when configured.
 struct ClassifyHelpers {
     skills: Vec<PathBuf>,
-    pi: Option<pixel_install::ClassifyPiPackage>,
+    pi: Option<pixel_setup::ClassifyPiPackage>,
 }
 
 impl ClassifyHelpers {
-    fn at(home: &Path, pi: Option<pixel_install::ClassifyPiPackage>) -> Self {
+    fn at(home: &Path, pi: Option<pixel_setup::ClassifyPiPackage>) -> Self {
         let skill_file = |root: &Path| {
             root.join("skills")
                 .join(CLASSIFY_SKILL_NAME)
                 .join("SKILL.md")
         };
         let mut skills = vec![skill_file(&home.join(".claude"))];
-        for root in pixel_install::config::SKILL_ROOTS {
+        for root in pixel_setup::config::SKILL_ROOTS {
             let dir = home.join(root);
             if dir.is_dir() {
                 skills.push(skill_file(&dir));
@@ -344,7 +413,7 @@ impl ClassifyHelpers {
             && self
                 .pi
                 .as_ref()
-                .is_none_or(pixel_install::ClassifyPiPackage::is_current)
+                .is_none_or(pixel_setup::ClassifyPiPackage::is_current)
     }
 
     /// Every path the proposal names, in the order it writes them.
@@ -378,7 +447,7 @@ fn propose_classify_helpers(
         writeln!(stdout, "classify helpers: skipped — no HOME").map_err(|e| e.to_string())?;
         return Ok(());
     };
-    let pi = pixel_install::ClassifyPiPackage::for_home(&home, PI_CLASSIFY_EXTENSION);
+    let pi = pixel_setup::ClassifyPiPackage::for_home(&home, PI_CLASSIFY_EXTENSION);
     if let Err(error) = propose_classify_helpers_at(&ClassifyHelpers::at(&home, pi), stdin, stdout)
     {
         writeln!(stdout, "classify helpers: skipped — {error}").map_err(|e| e.to_string())?;
@@ -419,7 +488,7 @@ fn propose_classify_helpers_at(
         }
         // A failed backup stops the overwrite: an edited helper is never
         // replaced without its copy.
-        pixel_install::config::backup_if_changing(path, CLASSIFY_SKILL.as_bytes())
+        pixel_setup::config::backup_if_changing(path, CLASSIFY_SKILL.as_bytes())
             .map_err(|e| format!("back up {}: {e}", path.display()))?;
         fs::write(path, CLASSIFY_SKILL).map_err(|e| format!("write {}: {e}", path.display()))?;
     }
@@ -1802,6 +1871,7 @@ mod tests {
             &mut std::io::Cursor::new(Vec::new()),
             &mut output,
             Some("remote".to_string()),
+            Some(crate::decide_remote::Preset::Deepseek),
             |_| panic!("stored setting must not start local setup"),
             |_, _| panic!("stored setting must not prompt for a key"),
             |_, _| panic!("stored setting must not run the openai flow"),
@@ -1813,7 +1883,9 @@ mod tests {
         )
         .unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("already configured"));
+        // The menu is always offered: the stored row is pre-highlighted and
+        // the empty answer keeps it rather than skipping the question.
+        assert!(output.contains("kept \"remote\""), "{output}");
         // A stored engine still gets the helpers offer.
         assert!(output.contains("helpers proposed"));
 
@@ -1822,6 +1894,7 @@ mod tests {
             false,
             &mut std::io::Cursor::new(Vec::new()),
             &mut output,
+            None,
             None,
             |_| panic!("non-interactive install must not start local setup"),
             |_, _| panic!("non-interactive install must not prompt for a key"),
@@ -1845,6 +1918,7 @@ mod tests {
             &mut std::io::Cursor::new(b"1\n".to_vec()),
             &mut output,
             None,
+            None,
             |stdout| writeln!(stdout, "local setup ran").map_err(|e| e.to_string()),
             |_, _| panic!("local choice must not prompt for a remote key"),
             |_, _| panic!("local choice must not run the openai flow"),
@@ -1865,6 +1939,7 @@ mod tests {
             true,
             &mut std::io::Cursor::new(b"2\nprovider input\n".to_vec()),
             &mut output,
+            None,
             None,
             |_| panic!("remote choice must not start local setup"),
             |stdin, stdout| {
@@ -1890,6 +1965,7 @@ mod tests {
             &mut std::io::Cursor::new(b"3\n".to_vec()),
             &mut output,
             None,
+            None,
             |_| panic!("openai choice must not start local setup"),
             |_, _| panic!("openai choice must not ask for a provider"),
             |_, stdout| writeln!(stdout, "openai prompt ran").map_err(|e| e.to_string()),
@@ -1909,6 +1985,7 @@ mod tests {
             true,
             &mut std::io::Cursor::new(b"4\n".to_vec()),
             &mut output,
+            None,
             None,
             |_| panic!("jev choice must not start local setup"),
             |_, _| panic!("jev choice must not ask for a provider"),
@@ -1930,6 +2007,7 @@ mod tests {
             &mut std::io::Cursor::new(b"5\n".to_vec()),
             &mut output,
             None,
+            None,
             |_| panic!("clef choice must not start local setup"),
             |_, _| panic!("clef choice must not ask for a provider"),
             |_, _| panic!("clef choice must not run the openai flow"),
@@ -1950,6 +2028,7 @@ mod tests {
             true,
             &mut std::io::Cursor::new(Vec::new()),
             &mut output,
+            None,
             None,
             |_| panic!("a skipped engine must not start local setup"),
             |_, _| panic!("a skipped engine must not prompt for a key"),
@@ -1975,6 +2054,7 @@ mod tests {
             true,
             &mut stdin,
             &mut stdout,
+            None,
             None,
             setup_local,
             propose_remote_key,
@@ -2002,7 +2082,7 @@ mod tests {
     fn helpers_at(home: &Path) -> ClassifyHelpers {
         ClassifyHelpers::at(
             home,
-            pixel_install::ClassifyPiPackage::with_agent_dir(home, None, PI_CLASSIFY_EXTENSION),
+            pixel_setup::ClassifyPiPackage::with_agent_dir(home, None, PI_CLASSIFY_EXTENSION),
         )
     }
 
@@ -2042,7 +2122,7 @@ mod tests {
         assert!(!home.join(".devin").exists());
         // The tools ship as Pixel's own Pi package, declared beside the
         // user's packages; nothing lands in Pi's `extensions/`.
-        let package = home.join(pixel_install::CLASSIFY_PACKAGE_DIR);
+        let package = home.join(pixel_setup::CLASSIFY_PACKAGE_DIR);
         assert_eq!(
             fs::read_to_string(package.join("extensions/pixel-classify-files.ts")).unwrap(),
             PI_CLASSIFY_EXTENSION
@@ -2104,7 +2184,7 @@ mod tests {
             fs::read_to_string(home.join(".pi/agent/settings.json")).unwrap(),
             "{ not json"
         );
-        assert!(!home.join(pixel_install::CLASSIFY_PACKAGE_DIR).exists());
+        assert!(!home.join(pixel_setup::CLASSIFY_PACKAGE_DIR).exists());
         std::fs::remove_dir_all(home).unwrap();
     }
 

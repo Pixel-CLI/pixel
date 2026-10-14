@@ -141,7 +141,7 @@ not "none needed"; the spec text and item wording both say so.
 | `crates/pixel-daemon/src/api.rs` | `op_plan` runs the post-pass, adds `"prereqs"` to the answer |
 | `crates/pixel/src/plan_cmd.rs` | `prereqs_of`, `auth_flow_names`, `gates_of`, render block, `gates` JSON field |
 | `crates/pixel/src/main.rs` | `--no-gates` plumbing + conflicts |
-| `crates/pixel-install/assets/pixel-agent-prompt.md` | gate semantics in Hard rules |
+| `crates/pixel-setup/assets/pixel-agent-prompt.md` | gate semantics in Hard rules |
 | `ARCHITECTURE.md` | `pixel plan` row mentions the gates |
 | `changelog.d/plan-prereqs.added.md` | `**cli:** …` fragment |
 | `crates/pixel/tests/cli/json_contract.rs` | end-to-end CLI coverage |

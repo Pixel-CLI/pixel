@@ -361,8 +361,8 @@ const CORPUS: &[Case] = &[
         oid: "e531744ca74364fc10adea85c2f6d3a5bcca75d0",
         task: "fix(install): pass the codex prompt through developer_instructions, not model_instructions_file",
         labels: &[
-            "crates/pixel-install/src/install.rs",
-            "crates/pixel-install/tests/install_tests.rs",
+            "crates/pixel-setup/src/install.rs",
+            "crates/pixel-setup/tests/install_tests.rs",
         ],
     },
     Case {
@@ -509,19 +509,19 @@ const CORPUS: &[Case] = &[
         oid: "4c5281dfe66d32461ef3956c03f580a84bd25def",
         task: "test(install): kill NotFound guard mutants in pi prompt read paths\n\nAdd tests that an unreadable (write-only) pi prompt file is an error for both write_pi_prompt and remove_agent_prompt, not treated as absent.",
         labels: &[
-            "crates/pixel-install/src/install.rs",
-            "crates/pixel-install/src/uninstall.rs",
+            "crates/pixel-setup/src/install.rs",
+            "crates/pixel-setup/src/uninstall.rs",
         ],
     },
     Case {
         oid: "50197d558989dd18776f5d65ed779b8fc674b884",
         task: "fmt(install): fix rustfmt on antigravity path assertions",
-        labels: &["crates/pixel-install/src/antigravity.rs"],
+        labels: &["crates/pixel-setup/src/antigravity.rs"],
     },
     Case {
         oid: "00173dfcd2bedacf62f7c45ea8fa2625886e7fcb",
         task: "fmt(install): cargo fmt antigravity.rs",
-        labels: &["crates/pixel-install/src/antigravity.rs"],
+        labels: &["crates/pixel-setup/src/antigravity.rs"],
     },
     Case {
         oid: "81692580ddcab39c56e2a957a5bbcdd0c9d8a37e",
@@ -552,8 +552,8 @@ const CORPUS: &[Case] = &[
         oid: "d86e8f274f29302611b5860e6b78f6ba01153249",
         task: "fix(install): format the guard tests and pin the unreadable prompt contract (#157)",
         labels: &[
-            "crates/pixel-install/src/install.rs",
-            "crates/pixel-install/src/uninstall.rs",
+            "crates/pixel-setup/src/install.rs",
+            "crates/pixel-setup/src/uninstall.rs",
         ],
     },
     Case {

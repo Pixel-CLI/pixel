@@ -109,8 +109,8 @@ const DOCS: &[&str] = &[
     "docs/manual-setup.md",
     "website/content/docs.md",
     "website/content/benchmarks.md",
-    "crates/pixel-install/assets/pixel-agent-prompt.md",
-    "crates/pixel-install/assets/pixel-subagent-prompt.md",
+    "crates/pixel-setup/assets/pixel-agent-prompt.md",
+    "crates/pixel-setup/assets/pixel-subagent-prompt.md",
     "AGENTS.md",
     ".agents/rules/test-campaigns.md",
     ".agents/rules/measuring.md",
@@ -799,7 +799,7 @@ fn dot_paths(text: &str) -> BTreeSet<String> {
 }
 
 fn repo_artifact_paths() -> BTreeSet<String> {
-    pixel_install::install::REPO_ARTIFACTS
+    pixel_setup::install::REPO_ARTIFACTS
         .iter()
         .map(|artifact| artifact.path.to_string())
         .collect()
@@ -1049,8 +1049,8 @@ fn repo_install_should_preserve_and_rewrite_documented_migration_files() {
     let codex_path = repo.join(".codex/config.toml");
     let codex_instructions = format!(
         "Keep this Codex instruction.\n{}\nRetired Pixel instructions.\n{}\nKeep this too.\n",
-        pixel_install::config::MANAGED_BEGIN,
-        pixel_install::config::MANAGED_END,
+        pixel_setup::config::MANAGED_BEGIN,
+        pixel_setup::config::MANAGED_END,
     );
     std::fs::write(
         &codex_path,
@@ -1080,7 +1080,7 @@ fn repo_install_should_preserve_and_rewrite_documented_migration_files() {
     let instructions = codex["developer_instructions"].as_str().unwrap();
     assert!(instructions.contains("Keep this Codex instruction."));
     assert!(instructions.contains("Keep this too."));
-    assert!(!instructions.contains(pixel_install::config::MANAGED_BEGIN));
+    assert!(!instructions.contains(pixel_setup::config::MANAGED_BEGIN));
     assert_eq!(codex["other"]["value"].as_str(), Some("preserve"));
 
     let agents = std::fs::read_to_string(&agents_path).unwrap();
@@ -1392,7 +1392,7 @@ fn agents_data_checks_should_be_exactly_the_agent_checks_of_doctor() {
         named.len(),
         "a check listed twice: {named:?}"
     );
-    let agent_checks: BTreeSet<&str> = pixel_install::doctor::CHECKS
+    let agent_checks: BTreeSet<&str> = pixel_setup::doctor::CHECKS
         .iter()
         .map(|check| check.id)
         .filter(|id| id.starts_with("install.") || id.starts_with("repo."))

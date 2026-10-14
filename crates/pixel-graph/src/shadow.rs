@@ -117,7 +117,12 @@ pub fn shadow(root: &Path, examples: usize) -> Result<Shadow, BoxErr> {
     let db = scratch.path().join("graph.db");
     let mvp = mvp_adapter::refresh(root, scratch.path())?;
     // This graph's own resolver, whatever the switch says.
-    crate::build::build_graph_from(root, &db, mvp_adapter::RustSource::V1)?;
+    crate::build::build_graph_sources(
+        root,
+        &db,
+        mvp_adapter::RustSource::V1,
+        mvp_adapter::ruby_switch::RubySource::V1,
+    )?;
     let store = GraphStore::open(&db)?;
     let rows = mvp_adapter::rust_rows(&store, &mvp)?;
     compare(&store, &rows, examples)

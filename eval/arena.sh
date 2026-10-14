@@ -208,11 +208,7 @@ launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
     if [ "$arm" = "raw" ] || [ "$SKILL_PILOT" = "1" ]; then
       # The snapshot carries pixel's own agent-facing docs; raw must not see
       # them or codex tries `pixel …` and burns a turn on the failure.
-      if ! rm -rf "$snap/.agents/skills/pixel" "$snap/skills/pixel" \
-        "$snap/.openclaw/skills/pixel" "$snap/rules/pixel.md" \
-        "$snap/PIXEL.md" "$snap/PIXEL-SUBAGENT.md" "$snap/.cursor/rules/pixel.mdc" \
-        "$snap/.windsurf/rules/pixel.md" "$snap/.kiro/steering/pixel.md" \
-        "$snap/.qoder/rules/pixel.md" "$snap/.clinerules/pixel.md"; then
+      if ! rm -rf "$snap/.agents/skills/pixel" "$snap/skills/pixel"; then
         echo "could not remove Pixel snapshot context: arm=$arm rep=$rep" >&2
         return 1
       fi

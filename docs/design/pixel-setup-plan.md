@@ -36,7 +36,7 @@ wizard does, read in their tree at `5cbe33d` and PR #14425).
 ## What a feature writes
 
 A feature writes exactly one of four things (`Feature::writes()` in
-`crates/pixel-install/src/setup/feature.rs`), and saying which is the point:
+`crates/pixel-setup/src/setup/feature.rs`), and saying which is the point:
 
 - `Steering` — a `###` section in the managed block of every selected agent's
   instruction file;
@@ -73,6 +73,50 @@ lets the user take them away. Feature 3 was `guard` ("Guard destructive git
 commands") in the first version of this PR; no destructive-git guard is
 registered by the installer any more (`HookScope::TaskEventsOnly`), so the row
 now says what the hook does.
+
+## AI classification journey
+
+Picking the `classify` feature opens the engine journey as its own setup step
+(after Review + Apply). The menu is always offered — a stored engine is
+pre-highlighted (`· current`), so Enter keeps it — and every branch ends by
+offering the helpers, which deploy the `pixel-classify` skill into every
+configured harness's skills dir (and the `pixel-classify-files` Pi package
+when Pi is selected):
+
+```text
+pixel setup → Classify engine
+│
+├─ not a TTY → print suggestion, done
+│
+└─ pick:
+   ├─ Local (Ollaya)
+   │   └─ install ollaya + pull model → engine: local
+   │
+   ├─ Remote (hosted LLM)
+   │   ├─ provider: openrouter / ollama / deepseek / openai …
+   │   └─ API key (blank = configure later) → engine: remote
+   │
+   ├─ OpenAI (Decisions API)
+   │   └─ OPENAI_API_KEY → engine: remote (openai)
+   │
+   ├─ Jev (TypeSafe decision model)
+   │   ├─ key source: OpenCode Go (OPENCODE_API_KEY)
+   │   │              or TypeSafe direct (TYPESAFE_API_KEY)
+   │   └─ model per source → engine: remote (jev)
+   │
+   └─ Clef-flash (Cloudflare)
+       ├─ host: Ollama (keyless local / OLLAMA_API_KEY remote)
+       │      or Workers AI (account id + CF token)
+       └─ engine: remote (clef-ollama | clef-cloudflare)
+            │
+            ▼
+   helpers? → pixel-classify skill into harness dirs (+ Pi package)
+```
+
+The implementation lives in `classify_setup.rs` (`install_step`); the engine
+rows and their accuracy labels are `ENGINE_ROWS`, and each branch's writes are
+the `pixel config classify-engine` / `remote-preset` keys `ARCHITECTURE.md`
+documents for `pixel classify`.
 
 ## Guided and unattended
 
@@ -183,12 +227,12 @@ repository state is touched by `pixel setup`.
 - [x] Answer questions 1–8 above; record the answers at the top of this file.
 - [x] Fix the feature → artifact mapping as a table (see above).
 - [x] File layout: detection, catalog, planner, renderer and upsert in
-      `crates/pixel-install/src/setup/`, command wiring and terminal I/O in
+      `crates/pixel-setup/src/setup/`, command wiring and terminal I/O in
       `crates/pixel/src/setup_cmd.rs`.
 
 ### 2. Detection module
 
-- [x] `crates/pixel-install/src/setup/detect.rs`: the env-var detection port
+- [x] `crates/pixel-setup/src/setup/detect.rs`: the env-var detection port
       (`AI_AGENT` → tool-specific markers → allowlisted `AGENT`), the
       `Agent` enum limited to the agents pixel supports, `as_str()` ids used by
       telemetry/action log, and normalization (`Claude_Code`, `claude code`,
@@ -237,7 +281,7 @@ repository state is touched by `pixel setup`.
       duplicate-block convergence, refusal on partial/reversed markers.
 - [x] Atomic write for the wizard path (temp file in the same directory +
       rename), and the concurrent-edit back-off `but` uses.
-- [x] Contract tests per property, in the `crates/pixel-install` style
+- [x] Contract tests per property, in the `crates/pixel-setup` style
       (`config/contract_tests.rs`).
 
 ### 6. The command
@@ -246,11 +290,24 @@ repository state is touched by `pixel setup`.
       `#[arg]` docs; `pixel setup --print` is the non-interactive surface and
       prints plain text only (no `--json`: the wizard's output is a Markdown
       block, and a JSON envelope would wrap one string in an object).
-- [x] Interactive wizard: both questions are one numbered list answered by
-      index (`ask_list`) — there is no arrow-key picker and no `y/n` prompt in
-      this command, because a 9-row and a 12-row multi-select is not a
-      yes/no question. `q` and end-of-input cancel; `Esc` is not handled and
-      is left to the terminal. Cancel writes nothing and says so.
+- [x] Interactive wizard, drawn like GitButler's: a titled rule for the run, a
+      `Step N of 3` banner per question, one checkbox row per option with the
+      focused row's help under the list, and a final Apply/Cancel list
+      (`docs/design/but-agent-setup-reference.md`, "The flow"). Two input
+      modes over the same rows: on a terminal the arrows move, space toggles,
+      `a`/`n` answer all or none, enter continues and esc cancels
+      (`prompt_key::{decode_list_byte, ListState}`); where raw mode is
+      unavailable the answer is typed as indices (`ask_list_lines`), a row this
+      scope cannot use carries its reason under the list, and `q` or
+      end-of-input cancels. Cancel writes nothing and says so.
+- [x] Every drawn line is wrapped to the terminal width (`wrap`, one column
+      short of it), never truncated: a help line cut at the edge hides the part
+      of the sentence that says what the feature does, and the reader has no way
+      to ask for the rest. `wrap` normalises whitespace, so a row's label is
+      wrapped *before* its pointer and checkbox are prepended — otherwise the
+      two columns they take would be eaten and every row pulled left. The
+      arrow-key list counts the lines each block takes, because it repaints in
+      place by moving the cursor up whole lines.
 - [x] Temporary non-interactive flags (`--selected-agents`,
       `--selected-features`, `--dummy-apply`) per answer to question 8; every
       out-of-range index is an error naming the valid range.
@@ -298,12 +355,12 @@ repository state is touched by `pixel setup`.
 - [x] `ARCHITECTURE.md` command table (a `pixel setup` row, and the
       `pixel setup` row, which `--remove` makes the owner of the block's removal), which is what
       `docs_drift` requires; `docs/manual-setup.md` got the guided path.
-      `crates/pixel-install/assets/pixel-agent-prompt.md` is deliberately
+      `crates/pixel-setup/assets/pixel-agent-prompt.md` is deliberately
       unchanged: it is the retrieval protocol, and the setup block is
       user-facing steering, not a command the agent runs.
 - [x] `changelog.d/pixel-setup-wizard.added.md`.
-- [x] `cargo fmt --all -- --check`, `cargo test -p pixel-install`,
-      `cargo test -p pixel-cli --test cli`, `cargo clippy -p pixel-install -p
+- [x] `cargo fmt --all -- --check`, `cargo test -p pixel-setup`,
+      `cargo test -p pixel-cli --test cli`, `cargo clippy -p pixel-setup -p
       pixel-cli --all-targets`, `cargo check --workspace --all-targets`,
       `cargo test -p pixel-git --test boundary`,
       `python3 scripts/check-spdx.py`.

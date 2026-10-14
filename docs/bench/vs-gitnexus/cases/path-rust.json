@@ -30,15 +30,15 @@
   {
     "from": "rewrite_agent_config",
     "to": "apply_managed_markers",
-    "from_file": "crates/pixel-install/src/config.rs",
-    "to_file": "crates/pixel-install/src/config.rs",
+    "from_file": "crates/pixel-setup/src/config.rs",
+    "to_file": "crates/pixel-setup/src/config.rs",
     "verified_line": 345
   },
   {
     "from": "doctor",
     "to": "apply_managed_markers",
-    "from_file": "crates/pixel-install/src/doctor.rs",
-    "to_file": "crates/pixel-install/src/config.rs",
+    "from_file": "crates/pixel-setup/src/doctor.rs",
+    "to_file": "crates/pixel-setup/src/config.rs",
     "verified_line": 221
   }
 ]

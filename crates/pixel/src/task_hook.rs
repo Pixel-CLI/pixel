@@ -22,7 +22,7 @@ pub(crate) const MAX_INPUT: u64 = crate::hook_input::MAX_HOOK_INPUT;
 const DECISION_TIMEOUT: Duration = Duration::from_secs(6);
 // The brief's longest window plus the time to print it stays inside that decision.
 const _: () = assert!(
-    pixel_install::config::BRIEF_WINDOW_MAX_MS + 1_500 <= DECISION_TIMEOUT.as_millis() as u64
+    pixel_setup::config::BRIEF_WINDOW_MAX_MS + 1_500 <= DECISION_TIMEOUT.as_millis() as u64
 );
 // The probes' ceiling (5 s after the prompt) leaves a second of the decision to print the merged brief.
 const _: () = assert!(5_000 + 1_000 <= DECISION_TIMEOUT.as_millis() as u64);
@@ -767,7 +767,7 @@ fn substitution_writes(chars: &mut Peekable<Chars<'_>>) -> bool {
 const IMPORTED_CLAUDE_CONFIG_MARKERS: &[&str] = &["DEVIN_PROJECT_DIR"];
 
 /// The imported-config marker set in this process, if any.
-fn imported_config_host() -> Option<&'static str> {
+pub(crate) fn imported_config_host() -> Option<&'static str> {
     IMPORTED_CLAUDE_CONFIG_MARKERS
         .iter()
         .copied()
@@ -1149,7 +1149,7 @@ fn forced_oversize(provider: TaskProvider, text: Option<String>) -> Option<Strin
     let parts = std::env::var(brief_parts::TEST_PAD_ENV)
         .ok()
         .and_then(|value| value.parse::<u8>().ok())
-        .filter(|parts| (1..=pixel_install::config::BRIEF_PARTS_MAX).contains(parts));
+        .filter(|parts| (1..=pixel_setup::config::BRIEF_PARTS_MAX).contains(parts));
     match parts {
         Some(parts) => Some(brief_parts::pad_to_parts(
             &text.unwrap_or_default(),
@@ -1310,6 +1310,18 @@ fn note_event(
             feedback::stop_lines(existing, ts, session, provider_name)
         }),
     };
+}
+
+/// Whether the 🟩 prompt-submit line joins the response: the `metrics`
+/// configuration for the payload's repository, vetoed by `PIXEL_METRICS=0`.
+fn metrics_on(raw: Option<&str>) -> bool {
+    if std::env::var_os("PIXEL_METRICS").is_some_and(|v| v == "0") {
+        return false;
+    }
+    let root = raw
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|payload| crate::discover_root(&payload_cwd(&payload)).ok());
+    crate::config_cmd::metrics_enabled(root.as_deref())
 }
 
 /// Part 1 of a split brief: finish the brief, store it whole for the other
@@ -1535,11 +1547,12 @@ fn bounded_decision(
 /// `part` is the slice of a split prompt-submit brief this hook serves (see
 /// [`brief_parts`]); on another event it means nothing and is ignored.
 pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>) -> ! {
+    let started = std::time::Instant::now();
     if provider == TaskProvider::Claude && imported_config_host().is_some() {
         std::process::exit(0);
     }
     let raw = crate::hook_input::read_bounded(&mut std::io::stdin(), MAX_INPUT);
-    let output = if let Some(raw) = &raw {
+    let mut output = if let Some(raw) = &raw {
         let later = part.filter(|part| part.index > 1 && event == TaskHookEvent::PromptSubmit);
         if let Some(part) = later {
             // Nothing to say is nothing printed: a hook that cannot get its
@@ -1559,6 +1572,21 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
     } else {
         Some(envelope(provider, event, &unavailable(event, None, true)))
     };
+    // A hook has no terminal: the metrics line a person would read on stderr
+    // rides the response as `systemMessage`, which the host surfaces as a
+    // warning next to the prompt. Only a delivered brief earns one — a `{}`
+    // abstention should not light up every prompt.
+    if event == TaskHookEvent::PromptSubmit
+        && part.is_none_or(|part| part.index == 1)
+        && let Some(output) = &mut output
+        && output.get("hookSpecificOutput").is_some()
+        && metrics_on(raw.as_deref())
+    {
+        output["systemMessage"] = json!(format!(
+            "🟩 pixel prompt-submit ❀ {:.1}ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
+    }
     // Flush the only response before exit terminates any stalled evaluator.
     if let Some(output) = &output {
         let mut stdout = std::io::stdout().lock();

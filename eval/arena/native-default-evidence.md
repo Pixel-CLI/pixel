@@ -492,7 +492,7 @@ and zero automatic retrieval/metrics callbacks; repository configs contain
 no Pixel callbacks. Pi's explicit extension is present and its retired
 automatic prompt is absent.
 
-`cargo test -p pixel-install --no-fail-fast` exited 0: 365 unit tests and
+`cargo test -p pixel-setup --no-fail-fast` exited 0: 365 unit tests and
 124 integration tests passed. The arena parser/runner suite passed 46 tests.
 These scoped results precede the final committed-candidate workspace gates;
 their logs and installed callback/hash manifest are retained in that run directory.

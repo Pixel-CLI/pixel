@@ -24,5 +24,5 @@
     "read_regular_bounded"
   ],
   "gitnexus_recall": 1.0,
-  "gitnexus_raw_head": "Changes: 3 files, 4 symbols\nAffected processes: 4\nRisk level: medium\n\nChanged symbols:\n  Function read_regular_bounded \u2192 crates/pixel-index/src/index.rs\n  Function apply_managed_markers \u2192 crates/pixel-install/src/config.rs\n  Impl RepositoryLock \u2192 crates/pixel-ops/src/lock.rs\n  Function acquire_with_state_root \u2192 crates/pixel-ops/src/lock.rs\n\nAffected execution flows:\n  \u2022 Failed_graph_upda"
+  "gitnexus_raw_head": "Changes: 3 files, 4 symbols\nAffected processes: 4\nRisk level: medium\n\nChanged symbols:\n  Function read_regular_bounded \u2192 crates/pixel-index/src/index.rs\n  Function apply_managed_markers \u2192 crates/pixel-setup/src/config.rs\n  Impl RepositoryLock \u2192 crates/pixel-ops/src/lock.rs\n  Function acquire_with_state_root \u2192 crates/pixel-ops/src/lock.rs\n\nAffected execution flows:\n  \u2022 Failed_graph_upda"
 }

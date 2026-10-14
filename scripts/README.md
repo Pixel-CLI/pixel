@@ -125,7 +125,7 @@ repository and a fake binary, so the bench path is exercised with no network and
 
 The pixel arm of the `claude -p` benches is given the deployed agent prompt
 (`~/.local/share/pixel/agent-prompt.md`, the bundled
-`crates/pixel-install/assets/pixel-agent-prompt.md` when nothing is
+`crates/pixel-setup/assets/pixel-agent-prompt.md` when nothing is
 installed) through `--append-system-prompt-file`, exactly as the `claude`
 shell wrapper written by `pixel setup` does. The scripts call `claude` by
 path, so a fish/zsh wrapper function never applies to them; without the

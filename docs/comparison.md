@@ -157,12 +157,12 @@ Adding stacklit's map is another ~420.
 
 One installer caveat: **`pixel setup` deletes GitNexus' generated section**
 from `CLAUDE.md` and `AGENTS.md` (the `# GitNexus — Code Intelligence` block and
-its subsections — `crates/pixel-install/src/config.rs`, `strip_stale_blocks`).
+its subsections — `crates/pixel-setup/src/config.rs`, `strip_stale_blocks`).
 It is regenerable with `gitnexus analyze`. Removal is bounded to a real
 generated section header, so hand-written prose that merely mentions GitNexus
 survives verbatim; there is a regression test for that case. pixel's hook router
 also recognises GitNexus' passive Claude context hook and coexists with it
-(`crates/pixel-install/src/routing.rs`). semble and stacklit are untouched.
+(`crates/pixel-setup/src/routing.rs`). semble and stacklit are untouched.
 
 `pixel setup --remove` removes everything `pixel setup` wrote and is idempotent. It
 does not restore the GitNexus block.

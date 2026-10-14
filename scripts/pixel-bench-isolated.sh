@@ -48,7 +48,7 @@ if [ -z "$PIXEL_BIN" ]; then
 fi
 REPO="${REPO:-$ROOT}"
 AGENT_PROMPT="${AGENT_PROMPT:-$HOME/.local/share/pixel/agent-prompt.md}"
-[ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
+[ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-setup/assets/pixel-agent-prompt.md"
 N="${1:-1}"
 OUTDIR="/tmp/pixel-bench-isolated-outputs"
 TMPDIR_M="/tmp/pixel-bench-isolated-tmp"

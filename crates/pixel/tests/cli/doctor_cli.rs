@@ -150,7 +150,7 @@ fn doctor_list_should_name_every_check_with_its_fix() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert_eq!(
         text.lines().count(),
-        pixel_install::doctor::CHECKS.len(),
+        pixel_setup::doctor::CHECKS.len(),
         "{text}"
     );
     assert!(
@@ -209,7 +209,7 @@ fn a_retired_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
     // both retired: the note does not compare contents.
     for content in [
         "# an older release's prompt\n",
-        include_str!("../../../pixel-install/assets/pixel-agent-prompt.md"),
+        include_str!("../../../pixel-setup/assets/pixel-agent-prompt.md"),
     ] {
         std::fs::write(deployed.join("agent-prompt.md"), content).unwrap();
         let warned = ordinary();

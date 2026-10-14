@@ -24,7 +24,7 @@ Safety: fault injection uses disposable homes, repositories, local bare remotes 
 | H | Disposable multi-commit repository including deleted and renamed symbols | `cargo test -p pixel-facts` |
 | G | Disposable worktrees and local bare remotes; divergent tips and interruption checkpoints | `cargo test -p pixel-git -p pixel-ops` |
 | E | Disposable .env with comments, duplicate keys, unrelated secrets and snapshots | `cargo test -p pixel-ops --test envfile` |
-| I | Disposable HOME, existing third-party hooks/config and fake pixel binary | `cargo test -p pixel-install` |
+| I | Disposable HOME, existing third-party hooks/config and fake pixel binary | `cargo test -p pixel-setup` |
 | C | Disposable transcript sources and corpus; malformed records and unavailable model | `cargo test -p pixel-recall` |
 | S | Disposable error SQLite store; error/event/run JSON, fake failing subprocess and MCP requests | `cargo test -p pixel-session` |
 | F | Disposable HOME/flow store and fake agent-browser; real shell executes generated argument data | `cargo test -p pixel-flow; cargo test -p pixel-cli --test flow_cli` |
@@ -170,7 +170,7 @@ The contract text below is inventory evidence, not an endorsement of wording; no
 | `pixel-session` | `query_mcp`, `store` | `cargo test -p pixel-session` | Coordinator final workspace: 865 tests / 60 suites PASS, exit 0 |
 | `pixel-recall` | `export` | `cargo test -p pixel-recall` | Coordinator final workspace: 865 tests / 60 suites PASS, exit 0 |
 | `pixel-flow` | Inline unit tests / library target | `cargo test -p pixel-flow` | 36 passed, 0 failed (F3) |
-| `pixel-install` | `install_tests` | `cargo test -p pixel-install` | Coordinator final workspace: 865 tests / 60 suites PASS, exit 0 |
+| `pixel-setup` | `install_tests` | `cargo test -p pixel-setup` | Coordinator final workspace: 865 tests / 60 suites PASS, exit 0 |
 | `pixel-bench` | Inline unit tests / library target | `cargo test -p pixel-bench` | Coordinator final workspace: 865 tests / 60 suites PASS, exit 0 |
 
 ## Boundary execution records
@@ -232,5 +232,5 @@ All following results are attributed to the coordinating agent, not inferred fro
 - Workspace **865 tests / 60 suites PASS**; formatting **exit 0**; warnings-denied Clippy **exit 0**; three CLI feature checks **exit 0**.
 - Atomic reinstall followed by parallel `index --history` and `build-agent-config && pixel install`: all **exit 0**. Doctor **11 green / 0 yellow / 0 red**. Only the repository daemon was restarted; ready JSON observed.
 - The two original questions return manual guide at **3/2** in the final 195-file corpus after raw audit evidence was moved under excluded `tests/`. The installed binary was rerun after that move: both queries searched all 195 candidates without degradation and returned the default eight results. This confirms acceptance but does not erase the separate broad relevance failures.
-- Parent-observed reports: `/tmp/pixel-installed-system-audit.json`, `/tmp/pixel-installed-recall-audit.json`; copies included in boundary artifact.
+- Parent-observed reports: `/tmp/pixel-setuped-system-audit.json`, `/tmp/pixel-setuped-recall-audit.json`; copies included in boundary artifact.
 - Develop recreated from main base `d7f2d0a`; old develop `abf3c…` preserved in local and remote backups. [PR #24](https://github.com/Pixel-CLI/pixel/pull/24) remains open, unmodified by this task; no implementation push while relevance/review blockers remain.

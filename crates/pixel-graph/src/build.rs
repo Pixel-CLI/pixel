@@ -21,6 +21,7 @@ use crate::extract::{
     FileExtraction, RawMixin, extract_file, is_binstub_candidate, lang_of, lang_of_file,
 };
 use crate::imports::{resolve_import_in, ruby as ruby_projects};
+use crate::mvp_adapter::ruby_switch::{self, RubySource};
 use crate::mvp_adapter::{self, RustSource};
 use crate::resolve::{
     Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference,
@@ -171,13 +172,18 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 pub const EXTRACTOR_VERSION: &str = "25";
 
 /// True iff the graph's rows were written by the current extractor, from
-/// the Rust source the switch asks for now (`mvp_adapter::RustSource`).
+/// the Rust and Ruby sources the switches ask for now
+/// (`mvp_adapter::RustSource`, `ruby_switch::RubySource`).
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
     Ok(
         store.meta_get(EXTRACTOR_VERSION_KEY)?.as_deref() == Some(EXTRACTOR_VERSION)
             && mvp_adapter::source_is_current(
                 store.meta_get(mvp_adapter::GRAPH_SOURCE_KEY)?.as_deref(),
                 RustSource::from_env(),
+            )
+            && ruby_switch::source_is_current(
+                store.meta_get(ruby_switch::RUBY_SOURCE_KEY)?.as_deref(),
+                RubySource::from_env(),
             ),
     )
 }
@@ -518,7 +524,28 @@ pub fn build_graph_from(
     db_path: &Path,
     rust: RustSource,
 ) -> Result<GraphStats, BoxErr> {
-    build_graph_with(root, db_path, rust, freshness_signature)
+    build_graph_with(
+        root,
+        db_path,
+        rust,
+        RubySource::from_env(),
+        freshness_signature,
+    )
+}
+
+/// [`build_graph_from`] with the Ruby edges taken from `ruby` too. With
+/// [`RubySource::Hybrid`], pixel-mvp's index is refreshed in the
+/// repository's state directory and merged into this resolver's Ruby rows
+/// site by site (`ruby_switch`); where it cannot index (no git work tree
+/// at `root`), the graph keeps this resolver's Ruby rows and records why
+/// (`ruby_switch::RUBY_MVP_UNAVAILABLE`).
+pub fn build_graph_sources(
+    root: &Path,
+    db_path: &Path,
+    rust: RustSource,
+    ruby: RubySource,
+) -> Result<GraphStats, BoxErr> {
+    build_graph_with(root, db_path, rust, ruby, freshness_signature)
 }
 
 /// [`build_graph_from`] with the signature of the tree as it stands after
@@ -528,6 +555,7 @@ fn build_graph_with(
     root: &Path,
     db_path: &Path,
     rust: RustSource,
+    ruby: RubySource,
     signature_now: impl FnOnce(&Path) -> String,
 ) -> Result<GraphStats, BoxErr> {
     let t0 = Instant::now();
@@ -592,19 +620,36 @@ fn build_graph_with(
         store.record_walked_file(rel, blob_oid)?;
     }
 
+    // A merge recorded by an earlier build describes rows this build
+    // replaces: it goes, whatever the Ruby switch says now.
+    ruby_switch::forget(&store)?;
     // pixel-mvp's index, read after the walk above: a file it reads newer
-    // than the walk did moves the signature checked below.
-    let mvp = match rust {
-        RustSource::V1 => None,
-        RustSource::Mvp => mvp_adapter::refresh_crate(root, &pixel_git::sidecar::dir(root)).ok(),
+    // than the walk did moves the signature checked below. Rust needs a
+    // crate root (`crate_root`); the Ruby merge does not.
+    let wants_rust = rust == RustSource::Mvp && mvp_adapter::crate_root(root);
+    let index = if wants_rust || ruby == RubySource::Hybrid {
+        mvp_adapter::refresh(root, &pixel_git::sidecar::dir(root)).ok()
+    } else {
+        None
     };
-    let source = match (rust, &mvp) {
+    let mvp = index.as_ref().filter(|_| wants_rust);
+    let source = match (rust, mvp) {
         (RustSource::V1, _) => None,
         (RustSource::Mvp, Some(_)) => Some(mvp_adapter::mvp_source()),
         (RustSource::Mvp, None) => Some(mvp_adapter::MVP_UNAVAILABLE.to_string()),
     };
     // Before resolution: the resolver reads it (`rust_is_walled`).
     mvp_adapter::record_source(&store, source.as_deref())?;
+    let ruby_index = index.as_ref().filter(|_| ruby == RubySource::Hybrid);
+    ruby_switch::record_source(
+        &store,
+        match (ruby, ruby_index) {
+            (RubySource::V1, _) => None,
+            (RubySource::Hybrid, Some(_)) => Some(ruby_switch::hybrid_source()),
+            (RubySource::Hybrid, None) => Some(ruby_switch::RUBY_MVP_UNAVAILABLE.to_string()),
+        }
+        .as_deref(),
+    )?;
 
     let projects = ruby_projects::Projects::load(root, &all_paths);
     let mut stored = store_batch(&mut store, extracted, &all_paths, &projects)?;
@@ -619,8 +664,11 @@ fn build_graph_with(
     phases.resolve_calls_ms = millis(clock.elapsed());
     let clock = Instant::now();
     resolve_references(&store, &stored.references)?;
-    if let Some(mvp) = &mvp {
+    if let Some(mvp) = mvp {
         mvp_adapter::apply(&store, &mvp_adapter::rust_rows(&store, mvp)?)?;
+    }
+    if let Some(index) = ruby_index {
+        ruby_switch::merge_into(&store, index)?;
     }
     phases.resolve_references_ms = millis(clock.elapsed());
     let clock = Instant::now();
@@ -1360,8 +1408,19 @@ fn stored_definitions(
 /// with pixel-mvp's answer, refreshed in `.pixel/.pixel-mvp/`, so whatever
 /// the passes before did to them (a demoted edge, a retried row) is not what
 /// stays.
+///
+/// When the graph's Ruby rows are the hybrid merge (`ruby_switch::is_hybrid`),
+/// they are restored to this resolver's own first, and merged again last
+/// with the same refresh of pixel-mvp's index.
 fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Result<(), BoxErr> {
     let walled = mvp_adapter::rust_is_walled(store)?;
+    // A merged graph goes back to this resolver's own Ruby rows first, so
+    // every pass below decides as it would without the merge; the merge is
+    // planned again at the end, on what they wrote.
+    let hybrid = ruby_switch::is_hybrid(store)?;
+    if hybrid {
+        ruby_switch::restore(store)?;
+    }
     // What the batch changed, before and after, for the re-resolution below.
     let mut affected = Affected::default();
     let mut before: Vec<Definition> = Vec::new();
@@ -1556,8 +1615,20 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     reconsider_resolved_calls(store, &mut affected)?;
     // Retry what the batch can have changed against the new candidate set.
     resolve_affected(store, &affected)?;
-    if walled {
-        mvp_adapter::switch_rust(root, store, &pixel_git::sidecar::dir(root))?;
+    if walled || hybrid {
+        // One refresh of pixel-mvp's index serves both.
+        let state = pixel_git::sidecar::dir(root);
+        let index = if walled {
+            mvp_adapter::refresh_crate(root, &state)?
+        } else {
+            mvp_adapter::refresh(root, &state)?
+        };
+        if walled {
+            mvp_adapter::apply(store, &mvp_adapter::rust_rows(store, &index)?)?;
+        }
+        if hybrid {
+            ruby_switch::merge_into(store, &index)?;
+        }
     }
 
     // Persisted analyses (`processes`, `clusters`) are keyed by symbol id,
@@ -1667,7 +1738,10 @@ mod tests {
         assert_eq!(before.1, ["kept"]);
 
         std::fs::write(root.join("b.rs"), "fn added() -> u32 { 2 }\n").unwrap();
-        let err = build_graph_with(&root, &db, RustSource::V1, |_| "moved".into()).unwrap_err();
+        let err = build_graph_with(&root, &db, RustSource::V1, RubySource::V1, |_| {
+            "moved".into()
+        })
+        .unwrap_err();
         assert!(err.to_string().contains("source changed"), "{err}");
         assert_eq!(
             snapshot(),

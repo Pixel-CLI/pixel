@@ -1,0 +1,1 @@
+**setup:** `pixel setup` draws its screens like GitButler's wizard: a titled rule for the run, a `Step N of 3` banner per question, one checkbox row per option, the focused row's help under the list, and arrow/space/enter selection on a terminal (numbers still work where raw input is unavailable). Long labels and help wrap instead of being cut at the terminal edge.

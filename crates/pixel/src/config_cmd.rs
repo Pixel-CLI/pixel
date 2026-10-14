@@ -31,7 +31,7 @@ pub(crate) const DAEMON_AUTO_START_FEATURE: &str = "daemon_auto_start";
 /// Its environment opt-out: `0`, `false` or `off`.
 pub(crate) const DAEMON_AUTO_START_ENV: &str = "PIXEL_DAEMON_AUTO_START";
 
-use pixel_install::config::{BRIEF_PARTS_KEY, BRIEF_PARTS_MAX};
+use pixel_setup::config::{BRIEF_PARTS_KEY, BRIEF_PARTS_MAX};
 
 /// The environment overrides and YAML switches exposed in the overview.
 const FEATURES: &[(&str, &str)] = &[
@@ -300,7 +300,7 @@ fn brief_parts(root: Option<&Path>) -> u8 {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    pixel_install::config::brief_parts(&home, root)
+    pixel_setup::config::brief_parts(&home, root)
 }
 
 /// Print only known public settings; arbitrary configuration can contain secrets.
@@ -777,18 +777,21 @@ fn setup_with_keys(
         };
         doc[key] = json!(value);
     }
-    let Some(enforce) = ask_bool(
+    // #863: the question is framed around the advisory direction, and its
+    // default is advisory — a stored `enforce` still wins so an explicit
+    // choice is not flipped by Enter.
+    let Some(advisory) = ask_bool(
         input,
         output,
-        "Enforce Pixel retrieval policy (retired: no hook reads this)?",
-        doc.get("policy").and_then(Value::as_str) == Some(PolicyMode::Enforce.as_str()),
+        "Keep the retrieval policy advisory (recommend pixel retrieval to agents, never block)?",
+        doc.get("policy").and_then(Value::as_str) != Some(PolicyMode::Enforce.as_str()),
         keys,
         color,
     )?
     else {
         return Ok(false);
     };
-    doc["policy"] = json!(if enforce { "enforce" } else { "advisory" });
+    doc["policy"] = json!(if advisory { "advisory" } else { "enforce" });
     writeln!(output).map_err(|e| e.to_string())?;
     writeln!(output, "{}", classify_blurb(color)).map_err(|e| e.to_string())?;
     let Some(enabled) = ask_bool(
@@ -1703,7 +1706,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("n\nn\nn\nn\nn\nn\ny\n"),
+                &mut std::io::Cursor::new("n\nn\nn\nn\ny\nn\ny\n"),
                 &mut output,
                 false,
             )
@@ -1744,7 +1747,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("n\nn\nn\nn\nn\nn\ny\n"),
+                &mut std::io::Cursor::new("n\nn\nn\nn\ny\nn\ny\n"),
                 &mut output,
                 false,
             )
@@ -1820,7 +1823,8 @@ mod tests {
         for key in ["daemon_auto_start", "task_context", "task_boundary"] {
             assert_eq!(doc[key], true);
         }
-        assert_eq!(doc["policy"], "enforce");
+        // `y` to the policy question is yes-to-advisory (#863).
+        assert_eq!(doc["policy"], "advisory");
         assert_eq!(doc["classify"]["enabled"], true);
     }
 

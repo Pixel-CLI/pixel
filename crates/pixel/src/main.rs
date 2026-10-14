@@ -51,9 +51,10 @@ mod evaluate_cmd;
 mod execution_brief;
 mod graph_shadow_cmd;
 mod hook_input;
+mod hook_metrics;
 mod impact_read;
 mod index_cmd;
-mod install_intro;
+
 mod operation_metrics;
 mod overview_intent;
 mod plan_cmd;
@@ -171,10 +172,10 @@ impl ReviewFailOn {
 }
 
 impl FailOn {
-    fn threshold(self) -> pixel_install::doctor::CheckStatus {
+    fn threshold(self) -> pixel_setup::doctor::CheckStatus {
         match self {
-            Self::Yellow => pixel_install::doctor::CheckStatus::Yellow,
-            Self::Red => pixel_install::doctor::CheckStatus::Red,
+            Self::Yellow => pixel_setup::doctor::CheckStatus::Yellow,
+            Self::Red => pixel_setup::doctor::CheckStatus::Red,
         }
     }
 }
@@ -1198,6 +1199,14 @@ enum HookCmd {
         #[arg(long, value_name = "K/N")]
         part: Option<brief_parts::BriefPart>,
     },
+    /// PostToolUse relay for hosts whose tool results drop stderr: re-emits
+    /// the finalized invocation's 🟩 metrics line as the provider's
+    /// additional-context envelope. Honors `pixel config metrics`.
+    Metrics {
+        /// Provider whose hook-response contract to emit under.
+        #[arg(long, value_enum)]
+        provider: Option<hook_metrics::Provider>,
+    },
     #[command(flatten)]
     Retired(RetiredHookCmd),
 }
@@ -1225,9 +1234,6 @@ enum RetiredHookCmd {
     /// Retired: the blast-radius note after an edit.
     #[command(hide = true)]
     PostToolUse(RetiredHook),
-    /// Retired: the hook relay of the metrics line.
-    #[command(hide = true)]
-    Metrics(RetiredHook),
 }
 
 /// The arguments of a retired hook verb: whatever an older release wrote into
@@ -3477,7 +3483,7 @@ fn upgrade_target_refusal(target: &UpgradeTarget, roots: &[ManagedRoot]) -> Opti
 /// can be exercised as `pixel-dev` while `pixel` stays the managed one.
 fn dev_install_path(home: &Path) -> PathBuf {
     home.join(".local/bin")
-        .join(pixel_install::config::PIXEL_DEV_EXECUTABLE)
+        .join(pixel_setup::config::PIXEL_DEV_EXECUTABLE)
 }
 
 /// The opening of the `CACHEDIR.TAG` cargo writes at the root of every
@@ -3507,12 +3513,12 @@ fn is_cargo_target_path(path: &Path) -> bool {
 
 /// True when `exe` is a build a developer runs from a checkout rather than
 /// a release install: cargo build output ([`is_cargo_target_path`]) or the
-/// `pixel-dev` side build ([`pixel_install::config::is_side_build`]). Such a
+/// `pixel-dev` side build ([`pixel_setup::config::is_side_build`]). Such a
 /// build carries its branch's prompts under the release's version, so
 /// whatever a release install owns (the deployed prompts, the upgrade
 /// notice) is not its to judge.
 pub(crate) fn is_developer_build(exe: &Path) -> bool {
-    is_cargo_target_path(exe) || pixel_install::config::is_side_build(exe)
+    is_cargo_target_path(exe) || pixel_setup::config::is_side_build(exe)
 }
 
 /// `dir` holds the `CACHEDIR.TAG` cargo writes at the root of a target
@@ -4151,7 +4157,7 @@ fn run() -> Result<(), String> {
     if checks_deployed_prompts(&command_label, protected, developer_build)
         && let Some(home) = std::env::var_os("HOME")
         && let Some(note) =
-            stale_prompt_note(&pixel_install::install::retired_prompts(Path::new(&home)))
+            stale_prompt_note(&pixel_setup::install::retired_prompts(Path::new(&home)))
     {
         eprint!("{note}");
     }
@@ -4298,7 +4304,7 @@ fn run() -> Result<(), String> {
             // the versioned store path `current_exe` resolves to.
             exe: std::env::current_exe()
                 .ok()
-                .map(pixel_install::install::stable_exe_path),
+                .map(pixel_setup::install::stable_exe_path),
             args: &argv[1..],
         },
         |name| std::env::var_os(name),
@@ -4326,13 +4332,11 @@ fn setup_install(json: bool, shell: Option<String>, repo: Option<PathBuf>) -> Re
     let interactive_banner = should_render_install_banner(json, stdout_tty);
     let color = banner_color(std::env::var_os("NO_COLOR").as_deref());
     if interactive_banner {
-        let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
-        if install_intro::should_play(json, stdout_tty, stdin_tty, |key| std::env::var_os(key)) {
-            install_intro::play();
-        }
-        write_stdout(&pixel_install::banner::render_start(color))?;
+        // #863: the four-act intro animation is retired; the card header
+        // (logo over version line) is the whole preamble now.
+        write_stdout(&pixel_setup::banner::render_start(color))?;
     }
-    let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
+    let report = pixel_setup::install::install(&pixel_setup::install::InstallOptions {
         shell,
         repo,
         ..Default::default()
@@ -4352,7 +4356,7 @@ fn setup_install(json: bool, shell: Option<String>, repo: Option<PathBuf>) -> Re
         print_data(&report_value, json)
     } else {
         operation_metrics::observe(&report_value);
-        write_stdout(&pixel_install::banner::render_result(&report, color))
+        write_stdout(&pixel_setup::banner::render_result(&report, color))
     }
 }
 
@@ -4365,7 +4369,7 @@ fn setup_remove(
     binary_path: Option<PathBuf>,
     wrappers_only: bool,
 ) -> Result<(), String> {
-    let report = pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
+    let report = pixel_setup::uninstall::uninstall(&pixel_setup::uninstall::UninstallOptions {
         binary_path,
         running_binary: std::env::current_exe().ok(),
         dry_run,
@@ -5601,37 +5605,37 @@ fn run_command(
             fix,
         } => {
             if list {
-                let catalogue = serde_json::to_value(pixel_install::doctor::CHECKS)
-                    .map_err(|e| e.to_string())?;
+                let catalogue =
+                    serde_json::to_value(pixel_setup::doctor::CHECKS).map_err(|e| e.to_string())?;
                 return if json {
                     print_data(&catalogue, true)
                 } else {
-                    write_stdout(&pixel_install::doctor::render_catalogue(
-                        pixel_install::doctor::CHECKS,
+                    write_stdout(&pixel_setup::doctor::render_catalogue(
+                        pixel_setup::doctor::CHECKS,
                     ))
                 };
             }
-            let options = discover_root(&path).map(|root| pixel_install::doctor::DoctorOptions {
+            let options = discover_root(&path).map(|root| pixel_setup::doctor::DoctorOptions {
                 repo_root: Some(root),
                 shell,
                 only,
                 skip,
                 ..Default::default()
             });
-            let run = |options: &pixel_install::doctor::DoctorOptions| {
-                pixel_install::doctor::doctor(options).map_err(|e| e.to_string())
+            let run = |options: &pixel_setup::doctor::DoctorOptions| {
+                pixel_setup::doctor::doctor(options).map_err(|e| e.to_string())
             };
             // Exit 2 keeps "the checks could not run" apart from exit 1,
             // "a check found a problem", for a script gating on doctor.
             let options = options.inspect_err(|_| owned_exit.set(Some(2)))?;
             let mut report = run(&options).inspect_err(|_| owned_exit.set(Some(2)))?;
-            let plan = pixel_install::doctor::repair_plan(&report);
+            let plan = pixel_setup::doctor::repair_plan(&report);
             let mut outcomes = None;
             if fix {
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                let (plan, left) = pixel_install::doctor::split_home_repairs(
+                let (plan, left) = pixel_setup::doctor::split_home_repairs(
                     plan.clone(),
-                    pixel_install::config::is_side_build(&exe),
+                    pixel_setup::config::is_side_build(&exe),
                 );
                 for repair in &left {
                     eprintln!(
@@ -5643,7 +5647,7 @@ fn run_command(
                     .iter()
                     .map(|repair| {
                         eprintln!("pixel doctor --fix: running {}", repair.command);
-                        pixel_install::doctor::run_repair(&exe, repair)
+                        pixel_setup::doctor::run_repair(&exe, repair)
                     })
                     .collect();
                 if !plan.is_empty() {
@@ -5654,7 +5658,7 @@ fn run_command(
                         .cloned()
                         .zip(runs)
                         .map(|(repair, ran)| {
-                            pixel_install::doctor::judge_repair(repair, ran, &report)
+                            pixel_setup::doctor::judge_repair(repair, ran, &report)
                         })
                         .collect::<Vec<_>>(),
                 );
@@ -5669,7 +5673,7 @@ fn run_command(
                 operation_metrics::observe(&value);
                 let mut text = String::new();
                 if let Some(outcomes) = &outcomes {
-                    text.push_str(&pixel_install::doctor::render_repairs(outcomes));
+                    text.push_str(&pixel_setup::doctor::render_repairs(outcomes));
                 }
                 text.push_str(&report.to_string());
                 if outcomes.is_none() && !plan.is_empty() {
@@ -5695,6 +5699,12 @@ fn run_command(
                 event,
                 part,
             } => task_hook::run(provider, event, part),
+            HookCmd::Metrics { provider } => {
+                // PostToolUse relay for hosts whose tool results drop stderr
+                // (Codex): re-emits the finalized invocation's 🟩 line as
+                // additionalContext. Never returns.
+                hook_metrics::run_metrics_hook(provider);
+            }
             // Retired verbs: drain the payload the host wrote, answer nothing.
             HookCmd::Retired(_) => {
                 let _ = hook_input::read_hook_payload();
@@ -6283,7 +6293,7 @@ fn parse_error_summary(rendered: &str) -> String {
 /// `None` when the argv has no sentinel or both values bound to one argument.
 #[cfg(test)]
 fn variadic_sentinel_misfit(args: &[String]) -> Option<String> {
-    use pixel_install::doctor::VARIADIC_SENTINEL;
+    use pixel_setup::doctor::VARIADIC_SENTINEL;
     let sentinel = args.iter().position(|a| a == VARIADIC_SENTINEL)?;
     let mut root = Cli::command();
     root.build();
@@ -6612,7 +6622,7 @@ mod tests {
         ];
         let mut failures = Vec::new();
         for line in canonical {
-            match pixel_install::doctor::normalize_rule_command(line) {
+            match pixel_setup::doctor::normalize_rule_command(line) {
                 None => failures.push(format!("`{line}` did not normalize")),
                 Some(argv) => {
                     if let Err(e) = validate_cli_syntax(&argv) {
@@ -6636,7 +6646,7 @@ mod tests {
     #[test]
     fn variadic_single_value_flags_are_rejected_as_documented() {
         let line = r#"pixel search-content "<re>" --glob <g>..."#;
-        let argv = pixel_install::doctor::normalize_rule_command(line)
+        let argv = pixel_setup::doctor::normalize_rule_command(line)
             .unwrap_or_else(|| panic!("`{line}` did not normalize"));
         assert!(
             validate_cli_syntax(&argv).is_err(),
@@ -6651,7 +6661,7 @@ mod tests {
         // The sentinel is the last value, so it is held only if its first
         // value's argument is found at the index just before it.
         let line = "pixel search-content \"<re>\" <path>...";
-        let argv = pixel_install::doctor::normalize_rule_command(line)
+        let argv = pixel_setup::doctor::normalize_rule_command(line)
             .unwrap_or_else(|| panic!("`{line}` did not normalize"));
         assert_eq!(validate_cli_syntax(&argv), Ok(()), "argv {argv:?}");
     }
@@ -7011,16 +7021,16 @@ mod tests {
 /// fail the build.
 #[cfg(test)]
 mod prompt_asset_parity {
-    use pixel_install::doctor::{extract_rule_commands, normalize_rule_command};
+    use pixel_setup::doctor::{extract_rule_commands, normalize_rule_command};
 
     const ASSETS: [(&str, &str); 2] = [
         (
             "pixel-agent-prompt.md",
-            include_str!("../../pixel-install/assets/pixel-agent-prompt.md"),
+            include_str!("../../pixel-setup/assets/pixel-agent-prompt.md"),
         ),
         (
             "pixel-subagent-prompt.md",
-            include_str!("../../pixel-install/assets/pixel-subagent-prompt.md"),
+            include_str!("../../pixel-setup/assets/pixel-subagent-prompt.md"),
         ),
     ];
 

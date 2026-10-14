@@ -70,15 +70,15 @@ pub(crate) fn window_for(root: &Path, command: bool) -> Duration {
         .map(PathBuf::from)
         .unwrap_or_default();
     let default = if command {
-        pixel_install::config::BRIEF_WINDOW_COMMAND_DEFAULT_MS
+        pixel_setup::config::BRIEF_WINDOW_COMMAND_DEFAULT_MS
     } else {
-        pixel_install::config::BRIEF_WINDOW_HOOK_DEFAULT_MS
+        pixel_setup::config::BRIEF_WINDOW_HOOK_DEFAULT_MS
     };
     window_of(
-        pixel_install::config::brief_window_ms(
+        pixel_setup::config::brief_window_ms(
             &home,
             Some(root),
-            std::env::var(pixel_install::config::BRIEF_WINDOW_ENV)
+            std::env::var(pixel_setup::config::BRIEF_WINDOW_ENV)
                 .ok()
                 .as_deref(),
             default,
@@ -89,9 +89,9 @@ pub(crate) fn window_for(root: &Path, command: bool) -> Duration {
 
 /// The window for a configured `ms`: the `brief` command is cut off by Pi
 /// after 1.2 s, so a setting tuned for the hook never lets it run past
-/// [`pixel_install::config::BRIEF_WINDOW_COMMAND_MAX_MS`].
+/// [`pixel_setup::config::BRIEF_WINDOW_COMMAND_MAX_MS`].
 fn window_of(ms: u64, command: bool) -> Duration {
-    let cap = pixel_install::config::BRIEF_WINDOW_COMMAND_MAX_MS;
+    let cap = pixel_setup::config::BRIEF_WINDOW_COMMAND_MAX_MS;
     Duration::from_millis(if command { ms.min(cap) } else { ms })
 }
 
@@ -9189,7 +9189,7 @@ mod tests {
         assert_eq!(window_of(3_000, false), Duration::from_millis(3_000));
         assert_eq!(
             window_of(3_000, true),
-            Duration::from_millis(pixel_install::config::BRIEF_WINDOW_COMMAND_MAX_MS)
+            Duration::from_millis(pixel_setup::config::BRIEF_WINDOW_COMMAND_MAX_MS)
         );
         assert_eq!(window_of(400, true), Duration::from_millis(400));
     }

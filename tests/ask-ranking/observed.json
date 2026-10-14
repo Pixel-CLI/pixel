@@ -13,14 +13,14 @@
         "retained": true,
         "elapsed_seconds": 6.766712208998797,
         "paths": [
-          "crates/pixel-install/src/uninstall.rs",
+          "crates/pixel-setup/src/uninstall.rs",
           "README.md",
           "docs/manual-setup.md",
           "scripts/pixel-bench.sh",
-          "crates/pixel-install/src/install.rs",
+          "crates/pixel-setup/src/install.rs",
           "AGENTS.md",
           "CLAUDE.md",
-          "crates/pixel-install/src/routing.rs"
+          "crates/pixel-setup/src/routing.rs"
         ],
         "coverage": {
           "candidate_files": 195,
@@ -43,12 +43,12 @@
         "retained": true,
         "elapsed_seconds": 6.07076799999777,
         "paths": [
-          "crates/pixel-install/src/uninstall.rs",
+          "crates/pixel-setup/src/uninstall.rs",
           "docs/manual-setup.md",
           "README.md",
           "crates/pixel/Cargo.toml",
           "ARCHITECTURE.md",
-          "crates/pixel-install/Cargo.toml",
+          "crates/pixel-setup/Cargo.toml",
           "AGENTS.md",
           "CLAUDE.md"
         ],
@@ -79,8 +79,8 @@
           "crates/pixel-index/src/indexset.rs",
           "crates/pixel-graph/src/changes.rs",
           "crates/pixel-daemon/src/api.rs",
-          "crates/pixel-install/src/doctor.rs",
-          "crates/pixel-install/src/config.rs"
+          "crates/pixel-setup/src/doctor.rs",
+          "crates/pixel-setup/src/config.rs"
         ],
         "coverage": {
           "candidate_files": 195,
@@ -165,7 +165,7 @@
         "retained": true,
         "elapsed_seconds": 6.1555856249979115,
         "paths": [
-          "crates/pixel-install/src/uninstall.rs",
+          "crates/pixel-setup/src/uninstall.rs",
           "README.md",
           "docs/manual-setup.md"
         ],
@@ -190,7 +190,7 @@
         "retained": true,
         "elapsed_seconds": 6.0002763329976005,
         "paths": [
-          "crates/pixel-install/src/uninstall.rs",
+          "crates/pixel-setup/src/uninstall.rs",
           "docs/manual-setup.md",
           "README.md"
         ],
@@ -292,11 +292,11 @@
         "retained": true,
         "elapsed_seconds": 6.139731542003574,
         "paths": [
-          "crates/pixel-install/src/uninstall.rs",
+          "crates/pixel-setup/src/uninstall.rs",
           "README.md",
           "docs/manual-setup.md",
           "scripts/pixel-bench.sh",
-          "crates/pixel-install/src/install.rs"
+          "crates/pixel-setup/src/install.rs"
         ],
         "coverage": {
           "candidate_files": 195,
@@ -319,7 +319,7 @@
         "retained": true,
         "elapsed_seconds": 6.0762517080002,
         "paths": [
-          "crates/pixel-install/src/uninstall.rs",
+          "crates/pixel-setup/src/uninstall.rs",
           "docs/manual-setup.md",
           "README.md",
           "crates/pixel/Cargo.toml",

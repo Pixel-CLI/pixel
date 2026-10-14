@@ -25,5 +25,6 @@ mod ruby_callbacks;
 mod ruby_constant_receivers;
 mod ruby_generated_methods;
 mod ruby_projects;
+mod ruby_source_switch;
 mod scoped_symbol_lookup;
 mod unresolved_diagnostic;

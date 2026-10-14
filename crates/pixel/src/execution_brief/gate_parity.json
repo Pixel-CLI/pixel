@@ -451,7 +451,7 @@
       "you"
      ],
      "line": 78,
-     "path": "crates/pixel-install/src/doctor.rs",
+     "path": "crates/pixel-setup/src/doctor.rs",
      "structural": true,
      "structural_keywords": [
       "line",
@@ -993,7 +993,7 @@
       "exactly"
      ],
      "line": 4,
-     "path": "crates/pixel-install/src/doctor.rs",
+     "path": "crates/pixel-setup/src/doctor.rs",
      "structural": true,
      "structural_keywords": [
       "daemon"

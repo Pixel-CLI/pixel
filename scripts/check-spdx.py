@@ -52,7 +52,7 @@ EXCLUDED = {
     # Written verbatim into users' agent configurations by `pixel setup`
     # (the pi guard extension, the OpenCode plugin): a header there changes
     # installed content. The root LICENSE covers them.
-    "crates/pixel-install/assets/",
+    "crates/pixel-setup/assets/",
     # Vendored from an upstream skill under its own license (see UPSTREAM).
     ".agents/skills/improve-codebase-architecture/",
 }

@@ -196,7 +196,7 @@ fn a_part_is_k_over_n_inside_the_bounds() {
     assert_eq!("1/3".parse::<BriefPart>(), Ok(part(1, 3)));
     assert_eq!("3/3".parse::<BriefPart>(), Ok(part(3, 3)));
     assert_eq!("1/1".parse::<BriefPart>(), Ok(part(1, 1)));
-    let most = pixel_install::config::BRIEF_PARTS_MAX;
+    let most = pixel_setup::config::BRIEF_PARTS_MAX;
     assert_eq!(
         format!("{most}/{most}").parse::<BriefPart>(),
         Ok(part(most, most))

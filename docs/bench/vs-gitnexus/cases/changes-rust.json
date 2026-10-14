@@ -1,5 +1,5 @@
 [
   {"symbol": "acquire_with_state_root", "file": "crates/pixel-ops/src/lock.rs", "line": 44},
   {"symbol": "read_regular_bounded", "file": "crates/pixel-index/src/index.rs", "line": 162},
-  {"symbol": "apply_managed_markers", "file": "crates/pixel-install/src/config.rs", "line": 231}
+  {"symbol": "apply_managed_markers", "file": "crates/pixel-setup/src/config.rs", "line": 231}
 ]

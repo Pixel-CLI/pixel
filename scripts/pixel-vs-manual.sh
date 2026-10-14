@@ -93,7 +93,7 @@ echo ""
 # `install` is ambiguous by bare name (a function, a module, a test method):
 # impact/context take the uid, which `pixel find-symbol` prints in its last column.
 INSTALL_UID=$("$PIXEL_BIN" find-symbol install "$REPO" 2>/dev/null | awk '$1=="function"{print $NF; exit}')
-INSTALL_UID="${INSTALL_UID:-crates/pixel-install/src/install.rs#install#function}"
+INSTALL_UID="${INSTALL_UID:-crates/pixel-setup/src/install.rs#install#function}"
 
 OUTDIR="/tmp/pixel-vs-manual"
 mkdir -p "$OUTDIR"

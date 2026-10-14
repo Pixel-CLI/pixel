@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 //! The `pixel setup` exit: `--json` and a piped stdout keep the
-//! machine-readable report; the human banner (`pixel_install::banner`) is
-//! a stdout-is-a-TTY path unit-tested in the pixel-install crate. These
+//! machine-readable report; the human banner (`pixel_setup::banner`) is
+//! a stdout-is-a-TTY path unit-tested in the pixel-setup crate. These
 //! tests pin the contract the banner branch must never break.
 
 use crate::support::{Scratch, pixel_command};

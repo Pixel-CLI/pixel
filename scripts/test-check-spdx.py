@@ -73,7 +73,7 @@ class CheckSpdx(unittest.TestCase):
 
     def test_out_of_scope_files_are_never_reported(self):
         root = self.repo({
-            "crates/pixel-install/assets/pi-pixel.ts": "export {};\n",
+            "crates/pixel-setup/assets/pi-pixel.ts": "export {};\n",
             "config.yaml": "a: 1\n",
             "README.md": "# readme\n",
             ".github/workflows/ci.yml": "# SPDX-FileCopyrightText: The Pixel contributors\n# SPDX-License-Identifier: MIT\nname: CI\n",
