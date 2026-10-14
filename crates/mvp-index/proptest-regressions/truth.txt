@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7e947a856b2ebdf7fa4a8fb42632d0f0c9e81d3583e9ff3a3dea5c075c800a84 # shrinks to classes = [[(4, [OnNew(0, 4)])]]
+cc 2d20bdb7aae1a76d1f83c21c122447437e4607455d557f87c99cf5bf85916563 # shrinks to modules = [RustModule { functions: [(0, [])], methods: [] }]
+cc 86ac7231f35ab2cc3faa6e3fd5a3509b6391ed7fe2453b245803e10ed8e63867 # shrinks to modules = [RustModule { functions: [(0, [])], methods: [] }]
+cc 97d826ce8c1828108b861d1a9cc073753db0880d12fa93dd52d2754ac159710c # shrinks to classes = [[(0, [Helper(true)])]]
+cc 43feefcc8cf9dd23cf4d85deb5979fb063916696ea0a847e4dc6cb715f1afad3 # shrinks to classes = [(false, [(1, [Local(1), Bare(1)])])]

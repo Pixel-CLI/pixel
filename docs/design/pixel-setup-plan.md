@@ -91,11 +91,11 @@ The guided apply order is: instruction files and rule files
 template and the global keys. A failure stops there; every step is idempotent, so
 a re-run finishes the job.
 
-## Temporary development flags (do not ship)
+## Temporary development flags (live in debug builds only)
 
-`but agent setup` has no non-interactive apply, so the port carries three
-throwaway flags to drive the wizard from a script while the goldens are built.
-They exist for this development loop only.
+`but agent setup` has no non-interactive apply, so the port carries three flags
+to drive the wizard from a script while the goldens under `tests/setup/` are
+built:
 
 | flag | meaning |
 |---|---|
@@ -108,15 +108,54 @@ flags need each other and run the guided path without a terminal or a
 confirmation; clap refuses them with `--yes`, `--print` and `--remove`.
 `--dummy-apply` changes no behaviour but the write root: instruction files, hook
 files (the installer's home is the dummy root) and the global configuration,
-which it leaves alone. They stay hidden development flags as planned, and fold
-into nothing: the unattended path needs no flag to select agents, it deploys for
-every configured host as `pixel install` did.
+which it leaves alone.
+
+### A released binary refuses them
+
+`dev::LIVE` in `crates/pixel/src/setup_cmd.rs` is `cfg!(debug_assertions)`:
+`cargo run`, `cargo test` and every other debug build take the flags, and the
+binaries a user installs answer
+
+```console
+$ pixel setup --dummy-apply --selected-agents=1 --selected-features=1
+pixel: --selected-agents, --selected-features, --dummy-apply are development-only
+flags, and this build does not have them: `pixel setup` runs the guided wizard in
+a terminal and the unattended installer everywhere else. The flags are live in a
+debug build; docs/design/pixel-setup-plan.md says how to test with them.
+```
+
+Refusing rather than ignoring is the point: an ignored `--dummy-apply` would
+write under the real `$HOME`, and a silently ignored `--selected-agents` would
+run the unattended installer where a script asked for a guided run. `main.rs`
+refuses before the guided/unattended decision, so no refused flag reaches a
+write.
+
+The release side is enforced by the compiler, not by a test: a
+`#[cfg(not(debug_assertions))] const _: () = assert!(!LIVE, …)` beside `LIVE`
+means a build with debug assertions off **fails to compile** if the flags are
+live, so no released binary can carry them and the release lanes in CI are the
+proof. A `#[cfg(not(debug_assertions))]` test could not do it: the CLI
+integration tests link the debug binary, so such a test is compiled out of the
+job that runs them and never executes.
+
+### Testing with a release-profile build
+
+The local-install loop builds `dev-release` (release settings, no thin LTO),
+which has debug assertions off and so refuses the flags. To drive the wizard
+from a script there — the mode `cargo run -p pixel-cli -- setup --dummy-apply`
+gives you in a debug build — set `LIVE` to `true` in
+`crates/pixel/src/setup_cmd.rs`, build with `--profile dev-release`, test, then
+set it back to `cfg!(debug_assertions)`. That edit is local and never pushed:
+the committed value has to stay `cfg!(debug_assertions)` for the release to
+refuse the flags, and a test (`the_test_build_is_live_so_the_scripted_cases_keep_working`)
+holds the debug side of it.
 
 **Removal gate (before the release PR):** delete the three flags from
-`crates/pixel/src/main.rs` and re-point the golden test at the in-process
-renderer (`setup::render_block` + `setup::files::upsert`) so the committed
-`tests/setup/.agents/` files stay verified without them. `--print` survives as the
-permanent non-interactive surface.
+`crates/pixel/src/main.rs`, the `mod dev` section and `refuse_dev_flags` in
+`crates/pixel/src/setup_cmd.rs`, and the scripted cases in
+`crates/pixel/tests/cli/setup_cli.rs`. The golden test never used them
+(`setup/goldens.rs` renders and applies in-process), so it survives the removal
+unchanged, and `--print` stays as the permanent non-interactive surface.
 
 ## Goal
 

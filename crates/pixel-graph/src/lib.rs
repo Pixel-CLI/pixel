@@ -12,6 +12,8 @@
 //! - `build`: whole-repo build/update orchestration
 //! - `impact`, `trace`, `process`, `cluster`, `changes`: analyses
 //! - `predicate`: bounded reachability with witnesses (`pixel evaluate`)
+//! - `mvp_adapter`: pixel-mvp's Rust index in this graph's rows (vendored
+//!   `mvp-*` crates); `shadow`: this graph's Rust edges against it
 
 pub mod build;
 pub mod changes;
@@ -22,12 +24,14 @@ pub mod cycles;
 pub mod extract;
 pub mod impact;
 pub mod imports;
+pub mod mvp_adapter;
 pub mod plan;
 pub mod predicate;
 pub mod process;
 pub mod rename;
 pub mod resolve;
 pub mod review;
+pub mod shadow;
 pub mod store;
 pub mod targets;
 pub mod trace;

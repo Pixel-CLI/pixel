@@ -82,12 +82,7 @@ fn task_hook_group_with(exe: &Path, provider: &str, event: &str, flags: &str) ->
 /// pre-existing lifecycle/foreign hooks independently of the new task hooks.
 fn without_task_hooks(value: &serde_json::Value, provider: &str, exe: &Path) -> serde_json::Value {
     let mut remaining = value.clone();
-    let extra = if provider == "claude" {
-        ("PostToolUseFailure", "tool-failure")
-    } else {
-        ("Interrupt", "interrupt")
-    };
-    for (event, name) in [
+    let mut events = vec![
         ("SessionStart", "session-start"),
         ("UserPromptSubmit", "prompt-submit"),
         ("PreToolUse", "pre-tool-use"),
@@ -96,8 +91,15 @@ fn without_task_hooks(value: &serde_json::Value, provider: &str, exe: &Path) -> 
         ("SessionEnd", "session-end"),
         ("SubagentStart", "subagent-start"),
         ("SubagentStop", "subagent-stop"),
-        extra,
-    ] {
+    ];
+    match provider {
+        "claude" => events.push(("PostToolUseFailure", "tool-failure")),
+        // Devin rejects a `hooks` object naming an event it does not accept,
+        // so install writes no Subagent*/Interrupt key there.
+        "devin" => events.retain(|(event, _)| !event.starts_with("Subagent")),
+        _ => events.push(("Interrupt", "interrupt")),
+    }
+    for (event, name) in events {
         let groups = remaining["hooks"][event].as_array_mut().unwrap();
         for expected in task_hook_groups(exe, provider, name) {
             assert_eq!(

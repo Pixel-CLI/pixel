@@ -21,6 +21,7 @@ use crate::extract::{
     FileExtraction, RawMixin, extract_file, is_binstub_candidate, lang_of, lang_of_file,
 };
 use crate::imports::{resolve_import_in, ruby as ruby_projects};
+use crate::mvp_adapter::{self, RustSource};
 use crate::resolve::{
     Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference,
     reconsider_resolved_calls, resolve_affected, resolve_calls, resolve_references,
@@ -169,9 +170,35 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    of their class, and the calls made inside them belong to them.
 pub const EXTRACTOR_VERSION: &str = "25";
 
-/// True iff the graph's rows were written by the current extractor.
+/// True iff the graph's rows were written by the current extractor, from
+/// the Rust source the switch asks for now (`mvp_adapter::RustSource`).
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
-    Ok(store.meta_get(EXTRACTOR_VERSION_KEY)?.as_deref() == Some(EXTRACTOR_VERSION))
+    Ok(
+        store.meta_get(EXTRACTOR_VERSION_KEY)?.as_deref() == Some(EXTRACTOR_VERSION)
+            && mvp_adapter::source_is_current(
+                store.meta_get(mvp_adapter::GRAPH_SOURCE_KEY)?.as_deref(),
+                RustSource::from_env(),
+            ),
+    )
+}
+
+/// The ids of the graph's Rust files.
+fn rust_file_ids(store: &GraphStore) -> Result<HashSet<i64>, StoreError> {
+    Ok(store
+        .files()?
+        .into_iter()
+        .filter(|f| f.lang == "rust")
+        .map(|f| f.id)
+        .collect())
+}
+
+/// `stored` without the calls and references of Rust files: when the
+/// graph's Rust edges are pixel-mvp's, this graph's resolver decides none.
+fn without_rust_sites(store: &GraphStore, stored: &mut StoredBatch) -> Result<(), StoreError> {
+    let rust = rust_file_ids(store)?;
+    stored.calls.retain(|fc| !rust.contains(&fc.file_id));
+    stored.references.retain(|fr| !rust.contains(&fr.file_id));
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -476,15 +503,31 @@ fn input_signature(inputs: &[(String, Vec<u8>)]) -> String {
 /// Full graph build: parse everything in parallel, then write files,
 /// symbols, imports, and resolved call edges.
 pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
-    build_graph_with(root, db_path, freshness_signature)
+    build_graph_from(root, db_path, RustSource::from_env())
 }
 
-/// [`build_graph`] with the signature of the tree as it stands after the
-/// writes supplied by `signature_now`: production re-walks the tree, a test
-/// makes it move to reach the rollback.
+/// [`build_graph`] with the Rust edges taken from `rust`. With
+/// [`RustSource::Mvp`], pixel-mvp's index is refreshed in the repository's
+/// state directory (`.pixel/.pixel-mvp/`) and its answer replaces this
+/// graph's resolver for Rust (`mvp_adapter::switch_rust`); where it cannot
+/// index (no `Cargo.toml` at `root`, no git work tree there), the graph
+/// keeps this resolver's Rust edges and records why
+/// (`mvp_adapter::MVP_UNAVAILABLE`).
+pub fn build_graph_from(
+    root: &Path,
+    db_path: &Path,
+    rust: RustSource,
+) -> Result<GraphStats, BoxErr> {
+    build_graph_with(root, db_path, rust, freshness_signature)
+}
+
+/// [`build_graph_from`] with the signature of the tree as it stands after
+/// the writes supplied by `signature_now`: production re-walks the tree, a
+/// test makes it move to reach the rollback.
 fn build_graph_with(
     root: &Path,
     db_path: &Path,
+    rust: RustSource,
     signature_now: impl FnOnce(&Path) -> String,
 ) -> Result<GraphStats, BoxErr> {
     let t0 = Instant::now();
@@ -549,8 +592,25 @@ fn build_graph_with(
         store.record_walked_file(rel, blob_oid)?;
     }
 
+    // pixel-mvp's index, read after the walk above: a file it reads newer
+    // than the walk did moves the signature checked below.
+    let mvp = match rust {
+        RustSource::V1 => None,
+        RustSource::Mvp => mvp_adapter::refresh_crate(root, &pixel_git::sidecar::dir(root)).ok(),
+    };
+    let source = match (rust, &mvp) {
+        (RustSource::V1, _) => None,
+        (RustSource::Mvp, Some(_)) => Some(mvp_adapter::mvp_source()),
+        (RustSource::Mvp, None) => Some(mvp_adapter::MVP_UNAVAILABLE.to_string()),
+    };
+    // Before resolution: the resolver reads it (`rust_is_walled`).
+    mvp_adapter::record_source(&store, source.as_deref())?;
+
     let projects = ruby_projects::Projects::load(root, &all_paths);
-    let stored = store_batch(&mut store, extracted, &all_paths, &projects)?;
+    let mut stored = store_batch(&mut store, extracted, &all_paths, &projects)?;
+    if mvp.is_some() {
+        without_rust_sites(&store, &mut stored)?;
+    }
     phases.store_ms = millis(stored.stored_at.duration_since(clock));
     phases.concepts_ms = millis(stored.concepts);
     phases.imports_ms = millis(stored.imports);
@@ -559,6 +619,9 @@ fn build_graph_with(
     phases.resolve_calls_ms = millis(clock.elapsed());
     let clock = Instant::now();
     resolve_references(&store, &stored.references)?;
+    if let Some(mvp) = &mvp {
+        mvp_adapter::apply(&store, &mvp_adapter::rust_rows(&store, mvp)?)?;
+    }
     phases.resolve_references_ms = millis(clock.elapsed());
     let clock = Instant::now();
 
@@ -1291,7 +1354,14 @@ fn stored_definitions(
 /// of everything a changed definition may have made ambiguous. Writes no
 /// signature: the caller decides which one (if any) describes the tree it
 /// just synchronised to.
+///
+/// When the graph's Rust edges are pixel-mvp's (`mvp_adapter::rust_is_walled`),
+/// this resolver decides no Rust site, and the Rust rows are replaced last
+/// with pixel-mvp's answer, refreshed in `.pixel/.pixel-mvp/`, so whatever
+/// the passes before did to them (a demoted edge, a retried row) is not what
+/// stays.
 fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Result<(), BoxErr> {
+    let walled = mvp_adapter::rust_is_walled(store)?;
     // What the batch changed, before and after, for the re-resolution below.
     let mut affected = Affected::default();
     let mut before: Vec<Definition> = Vec::new();
@@ -1419,7 +1489,10 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     );
     let added_any = extracted.iter().any(|e| !known_before.contains(&e.rel));
     let projects = ruby_projects::Projects::load(root, &all_paths);
-    let stored = store_batch(store, extracted, &all_paths, &projects)?;
+    let mut stored = store_batch(store, extracted, &all_paths, &projects)?;
+    if walled {
+        without_rust_sites(store, &mut stored)?;
+    }
     affected.record_changed_definitions(&before, &after);
     affected.record_changed_mixins(store, &mixins_before, &mixins_after)?;
     // A file new to the graph gets its id here; its importers are any file
@@ -1483,6 +1556,9 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     reconsider_resolved_calls(store, &mut affected)?;
     // Retry what the batch can have changed against the new candidate set.
     resolve_affected(store, &affected)?;
+    if walled {
+        mvp_adapter::switch_rust(root, store, &pixel_git::sidecar::dir(root))?;
+    }
 
     // Persisted analyses (`processes`, `clusters`) are keyed by symbol id,
     // and `replace_file` hands re-extracted symbols NEW ids: the cached
@@ -1591,7 +1667,7 @@ mod tests {
         assert_eq!(before.1, ["kept"]);
 
         std::fs::write(root.join("b.rs"), "fn added() -> u32 { 2 }\n").unwrap();
-        let err = build_graph_with(&root, &db, |_| "moved".into()).unwrap_err();
+        let err = build_graph_with(&root, &db, RustSource::V1, |_| "moved".into()).unwrap_err();
         assert!(err.to_string().contains("source changed"), "{err}");
         assert_eq!(
             snapshot(),

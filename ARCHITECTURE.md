@@ -38,11 +38,11 @@ MCP server. `pixel setup` registers no MCP server with any agent.
 
 | Crate | Role | Depends on (pixel crates) |
 | --- | --- | --- |
-| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry point under `run-hook` (alias `hook`: `task-event`). | every library crate except `pixel-context` (reached through the daemon), `pixel-ultraflow` and `pixel-bench` |
+| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry point under `run-hook` (alias `hook`: `task-event`). | every library crate except `pixel-context` (reached through the daemon), `pixel-ultraflow`, `pixel-bench` and the vendored `mvp-model`, `mvp-store` and `mvp-index` |
 | `pixel-proto` | The shared contract crate: `Envelope`, `PixelError` and `ErrorCode`, `Epistemics`, `SnapshotInfo`, `Budget`, `Warning`, the `Op` request enum, and `commands::RENAMED_COMMANDS`, the old-to-new CLI subcommand names the CLI accepts as hidden aliases until 1.0. No I/O, no business logic. Every other crate that speaks the wire format depends on it, and it depends on nothing internal. | none |
 | `pixel-daemon` | Transport-agnostic `Service` (`api.rs`) and the Unix-socket NDJSON daemon with filesystem watching (`daemon.rs`). Dispatches each `Op` to the right library, attaches snapshot and epistemics metadata, and is the one place a retrieval envelope is built. Also hosts the recall daemon service. | index, graph, context, rank, proto, ops, facts, session, recall, git |
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
-| `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. | git, index |
+| `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. `mvp_adapter` reads the vendored pixel-mvp index (`refresh` brings it up to date under a state directory, through git) and returns what its rules decide at each Rust site in this graph's rows: proven calls as `exact` edges, references as `probable`, the rest as `unresolved_calls` rows, and each Rust import's resolved file, on this graph's own symbols (rows with no symbol here, Rust test code, are dropped and counted); the Rust source switch, on by default for a Cargo crate, writes them in ("Indexes and freshness"). `shadow` builds this graph and the adapter's rows in a scratch directory and counts what each links alone (`pixel graph-shadow`). | git, index, mvp-index, mvp-model, mvp-store |
 | `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db`: commit metadata, diff text, and contentless FTS5 trigram indexes over the diffs and paths. Demand-driven: the daemon never ingests at startup, and `status` and `doctor` never create the db — the first history query runs a bounded catch-up (`PIXEL_FACTS_QUERY_BUDGET_MS`, default 3 s) and spawns the low-priority keep-fresh loop that never blocks queries. The daemon `history`, `dig-history` and `lifecycle` ops take `read_only: true` (protocol 15), under which an absent db answers `unavailable` and a stale one answers from existing rows — ingest and catch-up are skipped; the prompt hook sends only this form. Bounded: diff text is kept for the last 365 days (`PIXEL_HISTORY_WINDOW_DAYS`, `0` for all) within 256 MiB of used pages (`PIXEL_HISTORY_BUDGET_MB`), newest first; older diffs are evicted, metadata never is. `build-index --history` remains the explicit full build. Backs `excavate`, `lifecycle`, `history-search` and `rescue` discovery (`resolve` is the graph's concept index). | git |
 | `pixel-rank` | Fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. The scoring is pure; `compute_signals` gathers the activity channel itself (git log churn when facts have none, and a failed or capped scan is reported as unavailable rather than as an empty map) and takes the session and error-sink channels from its caller — the daemon feeds neither of those. Also hosts `regions`: the pure symbol-level regions analysis for `scope-task --regions` (P0 symbols + call/import edges in, regions manifest out — line ranges, conservative conflict pairs, merge-order layers, shared files). | graph, git, session |
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
@@ -56,8 +56,11 @@ MCP server. `pixel setup` registers no MCP server with any agent.
 | `pixel-install` | Idempotent `pixel setup`, `pixel setup --remove`, `pixel doctor`. The guided run at a terminal is the `setup/` module (agent detection and targets, the 12-feature catalog, the plan, the managed block and its upsert) in front of the same installer, which `install_selected` limits to the agents and hook groups the plan picked. Global install: Claude and Codex task lifecycle hooks, cleanup of their retired retrieval hooks and prompts and the `claude()` shell wrapper, removal of the Pi `APPEND_SYSTEM.md` retrieval block, and the explicit Pi `/pixel-impact` package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`) when Pi is present. No prompt is deployed and no other host is wired: the retired OpenCode, Devin, Antigravity, zcode, Cursor and Copilot CLI artifacts and the deployed agent prompts are removed. An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo`: native-default migration for Claude and Codex, and removal of the retired Devin and Pi project guards and `AGENTS.md` retrieval blocks (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `intro` animation (frames only; `pixel` owns the tty) and ends on the `banner` summary. The text it deploys depends on which plugins run (`pixel_plugin::Available`): the steering names `pixel who-wrote` only where the git plugin runs, and the web-search section is written only where `pixel-utilities` does (the plan's notes say which plugin to install otherwise). `pixel doctor` reads the managed blocks it deployed (`setup::deployed_files`, `setup::managed_text`) and reports `plugins.references` yellow, with the `pixel install github:Pixel-CLI/<repo>` command, for a plugin command they name that no plugin provides; `web-search.provider` is green and says so when `pixel-utilities` is not installed. | proto, daemon, index, facts, git, plugin |
 | `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`, and an optional `commands` list so one binary serves several `pixel <command>` words, run as `<run> <command> <args…>`; two plugins of a tier answering to one command are an error naming both, in `resolve`, `list` and `install`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (the library behind `pixel install`: a local directory, a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL, or `github:<owner>/<repo>[@<ref>]`, whose unshipped program is fetched as a release asset with `curl`), `remove` (`pixel uninstall`), `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. `Available` is the set of moved commands (`MOVED_COMMANDS`) that a plugin runs on this host, with the host's own reason for one that is installed but blocked (untrusted, not enabled): text that would name a plugin command asks it first. `read_only_invocation` says which moved commands and modes only read, for the task gate: `repo-state`, `review-changes` and the history reads always; `recall` and `list-errors` only when their first argument is a read mode (an option first makes it not a read, so an option value is never taken for the mode); `list-branches` unless `--fetch`. Home, repo root, PATH and the GitHub base URL are fields of `Host`, never read from the process. | git |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
+| `mvp-model` | Vendored from pixel-mvp at a pinned commit (`crates/mvp-model/VENDORED.md`, ADR-0035 there): the row types of pixel-mvp's index (files, symbols, edges with a target or none, provenance) and the `Graph` read trait. Pure: no I/O, enforced by its own `clippy.toml`. `src/` is a copy, synced by `scripts/vendor-mvp.sh`, never edited here. | none |
+| `mvp-store` | Vendored from pixel-mvp like `mvp-model`: pixel-mvp's graph store, one SQLite file (`graph.db`) in a `.pixel-mvp/` state directory under the root it is given, with one writer behind a lock, one generation published per transaction, and a damaged or foreign file refused and rebuilt. `pixel-graph`'s `mvp_adapter` refreshes and reads it. | mvp-model |
+| `mvp-index` | Vendored from pixel-mvp like `mvp-model`: pixel-mvp's indexer for Ruby and Rust. `tree` scans the work tree through git (tracked and untracked files, the commit and the dirty flag a generation names), `link::plan` diffs it against the stored generation, `extract` parses the planned files with tree-sitter into symbols and edges, and `link::link` decides every site of the generation again under each language's rules: an edge only where the rule proves its target, every other site kept unresolved. It writes nothing; its caller hands the rows to `mvp-store`. It spawns `git` itself (`tree.rs`), outside `pixel-git`'s `GitRunner`: no timeout and no output cap. `pixel-graph`'s `mvp_adapter` runs it. | mvp-model |
 
-Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context` and `pixel-release`; `pixel-session`, `pixel-actionlog` and `pixel-plugin` depend on `pixel-git` only). `pixel-daemon` is
+Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context` and `pixel-release`; `pixel-session`, `pixel-actionlog` and `pixel-plugin` depend on `pixel-git` only). The vendored `mvp-*` crates depend on each other and on third-party crates only, never on a `pixel-*` crate, so that each sync stays a copy; `pixel-graph` is the one crate that depends on them. `pixel-daemon` is
 the integration point and is the only library crate allowed to depend on
 almost everything. The CLI depends on the daemon plus whatever it needs for
 commands that never touch the daemon (install, check-release).
@@ -95,6 +98,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel list-areas` | Functional-area clusters |
 | `pixel what-changed` | Symbols/flows affected by working-tree changes |
 | `pixel rebuild-graph` | Force (re)build of the code graph db |
+| `pixel graph-shadow` | Compare this graph's Rust edges with pixel-mvp's index (both built in a scratch directory) |
 | `pixel workspace` | Multi-repo registry (`.pixel/workspace.json` members add/remove/list); `--workspace` fans `impact`/`who-calls` out across registered repos with per-repo provenance |
 | `pixel index-pack` | Freeze the index into one checksummed `.pxpack` bundle — CI builds once, teammates install instead of re-indexing |
 | `pixel index-unpack` | Install a packed index bundle from a path or https:// URL, hash-verified, refusing to overwrite a live index without `--force` |
@@ -130,6 +134,7 @@ Per repository, under `.pixel/` (git-ignored):
 | --- | --- | --- |
 | `base.shard`, `delta.shard`, `state.json`, `build.lock` | `pixel-index` | Base shard for all tracked files at a pinned commit, delta shard for files changed between that commit and HEAD, and `state.json` as the delta-layer sidecar (tombstones for superseded base paths). The dirty working-tree overlay is in memory only. First process to hold `build.lock` builds; others wait. |
 | `graph.v2.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. The name moves with the schema (`pixel_daemon::api::GRAPH_DB_FILE`); user-facing messages still say `graph.db`. |
+| `.pixel-mvp/` (`graph.db` + journals, `index.lock`, `.gitignore`, `checked`) | `mvp-store`, through `pixel-graph`'s `mvp_adapter` | pixel-mvp's index of the Rust and Ruby files, written when the graph's root holds a `Cargo.toml` and the Rust source switch is not `PIXEL_GRAPH_SOURCE_RUST=v1` (see "Indexes and freshness"), and refreshed by every graph build and update; rebuildable, one writer at a time behind `index.lock`, a damaged or foreign `graph.db` rebuilt. Opened only after `pixel_git::sidecar::check`. |
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
@@ -375,6 +380,48 @@ envelope talks to the daemon socket directly.
   graph.db on first use`, or `rebuilt graph.db: <reason>` (the file on disk
   is `graph.v2.db`). Call edges carry a resolution tier, and
   analyses report a lower bound when same-name call sites stay unresolved.
+- The Rust source switch, `PIXEL_GRAPH_SOURCE_RUST` (`v1` off; unset or
+  anything else on, the default; `pixel_graph::mvp_adapter::RustSource`),
+  read by the process that builds the graph (the daemon, or the CLI
+  without one). With it on and a `Cargo.toml` at the graph's root, the
+  full build and every incremental update (`write_rows`, so
+  `update_files` and `apply_tree_delta`) refresh pixel-mvp's index in
+  `.pixel/.pixel-mvp/` and replace the Rust rows with its answer
+  (`mvp_adapter::switch_rust`): every `calls` edge from a Rust symbol
+  (all `exact`: pixel-mvp links a site only where Rust's rules prove the
+  target), every `references` edge (`probable`), every `unresolved_calls`
+  row of a Rust file, every Rust import's target. This resolver then
+  decides no Rust site (the batch's Rust calls are not resolved,
+  `resolve_affected`'s retry skips their rows) and `ResolveIndex` offers
+  no Rust symbol to a caller of another language. The graph records its
+  Rust source in the `graph_source` meta key (`rust=mvp <commit>
+  <extractor>`; absent with `v1`, so that graph is the one built before
+  the switch existed), and a graph whose source differs from the
+  switch's, or from the vendored commit and extractor, is not current: the
+  next read rebuilds it whole. Where pixel-mvp cannot index (no
+  `Cargo.toml` at the root, the root is not the top level of a git work
+  tree, a tracked `.pixel/`), the graph keeps this resolver's Rust edges
+  and records `rust=v1, pixel-mvp unavailable`, which counts as current
+  while the switch is on. Ruby and every other language keep this
+  resolver. Known limits of the Rust source, kept here until pixel-mvp
+  fixes them:
+  - Rust test code (`#[test]` functions, `#[cfg(test)]` modules) has no
+    symbols in this graph, so its calls are dropped (`pixel graph-shadow`
+    counts them);
+  - a local typed only by what a function returns is not followed beyond
+    `T::f(…)?`, `.unwrap()` and `.expect(…)` on std's `Result` or `Option`
+    of `T`: such method calls stay unresolved, counted in the lower bound;
+  - a macro invoked in a block may write a method or an impl the rules do
+    not see; a dependency's attribute macro is read as inert and its
+    derive may write beside its type; a dependency's own macro named
+    `lazy_static` or `thread_local` is taken for the standard one; cfg-like
+    forms outside `#[cfg]` are not read;
+  - pixel-mvp's index spawns `git` without `GitRunner`'s timeout and output
+    cap;
+  - an incremental update rewrites every Rust row: on this repository
+    (`b2d22eee`, `dev-release` build) the first graph command after a
+    one-file edit takes about 0.85 s instead of 0.22 s, and `.pixel/` holds
+    about 44 MB more.
 - Ruby constant receivers are resolved in `pixel-graph/src/resolve/ruby.rs`
   against class/module scopes, preserving the difference between nested
   declarations and `class A::B`. Unique class and constructor targets are
@@ -1206,7 +1253,10 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   A checkpoint is uploaded after every listed mutant has a recognized
   outcome; survivors keep the run red, while missing outcomes and disk-full
   failures leave the prior checkpoint. Unchanged main starts no Rust jobs.
-  The existing plan/shards/report share `.cargo/mutants.toml` and distribute
+  `.cargo/mutants.toml` leaves out benches, crate-root build scripts and
+  the crates vendored from pixel-mvp (`crates/mvp-*`, each with its
+  `VENDORED.md`), and `scripts/test-mutants-config.py` refuses any other
+  exclusion. The existing plan/shards/report share that file and distribute
   shards over `PIXEL_MUTANTS_SHARD_RUNNERS` (GitHub-hosted `ubuntu-26.04`
   by default). Only scheduled CI executes mutations; there is no manual,
   local or pull-request campaign. The pre-push hook is a no-op; local validation is optional.

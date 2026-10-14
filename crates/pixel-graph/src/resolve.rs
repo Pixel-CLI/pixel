@@ -188,6 +188,8 @@ pub struct ResolveIndex {
     /// root (`rust_crate_depth`, `None` outside `src/`), for the module-path
     /// receiver rule (`module_match`).
     rust_modules: HashMap<i64, (Vec<String>, Option<usize>)>,
+    /// The graph's Rust edges are pixel-mvp's (`mvp_adapter::rust_is_walled`).
+    walled: bool,
 }
 
 fn callable(kind: SymbolKind) -> bool {
@@ -217,6 +219,10 @@ fn best(cands: &[Candidate]) -> Option<i64> {
 impl ResolveIndex {
     pub fn build(store: &GraphStore) -> Result<Self, StoreError> {
         let conn = store.conn();
+        // A graph whose Rust edges are pixel-mvp's offers no Rust symbol to
+        // this resolver: it decides no Rust site, and a caller of another
+        // language never reaches Rust by name.
+        let walled = crate::mvp_adapter::rust_is_walled(store)?;
         let ruby_files = {
             let mut stmt = conn.prepare("SELECT id FROM files WHERE lang = 'ruby'")?;
             let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
@@ -259,7 +265,7 @@ impl ResolveIndex {
                     containers.insert(cand.symbol_id);
                 }
                 qualified_of.insert(cand.symbol_id, qualified);
-                if callable(cand.kind) {
+                if callable(cand.kind) && !(walled && rust_modules.contains_key(&cand.file_id)) {
                     by_name.entry(name).or_default().push(cand);
                 }
             }
@@ -305,7 +311,14 @@ impl ResolveIndex {
             qualified_of,
             import_bindings,
             rust_modules,
+            walled,
         })
+    }
+
+    /// True iff `file_id` is a Rust file of a graph whose Rust edges are
+    /// pixel-mvp's.
+    fn walled_file(&self, file_id: i64) -> bool {
+        self.walled && self.rust_modules.contains_key(&file_id)
     }
 
     /// True iff some symbol in the graph is named `name`.
@@ -1418,6 +1431,11 @@ fn retry(store: &mut GraphStore, rows: Vec<RetryRow>) -> Result<ResolveStats, St
     let idx = ResolveIndex::build(store)?;
     let mut stats = ResolveStats::default();
     for row in &rows {
+        // pixel-mvp's row: this resolver does not decide it again.
+        if idx.walled_file(row.file_id) {
+            stats.unresolved += 1;
+            continue;
+        }
         let decision = if row.kind == "references" {
             idx.decide_reference(
                 row.file_id,

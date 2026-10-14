@@ -45,8 +45,15 @@ pub struct SetupOptions {
     pub dev: dev::Options,
 }
 
-// TEMPORARY (dev-flags): the public name `main.rs` fills in.
+// TEMPORARY (dev-flags): the public names `main.rs` fills in and checks.
 pub use dev::Options as DevOptions;
+
+/// The refusal a released binary answers a development flag with, or `None`
+/// when this build takes it. `main.rs` asks before the guided/unattended
+/// decision, so a refused flag never reaches a write.
+pub fn refuse_dev_flags(dev: &DevOptions) -> Option<String> {
+    dev::refused(dev, dev::LIVE)
+}
 
 /// Whether `pixel setup` runs the guided setup rather than the unattended
 /// installer.
@@ -696,15 +703,22 @@ fn io(err: std::io::Error) -> String {
 // `tests/setup/` are built. They are hidden from `--help` and are not part of
 // the shipped command.
 //
+// They are live in a debug build only (`LIVE` below is `cfg!(debug_assertions)`):
+// a released binary refuses them by name, so nothing that ships can be driven
+// by them, and `--dummy-apply` can never be ignored into a write under a real
+// `$HOME`. Tests and `cargo run` build with debug assertions on, which is what
+// keeps the scripted cases in `tests/cli/setup_cli.rs` working.
+//
 // REMOVAL (before the release, tracked in docs/design/pixel-setup-plan.md and
 // on issue #890). Every site is a deletion; nothing new is written:
 //
 //   1. delete this whole section, to the matching END marker below, and the
 //      `#[cfg(test)] mod dev_tests` block in the tests module;
-//   2. delete the `dev: dev::Options` field of `SetupOptions` here, the
-//      `dev` argument at the construction site in `main.rs`, and the three
-//      `--selected-agents` / `--selected-features` / `--dummy-apply` clap args
-//      in `main.rs` (marked with the same phrase);
+//   2. delete the `dev: dev::Options` field of `SetupOptions` and the
+//      `refuse_dev_flags` function beside it here, and in `main.rs` the `dev`
+//      argument at the construction site, the `refuse_dev_flags` call and the
+//      three `--selected-agents` / `--selected-features` / `--dummy-apply`
+//      clap args (all marked with the same phrase);
 //   3. delete the four `TEMPORARY (dev-flags)` lines in `run` and `collect`,
 //      and the `dev::dummy_root` / `dev::skips_config` blocks they guard:
 //      each one wraps the production code, so deleting the wrapper leaves it;
@@ -725,6 +739,29 @@ mod dev {
     /// root.
     const DUMMY_ROOT: [&str; 2] = ["tests", "setup"];
 
+    /// Whether the development switches are live in this build.
+    ///
+    /// A released binary is built with debug assertions off, so the three flags
+    /// are refused there: nothing that ships can be driven by them, and a
+    /// silently ignored `--dummy-apply` can never become a write under a real
+    /// `$HOME`. `cargo run`, `cargo test` and every other debug build accept
+    /// them.
+    pub(super) const LIVE: bool = cfg!(debug_assertions);
+
+    /// The release side of [`LIVE`], enforced by the compiler rather than by a
+    /// test: a build with debug assertions off fails to compile if the flags
+    /// are live, so no released binary can carry them, and the release lanes in
+    /// CI are the ones that prove it.
+    ///
+    /// A `#[cfg(not(debug_assertions))]` test would not do: the CLI integration
+    /// tests link the debug binary, so such a test is compiled out of the job
+    /// that runs them and never executes.
+    #[cfg(not(debug_assertions))]
+    const _: () = assert!(
+        !LIVE,
+        "the development-only setup flags must not be live in a release build"
+    );
+
     /// The three development switches, as `main.rs` fills them from the
     /// command line.
     #[derive(Debug, Clone, Default)]
@@ -736,6 +773,45 @@ mod dev {
         /// Redirect every write under `tests/setup/` instead of a real home or
         /// repository.
         pub dummy_apply: bool,
+    }
+
+    /// The flags this build refuses, named with the reason, or `None` when it
+    /// takes them all.
+    ///
+    /// `live` is a parameter rather than a read of [`LIVE`], so a test can hold
+    /// both branches: the debug build that takes them and the release build
+    /// that refuses them.
+    pub(super) fn refused(options: &Options, live: bool) -> Option<String> {
+        if live {
+            return None;
+        }
+        let mut named: Vec<&str> = Vec::new();
+        if options.selected_agents.is_some() {
+            named.push("--selected-agents");
+        }
+        if options.selected_features.is_some() {
+            named.push("--selected-features");
+        }
+        if options.dummy_apply {
+            named.push("--dummy-apply");
+        }
+        if named.is_empty() {
+            return None;
+        }
+        // One flag reads as a singular, several as a plural: naming all three
+        // and then saying "is a flag" is the kind of message a reader stops
+        // trusting.
+        let (verb, noun, pronoun) = match named.len() {
+            1 => ("is", "a development-only flag", "it"),
+            _ => ("are", "development-only flags", "them"),
+        };
+        Some(format!(
+            "{} {verb} {noun}, and this build does not have {pronoun}: \
+             `pixel setup` runs the guided wizard in a terminal and the unattended \
+             installer everywhere else. The flags are live in a debug build; \
+             docs/design/pixel-setup-plan.md says how to test with them.",
+            named.join(", ")
+        ))
     }
 
     /// The directory `--dummy-apply` writes under, relative to the repository
@@ -1274,6 +1350,70 @@ mod tests {
                 dummy_apply: false,
             };
             assert!(dev::answers(&options, pixel_install::setup::Scope::Global).is_err());
+        }
+
+        #[test]
+        fn a_build_without_the_flags_refuses_each_one_by_name() {
+            let one = Options {
+                selected_agents: Some("1".into()),
+                ..Options::default()
+            };
+            let refusal = dev::refused(&one, false).expect("refused");
+            assert!(refusal.contains("--selected-agents"), "{refusal}");
+            assert!(refusal.contains("is a development-only flag"), "{refusal}");
+
+            let many = Options {
+                selected_agents: Some("1".into()),
+                selected_features: Some("1".into()),
+                dummy_apply: true,
+            };
+            let refusal = dev::refused(&many, false).expect("refused");
+            for flag in ["--selected-agents", "--selected-features", "--dummy-apply"] {
+                assert!(refusal.contains(flag), "{flag} missing from {refusal}");
+            }
+            assert!(
+                refusal.contains("are development-only flags"),
+                "several flags read as a plural: {refusal}"
+            );
+            assert!(
+                refusal.contains("docs/design/pixel-setup-plan.md"),
+                "the refusal says where the flags are documented: {refusal}"
+            );
+        }
+
+        #[test]
+        fn a_build_with_the_flags_takes_them_and_an_empty_set_is_never_refused() {
+            let all = Options {
+                selected_agents: Some("1".into()),
+                selected_features: Some("1,2".into()),
+                dummy_apply: true,
+            };
+            assert_eq!(dev::refused(&all, true), None, "a debug build takes them");
+            assert_eq!(
+                dev::refused(&Options::default(), false),
+                None,
+                "a release build refuses nothing when nothing is asked"
+            );
+        }
+
+        #[test]
+        fn the_test_build_is_live_so_the_scripted_cases_keep_working() {
+            // `crates/pixel/tests/cli/setup_cli.rs` drives the wizard with the
+            // flags through this build. `LIVE` is `cfg!(debug_assertions)`, and
+            // the test profile is a debug build: the behaviour is asserted
+            // rather than the constant, so a committed `false` fails here with
+            // the reason instead of somewhere in the CLI cases.
+            let scripted = Options {
+                selected_agents: Some("1".into()),
+                selected_features: Some("1".into()),
+                dummy_apply: false,
+            };
+            assert_eq!(
+                dev::refused(&scripted, dev::LIVE),
+                None,
+                "this build has to take the scripted flags; `LIVE` is \
+                 `cfg!(debug_assertions)`, which is true for a test profile"
+            );
         }
 
         #[test]

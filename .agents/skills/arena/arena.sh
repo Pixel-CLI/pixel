@@ -175,8 +175,10 @@ arena_panes() {
   ids=$(find "$SCRATCH/runs" -name run.json -exec jq -s \
     '[.[] | {(.pixel_pane): ("arena:" + .name + ":pixel"), (.no_pixel_pane): ("arena:" + .name + ":no-pixel")}] | add // {}' {} + 2>/dev/null) || ids='{}'
   [ -n "$ids" ] || ids='{}'
-  hd pane list | jq -r --argjson m "$ids" --arg p "$PREFIX:" \
-    '.result.panes[] | (if (.label | startswith($p)) then .label else ($m[.pane_id] // empty) end) as $l | [.pane_id, .tab_id, $l] | @tsv'
+  hd pane list | jq -r --argjson m "$ids" --arg p "$PREFIX:" --arg s "$SCRATCH/runs/" \
+    '.result.panes[] | (if ((.label // "") | startswith($p)) then .label
+       elif ((.cwd // "") | startswith($s)) and ((.cwd // "") | test("/(pixel|no-pixel)/ws$")) then ($p + "orphan")
+       else ($m[.pane_id] // empty) end) as $l | [.pane_id, .tab_id, $l] | @tsv'
 }
 
 titles() { # $1 pixel pane, $2 no-pixel pane, $3 case
@@ -187,15 +189,17 @@ titles() { # $1 pixel pane, $2 no-pixel pane, $3 case
 # Drag column boundaries until every pane in the tab is ~1/N of the row width
 # (herdr only nests binary splits). A zero-delta resize returns the layout.
 equalize_columns() { # $1 any pane in the tab
-  local want=$2 k actual target delta dir moved lay ids xs
+  local anchor=$1 want=$2 k actual target delta dir moved lay w
+  local -a P X
   for _ in $(seq $((want * 3))); do
-    lay=$(hd pane resize --pane "$1" --direction left --amount 0 | jq -c '.result.resize.layout' 2>/dev/null) || { sleep 1; continue; }
+    lay=$(hd pane resize --pane "$anchor" --direction left --amount 0 | jq -c '.result.resize.layout' 2>/dev/null) || { sleep 1; continue; }
     [ "$(jq '.panes | length' <<<"$lay")" = "$want" ] || { sleep 1; continue; }
-    xs=$(jq '[.panes | sort_by(.rect.x) | .[].rect.x] | join(" ")' -r <<<"$lay")
-    ids=$(jq '[.panes | sort_by(.rect.x) | .[].pane_id] | join(" ")' -r <<<"$lay")
-    local w; w=$(jq '.area.width' <<<"$lay")
+    w=$(jq '.area.width' <<<"$lay")
+    P=(); X=()  # bash 3.2: no mapfile
+    while IFS=$'\t' read -r pp xx; do P+=("$pp"); X+=("$xx"); done \
+      < <(jq -r '.panes | sort_by(.rect.x) | .[] | [.pane_id, .rect.x] | @tsv' <<<"$lay")
+    anchor=${P[1]}  # re-probe a mid pane; keeps working if $1 was retitled
     moved=0
-    set -- $ids; local -a P=("$@"); set -- $xs; local -a X=("$@")
     for ((k = 1; k < want; k++)); do
       target=$((w * k / want)); actual=${X[$k]}; delta=$((actual - target))
       [ ${delta#-} -le 1 ] && continue
@@ -286,7 +290,9 @@ cmd_run() {
   [ -n "$row" ] || die "unknown case: $sel (see: arena.sh list)"
   IFS=$'\t' read -r n name prompt <<<"$row"
 
-  if arena_panes | awk -F'\t' -v c="$PREFIX:$name:" 'index($3, c) == 1 { f = 1 } END { exit !f }'; then
+  if [ "$here" = 1 ]; then
+    close_all_arena_panes
+  elif arena_panes | awk -F'\t' -v c="$PREFIX:$name:" 'index($3, c) == 1 { f = 1 } END { exit !f }'; then
     say "closing the stale arena panes of case $name"
     close_case_tab "$name"
   fi
@@ -322,7 +328,7 @@ cmd_run() {
 
   sleep 2
   local safe_path="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin"
-  hd pane run "$p_pane" "cd '$PIXEL_WS' && env CODEX_HOME='$ph' PATH='$KEY_DIR/pixel/shim':$safe_path '$CODEX_BIN'" >/dev/null
+  hd pane run "$p_pane" "cd '$PIXEL_WS' && env CODEX_HOME='$ph' PATH='$KEY_DIR/pixel/shim':$safe_path '$CODEX_BIN' --dangerously-bypass-hook-trust" >/dev/null
   hd pane run "$n_pane" "cd '$NOPIXEL_WS' && env CODEX_HOME='$nh' PIXEL_BRIEF=0 PATH='$KEY_DIR/no-pixel/shim':$safe_path '$CODEX_BIN'" >/dev/null
   wait_ready "$p_pane" || die "pixel arm never became ready (pane $p_pane)"
   wait_ready "$n_pane" || die "no-pixel arm never became ready (pane $n_pane)"
@@ -396,6 +402,8 @@ collect_receipt() {
         no_pixel_arm_received_brief: ($nopixel.brief != null),
         ok: ($pixel.brief != null and $nopixel.brief == null) },
       arms: { "pixel": $pixel, "no-pixel": $nopixel } }' "$run_dir/run.json" >"$run_dir/receipt.json"
+  # The exact brief text the pixel arm's Codex received — a run's main output.
+  jq -r '.arms.pixel.brief // empty' "$run_dir/receipt.json" >"$run_dir/brief.md"
 }
 
 # Rebuild a receipt from the rollouts, e.g. after follow-up prompts.
@@ -422,6 +430,13 @@ summarize() {
     "answers:",
     (.arms | to_entries[] | "  [\(.key)] \((.value.final_answer // "none") | gsub("\n"; " ") | .[0:300])")' "$r"
   say "receipt: $r"
+  # Print the brief the pixel arm's Codex actually received.
+  local brief; brief=$(jq -r '.arms.pixel.brief // empty' "$r")
+  if [ -n "$brief" ]; then
+    say '----- pixel brief (injected into the with-pixel arm) -----'
+    printf '%s\n' "$brief"
+    say '----- end of pixel brief -----'
+  fi
 }
 
 # ---------------------------------------------------------------- status / abort
@@ -572,6 +587,13 @@ close_case_tab() { # $1 case name: close the arena panes and tab of a finished c
   done < <(arena_panes)
 }
 
+close_all_arena_panes() { # every arena pane left by any earlier run — --here mode shares the caller tab
+  local pane
+  while IFS=$'\t' read -r pane _ _; do
+    hd pane close "$pane" >/dev/null 2>&1 || true
+  done < <(arena_panes | awk -F'\t' -v p="$PREFIX:" 'index($3, p) == 1')
+}
+
 set_abort() {
   say 'abort: interrupting the set'
   [ -z "${SET_PIDS:-}" ] || kill $SET_PIDS 2>/dev/null || true
@@ -635,6 +657,9 @@ cmd_run_set() {
   local id repo srcdir csha prompt n=0 total prev_case=''
   total=$(printf '%s\n' "$cases" | awk -F'\t' -v o="$only" 'BEGIN{split(o,a,","); for(i in a) w[a[i]]=1} o=="" || ($1 in w) {c++} END{print c+0}')
   say "set $source: $total case(s), pixel binary ${bin_hash:0:12}${extra:+, brief extra: $extra}; output $SET_OUT"
+  # --here: the caller tab is shared — close every leftover arena pair from
+  # earlier runs or a killed set before the first case opens its own.
+  [ "$here" = 1 ] && close_all_arena_panes
   while IFS=$'\t' read -r id repo srcdir csha prompt <&3; do
     [ -n "$id" ] || continue
     if [ -n "$only" ] && ! printf ',%s,' "$only" | grep -q ",$id,"; then continue; fi
@@ -683,7 +708,7 @@ cmd_run_set() {
       '{run:$id,tab:$tab,pixel_pane:$pp,no_pixel_pane:$np,pixel_home:$ph,no_pixel_home:$nh,case:0,name:$name,prompt:("sha256:"+$digest),commit:$sha,pixel_binary_sha256:$bh}' >"$run_dir/run.json"
     sleep 2
     local safe_path="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin"
-    hd pane run "$p_pane" "cd '$pws' && env CODEX_HOME='$ph' PATH='$run_dir/pixel/shim':$safe_path '$CODEX_BIN'" >/dev/null
+    hd pane run "$p_pane" "cd '$pws' && env CODEX_HOME='$ph' PATH='$run_dir/pixel/shim':$safe_path '$CODEX_BIN' --dangerously-bypass-hook-trust" >/dev/null
     hd pane run "$n_pane" "cd '$nws' && env CODEX_HOME='$nh' PIXEL_BRIEF=0 PATH='$run_dir/no-pixel/shim':$safe_path '$CODEX_BIN'" >/dev/null
     wait_ready "$p_pane" || die "pixel arm never became ready (pane $p_pane)"
     wait_ready "$n_pane" || die "no-pixel arm never became ready (pane $n_pane)"
@@ -716,8 +741,14 @@ cmd_run_set() {
     jq -nc --arg id "$id" --argjson pc "$pc" --argjson nc "$nc" --argjson b "$bytes" --argjson base "$base" --arg run "$runid" \
       '{id:$id, pixel_calls:$pc, no_pixel_calls:$nc, brief_bytes:$b, baseline:$base, run:$run}' >>"$SET_OUT/results.jsonl"
     say "$id: no-pixel $nc calls, pixel $pc calls, brief $bytes bytes"
-    # --here leaves the pair open; the next case's opening closes it, and the
-    # last case's pair stays for inspection.
+    if [ -s "$run_dir/brief.md" ]; then
+      say "----- $id pixel brief (injected into the with-pixel arm) -----"
+      cat "$run_dir/brief.md"
+      say "----- end of $id pixel brief -----"
+    else
+      say "$id: NO brief delivered ($run_dir/brief.md empty)"
+    fi
+    # --here leaves the pair open; the next case or the next relaunch closes it.
     [ "$here" = 1 ] || close_case_tab "$id"
     SET_CASE=''
   done 3<<<"$cases"

@@ -1,0 +1,85 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
+//! `pixel_graph::shadow` on the adapter's fixture (`mvp_adapter.rs`): the
+//! counts `pixel graph-shadow` prints, each traced to a site of the fixture.
+
+use pixel_graph::shadow::{Calls, Imports, Overlap, Sides, V1Only, shadow};
+
+#[test]
+fn the_shadow_counts_what_each_resolver_links_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    crate::mvp_adapter::fixture(&root);
+    let report = shadow(&root, 10).unwrap();
+    assert_eq!(
+        report.calls,
+        Calls {
+            // Both: run -> open, run -> helper, run -> Store::len (`s` is
+            // annotated `S`), helper -> open.
+            overlap: Overlap {
+                v1: 8,
+                mvp: 4,
+                both: 4,
+                v1_only: 4,
+                mvp_only: 0,
+            },
+            v1_exact: 1,
+            v1_probable: 7,
+            v1_only_by: V1Only {
+                exact: 0,
+                probable: 4,
+                // `.count()` and `.unwrap()` reach env.py's functions.
+                into_other_language: 2,
+                method_receiver: 4,
+                path_receiver: 0,
+                no_receiver: 0,
+                mvp_abstains: 4,
+                mvp_resolves_elsewhere: 0,
+                mvp_has_no_site: 0,
+            },
+        }
+    );
+    // `helper -> Store::len` is right, and pixel-mvp's rules do not reach
+    // it: the receiver's type is a function's return.
+    let mut examples = report.examples.v1_only.clone();
+    examples.sort();
+    assert_eq!(
+        examples,
+        vec![
+            "first -> unwrap (src/lib.rs:15)".to_string(),
+            "helper -> Store::len (src/util.rs:2)".to_string(),
+            "run -> count (src/lib.rs:11)".to_string(),
+            "run -> join (src/lib.rs:9)".to_string(),
+        ]
+    );
+    assert_eq!(
+        report.imports,
+        Imports {
+            rows: 4,
+            v1_resolved: 3,
+            mvp_resolved: 3,
+            same: 3,
+            v1_only: 0,
+            mvp_only: 0,
+            different_file: 0,
+        }
+    );
+    // pixel-mvp keeps `p.join`, `x.iter`, `.count`, `v.unwrap` and the
+    // rest unresolved where this graph guessed.
+    assert_eq!(report.unresolved, Sides { v1: 2, mvp: 6 });
+    // `tests::t` -> helper.
+    assert_eq!(report.dropped_no_caller, 1);
+    // env.py's `count` -> helper, linked by name.
+    assert_eq!(report.into_rust_from_other_languages, 1);
+    // Both graphs were built in a scratch directory.
+    assert!(!root.join(".pixel").exists());
+}
+
+#[test]
+fn examples_are_capped() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    crate::mvp_adapter::fixture(&root);
+    assert_eq!(shadow(&root, 1).unwrap().examples.v1_only.len(), 1);
+}

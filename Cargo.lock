@@ -1713,6 +1713,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
 
 [[package]]
+name = "mvp-index"
+version = "0.7.1"
+dependencies = [
+ "mvp-model",
+ "proptest",
+ "tempfile",
+ "tree-sitter",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+]
+
+[[package]]
+name = "mvp-model"
+version = "0.7.1"
+
+[[package]]
+name = "mvp-store"
+version = "0.7.1"
+dependencies = [
+ "mvp-model",
+ "rusqlite",
+ "rustix",
+ "tempfile",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2122,6 +2148,9 @@ name = "pixel-graph"
 version = "0.7.1"
 dependencies = [
  "mutants",
+ "mvp-index",
+ "mvp-model",
+ "mvp-store",
  "pixel-git",
  "pixel-index",
  "rayon",
@@ -2660,9 +2689,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",

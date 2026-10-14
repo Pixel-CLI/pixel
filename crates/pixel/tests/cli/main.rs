@@ -18,6 +18,7 @@ mod docs_drift;
 mod doctor_cli;
 mod evaluate_cli;
 mod execution_brief;
+mod graph_shadow_cli;
 #[cfg(unix)]
 mod hook_stdin_cap_cli;
 mod impact_read_cli;
@@ -49,4 +50,5 @@ mod uninstall_cli;
 #[cfg(unix)]
 mod update_notice_cli;
 mod upgrade_cli;
+mod vendored_boundary;
 mod version_cli;

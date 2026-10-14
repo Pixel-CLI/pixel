@@ -539,6 +539,7 @@ jobs:
         run: |
           python3 scripts/bench-brief-gate.py --self-test
           python3 scripts/bench-brief-gate.py --check-set
+          python3 scripts/bench-graph-edges.py --self-test
           python3 scripts/bench-brief-excerpt.py --self-test
           python3 scripts/bench-brief-spans.py --self-test
           python3 scripts/excavation-count.py --self-test

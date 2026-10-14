@@ -648,7 +648,17 @@ impl Anchors {
         self.names()
             .next()
             .map(ToString::to_string)
-            .or_else(|| self.paths().first().map(|path| file_stem(path)))
+            .or_else(|| self.sole_path_stem())
+    }
+
+    /// The stem of the one path a prompt names, as an identifier to search
+    /// for. A prompt naming several files has no single name, and a stem such
+    /// as `index` or `mod` is only a path segment, never a symbol.
+    fn sole_path_stem(&self) -> Option<String> {
+        match self.paths()[..] {
+            [path] => Some(file_stem(path)).filter(|stem| !is_generic_stem(stem)),
+            _ => None,
+        }
     }
 
     /// The name `find-symbol` looks up: the last segment of a `a::b` word.
@@ -656,7 +666,7 @@ impl Anchors {
         self.names()
             .next()
             .map(|name| name.rsplit("::").next().unwrap_or(name).to_string())
-            .or_else(|| self.paths().first().map(|path| file_stem(path)))
+            .or_else(|| self.sole_path_stem())
     }
 
     /// The lowercase words the anchors consist of: `build`, `decisions`
@@ -788,6 +798,14 @@ fn has_source_extension(token: &str) -> bool {
         .is_some_and(|(stem, ext)| {
             !stem.is_empty() && SOURCE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
         })
+}
+
+/// A file stem shared by countless files, so it names none of them.
+fn is_generic_stem(stem: &str) -> bool {
+    matches!(
+        stem.to_ascii_lowercase().as_str(),
+        "index" | "mod" | "main" | "lib" | "init" | "__init__" | "__main__" | "types" | "utils"
+    )
 }
 
 fn file_stem(path: &str) -> String {
@@ -1251,6 +1269,53 @@ fn spend(state: &Mutex<Brief>, deadline: Instant) -> bool {
     })
 }
 
+/// Files the prompt names by path come first in `files`, each with its first
+/// line: they are what was asked about, whatever else a search finds. A path
+/// that does not read (partial, moved) is left to the search.
+fn pin_named_files(
+    plan: &Plan,
+    evidence: &dyn Evidence,
+    state: &Mutex<Brief>,
+    deadline: Instant,
+) -> usize {
+    // A prompt that also names an identifier is about that identifier; its
+    // path only selects the declaration.
+    if plan.anchors.names().next().is_some() {
+        return 0;
+    }
+    let mut pinned: Vec<RichHit> = Vec::new();
+    for path in plan.anchors.paths() {
+        if pixel_index::index::credential_path(Path::new(path)) || is_generated(path) {
+            continue;
+        }
+        if let Ok(head) = evidence.line_at(path, 1, deadline) {
+            pinned.push(RichHit {
+                path: path.to_string(),
+                line: 1,
+                text: Some(head).filter(|head| !head.is_empty()),
+            });
+        }
+    }
+    let count = pinned.len();
+    if pinned.is_empty() {
+        return 0;
+    }
+    edit(state, |brief| {
+        brief.files.retain(|file| {
+            !pinned
+                .iter()
+                .any(|hit| hit.path == file.path && file.line == 1)
+        });
+        brief.files.splice(0..0, pinned);
+        brief.searched = true;
+        // The reads are one answered step, so a prompt that names only files
+        // still gets its packet.
+        brief.ops += 1;
+        brief.answered += 1;
+    });
+    count
+}
+
 /// Run the chain against `evidence`, writing into `state` after each
 /// operation so a reader that stops waiting still sees what is done.
 pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Instant) {
@@ -1265,7 +1330,12 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
             .clone()
             .map(|phrase| format!("pixel find-code {}", super::routes::q(&phrase)));
     });
-    if let Some(term) = plan.anchors.search_term()
+    let pinned = pin_named_files(plan, evidence, state, deadline);
+    // Files named by path and all read need no word search: a stem such as
+    // `scheduler` would only add prose mentions of it above nothing.
+    let names_only_paths = plan.anchors.names().next().is_none();
+    let all_pinned = names_only_paths && pinned > 0 && pinned == plan.anchors.paths().len();
+    if let Some(term) = plan.anchors.search_term().filter(|_| !all_pinned)
         && spend(state, deadline)
     {
         match evidence.files_matching(&term, deadline) {
@@ -1319,7 +1389,11 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
                     brief.answered += 1;
                     brief.defined = ordered(&hits, pick);
                     brief.unambiguous_def = single;
-                    brief.unresolved.extend(note);
+                    // A stem taken from a path is a guess, not a name the
+                    // prompt asked for: missing it is not a gap.
+                    if !names_only_paths {
+                        brief.unresolved.extend(note);
+                    }
                 });
                 if plan.change_intent && spend(state, deadline) {
                     match evidence.callers(&target, deadline) {
@@ -4673,6 +4747,77 @@ mod tests {
         );
         assert_eq!((brief.ops, brief.answered), (4, 4));
         assert!(brief.finished && !brief.cut);
+    }
+
+    #[test]
+    fn chain_should_list_files_named_by_path_first_and_never_look_up_their_stem() {
+        let mut fake = Fake::new();
+        fake.source = Some("/** head */".into());
+        fake.files = Ok(found(vec![hit(".agents/skills/arena/SKILL.md", 10)]));
+        let brief = chain(
+            "summarize extensions/plan/index.ts and extensions/todo/index.ts",
+            &fake,
+            SECOND,
+        );
+        let calls = fake.calls();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.contains("symbols") || c.contains("files_with")),
+            "{calls:?}"
+        );
+        assert_eq!(
+            brief.files,
+            [
+                RichHit {
+                    path: "extensions/plan/index.ts".into(),
+                    line: 1,
+                    text: Some("/** head */".into())
+                },
+                RichHit {
+                    path: "extensions/todo/index.ts".into(),
+                    line: 1,
+                    text: Some("/** head */".into())
+                },
+            ]
+        );
+        assert!(brief.unresolved.is_empty() && brief.likely_def.is_none());
+        assert!(brief.answered > 0 && brief.finished && !brief.partial());
+    }
+
+    #[test]
+    fn chain_should_not_pin_a_path_when_the_prompt_names_an_identifier() {
+        let mut fake = Fake::new();
+        fake.source = Some("import x".into());
+        fake.files = Ok(found(vec![hit("README.md", 3)]));
+        let brief = chain(
+            "explain src/subagent/scheduler.ts and scheduleLoop()",
+            &fake,
+            SECOND,
+        );
+        assert!(
+            brief
+                .files
+                .iter()
+                .all(|f| f.path != "src/subagent/scheduler.ts")
+        );
+    }
+
+    #[test]
+    fn anchors_should_not_take_a_generic_stem_as_a_symbol() {
+        for text in [
+            "explain src/a/index.ts",
+            "explain src/a/mod.rs",
+            "read a/b/index.ts and c/d/index.ts",
+        ] {
+            let found = Anchors::from_text(text);
+            assert_eq!(found.symbol_name(), None, "{text}");
+            assert_eq!(found.search_term(), None, "{text}");
+        }
+        let one = Anchors::from_text("explain src/subagent/scheduler.ts");
+        assert_eq!(one.symbol_name().as_deref(), Some("scheduler"));
+        let two = Anchors::from_text("explain src/a/scheduler.ts and src/b/runner.ts");
+        assert_eq!(two.symbol_name(), None);
     }
 
     #[test]

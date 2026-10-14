@@ -58,6 +58,12 @@ corpus and `~/.local/state/pixel` are never touched by any of them.
 | --- | --- | --- |
 | `pr-swarm.sh` | `scripts/pr-swarm.sh reconcile [--wait N\|--no-wait] [--dry-run] \| status \| up <PR> [--worktree] \| down <PR> [--force] \| watch \| hook-session-start` | one rmux pane per open-PR worktree, each a `claude -n pr-<N>-<slug>` session sitting in that PR's tree; `reconcile` diffs the open PRs against panes titled `PR#<N>` and creates, retitles or tears down (`status` is read-only). Wired to SessionStart by `.claude/settings.json`; rails in `.agents/rules/pr-swarm.md` |
 
+## Vendored code
+
+| Script | Run | What |
+| --- | --- | --- |
+| `vendor-mvp.sh` | `scripts/vendor-mvp.sh <pixel-mvp checkout> <commit> model store index` | copies pixel-mvp's `crates/pixel-<name>/` at `<commit>` (read with `git archive`, never the working tree) over `crates/mvp-<name>/`, keeping the workspace's `Cargo.toml`; renames the crates, adds the SPDX headers, runs `cargo fmt` and rewrites each `VENDORED.md` with the commit. A sync is a pull request that names the commit |
+
 ## Optional local smoke and audits
 
 | Script | Run | What |

@@ -39,6 +39,17 @@ fn crates_dir() -> PathBuf {
         .unwrap()
 }
 
+/// Whether `name` is a crate vendored from pixel-mvp (`crates/mvp-*`,
+/// `VENDORED.md`): its `src/` is a copy that each sync replaces, so it keeps
+/// pixel-mvp's own rules instead of these walks. Its git spawns are
+/// pixel-mvp's (`mvp-index`'s `tree.rs`, which clears git's local
+/// environment and takes no optional lock but has no timeout), and a test
+/// seam may follow a `#[cfg(test)] mod` (`mvp-store`'s `checked.rs`), which
+/// only shortens what `docs_drift`'s printed-command walk reads of it.
+fn vendored(name: &str) -> bool {
+    name.starts_with("mvp-")
+}
+
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -264,7 +275,11 @@ fn test_modules_follow_every_production_item() {
     let crates = crates_dir();
     let mut files = Vec::new();
     for entry in std::fs::read_dir(&crates).unwrap() {
-        let src = entry.unwrap().path().join("src");
+        let krate = entry.unwrap().path();
+        if vendored(&krate.file_name().unwrap().to_string_lossy()) {
+            continue;
+        }
+        let src = krate.join("src");
         if src.is_dir() {
             rust_sources(&src, &mut files);
         }
@@ -378,7 +393,7 @@ fn only_pixel_git_spawns_git_in_production_code() {
         let krate = entry.unwrap().path();
         let name = krate.file_name().unwrap().to_string_lossy().into_owned();
         // The bench crate is not shipped; pixel-git is the boundary itself.
-        if name == "pixel-git" || name == "pixel-bench" {
+        if name == "pixel-git" || name == "pixel-bench" || vendored(&name) {
             continue;
         }
         let src = krate.join("src");
