@@ -130,6 +130,14 @@ run the unattended installer where a script asked for a guided run. `main.rs`
 refuses before the guided/unattended decision, so no refused flag reaches a
 write.
 
+The release side is enforced by the compiler, not by a test: a
+`#[cfg(not(debug_assertions))] const _: () = assert!(!LIVE, …)` beside `LIVE`
+means a build with debug assertions off **fails to compile** if the flags are
+live, so no released binary can carry them and the release lanes in CI are the
+proof. A `#[cfg(not(debug_assertions))]` test could not do it: the CLI
+integration tests link the debug binary, so such a test is compiled out of the
+job that runs them and never executes.
+
 ### Testing with a release-profile build
 
 The local-install loop builds `dev-release` (release settings, no thin LTO),

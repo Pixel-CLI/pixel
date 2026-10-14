@@ -748,6 +748,20 @@ mod dev {
     /// them.
     pub(super) const LIVE: bool = cfg!(debug_assertions);
 
+    /// The release side of [`LIVE`], enforced by the compiler rather than by a
+    /// test: a build with debug assertions off fails to compile if the flags
+    /// are live, so no released binary can carry them, and the release lanes in
+    /// CI are the ones that prove it.
+    ///
+    /// A `#[cfg(not(debug_assertions))]` test would not do: the CLI integration
+    /// tests link the debug binary, so such a test is compiled out of the job
+    /// that runs them and never executes.
+    #[cfg(not(debug_assertions))]
+    const _: () = assert!(
+        !LIVE,
+        "the development-only setup flags must not be live in a release build"
+    );
+
     /// The three development switches, as `main.rs` fills them from the
     /// command line.
     #[derive(Debug, Clone, Default)]
