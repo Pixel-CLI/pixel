@@ -84,7 +84,13 @@ pub(crate) struct ChangedFile {
     pub(crate) removed: usize,
     /// The lines of the new side that changed, `(first, last)`, in order.
     pub(crate) hunks: Vec<(u64, u64)>,
+    /// The diff itself: each hunk header and its `+`/`-` lines, cut at
+    /// [`MAX_PATCH_LINES`] lines.
+    pub(crate) patch: Vec<String>,
 }
+
+/// Lines of a file's diff kept.
+pub(crate) const MAX_PATCH_LINES: usize = 120;
 
 /// A change: what it is, and its files, largest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -552,7 +558,7 @@ const SUMMARY_FILES: usize = 40;
 const REVIEW_FILES: usize = 8;
 const REGIONS_PER_FILE: usize = 2;
 const TEST_REGIONS_PER_FILE: usize = 1;
-const MAX_REGIONS: usize = 10;
+const MAX_REGIONS: usize = 8;
 const MAX_TEST_REGIONS: usize = 3;
 /// Lines of one changed region, at most.
 const REGION_LINES: u64 = 60;
@@ -653,6 +659,38 @@ fn is_source_file(path: &str) -> bool {
         .is_some_and(|(_, extension)| SOURCE.contains(&extension))
 }
 
+/// Added tests named in the summary.
+const TESTS_NAMED: usize = 12;
+/// Files whose diff is shown, and lines of it.
+const DIFF_FILES: usize = 4;
+const DIFF_LINES: usize = 50;
+
+/// The names of the tests the change adds: a `+` line that opens a test case
+/// (`it("...")`, `test("...")`, `def test_x`, `fn x` after `#[test]`).
+pub(crate) fn added_test_names(changes: &Changes) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for file in changes
+        .files
+        .iter()
+        .filter(|file| answer::is_test_path(&file.path))
+    {
+        let added: Vec<String> = file
+            .patch
+            .iter()
+            .filter_map(|line| line.strip_prefix('+'))
+            .map(str::to_string)
+            .collect();
+        for index in 0..added.len() {
+            if let Some(name) = answer::test_name(&added, index)
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 /// The lines of the summary block: the commit, the totals, each file with its
 /// line counts, and what the tests say.
 pub(crate) fn summary_lines(changes: &Changes) -> Vec<String> {
@@ -684,6 +722,23 @@ pub(crate) fn summary_lines(changes: &Changes) -> Vec<String> {
         .iter()
         .filter(|file| answer::is_test_path(&file.path))
         .count();
+    let added_tests = added_test_names(changes);
+    if !added_tests.is_empty() {
+        lines.push(format!(
+            "tests added: {}{}",
+            added_tests
+                .iter()
+                .take(TESTS_NAMED)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; "),
+            if added_tests.len() > TESTS_NAMED {
+                "; …"
+            } else {
+                ""
+            }
+        ));
+    }
     let unpaired = unpaired_sources(changes);
     if unpaired.is_empty() {
         lines.push(format!("tests: {tests} of the changed files are tests; every changed source file has one beside it"));
@@ -753,6 +808,24 @@ fn review_blocks(typed: &str, evidence: &dyn Evidence, deadline: Instant) -> Vec
         format!("change summary — {}", changes.label),
         summary_lines(&changes),
     )];
+    // What changed, as the diff has it: the removed lines are in no file.
+    for file in changes
+        .files
+        .iter()
+        .filter(|file| {
+            reviewable(file) && !answer::is_test_path(&file.path) && !file.patch.is_empty()
+        })
+        .take(DIFF_FILES)
+    {
+        let mut patch: Vec<String> = file.patch.iter().take(DIFF_LINES).cloned().collect();
+        if file.patch.len() > DIFF_LINES {
+            patch.push("… diff cut".to_string());
+        }
+        blocks.push(Block::new(
+            format!("diff of {} (+{} -{})", file.path, file.added, file.removed),
+            patch,
+        ));
+    }
     let (mut regions, mut test_regions) = (0, 0);
     // The code under review first, its tests after, each by size of change.
     let mut reviewable_files: Vec<&ChangedFile> = changes
@@ -1683,6 +1756,7 @@ mod tests {
             added,
             removed,
             hunks: hunks.to_vec(),
+            patch: Vec::new(),
         }
     }
 
@@ -2628,5 +2702,109 @@ mod tests {
             .is_empty()
         );
         assert!(owns_the_pack(QuestionKind::History));
+    }
+
+    fn with_patch(mut file: ChangedFile, patch: &[&str]) -> ChangedFile {
+        file.patch = strings(patch);
+        file
+    }
+
+    #[test]
+    fn added_test_names_should_read_the_cases_a_change_adds_to_test_files_only() {
+        let changes = change(vec![
+            with_patch(
+                changed("tests/frame.test.ts", 'M', 4, 0, &[(1, 4)]),
+                &[
+                    "@@ -0,0 +1,4 @@",
+                    "+  it(\"clips a child on the frame edge\", () => {",
+                    "+    expect(x).toBe(1);",
+                    "+  });",
+                    "+  test(\"keeps bound text\", () => {});",
+                ],
+            ),
+            with_patch(
+                changed("tests/test_b.py", 'A', 2, 0, &[(1, 2)]),
+                &[
+                    "@@ -0,0 +1,2 @@",
+                    "+def test_cut_removes_frame_children(self):",
+                    "+    pass",
+                ],
+            ),
+            with_patch(
+                changed("src/frame.ts", 'M', 1, 0, &[(1, 1)]),
+                &["@@ -0,0 +1 @@", "+it(\"not a test file\", () => {})"],
+            ),
+        ]);
+        assert_eq!(
+            added_test_names(&changes),
+            [
+                "clips a child on the frame edge",
+                "keeps bound text",
+                "test_cut_removes_frame_children"
+            ]
+        );
+        let summary = summary_lines(&changes).join("\n");
+        assert!(
+            summary.contains("tests added: clips a child on the frame edge; keeps bound text; test_cut_removes_frame_children"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn a_review_should_show_the_diff_of_the_changed_source_so_the_removed_lines_are_there() {
+        let world = World {
+            changes: Some(change(vec![
+                with_patch(
+                    changed("src/frame.rs", 'M', 1, 1, &[(4, 4)]),
+                    &[
+                        "@@ -4 +4 @@ pub fn clip(a: u8) -> u8 {",
+                        "-    let b = a;",
+                        "+    let b = a + 1;",
+                    ],
+                ),
+                with_patch(
+                    changed("tests/frame_test.rs", 'M', 1, 0, &[(1, 1)]),
+                    &["@@ -0,0 +1 @@", "+fn t() {}"],
+                ),
+            ])),
+            ..World::default()
+        }
+        .with_file(
+            "src/frame.rs",
+            &[
+                "use x;",
+                "",
+                "",
+                "pub fn clip(a: u8) -> u8 {",
+                "    let b = a + 1;",
+                "    b",
+                "}",
+            ],
+        );
+        let out = blocks(
+            &input(
+                QuestionKind::Review,
+                "review the latest commit",
+                &[],
+                &[],
+                &[],
+            ),
+            &world,
+            soon(),
+        );
+        let heads = heads(&out);
+        assert_eq!(heads[1], "### diff of src/frame.rs (+1 -1)");
+        let diff = out[1].text();
+        assert!(
+            diff.contains("-    let b = a;\n+    let b = a + 1;"),
+            "{diff}"
+        );
+        // Only source files get a diff block; the test's lines are in the summary.
+        assert!(
+            !heads
+                .iter()
+                .any(|head| head.starts_with("### diff of tests/")),
+            "{heads:?}"
+        );
     }
 }

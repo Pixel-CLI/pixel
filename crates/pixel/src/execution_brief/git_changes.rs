@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use pixel_git::{GitOptions, GitRunner};
 
-use super::kinds::{ChangeScope, ChangedFile, Changes};
+use super::kinds::{ChangeScope, ChangedFile, Changes, MAX_PATCH_LINES};
 
 /// Bytes of diff read at most; a larger change is cut by git's own error and
 /// the pack is left out.
@@ -26,6 +26,8 @@ const DIFF_BYTES: usize = 2 * 1024 * 1024;
 const LINE_BYTES: usize = 4096;
 /// Files a change lists at most.
 const MAX_FILES: usize = 400;
+/// Characters of one line of a diff kept.
+const PATCH_LINE_CHARS: usize = 160;
 /// Branches a merge base is looked for against, in order.
 const BASES: &[&str] = &["origin/main", "origin/master", "main", "master"];
 
@@ -145,6 +147,7 @@ pub(crate) fn parse_diff(diff: &str) -> (Vec<ChangedFile>, bool) {
                 added: 0,
                 removed: 0,
                 hunks: Vec::new(),
+                patch: Vec::new(),
             });
             continue;
         }
@@ -161,6 +164,7 @@ pub(crate) fn parse_diff(diff: &str) -> (Vec<ChangedFile>, bool) {
                 if let Some(range) = new_side(hunk) {
                     file.hunks.push(range);
                 }
+                keep(&mut file.patch, line);
             }
             continue;
         }
@@ -168,10 +172,13 @@ pub(crate) fn parse_diff(diff: &str) -> (Vec<ChangedFile>, bool) {
             if let Some(range) = new_side(hunk) {
                 file.hunks.push(range);
             }
+            keep(&mut file.patch, line);
         } else if line.starts_with('+') {
             file.added += 1;
+            keep(&mut file.patch, line);
         } else if line.starts_with('-') {
             file.removed += 1;
+            keep(&mut file.patch, line);
         }
     }
     files.sort_by(|a, b| {
@@ -182,6 +189,14 @@ pub(crate) fn parse_diff(diff: &str) -> (Vec<ChangedFile>, bool) {
     let truncated = files.len() > MAX_FILES;
     files.truncate(MAX_FILES);
     (files, truncated)
+}
+
+/// `line` appended to `patch` while it holds fewer than
+/// [`MAX_PATCH_LINES`] lines, each cut to a readable width.
+fn keep(patch: &mut Vec<String>, line: &str) {
+    if patch.len() < MAX_PATCH_LINES {
+        patch.push(line.chars().take(PATCH_LINE_CHARS).collect());
+    }
 }
 
 /// The lines of the new side a hunk header (`-3,2 +5,4 @@ ...`) changed:
@@ -254,7 +269,35 @@ deleted file mode 100644
         // file is all of it; a deleted one has no new side to point at.
         assert_eq!(files[0].hunks, [(3, 5), (21, 21)]);
         assert_eq!(files[2].hunks, [(1, 2)]);
+        // The diff is kept as written, headers and +/- lines, not the file markers.
+        assert_eq!(
+            files[0].patch,
+            [
+                "@@ -3,2 +3,3 @@ fn a() {",
+                "-old1",
+                "-old2",
+                "+new1",
+                "+new2",
+                "+new3",
+                "@@ -20 +21,0 @@ fn b() {",
+                "-gone"
+            ]
+        );
         assert_eq!(files[1].hunks, [(1, 1)]);
+    }
+
+    #[test]
+    fn parse_diff_should_cut_the_kept_diff_of_a_long_change() {
+        let body: String = (0..MAX_PATCH_LINES + 50)
+            .map(|n| format!("+line {n}\n"))
+            .collect();
+        let (files, _) = parse_diff(&format!("diff --git a/x b/x\n@@ -0,0 +1,300 @@\n{body}"));
+        assert_eq!(files[0].patch.len(), MAX_PATCH_LINES);
+        assert_eq!(
+            files[0].added,
+            MAX_PATCH_LINES + 50,
+            "the counts stay exact"
+        );
     }
 
     #[test]
