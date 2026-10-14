@@ -87,32 +87,25 @@ impl AgentTarget {
         }
     }
 
-    /// The row's help text: what writing this target's file actually changes.
+    /// The row's help text: what installing into this target actually changes.
     pub fn help(self) -> &'static str {
         match self {
-            Self::ClaudeCode => "Write the pixel steering block into CLAUDE.md.",
-            // The instruction file is the block; Codex's hooks are the
-            // `CodexConfig` feature's, deployed by the installer.
-            Self::Codex => "Write the pixel steering block into the AGENTS.md Codex reads.",
-            Self::Devin => {
-                "Write the pixel steering block into the repository AGENTS.md Devin reads."
-            }
-            Self::Cursor => {
-                "Write the pixel steering block into the repository AGENTS.md Cursor reads."
-            }
-            Self::Gemini => "Write the pixel steering block into GEMINI.md.",
-            Self::Antigravity => "Write the pixel steering block into the repository AGENTS.md.",
-            Self::OpenCode => "Write the pixel steering block into the opencode AGENTS.md.",
+            Self::ClaudeCode => "Install the pixel skill under ~/.claude/skills.",
+            // The skill is the write; Codex's hooks ride along automatically.
+            Self::Codex => "Install the pixel skill under ~/.codex/skills and Codex's hooks.",
+            Self::Devin => "Install the pixel skill under ~/.devin/skills.",
+            Self::Cursor => "Install the pixel skill under ~/.cursor/skills.",
+            Self::Gemini => "Install the pixel skill under ~/.gemini/skills.",
+            Self::Antigravity => "Install the pixel skill under the shared ~/.gemini/skills.",
+            Self::OpenCode => "Install the pixel skill under ~/.config/opencode/skills.",
             Self::Pi => "Install the pixel skill and the impact/brief package under ~/.pi/agent.",
-            Self::AgentMd => {
-                "Write the pixel steering block into the repository AGENTS.md every other agent reads."
-            }
+            Self::AgentMd => "No harness directory of its own; nothing is written for it.",
         }
     }
 
     /// The setup target a detected agent belongs to. Every agent pixel does
     /// not have a target of its own maps to [`AgentTarget::AgentMd`], so a
-    /// harness we cannot name still gets its steering file.
+    /// harness we cannot name still lands in the picker.
     pub fn from_detected(agent: Agent) -> Self {
         match agent {
             Agent::ClaudeCode | Agent::ClaudeCodeCowork => Self::ClaudeCode,

@@ -220,6 +220,15 @@ pub fn install_selected(
     // skill: a guided run writes the selected agents' roots, the unattended
     // install every configured one.
     steps.push(crate::skill::install(&home, selection, dry_run)?);
+    // …and the managed instruction-file block it replaces comes out of the
+    // instruction files an earlier release wrote it into — scoped to the
+    // picked agents when the run is guided.
+    steps.push(crate::uninstall::strip_setup_blocks_selected(
+        &home,
+        crate::setup::Scope::Global,
+        selection.map(|s| s.agents.as_slice()),
+        dry_run,
+    )?);
     if wants.pi_extension() {
         steps.push(crate::pi_global::install(
             &crate::pi_global::PiPaths::resolve(&home, options.home.is_some()),
@@ -467,6 +476,15 @@ fn install_project(
     }
     steps.push(crate::warp::retire(repo, dry_run)?);
     steps.push(retired_pixel_first_rules);
+    // The instruction-file block the guided setup upserted into AGENTS.md,
+    // CLAUDE.md and GEMINI.md is retired — the pixel skill carries the
+    // content now, so a repo run strips the copies an earlier release wrote.
+    steps.push(crate::uninstall::strip_setup_blocks_selected(
+        repo,
+        crate::setup::Scope::Repository,
+        wants.0.map(|s| s.agents.as_slice()),
+        dry_run,
+    )?);
     steps.push(exclude_project_artifacts(repo, dry_run)?);
 
     Ok(install_report(exe, repo, dry_run, steps))

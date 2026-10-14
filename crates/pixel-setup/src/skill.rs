@@ -26,7 +26,7 @@ type Result<T> = std::result::Result<T, InstallError>;
 
 /// The skill content: the same front matter and prompt the `.openclaw`
 /// plugin ships, so every harness reads one source.
-pub(crate) const PIXEL_SKILL: &str = concat!(
+pub const PIXEL_SKILL: &str = concat!(
     "---\nname: pixel\ndescription: >\n  Deterministic code retrieval: indexed search, concept resolve, impact\n  analysis, caller/callee tracing, task scoping, plan generation, and git\n  history archaeology via the `pixel` CLI. Use when the repo has a `.pixel`\n  directory, when the user mentions pixel, or before editing a symbol when\n  blast radius matters. Requires the `pixel` binary on PATH.\nlicense: MIT\n---\n\n",
     include_str!("../assets/pixel-agent-prompt.md"),
 );

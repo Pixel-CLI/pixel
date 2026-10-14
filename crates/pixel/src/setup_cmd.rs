@@ -91,15 +91,8 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
     };
 
     if options.print {
-        let plan = SetupPlan::new(
-            &base,
-            scope,
-            &default_agents(&base, scope, running_agent()),
-            &default_features(scope),
-            &crate::plugin_cmd::available(),
-        )
-        .map_err(|e| e.to_string())?;
-        print!("{}", plan.block);
+        // The block is retired: what `pixel setup` deploys is the skill.
+        print!("{}", pixel_setup::skill::PIXEL_SKILL);
         return Ok(());
     }
 
@@ -174,14 +167,8 @@ fn run_questions(
     if answers.features.contains(&Feature::Classify) {
         screens.steps.total += 1;
     }
-    let plan = SetupPlan::new(
-        &base,
-        scope,
-        &answers.agents,
-        &answers.features,
-        &crate::plugin_cmd::available(),
-    )
-    .map_err(|e| e.to_string())?;
+    let plan = SetupPlan::new(&base, scope, &answers.agents, &answers.features)
+        .map_err(|e| e.to_string())?;
     let install = install_options(options, &base, &plan);
     let selection = plan.install_selection();
     // The hooks are shown from a dry run of the very call that applies them,
@@ -207,7 +194,6 @@ fn run_questions(
         return Ok(());
     }
 
-    let written = plan.apply().map_err(|e| e.to_string())?;
     let hooks = pixel_setup::install::install_selected(&install, Some(&selection))
         .map_err(|e| e.to_string())?;
     // TEMPORARY (dev-flags): the `if` is `dev`'s; without it the block below
@@ -218,7 +204,7 @@ fn run_questions(
             config_cmd::set_global_key(key.key, key.value.to_json())?;
         }
     }
-    report(output, &plan, &written, &hooks, scripted, screens)?;
+    report(output, &plan, &hooks, scripted, screens)?;
     // Picking AI classification opens its own journey after the files land:
     // the engine menu (local Ollaya, remote preset, OpenAI Decisions, Jev,
     // Clef-flash) and the optional harness helpers. A scripted run gets the
@@ -562,7 +548,7 @@ fn intro_card(width: usize, color: bool, logo_code: &str, show_logo: bool) -> Ve
         width,
     ));
     for bullet in [
-        "Write a managed pixel block into each agent's instruction file",
+        "Install the pixel skill into each picked harness's skills dir",
         "Register the hooks of the agents and features you pick",
         "Store the settings the features you pick need",
     ] {
@@ -1093,26 +1079,6 @@ fn write_review(
     )
     .map_err(io)?;
 
-    if !plan.instruction_writes.is_empty() {
-        section(output, color, "Instruction files")?;
-        for write in &plan.instruction_writes {
-            let agents = write
-                .agents
-                .iter()
-                .map(|agent| agent.name())
-                .collect::<Vec<_>>()
-                .join(", ");
-            item(
-                output,
-                color,
-                &format!(
-                    "{} {}",
-                    display_path(&write.path, &plan.base, plan.scope),
-                    paint(color, "2", &format!("({agents})"))
-                ),
-            )?;
-        }
-    }
     if !hooks.is_empty() {
         section(output, color, "Hooks and agent configuration")?;
         writeln!(
@@ -1160,9 +1126,9 @@ fn write_review(
         }
     }
 
-    section(output, color, "The exact text")?;
+    section(output, color, "The skill's text")?;
     let gutter = paint(color, "2", "▏");
-    for line in plan.block.lines() {
+    for line in pixel_setup::skill::PIXEL_SKILL.lines() {
         writeln!(output, "  {gutter} {}", paint(color, "2", line)).map_err(io)?;
     }
     Ok(())
@@ -1193,26 +1159,6 @@ fn display_base(base: &Path, scope: Scope) -> String {
     match scope {
         Scope::Global if home_path().as_deref() == Some(base) => "~".to_string(),
         _ => base.display().to_string(),
-    }
-}
-
-/// A written path as the review shows it: relative to the run's base, with the
-/// home directory collapsed to `~` for a machine-wide run.
-///
-/// `but` shows the same two forms — `.codex/skills/gitbutler` in a repository
-/// and `~/.claude/CLAUDE.md` on a machine — and for the same reason: an
-/// absolute home path is the reader's own name read back at them, in the middle
-/// of the list of files that actually change.
-fn display_path(path: &Path, base: &Path, scope: Scope) -> String {
-    let Ok(relative) = path.strip_prefix(base) else {
-        return path.display().to_string();
-    };
-    let stripped = relative.display().to_string();
-    let text = stripped.strip_prefix("./").unwrap_or(&stripped).to_string();
-    if scope == Scope::Global && home_path().as_deref() == Some(base) {
-        format!("~/{text}")
-    } else {
-        text
     }
 }
 
@@ -1335,14 +1281,13 @@ fn confirm(input: &mut impl BufRead, output: &mut impl Write, color: bool) -> Re
 fn report(
     output: &mut impl Write,
     plan: &SetupPlan,
-    written: &[PathBuf],
     hooks: &InstallReport,
     scripted: bool,
     screens: &Screens<'_>,
 ) -> Result<(), String> {
     let color = screens.color;
     writeln!(output).map_err(io)?;
-    if written.is_empty() && plan.config_writes.is_empty() && hooks.steps.is_empty() {
+    if plan.config_writes.is_empty() && hooks.steps.is_empty() {
         writeln!(
             output,
             "{}",
@@ -1378,9 +1323,6 @@ fn report(
             )
         )
         .map_err(io)?;
-        for path in written {
-            box_lines(output, &format!("  updated {}", path.display()))?;
-        }
         for step in &hooks.steps {
             box_lines(output, &format!("  {}: {}", step.id, step.summary))?;
         }
@@ -1714,7 +1656,6 @@ mod tests {
             Scope::Global,
             &[AgentTarget::ClaudeCode],
             &[Feature::Prompt],
-            &pixel_plugin::Available::none(),
         )
         .unwrap();
         // A note that fills the two-column reservation twice over, so the wrap
@@ -2026,37 +1967,47 @@ mod tests {
     }
 
     #[test]
-    fn the_review_prints_every_path_key_and_note_before_the_text() {
+    fn the_review_prints_every_step_key_and_note_before_the_text() {
         let scratch = scratch_dir("review");
         let plan = SetupPlan::new(
             &scratch,
             Scope::Global,
-            &[AgentTarget::ClaudeCode, AgentTarget::Cursor],
+            &[AgentTarget::ClaudeCode, AgentTarget::AgentMd],
             &[Feature::Prompt, Feature::Metrics],
-            &pixel_plugin::Available::none(),
         )
         .unwrap();
-        let hooks = [step("hooks.claude", "would register the task-event hooks")];
+        let hooks = [
+            step("hooks.claude", "would register the task-event hooks"),
+            step("skills.pixel", "would write skills/pixel/SKILL.md"),
+        ];
         let keys = KeyReader::inert();
         let (rendered, written) = with_input("", |_, output| {
             write_review(output, &plan, &hooks, &mut screens(&keys))
         });
         rendered.unwrap();
 
-        assert!(written.contains(".claude/CLAUDE.md"), "{written}");
-        assert!(written.contains("Claude Code"), "{written}");
+        assert!(written.contains("hooks.claude"), "{written}");
+        assert!(written.contains("skills.pixel"), "{written}");
         assert!(written.contains("metrics: \"on\""), "{written}");
+        assert!(written.contains("brief: true"), "{written}");
         assert!(
-            written.contains("Cursor has no instruction file"),
+            written.contains("no harness directory"),
             "the agent with nothing to write is named: {written}"
         );
         assert!(
-            written.contains("<!-- pixel:setup:start -->"),
-            "the exact text is shown: {written}"
+            written.contains("The skill's text"),
+            "the deployed skill text is shown: {written}"
         );
-        let text = written.find("The exact text").unwrap();
-        let path = written.find(".claude/CLAUDE.md").unwrap();
-        assert!(path < text, "the paths come before the text they belong to");
+        assert!(
+            written.contains("name: pixel"),
+            "the skill front matter is shown: {written}"
+        );
+        let text = written.find("The skill's text").unwrap();
+        let step = written.find("skills.pixel").unwrap();
+        assert!(
+            step < text,
+            "the install steps come before the text they deploy"
+        );
         std::fs::remove_dir_all(&scratch).ok();
     }
 
@@ -2093,7 +2044,6 @@ mod tests {
             Scope::Global,
             &[AgentTarget::ClaudeCode],
             &[Feature::Prompt],
-            &pixel_plugin::Available::none(),
         )
         .unwrap();
         let hooks = [
@@ -2119,7 +2069,7 @@ mod tests {
             "the file a hook step writes is named: {written}"
         );
         assert!(
-            written.find("hooks.claude").unwrap() < written.find("The exact text").unwrap(),
+            written.find("hooks.claude").unwrap() < written.find("The skill's text").unwrap(),
             "the hooks are part of the review, not an afterthought"
         );
 
@@ -2142,7 +2092,6 @@ mod tests {
             Scope::Global,
             &[AgentTarget::Codex],
             &[Feature::Prompt],
-            &pixel_plugin::Available::none(),
         )
         .unwrap();
         let options = SetupOptions {
@@ -2161,7 +2110,6 @@ mod tests {
             Scope::Repository,
             &[AgentTarget::ClaudeCode],
             &[Feature::Classify],
-            &pixel_plugin::Available::none(),
         )
         .unwrap();
         let repo = install_options(&options, &base, &repo_plan);
@@ -2219,41 +2167,26 @@ mod tests {
             Scope::Global,
             &[AgentTarget::ClaudeCode],
             &[Feature::Prompt],
-            &pixel_plugin::Available::none(),
         )
         .unwrap();
         let hooks = install_report(vec![step("hooks.claude", "registered the hooks")]);
         let keys = KeyReader::inert();
         let (_, written) = with_input("", |_, output| {
-            report(
-                output,
-                &plan,
-                &[scratch.join(".claude/CLAUDE.md")],
-                &hooks,
-                false,
-                &screens(&keys),
-            )
+            report(output, &plan, &hooks, false, &screens(&keys))
         });
-        assert!(written.contains("updated"), "{written}");
+        assert!(written.contains("pixel setup complete"), "{written}");
         assert!(
             written.contains("hooks.claude: registered the hooks"),
             "{written}"
         );
         assert!(written.contains("pixel doctor"), "{written}");
 
-        let empty_plan = SetupPlan::new(
-            &scratch,
-            Scope::Global,
-            &[AgentTarget::ClaudeCode],
-            &[],
-            &pixel_plugin::Available::none(),
-        )
-        .unwrap();
+        let empty_plan =
+            SetupPlan::new(&scratch, Scope::Global, &[AgentTarget::ClaudeCode], &[]).unwrap();
         let (_, empty) = with_input("", |_, output| {
             report(
                 output,
                 &empty_plan,
-                &[],
                 &install_report(Vec::new()),
                 true,
                 &screens(&keys),

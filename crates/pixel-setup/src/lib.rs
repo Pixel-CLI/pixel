@@ -32,7 +32,7 @@ mod pixel_first;
 mod repo_git;
 mod routing;
 pub mod setup;
-pub(crate) mod skill;
+pub mod skill;
 pub mod uninstall;
 mod warp;
 

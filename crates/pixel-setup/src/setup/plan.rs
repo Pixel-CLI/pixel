@@ -5,21 +5,21 @@
 //!
 //! The split is the point: a wizard that prompts, writes and reports at the
 //! same time cannot show the user what it is about to do. `SetupPlan` resolves
-//! every answer to concrete paths first, so the review screen prints the exact
-//! files and the exact text, cancelling writes nothing, and applying is a
-//! separate step over a plan that is already known to be valid.
+//! every answer to concrete writes first, so the review screen prints them
+//! and cancelling writes nothing. The instruction-file block is retired —
+//! the `pixel` skill carries the retrieval workflow into every harness's
+//! skills dir, and the installer (not this plan) writes it, alongside the
+//! hooks. What the plan still owns: the selected agents and features in
+//! catalog order, the configuration keys to store, and the notes a user has
+//! to act on by hand.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use pixel_plugin::Available;
-
+use crate::Result;
 use crate::install::InstallSelection;
-use crate::{InstallError, Result};
 
 use super::agent::{AgentTarget, Scope, join};
 use super::feature::{ConfigValue, Feature, HookGroup, Writes};
-use super::render::render_block;
 
 /// The rule file `pixel setup` writes inside a harness's rules directory,
 /// relative to the scope base. Named for what it is: a setup block, not a rule
@@ -43,15 +43,6 @@ const RULES_DIRS: &[(AgentTarget, &str)] = &[
     (AgentTarget::Devin, ".devin/rules"),
 ];
 
-/// An instruction file the setup rewrites, and the agents that read it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InstructionWrite {
-    /// The file to upsert the block into.
-    pub path: PathBuf,
-    /// The agents whose instruction file this is, in catalog order.
-    pub agents: Vec<AgentTarget>,
-}
-
 /// A key the selected features store in the global configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigWrite {
@@ -73,10 +64,6 @@ pub struct SetupPlan {
     pub agents: Vec<AgentTarget>,
     /// The features selected, in catalog order.
     pub features: Vec<Feature>,
-    /// The managed block, rendered once for every file below.
-    pub block: String,
-    /// The instruction files to rewrite.
-    pub instruction_writes: Vec<InstructionWrite>,
     /// The configuration keys to store, applied by the caller: this crate does
     /// not own the global YAML document.
     pub config_writes: Vec<ConfigWrite>,
@@ -97,7 +84,6 @@ impl SetupPlan {
         scope: Scope,
         agents: &[AgentTarget],
         features: &[Feature],
-        plugins: &Available,
     ) -> Result<Self> {
         let agents: Vec<AgentTarget> = AgentTarget::ALL
             .iter()
@@ -113,24 +99,23 @@ impl SetupPlan {
             })
             .collect();
 
-        let mut by_path: BTreeMap<PathBuf, Vec<AgentTarget>> = BTreeMap::new();
+        // The `pixel` skill lands in each selected harness's skills dir (the
+        // installer writes it, so the review's dry run already lists every
+        // path); the notes are only for the agents nothing reaches that way.
         let mut notes = Vec::new();
         for agent in &agents {
-            match agent.instruction_path(base, scope) {
-                Some(path) => by_path.entry(path).or_default().push(*agent),
-                None => notes.push(match agent {
-                    AgentTarget::Pi if scope == Scope::Global => format!(
-                        "{} reads no instruction file pixel writes; it gets the \
-                         pixel skill and the impact/brief package under \
-                         ~/.pi/agent instead.",
-                        agent.name()
-                    ),
-                    _ => format!(
-                        "{} has no instruction file pixel writes in this scope; \
-                         copy the block below into the file it reads by hand.",
-                        agent.name()
-                    ),
-                }),
+            match agent {
+                AgentTarget::Pi if scope == Scope::Global => notes.push(format!(
+                    "{} gets the pixel skill and the impact/brief package under \
+                     ~/.pi/agent.",
+                    agent.name()
+                )),
+                AgentTarget::AgentMd => notes.push(format!(
+                    "{} names no harness directory of its own; nothing is \
+                     written for it.",
+                    agent.name()
+                )),
+                _ => {}
             }
         }
 
@@ -157,38 +142,16 @@ impl SetupPlan {
             base: base.to_path_buf(),
             scope,
             agents,
-            block: render_block(&features, plugins),
             features,
-            instruction_writes: by_path
-                .into_iter()
-                .map(|(path, agents)| InstructionWrite { path, agents })
-                .collect(),
             config_writes,
             notes,
         })
     }
 
-    /// Write the block into every instruction file.
-    ///
-    /// Returns the paths written, in the order they were written. A failure
-    /// stops here: the files already written hold an idempotent block, so
-    /// re-running finishes the job, and the review screen promised nothing
-    /// beyond them.
-    pub fn apply(&self) -> Result<Vec<PathBuf>> {
-        let mut written = Vec::new();
-        for write in &self.instruction_writes {
-            super::files::upsert_file(&write.path, &self.block).map_err(|err| {
-                InstallError::Setup(format!("update {}: {err}", write.path.display()))
-            })?;
-            written.push(write.path.clone());
-        }
-        Ok(written)
-    }
-
     /// What the installer is asked to deploy for this plan: the selected
     /// agents, and the hook groups the selected features switch on. The hook
-    /// files are not rendered here; the installer owns them, and the review
-    /// prints its dry run next to the instruction files.
+    /// and skill files are not rendered here; the installer owns them, and
+    /// the review prints its dry run.
     pub fn install_selection(&self) -> InstallSelection {
         let has = |group| {
             self.features
@@ -197,19 +160,11 @@ impl SetupPlan {
         };
         InstallSelection {
             agents: self.agents.clone(),
-            task_hooks: has(HookGroup::Task) || self.features.contains(&Feature::Prompt),
+            task_hooks: has(HookGroup::Task),
             codex_hooks: has(HookGroup::Codex) || self.agents.contains(&AgentTarget::Codex),
             // pi extension is installed automatically when pi is selected.
             pi_extension: has(HookGroup::Pi) || self.agents.contains(&AgentTarget::Pi),
         }
-    }
-
-    /// Whether the plan writes any instruction file. A setup whose every
-    /// answer was a note has no file to write, and saying so is better than
-    /// reporting a success that changed nothing; the hook steps and the
-    /// configuration keys are counted separately by the caller.
-    pub fn is_empty(&self) -> bool {
-        self.instruction_writes.is_empty()
     }
 }
 
@@ -233,38 +188,13 @@ mod tests {
         PathBuf::from("/tmp/pixel-setup-plan-test")
     }
 
-    fn plan(scope: Scope, agents: &[AgentTarget], features: &[Feature]) -> SetupPlan {
-        SetupPlan::new(&base(), scope, agents, features, &Available::none()).unwrap()
-    }
-
-    #[test]
-    fn one_shared_instruction_file_is_written_once_for_every_agent_reading_it() {
-        let plan = plan(
-            Scope::Repository,
-            &[
-                AgentTarget::Cursor,
-                AgentTarget::Devin,
-                AgentTarget::AgentMd,
-            ],
-            &[Feature::Prompt],
-        );
-        assert_eq!(plan.instruction_writes.len(), 1, "got {plan:?}");
-        let write = &plan.instruction_writes[0];
-        assert_eq!(write.path, base().join("AGENTS.md"));
-        assert_eq!(
-            write.agents,
-            vec![
-                AgentTarget::Devin,
-                AgentTarget::Cursor,
-                AgentTarget::AgentMd
-            ],
-            "the review screen names every agent reading the file"
-        );
+    fn make_plan(scope: Scope, agents: &[AgentTarget], features: &[Feature]) -> SetupPlan {
+        SetupPlan::new(&base(), scope, agents, features).unwrap()
     }
 
     #[test]
     fn the_selected_agents_and_features_are_normalized_to_catalog_order() {
-        let plan = plan(
+        let plan = make_plan(
             Scope::Repository,
             &[AgentTarget::Pi, AgentTarget::ClaudeCode],
             &[Feature::Metrics, Feature::Prompt],
@@ -278,20 +208,29 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_with_no_instruction_file_in_scope_becomes_a_note() {
-        let plan = plan(Scope::Global, &[AgentTarget::Cursor], &[Feature::Prompt]);
-        assert!(plan.instruction_writes.is_empty());
+    fn the_agents_nothing_reaches_become_notes() {
+        let plan = make_plan(Scope::Global, &[AgentTarget::Pi], &[]);
         assert!(
-            plan.notes.iter().any(|note| note.contains("Cursor")),
-            "got {:?}",
+            plan.notes
+                .iter()
+                .any(|note| note.contains("impact/brief package")),
+            "pi's package note: {:?}",
             plan.notes
         );
-        assert!(plan.is_empty(), "nothing to write, and it says so");
+
+        let plan = make_plan(Scope::Global, &[AgentTarget::AgentMd], &[]);
+        assert!(
+            plan.notes
+                .iter()
+                .any(|note| note.contains("no harness directory")),
+            "the generic target says nothing is written: {:?}",
+            plan.notes
+        );
     }
 
     #[test]
-    fn a_hook_feature_writes_no_file_here_and_selects_what_the_installer_deploys() {
-        let plan = plan(
+    fn a_hook_feature_selects_what_the_installer_deploys() {
+        let plan = make_plan(
             Scope::Repository,
             &[AgentTarget::ClaudeCode, AgentTarget::Pi],
             &[Feature::Prompt],
@@ -307,29 +246,19 @@ mod tests {
             "the retrieval-first feature installs task hooks and pi is automatic"
         );
 
-        let none = super::SetupPlan::new(
-            &base(),
+        let none = make_plan(
             Scope::Global,
             &[AgentTarget::ClaudeCode],
             &[Feature::Classify],
-            &Available::none(),
         )
-        .unwrap()
         .install_selection();
         assert!(
             !none.task_hooks && !none.codex_hooks && !none.pi_extension,
             "a feature left off installs nothing: {none:?}"
         );
 
-        let codex = super::SetupPlan::new(
-            &base(),
-            Scope::Global,
-            &[AgentTarget::Codex],
-            &[Feature::Classify],
-            &Available::none(),
-        )
-        .unwrap()
-        .install_selection();
+        let codex = make_plan(Scope::Global, &[AgentTarget::Codex], &[Feature::Classify])
+            .install_selection();
         assert!(
             codex.codex_hooks && !codex.task_hooks && !codex.pi_extension,
             "Codex hooks are installed automatically when Codex is selected: {codex:?}"
@@ -338,7 +267,7 @@ mod tests {
 
     #[test]
     fn the_configuration_keys_are_collected_in_catalog_order() {
-        let plan = plan(
+        let plan = make_plan(
             Scope::Global,
             &[AgentTarget::ClaudeCode],
             &[Feature::Metrics, Feature::Classify, Feature::Prompt],
@@ -351,67 +280,6 @@ mod tests {
                 &["metrics"][..],
                 &["classify", "enabled"][..]
             ]
-        );
-    }
-
-    #[test]
-    fn applying_writes_the_block_and_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let plan = SetupPlan::new(
-            dir.path(),
-            Scope::Repository,
-            &[AgentTarget::ClaudeCode, AgentTarget::Cursor],
-            &[Feature::Prompt],
-            &Available::none(),
-        )
-        .unwrap();
-
-        let written = plan.apply().unwrap();
-        assert_eq!(
-            written,
-            vec![dir.path().join("AGENTS.md"), dir.path().join("CLAUDE.md")],
-            "instruction files are written in path order, so a run is reproducible"
-        );
-        for path in &written {
-            let content = std::fs::read_to_string(path).unwrap();
-            assert_eq!(content, plan.block, "the file is exactly the block");
-        }
-
-        // A user's own line survives a re-run.
-        let agents_md = dir.path().join("AGENTS.md");
-        let with_text = format!(
-            "# House rules\n\n{content}",
-            content = std::fs::read_to_string(&agents_md).unwrap()
-        );
-        std::fs::write(&agents_md, with_text).unwrap();
-        plan.apply().unwrap();
-        let after = std::fs::read_to_string(&agents_md).unwrap();
-        assert!(after.starts_with("# House rules\n"), "got {after}");
-        assert_eq!(after.matches(super::super::files::BLOCK_START).count(), 1);
-    }
-
-    #[test]
-    fn a_malformed_block_stops_the_apply_instead_of_guessing() {
-        let dir = tempfile::tempdir().unwrap();
-        // AGENTS.md sorts first, so the run stops before writing anything else.
-        std::fs::write(
-            dir.path().join("AGENTS.md"),
-            "# rules\n<!-- pixel:setup:start -->\n",
-        )
-        .unwrap();
-        let plan = SetupPlan::new(
-            dir.path(),
-            Scope::Repository,
-            &[AgentTarget::ClaudeCode, AgentTarget::Cursor],
-            &[Feature::Prompt],
-            &Available::none(),
-        )
-        .unwrap();
-        let err = plan.apply().unwrap_err();
-        assert!(format!("{err}").contains("marker"), "got {err}");
-        assert!(
-            !dir.path().join("CLAUDE.md").exists(),
-            "the malformed file is the user's to fix; the run must not continue past it"
         );
     }
 }

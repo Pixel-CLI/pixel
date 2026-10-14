@@ -370,15 +370,34 @@ fn remove_project_claude_guard(repo: &Path, exe: &Path, dry_run: bool) -> Result
 /// list here: a target added to the wizard has to be removed by the same
 /// uninstall run that installed it, and a copied list is how a block survives
 /// an uninstall.
-fn strip_setup_blocks(
+pub(crate) fn strip_setup_blocks(
     base: &Path,
     scope: crate::setup::Scope,
     dry_run: bool,
 ) -> Result<InstallStep> {
-    let mut targets: Vec<PathBuf> = crate::setup::AgentTarget::ALL
-        .iter()
-        .filter_map(|agent| agent.instruction_path(base, scope))
-        .collect();
+    strip_setup_blocks_selected(base, scope, None, dry_run)
+}
+
+/// [`strip_setup_blocks`], limited to `agents`' instruction paths when a
+/// guided setup gives a selection: an agent that was not picked keeps its
+/// files. The rule files and Pi's retired system prompt are not owned by one
+/// agent, so they are swept either way.
+pub(crate) fn strip_setup_blocks_selected(
+    base: &Path,
+    scope: crate::setup::Scope,
+    agents: Option<&[crate::setup::AgentTarget]>,
+    dry_run: bool,
+) -> Result<InstallStep> {
+    let mut targets: Vec<PathBuf> = match agents {
+        Some(agents) => agents
+            .iter()
+            .filter_map(|agent| agent.instruction_path(base, scope))
+            .collect(),
+        None => crate::setup::AgentTarget::ALL
+            .iter()
+            .filter_map(|agent| agent.instruction_path(base, scope))
+            .collect(),
+    };
     // The per-agent rule files, where that feature wrote one. Pixel names
     // them, so one left with nothing but whitespace after the strip is a file
     // the setup created and is deleted rather than left empty.

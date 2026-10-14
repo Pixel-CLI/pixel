@@ -10,28 +10,21 @@
 //!
 //! A feature is a bundle of up to two things, and saying which is the point:
 //!
-//! - [`Writes::Steering`] — a section in the managed block of every selected
-//!   agent's instruction file;
-//! - [`Writes::Config`] — a key in the global `~/.pixel/config.yaml`.
+//! - [`Writes::Config`] — a key in the global `~/.pixel/config.yaml`;
+//! - [`Writes::Hooks`] — a group of hook registrations.
 //!
-//! `pixel setup` owns the hook files. The review prints each hook step (from a
-//! dry run of the same code that applies it) next to the instruction files, so
+//! `pixel setup` owns the hook files and the `pixel` skill. The review prints
+//! each install step (from a dry run of the same code that applies it), so
 //! nothing is written that the confirmation did not show.
-
-use pixel_plugin::Available;
 
 /// Where a feature's effect lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Writes {
-    /// A `###` section inside the managed block of every selected agent's
-    /// instruction file. Its text is [`Feature::steering`].
-    Steering,
     /// A key in the global configuration, as a path below its root
     /// (`["classify", "enabled"]`) and the value to store.
     Config(&'static [&'static str], ConfigValue),
     /// A group of hook registrations, applied by the installer for the
-    /// selected agents rather than rendered by this crate. Retired from the
-    /// catalog, but the installer still uses [`HookGroup`] directly.
+    /// selected agents rather than rendered by this crate.
     Hooks(HookGroup),
 }
 
@@ -139,7 +132,7 @@ impl Feature {
     /// features.
     pub fn writes(self) -> Writes {
         match self {
-            Self::Prompt => Writes::Steering,
+            Self::Prompt => Writes::Hooks(HookGroup::Task),
             Self::Metrics => Writes::Config(&["metrics"], ConfigValue::Text("on")),
             Self::Daemon => Writes::Config(&["daemon_auto_start"], ConfigValue::Bool(true)),
             Self::Classify => Writes::Config(&["classify", "enabled"], ConfigValue::Bool(true)),
@@ -169,65 +162,9 @@ impl Feature {
     }
 }
 
-/// The baseline section up to the commands that follow `pixel impact`: what
-/// the agent is told to do, and what it is told pixel already refuses to do.
-const PROMPT_RETRIEVAL: &str = "\
-- Use pixel for repository retrieval: `pixel scope-task` for the file list, `pixel search-content` for a literal search, `pixel search-meaning` for a question about intent, `pixel impact`";
-
-/// What the retrieval bullet adds when the git plugin runs here.
-const PROMPT_WHO_WROTE: &str = " and `pixel who-wrote`";
-
-/// The rest of the baseline, which names no plugin command.
-const PROMPT_REST: &str = " before editing a symbol.
-- Read a file only when the retrieval result does not answer the question; do not sweep the tree first.
-- Keep every edit inside the scoped task. A file outside it needs the user to say so.
-- Commit messages and pull request descriptions say what changed and why, in a few lines.
-- Pixel does not manage pull requests, issues or reviews. Use the host's own tooling for those.";
-
-/// The steering text of a feature that writes any, for the plugins in
-/// `plugins`; `None` for a feature that writes no steering. An agent copies the
-/// commands it is given, so a command no plugin answers is left out rather than
-/// taught.
-impl Feature {
-    pub(crate) fn steering(self, plugins: &Available) -> Option<String> {
-        if self.writes() != Writes::Steering {
-            return None;
-        }
-        Some(match self {
-            Self::Prompt => {
-                let who_wrote = if plugins.has("who-wrote") {
-                    PROMPT_WHO_WROTE
-                } else {
-                    ""
-                };
-                format!("{PROMPT_RETRIEVAL}{who_wrote}{PROMPT_REST}")
-            }
-            Self::Metrics | Self::Daemon | Self::Classify => {
-                unreachable!("{} writes no steering", self.id())
-            }
-        })
-    }
-}
-
-/// The section title a steering feature renders under. Every other feature
-/// writes its effect somewhere other than the block, so asking it for a title
-/// is the caller's bug rather than a missing case to paper over.
-pub(crate) fn steering_title(feature: Feature) -> &'static str {
-    match feature {
-        Feature::Prompt => "Pixel",
-        Feature::Metrics | Feature::Daemon | Feature::Classify => {
-            panic!("{} writes no steering section", feature.id())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn every_plugin() -> Available {
-        Available::of(&["who-wrote", "web-search"])
-    }
 
     #[test]
     fn every_feature_has_a_distinct_index_and_id() {
@@ -293,32 +230,12 @@ mod tests {
     }
 
     #[test]
-    fn a_steering_feature_has_text_and_a_title() {
-        for feature in Feature::ALL {
-            if feature.writes() == Writes::Steering {
-                let body = feature
-                    .steering(&every_plugin())
-                    .expect("a steering feature has text when its plugin runs");
-                assert!(
-                    body.lines().all(|line| line.starts_with("- ")),
-                    "{} renders bullets, not prose",
-                    feature.id()
-                );
-                assert!(!steering_title(feature).is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn no_feature_is_a_hook_group_in_the_current_catalog() {
-        let groups: Vec<(&str, HookGroup)> = Feature::ALL
-            .iter()
-            .filter_map(|f| match f.writes() {
-                Writes::Hooks(group) => Some((f.id(), group)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(groups, Vec::<(&str, HookGroup)>::new());
+    fn the_prompt_feature_installs_the_task_hooks() {
+        assert_eq!(
+            Feature::Prompt.writes(),
+            Writes::Hooks(HookGroup::Task),
+            "the prompt-submit hook is what Token super savior writes"
+        );
     }
 
     #[test]
@@ -332,35 +249,5 @@ mod tests {
             serde_json::Value::String("on".into()),
             "a bare off would parse as a YAML boolean"
         );
-    }
-
-    #[test]
-    fn the_baseline_names_who_wrote_only_where_the_git_plugin_runs() {
-        let without = Feature::Prompt.steering(&Available::none()).unwrap();
-        let with = Feature::Prompt.steering(&every_plugin()).unwrap();
-        assert!(!without.contains("who-wrote"), "{without}");
-        assert!(
-            without.contains("`pixel impact` before editing a symbol."),
-            "{without}"
-        );
-        assert!(
-            with.contains("`pixel impact` and `pixel who-wrote` before editing a symbol."),
-            "{with}"
-        );
-        // Everything else is the same bullet for bullet.
-        assert_eq!(without.lines().count(), with.lines().count());
-        assert_eq!(
-            without.lines().skip(1).collect::<Vec<_>>(),
-            with.lines().skip(1).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn a_feature_without_steering_has_none_whatever_plugins_run() {
-        for feature in Feature::ALL {
-            if feature.writes() != Writes::Steering {
-                assert_eq!(feature.steering(&every_plugin()), None, "{}", feature.id());
-            }
-        }
     }
 }

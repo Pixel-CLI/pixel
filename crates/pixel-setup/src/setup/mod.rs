@@ -13,14 +13,15 @@
 //!   writes, and no marker shared between two agents;
 //! - [`feature`] — what each feature actually writes, stated as one of four
 //!   kinds rather than left to the review screen to imply;
-//! - [`plan`] — every path resolved before anything is written;
-//! - [`render`] / [`files`] — one managed block, rendered once, upserted
-//!   idempotently, and refused rather than guessed at when malformed.
+//! - [`plan`] — every write resolved before anything is written;
+//! - [`files`] — the managed-block format, kept so `pixel setup --remove` can
+//!   still strip a block an earlier release upserted (pixel itself writes
+//!   none: the `pixel` skill carries the content now).
 //!
 //! The parts deliberately left out: `but setup` (pixel prepares nothing here —
-//! no index, no workspace mode), the skill-bundle install (pixel ships no
-//! prompt), and the runtime retired-syntax sweep (the
-//! answers are rendered fresh on every run).
+//! no index, no workspace mode), the skill-bundle install (the `pixel` skill
+//! deploy lives in [`crate::skill`], not here), and the runtime
+//! retired-syntax sweep (the answers are resolved fresh on every run).
 //!
 //! [`but-agent-setup`]: https://docs.gitbutler.com/ai-agents/getting-started
 
@@ -29,25 +30,18 @@ mod detect;
 mod feature;
 mod files;
 mod plan;
-mod render;
 
 pub use agent::{AgentTarget, Scope};
 pub use detect::{Agent, ENVIRONMENT_VARIABLES, ParseAgentError, detect, detect_with};
 pub use feature::{ConfigValue, Feature, HookGroup, Writes};
 pub use files::{BLOCK_END, BLOCK_START, strip};
 pub use pixel_plugin::Available;
-pub use plan::{ConfigWrite, InstructionWrite, SetupPlan, rule_files};
+pub use plan::{ConfigWrite, SetupPlan, rule_files};
 
-/// Render the block the wizard would write for `features`, without writing
-/// anything. This is what `pixel setup --print` prints and what the golden
-/// files under `tests/setup/.agents/` are compared against.
-pub fn preview(features: &[Feature], plugins: &Available) -> String {
-    render::render_block(features, plugins)
-}
-
-/// Every file a setup deploys its text into under `base`, whatever the
-/// answers: the instruction file of each agent in `scope` and the rule files.
-/// The doctor reads them to check the text it deployed.
+/// Every file a setup ever deployed its block into under `base`, whatever
+/// the answers: the instruction file of each agent in `scope` and the rule
+/// files. Nothing writes the block any more, but the doctor still reads the
+/// list to check text an earlier release deployed, and `--remove` strips it.
 pub fn deployed_files(base: &std::path::Path, scope: Scope) -> Vec<std::path::PathBuf> {
     let mut paths: Vec<std::path::PathBuf> = AgentTarget::ALL
         .iter()
@@ -98,19 +92,22 @@ mod tests {
         assert!(BLOCK_END.ends_with("-->"));
     }
 
+    /// A block in the retired managed format, for the strip tests: nothing
+    /// renders one for real any more.
+    fn retired_block() -> String {
+        format!("{BLOCK_START}\nold guidance\n{BLOCK_END}\n")
+    }
+
     #[test]
     fn stripping_removes_a_block_and_leaves_the_users_own_lines() {
-        let block = preview(&[Feature::Prompt], &Available::none());
+        let block = retired_block();
         let file = format!("# House rules\n\n{block}\nkeep this\n");
         assert_eq!(strip_block(&file), "# House rules\n\nkeep this\n");
     }
 
     #[test]
-    fn a_preview_can_be_upserted_and_stripped_back_out() {
-        let block = preview(
-            &Feature::ALL.iter().copied().take(3).collect::<Vec<_>>(),
-            &Available::none(),
-        );
+    fn a_retired_block_can_be_stripped_back_out() {
+        let block = retired_block();
         let with = files::upsert("keep\n", &block).unwrap();
         assert!(with.starts_with("keep\n\n"), "got {with:?}");
         assert_eq!(
