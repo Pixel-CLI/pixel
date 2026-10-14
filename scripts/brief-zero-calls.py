@@ -55,6 +55,7 @@ CENSUS_DIRS = (
 )
 PASS = "pass"
 FELL_BACK = "fell back to tool calls"
+HISTORY_BUDGET_S = 420
 SETTLE_TRIES = 14
 SETTLE_NEED = 3
 
@@ -133,9 +134,20 @@ def verdict(n_calls):
     return PASS if n_calls == 0 else FELL_BACK
 
 
-def activate(binary, ws, env):
-    """Index ``ws`` with the binary under test and settle the daemon, as ``score_brief.py`` does."""
+def activate(binary, ws, env, history=True):
+    """Index ``ws`` with the binary under test and settle the daemon, as ``score_brief.py`` does.
+
+    ``history`` also builds the history index (``build-index --history``), which a question about
+    when or by whom something changed is answered from; a user who asks such a question has it
+    built, a fresh clone does not."""
     sh([binary, "prepare-repo", "."], cwd=ws, timeout=1800, env=env)
+    if history:
+        # A blobless clone fetches every blob it diffs from the network: bounded, and
+        # a question of history in such a repository is simply not answerable.
+        try:
+            sh([binary, "build-index", "--history", "."], cwd=ws, timeout=HISTORY_BUDGET_S, env=env)
+        except subprocess.TimeoutExpired:
+            pass
     sh([binary, "search-meaning", "how does this code work", "."], cwd=ws, timeout=1800, env=env)
     last, same = None, 0
     for _ in range(SETTLE_TRIES):
@@ -176,7 +188,7 @@ class Run:
                "verdict": "error", "problems": []}
         try:
             shutil.rmtree(Path(ws) / ".pixel", ignore_errors=True)
-            activate(args.brief_bin, ws, env)
+            activate(args.brief_bin, ws, env, not args.no_history)
             settings = self.out / "settings" / f"{sid}.json"
             settings.parent.mkdir(parents=True, exist_ok=True)
             settings.write_text(json.dumps(settings_body(args.brief_bin, args.parts)) + "\n", encoding="utf-8")
@@ -223,6 +235,7 @@ def main(argv=None):
     parser.add_argument("--effort", default=None)
     parser.add_argument("--budget", type=float, default=2.0)
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--no-history", action="store_true", help="skip build-index --history")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
