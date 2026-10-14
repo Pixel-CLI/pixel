@@ -11,15 +11,32 @@ LIVE with Pixel's own brief instead of the oracle and counts the tool calls of e
 
     pass                    0 calls: the brief carried everything the answer needed
     fell back to tool calls >= 1 call: something was missing from the brief
+    brief not delivered     the hooks printed no byte to the agent: not a pass, whatever it did
 
-Per question it makes a pinned clone of the census repository, indexes it with the binary under
-test (``prepare-repo``, one ``search-meaning``, throwaway briefs until the output settles, as
-``score_brief.py`` does), registers the prompt-submit hooks the way ``pixel setup`` writes them for
-Claude Code (``run-hook task-event --provider claude --event prompt-submit --part K/N``, N parts),
-and runs ``claude -p`` with those hooks, the census tool set and a ``pixel`` that is visibly
-absent from PATH, so the only Pixel the agent sees is the brief.
+``--agent`` picks the live agent: ``codex`` (the default) or ``claude``. A session is an
+``(arm, question)`` pair: ``--arm brief`` registers the hooks, ``--arm nobrief`` is the same
+question with no Pixel hook at all (the fair baseline), ``--arm both`` runs the two.
 
-    brief-zero-calls.py --brief-bin <pixel> [--only id,id] [--parts 3] [--jobs 13]
+Per session it makes a pinned clone of the census repository. A brief session indexes the clone with
+the binary under test (``prepare-repo``, one ``search-meaning``, throwaway briefs until the output
+settles, as ``score_brief.py`` does) and registers the hooks the way ``pixel setup`` writes them:
+
+* Codex: a disposable ``CODEX_HOME`` per session holding ``config.toml``, ``hooks.json`` and a copy
+  of ``auth.json`` (never printed or logged, deleted with the session; the real ``~/.codex`` is
+  never written), and ``codex exec --json --ephemeral --skip-git-repo-check --ignore-user-config
+  --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c features.hooks=true``,
+  the recipe of ``eval/clis/codex.sh`` and ``scripts/codex-pixel-ab.sh``. Tool calls are counted from
+  the parsed JSON events (command executions, file changes, MCP calls, web searches), not by grep.
+* Claude: ``claude -p`` with the census tool set and a settings file with the same hooks.
+
+The hooks are ``run-hook task-event --provider <agent> --event prompt-submit --part K/N`` (N parts:
+a host caps what one hook injects), and the ``post-tool-use``, ``stop`` and ``session-start`` hooks
+that ``pixel setup`` registers too. The agent runs with a ``pixel`` that is visibly absent from
+PATH, so the only Pixel it sees is the brief. What each hook part printed to the agent is read
+back from the clone's ``.pixel/brief-feedback.jsonl`` (written by the hooks themselves).
+
+    brief-zero-calls.py --brief-bin <pixel> [--agent codex|claude] [--arm brief|nobrief|both]
+                        [--only id,id] [--parts 3] [--jobs 26]
     brief-zero-calls.py --self-test
 
 The questions, the answers and the transcripts are private: the questions are read from
@@ -37,10 +54,12 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -53,11 +72,22 @@ CENSUS_DIRS = (
     HERE / "tool-census",
     Path("/Users/livio/Documents/pixel-wt/census/scripts/tool-census"),
 )
+CODEX = Path(os.environ.get("CODEX_BIN") or (Path.home() / ".local" / "bin" / "codex"))
+CODEX_AUTH = Path.home() / ".codex" / "auth.json"
+# The campaign defaults of eval/run.sh.
+CODEX_MODEL = "gpt-5.6-terra"
+CODEX_EFFORT = "medium"
 PASS = "pass"
 FELL_BACK = "fell back to tool calls"
+NOT_DELIVERED = "brief not delivered"
+BASELINE = "baseline"
+ERROR = "error"
+# Items of a `codex exec --json` stream that are not tool calls; every other item type is one.
+NON_CALL_ITEMS = frozenset({"agent_message", "reasoning", "error", "todo_list", "user_message", "plan"})
 HISTORY_BUDGET_S = 420
 SETTLE_TRIES = 14
 SETTLE_NEED = 3
+LIFECYCLE = (("SessionStart", "session-start"), ("PostToolUse", "post-tool-use"), ("Stop", "stop"))
 
 
 def load_census(directory):
@@ -82,6 +112,7 @@ def clean_env():
     env = dict(os.environ)
     env.pop("ANTHROPIC_API_KEY", None)  # banned everywhere
     env.pop("PIXEL_BRIEF", None)        # the kill switch must not blank the brief under test
+    env.pop("PIXEL_BRIEF_LOG", None)    # the feedback log is how delivery is read back
     return env
 
 
@@ -94,19 +125,124 @@ def answer_sessions(db_path, only=None):
     return [r for r in rows if not only or r[0] in only]
 
 
+def census_calls(db_path):
+    """Tool calls of each census session: the vanilla Claude Code count to compare with."""
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    rows = db.execute("SELECT session, COUNT(*) FROM calls GROUP BY session").fetchall()
+    db.close()
+    return dict(rows)
+
+
+def task_event_command(binary, provider, event, part=None, parts=1):
+    """The command ``pixel setup`` registers for ``event``: a prompt-submit part carries ``--part K/N`` and ends
+    on ``|| true`` so it exits 0 whatever happens."""
+    command = f"'{binary}' run-hook task-event --provider {provider} --event {event}"
+    if event == "prompt-submit":
+        if parts > 1:
+            command += f" --part {part}/{parts}"
+        command += " || true"
+    return command
+
+
 def hook_command(binary, part, parts):
     """The command ``pixel setup`` registers for UserPromptSubmit part ``part`` of ``parts`` on Claude Code."""
-    return (f"'{binary}' run-hook task-event --provider claude --event prompt-submit --part {part}/{parts} || true")
+    return task_event_command(binary, "claude", "prompt-submit", part, parts)
+
+
+def hook_entry(command):
+    return {"type": "command", "command": command, "timeout": 10}
 
 
 def settings_body(binary, parts):
-    """Claude Code settings with one UserPromptSubmit hook per part (a single hook when ``parts`` is 1)."""
-    if parts <= 1:
-        commands = [f"'{binary}' run-hook task-event --provider claude --event prompt-submit || true"]
-    else:
-        commands = [hook_command(binary, k, parts) for k in range(1, parts + 1)]
-    return {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": c, "timeout": 10}
-                                                      for c in commands]}]}}
+    """Claude Code settings: one UserPromptSubmit hook per part (a single hook when ``parts`` is 1), and the
+    SessionStart, PostToolUse and Stop hooks that ``pixel setup`` registers beside them."""
+    commands = [task_event_command(binary, "claude", "prompt-submit", k, parts) for k in range(1, max(parts, 1) + 1)]
+    hooks = {"UserPromptSubmit": [{"hooks": [hook_entry(c) for c in commands]}]}
+    for host_event, name in LIFECYCLE:
+        hooks[host_event] = [{"hooks": [hook_entry(task_event_command(binary, "claude", name))]}]
+    return {"hooks": hooks}
+
+
+def codex_hooks_body(binary, parts):
+    """Codex ``hooks.json`` as ``pixel setup`` writes it: every hook its own group, the brief in ``parts`` hooks."""
+    prompt = [task_event_command(binary, "codex", "prompt-submit", k, parts) for k in range(1, max(parts, 1) + 1)]
+    hooks = {"UserPromptSubmit": [{"hooks": [hook_entry(c)]} for c in prompt]}
+    for host_event, name in LIFECYCLE:
+        hooks[host_event] = [{"hooks": [hook_entry(task_event_command(binary, "codex", name))]}]
+    return {"hooks": hooks}
+
+
+def codex_config_body(model, effort, ws):
+    """The disposable home's ``config.toml``. ``--ignore-user-config`` skips it; the same values travel as flags,
+    so the file documents the arm rather than deciding it."""
+    return (f'model = "{model}"\nmodel_reasoning_effort = "{effort}"\n\n[features]\nhooks = true\n\n'
+            f'[projects."{ws}"]\ntrust_level = "trusted"\n')
+
+
+def make_codex_home(home, binary, parts, model, effort, ws, hooks=True, auth=None):
+    """A disposable ``CODEX_HOME``: ``config.toml``, ``hooks.json`` (brief arm only) and a copy of ``auth.json``.
+
+    The credentials are copied byte for byte, owner-only, and never read into this process's output; the real
+    ``~/.codex`` is only read from."""
+    auth = Path(auth) if auth else CODEX_AUTH
+    if not auth.exists():
+        raise SystemExit("no Codex login to copy: run `codex login` first")
+    home = Path(home)
+    home.mkdir(parents=True, exist_ok=True)
+    home.chmod(0o700)
+    (home / "config.toml").write_text(codex_config_body(model, effort, ws), encoding="utf-8")
+    if hooks:
+        (home / "hooks.json").write_text(json.dumps(codex_hooks_body(binary, parts), indent=1) + "\n", encoding="utf-8")
+    shutil.copyfile(auth, home / "auth.json")
+    (home / "auth.json").chmod(0o600)
+    return home
+
+
+def codex_argv(codex, ws, model, effort):
+    """The proven recipe of ``eval/clis/codex.sh`` and ``scripts/codex-pixel-ab.sh``; the prompt is read from stdin."""
+    return [str(codex), "exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
+            "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
+            "-c", "features.hooks=true", "-m", model, "-c", f'model_reasoning_effort="{effort}"',
+            "-C", str(ws), "-"]
+
+
+def command_label(command):
+    """The executable a shell command item ran (``rg``, ``sed``...): names only, the arguments are private."""
+    try:
+        words = shlex.split(command)
+        if len(words) >= 3 and words[1] in ("-c", "-lc", "-ic"):
+            words = shlex.split(words[2])
+        return f"sh:{Path(words[0]).name}" if words else "sh"
+    except ValueError:
+        return "sh"
+
+
+def parse_codex_stream(lines):
+    """Tool calls (type and executable only: the arguments are private) and the outcome of one ``codex exec --json``
+    session. Every item that is not a message, a reasoning step, a todo list or an error is a call, counted once."""
+    calls, seen, errors, completed, failed = [], set(), 0, False, False
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        kind = rec.get("type")
+        item = rec.get("item") or {}
+        if kind in ("item.started", "item.updated", "item.completed") and item.get("type") not in NON_CALL_ITEMS:
+            ident = item.get("id") or f"anon-{len(calls)}"
+            if ident not in seen:
+                seen.add(ident)
+                label = item.get("type") or "?"
+                if label == "command_execution":
+                    label = command_label(str(item.get("command") or ""))
+                calls.append({"id": ident, "tool": label})
+        elif kind == "item.completed" and item.get("type") == "error":
+            errors += 1
+        elif kind == "turn.completed":
+            completed = True
+        elif kind in ("turn.failed", "error"):
+            failed = True
+    return {"calls": calls, "errors": errors, "completed": completed and not failed}
 
 
 def parse_stream(lines):
@@ -130,7 +266,38 @@ def parse_stream(lines):
     return {"calls": calls, "hooks": hooks, "result": result}
 
 
-def verdict(n_calls):
+def feedback_of(ws):
+    """What the hooks of one session printed to the agent, from the clone's ``.pixel/brief-feedback.jsonl``:
+    bytes per part, how many parts ran, and the brief's own size. Paths and counts only."""
+    path = Path(ws) / ".pixel" / "brief-feedback.jsonl"
+    parts, briefed = {}, 0
+    late = 0
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("t") == "part":
+            parts[int(rec.get("part") or 0)] = parts.get(int(rec.get("part") or 0), 0) + int(rec.get("bytes") or 0)
+            late += 1 if rec.get("late") else 0
+        elif rec.get("t") == "prompt":
+            briefed += int(rec.get("bytes") or 0)
+    return {"parts_ran": len(parts), "part_bytes": sum(parts.values()), "late": late, "brief_bytes": briefed}
+
+
+def verdict(arm, n_calls, delivered, problems=()):
+    """One session's result. A brief that reached the agent with 0 calls is the only pass; a brief that did not
+    reach it is never one, whatever the agent did."""
+    if problems:
+        return ERROR
+    if arm == "nobrief":
+        return BASELINE
+    if not delivered:
+        return NOT_DELIVERED
     return PASS if n_calls == 0 else FELL_BACK
 
 
@@ -168,16 +335,53 @@ def activate(binary, ws, env, history=True):
         time.sleep(1)
 
 
-def render(rows, label):
-    lines = [f"# Zero-call test: {label}", "", "| question | repo | calls | tools | brief chars | result |",
-             "|---|---|---:|---|---:|---|"]
+def short(row):
+    return f"{row['n_calls']} ({row['verdict']})" if row else "-"
+
+
+def render(rows, label, claude_census=None):
+    """The report: aggregates only. With both arms, one line per question compares them."""
+    claude_census = claude_census or {}
+    by = {}
     for row in rows:
-        tools = ", ".join(f"{t} x{n}" for t, n in sorted(row["tools"].items())) or "-"
-        lines.append(f"| {row['id']} | {row['repo']} | {row['n_calls']} | {tools} | {row['brief_chars']} | {row['verdict']} |")
-    passed = sum(1 for r in rows if r["verdict"] == PASS)
-    lines += ["", f"**{passed} of {len(rows)} answered with 0 tool calls**; "
-                  f"{len(rows) - passed} {FELL_BACK}.", ""]
-    return "\n".join(lines)
+        by.setdefault(row["id"], {})[row.get("arm", "brief")] = row
+    both = any("nobrief" in arms for arms in by.values()) and any("brief" in arms for arms in by.values())
+    agent = rows[0].get("agent", "claude") if rows else "?"
+    lines = [f"# Zero-call test: {label}", ""]
+    if both:
+        lines += [f"Live agent: {agent}. Calls per question, without the brief and with it; the census column is the "
+                  "vanilla Claude Code session of #905.", "",
+                  "| question | repo | census Claude calls | no brief calls | brief calls | brief bytes | result |",
+                  "|---|---|---:|---:|---:|---:|---|"]
+        for qid in sorted(by):
+            base, brief = by[qid].get("nobrief"), by[qid].get("brief")
+            census = claude_census.get(qid)
+            lines.append(f"| {qid} | {(brief or base)['repo']} | {'-' if census is None else census} | "
+                         f"{'-' if not base else base['n_calls']} | {'-' if not brief else brief['n_calls']} | "
+                         f"{'-' if not brief else brief['brief_bytes']} | {brief['verdict'] if brief else '-'} |")
+    else:
+        lines += ["| question | repo | calls | tools | brief bytes | result |", "|---|---|---:|---|---:|---|"]
+        for row in sorted(rows, key=lambda r: r["id"]):
+            tools = ", ".join(f"{t} x{n}" for t, n in sorted(row["tools"].items())) or "-"
+            lines.append(f"| {row['id']} | {row['repo']} | {row['n_calls']} | {tools} | {row['brief_bytes']} | "
+                         f"{row['verdict']} |")
+    brief_rows = [r for r in rows if r.get("arm", "brief") == "brief"]
+    base_rows = [r for r in rows if r.get("arm") == "nobrief"]
+    passed = sum(1 for r in brief_rows if r["verdict"] == PASS)
+    undelivered = sum(1 for r in brief_rows if r["verdict"] == NOT_DELIVERED)
+    errors = sum(1 for r in rows if r["verdict"] == ERROR)
+    if brief_rows:
+        lines += ["", f"**{passed} of {len(brief_rows)} brief sessions answered with 0 tool calls**; "
+                      f"{sum(1 for r in brief_rows if r['verdict'] == FELL_BACK)} {FELL_BACK}, "
+                      f"{undelivered} {NOT_DELIVERED}, {errors} error."]
+        lines.append(f"Brief sessions: {sum(r['n_calls'] for r in brief_rows if r['n_calls'] >= 0)} tool calls in total.")
+    if base_rows:
+        lines.append(f"No-brief sessions: {sum(r['n_calls'] for r in base_rows if r['n_calls'] >= 0)} tool calls in total, "
+                     f"{sum(1 for r in base_rows if r['n_calls'] == 0)} with none.")
+    if claude_census:
+        lines.append(f"Census (vanilla Claude Code): {sum(claude_census.get(q, 0) for q in by)} tool calls over these "
+                     f"{len(by)} questions.")
+    return "\n".join(lines) + "\n"
 
 
 class Run:
@@ -187,45 +391,80 @@ class Run:
         self.out = self.root / "zero-calls" / args.run_id
         self.lock, self.rows = threading.Lock(), []
         self.shim = census.make_shim_dir(self.root)
+        self.index_slots = threading.Semaphore(max(1, args.index_jobs))
 
-    def unit(self, sid, repo, sha, prompt, total):
+    def session(self, sid, ws, arm, prompt, env):
+        """Run the agent on ``prompt`` in ``ws``: (tool calls, outcome problems, seconds, raw stream path)."""
+        census, args = self.census, self.args
+        settings = None
+        home = None
+        raw = self.out / "raw" / f"{sid}.{arm}.stream.jsonl"
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if args.agent == "codex":
+                home = Path(tempfile.mkdtemp(prefix="zc-codex-home-", dir=str(self.root / "work")))
+                make_codex_home(home, args.brief_bin, args.parts, args.codex_model, args.codex_effort, ws,
+                                hooks=arm == "brief")
+                env = dict(env, CODEX_HOME=str(home))
+                argv = codex_argv(CODEX, ws, args.codex_model, args.codex_effort)
+            else:
+                settings = self.out / "settings" / f"{sid}.{arm}.json"
+                settings.parent.mkdir(parents=True, exist_ok=True)
+                body = settings_body(args.brief_bin, args.parts) if arm == "brief" else {"hooks": {}}
+                settings.write_text(json.dumps(body) + "\n", encoding="utf-8")
+                argv = census.claude_argv(census.CLAUDE, settings, args.model, args.effort, args.budget)
+            lines, _err, code, timed_out, seconds = census.run_claude(argv, prompt, ws, env, args.timeout, None)
+        finally:
+            if home is not None:
+                shutil.rmtree(home, ignore_errors=True)  # the copied login goes with the session
+        raw.write_text("".join(x if x.endswith("\n") else x + "\n" for _, x in lines), encoding="utf-8")
+        text = [x for _, x in lines]
+        if args.agent == "codex":
+            stream = parse_codex_stream(text)
+            finished = stream["completed"]
+        else:
+            stream = parse_stream(text)
+            finished = bool(stream["result"])
+        problems = []
+        if timed_out or code != 0 or not finished:
+            problems.append(f"session:exit{code}{'+timeout' if timed_out else ''}")
+        return stream["calls"], problems, seconds
+
+    def unit(self, sid, repo, sha, prompt, arm, total):
         census, args = self.census, self.args
         env = clean_env()
-        ws = census.make_workspace(self.root, repo, f"zc-{args.run_id}-{sid}", sha)
-        row = {"id": sid, "repo": repo, "sha": sha[:8], "n_calls": -1, "tools": {}, "brief_chars": 0,
-               "verdict": "error", "problems": []}
+        ws = census.make_workspace(self.root, repo, f"zc-{args.run_id}-{sid}-{arm}", sha)
+        row = {"id": sid, "repo": repo, "sha": sha[:8], "agent": args.agent, "arm": arm, "n_calls": -1, "tools": {},
+               "brief_bytes": 0, "verdict": ERROR, "problems": []}
         try:
             shutil.rmtree(Path(ws) / ".pixel", ignore_errors=True)
-            activate(args.brief_bin, ws, env, not args.no_history)
-            settings = self.out / "settings" / f"{sid}.json"
-            settings.parent.mkdir(parents=True, exist_ok=True)
-            settings.write_text(json.dumps(settings_body(args.brief_bin, args.parts)) + "\n", encoding="utf-8")
-            argv = census.claude_argv(census.CLAUDE, settings, args.model, args.effort, args.budget)
-            lines, err, code, timed_out, seconds = census.run_claude(
-                argv, prompt, ws, census.agent_env(os.environ, self.shim), args.timeout, None)
-            raw = self.out / "raw" / f"{sid}.stream.jsonl"
-            raw.parent.mkdir(parents=True, exist_ok=True)
-            raw.write_text("".join(x if x.endswith("\n") else x + "\n" for _, x in lines), encoding="utf-8")
-            stream = parse_stream([x for _, x in lines])
+            if arm == "brief":
+                with self.index_slots:
+                    activate(args.brief_bin, ws, env, not args.no_history)
+            calls, problems, seconds = self.session(sid, ws, arm, prompt, census.agent_env(os.environ, self.shim))
             tools = {}
-            for call in stream["calls"]:
+            for call in calls:
                 tools[call["tool"]] = tools.get(call["tool"], 0) + 1
-            responses = [h for h in stream["hooks"] if h["subtype"] == "hook_response"]
-            if len(responses) != args.parts:
-                row["problems"].append(f"hooks:{len(responses)}/{args.parts}")
-            if timed_out or code != 0 or not stream["result"]:
-                row["problems"].append(f"session:exit{code}{'+timeout' if timed_out else ''}")
-            row.update({"n_calls": len(stream["calls"]), "tools": tools,
-                        "brief_chars": sum(h["chars"] for h in responses), "seconds": round(seconds, 1),
-                        "verdict": verdict(len(stream["calls"])) if not row["problems"] else "error"})
+            fb = feedback_of(ws) if arm == "brief" else {"parts_ran": 0, "part_bytes": 0, "late": 0, "brief_bytes": 0}
+            delivered = fb["part_bytes"] > 0
+            if arm == "brief" and delivered and fb["parts_ran"] != args.parts:
+                problems.append(f"hooks:{fb['parts_ran']}/{args.parts}")
+            row.update({"n_calls": len(calls), "tools": tools, "brief_bytes": fb["part_bytes"],
+                        "parts_ran": fb["parts_ran"], "parts_late": fb["late"], "seconds": round(seconds, 1),
+                        "problems": problems, "verdict": verdict(arm, len(calls), delivered, problems)})
         except (OSError, subprocess.SubprocessError) as error:
             row["problems"].append(type(error).__name__)
         finally:
-            sh([args.brief_bin, "daemon", "stop", "."], cwd=ws, timeout=60, env=env)
+            if arm == "brief":
+                try:
+                    sh([args.brief_bin, "daemon", "stop", "."], cwd=ws, timeout=60, env=env)
+                except (OSError, subprocess.SubprocessError):
+                    pass
             shutil.rmtree(ws, ignore_errors=True)
         with self.lock:
             self.rows.append(row)
-            print(f"[{len(self.rows)}/{total}] {sid:<13} calls {row['n_calls']:>2}  {row['verdict']}"
+            print(f"[{len(self.rows)}/{total}] {sid:<13} {arm:<7} calls {row['n_calls']:>2}  {row['verdict']}"
+                  f"{'  bytes ' + str(row['brief_bytes']) if arm == 'brief' else ''}"
                   f"{'  ' + ','.join(row['problems']) if row['problems'] else ''}", flush=True)
         return row
 
@@ -233,16 +472,23 @@ class Run:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--brief-bin", help="the pixel binary under test")
+    parser.add_argument("--agent", choices=("codex", "claude"), default="codex", help="the live agent (default codex)")
+    parser.add_argument("--arm", choices=("brief", "nobrief", "both"), default="brief",
+                        help="brief: hooks registered; nobrief: the same question with no Pixel hook")
     parser.add_argument("--census-dir", default=None, help="scripts/tool-census of the census (default: PIXEL_CENSUS_DIR or known places)")
     parser.add_argument("--root", default=str(DEFAULT_ROOT), help="census root (cache/, census.db)")
     parser.add_argument("--run-id", default=time.strftime("zc-%Y%m%d-%H%M%S"))
     parser.add_argument("--only", default=None, help="comma-separated question ids")
     parser.add_argument("--parts", type=int, default=3, help="UserPromptSubmit hooks (brief_parts)")
     parser.add_argument("--jobs", "--concurrency", dest="jobs", type=int, default=1,
-                        help="questions run in parallel, each in its own clone and output file (default 1)")
-    parser.add_argument("--model", default=None)
-    parser.add_argument("--effort", default=None)
-    parser.add_argument("--budget", type=float, default=2.0)
+                        help="sessions run in parallel, each in its own clone and output file (default 1)")
+    parser.add_argument("--index-jobs", type=int, default=4,
+                        help="clones indexed at once; the sessions themselves all start together (default 4)")
+    parser.add_argument("--model", default=None, help="Claude model (--agent claude)")
+    parser.add_argument("--effort", default=None, help="Claude effort (--agent claude)")
+    parser.add_argument("--budget", type=float, default=2.0, help="Claude budget in USD (--agent claude)")
+    parser.add_argument("--codex-model", default=CODEX_MODEL)
+    parser.add_argument("--codex-effort", default=CODEX_EFFORT)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--no-history", action="store_true", help="skip build-index --history")
     parser.add_argument("--self-test", action="store_true")
@@ -258,23 +504,28 @@ def main(argv=None):
     sessions = answer_sessions(root / "census.db", set(args.only.split(",")) if args.only else None)
     if not sessions:
         raise SystemExit("no answer-only census session selected")
+    arms = ("brief", "nobrief") if args.arm == "both" else (args.arm,)
+    units = [(sid, repo, sha, prompt, arm) for sid, repo, sha, prompt in sessions for arm in arms]
     census.prepare_cache(root)
+    (root / "work").mkdir(parents=True, exist_ok=True)
     run = Run(args, census)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
         for future in concurrent.futures.as_completed(
-                [pool.submit(run.unit, sid, repo, sha, prompt, len(sessions)) for sid, repo, sha, prompt in sessions]):
+                [pool.submit(run.unit, sid, repo, sha, prompt, arm, len(units)) for sid, repo, sha, prompt, arm in units]):
             future.result()
-    rows = sorted(run.rows, key=lambda r: r["id"])
+    rows = sorted(run.rows, key=lambda r: (r["id"], r["arm"]))
     digest = hashlib.sha256(Path(args.brief_bin).read_bytes()).hexdigest()[:12]
     version = sh([args.brief_bin, "--version"]).stdout.strip().replace("\n", " ")
-    label = f"{Path(args.brief_bin).name} ({version}, sha256 {digest}), {args.parts} hook part(s)"
-    report = render(rows, label)
+    model = f"{args.codex_model}/{args.codex_effort}" if args.agent == "codex" else (args.model or "default")
+    label = (f"{args.agent} ({model}), {Path(args.brief_bin).name} ({version}, sha256 {digest}), "
+             f"{args.parts} hook part(s)")
+    report = render(rows, label, census_calls(root / "census.db"))
     run.out.mkdir(parents=True, exist_ok=True)
     (run.out / "report.md").write_text(report, encoding="utf-8")
     (run.out / "report.json").write_text(json.dumps({"binary": label, "rows": rows}, indent=1), encoding="utf-8")
     print("\n" + report)
     print(f"report {run.out / 'report.md'}")
-    return 0 if all(r["verdict"] == PASS for r in rows) else 1
+    return 0 if all(r["verdict"] in (PASS, BASELINE) for r in rows) else 1
 
 
 class SelfTest(unittest.TestCase):
@@ -288,6 +539,72 @@ class SelfTest(unittest.TestCase):
         single = settings_body("/x/pixel", 1)["hooks"]["UserPromptSubmit"][0]["hooks"]
         self.assertEqual(len(single), 1)
         self.assertNotIn("--part", single[0]["command"])
+
+    def test_codex_hooks_are_one_group_per_hook_with_the_lifecycle_beside_the_brief(self):
+        body = codex_hooks_body("/x/pixel", 3)["hooks"]
+        prompt = [g["hooks"][0]["command"] for g in body["UserPromptSubmit"]]
+        self.assertEqual(len(prompt), 3)
+        self.assertTrue(all(len(g["hooks"]) == 1 for g in body["UserPromptSubmit"]))
+        self.assertEqual(prompt[2], "'/x/pixel' run-hook task-event --provider codex --event prompt-submit "
+                                    "--part 3/3 || true")
+        self.assertEqual(body["PostToolUse"][0]["hooks"][0]["command"],
+                         "'/x/pixel' run-hook task-event --provider codex --event post-tool-use")
+        self.assertEqual(sorted(body), ["PostToolUse", "SessionStart", "Stop", "UserPromptSubmit"])
+        single = codex_hooks_body("/x/pixel", 1)["hooks"]["UserPromptSubmit"]
+        self.assertEqual(len(single), 1)
+        self.assertNotIn("--part", single[0]["hooks"][0]["command"])
+
+    def test_the_codex_recipe_is_the_proven_one_and_reads_the_prompt_from_stdin(self):
+        argv = codex_argv("/bin/codex", "/ws", "m", "medium")
+        for flag in ("exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
+                     "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("-c") + 1], "features.hooks=true")
+        self.assertEqual(argv[-3:], ["-C", "/ws", "-"])
+
+    def test_a_disposable_codex_home_holds_a_private_copy_of_the_login_and_never_the_real_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = Path(tmp) / "auth.json"
+            auth.write_text('{"marker": "a-login"}')
+            home = Path(tmp) / "home"
+            make_codex_home(home, "/x/pixel", 3, "m", "medium", "/ws", hooks=True, auth=auth)
+            self.assertEqual((home / "auth.json").read_text(), auth.read_text())
+            self.assertEqual((home / "auth.json").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+            self.assertNotEqual(home.resolve(), (Path.home() / ".codex").resolve())
+            config = (home / "config.toml").read_text()
+            self.assertIn('model = "m"', config)
+            self.assertIn("hooks = true", config)
+            self.assertNotIn("a-login", config + (home / "hooks.json").read_text())
+            baseline = Path(tmp) / "baseline"
+            make_codex_home(baseline, "/x/pixel", 3, "m", "medium", "/ws", hooks=False, auth=auth)
+            self.assertFalse((baseline / "hooks.json").exists())
+            with self.assertRaises(SystemExit):
+                make_codex_home(Path(tmp) / "none", "/x/pixel", 3, "m", "medium", "/ws", auth=Path(tmp) / "absent")
+
+    def test_codex_calls_are_counted_from_the_parsed_events_once_each(self):
+        def event(kind, item):
+            return json.dumps({"type": kind, "item": item})
+        lines = [
+            json.dumps({"type": "thread.started", "thread_id": "t"}),
+            event("item.completed", {"id": "e0", "type": "error", "message": "a warning that mentions command_execution"}),
+            event("item.completed", {"id": "m0", "type": "agent_message", "text": "item.started command_execution"}),
+            event("item.started", {"id": "c1", "type": "command_execution", "command": "/bin/zsh -lc 'rg -n foo .'"}),
+            event("item.completed", {"id": "c1", "type": "command_execution", "command": "/bin/zsh -lc 'rg -n foo .'"}),
+            event("item.started", {"id": "c2", "type": "command_execution", "command": "sed -n 1,5p a.rs"}),
+            event("item.completed", {"id": "p1", "type": "file_change", "changes": []}),
+            event("item.completed", {"id": "k1", "type": "mcp_tool_call", "server": "s", "tool": "t"}),
+            event("item.completed", {"id": "r1", "type": "reasoning", "text": "..."}),
+            event("item.updated", {"id": "t1", "type": "todo_list", "items": []}),
+            "not json",
+            json.dumps({"type": "turn.completed", "usage": {}}),
+        ]
+        stream = parse_codex_stream(lines)
+        self.assertEqual([c["tool"] for c in stream["calls"]], ["sh:rg", "sh:sed", "file_change", "mcp_tool_call"])
+        self.assertEqual(stream["errors"], 1)
+        self.assertTrue(stream["completed"])
+        self.assertFalse(parse_codex_stream([json.dumps({"type": "turn.failed"})])["completed"])
+        self.assertEqual(parse_codex_stream([])["calls"], [])
 
     def test_stream_counts_each_tool_call_once_and_ignores_subagent_calls(self):
         lines = [
@@ -306,33 +623,66 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(stream["hooks"][0]["chars"], 40)
         self.assertEqual(stream["result"]["subtype"], "success")
 
-    def test_verdict_and_report(self):
-        self.assertEqual(verdict(0), PASS)
-        self.assertEqual(verdict(3), FELL_BACK)
-        rows = [{"id": "a-1", "repo": "a", "n_calls": 0, "tools": {}, "brief_chars": 900, "verdict": PASS},
-                {"id": "a-2", "repo": "a", "n_calls": 2, "tools": {"Read": 1, "Grep": 1}, "brief_chars": 90,
-                 "verdict": FELL_BACK}]
-        text = render(rows, "t")
-        self.assertIn("| a-2 | a | 2 | Grep x1, Read x1 | 90 | fell back to tool calls |", text)
-        self.assertIn("**1 of 2 answered with 0 tool calls**; 1 fell back to tool calls.", text)
+    def test_a_brief_that_did_not_reach_the_agent_is_never_a_zero_call_pass(self):
+        self.assertEqual(verdict("brief", 0, True), PASS)
+        self.assertEqual(verdict("brief", 3, True), FELL_BACK)
+        self.assertEqual(verdict("brief", 0, False), NOT_DELIVERED)
+        self.assertEqual(verdict("brief", 5, False), NOT_DELIVERED)
+        self.assertEqual(verdict("nobrief", 0, False), BASELINE)
+        self.assertEqual(verdict("brief", 0, True, ["session:exit1"]), ERROR)
+
+    def test_feedback_reads_back_the_bytes_each_part_printed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(feedback_of(tmp), {"parts_ran": 0, "part_bytes": 0, "late": 0, "brief_bytes": 0})
+            log = Path(tmp) / ".pixel" / "brief-feedback.jsonl"
+            log.parent.mkdir()
+            log.write_text("\n".join([
+                json.dumps({"t": "part", "part": 1, "of": 3, "bytes": 9796, "late": False}),
+                json.dumps({"t": "part", "part": 2, "of": 3, "bytes": 5783, "late": False}),
+                json.dumps({"t": "part", "part": 3, "of": 3, "bytes": 0, "late": True}),
+                json.dumps({"t": "prompt", "bytes": 15579}),
+                "not json", json.dumps({"t": "tool", "bytes": 99})]) + "\n")
+            self.assertEqual(feedback_of(tmp), {"parts_ran": 3, "part_bytes": 15579, "late": 1, "brief_bytes": 15579})
+
+    def test_report_compares_the_arms_per_question_with_the_census_count(self):
+        def row(qid, arm, calls, brief_bytes, result):
+            return {"id": qid, "repo": "a", "agent": "codex", "arm": arm, "n_calls": calls, "tools": {},
+                    "brief_bytes": brief_bytes, "verdict": result}
+        rows = [row("a-1", "nobrief", 4, 0, BASELINE), row("a-1", "brief", 0, 900, PASS),
+                row("a-2", "nobrief", 2, 0, BASELINE), row("a-2", "brief", 1, 90, FELL_BACK),
+                row("a-3", "nobrief", 0, 0, BASELINE), row("a-3", "brief", 0, 0, NOT_DELIVERED)]
+        text = render(rows, "t", {"a-1": 7, "a-2": 3, "a-3": 5})
+        self.assertIn("| a-1 | a | 7 | 4 | 0 | 900 | pass |", text)
+        self.assertIn("| a-2 | a | 3 | 2 | 1 | 90 | fell back to tool calls |", text)
+        self.assertIn("| a-3 | a | 5 | 0 | 0 | 0 | brief not delivered |", text)
+        self.assertIn("**1 of 3 brief sessions answered with 0 tool calls**; 1 fell back to tool calls, "
+                      "1 brief not delivered, 0 error.", text)
+        self.assertIn("No-brief sessions: 6 tool calls in total, 1 with none.", text)
+        self.assertIn("Census (vanilla Claude Code): 15 tool calls over these 3 questions.", text)
+
+    def test_single_arm_report_lists_tools(self):
+        rows = [{"id": "a-2", "repo": "a", "arm": "brief", "n_calls": 2, "tools": {"sh:rg": 1, "sh:sed": 1},
+                 "brief_bytes": 90, "verdict": FELL_BACK}]
+        self.assertIn("| a-2 | a | 2 | sh:rg x1, sh:sed x1 | 90 | fell back to tool calls |", render(rows, "t"))
 
     def test_answer_sessions_reads_only_ok_answer_rows(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "census.db"
             db = sqlite3.connect(path)
             db.execute("CREATE TABLE sessions(id TEXT, source TEXT, repo TEXT, sha TEXT, mode TEXT, prompt TEXT, ok INT)")
+            db.execute("CREATE TABLE calls(session TEXT, seq INT)")
             db.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?)", [
                 ("a-1", "census", "a", "s1", "answer", "q1", 1), ("a-2", "census", "a", "s2", "edit", "q2", 1),
                 ("a-3", "census", "a", "s3", "answer", "q3", 0), ("a-4", "history", "a", "s4", "answer", "q4", 1),
                 ("a-5", "census", "b", "s5", "answer", "q5", 1)])
+            db.executemany("INSERT INTO calls VALUES (?,?)", [("a-1", 1), ("a-1", 2), ("a-5", 1)])
             db.commit()
             db.close()
             self.assertEqual([r[0] for r in answer_sessions(path)], ["a-1", "a-5"])
             self.assertEqual([r[0] for r in answer_sessions(path, {"a-5"})], ["a-5"])
+            self.assertEqual(census_calls(path), {"a-1": 2, "a-5": 1})
 
     def test_a_blobless_clone_is_recognised_by_its_promisor_remote(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             git = Path(tmp) / ".git"
             git.mkdir()
@@ -342,12 +692,16 @@ class SelfTest(unittest.TestCase):
             (git / "config").write_text("[remote \"origin\"]\n\tpromisor = true\n\tpartialclonefilter = blob:none\n")
             self.assertTrue(is_promisor_clone(tmp))
 
-    def test_the_api_key_never_reaches_a_child(self):
+    def test_the_api_key_never_reaches_a_child_and_the_log_switches_stay_out(self):
         os.environ["ANTHROPIC_API_KEY"] = "x"
+        os.environ["PIXEL_BRIEF_LOG"] = "0"
         try:
-            self.assertNotIn("ANTHROPIC_API_KEY", clean_env())
+            env = clean_env()
+            self.assertNotIn("ANTHROPIC_API_KEY", env)
+            self.assertNotIn("PIXEL_BRIEF_LOG", env)
         finally:
             del os.environ["ANTHROPIC_API_KEY"]
+            del os.environ["PIXEL_BRIEF_LOG"]
 
 
 if __name__ == "__main__":
