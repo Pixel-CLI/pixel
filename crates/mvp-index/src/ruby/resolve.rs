@@ -59,7 +59,9 @@
 //! an owner forgets or computes a method's name (F4, D16), an unread region
 //! may define a name (D12; any class's, for a name it defines where it
 //! cannot tell on what, B9), or code evaluated on a class from outside its
-//! body may (R9, R10). A load under a condition proves no function (R13),
+//! body may (R9, R10); a string a binding evaluates that can define
+//! nothing on any `self` (a Redis script, `dsl::inert`, #111) changes no
+//! class. A load under a condition proves no function (R13),
 //! and neither does one whose file requires the caller's back (M1). A method
 //! defined only where it may not run (under a condition, in a block, in
 //! another method's body, in a body a `rescue` guards, past a statement that
@@ -70,13 +72,21 @@
 //! Where modelling Ruby's dynamic forms one by one did not converge, the
 //! rules are blunt, sound by construction: a method defined on an object
 //! the rules cannot name exactly taints its name, which no lookup then
-//! proves, whatever the receiver, and so does one a class reopened through
+//! proves, whatever the receiver (but one an owner's instance method
+//! defines on the singleton class of the object it runs on, which only
+//! the lookups from objects whose chain holds that owner's step, and the
+//! calls in a top-level function, may meet, #106; and one a test file
+//! writes, below), and so does one a class reopened through
 //! a constant alias defines (`class Alias` for `Alias = Foo`, R5-03,
 //! R5-04); a module mixed in from outside a body, from a block or a macro,
 //! by code the rules do not read, or into such an object, proves nothing
 //! of its self calls, and neither does what it brings along (R5-05, R6-06,
 //! R6-14), any constant an expression mixed in so writes, or any module
-//! at all for a constant whose value the rules do not read (R7-05); a
+//! at all for a constant whose value the rules do not read (R7-05), but
+//! none for a module `Module.new` builds where it is mixed in, which is
+//! no module of the graph (`dsl::fresh`, #111); what code a string
+//! evaluates on an object the rules cannot name mixes in is mixed into
+//! such an object (a test file's, a stub, #106, #111); a
 //! mixin that may not run, or that a step the rules cannot name may
 //! already hold, is a step that may not be there (R5-06, R5-07); a mixin
 //! of an expression from outside a class is an unknown step on its chain
@@ -88,6 +98,18 @@
 //! on to rebind `self`, a block given to a `send` of a name the rules
 //! cannot read, and a lambda or proc passed, stored or returned keep no
 //! `self` (R5-11, R6-12, R8-07, R8-08).
+//!
+//! Test files are another program (#106, decided 2026-10-14). What a test
+//! file (under a `spec` or `test` directory, or named `*_spec.rb` or
+//! `*_test.rb`) defines on an object the rules cannot name
+//! (`product.define_singleton_method(m)`, `klass.class_eval(&block)`) is a
+//! hand-written stub, as `allow(x).to receive(:m)` and `x.stubs(:m)` are,
+//! which the rules do not read either: only a test runner loads the file,
+//! never the application. Such a definition taints the lookups of callers
+//! in test files alone, which prove nothing of its name (C-10 holds for
+//! them); a caller elsewhere keeps its edge. What a test file defines on a
+//! class it names (`class Link` reopened in `spec/support`) is read as any
+//! file's.
 
 mod ancestors;
 mod constants;
@@ -129,23 +151,60 @@ pub fn resolve(world: &World<'_>) -> Vec<Option<usize>> {
     }
     let mut decided = vec![None; world.edges.len()];
     for (root, positions) in groups {
-        let index_of = |root: Option<&str>| {
+        let index_of = |root: Option<&str>, tests: bool| {
             let visible = projects.visible_from(root);
-            Index::build(world, &|file| visible.contains(&projects.root_of(file)))
+            Index::build(
+                world,
+                &|file| visible.contains(&projects.root_of(file)),
+                tests,
+            )
         };
         // The projects that load this one as a path gem hold subclasses
         // and includers of its classes and modules (R6).
-        let mut index = index_of(root);
-        index.loaders = projects
-            .loaders_of(root)
-            .into_iter()
-            .map(index_of)
-            .collect();
-        for position in positions {
+        let with_loaders = |tests: bool| {
+            let mut index = index_of(root, tests);
+            index.loaders = projects
+                .loaders_of(root)
+                .into_iter()
+                .map(|loader| index_of(loader, tests))
+                .collect();
+            index
+        };
+        // A test file's callers are decided with what test files define on
+        // objects the rules cannot name; the others without (#106).
+        let (in_tests, elsewhere): (Vec<usize>, Vec<usize>) =
+            positions.into_iter().partition(|&position| {
+                file_of
+                    .get(world.edges[position].src.as_str())
+                    .is_some_and(|file| test_file(file))
+            });
+        let index = with_loaders(false);
+        for position in elsewhere {
             decided[position] = index.decide(position, &world.edges[position]);
+        }
+        if in_tests.is_empty() {
+            continue;
+        }
+        let stubbed = std::iter::once(&index)
+            .chain(&index.loaders)
+            .any(|index| index.facts.test_tainted());
+        let tests = if stubbed { with_loaders(true) } else { index };
+        for position in in_tests {
+            decided[position] = tests.decide(position, &world.edges[position]);
         }
     }
     decided
+}
+
+/// Whether `path` is a test file: under a `spec` or `test` directory, or
+/// named `*_spec.rb` or `*_test.rb`. Only a test runner loads one, never
+/// the application, so what it defines on an object the rules cannot name
+/// is a stub, which only its callers may meet (#106).
+pub(super) fn test_file(path: &str) -> bool {
+    let (dirs, name) = path.rsplit_once('/').unwrap_or(("", path));
+    dirs.split('/').any(|dir| dir == "spec" || dir == "test")
+        || name.ends_with("_spec.rb")
+        || name.ends_with("_test.rb")
 }
 
 /// What a rule decides for a site: the index of its target symbol, or `None`
@@ -281,7 +340,10 @@ struct Index<'a> {
 impl<'a> Index<'a> {
     /// The index of the rows of the files `visible` accepts; every file's
     /// `File` symbol, which a `require` may name across projects.
-    fn build(world: &World<'a>, visible: &dyn Fn(&str) -> bool) -> Index<'a> {
+    /// With `tests`, what test files define on objects the rules cannot
+    /// name taints the lookups as any such definition does; without, it
+    /// taints none ([`test_file`]).
+    fn build(world: &World<'a>, visible: &dyn Fn(&str) -> bool, tests: bool) -> Index<'a> {
         let symbols = world.symbols;
         let mut index = Index {
             symbols,
@@ -309,6 +371,7 @@ impl<'a> Index<'a> {
             facts: Facts::read(world.files, symbols, visible),
             loaders: Vec::new(),
         };
+        index.facts.with_tests(tests);
         for (i, symbol) in symbols.iter().enumerate() {
             if symbol.kind != SymbolKind::File && !visible(&symbol.file) {
                 continue;
@@ -747,6 +810,10 @@ impl<'a> Index<'a> {
             // Top-level code and top-level functions run with `main`, an
             // `Object`, as `self`; top-level code runs as the file loads.
             SymbolKind::File => return self.function(name, file, Some(line)),
+            // A top-level function runs on whatever object calls it, which
+            // may be one an owner's instance method defined `name` on
+            // (#106).
+            _ if self.facts.front_named(name) => return None,
             _ => return self.function(name, file, None),
         };
         let found = if exact {

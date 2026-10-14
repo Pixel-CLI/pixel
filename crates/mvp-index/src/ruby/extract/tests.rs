@@ -1572,7 +1572,8 @@ end
 
 /// A tree with a syntax error is still walked, outside the region the
 /// grammar could not parse: `, &` (an anonymous block argument without
-/// parentheses, which tree-sitter-ruby 0.23 cannot read) costs only itself.
+/// parentheses, which tree-sitter-ruby 0.23 cannot read) costs only itself,
+/// and since #107 nothing, read over the same bytes as `&1`.
 #[test]
 fn a_local_syntax_error_costs_only_its_own_region() {
     let rows = rows(
@@ -1700,4 +1701,75 @@ end
         ]
     );
     assert_eq!(calls(&rows), ["1 C#a: b [C]",]);
+}
+
+/// #107: anonymous forwarding (Ruby 3.1+) in each of its forms keeps the
+/// file's symbols and calls. tree-sitter-ruby 0.23.1, the latest, reads
+/// `(&)`, `(*)`, `(**)` and `(...)` in parentheses, but a bare `&` or `**`
+/// ending the arguments of a call without them (`tag.div id: room, &`)
+/// made it lose the `end` after it, and with it the module around every
+/// `def`: six once-campfire helpers lost all their symbols. Each signature
+/// is still its own line's text.
+#[test]
+fn c10_anonymous_forwarding_keeps_the_files_symbols_and_calls() {
+    let source = r#"module Helper
+  def area(room, &)
+    tag.div id: room, &
+  end
+  def opts(**)
+    render partial: "x", **
+  end
+  def list(*) = items(*)
+  def kw(**) = build(**)
+  def all(...) = route(...)
+  def blk(&) = wrap(&)
+  def inline(&); other 2, &; end
+  def noted(&)
+    link_to "x", &  # the block
+  end
+  def below(&)
+    link_to "x",
+      &
+  end
+  def last; finish; end
+end
+"#;
+    let rows = rows("app/helpers/helper.rb", source);
+    assert_eq!(
+        symbols(&rows),
+        [
+            "file app/helpers/helper.rb 1-22",
+            "module Helper 1-21 | module Helper",
+            "method Helper#area 2-4 | def area(room, &)",
+            "method Helper#opts 5-7 | def opts(**)",
+            "method Helper#list 8-8 | def list(*) = items(*)",
+            "method Helper#kw 9-9 | def kw(**) = build(**)",
+            "method Helper#all 10-10 | def all(...) = route(...)",
+            "method Helper#blk 11-11 | def blk(&) = wrap(&)",
+            "method Helper#inline 12-12 | def inline(&); other 2, &; end",
+            "method Helper#noted 13-15 | def noted(&)",
+            "method Helper#below 16-19 | def below(&)",
+            "method Helper#last 20-20 | def last; finish; end",
+        ]
+    );
+    assert_eq!(
+        calls(&rows),
+        [
+            "3 Helper#area: div on tag [Helper]",
+            "3 Helper#area: tag [Helper]",
+            "6 Helper#opts: render [Helper]",
+            "8 Helper#list: items [Helper]",
+            "9 Helper#kw: build [Helper]",
+            "10 Helper#all: route [Helper]",
+            "11 Helper#blk: wrap [Helper]",
+            "12 Helper#inline: other [Helper]",
+            "14 Helper#noted: link_to [Helper]",
+            "17 Helper#below: link_to [Helper]",
+            "20 Helper#last: finish [Helper]",
+        ]
+    );
+    for symbol in &rows.symbols[1..] {
+        let line = text::line(source, symbol.line).unwrap_or_default().trim();
+        assert!(line.starts_with(&symbol.signature), "{symbol:?}");
+    }
 }

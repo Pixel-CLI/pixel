@@ -68,10 +68,16 @@ impl Walker<'_> {
     /// do`, whose definitions are tainted where they are written) is not
     /// followed: a named module reached through a variable is a known
     /// residual, and so is a gem's module, whose names the graph does not
-    /// hold.
+    /// hold. A module `Module.new` builds there is none of the graph's
+    /// (`dsl::fresh`, #111).
     pub(in crate::ruby) fn spread(&mut self, args: &[Node]) {
         let scope = self.context("", "").cref;
-        for &arg in args {
+        let named: Vec<Node> = args
+            .iter()
+            .copied()
+            .filter(|&arg| !dsl::fresh_module(self, arg))
+            .collect();
+        for arg in named {
             let mut paths = dsl::mixed_paths(self, arg);
             if arg.kind() == "self"
                 && let Some(owner) = self.owners.last()

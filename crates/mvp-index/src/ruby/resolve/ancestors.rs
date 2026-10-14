@@ -683,6 +683,9 @@ impl<'a> Building<'a, '_> {
     }
 }
 
+/// Owners, read once and shared.
+type Owners<'a> = Rc<[&'a str]>;
+
 /// The walks of one generation. What a walk builds depends only on the
 /// owner, unless the walk met the depth cap (then on the depth it started
 /// at too) or a cycle (then on the walks around it): each is kept as far as
@@ -721,6 +724,10 @@ pub(super) struct Walks<'a> {
     /// (owner, side) → whether every object holding that step reaches
     /// `Object`.
     reach: RefCell<HashMap<(&'a str, Side), bool>>,
+    /// (owner, side) → the owners of its chain whose instance methods
+    /// define on the singleton class of the object they run on
+    /// ([`Index::fronted`]), for chains read outside any walk.
+    fronts: RefCell<HashMap<(&'a str, Side), Owners<'a>>>,
     /// The wholly unknown chain and own lists, shared by every walk kept
     /// as such.
     unread_chain: OnceCell<Rc<Chain<'a>>>,
@@ -892,13 +899,85 @@ impl<'a> Index<'a> {
             || self.facts.hidden(owner, name)
             || self.block_defined(owner, side, name)
             || self.macro_defined(owner, side, name)
+            || self.fronted(owner, side, name)
+    }
+
+    /// Whether the chain of `owner` on `side` holds the instance step of an
+    /// owner whose instance methods may define `name` on the singleton
+    /// class of the object they run on ([`Fact::Fronted`]): such an object
+    /// is `owner` itself (its instances, or the class or module), or one
+    /// whose chain holds `owner`'s step, which then holds that step too,
+    /// so the step is unsure from the front of every chain that may meet
+    /// the method (#106). Every other chain is left alone.
+    ///
+    /// [`Fact::Fronted`]: crate::ruby::Fact::Fronted
+    fn fronted(&self, owner: &str, side: Side, name: &str) -> bool {
+        if !self.facts.front_named(name) {
+            return false;
+        }
+        if side == Side::Instance && self.facts.fronts(owner, name) {
+            return true;
+        }
+        match self.fronts_held(owner, side) {
+            Some(held) => held.iter().any(|front| self.facts.fronts(front, name)),
+            None => true,
+        }
+    }
+
+    /// Whether the chain of `owner` on `side` holds the instance step of
+    /// an owner whose instance methods may define some name on the
+    /// singleton class of the object they run on ([`Self::fronted`]).
+    pub(super) fn fronting(&self, owner: &str, side: Side) -> bool {
+        self.facts.any_front()
+            && ((side == Side::Instance && self.facts.fronting(owner))
+                || self
+                    .fronts_held(owner, side)
+                    .is_none_or(|held| !held.is_empty()))
+    }
+
+    /// The owners of the chain of `owner` on `side` whose instance methods
+    /// define on the singleton class of the object they run on; `None`
+    /// when the chain is not known yet (being walked, or cut), which may
+    /// hold any.
+    fn fronts_held(&self, owner: &str, side: Side) -> Option<Rc<[&'a str]>> {
+        let Some((&owner, _)) = self.constants.get_key_value(owner) else {
+            return Some(Rc::from([]));
+        };
+        if let Some(held) = self.walks.fronts.borrow().get(&(owner, side)) {
+            return Some(Rc::clone(held));
+        }
+        let walks = &self.walks;
+        let outside = walks.building.borrow().is_empty() && walks.walking.borrow().is_empty();
+        if walks.building.borrow().contains(&owner)
+            || walks.walking.borrow().contains(&(owner, side))
+        {
+            return None;
+        }
+        let chain = self.chain(owner, side);
+        if chain.is_cut() {
+            return None;
+        }
+        let mut held: Vec<&'a str> = chain
+            .steps()
+            .filter(|&(o, s)| s == Side::Instance && self.facts.fronting(o))
+            .map(|(o, _)| o)
+            .collect();
+        held.dedup();
+        let held: Rc<[&'a str]> = held.into();
+        if outside {
+            walks
+                .fronts
+                .borrow_mut()
+                .insert((owner, side), Rc::clone(&held));
+        }
+        Some(held)
     }
 
     /// Whether [`Self::unsure`] holds through `owner` on `side` for no name
     /// but a tainted one, which holds everywhere: no fact touches that step
     /// (R6-03). Conservative: a step being walked is not quiet.
     pub(super) fn quiet(&self, owner: &str, side: Side) -> bool {
-        if self.facts.touches(owner, side) {
+        if self.touched(owner, side) {
             return false;
         }
         let Some((&owner, _)) = self.constants.get_key_value(owner) else {
@@ -921,6 +1000,16 @@ impl<'a> Index<'a> {
                     .chain(owner, Side::Singleton)
                     .steps()
                     .any(|(o, s)| self.facts.macro_defines(o, s, side, None))
+    }
+
+    /// Whether a fact may leave lookup through `owner` on `side` unsure of
+    /// some name, whatever the name: one of [`Facts::touches`], or an
+    /// owner of its chain whose instance methods define on the singleton
+    /// class of the object they run on ([`Self::fronted`]).
+    ///
+    /// [`Facts::touches`]: super::facts::Facts::touches
+    pub(super) fn touched(&self, owner: &str, side: Side) -> bool {
+        self.facts.touches(owner, side) || self.fronting(owner, side)
     }
 
     /// Whether a class macro may have defined `name` on `side` of `owner`:

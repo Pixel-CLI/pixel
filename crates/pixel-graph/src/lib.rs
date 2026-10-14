@@ -13,7 +13,8 @@
 //! - `impact`, `trace`, `process`, `cluster`, `changes`: analyses
 //! - `predicate`: bounded reachability with witnesses (`pixel evaluate`)
 //! - `mvp_adapter`: pixel-mvp's Rust index in this graph's rows (vendored
-//!   `mvp-*` crates); `shadow`: this graph's Rust edges against it
+//!   `mvp-*` crates), and `mvp_adapter::ruby`, its Ruby answer merged site
+//!   by site with this graph's; `shadow`: this graph's Rust edges against it
 
 pub mod build;
 pub mod changes;

@@ -18,6 +18,7 @@
 //!   no owner: outside every owner but in a block or a top-level `class <<
 //!   self`, a top-level `def self.m`, and inside an owner a `def` in a
 //!   block that may run on another object (any block but plain iteration,
+//!   a core collection's iterator on a literal or a constant,
 //!   `included`, `prepended`, `class_methods`, `concerning`, and
 //!   `class_eval` or `instance_eval` sent to the owner itself), in a
 //!   concern's `included do` or `prepended do` (its includer's, a
@@ -92,7 +93,9 @@
 //!   ([`Fact::Block`]), what a class macro defines on its callers
 //!   ([`Fact::Macro`]), a constant `||=` may leave unassigned
 //!   ([`Fact::MaybeConstant`]), a method defined on an object the rules
-//!   cannot name ([`Fact::Tainted`]), a module mixed into one
+//!   cannot name ([`Fact::Tainted`]), or on the singleton class of the
+//!   object an owner's instance method runs on ([`Fact::Fronted`]), a
+//!   module mixed into one
 //!   ([`Fact::Spread`]), a method `private` or `protected` may hide from
 //!   an explicit receiver ([`Fact::Hidden`]), or a visibility change the
 //!   rules do not read may ([`Fact::Visibility`]),
@@ -133,7 +136,7 @@ use crate::codec;
 use crate::lang::{Extraction, Rules, World};
 
 /// Bumped by any change to the grammar or these rules.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 6;
 
 /// The nesting of an encoded [`Fact::Definee`] that has the one of the
 /// definee before it: no constant's name.
@@ -158,6 +161,14 @@ pub const REBOUND: &str = ":rebound";
 /// ancestor declaration written where it may not run when its body does
 /// (R5-07).
 pub const CONDITIONAL: &str = ":conditional";
+
+/// The tree the Ruby rules read of `content`: tree-sitter's, past the
+/// anonymous forwarding it cannot parse (#107); `None` past the parse
+/// budget. C-10's oracle re-parses a file the same way.
+#[cfg(test)]
+pub(crate) fn tree(content: &[u8]) -> Option<tree_sitter::Tree> {
+    extract::readable(content)
+}
 
 /// The cref entry of the body of `class << self` in `owner`, named as Ruby
 /// inspects the singleton class (`#<Class:Owner>`): a constant assigned
@@ -332,8 +343,18 @@ pub enum Fact {
     /// rules do not model may run anywhere, on a receiver that is neither
     /// `self` nor a constant, or on a constant that names no class or
     /// module but another constant. A lookup of that name proves nothing,
-    /// whatever its receiver (R5-03, R5-04).
+    /// whatever its receiver (R5-03, R5-04); written in a test file, only
+    /// the lookup of a caller in a test file does (`resolve`, "Test files
+    /// are another program", #106).
     Tainted { name: Option<String> },
+    /// An instance method of `owner` defines a method `name` (`None`: any
+    /// name) on the singleton class of the object it runs on
+    /// (`define_singleton_method(n)` in a `def`): that object's chain holds
+    /// `owner`'s instance step, and the method comes before the whole
+    /// chain. A lookup from an object whose chain holds that step proves
+    /// nothing of the name; one from any other object is not touched (R5-04
+    /// scoped, #106).
+    Fronted { owner: String, name: Option<String> },
     /// The module the constant `path` names in the nesting `scope` is
     /// mixed into an object the rules cannot name (`o.extend(M)`,
     /// `klass.include(M)`, an `include` in a new anonymous class): its
@@ -496,6 +517,11 @@ impl Fact {
                     "tainted".to_owned(),
                     name.clone().map_or_else(String::new, |n| format!("={n}")),
                 ],
+                Fact::Fronted { owner, name } => vec![
+                    "fronted".to_owned(),
+                    owner.clone(),
+                    name.clone().map_or_else(String::new, |n| format!("={n}")),
+                ],
                 Fact::Spread { path, scope } => {
                     let mut record = vec!["spread".to_owned(), path.clone()];
                     record.extend(scope.iter().cloned());
@@ -653,6 +679,13 @@ impl Fact {
                     "maybe_constant" => Fact::MaybeConstant { segment: first },
                     "tainted" => Fact::Tainted {
                         name: first.strip_prefix('=').map(str::to_owned),
+                    },
+                    "fronted" => Fact::Fronted {
+                        owner: first,
+                        name: rest
+                            .get(1)
+                            .and_then(|n| n.strip_prefix('='))
+                            .map(str::to_owned),
                     },
                     "spread" => Fact::Spread {
                         path: first,
@@ -934,6 +967,14 @@ mod contract_tests {
                 name: Some("hook".to_owned()),
             },
             Fact::Tainted { name: None },
+            Fact::Fronted {
+                owner: "Maker".to_owned(),
+                name: Some("hook".to_owned()),
+            },
+            Fact::Fronted {
+                owner: "Admin::Maker".to_owned(),
+                name: None,
+            },
             Fact::Spread {
                 path: "Over".to_owned(),
                 scope: vec!["Admin".to_owned()],
