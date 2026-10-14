@@ -289,6 +289,25 @@ def feedback_of(ws):
     return {"parts_ran": len(parts), "part_bytes": sum(parts.values()), "late": late, "brief_bytes": briefed}
 
 
+def brief_ms_of(ws):
+    """Milliseconds the hook's brief took, from the last line of the clone's decision log (the prompt the agent
+    was given is the last one the brief judged)."""
+    path = Path(ws) / ".pixel" / "brief-decisions.jsonl"
+    try:
+        lines = [line for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+        return int(json.loads(lines[-1]).get("elapsed_ms")) if lines else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def percentile(values, q):
+    """The ``q`` quantile (0..1) of ``values`` by nearest rank; ``None`` for no values."""
+    values = sorted(v for v in values if v is not None)
+    if not values:
+        return None
+    return values[min(len(values) - 1, max(0, int(q * len(values) + 0.999999) - 1))]
+
+
 def verdict(arm, n_calls, delivered, problems=()):
     """One session's result. A brief that reached the agent with 0 calls is the only pass; a brief that did not
     reach it is never one, whatever the agent did."""
@@ -378,6 +397,11 @@ def render(rows, label, claude_census=None):
     if base_rows:
         lines.append(f"No-brief sessions: {sum(r['n_calls'] for r in base_rows if r['n_calls'] >= 0)} tool calls in total, "
                      f"{sum(1 for r in base_rows if r['n_calls'] == 0)} with none.")
+    latency = [r.get("brief_ms") for r in brief_rows]
+    if any(v is not None for v in latency):
+        lines.append(f"Brief latency over {sum(v is not None for v in latency)} sessions: "
+                     f"p50 {percentile(latency, 0.5)} ms, p95 {percentile(latency, 0.95)} ms, "
+                     f"max {max(v for v in latency if v is not None)} ms (window 750 ms).")
     if claude_census:
         lines.append(f"Census (vanilla Claude Code): {sum(claude_census.get(q, 0) for q in by)} tool calls over these "
                      f"{len(by)} questions.")
@@ -446,11 +470,20 @@ class Run:
             for call in calls:
                 tools[call["tool"]] = tools.get(call["tool"], 0) + 1
             fb = feedback_of(ws) if arm == "brief" else {"parts_ran": 0, "part_bytes": 0, "late": 0, "brief_bytes": 0}
+            if arm == "brief":
+                # Paths and counts only: kept so the feedback summary can be run over the whole run.
+                saved = self.out / "feedback" / f"{sid}.jsonl"
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copyfile(Path(ws) / ".pixel" / "brief-feedback.jsonl", saved)
+                except OSError:
+                    pass
             delivered = fb["part_bytes"] > 0
             if arm == "brief" and delivered and fb["parts_ran"] != args.parts:
                 problems.append(f"hooks:{fb['parts_ran']}/{args.parts}")
             row.update({"n_calls": len(calls), "tools": tools, "brief_bytes": fb["part_bytes"],
-                        "parts_ran": fb["parts_ran"], "parts_late": fb["late"], "seconds": round(seconds, 1),
+                        "parts_ran": fb["parts_ran"], "parts_late": fb["late"],
+                        "brief_ms": brief_ms_of(ws) if arm == "brief" else None, "seconds": round(seconds, 1),
                         "problems": problems, "verdict": verdict(arm, len(calls), delivered, problems)})
         except (OSError, subprocess.SubprocessError) as error:
             row["problems"].append(type(error).__name__)
@@ -659,6 +692,24 @@ class SelfTest(unittest.TestCase):
                       "1 brief not delivered, 0 error.", text)
         self.assertIn("No-brief sessions: 6 tool calls in total, 1 with none.", text)
         self.assertIn("Census (vanilla Claude Code): 15 tool calls over these 3 questions.", text)
+
+    def test_latency_is_read_from_the_last_decision_and_reported_as_percentiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(brief_ms_of(tmp))
+            log = Path(tmp) / ".pixel" / "brief-decisions.jsonl"
+            log.parent.mkdir()
+            log.write_text(json.dumps({"elapsed_ms": 900}) + "\n" + json.dumps({"elapsed_ms": 210}) + "\n")
+            self.assertEqual(brief_ms_of(tmp), 210)
+            log.write_text("not json\n")
+            self.assertIsNone(brief_ms_of(tmp))
+        values = list(range(1, 21))
+        self.assertEqual(percentile(values, 0.5), 10)
+        self.assertEqual(percentile(values, 0.95), 19)
+        self.assertEqual(percentile([7], 0.95), 7)
+        self.assertIsNone(percentile([None], 0.95))
+        rows = [{"id": f"a-{n}", "repo": "a", "arm": "brief", "n_calls": 0, "tools": {}, "brief_bytes": 10,
+                 "verdict": PASS, "brief_ms": ms} for n, ms in enumerate([100, 200, 300, 700])]
+        self.assertIn("Brief latency over 4 sessions: p50 200 ms, p95 700 ms, max 700 ms", render(rows, "t"))
 
     def test_single_arm_report_lists_tools(self):
         rows = [{"id": "a-2", "repo": "a", "arm": "brief", "n_calls": 2, "tools": {"sh:rg": 1, "sh:sed": 1},
