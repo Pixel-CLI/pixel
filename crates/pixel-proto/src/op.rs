@@ -548,7 +548,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
 ///
 /// Describes what Pixel offers without directing the agent: native tools
 /// stay the default, and Pixel is one option among them.
-pub const SESSION_USAGE: &str = "pixel offers deterministic repository retrieval: `pixel search-content`, `pixel find-code`, `pixel impact <symbol>` for callers and blast radius, and `pixel what-changed`. Use one when it answers a question faster than your native tools; native search and reads remain available. `pixel --help` lists every command.";
+pub const SESSION_USAGE: &str = "pixel offers deterministic repository retrieval: `pixel search-content`, `pixel find-code`, `pixel impact <symbol>` for callers and blast radius, and `pixel what-changed`. Use one when it answers a question faster than your native tools; native search and reads remain available. `pixel --help` lists the core commands; one that moved to a plugin needs it installed (`pixel install github:Pixel-CLI/<repo>`).";
 
 /// The `skip_serializing_if` predicate for a flag whose absence means false;
 /// serde hands the field by reference.
@@ -1177,6 +1177,11 @@ mod tests {
             );
         }
         assert!(SESSION_USAGE.contains("native search and reads remain available"));
+        assert!(
+            SESSION_USAGE.contains("`pixel --help` lists the core commands")
+                && !SESSION_USAGE.contains("lists every command"),
+            "--help does not list the commands that moved to plugins"
+        );
     }
 
     #[test]

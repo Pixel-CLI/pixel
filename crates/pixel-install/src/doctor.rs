@@ -1512,6 +1512,16 @@ struct PluginReference {
     commands: Vec<&'static str>,
 }
 
+/// Whether `text` names the moved `command` by its current name or by a
+/// pre-rename spelling the CLI still accepts (`pixel inspect` is
+/// `repo-state`): both reach the same plugin.
+fn names_moved_command(text: &str, command: &str) -> bool {
+    names_command(text, command)
+        || pixel_proto::commands::RENAMED_COMMANDS
+            .iter()
+            .any(|(old, new)| *new == command && names_command(text, old))
+}
+
 /// Whether `text` names `pixel <command>` as a whole command word.
 fn names_command(text: &str, command: &str) -> bool {
     let needle = format!("pixel {command}");
@@ -1541,7 +1551,7 @@ fn deployed_plugin_references(home: &Path, repo_root: Option<&Path>) -> Vec<Plug
                 .iter()
                 .map(|(command, _)| *command)
                 .filter(|command| !pixel_plugin::stays_in_core(command))
-                .filter(|command| names_command(&block, command))
+                .filter(|command| names_moved_command(&block, command))
                 .collect();
             if !commands.is_empty() {
                 references.push(PluginReference { path, commands });
@@ -2457,7 +2467,8 @@ mod tests {
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use super::{
-        PluginReference, deployed_plugin_references, names_command, plugin_references_check,
+        PluginReference, deployed_plugin_references, names_command, names_moved_command,
+        plugin_references_check,
     };
     use crate::InstallError;
 
@@ -4119,6 +4130,22 @@ Prose naming `pixel status` is not a table row.
         assert!(!names_command("pixel diffuse", "diff"));
         assert!(!names_command("who-wrote alone", "who-wrote"));
         assert!(names_command("pixel diff`", "diff"));
+    }
+
+    #[test]
+    fn plugin_references_should_see_a_renamed_spelling_as_its_current_command() {
+        let home = home_with_block("- `pixel inspect` then `pixel rescue \"x\"`.");
+        let refs = deployed_plugin_references(home.path(), None);
+        assert_eq!(
+            refs,
+            vec![PluginReference {
+                path: home.path().join(".claude/CLAUDE.md"),
+                commands: vec!["repo-state", "plan-rollback"],
+            }],
+            "the canonical command is reported, in the table's order"
+        );
+        assert!(names_moved_command("pixel inspect", "repo-state"));
+        assert!(!names_moved_command("pixel inspect", "diff"));
     }
 
     #[test]

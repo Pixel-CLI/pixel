@@ -1831,6 +1831,9 @@ mod tests {
             "pixel list-branches . --fetch",
             "pixel recall index",
             "pixel list-errors gc",
+            "pixel list-errors run -- make",
+            "pixel recall --limit 5 index",
+            "pixel recall setup",
             "pixel plan-rollback --apply abc --file a.rs",
             "pixel new-branch topic --request-id 1",
         ] {

@@ -113,32 +113,30 @@ pub fn install_command(repo: &str) -> String {
 
 /// Whether `pixel <command> <args…>` only reads, so an agent may run it
 /// without it counting as an edit. The plugin does the work; the core only
-/// has to know which of its words and nested modes never write:
-/// `recall index` ingests, `list-errors gc` applies retention and
-/// `list-branches --fetch` runs `git fetch --prune`. A name that is not a
-/// moved read command, or that is not moved at all, is not read-only.
+/// has to know which of its words and modes never write, and it errs toward
+/// "writes": a command with modes is read-only only when its **first**
+/// argument names a read mode, so an option value can never be mistaken for
+/// the mode (`recall --limit 5 index` is not read-only). `recall index`,
+/// `setup`, `embed`, `export` and `daemon`, `list-errors gc` and `run` (which
+/// executes a wrapped command), and `list-branches --fetch` (a `git fetch
+/// --prune`) write. A name that is not a moved read command, or that is not
+/// moved at all, is not read-only.
 pub fn read_only_invocation(command: &str, args: &[String]) -> bool {
-    const READ_ONLY: [&str; 10] = [
-        "recall",
-        "list-errors",
-        "repo-state",
-        "review-changes",
-        "commit-history",
-        "diff",
-        "file-history",
-        "search-history",
-        "dig-history",
-        "list-branches",
-    ];
-    if !READ_ONLY.contains(&command) {
-        return false;
-    }
-    let first = args.iter().find(|arg| !arg.starts_with('-'));
+    const RECALL_READ_MODES: [&str; 6] = ["search", "ask", "context", "show", "sessions", "status"];
+    const LIST_ERRORS_READ_MODES: [&str; 4] = ["last", "since", "show", "cursor"];
+    let first_is = |modes: &[&str]| {
+        args.first()
+            .is_some_and(|mode| modes.contains(&mode.as_str()))
+    };
     match command {
-        "recall" => first.map(String::as_str) != Some("index"),
-        "list-errors" => first.map(String::as_str) != Some("gc"),
-        "list-branches" => !args.iter().any(|arg| arg == "--fetch"),
-        _ => true,
+        "recall" => first_is(&RECALL_READ_MODES),
+        "list-errors" => first_is(&LIST_ERRORS_READ_MODES),
+        "list-branches" => !args
+            .iter()
+            .any(|arg| arg == "--fetch" || arg.starts_with("--fetch=")),
+        "repo-state" | "review-changes" | "commit-history" | "diff" | "file-history"
+        | "search-history" | "dig-history" => true,
+        _ => false,
     }
 }
 
@@ -218,16 +216,67 @@ mod tests {
             "dig-history",
         ] {
             assert!(read_only_invocation(name, &args(&["--json"])), "{name}");
+            assert!(read_only_invocation(name, &[]), "{name}");
         }
-        assert!(read_only_invocation("recall", &args(&["search", "x"])));
-        assert!(!read_only_invocation("recall", &args(&["index"])));
-        assert!(!read_only_invocation("recall", &args(&["--json", "index"])));
-        assert!(read_only_invocation("list-errors", &args(&["--json"])));
-        assert!(!read_only_invocation("list-errors", &args(&["gc"])));
+        for mode in ["search", "ask", "context", "show", "sessions", "status"] {
+            assert!(
+                read_only_invocation("recall", &args(&[mode, "x"])),
+                "{mode}"
+            );
+        }
+        for mode in ["index", "setup", "embed", "export", "daemon", "bogus"] {
+            assert!(!read_only_invocation("recall", &args(&[mode])), "{mode}");
+        }
+        assert!(
+            !read_only_invocation("recall", &[]),
+            "no mode is not a read"
+        );
+        for mode in ["last", "since", "show", "cursor"] {
+            assert!(
+                read_only_invocation("list-errors", &args(&[mode, "--json"])),
+                "{mode}"
+            );
+        }
+        for mode in ["gc", "run", "bogus"] {
+            assert!(
+                !read_only_invocation("list-errors", &args(&[mode])),
+                "{mode}"
+            );
+        }
         assert!(read_only_invocation("list-branches", &args(&["."])));
         assert!(!read_only_invocation(
             "list-branches",
             &args(&[".", "--fetch"])
+        ));
+        assert!(!read_only_invocation(
+            "list-branches",
+            &args(&["--fetch=true"])
+        ));
+    }
+
+    /// An option's value is not the mode: with an option first the core
+    /// cannot tell, so the invocation is not a read.
+    #[test]
+    fn an_option_before_the_mode_makes_the_invocation_not_read_only() {
+        assert!(!read_only_invocation(
+            "recall",
+            &args(&["--limit", "5", "index"])
+        ));
+        assert!(!read_only_invocation(
+            "recall",
+            &args(&["--limit", "index", "search"])
+        ));
+        assert!(!read_only_invocation(
+            "recall",
+            &args(&["--json", "search", "x"])
+        ));
+        assert!(!read_only_invocation(
+            "list-errors",
+            &args(&["--repo", "last", "gc"])
+        ));
+        assert!(!read_only_invocation(
+            "list-errors",
+            &args(&["--json", "last"])
         ));
     }
 
