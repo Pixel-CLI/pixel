@@ -1,19 +1,19 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! Integration tests for pixel-install: doctor and install.
+//! Integration tests for pixel-setup: doctor and install.
 
 use std::fs;
 use std::path::Path;
 
-use pixel_install::config::{MANAGED_BEGIN, MANAGED_END, PI_SETTINGS_FILE};
-use pixel_install::doctor::{CHECKS, CheckStatus, DoctorOptions, doctor};
-use pixel_install::install::{
+use pixel_setup::config::{MANAGED_BEGIN, MANAGED_END, PI_SETTINGS_FILE};
+use pixel_setup::doctor::{CHECKS, CheckStatus, DoctorOptions, doctor};
+use pixel_setup::install::{
     CheckStatus as StepStatus, InstallOptions, InstallReport, InstallSelection, InstallStep,
     install, install_selected,
 };
-use pixel_install::setup::AgentTarget;
-use pixel_install::uninstall::{UninstallOptions, uninstall};
+use pixel_setup::setup::AgentTarget;
+use pixel_setup::uninstall::{UninstallOptions, uninstall};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -288,7 +288,7 @@ fn doctor_should_refuse_an_unknown_check_id_before_running_anything() {
     })
     .unwrap_err();
     assert!(
-        matches!(&err, pixel_install::InstallError::UnknownDoctorCheck(id) if id == "install.shell-wrappers"),
+        matches!(&err, pixel_setup::InstallError::UnknownDoctorCheck(id) if id == "install.shell-wrappers"),
         "{err}"
     );
 }
@@ -450,7 +450,7 @@ fn install_is_idempotent() {
 fn global_install_removes_retired_codex_hook_and_preserves_foreign_config() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
-    let codex_path = home.join(pixel_install::config::CODEX_HOOKS_FILE);
+    let codex_path = home.join(pixel_setup::config::CODEX_HOOKS_FILE);
     fs::create_dir_all(codex_path.parent().unwrap()).unwrap();
     let original = serde_json::json!({
         "hooks": {
@@ -545,7 +545,7 @@ fn find_agent_configs_never_includes_settings_json() {
     fs::write(settings_dir.join("settings.json"), "{}").unwrap();
     fs::write(home.join("CLAUDE.md"), "# Project\n").unwrap();
 
-    let configs = pixel_install::config::find_agent_configs(home);
+    let configs = pixel_setup::config::find_agent_configs(home);
     assert!(
         !configs.iter().any(|p| p.ends_with("settings.json")),
         "find_agent_configs must never return settings.json, got: {configs:?}"
@@ -573,7 +573,7 @@ fn stale_block_removal_never_deletes_incidental_mentions() {
 protocol (codebase-memory, gitnexus, generic exploration).
 - Some other rule entirely.
 ";
-    let (cleaned, removed) = pixel_install::config::strip_stale_blocks(original);
+    let (cleaned, removed) = pixel_setup::config::strip_stale_blocks(original);
     assert_eq!(
         removed, 0,
         "no genuine stale block header exists; nothing should be removed"
@@ -1063,7 +1063,7 @@ fn doctor_install_artifact_checks_red_and_green() {
     let prompt_check = check(&report, "install.agent-prompt");
     assert_eq!(
         prompt_check.status,
-        pixel_install::doctor::CheckStatus::Green,
+        pixel_setup::doctor::CheckStatus::Green,
         "agent-prompt is green when no prompt file exists: {prompt_check:?}"
     );
     let hooks_check = report
@@ -1073,7 +1073,7 @@ fn doctor_install_artifact_checks_red_and_green() {
         .unwrap();
     assert_eq!(
         hooks_check.status,
-        pixel_install::doctor::CheckStatus::Red,
+        pixel_setup::doctor::CheckStatus::Red,
         "claude-hooks should be red when not installed"
     );
     let legacy_check = report
@@ -1083,7 +1083,7 @@ fn doctor_install_artifact_checks_red_and_green() {
         .unwrap();
     assert_eq!(
         legacy_check.status,
-        pixel_install::doctor::CheckStatus::Green,
+        pixel_setup::doctor::CheckStatus::Green,
         "legacy-wrappers should be green when no stale block exists"
     );
 
@@ -1094,7 +1094,7 @@ fn doctor_install_artifact_checks_red_and_green() {
     let prompt_check = check(&report, "install.agent-prompt");
     assert_eq!(
         prompt_check.status,
-        pixel_install::doctor::CheckStatus::Red,
+        pixel_setup::doctor::CheckStatus::Red,
         "{prompt_check:?}"
     );
     assert_eq!(
@@ -1134,7 +1134,7 @@ fn doctor_install_artifact_checks_red_and_green() {
         let check = report.checks.iter().find(|c| c.id == id).unwrap();
         assert_eq!(
             check.status,
-            pixel_install::doctor::CheckStatus::Green,
+            pixel_setup::doctor::CheckStatus::Green,
             "{id} should be green after install, got {:?}: {:?}",
             check.status,
             check.reason
@@ -1144,9 +1144,9 @@ fn doctor_install_artifact_checks_red_and_green() {
 }
 
 fn check<'a>(
-    report: &'a pixel_install::doctor::DoctorReport,
+    report: &'a pixel_setup::doctor::DoctorReport,
     id: &str,
-) -> &'a pixel_install::doctor::DoctorCheck {
+) -> &'a pixel_setup::doctor::DoctorCheck {
     report
         .checks
         .iter()
@@ -1172,7 +1172,7 @@ fn doctor_should_refuse_the_retired_prompt_validation_check_ids() {
         })
         .unwrap_err();
         assert!(
-            matches!(&err, pixel_install::InstallError::UnknownDoctorCheck(found) if found == id),
+            matches!(&err, pixel_setup::InstallError::UnknownDoctorCheck(found) if found == id),
             "{err}"
         );
     }
@@ -1956,7 +1956,7 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
     assert!(
         !installed
             .to_string()
-            .contains(pixel_install::config::GUARD_HOOK),
+            .contains(pixel_setup::config::GUARD_HOOK),
         "install must not wire any pixel guard"
     );
     uninstall(&UninstallOptions {
@@ -2198,12 +2198,12 @@ fn doctor_reports_a_clean_home_and_a_stale_wrapper_block() {
 
     assert_eq!(
         legacy_check(FISH_SHELL).status,
-        pixel_install::doctor::CheckStatus::Green,
+        pixel_setup::doctor::CheckStatus::Green,
         "a fresh install has no stale wrapper"
     );
     assert_eq!(
         legacy_check("/bin/zsh").status,
-        pixel_install::doctor::CheckStatus::Green,
+        pixel_setup::doctor::CheckStatus::Green,
         "no stale block exists for zsh either"
     );
 
@@ -2211,7 +2211,7 @@ fn doctor_reports_a_clean_home_and_a_stale_wrapper_block() {
     // double-injects next to the SessionStart hook.
     fs::write(home.join(".zshrc"), legacy_posix_block()).unwrap();
     let stale = legacy_check(FISH_SHELL);
-    assert_eq!(stale.status, pixel_install::doctor::CheckStatus::Red);
+    assert_eq!(stale.status, pixel_setup::doctor::CheckStatus::Red);
     let zshrc = home.join(".zshrc").display().to_string();
     assert!(
         stale.reason.as_deref().unwrap_or_default().contains(&zshrc),
@@ -2222,7 +2222,7 @@ fn doctor_reports_a_clean_home_and_a_stale_wrapper_block() {
     install_for_shell(home, FISH_SHELL);
     assert_eq!(
         legacy_check(FISH_SHELL).status,
-        pixel_install::doctor::CheckStatus::Green,
+        pixel_setup::doctor::CheckStatus::Green,
         "install removes the stale block"
     );
     assert!(
@@ -2311,7 +2311,7 @@ fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
     .unwrap();
     assert_eq!(
         check.status,
-        pixel_install::doctor::CheckStatus::Red,
+        pixel_setup::doctor::CheckStatus::Red,
         "the surviving fish block is stale: {check:?}"
     );
 }
@@ -2343,7 +2343,7 @@ fn an_unterminated_managed_block_refuses_the_rewrite_and_keeps_the_profile() {
     let step = wrappers_step(&report);
     assert_eq!(
         step.status,
-        pixel_install::install::CheckStatus::Red,
+        pixel_setup::install::CheckStatus::Red,
         "{step:?}"
     );
     assert!(
@@ -2372,7 +2372,7 @@ fn an_unterminated_managed_block_refuses_the_rewrite_and_keeps_the_profile() {
         .expect("shell-wrappers step");
     assert_eq!(
         step.status,
-        pixel_install::install::CheckStatus::Red,
+        pixel_setup::install::CheckStatus::Red,
         "{step:?}"
     );
     assert_eq!(
@@ -2461,7 +2461,7 @@ fn doctor_flags_a_posix_block_sitting_in_the_fish_dropin_as_stale() {
         .expect("legacy-wrappers check");
     assert_eq!(
         check.status,
-        pixel_install::doctor::CheckStatus::Red,
+        pixel_setup::doctor::CheckStatus::Red,
         "a POSIX block in the fish drop-in is stale, got {:?}",
         check.reason
     );
@@ -2782,7 +2782,7 @@ fn install_refuses_to_rewrite_a_codex_config_it_cannot_parse() {
         .expect("codex-config step");
     assert_eq!(
         step.status,
-        pixel_install::install::CheckStatus::Red,
+        pixel_setup::install::CheckStatus::Red,
         "a file codex itself cannot load is reported, not repaired: {step:?}"
     );
     assert_eq!(
@@ -2919,7 +2919,7 @@ fn doctor_codex_config_check_is_green_without_pixel_and_red_for_a_retired_block(
 
 #[test]
 fn uninstall_takes_only_the_pixel_block_out_of_codex_config() {
-    use pixel_install::uninstall::{UninstallOptions, uninstall};
+    use pixel_setup::uninstall::{UninstallOptions, uninstall};
 
     // A retired block is removed with its key; unrelated settings in the
     // same config.toml survive byte-for-byte.
@@ -3039,17 +3039,13 @@ fn doctor_flags_a_retired_subagent_prompt_until_install_removes_it() {
     };
     assert_eq!(
         check(home).status,
-        pixel_install::doctor::CheckStatus::Green,
+        pixel_setup::doctor::CheckStatus::Green,
         "a fresh install leaves no prompt file"
     );
     fs::create_dir_all(subagent_prompt_path(home).parent().unwrap()).unwrap();
     fs::write(subagent_prompt_path(home), "pixel who-calls X --callers\n").unwrap();
     let red = check(home);
-    assert_eq!(
-        red.status,
-        pixel_install::doctor::CheckStatus::Red,
-        "{red:?}"
-    );
+    assert_eq!(red.status, pixel_setup::doctor::CheckStatus::Red, "{red:?}");
     assert_eq!(
         red.reason.as_deref(),
         Some(
@@ -3061,10 +3057,7 @@ fn doctor_flags_a_retired_subagent_prompt_until_install_removes_it() {
         )
     );
     install_for_shell(home, TEST_SHELL);
-    assert_eq!(
-        check(home).status,
-        pixel_install::doctor::CheckStatus::Green
-    );
+    assert_eq!(check(home).status, pixel_setup::doctor::CheckStatus::Green);
     assert!(!subagent_prompt_path(home).exists());
 }
 
@@ -3296,10 +3289,7 @@ fn doctor_and_install_should_remove_a_managed_pi_prompt_and_preserve_orphan_mark
     let original = format!("{prefix}{MANAGED_BEGIN}\nstale\n{MANAGED_END}");
     fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
     fs::write(&pi_path, &original).unwrap();
-    assert_eq!(
-        pixel_install::config::strip_managed_block(&original),
-        prefix
-    );
+    assert_eq!(pixel_setup::config::strip_managed_block(&original), prefix);
 
     let opts = DoctorOptions {
         home: Some(home.to_path_buf()),
@@ -3451,11 +3441,11 @@ fn uninstall_removes_the_classify_helpers_and_keeps_a_backup_of_them() {
     }
     let settings = home.join(".pi/agent/settings.json");
     fs::write(&settings, r#"{"theme":"dark","packages":["npm:mine"]}"#).unwrap();
-    pixel_install::ClassifyPiPackage::with_agent_dir(home, None, "export default () => {};\n")
+    pixel_setup::ClassifyPiPackage::with_agent_dir(home, None, "export default () => {};\n")
         .expect("Pi is configured")
         .install()
         .unwrap();
-    let package = home.join(pixel_install::CLASSIFY_PACKAGE_DIR);
+    let package = home.join(pixel_setup::CLASSIFY_PACKAGE_DIR);
     assert!(package.join("package.json").is_file());
 
     uninstall_home(home);
@@ -3674,7 +3664,7 @@ fn doctor_distinguishes_retired_pi_prompt_from_explicit_impact_extension() {
 // wrapper cannot double-inject the prompt next to the SessionStart hook.
 // ---------------------------------------------------------------------------
 
-fn wrappers_step(report: &InstallReport) -> &pixel_install::install::InstallStep {
+fn wrappers_step(report: &InstallReport) -> &pixel_setup::install::InstallStep {
     report
         .steps
         .iter()
@@ -4406,7 +4396,7 @@ fn repo_install_should_move_a_guard_left_in_shared_settings_to_the_local_file() 
         .unwrap();
     assert_eq!(
         claude_step.status,
-        pixel_install::install::CheckStatus::Green,
+        pixel_setup::install::CheckStatus::Green,
         "{claude_step:?}"
     );
     assert!(
@@ -4472,7 +4462,7 @@ fn repo_install_should_hold_back_the_guard_beside_a_shell_rewriter_in_shared_set
         .unwrap();
     assert_eq!(
         claude_step.status,
-        pixel_install::install::CheckStatus::Green,
+        pixel_setup::install::CheckStatus::Green,
         "{claude_step:?}"
     );
     assert!(
@@ -4698,7 +4688,7 @@ fn repo_install_should_keep_machine_local_artifacts_out_of_git() {
     let codex_step = report.steps.iter().find(|s| s.id == "hooks.codex").unwrap();
     assert_eq!(
         codex_step.status,
-        pixel_install::install::CheckStatus::Yellow,
+        pixel_setup::install::CheckStatus::Yellow,
         "{codex_step:?}"
     );
     assert!(
@@ -4920,7 +4910,7 @@ fn doctor_repo_codex_hooks_should_not_depend_on_project_trust() {
 /// where it runs this machine's path on every clone.
 #[test]
 #[cfg(unix)]
-fn doctor_repo_checks_should_go_red_on_a_broken_pixel_install() {
+fn doctor_repo_checks_should_go_red_on_a_broken_pixel_setup() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -5631,7 +5621,7 @@ fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
             "native install must not create {path}"
         );
     }
-    let mut listed: Vec<String> = pixel_install::install::REPO_ARTIFACTS
+    let mut listed: Vec<String> = pixel_setup::install::REPO_ARTIFACTS
         .iter()
         .filter(|a| !legacy_sidecars.contains(&a.path))
         .map(|a| a.path.to_string())
@@ -5762,7 +5752,7 @@ fn repo_install_should_hold_back_the_guard_beside_a_global_rtk_hook() {
             .unwrap();
         assert_eq!(
             step.status,
-            pixel_install::install::CheckStatus::Green,
+            pixel_setup::install::CheckStatus::Green,
             "{step:?}"
         );
         assert!(step.summary.contains("native tools preserved"), "{step:?}");
@@ -6025,7 +6015,7 @@ fn repo_install_should_install_the_guard_when_the_global_settings_is_unreadable(
         .unwrap();
     assert_eq!(
         step.status,
-        pixel_install::install::CheckStatus::Green,
+        pixel_setup::install::CheckStatus::Green,
         "{step:?}"
     );
     assert!(step.summary.contains("native tools preserved"), "{step:?}");
@@ -6063,7 +6053,7 @@ fn repo_install_at_home_should_read_the_global_file_once() {
             .unwrap();
         assert_eq!(
             step.status,
-            pixel_install::install::CheckStatus::Green,
+            pixel_setup::install::CheckStatus::Green,
             "dry_run={dry_run}: {step:?}"
         );
         if dry_run {
@@ -6109,7 +6099,7 @@ fn repo_install_should_not_duplicate_a_global_pixel_callback() {
         .unwrap();
     assert_eq!(
         step.status,
-        pixel_install::install::CheckStatus::Green,
+        pixel_setup::install::CheckStatus::Green,
         "{step:?}"
     );
     assert!(step.summary.contains("native tools preserved"), "{step:?}");

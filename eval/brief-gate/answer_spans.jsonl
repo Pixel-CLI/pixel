@@ -1,6 +1,6 @@
 {"id": "bg-006", "answer_spans": [{"path": "crates/pixel-daemon/src/daemon.rs", "symbol": "Service::watch_ready / watch_ready", "start_line": 276, "end_line": 309}, {"path": "crates/pixel-daemon/src/daemon.rs", "symbol": "Service::watch_ready / watch_ready", "start_line": 570, "end_line": 583}], "confidence": "high"}
 {"id": "bg-014", "answer_spans": [{"path": "crates/pixel/src/execution_brief/chain.rs", "symbol": "BRIEF_WINDOW", "start_line": 40, "end_line": 42}], "confidence": "high"}
-{"id": "bg-015", "answer_spans": [{"path": "crates/pixel-install/src/repo_git.rs", "symbol": "exclude_locally", "start_line": 4, "end_line": 12}, {"path": "crates/pixel-install/src/repo_git.rs", "symbol": "exclude_locally", "start_line": 37, "end_line": 78}], "confidence": "high"}
+{"id": "bg-015", "answer_spans": [{"path": "crates/pixel-setup/src/repo_git.rs", "symbol": "exclude_locally", "start_line": 4, "end_line": 12}, {"path": "crates/pixel-setup/src/repo_git.rs", "symbol": "exclude_locally", "start_line": 37, "end_line": 78}], "confidence": "high"}
 {"id": "bg-018", "answer_spans": [{"path": "crates/pixel-task/src/policy.rs", "symbol": "policy::decide", "start_line": 8, "end_line": 72}], "confidence": "high"}
 {"id": "bg-030", "answer_spans": [{"path": "crates/pixel-git/src/redact.rs", "symbol": "redact", "start_line": 16, "end_line": 37}], "confidence": "high"}
 {"id": "bg-036", "answer_spans": [{"path": "crates/pixel/src/config_cmd.rs", "symbol": "config_cmd module doc (metrics footer on stderr)", "start_line": 4, "end_line": 10}], "confidence": "medium"}
@@ -16,7 +16,7 @@
 {"id": "bg-128", "answer_spans": [{"path": "crates/pixel-proto/src/envelope.rs", "symbol": "Envelope", "start_line": 30, "end_line": 49}], "confidence": "high"}
 {"id": "bg-146", "answer_spans": [{"path": "crates/pixel-index/src/index.rs", "symbol": "credential_path", "start_line": 66, "end_line": 119}], "confidence": "high"}
 {"id": "bg-181", "answer_spans": [{"path": "crates/pixel-git/src/ref_guard.rs", "symbol": "validate_ref", "start_line": 11, "end_line": 44}], "confidence": "high"}
-{"id": "bg-211", "answer_spans": [{"path": "crates/pixel-install/src/config.rs", "symbol": "merge_hook_entry", "start_line": 533, "end_line": 564}], "confidence": "high"}
+{"id": "bg-211", "answer_spans": [{"path": "crates/pixel-setup/src/config.rs", "symbol": "merge_hook_entry", "start_line": 533, "end_line": 564}], "confidence": "high"}
 {"id": "bg-070", "answer_spans": [{"path": "crates/pixel-recall/src/hybrid.rs", "symbol": "hybrid::fuse", "start_line": 4, "end_line": 9}, {"path": "crates/pixel-recall/src/hybrid.rs", "symbol": "hybrid::fuse", "start_line": 17, "end_line": 29}], "confidence": "high"}
 {"id": "bg-203", "answer_spans": [{"path": "crates/pixel/src/prompt_continuation.rs", "symbol": "is_trivial_continuation", "start_line": 8, "end_line": 70}], "confidence": "high"}
 {"id": "bg-136", "answer_spans": [{"path": "crates/pixel-flow/src/store.rs", "symbol": "flow_dir", "start_line": 13, "end_line": 23}], "confidence": "high"}

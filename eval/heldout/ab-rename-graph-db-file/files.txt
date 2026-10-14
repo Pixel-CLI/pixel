@@ -2,8 +2,8 @@
 .agents/rules/change-propagation.md
 ARCHITECTURE.md
 crates/pixel-daemon/src/api.rs
-crates/pixel-install/src/doctor.rs
-crates/pixel-install/tests/install_tests.rs
+crates/pixel-setup/src/doctor.rs
+crates/pixel-setup/tests/install_tests.rs
 crates/pixel/src/audit_cmd.rs
 crates/pixel/src/coverage_cmd.rs
 crates/pixel/src/guard.rs

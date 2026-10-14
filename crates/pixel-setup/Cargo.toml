@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 [package]
-name = "pixel-install"
+name = "pixel-setup"
 version = "0.7.1"
 edition.workspace = true
 license.workspace = true

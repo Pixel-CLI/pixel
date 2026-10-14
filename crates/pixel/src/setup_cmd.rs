@@ -4,7 +4,7 @@
 //! `pixel setup`: the interactive per-agent, per-feature onboarding wizard.
 //!
 //! Ported from GitButler's `but agent setup` (read at `5cbe33d`). The planning
-//! half lives in [`pixel_install::setup`], which knows the agent targets, the
+//! half lives in [`pixel_setup::setup`], which knows the agent targets, the
 //! feature catalog and the managed block; this module owns the terminal, the
 //! global configuration file and the report.
 //!
@@ -15,7 +15,7 @@
 //! The guided setup is `pixel setup` at a terminal. The same command run
 //! unattended (no terminal, `CI`, `--yes`, `--json`) is the installer in
 //! `main.rs::setup_install`, unchanged. The guided run owns the hook files
-//! too, through the one installer (`pixel_install::install::install`), not a
+//! too, through the one installer (`pixel_setup::install::install`), not a
 //! second writer: the review prints that installer's dry run for the agents
 //! and hook groups picked, the confirmation covers it, and the apply runs the
 //! same call for real.
@@ -23,11 +23,11 @@
 //! What is deliberately absent: repository preparation (no index, no
 //! `prepare-repo`) and skill-bundle installation.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use pixel_install::install::{InstallOptions, InstallReport, InstallStep};
-use pixel_install::setup::{AgentTarget, Feature, Scope, SetupPlan};
+use pixel_setup::install::{InstallOptions, InstallReport, InstallStep};
+use pixel_setup::setup::{AgentTarget, Feature, Scope, SetupPlan};
 
 use crate::config_cmd;
 use crate::prompt_key::KeyReader;
@@ -118,24 +118,62 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
     };
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stderr().lock();
-    let answers = collect(
+    // On a live terminal the wizard takes the alternate screen (#863): every
+    // card is drawn there and the shell comes back clean when it ends.
+    let alt_screen = !scripted && std::io::stderr().is_terminal() && keys.active();
+    if alt_screen {
+        write!(output, "\x1b[?1049h").map_err(io)?;
+    }
+    let result = run_questions(
         &options,
-        &base,
+        base,
         scope,
+        scripted,
         &mut screens,
         &mut input,
         &mut output,
-    )?;
+        color,
+    );
+    if alt_screen {
+        let _ = write!(output, "\x1b[?1049l");
+    }
+    result
+}
+
+/// The wizard's body: collect the answers, review, confirm, apply, report,
+/// then the classify journey when it was picked.
+#[allow(clippy::too_many_arguments)] // the pieces come from `run`'s setup
+fn run_questions(
+    options: &SetupOptions,
+    base: PathBuf,
+    scope: Scope,
+    scripted: bool,
+    screens: &mut Screens<'_>,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    color: bool,
+) -> Result<(), String> {
+    let answers = collect(options, &base, scope, screens, input, output)?;
     let Some(answers) = answers else {
         writeln!(output).map_err(io)?;
         writeln!(
             output,
-            "Cancelled. Nothing was written and no setting was changed."
+            "{}",
+            paint(
+                color,
+                "2",
+                "Cancelled. Nothing was written and no setting was changed."
+            )
         )
         .map_err(io)?;
         return Ok(());
     };
 
+    // A picked AI classification adds its own screen after the apply — the
+    // engine menu and helpers — so the run has a fourth step to count to.
+    if answers.features.contains(&Feature::Classify) {
+        screens.steps.total += 1;
+    }
     let plan = SetupPlan::new(
         &base,
         scope,
@@ -144,11 +182,11 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
         &crate::plugin_cmd::available(),
     )
     .map_err(|e| e.to_string())?;
-    let install = install_options(&options, &base, &plan);
+    let install = install_options(options, &base, &plan);
     let selection = plan.install_selection();
     // The hooks are shown from a dry run of the very call that applies them,
     // so the review cannot promise a write the apply does not make.
-    let hook_preview = pixel_install::install::install_selected(
+    let hook_preview = pixel_setup::install::install_selected(
         &InstallOptions {
             dry_run: true,
             ..install.clone()
@@ -156,16 +194,21 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
         Some(&selection),
     )
     .map_err(|e| e.to_string())?;
-    write_review(&mut output, &plan, &hook_preview.steps, &mut screens)?;
+    write_review(output, &plan, &hook_preview.steps, screens)?;
     writeln!(output).map_err(io)?;
     writeln!(output, "Apply these changes?").map_err(io)?;
-    if !scripted && !ask_confirm(&mut input, &mut output, &mut screens)? {
-        writeln!(output, "Cancelled. Nothing was written.").map_err(io)?;
+    if !scripted && !ask_confirm(input, output, screens)? {
+        writeln!(
+            output,
+            "{}",
+            paint(color, "2", "Cancelled. Nothing was written.")
+        )
+        .map_err(io)?;
         return Ok(());
     }
 
     let written = plan.apply().map_err(|e| e.to_string())?;
-    let hooks = pixel_install::install::install_selected(&install, Some(&selection))
+    let hooks = pixel_setup::install::install_selected(&install, Some(&selection))
         .map_err(|e| e.to_string())?;
     // TEMPORARY (dev-flags): the `if` is `dev`'s; without it the block below
     // runs unconditionally, which is what a normal run does.
@@ -175,7 +218,18 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
             config_cmd::set_global_key(key.key, key.value.to_json())?;
         }
     }
-    report(&mut output, &plan, &written, &hooks, scripted, &screens)
+    report(output, &plan, &written, &hooks, scripted, screens)?;
+    // Picking AI classification opens its own journey after the files land:
+    // the engine menu (local Ollaya, remote preset, OpenAI Decisions, Jev,
+    // Clef-flash) and the optional harness helpers. A scripted run gets the
+    // printed suggestion instead of a second set of questions.
+    if answers.features.contains(&Feature::Classify) {
+        if !scripted {
+            screens.steps.banner(output, "Classify", color)?;
+        }
+        crate::classify_setup::install_step(!scripted, input, output)?;
+    }
+    Ok(())
 }
 
 /// The installer options for a plan, in the plan's scope. Under `--dummy-apply` the home directory is the dummy root
@@ -211,7 +265,7 @@ fn base_for(options: &SetupOptions) -> Result<PathBuf, String> {
 /// every agent this scope already shows evidence of.
 ///
 /// The running agent is a parameter, not a call to
-/// [`pixel_install::setup::detect`] inside: detection reads the process
+/// [`pixel_setup::setup::detect`] inside: detection reads the process
 /// environment, and a test that reads the environment of the machine running
 /// it asserts on the wrong thing.
 fn default_agents(base: &Path, scope: Scope, running: Option<AgentTarget>) -> Vec<AgentTarget> {
@@ -224,7 +278,7 @@ fn default_agents(base: &Path, scope: Scope, running: Option<AgentTarget>) -> Ve
 
 /// The harness driving this process, as a setup target.
 fn running_agent() -> Option<AgentTarget> {
-    pixel_install::setup::detect().map(AgentTarget::from_detected)
+    pixel_setup::setup::detect().map(AgentTarget::from_detected)
 }
 
 /// The features pre-checked in the picker.
@@ -278,15 +332,29 @@ fn collect(
 // option, and the focused row's help in dim text under the list.
 
 /// Width of a banner rule and of the right-aligned step counter. Clamped so a
-/// header reads the same on a narrow and on a very wide terminal; GitButler's
-/// wizard clamps the same `40..=72`.
+/// header reads the same on a narrow and on a very wide terminal; the card
+/// border's two columns come off the top, so the box never exceeds the screen.
 fn banner_width() -> usize {
-    crate::select::terminal_width().clamp(40, 72)
+    // The card's border adds two columns, so the width is clamped under the
+    // terminal's: a box wider than the screen wraps and its rows stop being
+    // one terminal line each, which the repaints count on.
+    crate::select::terminal_width()
+        .saturating_sub(2)
+        .clamp(24, 72)
 }
 
 /// A dim horizontal rule, the width of the banner.
 fn rule(color: bool) -> String {
     paint(color, "2", &"─".repeat(banner_width()))
+}
+
+/// One line of a rounded `╭─╮` box: `content` is padded to `width` columns of
+/// visible text so the right border stays square with colour on or off.
+fn box_row(color: bool, content: &str, width: usize) -> String {
+    let visible = crate::select::visible_len(content);
+    let pad = width.saturating_sub(2 + visible);
+    let bar = paint(color, "2", "│");
+    format!("{bar} {content}{} {bar}", " ".repeat(pad))
 }
 
 /// The columns a drawn line may use. One less than the terminal, so the last
@@ -382,17 +450,31 @@ impl Steps {
         Self { current: 0, total }
     }
 
-    /// The step's banner: its title on the left, `Step N of M` on the right,
-    /// and a rule under both.
+    /// The step's banner: a brand dot and title on the left, progress dots and
+    /// `Step N of M` dim on the right, and a rule under both.
     fn banner(&mut self, output: &mut impl Write, title: &str, color: bool) -> Result<(), String> {
         self.current += 1;
-        let right = format!("Step {} of {}", self.current, self.total);
-        let gap = banner_gap(title, &right, banner_width());
+        // The dots are the progress the issue asks for: filled up to the
+        // current step, hollow past it, beside the written count.
+        let dots: String = (1..=self.total)
+            .map(|step| {
+                if step <= self.current {
+                    paint(color, "92", "●")
+                } else {
+                    paint(color, "2", "○")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let right = format!("{}  Step {} of {}", dots, self.current, self.total);
+        let title_visible = format!("● {title}");
+        let title_rendered = format!("{} {}", paint(color, "92", "●"), paint(color, "1", title));
+        let gap = banner_gap(&title_visible, &right, banner_width());
         writeln!(output).map_err(io)?;
         writeln!(
             output,
             "{}{}{}",
-            paint(color, "1", title),
+            title_rendered,
             " ".repeat(gap),
             paint(color, "2", &right)
         )
@@ -403,10 +485,11 @@ impl Steps {
 }
 
 /// The spaces between a step's title and its right-aligned counter: at least
-/// one, so a title longer than the banner never runs into the counter.
+/// one, so a title longer than the banner never runs into the counter. Widths
+/// are counted visibly so SGR sequences do not skew the alignment.
 fn banner_gap(title: &str, right: &str, width: usize) -> usize {
     width
-        .saturating_sub(title.chars().count() + right.chars().count())
+        .saturating_sub(crate::select::visible_len(title) + crate::select::visible_len(right))
         .max(1)
 }
 
@@ -431,6 +514,80 @@ struct Screens<'a> {
     keys: &'a KeyReader,
 }
 
+/// The intro card's lines: the logo as the header when it fits (the short
+/// pulse the issue asks for is drawn over it), the `pixel · setup` wordmark
+/// otherwise, then what the wizard does and the nothing-until-confirm
+/// promise. `logo_code` is the SGR the logo rows are painted with, so the
+/// pulse can draw the same card dim and then bright.
+fn intro_card(width: usize, color: bool, logo_code: &str, show_logo: bool) -> Vec<String> {
+    let inner = width.saturating_sub(2);
+    let mut card = vec![format!("╭{}╮", "─".repeat(width))];
+    if show_logo {
+        card.push(box_row(color, "", width));
+        for line in pixel_setup::banner::logo_lines() {
+            card.push(box_row(color, &paint(color, logo_code, line), width));
+        }
+        card.push(box_row(
+            color,
+            &format!(
+                "{} {}",
+                paint(color, "2", env!("CARGO_PKG_VERSION")),
+                paint(color, "2", "· setup")
+            ),
+            width,
+        ));
+    } else {
+        card.push(box_row(
+            color,
+            &format!(
+                "{} {}",
+                paint(color, "92", "●"),
+                paint(color, "1", "pixel · setup")
+            ),
+            width,
+        ));
+    }
+    card.push(box_row(color, "", width));
+    for line in wrap(
+        "Set up your coding agent to work well with pixel.",
+        inner.saturating_sub(2),
+        0,
+    ) {
+        card.push(box_row(color, &paint(color, "2", &line), width));
+    }
+    card.push(box_row(color, "", width));
+    card.push(box_row(
+        color,
+        &paint(color, "1", "Here's what this does:"),
+        width,
+    ));
+    for bullet in [
+        "Write a managed pixel block into each agent's instruction file",
+        "Register the hooks of the agents and features you pick",
+        "Store the settings the features you pick need",
+    ] {
+        card.push(box_row(
+            color,
+            &format!("{} {}", paint(color, "92", "✦"), bullet),
+            width,
+        ));
+    }
+    card.push(box_row(color, "", width));
+    for line in wrap(
+        "Nothing is written until you review and confirm — you'll see exactly what changes first.",
+        inner.saturating_sub(2),
+        0,
+    ) {
+        card.push(box_row(color, &paint(color, "2", &line), width));
+    }
+    card.push(format!("╰{}╯", "─".repeat(width)));
+    card
+}
+
+/// The length of the logo's dimming pulse: one beat, not the retired
+/// multi-second animation the issue replaced with this card.
+const LOGO_PULSE: std::time::Duration = std::time::Duration::from_millis(160);
+
 fn write_intro(
     output: &mut impl Write,
     base: &Path,
@@ -440,31 +597,30 @@ fn write_intro(
 ) -> Result<(), String> {
     let color = screens.color;
     let keys = screens.keys;
+    let width = banner_width();
+    // The logo needs its 50 columns plus the card's padding; a narrower
+    // terminal gets the `● pixel · setup` wordmark instead of a clipped mark.
+    let show_logo = pixel_setup::banner::logo_width() + 4 <= width;
+    // The pulse is the card header the issue asks for: on a live terminal the
+    // logo lands dim and brightens once; elsewhere the card is drawn bright
+    // the one time it needs drawing.
+    let pulse = show_logo && color && keys.active();
+
     writeln!(output).map_err(io)?;
-    writeln!(output, "{}", paint(color, "1;32", "pixel · setup")).map_err(io)?;
-    writeln!(output, "{}", rule(color)).map_err(io)?;
-    writeln!(output, "Set up your coding agent to work well with pixel.").map_err(io)?;
-    writeln!(output).map_err(io)?;
-    writeln!(output, "Here's what this does:").map_err(io)?;
-    for line in [
-        "Write a managed pixel block into each agent's instruction file",
-        "Register the hooks of the agents and features you pick",
-        "Store the settings the features you pick need",
-    ] {
-        writeln!(output, "  {} {line}", paint(color, "2", "•")).map_err(io)?;
+    let mut card = intro_card(width, color, if pulse { "2;32" } else { "1;32" }, show_logo);
+    for line in &card {
+        writeln!(output, "{line}").map_err(io)?;
     }
-    writeln!(output).map_err(io)?;
-    writeln!(
-        output,
-        "{}",
-        paint(
-            color,
-            "2",
-            "Nothing is written until you review and confirm — you'll see exactly what changes first."
-        )
-    )
-    .map_err(io)?;
-    writeln!(output, "{}", paint(color, "2", &list_keys_hint(keys))).map_err(io)?;
+    if pulse {
+        output.flush().map_err(io)?;
+        std::thread::sleep(LOGO_PULSE);
+        rewind_block(output, card.len())?;
+        card = intro_card(width, color, "1;32", show_logo);
+        for line in &card {
+            writeln!(output, "{line}").map_err(io)?;
+        }
+    }
+
     let where_ = match scope {
         Scope::Global => "this machine ($HOME)",
         Scope::Repository => "this repository",
@@ -472,26 +628,27 @@ fn write_intro(
     let driving = detected.map_or(String::new(), |agent| {
         format!("  ·  driving: {}", agent.name())
     });
+    writeln!(
+        output,
+        "{}",
+        paint(color, "2", &format!("scope: {where_}{driving}"))
+    )
+    .map_err(io)?;
     for line in help_lines(
-        &format!("Writes under {}", base.display()),
+        &format!("writes under {}", base.display()),
         row_width(),
         color,
     ) {
         writeln!(output, "{line}").map_err(io)?;
     }
-    writeln!(
-        output,
-        "{}",
-        paint(color, "2", &format!("{where_}{driving}"))
-    )
-    .map_err(io)?;
+    writeln!(output, "{}", paint(color, "2", &list_keys_hint(keys))).map_err(io)?;
     Ok(())
 }
 
 /// The key hints the list questions share, for the input mode this run has.
 fn list_keys_hint(keys: &KeyReader) -> String {
     if keys.active() {
-        "↑/↓ move · space select · a all · n none · enter continue · esc cancel".to_string()
+        "↑/↓ or ←/→ move · space select · a all · n none · enter continue · esc cancel".to_string()
     } else {
         "Type numbers (1,3), `all` or `none` · enter keeps the shown defaults · q cancels"
             .to_string()
@@ -519,7 +676,8 @@ fn ask_agents(
                 ""
             };
             Row {
-                label: format!("{}. {}{note}", agent.index(), agent.name()),
+                index: agent.index(),
+                label: format!("{}{note}", agent.name()),
                 help: agent.help(),
                 disabled: false,
             }
@@ -562,7 +720,8 @@ fn ask_features(
         .map(|feature| {
             let disabled = feature.repo_local_only() && scope != Scope::Repository;
             Row {
-                label: format!("{}. {}", feature.index(), feature.label()),
+                index: feature.index(),
+                label: feature.label().to_string(),
                 help: if disabled {
                     feature.repo_local_help()
                 } else {
@@ -596,67 +755,89 @@ fn ask_features(
     ))
 }
 
-/// One selectable row: what it says, the help shown while the cursor is on it,
-/// and whether this scope can use it at all.
+/// One selectable row: its 1-based index (shown only in typed mode), the label
+/// without that index, the help shown while the cursor is on it, and whether
+/// this scope can use it at all.
 struct Row {
+    index: usize,
     label: String,
     help: &'static str,
     disabled: bool,
 }
 
-/// A row's cursor and checkbox, the columns a wrapped label lines up under.
-fn row_prefix(cursor: bool, checked: bool) -> String {
-    let pointer = if cursor { ">" } else { " " };
-    let checkbox = if checked { "[x]" } else { "[ ]" };
+/// A row's cursor and checkbox. The checkbox is bright green when checked; the
+/// cursor row is bold. Typed mode shows the number in the label, arrow mode
+/// drops it.
+fn row_prefix(cursor: bool, checked: bool, color: bool) -> String {
+    let pointer = if cursor {
+        paint(color, "1", "❯")
+    } else {
+        " ".to_string()
+    };
+    let checkbox = match (cursor, checked) {
+        (true, true) => paint(color, "1;92", "◉"),
+        (false, true) => paint(color, "92", "◉"),
+        _ => "◯".to_string(),
+    };
     format!("{pointer} {checkbox} ")
 }
 
-/// A row's label, with the note a row this scope cannot use carries. The long
-/// reason is the help line under the list.
-fn row_label(row: &Row) -> String {
-    if row.disabled {
-        format!("{} (not in this scope)", row.label)
+/// A row's label, with the index prepended in typed mode and the note a row
+/// this scope cannot use carries. The long reason is the help line under the
+/// list.
+fn row_label(row: &Row, show_numbers: bool) -> String {
+    let text = if show_numbers {
+        format!("{}. {}", row.index, row.label)
     } else {
         row.label.clone()
+    };
+    if row.disabled {
+        format!("{text} (not in this scope)")
+    } else {
+        text
     }
 }
 
 /// A row as drawn: the checkbox on the first line, the label wrapped under it,
 /// then styled. A row this scope cannot use is dim; the row under the cursor is
-/// bold, its checkbox green.
+/// bold, its checkbox bright green.
 ///
 /// The label is wrapped *before* the prefix is added: `wrap` collapses runs of
-/// whitespace, so wrapping the prefixed line would eat the two columns the
-/// cursor and the checkbox occupy and pull every row to the left edge.
-fn row_lines(row: &Row, cursor: bool, checked: bool, width: usize, color: bool) -> Vec<String> {
-    let prefix = row_prefix(cursor, checked);
-    let room = width.saturating_sub(prefix.chars().count());
-    let mut lines = wrap(&row_label(row), room.max(1), prefix.chars().count());
-    let first = lines.first_mut().expect("wrap always returns one line");
-    *first = format!("{prefix}{first}");
+/// whitespace, so wrapping the prefixed line would eat the columns the cursor
+/// and the checkbox occupy and pull every row to the left edge.
+fn row_lines(
+    row: &Row,
+    cursor: bool,
+    checked: bool,
+    width: usize,
+    color: bool,
+    show_numbers: bool,
+) -> Vec<String> {
+    let prefix = row_prefix(cursor, checked, color);
+    let label = row_label(row, show_numbers);
+    let prefix_width = crate::select::visible_len(&prefix);
+    let room = width.saturating_sub(prefix_width);
+    let wrapped = wrap(&label, room.max(1), prefix_width);
 
-    lines
+    wrapped
         .into_iter()
-        .map(|line| {
+        .enumerate()
+        .map(|(i, text)| {
+            let text = if cursor && !row.disabled {
+                paint(color, "1", &text)
+            } else {
+                text
+            };
+            let line = if i == 0 {
+                format!("{prefix}{text}")
+            } else {
+                text
+            };
             if row.disabled {
-                return paint(color, "2", &line);
+                paint(color, "2", &line)
+            } else {
+                line
             }
-            let cut = line
-                .char_indices()
-                .nth(prefix.chars().count())
-                .map_or(line.len(), |(at, _)| at);
-            let (box_, label) = line.split_at(cut);
-            let box_ = if checked {
-                paint(color, "1;32", box_)
-            } else {
-                box_.to_string()
-            };
-            let label = if cursor {
-                paint(color, "1", label)
-            } else {
-                label.to_string()
-            };
-            format!("{box_}{label}")
         })
         .collect()
 }
@@ -681,6 +862,7 @@ fn list_block(
             checked.get(index).copied().unwrap_or(false),
             width,
             color,
+            false,
         ));
     }
     block.push(String::new());
@@ -692,15 +874,17 @@ fn list_block(
     block
 }
 
-/// The focused row's help, dim, wrapped, indented two columns.
+/// The focused row's help, dim, wrapped, with a dim `▏` gutter.
 ///
-/// `wrap` is asked for no indent of its own: the two spaces are added here to
-/// every line, so a continuation would otherwise carry four and drift right of
-/// the sentence it continues.
+/// `wrap` is asked for no indent of its own: the two spaces and gutter are added
+/// here to every line, so a continuation would otherwise carry extra columns
+/// and drift right of the sentence it continues.
 fn help_lines(text: &str, width: usize, color: bool) -> Vec<String> {
-    wrap(text, width.saturating_sub(2), 0)
+    let gutter = paint(color, "2", "▏");
+    let prefix_width = 2 + crate::select::visible_len(&gutter) + 1;
+    wrap(text, width.saturating_sub(prefix_width), 0)
         .into_iter()
-        .map(|line| format!("  {}", paint(color, "2", &line)))
+        .map(|line| format!("  {gutter} {}", paint(color, "2", &line)))
         .collect()
 }
 
@@ -798,7 +982,7 @@ fn ask_list_lines(
         writeln!(output, "{question}").map_err(io)?;
         let width = row_width();
         for (index, row) in rows.iter().enumerate() {
-            for line in row_lines(row, false, checked[index], width, color) {
+            for line in row_lines(row, false, checked[index], width, color, true) {
                 writeln!(output, "{line}").map_err(io)?;
             }
         }
@@ -929,27 +1113,6 @@ fn write_review(
             )?;
         }
     }
-    if !plan.rule_writes.is_empty() {
-        section(output, color, "Rule files")?;
-        for write in &plan.rule_writes {
-            item(
-                output,
-                color,
-                &format!(
-                    "{} {}",
-                    write.agent.name(),
-                    paint(
-                        color,
-                        "2",
-                        &format!(
-                            "\u{2192} {}",
-                            display_path(&write.path, &plan.base, plan.scope)
-                        )
-                    )
-                ),
-            )?;
-        }
-    }
     if !hooks.is_empty() {
         section(output, color, "Hooks and agent configuration")?;
         writeln!(
@@ -965,7 +1128,8 @@ fn write_review(
         for step in hooks {
             item(output, color, &format!("{}: {}", step.id, step.summary))?;
             if let Some(detail) = &step.detail {
-                writeln!(output, "    {}", paint(color, "2", detail)).map_err(io)?;
+                let gutter = paint(color, "2", "▏");
+                writeln!(output, "  {gutter} {}", paint(color, "2", detail)).map_err(io)?;
             }
         }
     }
@@ -997,23 +1161,23 @@ fn write_review(
     }
 
     section(output, color, "The exact text")?;
+    let gutter = paint(color, "2", "▏");
     for line in plan.block.lines() {
-        writeln!(output, "{line}").map_err(io)?;
+        writeln!(output, "  {gutter} {}", paint(color, "2", line)).map_err(io)?;
     }
     Ok(())
 }
 
-/// A review section: a bold title, set off from what comes before it by a blank
-/// line. Every section carries its own, so a multi-line help or a long item
-/// cannot crowd the next one.
+/// A review section: a bold bright-green heading with an arrow marker, set off
+/// from what comes before it by a blank line.
 fn section(output: &mut impl Write, color: bool, title: &str) -> Result<(), String> {
     writeln!(output).map_err(io)?;
-    writeln!(output, "{}", paint(color, "1", title)).map_err(io)
+    writeln!(output, "{}", paint(color, "1;92", &format!("▸ {title}"))).map_err(io)
 }
 
-/// One line of what the run will do: a check, then the thing itself.
+/// One line of what the run will do: a bright-green check, then the thing itself.
 fn item(output: &mut impl Write, color: bool, text: &str) -> Result<(), String> {
-    writeln!(output, "{} {text}", paint(color, "1;32", "\u{2714}")).map_err(io)
+    writeln!(output, "{} {text}", paint(color, "92", "\u{2714}")).map_err(io)
 }
 
 /// The home directory, for collapsing a path to `~`.
@@ -1068,6 +1232,22 @@ fn ask_confirm(
     confirm(input, output, color)
 }
 
+/// The prefix for an Apply/Cancel row: a bold cursor when focused, a filled
+/// diamond for Apply and a hollow one for Cancel.
+fn confirm_prefix(cursor: bool, yes: bool, color: bool) -> String {
+    let pointer = if cursor {
+        paint(color, "1", "❯")
+    } else {
+        " ".to_string()
+    };
+    let diamond = if yes {
+        paint(color, "92", "◆")
+    } else {
+        "◇".to_string()
+    };
+    format!("{pointer} {diamond} ")
+}
+
 /// The Apply/Cancel list: the cursor moves, enter answers, esc cancels.
 #[cfg_attr(test, mutants::skip)] // the raw branch needs a real tty; the line branch below is what the tests drive
 fn ask_confirm_keys(
@@ -1095,12 +1275,14 @@ fn ask_confirm_keys(
         let width = row_width();
         let mut block: Vec<String> = Vec::new();
         for (index, (label, _)) in CHOICES.iter().enumerate() {
-            let line = if index == picked {
-                format!("> {}", paint(color, "1", label))
+            let yes = index == 0;
+            let prefix = confirm_prefix(index == picked, yes, color);
+            let text = if index == picked {
+                paint(color, "1", label)
             } else {
-                format!("  {label}")
+                label.to_string()
             };
-            block.push(line);
+            block.push(format!("{prefix}{text}"));
         }
         // The blank line the list questions use, for the same reason.
         block.push(String::new());
@@ -1160,36 +1342,74 @@ fn report(
 ) -> Result<(), String> {
     let color = screens.color;
     writeln!(output).map_err(io)?;
-    writeln!(output, "{}", rule(color)).map_err(io)?;
     if written.is_empty() && plan.config_writes.is_empty() && hooks.steps.is_empty() {
-        writeln!(output, "pixel setup wrote nothing.").map_err(io)?;
-    } else {
-        writeln!(output, "{}", paint(color, "1;32", "pixel setup complete")).map_err(io)?;
-        for path in written {
-            writeln!(output, "  updated {}", path.display()).map_err(io)?;
-        }
-        for step in &hooks.steps {
-            writeln!(output, "  {}: {}", step.id, step.summary).map_err(io)?;
-        }
-        for key in &plan.config_writes {
-            writeln!(
-                output,
-                "  set {} = {}",
-                key.key.join("."),
-                render_value(key.value.to_json())
-            )
-            .map_err(io)?;
-        }
-    }
-    for note in &plan.notes {
-        writeln!(output, "  note: {note}").map_err(io)?;
-    }
-    if !scripted {
         writeln!(
             output,
-            "Run `pixel doctor .` afterwards to check the machine end to end."
+            "{}",
+            paint(color, "2", "pixel setup wrote nothing.")
         )
         .map_err(io)?;
+        for note in &plan.notes {
+            writeln!(output, "  note: {note}").map_err(io)?;
+        }
+    } else {
+        let width = banner_width();
+        // A card row that runs past the width would push the right border
+        // out: every line is wrapped to fit before it is boxed.
+        let inner = width.saturating_sub(4);
+        let box_lines = |output: &mut dyn Write, text: &str| -> Result<(), String> {
+            for line in wrap(text, inner, 0) {
+                writeln!(output, "{}", box_row(color, &line, width)).map_err(io)?;
+            }
+            Ok(())
+        };
+        writeln!(output, "╭{}╮", "─".repeat(width)).map_err(io)?;
+        writeln!(
+            output,
+            "{}",
+            box_row(
+                color,
+                &format!(
+                    "{} {}",
+                    paint(color, "92", "✓"),
+                    paint(color, "1", "pixel setup complete")
+                ),
+                width,
+            )
+        )
+        .map_err(io)?;
+        for path in written {
+            box_lines(output, &format!("  updated {}", path.display()))?;
+        }
+        for step in &hooks.steps {
+            box_lines(output, &format!("  {}: {}", step.id, step.summary))?;
+        }
+        for key in &plan.config_writes {
+            box_lines(
+                output,
+                &format!(
+                    "  set {} = {}",
+                    key.key.join("."),
+                    render_value(key.value.to_json())
+                ),
+            )?;
+        }
+        if !plan.notes.is_empty() {
+            writeln!(output, "{}", box_row(color, "", width)).map_err(io)?;
+            for note in &plan.notes {
+                box_lines(output, &format!("  note: {note}"))?;
+            }
+        }
+        if !scripted {
+            writeln!(output, "{}", box_row(color, "", width)).map_err(io)?;
+            let next = format!(
+                "{} {}",
+                paint(color, "92", "next ›"),
+                paint(color, "92", "pixel doctor .")
+            );
+            writeln!(output, "{}", box_row(color, &next, width)).map_err(io)?;
+        }
+        writeln!(output, "╰{}╯", "─".repeat(width)).map_err(io)?;
     }
     Ok(())
 }
@@ -1254,7 +1474,7 @@ fn io(err: std::io::Error) -> String {
 mod dev {
     use std::path::{Path, PathBuf};
 
-    use pixel_install::setup::{AgentTarget, Feature, Scope};
+    use pixel_setup::setup::{AgentTarget, Feature, Scope};
 
     use super::{Answers, parse_indices};
 
@@ -1366,7 +1586,9 @@ mod tests {
     fn rows(labels: &[&str]) -> Vec<Row> {
         labels
             .iter()
-            .map(|label| Row {
+            .enumerate()
+            .map(|(index, label)| Row {
+                index: index + 1,
                 label: (*label).to_string(),
                 help: "the help line",
                 disabled: false,
@@ -1419,7 +1641,7 @@ mod tests {
         );
         assert_eq!(
             block[help - 2],
-            "> [ ] b",
+            "❯ ◯ b",
             "the row above the gap is the cursor's own row: {block:?}"
         );
 
@@ -1453,7 +1675,7 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         let title = lines
             .iter()
-            .position(|line| line.starts_with("Review"))
+            .position(|line| line.contains("Review"))
             .expect("the banner title");
         assert_eq!(
             lines[title - 1],
@@ -1556,7 +1778,7 @@ mod tests {
     fn both_key_hints_are_the_ones_each_input_mode_shows() {
         assert_eq!(
             list_keys_hint(&KeyReader::forced(true)),
-            "↑/↓ move · space select · a all · n none · enter continue · esc cancel"
+            "↑/↓ or ←/→ move · space select · a all · n none · enter continue · esc cancel"
         );
         assert_eq!(
             list_keys_hint(&KeyReader::forced(false)),
@@ -1620,9 +1842,9 @@ mod tests {
         let question = written.find("Pick one:").expect("the question");
         assert!(banner < rule && rule < question, "got {written}");
         assert!(written.contains("Step 1 of 3"), "got {written}");
-        assert!(written.contains("  [x] a"), "got {written}");
-        assert!(written.contains("  [ ] b"), "got {written}");
-        assert!(written.contains("  [x] c"), "got {written}");
+        assert!(written.contains("  ◉ 1. a"), "got {written}");
+        assert!(written.contains("  ◯ 2. b"), "got {written}");
+        assert!(written.contains("  ◉ 3. c"), "got {written}");
         assert!(
             written.contains("Your answer [3 numbers, `all`, `none`] default [1,3]"),
             "the answer line names the default it will keep: {written}"
@@ -1636,7 +1858,7 @@ mod tests {
         rows[1].help = "Re-run with --repo <path> to land work on the target branch.";
         let (_, written) = with_input("\n", |input, output| ask(input, output, &rows, &[1]));
         assert!(
-            written.contains("[ ] land (not in this scope)"),
+            written.contains("◯ 2. land (not in this scope)"),
             "the row says what it is: {written}"
         );
         assert!(
@@ -1735,16 +1957,17 @@ mod tests {
     #[test]
     fn a_row_wraps_its_own_label_and_the_continuation_lines_up_under_it() {
         let row = Row {
-            label: "12. Land on the target branch, and the rest of a long label".into(),
+            index: 12,
+            label: "Land on the target branch, and the rest of a long label".into(),
             help: "help",
             disabled: false,
         };
-        let lines = row_lines(&row, true, true, 24, false);
+        let lines = row_lines(&row, true, true, 24, false, false);
         assert!(lines.len() > 1, "a label past the width wraps: {lines:?}");
-        assert!(lines[0].starts_with("> [x] "), "{lines:?}");
+        assert!(lines[0].starts_with("❯ ◉ "), "{lines:?}");
         assert_eq!(
             lines[1].chars().take_while(|c| *c == ' ').count(),
-            row_prefix(true, true).chars().count(),
+            row_prefix(true, true, false).chars().count(),
             "the continuation lines up under the label: {lines:?}"
         );
         assert!(
@@ -1756,29 +1979,31 @@ mod tests {
     #[test]
     fn with_colour_on_the_checkbox_is_green_and_the_cursor_row_is_bold() {
         let row = Row {
-            label: "3. Cursor".into(),
+            index: 3,
+            label: "Cursor".into(),
             help: "help",
             disabled: false,
         };
-        let on = row_lines(&row, true, true, 40, true);
-        assert!(on[0].contains("\x1b[1;32m"), "the checkbox: {on:?}");
+        let on = row_lines(&row, true, true, 40, true, false);
+        assert!(on[0].contains("\x1b[1;92m"), "the checkbox: {on:?}");
         assert!(
             on[0].ends_with("\x1b[0m") || on[0].contains("\x1b[1m"),
             "the label carries the cursor: {on:?}"
         );
-        let plain = row_lines(&row, true, true, 40, false);
-        assert_eq!(plain, vec!["> [x] 3. Cursor"], "no SGR when colour is off");
+        let plain = row_lines(&row, true, true, 40, false, false);
+        assert_eq!(plain, vec!["❯ ◉ Cursor"], "no SGR when colour is off");
     }
 
     #[test]
     fn a_disabled_row_is_dim_and_keeps_its_reason_out_of_the_label() {
         let row = Row {
-            label: "12. Land".into(),
+            index: 12,
+            label: "Land".into(),
             help: "why",
             disabled: true,
         };
-        let lines = row_lines(&row, false, false, 40, false);
-        assert_eq!(lines, vec!["  [ ] 12. Land (not in this scope)"]);
+        let lines = row_lines(&row, false, false, 40, false, true);
+        assert_eq!(lines, vec!["  ◯ 12. Land (not in this scope)"]);
     }
 
     #[test]
@@ -1807,12 +2032,7 @@ mod tests {
             &scratch,
             Scope::Global,
             &[AgentTarget::ClaudeCode, AgentTarget::Cursor],
-            &[
-                Feature::Prompt,
-                Feature::Metrics,
-                Feature::Land,
-                Feature::TaskHooks,
-            ],
+            &[Feature::Prompt, Feature::Metrics],
             &pixel_plugin::Available::none(),
         )
         .unwrap();
@@ -1843,7 +2063,7 @@ mod tests {
     fn step(id: &str, summary: &str) -> InstallStep {
         InstallStep {
             id: id.into(),
-            status: pixel_install::install::CheckStatus::Green,
+            status: pixel_setup::install::CheckStatus::Green,
             summary: summary.into(),
             detail: Some("/home/someone/.claude/settings.json".into()),
         }
@@ -1857,7 +2077,7 @@ mod tests {
             home: "home".into(),
             dry_run: false,
             steps,
-            summary: pixel_install::install::InstallSummary {
+            summary: pixel_setup::install::InstallSummary {
                 green: 0,
                 yellow: 0,
                 red: 0,
@@ -1872,7 +2092,7 @@ mod tests {
             &scratch,
             Scope::Global,
             &[AgentTarget::ClaudeCode],
-            &[Feature::Prompt, Feature::TaskHooks],
+            &[Feature::Prompt],
             &pixel_plugin::Available::none(),
         )
         .unwrap();
@@ -1921,7 +2141,7 @@ mod tests {
             &base,
             Scope::Global,
             &[AgentTarget::Codex],
-            &[Feature::CodexConfig],
+            &[Feature::Prompt],
             &pixel_plugin::Available::none(),
         )
         .unwrap();
@@ -1940,7 +2160,7 @@ mod tests {
             &base,
             Scope::Repository,
             &[AgentTarget::ClaudeCode],
-            &[Feature::TaskHooks],
+            &[Feature::Classify],
             &pixel_plugin::Available::none(),
         )
         .unwrap();
@@ -2021,10 +2241,18 @@ mod tests {
         );
         assert!(written.contains("pixel doctor"), "{written}");
 
+        let empty_plan = SetupPlan::new(
+            &scratch,
+            Scope::Global,
+            &[AgentTarget::ClaudeCode],
+            &[],
+            &pixel_plugin::Available::none(),
+        )
+        .unwrap();
         let (_, empty) = with_input("", |_, output| {
             report(
                 output,
-                &plan,
+                &empty_plan,
                 &[],
                 &install_report(Vec::new()),
                 true,
@@ -2057,15 +2285,7 @@ mod tests {
 
     #[test]
     fn the_defaults_are_the_catalog_defaults_and_the_markers_on_disk() {
-        assert_eq!(default_features(Scope::Global).len(), 7);
-        assert!(
-            !default_features(Scope::Global).contains(&Feature::Land),
-            "a repository-only feature is never the machine default"
-        );
-        assert!(
-            !default_features(Scope::Repository).contains(&Feature::Land),
-            "Land is opt-in even where it could be honoured"
-        );
+        assert_eq!(default_features(Scope::Global).len(), 3);
 
         let scratch = scratch_dir("defaults");
         // An empty directory evidences no agent, and a human drives none.
@@ -2157,14 +2377,14 @@ mod tests {
                 selected_features: Some("1".into()),
                 dummy_apply: false,
             };
-            let answers = dev::answers(&options, pixel_install::setup::Scope::Global)
+            let answers = dev::answers(&options, pixel_setup::setup::Scope::Global)
                 .unwrap()
                 .expect("both flags answered");
             assert_eq!(
                 answers.agents,
                 vec![
-                    pixel_install::setup::AgentTarget::ClaudeCode,
-                    pixel_install::setup::AgentTarget::Devin
+                    pixel_setup::setup::AgentTarget::ClaudeCode,
+                    pixel_setup::setup::AgentTarget::Devin
                 ]
             );
             assert!(!dev::scripted(&Options {
@@ -2174,33 +2394,13 @@ mod tests {
         }
 
         #[test]
-        fn the_feature_flag_drops_a_repository_local_feature_outside_a_repository() {
-            use pixel_install::setup::{Feature, Scope};
-            let land = Feature::Land.index();
-            let list = format!("1,{land}");
-            let global = Options {
-                selected_agents: Some("1".into()),
-                selected_features: Some(list.clone()),
-                dummy_apply: false,
-            };
-            let answers = dev::answers(&global, Scope::Global).unwrap().unwrap();
-            assert_eq!(
-                answers.features,
-                vec![Feature::Prompt],
-                "a repository-only feature is dropped in a machine-wide run"
-            );
-            let repo = dev::answers(&global, Scope::Repository).unwrap().unwrap();
-            assert_eq!(repo.features, vec![Feature::Prompt, Feature::Land]);
-        }
-
-        #[test]
         fn a_cancel_cannot_be_typed_into_a_flag() {
             let options = Options {
                 selected_agents: Some("q".into()),
                 selected_features: Some("q".into()),
                 dummy_apply: false,
             };
-            assert!(dev::answers(&options, pixel_install::setup::Scope::Global).is_err());
+            assert!(dev::answers(&options, pixel_setup::setup::Scope::Global).is_err());
         }
 
         #[test]

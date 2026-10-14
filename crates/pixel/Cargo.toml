@@ -34,7 +34,7 @@ pixel-rank = { path = "../pixel-rank" }
 pixel-session = { path = "../pixel-session" }
 pixel-ops = { path = "../pixel-ops" }
 pixel-facts = { path = "../pixel-facts" }
-pixel-install = { path = "../pixel-install" }
+pixel-setup = { path = "../pixel-setup" }
 pixel-proto = { path = "../pixel-proto" }
 pixel-actionlog = { path = "../pixel-actionlog" }
 pixel-release = { path = "../pixel-release" }

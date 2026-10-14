@@ -223,9 +223,9 @@ case "$PROVIDER" in
         # prompt, --verbose so stream-json emits tool events. Headless (-p)
         # unless --interactive, which runs the real TUI.
         AGENT_PROMPT="${AGENT_PROMPT:-$HOME/.local/share/pixel/agent-prompt.md}"
-        [ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
+        [ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-setup/assets/pixel-agent-prompt.md"
         SUBAGENT_PROMPT="${SUBAGENT_PROMPT:-$HOME/.local/share/pixel/subagent-prompt.md}"
-        [ -s "$SUBAGENT_PROMPT" ] || SUBAGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-subagent-prompt.md"
+        [ -s "$SUBAGENT_PROMPT" ] || SUBAGENT_PROMPT="$ROOT/crates/pixel-setup/assets/pixel-subagent-prompt.md"
         [ -s "$AGENT_PROMPT" ] || die "agent prompt missing (run: pixel setup)"
         command -v claude >/dev/null 2>&1 || die "claude not on PATH"
         if [ "$INTERACTIVE" -eq 1 ]; then

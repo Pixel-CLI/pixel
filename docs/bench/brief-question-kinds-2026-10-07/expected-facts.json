@@ -50,8 +50,8 @@
       "The current Codex hook is the retired pixel run-hook prompt-submit --provider codex command."
     ],
     "source": [
-      "crates/pixel-install/src/codex_config.rs:1044",
-      "crates/pixel-install/src/codex_config.rs:1054",
+      "crates/pixel-setup/src/codex_config.rs:1044",
+      "crates/pixel-setup/src/codex_config.rs:1054",
       "crates/pixel/src/execution_brief/chain.rs:596",
       "crates/pixel/src/execution_brief/chain.rs:722",
       "crates/pixel/src/task_hook.rs:1015",
@@ -100,9 +100,9 @@
       "The host event is a different Codex event."
     ],
     "source": [
-      "crates/pixel-install/src/codex_config.rs:1044",
-      "crates/pixel-install/src/codex_config.rs:1054",
-      "crates/pixel-install/src/codex_config.rs:203"
+      "crates/pixel-setup/src/codex_config.rs:1044",
+      "crates/pixel-setup/src/codex_config.rs:1054",
+      "crates/pixel-setup/src/codex_config.rs:203"
     ],
     "regex_rubric_role": "coverage signal only; semantic criteria require human/transcript review"
   },

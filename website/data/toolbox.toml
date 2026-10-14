@@ -1,6 +1,6 @@
 # The "What your agent gets" chapter of the home (layouts/index.html, #toolbox):
 # six questions an agent asks around an edit, the command the installed prompt
-# (crates/pixel-install/assets/pixel-agent-prompt.md, "Retrieval commands")
+# (crates/pixel-setup/assets/pixel-agent-prompt.md, "Retrieval commands")
 # maps each one to, and an excerpt of what that command printed.
 #
 # Every excerpt is real output, shortened, never rewritten: paths lose their

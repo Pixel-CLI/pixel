@@ -39,7 +39,7 @@ pub(crate) const PARTS_ENV: &str = "PIXEL_BRIEF_PARTS";
 /// Characters of one delivered part: under the 10 000 a host caps one hook at.
 pub(crate) const PART_CHARS: usize = 9_800;
 /// Parts a pack may fill: the most hooks `brief_parts` allows.
-pub(crate) const MAX_PARTS: usize = pixel_install::config::BRIEF_PARTS_MAX as usize;
+pub(crate) const MAX_PARTS: usize = pixel_setup::config::BRIEF_PARTS_MAX as usize;
 /// The line the pack ends on.
 pub(crate) const DIRECTIVE: &str =
     "Answer from this context. Use a tool only if something you need is not shown above.";

@@ -1007,7 +1007,7 @@ class SelfTest(unittest.TestCase):
                       "token " + "A1b2C3d4" * 6):
             self.assertTrue(privacy_problems("text", value), value)
         for value in ("how does install work", "https://github.com/Pixel-CLI/pixel/pull/876",
-                      "crates/pixel-install/src/config.rs"):
+                      "crates/pixel-setup/src/config.rs"):
             self.assertEqual(privacy_problems("text", value), [], value)
 
     def test_shipped_set_is_valid(self):

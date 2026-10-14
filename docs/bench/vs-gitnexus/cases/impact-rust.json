@@ -17,12 +17,12 @@
   {
     "symbol": "apply_managed_markers",
     "lang": "rust",
-    "def_file": "crates/pixel-install/src/config.rs",
+    "def_file": "crates/pixel-setup/src/config.rs",
     "def_line": 231,
     "truth_files": [
-      "crates/pixel-install/src/config.rs",
-      "crates/pixel-install/src/doctor.rs",
-      "crates/pixel-install/src/install.rs"
+      "crates/pixel-setup/src/config.rs",
+      "crates/pixel-setup/src/doctor.rs",
+      "crates/pixel-setup/src/install.rs"
     ]
   },
   {
@@ -65,12 +65,12 @@
   {
     "symbol": "backup_if_changing",
     "lang": "rust",
-    "def_file": "crates/pixel-install/src/config.rs",
+    "def_file": "crates/pixel-setup/src/config.rs",
     "def_line": 200,
     "truth_files": [
-      "crates/pixel-install/src/config.rs",
-      "crates/pixel-install/src/install.rs",
-      "crates/pixel-install/src/uninstall.rs"
+      "crates/pixel-setup/src/config.rs",
+      "crates/pixel-setup/src/install.rs",
+      "crates/pixel-setup/src/uninstall.rs"
     ]
   },
   {

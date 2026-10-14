@@ -103,7 +103,7 @@ impl AgentTarget {
             Self::Gemini => "Write the pixel steering block into GEMINI.md.",
             Self::Antigravity => "Write the pixel steering block into the repository AGENTS.md.",
             Self::OpenCode => "Write the pixel steering block into the opencode AGENTS.md.",
-            Self::Pi => "Write the pixel steering block into the pi system-prompt file.",
+            Self::Pi => "Install the pixel skill and the impact/brief package under ~/.pi/agent.",
             Self::AgentMd => {
                 "Write the pixel steering block into the repository AGENTS.md every other agent reads."
             }
@@ -199,7 +199,6 @@ impl AgentTarget {
             (Self::ClaudeCode, Scope::Global) => Some(&[".claude", "CLAUDE.md"]),
             (Self::Codex, Scope::Global) => Some(&[".codex", "AGENTS.md"]),
             (Self::OpenCode, Scope::Global) => Some(&[".config", "opencode", "AGENTS.md"]),
-            (Self::Pi, Scope::Global) => Some(&[".pi", "agent", "APPEND_SYSTEM.md"]),
             (Self::Gemini, Scope::Global) => Some(&[".gemini", "GEMINI.md"]),
             (_, Scope::Repository) => Some(match self {
                 Self::ClaudeCode => &["CLAUDE.md"][..],
@@ -207,10 +206,15 @@ impl AgentTarget {
                 _ => &["AGENTS.md"][..],
             }),
             // Cursor's global rules need `.mdc` frontmatter to load at all, the
-            // generic target has no global file of its own, and Devin and
-            // Antigravity read the project's AGENTS.md only. None of them has a
-            // global instruction file pixel writes without guessing.
-            (Self::Cursor | Self::Devin | Self::Antigravity | Self::AgentMd, Scope::Global) => None,
+            // generic target has no global file of its own, and Devin,
+            // Antigravity and pi are handled by their own installs (pi gets a
+            // skill and a package under ~/.pi/agent, not an instruction file).
+            // None of them has a global instruction file pixel writes without
+            // guessing.
+            (
+                Self::Cursor | Self::Devin | Self::Antigravity | Self::Pi | Self::AgentMd,
+                Scope::Global,
+            ) => None,
         }
     }
 
@@ -327,7 +331,7 @@ mod tests {
             .collect();
         assert_eq!(
             named,
-            vec!["Claude Code", "Codex", "Gemini CLI", "OpenCode", "pi"],
+            vec!["Claude Code", "Codex", "Gemini CLI", "OpenCode"],
             "a global instruction file is claimed only where the harness reads one"
         );
     }

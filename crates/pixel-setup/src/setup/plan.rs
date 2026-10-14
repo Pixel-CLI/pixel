@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use pixel_plugin::{Available, install_command};
+use pixel_plugin::Available;
 
 use crate::install::InstallSelection;
 use crate::{InstallError, Result};
@@ -52,15 +52,6 @@ pub struct InstructionWrite {
     pub agents: Vec<AgentTarget>,
 }
 
-/// A per-agent rule file the setup writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuleWrite {
-    /// The file to write.
-    pub path: PathBuf,
-    /// The harness whose rules directory it sits in.
-    pub agent: AgentTarget,
-}
-
 /// A key the selected features store in the global configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigWrite {
@@ -86,8 +77,6 @@ pub struct SetupPlan {
     pub block: String,
     /// The instruction files to rewrite.
     pub instruction_writes: Vec<InstructionWrite>,
-    /// The rule files to write, empty unless the `rules` feature is selected.
-    pub rule_writes: Vec<RuleWrite>,
     /// The configuration keys to store, applied by the caller: this crate does
     /// not own the global YAML document.
     pub config_writes: Vec<ConfigWrite>,
@@ -129,38 +118,40 @@ impl SetupPlan {
         for agent in &agents {
             match agent.instruction_path(base, scope) {
                 Some(path) => by_path.entry(path).or_default().push(*agent),
-                None => notes.push(format!(
-                    "{} has no instruction file pixel writes in this scope; \
-                     copy the block below into the file it reads by hand.",
-                    agent.name()
-                )),
+                None => notes.push(match agent {
+                    AgentTarget::Pi if scope == Scope::Global => format!(
+                        "{} reads no instruction file pixel writes; it gets the \
+                         pixel skill and the impact/brief package under \
+                         ~/.pi/agent instead.",
+                        agent.name()
+                    ),
+                    _ => format!(
+                        "{} has no instruction file pixel writes in this scope; \
+                         copy the block below into the file it reads by hand.",
+                        agent.name()
+                    ),
+                }),
             }
         }
 
-        // A feature that is about a plugin command writes nothing where that
-        // plugin does not run: say which plugin makes it do something.
-        for feature in &features {
-            if let Some((command, repo)) = feature.requires_plugin()
-                && !plugins.has(command)
-            {
-                let why = plugins
-                    .blocked(command)
-                    .map_or_else(|| format!("run `{}`", install_command(repo)), str::to_owned);
-                notes.push(format!(
-                    "{} needs the {repo} plugin, which does not run here, so nothing was written for it; {why}.",
-                    feature.label()
-                ));
-            }
-        }
-
-        let rule_writes = rule_writes(base, &features, &agents);
-        let config_writes = features
+        let mut config_writes: Vec<ConfigWrite> = features
             .iter()
             .filter_map(|feature| match feature.writes() {
                 Writes::Config(key, value) => Some(ConfigWrite { key, value }),
                 _ => None,
             })
             .collect();
+        // The retrieval-first feature is also the brief feature: it installs the
+        // prompt-submit hook and enables the per-prompt brief in one choice.
+        if features.contains(&Feature::Prompt) {
+            config_writes.insert(
+                0,
+                ConfigWrite {
+                    key: &["brief"],
+                    value: ConfigValue::Bool(true),
+                },
+            );
+        }
 
         Ok(Self {
             base: base.to_path_buf(),
@@ -172,14 +163,12 @@ impl SetupPlan {
                 .into_iter()
                 .map(|(path, agents)| InstructionWrite { path, agents })
                 .collect(),
-            rule_writes,
             config_writes,
             notes,
         })
     }
 
-    /// Write the block into every instruction file, and the rules files when
-    /// the `rules` feature is selected.
+    /// Write the block into every instruction file.
     ///
     /// Returns the paths written, in the order they were written. A failure
     /// stops here: the files already written hold an idempotent block, so
@@ -188,12 +177,6 @@ impl SetupPlan {
     pub fn apply(&self) -> Result<Vec<PathBuf>> {
         let mut written = Vec::new();
         for write in &self.instruction_writes {
-            super::files::upsert_file(&write.path, &self.block).map_err(|err| {
-                InstallError::Setup(format!("update {}: {err}", write.path.display()))
-            })?;
-            written.push(write.path.clone());
-        }
-        for write in &self.rule_writes {
             super::files::upsert_file(&write.path, &self.block).map_err(|err| {
                 InstallError::Setup(format!("update {}: {err}", write.path.display()))
             })?;
@@ -214,18 +197,19 @@ impl SetupPlan {
         };
         InstallSelection {
             agents: self.agents.clone(),
-            task_hooks: has(HookGroup::Task),
-            codex_hooks: has(HookGroup::Codex),
-            pi_extension: has(HookGroup::Pi),
+            task_hooks: has(HookGroup::Task) || self.features.contains(&Feature::Prompt),
+            codex_hooks: has(HookGroup::Codex) || self.agents.contains(&AgentTarget::Codex),
+            // pi extension is installed automatically when pi is selected.
+            pi_extension: has(HookGroup::Pi) || self.agents.contains(&AgentTarget::Pi),
         }
     }
 
-    /// Whether the plan writes any instruction or rule file. A setup whose
-    /// every answer was a note has no file to write, and saying so is better
-    /// than reporting a success that changed nothing; the hook steps and the
+    /// Whether the plan writes any instruction file. A setup whose every
+    /// answer was a note has no file to write, and saying so is better than
+    /// reporting a success that changed nothing; the hook steps and the
     /// configuration keys are counted separately by the caller.
     pub fn is_empty(&self) -> bool {
-        self.instruction_writes.is_empty() && self.rule_writes.is_empty()
+        self.instruction_writes.is_empty()
     }
 }
 
@@ -239,25 +223,6 @@ pub fn rule_files(base: &Path) -> Vec<PathBuf> {
     paths.sort();
     paths.dedup();
     paths
-}
-
-/// The rule files the `rules` feature writes, one per selected agent that has
-/// a rules directory. Duplicates collapse: two agents sharing a directory get
-/// one file.
-fn rule_writes(base: &Path, features: &[Feature], agents: &[AgentTarget]) -> Vec<RuleWrite> {
-    if !features.contains(&Feature::Rules) {
-        return Vec::new();
-    }
-    let mut seen = BTreeMap::new();
-    for (agent, dir) in RULES_DIRS {
-        if agents.contains(agent) {
-            seen.entry(*agent)
-                .or_insert_with(|| join(base, &[dir, RULES_FILE]));
-        }
-    }
-    seen.into_iter()
-        .map(|(agent, path)| RuleWrite { path, agent })
-        .collect()
 }
 
 #[cfg(test)]
@@ -302,29 +267,14 @@ mod tests {
         let plan = plan(
             Scope::Repository,
             &[AgentTarget::Pi, AgentTarget::ClaudeCode],
-            &[Feature::Semantic, Feature::Prompt],
+            &[Feature::Metrics, Feature::Prompt],
         );
         assert_eq!(
             plan.agents,
             vec![AgentTarget::ClaudeCode, AgentTarget::Pi],
             "the wizard's answer order must not reach the output"
         );
-        assert_eq!(plan.features, vec![Feature::Prompt, Feature::Semantic]);
-    }
-
-    #[test]
-    fn a_repository_local_feature_is_dropped_outside_a_repository() {
-        let global = plan(Scope::Global, &[AgentTarget::ClaudeCode], &[Feature::Land]);
-        assert!(global.features.is_empty(), "got {:?}", global.features);
-        assert!(!global.block.contains("Publishing"));
-
-        let repo = plan(
-            Scope::Repository,
-            &[AgentTarget::ClaudeCode],
-            &[Feature::Land],
-        );
-        assert_eq!(repo.features, vec![Feature::Land]);
-        assert!(repo.block.contains("### Publishing"));
+        assert_eq!(plan.features, vec![Feature::Prompt, Feature::Metrics]);
     }
 
     #[test]
@@ -344,9 +294,8 @@ mod tests {
         let plan = plan(
             Scope::Repository,
             &[AgentTarget::ClaudeCode, AgentTarget::Pi],
-            &[Feature::TaskHooks, Feature::PiExtension, Feature::Prompt],
+            &[Feature::Prompt],
         );
-        assert_eq!(plan.instruction_writes.len(), 2);
         assert_eq!(
             plan.install_selection(),
             InstallSelection {
@@ -355,14 +304,14 @@ mod tests {
                 codex_hooks: false,
                 pi_extension: true,
             },
-            "only the hook groups the features name, for the agents picked"
+            "the retrieval-first feature installs task hooks and pi is automatic"
         );
 
         let none = super::SetupPlan::new(
             &base(),
             Scope::Global,
-            &[AgentTarget::Codex],
-            &[Feature::Prompt],
+            &[AgentTarget::ClaudeCode],
+            &[Feature::Classify],
             &Available::none(),
         )
         .unwrap()
@@ -371,6 +320,20 @@ mod tests {
             !none.task_hooks && !none.codex_hooks && !none.pi_extension,
             "a feature left off installs nothing: {none:?}"
         );
+
+        let codex = super::SetupPlan::new(
+            &base(),
+            Scope::Global,
+            &[AgentTarget::Codex],
+            &[Feature::Classify],
+            &Available::none(),
+        )
+        .unwrap()
+        .install_selection();
+        assert!(
+            codex.codex_hooks && !codex.task_hooks && !codex.pi_extension,
+            "Codex hooks are installed automatically when Codex is selected: {codex:?}"
+        );
     }
 
     #[test]
@@ -378,7 +341,7 @@ mod tests {
         let plan = plan(
             Scope::Global,
             &[AgentTarget::ClaudeCode],
-            &[Feature::Metrics, Feature::Classify, Feature::Brief],
+            &[Feature::Metrics, Feature::Classify, Feature::Prompt],
         );
         let keys: Vec<&[&str]> = plan.config_writes.iter().map(|w| w.key).collect();
         assert_eq!(
@@ -389,35 +352,6 @@ mod tests {
                 &["classify", "enabled"][..]
             ]
         );
-    }
-
-    #[test]
-    fn no_rule_file_is_written_unless_the_rules_feature_is_selected() {
-        let without = plan(
-            Scope::Global,
-            &[AgentTarget::ClaudeCode],
-            &[Feature::Prompt],
-        );
-        assert!(without.rule_writes.is_empty());
-
-        let with = plan(Scope::Global, &[AgentTarget::ClaudeCode], &[Feature::Rules]);
-        assert_eq!(
-            with.rule_writes,
-            vec![RuleWrite {
-                path: base().join(".claude/rules").join(RULES_FILE),
-                agent: AgentTarget::ClaudeCode,
-            }]
-        );
-    }
-
-    #[test]
-    fn two_agents_sharing_a_rules_directory_write_one_file() {
-        let plan = plan(
-            Scope::Global,
-            &[AgentTarget::Gemini, AgentTarget::Antigravity],
-            &[Feature::Rules],
-        );
-        assert_eq!(plan.rule_writes.len(), 1, "got {:?}", plan.rule_writes);
     }
 
     #[test]
@@ -479,37 +413,5 @@ mod tests {
             !dir.path().join("CLAUDE.md").exists(),
             "the malformed file is the user's to fix; the run must not continue past it"
         );
-    }
-
-    #[test]
-    fn a_feature_about_a_missing_plugin_writes_nothing_and_says_which_plugin_to_install() {
-        let plan = plan(
-            Scope::Global,
-            &[AgentTarget::ClaudeCode],
-            &[Feature::Prompt, Feature::WebSearch],
-        );
-        assert!(!plan.block.contains("### Web search"), "{}", plan.block);
-        assert!(!plan.block.contains("pixel web-search"), "{}", plan.block);
-        assert_eq!(
-            plan.notes,
-            vec![
-                "Private web-search provider needs the pixel-utilities plugin, which does not run here, so nothing was written for it; run `pixel install github:Pixel-CLI/pixel-utilities`.".to_owned()
-            ]
-        );
-    }
-
-    #[test]
-    fn a_feature_about_an_installed_plugin_is_written_and_needs_no_note() {
-        let plugins = Available::of(&["web-search"]);
-        let plan = SetupPlan::new(
-            &base(),
-            Scope::Global,
-            &[AgentTarget::ClaudeCode],
-            &[Feature::Prompt, Feature::WebSearch],
-            &plugins,
-        )
-        .unwrap();
-        assert!(plan.block.contains("### Web search"), "{}", plan.block);
-        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
     }
 }

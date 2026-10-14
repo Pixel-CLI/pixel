@@ -47,12 +47,14 @@ pub fn decode_list_byte(byte: u8) -> Option<ListKey> {
 }
 
 /// Decode a complete `ESC [` sequence in a list picker: `[A`/`[B` are the
-/// vertical arrows. A sequence that died before its second byte is a lone Esc
-/// press, and cancels.
+/// vertical arrows and `[D`/`[C` the horizontal ones, which the Apply/Cancel
+/// row reads as its left/right pick (in a vertical list they move the same
+/// way). A sequence that died before its second byte is a lone Esc press,
+/// and cancels.
 pub fn decode_list_escape(second: Option<u8>, third: Option<u8>) -> Option<ListKey> {
     match (second, third) {
-        (Some(b'['), Some(b'A')) => Some(ListKey::Up),
-        (Some(b'['), Some(b'B')) => Some(ListKey::Down),
+        (Some(b'['), Some(b'A' | b'D')) => Some(ListKey::Up),
+        (Some(b'['), Some(b'B' | b'C')) => Some(ListKey::Down),
         (None, _) => Some(ListKey::Cancel),
         _ => None,
     }
@@ -437,9 +439,14 @@ mod tests {
             "a lone Esc"
         );
         assert_eq!(
+            decode_list_escape(Some(b'['), Some(b'D')),
+            Some(ListKey::Up),
+            "left moves like up"
+        );
+        assert_eq!(
             decode_list_escape(Some(b'['), Some(b'C')),
-            None,
-            "left/right do nothing here"
+            Some(ListKey::Down),
+            "right moves like down — the Apply/Cancel row's ←/→ pick"
         );
     }
 

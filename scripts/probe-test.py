@@ -1053,11 +1053,11 @@ class SelfTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             good = Path(self.write_probe(tmp, "good", body="#!/bin/sh\nrg --files | head\n"))
             prompt = "where does pixel decide how many hook parts a brief is split into"
-            self.assertEqual(overfit(good, prompt, ["crates/pixel-install/src/config.rs"]), [])
-            bad = Path(self.write_probe(tmp, "bad", body="#!/bin/sh\ncat crates/pixel-install/src/config.rs\n"
+            self.assertEqual(overfit(good, prompt, ["crates/pixel-setup/src/config.rs"]), [])
+            bad = Path(self.write_probe(tmp, "bad", body="#!/bin/sh\ncat crates/pixel-setup/src/config.rs\n"
                                                          "grep brief_parts src; echo hook parts\n"))
-            found = overfit(bad, prompt, ["crates/pixel-install/src/config.rs"])
-            self.assertIn("crates/pixel-install/src/config.rs", found)
+            found = overfit(bad, prompt, ["crates/pixel-setup/src/config.rs"])
+            self.assertIn("crates/pixel-setup/src/config.rs", found)
             self.assertIn("parts", found)
             self.assertIn("config", found)
             self.assertNotIn("how", found)

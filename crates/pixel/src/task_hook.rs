@@ -22,7 +22,7 @@ pub(crate) const MAX_INPUT: u64 = crate::hook_input::MAX_HOOK_INPUT;
 const DECISION_TIMEOUT: Duration = Duration::from_secs(6);
 // The brief's longest window plus the time to print it stays inside that decision.
 const _: () = assert!(
-    pixel_install::config::BRIEF_WINDOW_MAX_MS + 1_500 <= DECISION_TIMEOUT.as_millis() as u64
+    pixel_setup::config::BRIEF_WINDOW_MAX_MS + 1_500 <= DECISION_TIMEOUT.as_millis() as u64
 );
 // The probes' ceiling (5 s after the prompt) leaves a second of the decision to print the merged brief.
 const _: () = assert!(5_000 + 1_000 <= DECISION_TIMEOUT.as_millis() as u64);
@@ -1149,7 +1149,7 @@ fn forced_oversize(provider: TaskProvider, text: Option<String>) -> Option<Strin
     let parts = std::env::var(brief_parts::TEST_PAD_ENV)
         .ok()
         .and_then(|value| value.parse::<u8>().ok())
-        .filter(|parts| (1..=pixel_install::config::BRIEF_PARTS_MAX).contains(parts));
+        .filter(|parts| (1..=pixel_setup::config::BRIEF_PARTS_MAX).contains(parts));
     match parts {
         Some(parts) => Some(brief_parts::pad_to_parts(
             &text.unwrap_or_default(),

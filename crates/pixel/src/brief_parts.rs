@@ -63,13 +63,13 @@ impl FromStr for BriefPart {
         let bad = || {
             format!(
                 "expected K/N with 1 <= K <= N <= {}, got `{text}`",
-                pixel_install::config::BRIEF_PARTS_MAX
+                pixel_setup::config::BRIEF_PARTS_MAX
             )
         };
         let (index, count) = text.split_once('/').ok_or_else(bad)?;
         let index: u8 = index.parse().map_err(|_| bad())?;
         let count: u8 = count.parse().map_err(|_| bad())?;
-        ((1..=pixel_install::config::BRIEF_PARTS_MAX).contains(&count)
+        ((1..=pixel_setup::config::BRIEF_PARTS_MAX).contains(&count)
             && (1..=count).contains(&index))
         .then_some(Self { index, count })
         .ok_or_else(bad)

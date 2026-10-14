@@ -7,8 +7,8 @@
 # native plugin mechanism (ponytail-style).
 #
 # Sources of truth:
-#   crates/pixel-install/assets/pixel-agent-prompt.md     → legacy prompt and rule surfaces
-#   crates/pixel-install/assets/pixel-subagent-prompt.md  → PIXEL-SUBAGENT.md
+#   crates/pixel-setup/assets/pixel-agent-prompt.md     → legacy prompt and rule surfaces
+#   crates/pixel-setup/assets/pixel-subagent-prompt.md  → PIXEL-SUBAGENT.md
 #
 # The plugin manifests register no hooks and ship no skill: the pixel-impact
 # skill is gone (the per-prompt brief covers it) and its old copies are retired.
@@ -19,9 +19,9 @@
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-SRC="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
-SUB_SRC="$ROOT/crates/pixel-install/assets/pixel-subagent-prompt.md"
-PI_IMPACT_SRC="$ROOT/crates/pixel-install/assets/pi-impact.ts"
+SRC="$ROOT/crates/pixel-setup/assets/pixel-agent-prompt.md"
+SUB_SRC="$ROOT/crates/pixel-setup/assets/pixel-subagent-prompt.md"
+PI_IMPACT_SRC="$ROOT/crates/pixel-setup/assets/pi-impact.ts"
 VERSION=$(grep -m1 '^version' "$ROOT/crates/pixel/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')
 
 [ -f "$SRC" ] || { echo "missing $SRC" >&2; exit 1; }

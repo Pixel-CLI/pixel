@@ -36,7 +36,7 @@ wizard does, read in their tree at `5cbe33d` and PR #14425).
 ## What a feature writes
 
 A feature writes exactly one of four things (`Feature::writes()` in
-`crates/pixel-install/src/setup/feature.rs`), and saying which is the point:
+`crates/pixel-setup/src/setup/feature.rs`), and saying which is the point:
 
 - `Steering` — a `###` section in the managed block of every selected agent's
   instruction file;
@@ -144,12 +144,12 @@ repository state is touched by `pixel setup`.
 - [x] Answer questions 1–8 above; record the answers at the top of this file.
 - [x] Fix the feature → artifact mapping as a table (see above).
 - [x] File layout: detection, catalog, planner, renderer and upsert in
-      `crates/pixel-install/src/setup/`, command wiring and terminal I/O in
+      `crates/pixel-setup/src/setup/`, command wiring and terminal I/O in
       `crates/pixel/src/setup_cmd.rs`.
 
 ### 2. Detection module
 
-- [x] `crates/pixel-install/src/setup/detect.rs`: the env-var detection port
+- [x] `crates/pixel-setup/src/setup/detect.rs`: the env-var detection port
       (`AI_AGENT` → tool-specific markers → allowlisted `AGENT`), the
       `Agent` enum limited to the agents pixel supports, `as_str()` ids used by
       telemetry/action log, and normalization (`Claude_Code`, `claude code`,
@@ -198,7 +198,7 @@ repository state is touched by `pixel setup`.
       duplicate-block convergence, refusal on partial/reversed markers.
 - [x] Atomic write for the wizard path (temp file in the same directory +
       rename), and the concurrent-edit back-off `but` uses.
-- [x] Contract tests per property, in the `crates/pixel-install` style
+- [x] Contract tests per property, in the `crates/pixel-setup` style
       (`config/contract_tests.rs`).
 
 ### 6. The command
@@ -272,12 +272,12 @@ repository state is touched by `pixel setup`.
 - [x] `ARCHITECTURE.md` command table (a `pixel setup` row, and the
       `pixel setup` row, which `--remove` makes the owner of the block's removal), which is what
       `docs_drift` requires; `docs/manual-setup.md` got the guided path.
-      `crates/pixel-install/assets/pixel-agent-prompt.md` is deliberately
+      `crates/pixel-setup/assets/pixel-agent-prompt.md` is deliberately
       unchanged: it is the retrieval protocol, and the setup block is
       user-facing steering, not a command the agent runs.
 - [x] `changelog.d/pixel-setup-wizard.added.md`.
-- [x] `cargo fmt --all -- --check`, `cargo test -p pixel-install`,
-      `cargo test -p pixel-cli --test cli`, `cargo clippy -p pixel-install -p
+- [x] `cargo fmt --all -- --check`, `cargo test -p pixel-setup`,
+      `cargo test -p pixel-cli --test cli`, `cargo clippy -p pixel-setup -p
       pixel-cli --all-targets`, `cargo check --workspace --all-targets`,
       `cargo test -p pixel-git --test boundary`,
       `python3 scripts/check-spdx.py`.

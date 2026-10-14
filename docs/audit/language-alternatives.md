@@ -28,7 +28,7 @@ The audit evaluates languages against the workloads Pixel actually runs. From
 | Daemon — Unix socket NDJSON, filesystem watching, request dispatch | `pixel-daemon` | Concurrency, I/O multiplexing, long-running process |
 | Git subprocess wrapper — timeout, output cap, redacted stderr, trust boundary | `pixel-git` | Process management, security-critical |
 | Recall — transcript ingestion, embedding backends (ONNX, model2vec), semantic search | `pixel-recall` | ML inference, SQLite corpus, lazy loading |
-| CLI + hooks — clap parsing, cross-platform binary, agent integrations | `pixel`, `pixel-install` | Startup time, distribution, cross-platform correctness |
+| CLI + hooks — clap parsing, cross-platform binary, agent integrations | `pixel`, `pixel-setup` | Startup time, distribution, cross-platform correctness |
 
 **Performance envelope to preserve** (measure on the current Rust binary, record
 as the baseline before comparing alternatives):

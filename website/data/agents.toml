@@ -4,7 +4,7 @@
 # (layouts/shortcodes/agents.html). One entry per agent; its mark is
 # assets/logos/<logo>.svg.
 #
-# Every fact here restates crates/pixel-install, the plugin manifests at the
+# Every fact here restates crates/pixel-setup, the plugin manifests at the
 # repository root or the rule files under .cursor/. A pull
 # request that changes what `pixel setup` writes changes this file too:
 # crates/pixel/tests/cli/docs_drift.rs runs a real `pixel setup` and
@@ -86,8 +86,8 @@ slug = "pi"
 name = "Pi"
 logo = "pi"
 wiring = "install"
-lede = "`pixel setup` adds a local Pi package with the explicit `/pixel-impact <symbol>` command and a prompt-submit evidence brief. Pi keeps its native tools."
-global = ["~/.local/share/pixel/pi-package/package.json", "~/.local/share/pixel/pi-package/extensions/pixel-impact.ts", "~/.local/share/pixel/pi-package/extensions/pixel-brief.ts", "~/.pi/agent/settings.json"]
+lede = "`pixel setup` adds the pixel skill plus a local Pi package with the explicit `/pixel-impact <symbol>` command and a prompt-submit evidence brief. Pi keeps its native tools."
+global = ["~/.local/share/pixel/pi-package/package.json", "~/.local/share/pixel/pi-package/extensions/pixel-impact.ts", "~/.local/share/pixel/pi-package/extensions/pixel-brief.ts", "~/.pi/agent/settings.json", "~/.pi/agent/skills/pixel/SKILL.md"]
 when = "when Pi's agent directory (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) exists or `pi` is on PATH"
 wires = "the local package provides `/pixel-impact` and a `before_agent_start` hook that runs `pixel brief` on the submitted prompt and prepends its bounded evidence brief; Pi's native tools remain unchanged"
 note = "Your other Pi settings and packages stay: Pixel adds only its package path to `packages`, and `pixel setup --remove` takes it out again. A copy of the command an earlier release put in `extensions/` is removed, so Pi does not list it twice. Installing the npm package with `pi install` as well registers the command a second time: use one or the other."

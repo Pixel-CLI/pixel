@@ -36,7 +36,7 @@ pub use detect::{Agent, ENVIRONMENT_VARIABLES, ParseAgentError, detect, detect_w
 pub use feature::{ConfigValue, Feature, HookGroup, Writes};
 pub use files::{BLOCK_END, BLOCK_START, strip};
 pub use pixel_plugin::Available;
-pub use plan::{ConfigWrite, InstructionWrite, RuleWrite, SetupPlan, rule_files};
+pub use plan::{ConfigWrite, InstructionWrite, SetupPlan, rule_files};
 
 /// Render the block the wizard would write for `features`, without writing
 /// anything. This is what `pixel setup --print` prints and what the golden
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn the_module_exposes_the_whole_answer_surface() {
         assert_eq!(AgentTarget::ALL.len(), 9);
-        assert_eq!(Feature::ALL.len(), 12);
+        assert_eq!(Feature::ALL.len(), 4);
         assert!(BLOCK_START.starts_with("<!-- pixel:setup:"));
         assert!(BLOCK_END.ends_with("-->"));
     }

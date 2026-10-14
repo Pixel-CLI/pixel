@@ -383,6 +383,12 @@ fn strip_setup_blocks(
     // the setup created and is deleted rather than left empty.
     let rule_files = crate::setup::rule_files(base);
     targets.extend(rule_files.iter().cloned());
+    // Pi's system-prompt file is retired as a setup target — no run writes it
+    // any more — but a block an earlier release put there still comes out on
+    // remove.
+    if scope == crate::setup::Scope::Global {
+        targets.push(base.join(crate::install::PI_PROMPT_REL));
+    }
     targets.sort();
     targets.dedup();
 

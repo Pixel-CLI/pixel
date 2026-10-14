@@ -408,7 +408,7 @@
     "semble_rc": 0
   },
   {
-    "truth_file": "crates/pixel-install/src/install.rs",
+    "truth_file": "crates/pixel-setup/src/install.rs",
     "symbol": "find_in_paths",
     "query": "First executable file named name the PATH style list path",
     "arm_order": [

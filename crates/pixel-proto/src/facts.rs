@@ -245,7 +245,7 @@ mod tests {
             ],
             cofiles: vec![
                 CoFile {
-                    path: "crates/pixel-install/src/claude.rs".into(),
+                    path: "crates/pixel-setup/src/claude.rs".into(),
                     keywords: vec!["install".into(), "claude".into()],
                     weight: 6.25,
                     structural: true,
@@ -300,7 +300,7 @@ mod tests {
                 ],
                 "cofiles": [
                     {
-                        "path": "crates/pixel-install/src/claude.rs",
+                        "path": "crates/pixel-setup/src/claude.rs",
                         "keywords": ["install", "claude"],
                         "weight": 6.25,
                         "structural": true,

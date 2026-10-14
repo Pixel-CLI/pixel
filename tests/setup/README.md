@@ -21,15 +21,15 @@ for them.
 
 Each file is the managed block and nothing else — the user's own text around a
 block is preserved by the upsert, and that is a contract test next to the code
-(`crates/pixel-install/src/setup/files.rs`), not a golden.
+(`crates/pixel-setup/src/setup/files.rs`), not a golden.
 
 ## Regenerate
 
-The wording lives in `crates/pixel-install/src/setup/feature.rs`. After an
+The wording lives in `crates/pixel-setup/src/setup/feature.rs`. After an
 intentional change:
 
 ```bash
-PIXEL_SETUP_UPDATE_GOLDENS=1 cargo test -p pixel-install --lib setup::goldens
+PIXEL_SETUP_UPDATE_GOLDENS=1 cargo test -p pixel-setup --lib setup::goldens
 ```
 
 Then **read the diff**. A golden that moves when it should not is the test doing
@@ -38,7 +38,7 @@ containing, byte for byte, without running the command.
 
 ## How it is verified
 
-`crates/pixel-install/src/setup/goldens.rs` renders and applies the setup for
+`crates/pixel-setup/src/setup/goldens.rs` renders and applies the setup for
 one agent at a time in a scratch directory and compares the result with the
 file here. It never goes through the command line: the `--selected-agents`,
 `--selected-features` and `--dummy-apply` flags that drive the wizard from a

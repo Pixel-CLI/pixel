@@ -74,9 +74,9 @@ fi
 # function never applies): the deployed agent prompt, or the bundled asset
 # when nothing is installed.
 AGENT_PROMPT="${AGENT_PROMPT:-$HOME/.local/share/pixel/agent-prompt.md}"
-[ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
+[ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-setup/assets/pixel-agent-prompt.md"
 SUBAGENT_PROMPT="${SUBAGENT_PROMPT:-$HOME/.local/share/pixel/subagent-prompt.md}"
-[ -s "$SUBAGENT_PROMPT" ] || SUBAGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-subagent-prompt.md"
+[ -s "$SUBAGENT_PROMPT" ] || SUBAGENT_PROMPT="$ROOT/crates/pixel-setup/assets/pixel-subagent-prompt.md"
 if [ ! -s "$AGENT_PROMPT" ]; then
   echo "ERROR: agent prompt not found (run \`pixel setup\`, or set AGENT_PROMPT)" >&2
   exit 1

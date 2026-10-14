@@ -485,7 +485,7 @@ and validates the stdin-to-stdout contract standalone; no model was run.
 - `verify_pixel_brief`: invocation changed to the live verb
   `pixel run-hook task-event --provider codex --event prompt-submit`,
   the spelling `pixel install` registers for Codex `UserPromptSubmit`
-  (`crates/pixel-install/src/routing.rs:214,303`). The stdin payload keeps
+  (`crates/pixel-setup/src/routing.rs:214,303`). The stdin payload keeps
   `session_id`/`prompt`/`cwd`/`hook_event_name`; the hook reads `prompt`
   (`task_hook.rs:1091`) and `cwd` (`task_hook.rs:1038-1042`). The probe
   prompt changed from "How should a contributor approach this repository's
@@ -542,7 +542,7 @@ printf '%s' '{"session_id":"arena-brief-1","prompt":"where is README.md and how 
 Observed, worktree binary, cwd=this worktree (verbatim, wrapped for print):
 
 ```json
-{"hookSpecificOutput":{"additionalContext":"[PIXEL:BRIEF]\nfiles: crates/pixel-install/src/pi_project.rs:47 crates/pixel-install/src/install.rs:310 crates/pixel-install/src/uninstall.rs:239\nconfidence: medium | ops: 1/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.","hookEventName":"UserPromptSubmit"}}
+{"hookSpecificOutput":{"additionalContext":"[PIXEL:BRIEF]\nfiles: crates/pixel-setup/src/pi_project.rs:47 crates/pixel-setup/src/install.rs:310 crates/pixel-setup/src/uninstall.rs:239\nconfidence: medium | ops: 1/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.","hookEventName":"UserPromptSubmit"}}
 ```
 
 Same 296-byte context, `context_sha256

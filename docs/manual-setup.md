@@ -68,7 +68,7 @@ under [`tests/setup/.agents/`](../tests/setup/README.md).
 
 `pixel setup` deploys no prompt. To give an agent Pixel's full protocol
 anyway, copy
-[`crates/pixel-install/assets/pixel-agent-prompt.md`](../crates/pixel-install/assets/pixel-agent-prompt.md)
+[`crates/pixel-setup/assets/pixel-agent-prompt.md`](../crates/pixel-setup/assets/pixel-agent-prompt.md)
 into that agent's own instruction file (see [Any other agent](#any-other-agent)),
 not under `~/.local/share/pixel/`: `pixel setup` deletes the
 `agent-prompt.md` and `subagent-prompt.md` earlier releases deployed there.
@@ -150,7 +150,7 @@ look beyond the returned list when task correctness requires it.
 [per-agent pages](https://pixel-cli.dev/for/) list what it writes or removes
 for each, and the plugins or rules files for the others. To give any tool the
 full protocol, put the text of the bundled
-`crates/pixel-install/assets/pixel-agent-prompt.md` wherever that tool reads
+`crates/pixel-setup/assets/pixel-agent-prompt.md` wherever that tool reads
 always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
 `.github/copilot-instructions.md`), a system-prompt flag, or a global
 `AGENTS.md`. Copy it verbatim rather than a summary, and re-copy it after an

@@ -2069,7 +2069,6 @@ dependencies = [
  "pixel-git",
  "pixel-graph",
  "pixel-index",
- "pixel-install",
  "pixel-ops",
  "pixel-plugin",
  "pixel-proto",
@@ -2077,6 +2076,7 @@ dependencies = [
  "pixel-recall",
  "pixel-release",
  "pixel-session",
+ "pixel-setup",
  "pixel-task",
  "regex",
  "rusqlite",
@@ -2199,26 +2199,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pixel-install"
-version = "0.7.1"
-dependencies = [
- "mutants",
- "pixel-daemon",
- "pixel-facts",
- "pixel-git",
- "pixel-index",
- "pixel-plugin",
- "pixel-proto",
- "serde",
- "serde-saphyr",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "toml_edit",
-]
-
-[[package]]
 name = "pixel-ops"
 version = "0.7.1"
 dependencies = [
@@ -2311,6 +2291,26 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "pixel-setup"
+version = "0.7.1"
+dependencies = [
+ "mutants",
+ "pixel-daemon",
+ "pixel-facts",
+ "pixel-git",
+ "pixel-index",
+ "pixel-plugin",
+ "pixel-proto",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml_edit",
 ]
 
 [[package]]

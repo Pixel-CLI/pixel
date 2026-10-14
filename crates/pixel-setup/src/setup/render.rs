@@ -90,18 +90,16 @@ mod tests {
 
     #[test]
     fn the_catalog_order_decides_the_section_order_not_the_selection_order() {
-        let forward = render_block(&selected(&["prompt", "semantic"]), &Available::none());
-        let backward = render_block(&selected(&["semantic", "prompt"]), &Available::none());
+        let forward = render_block(&selected(&["prompt", "metrics"]), &Available::none());
+        let backward = render_block(&selected(&["metrics", "prompt"]), &Available::none());
         assert_eq!(forward, backward);
-        let prompt = forward.find("## Pixel").unwrap();
-        let semantic = forward.find("### Search").unwrap();
-        assert!(prompt < semantic, "got {forward}");
+        assert!(forward.contains("## Pixel\n"), "got {forward}");
     }
 
     #[test]
     fn a_feature_that_writes_no_steering_adds_no_section() {
         let block = render_block(
-            &selected(&["prompt", "metrics", "daemon", "guard", "rules"]),
+            &selected(&["prompt", "metrics", "daemon", "classify"]),
             &every_plugin(),
         );
         assert!(
@@ -144,21 +142,6 @@ mod tests {
                 assert!(line.starts_with("- "), "not a bullet: {line}");
             }
         }
-        assert_eq!(
-            sections, 4,
-            "prompt, semantic, web-search and land: {block}"
-        );
-    }
-
-    #[test]
-    fn a_web_search_row_without_its_plugin_renders_no_section_and_no_command() {
-        let block = render_block(&selected(&["prompt", "web-search"]), &Available::none());
-        assert!(!block.contains("### Web search"), "{block}");
-        assert!(!block.contains("pixel web-search"), "{block}");
-        assert!(!block.contains("who-wrote"), "{block}");
-        let block = render_block(&selected(&["prompt", "web-search"]), &every_plugin());
-        assert!(block.contains("### Web search\n"), "{block}");
-        assert!(block.contains("`pixel web-search`"), "{block}");
-        assert!(block.contains("`pixel who-wrote`"), "{block}");
+        assert_eq!(sections, 1, "only the Pixel baseline is offered: {block}");
     }
 }

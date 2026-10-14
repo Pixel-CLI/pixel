@@ -75,9 +75,23 @@ fn symbol(status: CheckStatus) -> (&'static str, &'static str) {
     }
 }
 
+/// The blocky logo's rows, unstyled: the setup wizard frames them in its own
+/// card and pulses the brightness itself, so this hands the text over.
+pub fn logo_lines() -> impl Iterator<Item = &'static str> {
+    LOGO.trim().lines()
+}
+
+/// The logo's display width: the widest row, so a host knows whether it fits.
+pub fn logo_width() -> usize {
+    logo_lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
 fn render_logo(color: bool) -> String {
     let mut out = String::new();
-    for line in LOGO.trim().lines() {
+    for line in logo_lines() {
         out.push_str(&paint(color, "1;32", line));
         out.push('\n');
     }

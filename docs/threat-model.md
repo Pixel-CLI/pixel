@@ -27,7 +27,7 @@ Statuses used below:
 
 Pixel is a local CLI (`crates/pixel`, binary `pixel`), a per-repository
 daemon (`pixel-daemon`) reached over a Unix socket, hooks it installs into
-coding agents (`pixel-install`), and the release chain that ships the binary.
+coding agents (`pixel-setup`), and the release chain that ships the binary.
 Out of scope: the agent hosts themselves (Claude Code, Codex, Pi, …), the
 model providers, and the website under `website/`.
 
@@ -249,7 +249,7 @@ repository file.
 `pixel setup` edits agent configs in place, rewriting only its own managed
 blocks and hook entries, refusing files that do not parse, and leaving a
 `<file>.pixel-bak.<nanos>-<seq>` copy of each file it changes
-(`pixel_install::config::backup_if_changing`). Hook commands embed the
+(`pixel_setup::config::backup_if_changing`). Hook commands embed the
 absolute binary path, quoted by `routing::quoted_executable`. The binary
 reaches users through `scripts/install.sh` (archive checked against the
 release's `.sha256`), Homebrew, mise, or the `setup-pixel` action (exact
@@ -564,7 +564,7 @@ stays so references to the later threats hold.
   no network, no write, bounded by the brief's window and a 2 MiB output cap);
   their file reads go through `Evidence::lines_at` like the pack's. No prompt is deployed. The bundled prompt a user copies by hand
   states that Pixel output is data, not instructions
-  (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
+  (`crates/pixel-setup/assets/pixel-agent-prompt.md`). The explicit impact
   skill and Pi command label graph output as repository data, not
   instructions. `impact --no-refresh` uses a read-only graph snapshot,
   verifies extractor and source signatures (re-hashing only files whose mtime
@@ -593,7 +593,7 @@ hold.
   config that holds keys readable by others.
 - **Mitigation**: only managed blocks and hook entries are rewritten; a file
   that does not parse is not touched; each changed file is backed up first;
-  `doctor` checks every artifact (`pixel_install::doctor::CHECKS`); hook
+  `doctor` checks every artifact (`pixel_setup::doctor::CHECKS`); hook
   commands quote the executable path.
 - **Status**: Partial.
 - **Residual**: backups and several configs are written with `fs::write`, so
@@ -843,7 +843,7 @@ hold.
 | Untrusted shard files | `Shard::open` | `malformed_shard_rejected_gracefully`, `corrupt_posting_cannot_escape_section_or_overflow_delta` (`shard.rs`) |
 | Source parsing | `pixel_graph::extract::extract_file` | `graph_extract` fuzz target |
 | Query planning | `pixel_index::plan::plan_pattern` | `search_plan` fuzz target |
-| Install edits | `pixel-install` | `crates/pixel-install/tests/install_tests.rs`, `install_exit.rs` and `uninstall_cli.rs` (CLI) |
+| Install edits | `pixel-setup` | `crates/pixel-setup/tests/install_tests.rs`, `install_exit.rs` and `uninstall_cli.rs` (CLI) |
 | Release consistency | `pixel-release` | `pixel check-release` in `release.yml`'s `verify` job |
 
 Across all of them:

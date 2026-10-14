@@ -4,7 +4,7 @@
 //! `pixel setup` through the real CLI, with an isolated home directory.
 //!
 //! The golden files under `tests/setup/.agents/` are compared in-process by
-//! `crates/pixel-install/src/setup/goldens.rs`, because the two flags that
+//! `crates/pixel-setup/src/setup/goldens.rs`, because the two flags that
 //! drive the wizard from a script (`--selected-agents`,
 //! `--selected-features`) are removed before the release. What this file holds
 //! is what only the command can show: the `--print` contract, that a run
@@ -274,7 +274,7 @@ fn a_run_succeeds_on_a_machine_pixel_config_setup_already_configured() {
         &[
             "setup",
             "--selected-agents=1",
-            "--selected-features=1,2,4,5,7",
+            "--selected-features=1,2,3,4",
         ],
     );
 
@@ -355,7 +355,8 @@ fn the_hooks_follow_the_agents_and_the_hook_features_that_were_picked() {
     let claude_hooks =
         |home: &Path| fs::read_to_string(home.join(".claude/settings.json")).unwrap_or_default();
     let task_event = "run-hook task-event --provider claude";
-    // The index of each feature in the picker: 1 prompt, 3 task hooks, 11 codex.
+    // 1 prompt, 2 metrics, 3 daemon, 4 classify. Task hooks ride with Prompt;
+    // Codex hooks are installed automatically when Codex is selected.
     let ok = |home: &Path, agents: &str, features: &str| {
         let out = run(
             home,
@@ -374,10 +375,10 @@ fn the_hooks_follow_the_agents_and_the_hook_features_that_were_picked() {
         String::from_utf8_lossy(&out.stderr).into_owned()
     };
 
-    let review = ok(&picked, "1", "1,3");
+    let review = ok(&picked, "1", "1");
     assert!(
         claude_hooks(&picked).contains(task_event),
-        "Claude Code and the task-hooks feature: the Claude hooks are written"
+        "Claude Code and Prompt: the Claude hooks are written"
     );
     assert!(
         review.contains("Hooks and agent configuration") && review.contains("hooks.claude"),
@@ -388,19 +389,19 @@ fn the_hooks_follow_the_agents_and_the_hook_features_that_were_picked() {
         "the review comes first"
     );
 
-    ok(&features_off, "1", "1");
+    ok(&features_off, "1", "2");
     assert!(
         !claude_hooks(&features_off).contains(task_event),
         "task hooks left off: the instruction block is written, the hooks are not"
     );
     assert!(features_off.join(".claude/CLAUDE.md").is_file());
 
-    ok(&other_agent, "2", "1,3,11");
+    ok(&other_agent, "2", "1");
     assert!(
         fs::read_to_string(other_agent.join(".codex/hooks.json"))
             .unwrap()
             .contains("task-event --provider codex"),
-        "Codex was picked with its hook feature"
+        "Codex was picked; its hooks are installed automatically"
     );
     assert!(
         !claude_hooks(&other_agent).contains(task_event),
@@ -416,19 +417,17 @@ fn remove_takes_out_the_block_the_rules_and_the_hooks_a_guided_run_wrote() {
     fs::create_dir_all(home.join(".claude")).unwrap();
     fs::write(home.join(".claude/CLAUDE.md"), "# My rules\n\nKeep me.\n").unwrap();
 
-    // Prompt, task hooks and the per-agent rule file (feature 9).
+    // Prompt: the managed block and the task hooks.
     let out = run(
         &home,
         &repo,
-        &["setup", "--selected-agents=1", "--selected-features=1,3,9"],
+        &["setup", "--selected-agents=1", "--selected-features=1"],
     );
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let rule = home.join(".claude/rules/pixel-setup.md");
-    assert!(rule.is_file(), "fixture: the rule file was written");
     assert!(
         fs::read_to_string(home.join(".claude/settings.json"))
             .unwrap()
@@ -459,7 +458,6 @@ fn remove_takes_out_the_block_the_rules_and_the_hooks_a_guided_run_wrote() {
 
     let claude_md = fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap();
     assert_eq!(claude_md, "# My rules\n\nKeep me.\n", "only the block goes");
-    assert!(!rule.exists(), "the rule file goes");
     let settings = fs::read_to_string(home.join(".claude/settings.json")).unwrap_or_default();
     assert!(
         !settings.contains("run-hook task-event"),

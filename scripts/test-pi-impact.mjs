@@ -54,7 +54,7 @@ try {
     assert.deepEqual(pkg.pi.extensions, ["./pi/extensions/pixel-impact.ts"]);
     assert.deepEqual(pkg.pi.skills, [], "Pi must not auto-discover root skill packages");
     const distributed = readFileSync(new URL("../pi/extensions/pixel-impact.ts", import.meta.url), "utf8");
-    const installerAsset = readFileSync(new URL("../crates/pixel-install/assets/pi-impact.ts", import.meta.url), "utf8")
+    const installerAsset = readFileSync(new URL("../crates/pixel-setup/assets/pi-impact.ts", import.meta.url), "utf8")
       .replace('const PIXEL_BIN = __PIXEL_BIN__;', 'const PIXEL_BIN = "pixel";')
       .replace("// __MANAGED_BEGIN__\n", "")
       .replace("// __MANAGED_END__\n", "");
