@@ -109,6 +109,17 @@ fn without_task_hooks(value: &serde_json::Value, provider: &str, exe: &Path) -> 
             );
             groups.retain(|group| group != &expected);
         }
+        // Codex also gets the merged PostToolUse metrics relay, which
+        // re-emits `pixel`'s metrics line after a shell command.
+        if provider == "codex" && event == "PostToolUse" {
+            let before = groups.len();
+            groups.retain(|group| {
+                !group
+                    .to_string()
+                    .contains("run-hook metrics --provider codex")
+            });
+            assert_eq!(before - groups.len(), 1, "{event}: {groups:?}");
+        }
         if groups.is_empty() {
             remaining["hooks"].as_object_mut().unwrap().remove(event);
         }
@@ -6761,7 +6772,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     assert_eq!(
         unreviewed.summary,
         format!(
-            "approval for 11 of the 11 Pixel hook(s) in {} is missing, stale, disabled, or not verifiable (Interrupt #0.0, PostToolUse #0.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0, UserPromptSubmit #1.0, UserPromptSubmit #2.0): \
+            "approval for 12 of the 12 Pixel hook(s) in {} is missing, stale, disabled, or not verifiable (Interrupt #0.0, PostToolUse #0.0, PostToolUse #1.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0, UserPromptSubmit #1.0, UserPromptSubmit #2.0): \
              start `codex` in this directory and inspect `/hooks`",
             hooks.display()
         )
@@ -6846,7 +6857,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
             .as_array()
             .unwrap()
             .len(),
-        11,
+        12,
         "stale hashes must not make the global task hooks green"
     );
 }
