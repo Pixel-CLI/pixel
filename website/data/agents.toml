@@ -41,6 +41,10 @@
 # prompt is deployed: install removes the copies earlier releases wrote.
 shared = [
   "~/.pixel/config.yaml",
+  # The retrieval workflow as a skill, in every configured harness's skills dir.
+  "~/.claude/skills/pixel/SKILL.md",
+  "~/.config/opencode/skills/pixel/SKILL.md",
+  "~/.gemini/skills/pixel/SKILL.md",
   # The first-party brief probes the prompt-submit brief runs (`pixel setup --remove` deletes them).
   "~/.pixel/plugins/config-registry/",
   "~/.pixel/plugins/doc-sections/",

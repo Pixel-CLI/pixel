@@ -139,6 +139,7 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         crate::copilot_config::remove_copilot_hooks(&home, dry_run)?,
         remove_pi_extension(&home, dry_run)?,
         remove_classify_skill(&home, dry_run)?,
+        remove_pixel_skill(&home, dry_run)?,
         crate::pi_global::uninstall(
             &crate::pi_global::PiPaths::resolve(&home, options.home.is_some()),
             dry_run,
@@ -959,6 +960,39 @@ fn remove_classify_skill(home: &Path, dry_run: bool) -> Result<InstallStep> {
                 "no classify skill found".to_string()
             } else {
                 format!("removed {} classify skill dir(s)", removed.len())
+            },
+        ),
+        detail: (!removed.is_empty()).then(|| removed.join(" ")),
+    })
+}
+
+// -------------------------------------------------------------------------
+// Step 4c: remove the pixel skill from every harness's skills dir
+// -------------------------------------------------------------------------
+
+/// Remove a `skills/pixel` dir only when its `SKILL.md` is the managed copy
+/// the install step wrote — a user-authored skill under the same name stays.
+fn remove_pixel_skill(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let mut removed = Vec::new();
+    for dir in crate::skill::managed_skill_dirs(home) {
+        let file = dir.join("SKILL.md");
+        if !fs::read_to_string(&file).is_ok_and(|text| text == crate::skill::PIXEL_SKILL) {
+            continue;
+        }
+        if !dry_run {
+            rename_as_backup(&dir)?;
+        }
+        removed.push(dir.display().to_string());
+    }
+    Ok(InstallStep {
+        id: "skills.pixel".into(),
+        status: CheckStatus::Green,
+        summary: install::dry_run_summary(
+            dry_run,
+            &if removed.is_empty() {
+                "no pixel skill found".to_string()
+            } else {
+                format!("removed {} pixel skill dir(s)", removed.len())
             },
         ),
         detail: (!removed.is_empty()).then(|| removed.join(" ")),

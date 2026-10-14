@@ -1559,7 +1559,13 @@ fn backups_on_disk(root: &Path) -> Vec<std::path::PathBuf> {
         for entry in fs::read_dir(dir).unwrap().flatten() {
             let path = entry.path();
             if path.is_dir() {
-                walk(&path, out);
+                // A `.pixel-bak` directory is itself a backup (a renamed
+                // skill dir), not a tree to walk.
+                if entry.file_name().to_string_lossy().contains(".pixel-bak.") {
+                    out.push(path);
+                } else {
+                    walk(&path, out);
+                }
             } else if entry.file_name().to_string_lossy().contains(".pixel-bak.") {
                 out.push(path);
             }
@@ -1574,22 +1580,32 @@ fn backups_on_disk(root: &Path) -> Vec<std::path::PathBuf> {
 /// The paths of `rm -- '<a>' '<b>'` as a POSIX shell reads them: each word
 /// single-quoted, a quote inside one spelled `'\''`.
 fn rm_command_paths(command: &str) -> Vec<std::path::PathBuf> {
-    let words = command
-        .strip_prefix("rm -- ")
-        .unwrap_or_else(|| panic!("not an rm command: {command}"));
     let mut paths = Vec::new();
-    let mut current = String::new();
-    let mut quoted = false;
-    let mut chars = words.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => quoted = !quoted,
-            '\\' if !quoted => current.push(chars.next().expect("escaped char")),
-            ' ' if !quoted => paths.push(std::path::PathBuf::from(std::mem::take(&mut current))),
-            _ => current.push(c),
+    for segment in command.split(" && ") {
+        // A segment is `rm --` for file backups or `rm -rf --` for renamed
+        // directories; either way the paths are single-quoted words after it.
+        let words = segment
+            .strip_prefix("rm -rf -- ")
+            .or_else(|| segment.strip_prefix("rm -- "))
+            .unwrap_or_else(|| panic!("not an rm command: {segment}"));
+        let mut current = String::new();
+        let mut quoted = false;
+        let mut chars = words.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' => quoted = !quoted,
+                '\\' if !quoted => current.push(chars.next().expect("escaped char")),
+                ' ' if !quoted => {
+                    paths.push(std::path::PathBuf::from(std::mem::take(&mut current)))
+                }
+                _ => current.push(c),
+            }
         }
+        paths.push(std::path::PathBuf::from(current));
     }
-    paths.push(std::path::PathBuf::from(current));
+    // The command lists file backups first and directory backups after;
+    // compare unordered.
+    paths.sort();
     paths
 }
 

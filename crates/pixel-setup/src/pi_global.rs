@@ -42,12 +42,9 @@ const BRIEF_EXTENSION: &str = "extensions/pixel-brief.ts";
 /// injected prompt text.
 const PI_SKILL_REL: &str = "skills/pixel/SKILL.md";
 
-/// The skill content: the same front matter and prompt the `.openclaw` plugin
-/// ships, so every harness reads one source.
-const PI_SKILL: &str = concat!(
-    "---\nname: pixel\ndescription: >\n  Deterministic code retrieval: indexed search, concept resolve, impact\n  analysis, caller/callee tracing, task scoping, plan generation, and git\n  history archaeology via the `pixel` CLI. Use when the repo has a `.pixel`\n  directory, when the user mentions pixel, or before editing a symbol when\n  blast radius matters. Requires the `pixel` binary on PATH.\nlicense: MIT\n---\n\n",
-    include_str!("../assets/pixel-agent-prompt.md"),
-);
+/// The skill content: [`crate::skill::PIXEL_SKILL`], the one copy every
+/// harness's deploy of `skills/pixel/SKILL.md` writes.
+const PI_SKILL: &str = crate::skill::PIXEL_SKILL;
 
 const PACKAGE_MANIFEST: &str = "package.json";
 

@@ -216,6 +216,10 @@ pub fn install_selected(
     // Prompts are no longer deployed for any host: retire earlier copies
     // and the automatic block in Pi's APPEND_SYSTEM.md.
     let mut steps = vec![crate::uninstall::remove_agent_prompt(&home, dry_run)?];
+    // The pixel skill is the retrieval workflow every harness reads as a
+    // skill: a guided run writes the selected agents' roots, the unattended
+    // install every configured one.
+    steps.push(crate::skill::install(&home, selection, dry_run)?);
     if wants.pi_extension() {
         steps.push(crate::pi_global::install(
             &crate::pi_global::PiPaths::resolve(&home, options.home.is_some()),

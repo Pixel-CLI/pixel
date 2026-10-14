@@ -1,0 +1,233 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
+//! The `pixel` skill, deployed to every configured harness.
+//!
+//! One `skills/<name>/SKILL.md` under a harness's configuration root is how
+//! every agent loads extra know-how, so the retrieval workflow lands as a
+//! skill the agent reads on demand — not as text injected into its prompt.
+//! The deploy mirrors the classify helpers' (`config::SKILL_ROOTS`): an
+//! unattended install writes `.claude` plus every harness whose
+//! configuration directory already exists; a guided run writes only the
+//! selected agents' roots. Pi is not a root here — its package step writes
+//! the identical file itself.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::InstallError;
+use crate::config::SKILL_ROOTS;
+use crate::install::{
+    CheckStatus, InstallSelection, InstallStep, dry_run_summary, write_atomically,
+};
+use crate::setup::AgentTarget;
+
+type Result<T> = std::result::Result<T, InstallError>;
+
+/// The skill content: the same front matter and prompt the `.openclaw`
+/// plugin ships, so every harness reads one source.
+pub(crate) const PIXEL_SKILL: &str = concat!(
+    "---\nname: pixel\ndescription: >\n  Deterministic code retrieval: indexed search, concept resolve, impact\n  analysis, caller/callee tracing, task scoping, plan generation, and git\n  history archaeology via the `pixel` CLI. Use when the repo has a `.pixel`\n  directory, when the user mentions pixel, or before editing a symbol when\n  blast radius matters. Requires the `pixel` binary on PATH.\nlicense: MIT\n---\n\n",
+    include_str!("../assets/pixel-agent-prompt.md"),
+);
+
+/// The install step's id in a report.
+const STEP_ID: &str = "skills.pixel";
+
+/// The skill's path inside one harness root.
+const SKILL_REL: &str = "skills/pixel/SKILL.md";
+
+/// The harness configuration root a selected agent's skill copy lands in,
+/// relative to home. Pi's package step writes the identical file itself and
+/// the generic `AGENTS.md` target names no harness directory.
+fn skill_root(agent: AgentTarget) -> Option<&'static str> {
+    Some(match agent {
+        AgentTarget::ClaudeCode => ".claude",
+        AgentTarget::Codex => ".codex",
+        AgentTarget::Devin => ".devin",
+        AgentTarget::Cursor => ".cursor",
+        AgentTarget::Gemini | AgentTarget::Antigravity => ".gemini",
+        AgentTarget::OpenCode => ".config/opencode",
+        AgentTarget::Pi | AgentTarget::AgentMd => return None,
+    })
+}
+
+/// The harness roots whose `skills/pixel/SKILL.md` this install writes.
+///
+/// A guided run touches the selected agents' roots only — selected means
+/// configured, so the directory is created when absent. The unattended
+/// install adds no directory of its own: `.claude` always (its hooks land
+/// there regardless) and every `SKILL_ROOTS` entry that already exists.
+fn skill_dirs(home: &Path, selection: Option<&InstallSelection>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = match selection {
+        Some(selection) => selection
+            .agents
+            .iter()
+            .filter_map(|agent| skill_root(*agent))
+            .map(|root| home.join(root))
+            .collect(),
+        None => [home.join(".claude")]
+            .into_iter()
+            .chain(
+                SKILL_ROOTS
+                    .iter()
+                    .map(|root| home.join(root))
+                    .filter(|dir| dir.is_dir()),
+            )
+            .collect(),
+    };
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// The skill files under [`skill_dirs`] — also what uninstall sweeps, so a
+/// managed copy an old guided run left under an unselected root still goes.
+pub(crate) fn skill_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    dirs.iter().map(|dir| dir.join(SKILL_REL)).collect()
+}
+
+/// Write `skills/pixel/SKILL.md` into every configured harness's skills
+/// dir; a differing copy is the user's, backed up before overwriting.
+pub(crate) fn install(
+    home: &Path,
+    selection: Option<&InstallSelection>,
+    dry_run: bool,
+) -> Result<InstallStep> {
+    let files = skill_files(&skill_dirs(home, selection));
+    if dry_run {
+        return Ok(InstallStep {
+            id: STEP_ID.into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(
+                dry_run,
+                &if files.is_empty() {
+                    "no configured harness skills dir".to_string()
+                } else {
+                    format!("deploy the pixel skill to {} harness dir(s)", files.len())
+                },
+            ),
+            detail: (!files.is_empty()).then(|| {
+                files
+                    .iter()
+                    .map(|file| file.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }),
+        });
+    }
+    for file in &files {
+        if let Some(dir) = file.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        // The skill is a harness file, not pixel's own: `write_atomically`
+        // backs a differing copy up before overwriting.
+        write_atomically(file, PIXEL_SKILL)?;
+    }
+    Ok(InstallStep {
+        id: STEP_ID.into(),
+        status: CheckStatus::Green,
+        summary: format!("pixel skill deployed to {} harness dir(s)", files.len()),
+        detail: (!files.is_empty()).then(|| {
+            files
+                .iter()
+                .map(|file| file.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        }),
+    })
+}
+
+/// Every `skills/pixel` dir a pixel install may have written, for uninstall:
+/// `.claude` plus every `SKILL_ROOTS` entry, whether configured or not.
+pub(crate) fn managed_skill_dirs(home: &Path) -> Vec<PathBuf> {
+    [PathBuf::from(".claude")]
+        .into_iter()
+        .chain(SKILL_ROOTS.iter().map(PathBuf::from))
+        .map(|root| home.join(root).join("skills/pixel"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selection(agents: &[AgentTarget]) -> InstallSelection {
+        InstallSelection {
+            agents: agents.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_unattended_install_deploys_to_claude_and_every_configured_harness() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(home.join(".cursor")).unwrap();
+
+        let step = install(home, None, false).unwrap();
+        assert_eq!(step.id, STEP_ID);
+        assert_eq!(
+            fs::read_to_string(home.join(".claude/skills/pixel/SKILL.md")).unwrap(),
+            PIXEL_SKILL
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".codex/skills/pixel/SKILL.md")).unwrap(),
+            PIXEL_SKILL
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".cursor/skills/pixel/SKILL.md")).unwrap(),
+            PIXEL_SKILL
+        );
+        // A harness never configured gets no directory of its own.
+        assert!(!home.join(".gemini").exists());
+        assert!(!home.join(".pi").exists());
+    }
+
+    #[test]
+    fn a_guided_run_deploys_only_to_the_selected_agents_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        // Configured but not selected: nothing lands there.
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        install(
+            home,
+            Some(&selection(&[AgentTarget::Cursor, AgentTarget::Pi])),
+            false,
+        )
+        .unwrap();
+        assert!(home.join(".cursor/skills/pixel/SKILL.md").is_file());
+        assert!(!home.join(".codex/skills").exists());
+        assert!(!home.join(".claude/skills").exists());
+        // Pi's copy is its package step's, not this one's.
+        assert!(!home.join(".pi").exists());
+    }
+
+    #[test]
+    fn a_differing_skill_is_backed_up_not_clobbered() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let file = home.join(".claude/skills/pixel/SKILL.md");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "mine\n").unwrap();
+
+        install(home, None, false).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), PIXEL_SKILL);
+        let backups: Vec<_> = fs::read_dir(home.join(".claude/skills/pixel"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".pixel-bak."))
+            .collect();
+        assert_eq!(backups.len(), 1, "the user's copy is backed up once");
+    }
+
+    #[test]
+    fn a_dry_run_writes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let step = install(home, None, true).unwrap();
+        assert_eq!(step.status, CheckStatus::Green);
+        assert!(!home.join(".claude").exists());
+    }
+}
