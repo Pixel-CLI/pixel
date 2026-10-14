@@ -2188,6 +2188,7 @@ dependencies = [
  "pixel-facts",
  "pixel-git",
  "pixel-index",
+ "pixel-plugin",
  "pixel-proto",
  "serde",
  "serde-saphyr",

@@ -12,6 +12,8 @@
 
 use std::time::Duration;
 
+use pixel_plugin::Available;
+
 use crate::classify::Spec;
 
 /// Whole-request cap of the warm task-intent call. A warm labeled call was
@@ -88,12 +90,26 @@ pub(crate) const INTENTS: &[IntentKind] = &[
     },
 ];
 
-/// The ops that fit `label`, or `None` for a label outside [`INTENTS`].
-pub(crate) fn ops_for(label: &str) -> Option<&'static [&'static str]> {
-    INTENTS
-        .iter()
-        .find(|kind| kind.label == label)
-        .map(|kind| kind.ops)
+/// The ops that fit `label` and run here, or `None` for a label outside
+/// [`INTENTS`]. An op that is a moved command (`pixel plan-rollback`) is
+/// offered only when its plugin runs: a model that is told to run a command
+/// that fails wastes the turn, and the table's other ops still fit the task.
+pub(crate) fn ops_for(label: &str, plugins: &Available) -> Option<Vec<&'static str>> {
+    INTENTS.iter().find(|kind| kind.label == label).map(|kind| {
+        kind.ops
+            .iter()
+            .copied()
+            .filter(|op| runs_here(op, plugins))
+            .collect()
+    })
+}
+
+/// Whether the command an op names needs no plugin, or has it.
+fn runs_here(op: &str, plugins: &Available) -> bool {
+    let Some(command) = op.split_whitespace().nth(1) else {
+        return true;
+    };
+    !pixel_plugin::is_moved(command) || pixel_plugin::stays_in_core(command) || plugins.has(command)
 }
 
 /// The decision request that judges `prompt` against every intent label.
@@ -133,23 +149,66 @@ mod tests {
         }
     }
 
+    fn every_plugin() -> Available {
+        Available::of(&[
+            "plan-rollback",
+            "dig-history",
+            "review-changes",
+            "repo-state",
+        ])
+    }
+
     #[test]
     fn ops_for_should_map_each_intent_to_its_documented_ops() {
-        let first = |label| ops_for(label).unwrap()[0];
-        assert_eq!(first("bugfix"), "pixel plan-rollback \"<problem>\"");
-        assert!(ops_for("bugfix").unwrap()[1].starts_with("pixel dig-history --phrase"));
-        assert_eq!(first("feature"), "pixel scope-task \"<task>\"");
-        assert_eq!(first("refactor"), "pixel scope-task \"<task>\"");
-        assert_eq!(first("investigate"), "pixel find-code \"<concept>\"");
-        assert_eq!(first("question"), "pixel find-code \"<concept>\"");
+        let plugins = every_plugin();
+        let ops = |label| ops_for(label, &plugins).unwrap();
+        assert_eq!(ops("bugfix")[0], "pixel plan-rollback \"<problem>\"");
+        assert!(ops("bugfix")[1].starts_with("pixel dig-history --phrase"));
+        assert_eq!(ops("feature")[0], "pixel scope-task \"<task>\"");
+        assert_eq!(ops("refactor")[0], "pixel scope-task \"<task>\"");
+        assert_eq!(ops("investigate")[0], "pixel find-code \"<concept>\"");
+        assert_eq!(ops("question")[0], "pixel find-code \"<concept>\"");
         assert_eq!(
-            ops_for("review").unwrap(),
+            ops("review"),
             ["pixel review-changes", "pixel what-changed"]
         );
+        assert_eq!(ops("ops"), ["pixel repo-state", "pixel doctor"]);
+        assert!(ops_for("chit-chat", &plugins).is_none());
+    }
+
+    #[test]
+    fn ops_for_should_leave_out_an_op_whose_plugin_does_not_run() {
+        let none = Available::none();
+        let ops = |label| ops_for(label, &none).unwrap();
+        assert_eq!(ops("bugfix"), ["pixel impact \"<symbol>\""]);
+        assert_eq!(ops("review"), ["pixel what-changed"]);
+        assert_eq!(ops("ops"), ["pixel doctor"]);
+        // The ops that are core commands are untouched.
+        assert_eq!(ops("feature").len(), 3);
+        assert_eq!(ops("investigate").len(), 3);
+        // One plugin command at a time.
+        let only_dig = Available::of(&["dig-history"]);
         assert_eq!(
-            ops_for("ops").unwrap(),
-            ["pixel repo-state", "pixel doctor"]
+            ops_for("bugfix", &only_dig).unwrap(),
+            [
+                "pixel dig-history --phrase \"<text>\"",
+                "pixel impact \"<symbol>\""
+            ]
         );
-        assert!(ops_for("chit-chat").is_none());
+    }
+
+    #[test]
+    fn every_op_that_names_a_moved_command_is_a_command_the_plugin_table_knows() {
+        for kind in INTENTS {
+            for op in kind.ops {
+                let command = op.split_whitespace().nth(1).unwrap();
+                if pixel_plugin::repo_of(command).is_some() {
+                    assert!(
+                        pixel_plugin::is_moved(command),
+                        "{op} must be filtered by availability"
+                    );
+                }
+            }
+        }
     }
 }

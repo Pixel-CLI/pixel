@@ -13,6 +13,20 @@ turn belongs in a separate conversation.
 Argument: a window (`24h` by default, `48h`, `7d`, an ISO date). Written
 `$W` below.
 
+## Prerequisite — the plugins this skill reads through
+
+`recall`, `action-log`, `list-errors`, `commit-history`, `search-history`,
+`repo-state`, `review-changes` and `diff` are command plugins, not core
+commands. `pixel plugin list` shows what runs; install what is missing, one
+repository each: `pixel install github:Pixel-CLI/pixel-recall` (`recall`),
+`pixel-telemetry` (`action-log`, `list-errors`, `token-savings`),
+`pixel-git` (the git commands). A plugin that declares network access also
+needs `pixel plugin enable <name>`. A missing plugin prints
+`"recall" moved to a plugin: pixel install …` and exits 2: install it, do
+not skip the step. The action log itself is plain JSONL
+(`<root>/.pixel/actions.jsonl`, one record per line, plugin runs included),
+readable without `action-log`.
+
 ## Step 0 — Fresh corpus, known baseline
 
 ```bash

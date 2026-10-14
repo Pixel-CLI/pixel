@@ -95,6 +95,7 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
             scope,
             &default_agents(&base, scope, running_agent()),
             &default_features(scope),
+            &crate::plugin_cmd::available(),
         )
         .map_err(|e| e.to_string())?;
         print!("{}", plan.block);
@@ -118,8 +119,14 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
         return Ok(());
     };
 
-    let plan = SetupPlan::new(&base, scope, &answers.agents, &answers.features)
-        .map_err(|e| e.to_string())?;
+    let plan = SetupPlan::new(
+        &base,
+        scope,
+        &answers.agents,
+        &answers.features,
+        &crate::plugin_cmd::available(),
+    )
+    .map_err(|e| e.to_string())?;
     let install = install_options(&options, &base, &plan);
     let selection = plan.install_selection();
     // The hooks are shown from a dry run of the very call that applies them,
@@ -894,6 +901,7 @@ mod tests {
                 Feature::Land,
                 Feature::TaskHooks,
             ],
+            &pixel_plugin::Available::none(),
         )
         .unwrap();
         let hooks = [step("hooks.claude", "would register the task-event hooks")];
@@ -951,6 +959,7 @@ mod tests {
             Scope::Global,
             &[AgentTarget::ClaudeCode],
             &[Feature::Prompt, Feature::TaskHooks],
+            &pixel_plugin::Available::none(),
         )
         .unwrap();
         let hooks = [
@@ -995,6 +1004,7 @@ mod tests {
             Scope::Global,
             &[AgentTarget::Codex],
             &[Feature::CodexConfig],
+            &pixel_plugin::Available::none(),
         )
         .unwrap();
         let options = SetupOptions {
@@ -1013,6 +1023,7 @@ mod tests {
             Scope::Repository,
             &[AgentTarget::ClaudeCode],
             &[Feature::TaskHooks],
+            &pixel_plugin::Available::none(),
         )
         .unwrap();
         let repo = install_options(&options, &base, &repo_plan);
@@ -1070,6 +1081,7 @@ mod tests {
             Scope::Global,
             &[AgentTarget::ClaudeCode],
             &[Feature::Prompt],
+            &pixel_plugin::Available::none(),
         )
         .unwrap();
         let hooks = install_report(vec![step("hooks.claude", "registered the hooks")]);

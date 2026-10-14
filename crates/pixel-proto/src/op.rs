@@ -548,7 +548,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
 ///
 /// Describes what Pixel offers without directing the agent: native tools
 /// stay the default, and Pixel is one option among them.
-pub const SESSION_USAGE: &str = "pixel offers deterministic repository retrieval and git commands: `pixel search-content`, `pixel find-code`, `pixel impact <symbol>` for callers and blast radius, `pixel dig-history` for past code, and `pixel what-changed`. Use one when it answers a question faster than your native tools; native search and reads remain available. `pixel --help` lists every command.";
+pub const SESSION_USAGE: &str = "pixel offers deterministic repository retrieval: `pixel search-content`, `pixel find-code`, `pixel impact <symbol>` for callers and blast radius, and `pixel what-changed`. Use one when it answers a question faster than your native tools; native search and reads remain available. `pixel --help` lists every command.";
 
 /// The `skip_serializing_if` predicate for a flag whose absence means false;
 /// serde hands the field by reference.
@@ -1162,14 +1162,13 @@ mod tests {
 
     #[test]
     fn session_usage_describes_pixel_without_mandating_it() {
-        for command in [
-            "search-content",
-            "find-code",
-            "impact",
-            "dig-history",
-            "what-changed",
-        ] {
+        for command in ["search-content", "find-code", "impact", "what-changed"] {
             assert!(SESSION_USAGE.contains(command), "{command}");
+        }
+        // It names no command that a plugin provides: nothing here knows
+        // whether one is installed.
+        for moved in ["dig-history", "git commands"] {
+            assert!(!SESSION_USAGE.contains(moved), "{moved}");
         }
         for directive in ["mandatory", "must", "before any", "before editing"] {
             assert!(

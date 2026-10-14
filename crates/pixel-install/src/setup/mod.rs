@@ -35,13 +35,42 @@ pub use agent::{AgentTarget, Scope};
 pub use detect::{Agent, ENVIRONMENT_VARIABLES, ParseAgentError, detect, detect_with};
 pub use feature::{ConfigValue, Feature, HookGroup, Writes};
 pub use files::{BLOCK_END, BLOCK_START, strip};
+pub use pixel_plugin::Available;
 pub use plan::{ConfigWrite, InstructionWrite, RuleWrite, SetupPlan, rule_files};
 
 /// Render the block the wizard would write for `features`, without writing
 /// anything. This is what `pixel setup --print` prints and what the golden
 /// files under `tests/setup/.agents/` are compared against.
-pub fn preview(features: &[Feature]) -> String {
-    render::render_block(features)
+pub fn preview(features: &[Feature], plugins: &Available) -> String {
+    render::render_block(features, plugins)
+}
+
+/// Every file a setup deploys its text into under `base`, whatever the
+/// answers: the instruction file of each agent in `scope` and the rule files.
+/// The doctor reads them to check the text it deployed.
+pub fn deployed_files(base: &std::path::Path, scope: Scope) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<std::path::PathBuf> = AgentTarget::ALL
+        .iter()
+        .filter_map(|agent| agent.instruction_path(base, scope))
+        .chain(rule_files(base))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// The text of the blocks `pixel setup` owns in `text`, and nothing the user
+/// wrote around them; empty when there is none or the markers are malformed.
+pub fn managed_text(text: &str) -> String {
+    files::block_spans(text)
+        .map(|spans| {
+            spans
+                .iter()
+                .map(|span| &text[span.clone()])
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
 }
 
 /// Remove the block `pixel setup` owns from `text`, keeping the user's own
@@ -71,14 +100,17 @@ mod tests {
 
     #[test]
     fn stripping_removes_a_block_and_leaves_the_users_own_lines() {
-        let block = preview(&[Feature::Prompt]);
+        let block = preview(&[Feature::Prompt], &Available::none());
         let file = format!("# House rules\n\n{block}\nkeep this\n");
         assert_eq!(strip_block(&file), "# House rules\n\nkeep this\n");
     }
 
     #[test]
     fn a_preview_can_be_upserted_and_stripped_back_out() {
-        let block = preview(&Feature::ALL.iter().copied().take(3).collect::<Vec<_>>());
+        let block = preview(
+            &Feature::ALL.iter().copied().take(3).collect::<Vec<_>>(),
+            &Available::none(),
+        );
         let with = files::upsert("keep\n", &block).unwrap();
         assert!(with.starts_with("keep\n\n"), "got {with:?}");
         assert_eq!(

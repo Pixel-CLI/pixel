@@ -8,9 +8,10 @@
 //! reads the process (HOME, PATH, the working directory), prints, and execs.
 
 use std::ffi::OsString;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::Command as Process;
+use std::process::{Command as Process, ExitStatus};
+use std::time::{Duration, Instant};
 
 use clap::Subcommand;
 use clap::error::{ContextKind, ContextValue, ErrorKind};
@@ -50,6 +51,17 @@ fn host() -> Result<Host, String> {
             .ok()
             .filter(|base| !base.is_empty()),
     })
+}
+
+/// The moved commands a plugin runs here, as this process sees the machine:
+/// what a rule, a next-step suggestion or the doctor may name without
+/// teaching a command that fails. A host that cannot be built (no `HOME`)
+/// has none.
+pub fn available() -> pixel_plugin::Available {
+    host().map_or_else(
+        |_| pixel_plugin::Available::none(),
+        |host| pixel_plugin::Available::scan(&host),
+    )
 }
 
 /// `pixel install <source>`. An unsupported source kind (`npm:`) is a usage
@@ -201,7 +213,7 @@ pub fn dispatch(error: &clap::Error, argv: &[String]) -> Option<i32> {
             if !help && let Some(note) = crate::rename_note(argv, true) {
                 eprint!("{note}");
             }
-            Some(exec(process, name))
+            Some(run_logged(process, name, argv, &root))
         }
         Plan::Stop(message, code) => {
             eprintln!("pixel: {message}");
@@ -233,13 +245,49 @@ fn names_the_unknown_command(error: &clap::Error, name: &str) -> bool {
         )
 }
 
-/// Replace this process with the plugin: stdio, signals and the exit code
-/// are the plugin's own. Only a failure to start returns.
-#[cfg_attr(test, mutants::skip)] // one-line adapter over exec(2)
-fn exec(mut process: Process, name: &str) -> i32 {
-    let failure = process.exec();
-    eprintln!("pixel: cannot run plugin `{name}`: {failure}");
-    1
+/// Run the plugin as a child with this process's stdio, wait for it, and
+/// write its run to the repository's action log like any core command:
+/// `.pixel/actions.jsonl`, the command word and the arguments through
+/// [`crate::logged_args`] (a credential in them is masked the same way), the
+/// outcome and the duration. The exit code is the plugin's own. A signal
+/// that ends the plugin is `128 + signal`, the shell's convention.
+fn run_logged(mut process: Process, name: &str, argv: &[String], root: &Path) -> i32 {
+    let started = Instant::now();
+    let code = match process.status() {
+        Ok(status) => exit_code(status),
+        Err(failure) => {
+            eprintln!("pixel: cannot run plugin `{name}`: {failure}");
+            1
+        }
+    };
+    log_run(name, argv, root, code, started.elapsed());
+    code
+}
+
+/// The code `pixel` exits with for a plugin that ended with `status`.
+fn exit_code(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1)
+}
+
+/// One action-log record for a plugin run. The record is on disk before the
+/// process exits: `pixel action-log` and the metrics history read it back.
+fn log_run(name: &str, argv: &[String], root: &Path, code: i32, elapsed: Duration) {
+    let mut logger = pixel_actionlog::ActionLog::spawn_for_root(root);
+    let result = if code == 0 {
+        Ok(())
+    } else {
+        Err(format!("{name} exited {code}"))
+    };
+    let mut event = pixel_actionlog::ActionEvent::new(name, crate::logged_args(&argv[1..]))
+        .with_result(&result, elapsed);
+    if let Some(correlation) = crate::task_commands::action_correlation(root) {
+        event = event.with_task(correlation);
+    }
+    logger.log(event);
+    logger.finish_flush();
 }
 
 #[cfg(test)]
@@ -517,5 +565,13 @@ mod tests {
                 "net declares network access: run `pixel plugin enable net` to allow it\n"
             )
         );
+    }
+
+    #[test]
+    fn a_plugins_exit_code_is_its_own_and_a_signal_is_128_plus_it() {
+        assert_eq!(exit_code(ExitStatus::from_raw(0)), 0);
+        assert_eq!(exit_code(ExitStatus::from_raw(7 << 8)), 7);
+        assert_eq!(exit_code(ExitStatus::from_raw(9)), 137);
+        assert_eq!(exit_code(ExitStatus::from_raw(15)), 143);
     }
 }

@@ -345,6 +345,11 @@ fn pixel_read_or_recovery(args: &[String]) -> bool {
                     | "-h"
             )
         }),
+        // A plugin's read commands stay reads: `pixel repo-state` resolves to
+        // the git plugin when it is installed, and to a hint when it is not,
+        // and neither writes. Which words and flags of them do write is the
+        // plugin table's to say.
+        name if pixel_plugin::read_only_invocation(name, rest) => true,
         _ => matches!(
             operation.as_str(),
             "status"
@@ -1808,6 +1813,12 @@ mod tests {
             "pixel doctor . --fix",
             "git diff",
             "cat src/a.rs",
+            "pixel repo-state --json",
+            "pixel review-changes",
+            "pixel list-branches .",
+            "pixel recall search 'auth'",
+            "pixel commit-history --json",
+            "pixel dig-history --phrase x",
         ] {
             assert!(!shell_mutates(command), "{command}");
         }
@@ -1817,6 +1828,11 @@ mod tests {
             "pixel commit --files x",
             "git checkout x",
             "rtk proxy rm x",
+            "pixel list-branches . --fetch",
+            "pixel recall index",
+            "pixel list-errors gc",
+            "pixel plan-rollback --apply abc --file a.rs",
+            "pixel new-branch topic --request-id 1",
         ] {
             assert!(shell_mutates(command), "{command}");
         }

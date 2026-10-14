@@ -10,15 +10,18 @@
 
 use std::fmt::Write as _;
 
-use super::feature::{Feature, Writes, steering_title};
+use pixel_plugin::Available;
+
+use super::feature::{Feature, steering_title};
 use super::files::{BLOCK_END, BLOCK_START};
 
 /// The managed block for `features`: every selected steering feature as one
-/// `###` section, in catalog order, between the markers.
+/// `###` section, in catalog order, between the markers. A line that names a
+/// plugin command is written only when `plugins` has it running.
 ///
 /// An empty selection still produces a well-formed block: the markers are the
 /// contract, and a block that lost them could no longer be replaced later.
-pub fn render_block(features: &[Feature]) -> String {
+pub fn render_block(features: &[Feature], plugins: &Available) -> String {
     let mut body = String::new();
     body.push_str(BLOCK_START);
     body.push('\n');
@@ -26,7 +29,7 @@ pub fn render_block(features: &[Feature]) -> String {
         if !features.contains(&feature) {
             continue;
         }
-        let Some(text) = steering_text(feature) else {
+        let Some(text) = feature.steering(plugins) else {
             continue;
         };
         // The baseline reads as the section's parent: `##` for the workflow
@@ -47,17 +50,14 @@ pub fn render_block(features: &[Feature]) -> String {
     body
 }
 
-/// The steering bullets of a feature, or `None` when it writes no steering.
-fn steering_text(feature: Feature) -> Option<&'static str> {
-    match feature.writes() {
-        Writes::Steering(text) => Some(text),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::feature::Writes;
+
+    fn every_plugin() -> Available {
+        Available::of(&["who-wrote", "web-search"])
+    }
 
     fn selected(ids: &[&str]) -> Vec<Feature> {
         Feature::ALL
@@ -75,12 +75,13 @@ mod tests {
                 .copied()
                 .filter(|f| f.default_selected())
                 .collect::<Vec<_>>(),
+            &Available::none(),
         );
         assert!(block.starts_with(BLOCK_START) && block.ends_with(&format!("{BLOCK_END}\n")));
         assert!(block.contains("## Pixel\n"), "got {block}");
         assert!(block.contains("pixel scope-task"), "got {block}");
         for feature in Feature::ALL.iter().filter(|f| f.default_selected()) {
-            if let Writes::Steering(_) = feature.writes() {
+            if feature.writes() == Writes::Steering {
                 let heading = steering_title(*feature);
                 assert!(block.contains(heading), "{heading} missing from {block}");
             }
@@ -89,8 +90,8 @@ mod tests {
 
     #[test]
     fn the_catalog_order_decides_the_section_order_not_the_selection_order() {
-        let forward = render_block(&selected(&["prompt", "semantic"]));
-        let backward = render_block(&selected(&["semantic", "prompt"]));
+        let forward = render_block(&selected(&["prompt", "semantic"]), &Available::none());
+        let backward = render_block(&selected(&["semantic", "prompt"]), &Available::none());
         assert_eq!(forward, backward);
         let prompt = forward.find("## Pixel").unwrap();
         let semantic = forward.find("### Search").unwrap();
@@ -99,9 +100,10 @@ mod tests {
 
     #[test]
     fn a_feature_that_writes_no_steering_adds_no_section() {
-        let block = render_block(&selected(&[
-            "prompt", "metrics", "daemon", "guard", "rules",
-        ]));
+        let block = render_block(
+            &selected(&["prompt", "metrics", "daemon", "guard", "rules"]),
+            &every_plugin(),
+        );
         assert!(
             block.contains("## Pixel\n"),
             "the markers and the title: {block}"
@@ -113,7 +115,7 @@ mod tests {
 
     #[test]
     fn an_empty_selection_is_still_a_well_formed_block() {
-        let block = render_block(&[]);
+        let block = render_block(&[], &Available::none());
         assert_eq!(block, format!("{BLOCK_START}\n{BLOCK_END}\n"));
         assert!(
             crate::setup::files::upsert("", &block).is_ok(),
@@ -123,7 +125,7 @@ mod tests {
 
     #[test]
     fn every_section_is_a_heading_followed_by_bullets() {
-        let block = render_block(&Feature::ALL);
+        let block = render_block(&Feature::ALL, &every_plugin());
         let body = block
             .strip_prefix(BLOCK_START)
             .and_then(|rest| rest.strip_suffix(&format!("{BLOCK_END}\n")))
@@ -146,5 +148,17 @@ mod tests {
             sections, 4,
             "prompt, semantic, web-search and land: {block}"
         );
+    }
+
+    #[test]
+    fn a_web_search_row_without_its_plugin_renders_no_section_and_no_command() {
+        let block = render_block(&selected(&["prompt", "web-search"]), &Available::none());
+        assert!(!block.contains("### Web search"), "{block}");
+        assert!(!block.contains("pixel web-search"), "{block}");
+        assert!(!block.contains("who-wrote"), "{block}");
+        let block = render_block(&selected(&["prompt", "web-search"]), &every_plugin());
+        assert!(block.contains("### Web search\n"), "{block}");
+        assert!(block.contains("`pixel web-search`"), "{block}");
+        assert!(block.contains("`pixel who-wrote`"), "{block}");
     }
 }

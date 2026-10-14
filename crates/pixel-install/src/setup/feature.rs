@@ -11,7 +11,8 @@
 //! A feature is a bundle of up to three things, and saying which is the point:
 //!
 //! - [`Writes::Steering`] — a section in the managed block of every selected
-//!   agent's instruction file;
+//!   agent's instruction file (a line that names a plugin command is written
+//!   only where that plugin runs, see [`Feature::steering`]);
 //! - [`Writes::Config`] — a key in the global `~/.pixel/config.yaml`;
 //! - [`Writes::Rules`] — a per-agent rule file, for the harnesses that load one;
 //! - [`Writes::Hooks`] — a group of hook registrations, deployed by
@@ -21,12 +22,15 @@
 //! dry run of the same code that applies it) next to the instruction files, so
 //! nothing is written that the confirmation did not show.
 
+use pixel_plugin::Available;
+
 /// Where a feature's effect lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Writes {
     /// A `###` section inside the managed block of every selected agent's
-    /// instruction file.
-    Steering(&'static str),
+    /// instruction file. Its text is [`Feature::steering`]: it depends on
+    /// which plugins run on this machine.
+    Steering,
     /// A key in the global configuration, as a path below its root
     /// (`["classify", "enabled"]`) and the value to store.
     Config(&'static [&'static str], ConfigValue),
@@ -188,7 +192,7 @@ impl Feature {
                 "Classify files with an AI engine. `pixel config setup` then asks for the engine and its credentials."
             }
             Self::WebSearch => {
-                "Use a private provider for `pixel web-search` instead of the public chain. `pixel config setup` asks for it."
+                "Use a private provider for `pixel web-search` (the pixel-utilities plugin) instead of the public chain. `pixel config setup` asks for it."
             }
             Self::Rules => {
                 "Also write the steering into the per-tool rule file the harness loads (rules/ directory)."
@@ -210,18 +214,18 @@ impl Feature {
     /// features.
     pub fn writes(self) -> Writes {
         match self {
-            Self::Prompt => Writes::Steering(PROMPT_STEERING),
+            Self::Prompt => Writes::Steering,
             Self::Brief => Writes::Config(&["brief"], ConfigValue::Bool(true)),
             Self::TaskHooks => Writes::Hooks(HookGroup::Task),
             Self::Metrics => Writes::Config(&["metrics"], ConfigValue::Text("on")),
             Self::Daemon => Writes::Config(&["daemon_auto_start"], ConfigValue::Bool(true)),
-            Self::Semantic => Writes::Steering(SEMANTIC_STEERING),
+            Self::Semantic => Writes::Steering,
             Self::Classify => Writes::Config(&["classify", "enabled"], ConfigValue::Bool(true)),
-            Self::WebSearch => Writes::Steering(WEB_SEARCH_STEERING),
+            Self::WebSearch => Writes::Steering,
             Self::Rules => Writes::Rules,
             Self::PiExtension => Writes::Hooks(HookGroup::Pi),
             Self::CodexConfig => Writes::Hooks(HookGroup::Codex),
-            Self::Land => Writes::Steering(LAND_STEERING),
+            Self::Land => Writes::Steering,
         }
     }
 
@@ -261,10 +265,16 @@ impl Feature {
     }
 }
 
-/// The baseline section: what the agent is told to do, and what it is told
-/// pixel already refuses to do.
-pub(crate) const PROMPT_STEERING: &str = "\
-- Use pixel for repository retrieval: `pixel scope-task` for the file list, `pixel search-content` for a literal search, `pixel search-meaning` for a question about intent, `pixel impact` and `pixel who-wrote` before editing a symbol.
+/// The baseline section up to the commands that follow `pixel impact`: what
+/// the agent is told to do, and what it is told pixel already refuses to do.
+const PROMPT_RETRIEVAL: &str = "\
+- Use pixel for repository retrieval: `pixel scope-task` for the file list, `pixel search-content` for a literal search, `pixel search-meaning` for a question about intent, `pixel impact`";
+
+/// What the retrieval bullet adds when the git plugin runs here.
+const PROMPT_WHO_WROTE: &str = " and `pixel who-wrote`";
+
+/// The rest of the baseline, which names no plugin command.
+const PROMPT_REST: &str = " before editing a symbol.
 - Read a file only when the retrieval result does not answer the question; do not sweep the tree first.
 - Keep every edit inside the scoped task. A file outside it needs the user to say so.
 - Commit messages and pull request descriptions say what changed and why, in a few lines.
@@ -286,6 +296,55 @@ pub(crate) const LAND_STEERING: &str = "\
 - This repository lands work directly on its target branch: there is no pull request here.
 - When the user approves the work as finished, commit it on the session's own branch and land it on the target with the host's own branch-protection flow. Ask before landing.
 - This rule is about this repository. A pull-request workflow in another repository is not contradicted by it.";
+
+/// The steering text of a feature that writes any, for the plugins in
+/// `plugins`; `None` for a feature that writes no steering, and for one whose
+/// whole point is a plugin command that does not run here (the note in
+/// [`SetupPlan::notes`](super::plan::SetupPlan) says how to install it).
+/// An agent copies the commands it is given, so a command no plugin answers
+/// is left out rather than taught.
+impl Feature {
+    pub(crate) fn steering(self, plugins: &Available) -> Option<String> {
+        if self.writes() != Writes::Steering {
+            return None;
+        }
+        if let Some((command, _)) = self.requires_plugin()
+            && !plugins.has(command)
+        {
+            return None;
+        }
+        Some(match self {
+            Self::Prompt => {
+                let who_wrote = if plugins.has("who-wrote") {
+                    PROMPT_WHO_WROTE
+                } else {
+                    ""
+                };
+                format!("{PROMPT_RETRIEVAL}{who_wrote}{PROMPT_REST}")
+            }
+            Self::Semantic => SEMANTIC_STEERING.to_owned(),
+            Self::WebSearch => WEB_SEARCH_STEERING.to_owned(),
+            Self::Land => LAND_STEERING.to_owned(),
+            Self::Brief
+            | Self::TaskHooks
+            | Self::Metrics
+            | Self::Daemon
+            | Self::Classify
+            | Self::Rules
+            | Self::PiExtension
+            | Self::CodexConfig => unreachable!("{} writes no steering", self.id()),
+        })
+    }
+
+    /// The moved command this feature is about and the repository that
+    /// publishes its plugin, when the feature means nothing without it.
+    pub fn requires_plugin(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::WebSearch => Some(("web-search", "pixel-utilities")),
+            _ => None,
+        }
+    }
+}
 
 /// The section title a steering feature renders under. Every other feature
 /// writes its effect somewhere other than the block, so asking it for a title
@@ -312,6 +371,10 @@ pub(crate) fn steering_title(feature: Feature) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn every_plugin() -> Available {
+        Available::of(&["who-wrote", "web-search"])
+    }
 
     #[test]
     fn every_feature_has_a_distinct_index_and_id() {
@@ -395,7 +458,10 @@ mod tests {
     #[test]
     fn a_steering_feature_has_text_and_a_title() {
         for feature in Feature::ALL {
-            if let Writes::Steering(body) = feature.writes() {
+            if feature.writes() == Writes::Steering {
+                let body = feature
+                    .steering(&every_plugin())
+                    .expect("a steering feature has text when its plugin runs");
                 assert!(
                     body.lines().all(|line| line.starts_with("- ")),
                     "{} renders bullets, not prose",
@@ -436,5 +502,59 @@ mod tests {
             serde_json::Value::String("on".into()),
             "a bare off would parse as a YAML boolean"
         );
+    }
+
+    #[test]
+    fn the_baseline_names_who_wrote_only_where_the_git_plugin_runs() {
+        let without = Feature::Prompt.steering(&Available::none()).unwrap();
+        let with = Feature::Prompt.steering(&every_plugin()).unwrap();
+        assert!(!without.contains("who-wrote"), "{without}");
+        assert!(
+            without.contains("`pixel impact` before editing a symbol."),
+            "{without}"
+        );
+        assert!(
+            with.contains("`pixel impact` and `pixel who-wrote` before editing a symbol."),
+            "{with}"
+        );
+        // Everything else is the same bullet for bullet.
+        assert_eq!(without.lines().count(), with.lines().count());
+        assert_eq!(
+            without.lines().skip(1).collect::<Vec<_>>(),
+            with.lines().skip(1).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn web_search_steering_exists_only_where_the_utilities_plugin_runs() {
+        assert_eq!(Feature::WebSearch.steering(&Available::none()), None);
+        assert_eq!(
+            Feature::WebSearch.steering(&Available::of(&["who-wrote"])),
+            None,
+            "another plugin does not provide it"
+        );
+        assert_eq!(
+            Feature::WebSearch.steering(&every_plugin()).as_deref(),
+            Some(WEB_SEARCH_STEERING)
+        );
+        assert_eq!(
+            Feature::WebSearch.requires_plugin(),
+            Some(("web-search", "pixel-utilities"))
+        );
+        let requiring: Vec<&str> = Feature::ALL
+            .iter()
+            .filter(|f| f.requires_plugin().is_some())
+            .map(|f| f.id())
+            .collect();
+        assert_eq!(requiring, vec!["web-search"]);
+    }
+
+    #[test]
+    fn a_feature_without_steering_has_none_whatever_plugins_run() {
+        for feature in Feature::ALL {
+            if feature.writes() != Writes::Steering {
+                assert_eq!(feature.steering(&every_plugin()), None, "{}", feature.id());
+            }
+        }
     }
 }

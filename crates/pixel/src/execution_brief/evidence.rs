@@ -342,6 +342,11 @@ impl Live {
 }
 
 impl Evidence for Live {
+    #[cfg_attr(test, mutants::skip)] // thin adapter over the process's plugin directories
+    fn plugins(&self) -> pixel_plugin::Available {
+        crate::plugin_cmd::available()
+    }
+
     fn route(&self) -> &'static str {
         match self.route {
             Route::Daemon => "daemon",

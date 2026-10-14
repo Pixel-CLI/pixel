@@ -730,6 +730,9 @@ fn serve_line(engine: &mut dyn DecisionEngine, line: &str) -> Option<String> {
 trait ClassifyOutput {
     fn write_text(&mut self, text: &str) -> Result<(), String>;
     fn print_document(&mut self, document: &Value) -> Result<(), String>;
+    /// The moved commands a plugin runs here: `--task-intent` suggests only
+    /// ops that run.
+    fn plugins(&self) -> pixel_plugin::Available;
 }
 
 struct ProductionOutput;
@@ -743,6 +746,11 @@ impl ClassifyOutput for ProductionOutput {
     #[cfg_attr(test, mutants::skip)] // thin adapter preserving JSON output caps
     fn print_document(&mut self, document: &Value) -> Result<(), String> {
         crate::print_data(document, true)
+    }
+
+    #[cfg_attr(test, mutants::skip)] // thin adapter over the process's plugin directories
+    fn plugins(&self) -> pixel_plugin::Available {
+        crate::plugin_cmd::available()
     }
 }
 
@@ -1031,7 +1039,7 @@ fn run_with(
             crate::classify_history::HistoryDecision::Accept(verdict) => {
                 let ops = opts
                     .task_intent
-                    .then(|| crate::prompt_intent::ops_for(&verdict.label))
+                    .then(|| crate::prompt_intent::ops_for(&verdict.label, &output.plugins()))
                     .flatten();
                 if opts.json {
                     let mut doc = history_document(&spec, &verdict);
@@ -1055,7 +1063,7 @@ fn run_with(
     let probs = engine.decide(&spec)?;
     let ops = opts
         .task_intent
-        .then(|| crate::prompt_intent::ops_for(predicted(&probs, &spec.labels)))
+        .then(|| crate::prompt_intent::ops_for(predicted(&probs, &spec.labels), &output.plugins()))
         .flatten();
     if opts.json {
         let mut doc = document(engine.as_ref(), &spec, &probs);
@@ -1503,6 +1511,7 @@ mod tests {
         documents: Vec<Value>,
         fail_text: bool,
         fail_document: bool,
+        plugins: pixel_plugin::Available,
     }
 
     impl ClassifyOutput for RecordingOutput {
@@ -1520,6 +1529,10 @@ mod tests {
             }
             self.documents.push(document.clone());
             Ok(())
+        }
+
+        fn plugins(&self) -> pixel_plugin::Available {
+            self.plugins.clone()
         }
     }
 
@@ -2026,6 +2039,10 @@ mod tests {
             self.docs.push(document.clone());
             Ok(())
         }
+
+        fn plugins(&self) -> pixel_plugin::Available {
+            pixel_plugin::Available::none()
+        }
     }
 
     #[test]
@@ -2397,7 +2414,10 @@ mod tests {
     fn task_intent_should_judge_the_built_in_labels_and_name_the_ops_of_the_verdict() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&calls);
-        let mut output = RecordingOutput::default();
+        let mut output = RecordingOutput {
+            plugins: pixel_plugin::Available::of(&["plan-rollback", "dig-history"]),
+            ..Default::default()
+        };
         run_with(
             parse_classify(&["pixel", "classify", "the login broke", "--task-intent"]),
             test_resolve,
@@ -2440,9 +2460,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output.documents[0]["predicted"], "bugfix");
+        // No plugin runs: the ops that need one are left out, not taught.
         assert_eq!(
             output.documents[0]["next_ops"],
-            json!(crate::prompt_intent::ops_for("bugfix").unwrap())
+            json!(["pixel impact \"<symbol>\""])
         );
 
         let mut output = RecordingOutput::default();

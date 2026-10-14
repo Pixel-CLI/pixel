@@ -238,6 +238,7 @@ fn render_human(
     report: &Report,
     coverage: &BTreeMap<String, coverage_cmd::Row>,
     root: &Path,
+    plugins: &pixel_plugin::Available,
 ) -> String {
     let mut out = format!(
         "pixel audit — what an agent reads to learn what a file contains\nroot: {}\n\n",
@@ -307,9 +308,16 @@ fn render_human(
     out.push_str(
         "\nThis counts what an agent reads to learn a file's contents, not your bill.\n\
          Counts are UTF-8 bytes / 4, rounded down, as `pixel list-signatures` prints them;\n\
-         re-check a row with `pixel list-signatures <file>`. After a few days of agent\n\
-         sessions, `pixel token-savings` reports what Pixel's answers actually spared.\n",
+         re-check a row with `pixel list-signatures <file>`.",
     );
+    // `pixel token-savings` is the telemetry plugin's: suggested where it runs.
+    if plugins.has("token-savings") {
+        out.push_str(
+            " After a few days of agent\n\
+             sessions, `pixel token-savings` reports what Pixel's answers actually spared.",
+        );
+    }
+    out.push('\n');
     out
 }
 
@@ -390,7 +398,12 @@ fn report_for(root: &Path, top: u32, json: bool) -> Result<String, String> {
             .map(|s| s + "\n")
             .map_err(|e| e.to_string());
     }
-    Ok(render_human(&report, &coverage, root))
+    Ok(render_human(
+        &report,
+        &coverage,
+        root,
+        &crate::plugin_cmd::available(),
+    ))
 }
 
 /// The stderr line of a first run, which builds the graph before measuring.
@@ -754,7 +767,12 @@ mod tests {
                 symbols: 9,
             },
         );
-        let text = render_human(&report, &coverage, Path::new("/repo"));
+        let text = render_human(
+            &report,
+            &coverage,
+            Path::new("/repo"),
+            &pixel_plugin::Available::of(&["token-savings"]),
+        );
         for line in [
             "root: /repo",
             "   1000 tok      100 tok       -90%      3      10  src/a.rs",
@@ -772,11 +790,43 @@ mod tests {
         }
     }
 
+    /// The closing pointer to `pixel token-savings` appears only where the
+    /// telemetry plugin runs.
+    #[test]
+    fn render_human_points_to_token_savings_only_when_the_telemetry_plugin_runs() {
+        let render = |plugins: &pixel_plugin::Available| {
+            render_human(
+                &Report::default(),
+                &BTreeMap::new(),
+                Path::new("/repo"),
+                plugins,
+            )
+        };
+        let without = render(&pixel_plugin::Available::none());
+        assert!(!without.contains("token-savings"), "{without}");
+        assert!(
+            without.ends_with("re-check a row with `pixel list-signatures <file>`.\n"),
+            "{without}"
+        );
+        let with = render(&pixel_plugin::Available::of(&["token-savings"]));
+        assert!(
+            with.ends_with(
+                "re-check a row with `pixel list-signatures <file>`. After a few days of agent\nsessions, `pixel token-savings` reports what Pixel's answers actually spared.\n"
+            ),
+            "{with}"
+        );
+    }
+
     /// With nothing left out and nothing measured, the report says so and
     /// prints no left-out, total or coverage line.
     #[test]
     fn render_human_on_an_empty_report_prints_no_totals() {
-        let text = render_human(&Report::default(), &BTreeMap::new(), Path::new("/repo"));
+        let text = render_human(
+            &Report::default(),
+            &BTreeMap::new(),
+            Path::new("/repo"),
+            &pixel_plugin::Available::none(),
+        );
         assert!(
             text.contains("no indexed source file could be measured\n"),
             "{text}"

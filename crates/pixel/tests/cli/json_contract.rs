@@ -18,6 +18,7 @@
 //! Each command runs against the in-process service (`PIXEL_DAEMON_AUTO_START=0`)
 //! so the test does not depend on, or leave behind, a background daemon.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -729,10 +730,47 @@ fn plan_lists_verification_gates_and_honors_no_gates() {
     )
     .unwrap();
 
+    // Replaying a flow is the pixel-flow plugin's: the gate names the replay
+    // command only where `pixel flow` runs, here a `pixel-flow` on PATH.
+    let bin = dir.join("flow-plugin-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let plugin = bin.join("pixel-flow");
+    std::fs::write(&plugin, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let with_plugin = format!("{}:/usr/bin:/bin", bin.display());
+
+    // Without the plugin the same flow is reported, not offered as a command.
+    let bare = pixel_command()
+        .args(["plan", "--query", "dead-code", "--json", "."])
+        .current_dir(&*dir)
+        .env("PIXEL_FLOW_DIR", &flows)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(bare.status.success(), "{bare:?}");
+    let bare_doc: serde_json::Value = serde_json::from_slice(&bare.stdout).unwrap();
+    let bare_labels: Vec<&str> = bare_doc["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|g| g["label"].as_str())
+        .collect();
+    assert!(
+        bare_labels.iter().any(|l| l.contains(
+            "1 saved login flow(s) cannot be replayed until the pixel-flow plugin is installed (pixel install github:Pixel-CLI/pixel-flow)"
+        )),
+        "{bare_doc}"
+    );
+    assert!(
+        !bare_labels.iter().any(|l| l.contains("pixel flow run")),
+        "{bare_doc}"
+    );
+
     let out = pixel_command()
         .args(["plan", "--query", "dead-code", "--json", "."])
         .current_dir(&*dir)
         .env("PIXEL_FLOW_DIR", &flows)
+        .env("PATH", &with_plugin)
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
@@ -756,6 +794,7 @@ fn plan_lists_verification_gates_and_honors_no_gates() {
         .args(["plan", "--query", "dead-code", "."])
         .current_dir(&*dir)
         .env("PIXEL_FLOW_DIR", &flows)
+        .env("PATH", &with_plugin)
         .output()
         .unwrap();
     assert!(md.status.success(), "{md:?}");

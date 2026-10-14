@@ -21,6 +21,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use pixel_plugin::Available;
+
 use super::agent::{AgentTarget, Scope};
 use super::feature::{ConfigValue, Feature, Writes};
 use super::files::{BLOCK_END, BLOCK_START};
@@ -67,8 +69,14 @@ fn default_features(scope: Scope) -> Vec<Feature> {
 /// relative to the base, and the file's content.
 fn apply_one(agent: AgentTarget, scope: Scope) -> Vec<(String, String)> {
     let scratch = scratch_dir(agent, scope);
-    let plan = SetupPlan::new(&scratch, scope, &[agent], &default_features(scope))
-        .expect("a single agent resolves to a plan");
+    let plan = SetupPlan::new(
+        &scratch,
+        scope,
+        &[agent],
+        &default_features(scope),
+        &Available::none(),
+    )
+    .expect("a single agent resolves to a plan");
     let written = plan
         .apply()
         .expect("a writable scratch directory accepts the block");

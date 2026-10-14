@@ -19,6 +19,7 @@
 //! field of [`Host`]; the CLI fills it from the process, tests from a
 //! scratch directory.
 
+mod available;
 mod discover;
 mod error;
 mod fetch;
@@ -29,6 +30,10 @@ mod manifest;
 mod source;
 mod state;
 
+pub use available::{
+    Available, Status, command_status, install_command, read_only_invocation, repo_of,
+    stays_in_core,
+};
 pub use discover::{
     Host, Place, Resolved, Row, contained_program, find_on_path, list, render, resolve,
 };

@@ -17,8 +17,9 @@ pub const PIXEL_API: &str = "1";
 pub const PLUGINS_ORG: &str = "Pixel-CLI";
 
 /// Commands that live in a first-party plugin repository under
-/// [`PLUGINS_ORG`], each with that repository. The core still builds most
-/// of them in; the hint is only reached for a name clap does not know.
+/// [`PLUGINS_ORG`], each with that repository. The core builds in none of them
+/// but `check-release` (see [`crate::stays_in_core`]); the hint is reached for
+/// a name clap does not know.
 pub const MOVED_COMMANDS: [(&str, &str); 30] = [
     ("commit", "pixel-git"),
     ("push", "pixel-git"),

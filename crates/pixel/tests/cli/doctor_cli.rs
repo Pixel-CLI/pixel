@@ -379,7 +379,7 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
         [
             "pixel doctor --fix: ran 1 repair(s) — 1 fixed, 0 not converged, 0 failed",
             "  [fixed] pixel setup --shell zsh (install.agent-prompt, install.pi-impact)",
-            "pixel doctor: ran 2 check(s), skipped 28 — 2 green, 0 yellow, 0 red",
+            "pixel doctor: ran 2 check(s), skipped 29 — 2 green, 0 yellow, 0 red",
             "",
         ]
         .join("\n")

@@ -171,7 +171,7 @@ flowchart TD
     class X stop
 ```
 
-`flow`, `plan-rollback`, `token-savings`, `squash-branch` and `fast-forward` ship as plugins: `pixel install github:Pixel-CLI/pixel-flow`, `github:Pixel-CLI/pixel-git` (`plan-rollback`, `squash-branch`, `fast-forward`) or `github:Pixel-CLI/pixel-telemetry` (`token-savings`). `pixel uninstall <plugin>` removes one.
+Every git command in the diagram (`commit`, `commit-and-push`, `new-branch`, `fetch`, `sync-branch`, `fast-forward`, `plan-rollback` and the rest) is the `pixel-git` plugin; `flow` and `ultraflow`, `recall`, `token-savings` and the other telemetry commands, and `web-search` ship the same way, one repository each under `Pixel-CLI`: `pixel install github:Pixel-CLI/pixel-git` (then `pixel plugin enable git`, which allows its network commands), `pixel-flow`, `pixel-recall`, `pixel-telemetry`, `pixel-utilities`. Without the plugin, `pixel <command>` prints the install command and exits 2; `pixel doctor` flags an instruction file that names a command no installed plugin provides. `pixel uninstall <plugin>` removes one; `check-release` stays in the binary.
 
 - Red is the LLM — reasoning, meaning, edits
 - Orange is `pixel classify` — a model system one like Jev

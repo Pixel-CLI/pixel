@@ -12,6 +12,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use pixel_plugin::{Available, install_command};
+
 use crate::install::InstallSelection;
 use crate::{InstallError, Result};
 
@@ -106,6 +108,7 @@ impl SetupPlan {
         scope: Scope,
         agents: &[AgentTarget],
         features: &[Feature],
+        plugins: &Available,
     ) -> Result<Self> {
         let agents: Vec<AgentTarget> = AgentTarget::ALL
             .iter()
@@ -134,6 +137,22 @@ impl SetupPlan {
             }
         }
 
+        // A feature that is about a plugin command writes nothing where that
+        // plugin does not run: say which plugin makes it do something.
+        for feature in &features {
+            if let Some((command, repo)) = feature.requires_plugin()
+                && !plugins.has(command)
+            {
+                let why = plugins
+                    .blocked(command)
+                    .map_or_else(|| format!("run `{}`", install_command(repo)), str::to_owned);
+                notes.push(format!(
+                    "{} needs the {repo} plugin, which does not run here, so nothing was written for it; {why}.",
+                    feature.label()
+                ));
+            }
+        }
+
         let rule_writes = rule_writes(base, &features, &agents);
         let config_writes = features
             .iter()
@@ -147,7 +166,7 @@ impl SetupPlan {
             base: base.to_path_buf(),
             scope,
             agents,
-            block: render_block(&features),
+            block: render_block(&features, plugins),
             features,
             instruction_writes: by_path
                 .into_iter()
@@ -250,7 +269,7 @@ mod tests {
     }
 
     fn plan(scope: Scope, agents: &[AgentTarget], features: &[Feature]) -> SetupPlan {
-        SetupPlan::new(&base(), scope, agents, features).unwrap()
+        SetupPlan::new(&base(), scope, agents, features, &Available::none()).unwrap()
     }
 
     #[test]
@@ -344,6 +363,7 @@ mod tests {
             Scope::Global,
             &[AgentTarget::Codex],
             &[Feature::Prompt],
+            &Available::none(),
         )
         .unwrap()
         .install_selection();
@@ -408,6 +428,7 @@ mod tests {
             Scope::Repository,
             &[AgentTarget::ClaudeCode, AgentTarget::Cursor],
             &[Feature::Prompt],
+            &Available::none(),
         )
         .unwrap();
 
@@ -449,6 +470,7 @@ mod tests {
             Scope::Repository,
             &[AgentTarget::ClaudeCode, AgentTarget::Cursor],
             &[Feature::Prompt],
+            &Available::none(),
         )
         .unwrap();
         let err = plan.apply().unwrap_err();
@@ -457,5 +479,37 @@ mod tests {
             !dir.path().join("CLAUDE.md").exists(),
             "the malformed file is the user's to fix; the run must not continue past it"
         );
+    }
+
+    #[test]
+    fn a_feature_about_a_missing_plugin_writes_nothing_and_says_which_plugin_to_install() {
+        let plan = plan(
+            Scope::Global,
+            &[AgentTarget::ClaudeCode],
+            &[Feature::Prompt, Feature::WebSearch],
+        );
+        assert!(!plan.block.contains("### Web search"), "{}", plan.block);
+        assert!(!plan.block.contains("pixel web-search"), "{}", plan.block);
+        assert_eq!(
+            plan.notes,
+            vec![
+                "Private web-search provider needs the pixel-utilities plugin, which does not run here, so nothing was written for it; run `pixel install github:Pixel-CLI/pixel-utilities`.".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_feature_about_an_installed_plugin_is_written_and_needs_no_note() {
+        let plugins = Available::of(&["web-search"]);
+        let plan = SetupPlan::new(
+            &base(),
+            Scope::Global,
+            &[AgentTarget::ClaudeCode],
+            &[Feature::Prompt, Feature::WebSearch],
+            &plugins,
+        )
+        .unwrap();
+        assert!(plan.block.contains("### Web search"), "{}", plan.block);
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
     }
 }

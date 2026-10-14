@@ -3891,8 +3891,9 @@ fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
 ///
 /// The auth flow's URL variable is masked for the same reason: its
 /// `code`/`state` query is a bearer token for one login, and any command
-/// given `--var auth_url=…` lands here. (`flow` itself is a plugin now and
-/// is never logged by the core.) The name stays readable, the value never
+/// given `--var auth_url=…` lands here, and so does a plugin run: the core
+/// logs the arguments of `pixel flow …` through this function before any
+/// plugin sees a log of its own. The name stays readable, the value never
 /// does.
 fn logged_args(args: &[String]) -> String {
     let secret_from = args
@@ -3970,7 +3971,11 @@ fn checks_deployed_prompts(command_label: &str, protected: bool, developer_build
 /// (`build-index`, `install`, `scope-task --clear`, ...) finishes and stays
 /// finished, and its notice stays informative without a prompt. Labels are
 /// clap's kebab-case subcommand names, the same strings
-/// `matches.subcommand_name()` reports.
+/// `matches.subcommand_name()` reports. A plugin's commands are not here and
+/// need not be: a plugin run never reaches the update close (the dispatch
+/// returns the plugin's own exit code first), so what such a command may do
+/// to an agent's task gate is `pixel_plugin::read_only_invocation`, which
+/// `task_hook` consults.
 const READ_ONLY_COMMANDS: &[&str] = &[
     "search-content",
     "search-like-rg",

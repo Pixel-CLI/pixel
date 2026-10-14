@@ -53,7 +53,7 @@ pixel doctor .        # optional: health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-The index, the code graph and the optional history data live in `.pixel/` at the repository root and stay on your machine, and there is no telemetry beyond an optional release check. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search`, the embedding model downloaded from Hugging Face on first use, and a release check throttled to at most once per day when a person is at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) ([security model](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md)).
+The index, the code graph and the optional history data live in `.pixel/` at the repository root and stay on your machine, and there is no telemetry beyond an optional release check. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search` (the `pixel-utilities` plugin), the embedding model downloaded from Hugging Face on first use, and a release check throttled to at most once per day when a person is at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) ([security model](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md)).
 
 ## What pixel setup wires
 
@@ -120,7 +120,7 @@ Any other agent: paste [`PIXEL.md`](https://github.com/Pixel-CLI/pixel/blob/main
 
 ### Command plugins
 
-Commands move out of the binary into plugins, one repository each under `Pixel-CLI`: `pixel-git` (`commit`, `push`, `plan-rollback`, `squash-branch`, `fast-forward` and the other git commands), `pixel-flow` (`flow`, `ultraflow`), `pixel-recall` (`recall`), `pixel-telemetry` (`token-savings`, `action-log`, `list-errors`, `record-event`, `space`) and `pixel-utilities` (`web-search`, `check-release`, `ai-cli-readify`). Today `flow`, `plan-rollback`, `token-savings`, `squash-branch` and `fast-forward` are already plugins: without one installed, `pixel <name>` prints how to get it (`pixel install github:Pixel-CLI/pixel-flow`) and exits 2. `pixel install <source>` takes `github:<owner>/<repo>[@<ref>]`, a git URL or a local directory; a program the repository does not ship comes from the release asset `pixel-<name>-<target-triple>` (checked against its `.sha256` when published), otherwise `pixel install` prints the `cargo install --git` command to build it and the plugin stays not runnable until it is. `npm:<package>` is not supported yet. `pixel plugin list` shows what is installed, `pixel uninstall <plugin>` removes one. The old names (`rescue`, `update`, `savings`, `rewrite`, `replay-flow`) run the plugin of the current name.
+Commands move out of the binary into plugins, one repository each under `Pixel-CLI`: `pixel-git` (`commit`, `push`, `plan-rollback`, `squash-branch`, `fast-forward` and the other git commands), `pixel-flow` (`flow`, `ultraflow`), `pixel-recall` (`recall`), `pixel-telemetry` (`token-savings`, `action-log`, `list-errors`, `record-event`, `space`) and `pixel-utilities` (`web-search`, `check-release`, `ai-cli-readify`). The binary builds in none of these except `check-release`, which stays (the release workflow runs it before any plugin could be installed): without the plugin installed, `pixel <name>` prints how to get it (`pixel install github:Pixel-CLI/pixel-flow`) and exits 2. The rules `pixel setup` writes and the suggestions pixel prints name a plugin command only where that plugin runs, and `pixel doctor` (`plugins.references`) flags an instruction file that names a command no installed plugin provides. A plugin that declares network access (`pixel-git` does, for `push`, `fetch` and `sync-branch`) runs after `pixel plugin enable git`. Every plugin run is written to the action log like a core command. `pixel install <source>` takes `github:<owner>/<repo>[@<ref>]`, a git URL or a local directory; a program the repository does not ship comes from the release asset `pixel-<name>-<target-triple>` (checked against its `.sha256` when published), otherwise `pixel install` prints the `cargo install --git` command to build it and the plugin stays not runnable until it is. `npm:<package>` is not supported yet. `pixel plugin list` shows what is installed, `pixel uninstall <plugin>` removes one. The old names (`rescue`, `update`, `savings`, `rewrite`, `replay-flow`) run the plugin of the current name.
 
 ## The workflow
 
@@ -168,6 +168,8 @@ The most used commands, by job. `pixel --help` lists all of them, and [ARCHITECT
 
 ### History
 
+These commands are the `pixel-git` [command plugin](#command-plugins) (`pixel install github:Pixel-CLI/pixel-git`).
+
 | Instead of | Run |
 | --- | --- |
 | `git log -S "x"` | `pixel dig-history --phrase "x"` |
@@ -176,6 +178,8 @@ The most used commands, by job. `pixel --help` lists all of them, and [ARCHITECT
 | "it worked before" | `pixel plan-rollback "<problem>"` (a [command plugin](#command-plugins)): flags the breaking commit, writes nothing without `--apply` |
 
 ### Git changes
+
+Also the `pixel-git` plugin.
 
 | Instead of | Run |
 | --- | --- |
@@ -189,7 +193,7 @@ The most used commands, by job. `pixel --help` lists all of them, and [ARCHITECT
 
 ### Past sessions
 
-`pixel recall` searches the transcripts of every agent on the machine (Claude Code, Codex, Pi and others). `pixel recall search "token"` finds an exact string, `pixel recall ask "topic"` a topic in your own words, and `pixel recall show <ref> --turn N..M` reads the turns around a hit.
+`pixel recall` (the `pixel-recall` [command plugin](#command-plugins)) searches the transcripts of every agent on the machine (Claude Code, Codex, Pi and others). `pixel recall search "token"` finds an exact string, `pixel recall ask "topic"` a topic in your own words, and `pixel recall show <ref> --turn N..M` reads the turns around a hit.
 
 ## Reading the answers
 

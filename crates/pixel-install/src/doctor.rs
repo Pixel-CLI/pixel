@@ -88,6 +88,9 @@ pub const CHECKS: &[CheckSpec] = &[
     // The setup step is interactive and needs the user at a terminal, so
     // the check names it in the message but leaves `--fix` out of it.
     entry("web-search.provider", None),
+    // The repair installs a plugin from the network, so the outcome names the
+    // exact `pixel install` commands and `--fix` leaves them to the user.
+    entry("plugins.references", None),
     entry("repo.task-hook-observations", None),
     entry("repo.codex-config", FIX_REPO_INSTALL),
     entry("repo.codex-hooks", FIX_REPO_INSTALL),
@@ -225,6 +228,9 @@ pub struct DoctorOptions {
     pub only: Vec<String>,
     /// Check ids to leave out.
     pub skip: Vec<String>,
+    /// The moved commands a plugin runs here. Defaults to a scan of the
+    /// plugin directories under `home` (and `repo_root`) and of `$PATH`.
+    pub plugins: Option<pixel_plugin::Available>,
 }
 
 /// Run `pixel doctor`.
@@ -246,6 +252,14 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         None => std::env::current_exe().map_err(InstallError::CurrentExe)?,
     };
     let exe = install::stable_exe_path(executable_path);
+    let plugins = options.plugins.clone().unwrap_or_else(|| {
+        pixel_plugin::Available::scan(&pixel_plugin::Host {
+            home: home.clone(),
+            repo_root: options.repo_root.clone(),
+            path: std::env::var_os("PATH").unwrap_or_default(),
+            github_base: None,
+        })
+    });
 
     let mut runner = Runner {
         only: &options.only,
@@ -585,7 +599,22 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     // doctor. Runs for every invocation, not only inside a repository,
     // so a bare `pixel doctor` still reports no provider when one is not
     // configured.
-    runner.check_status("web-search.provider", || web_search_provider_check(&home));
+    runner.check_status("web-search.provider", || {
+        if !plugins.has("web-search") {
+            return Ok(web_search_plugin_absent(&plugins));
+        }
+        web_search_provider_check(&home)
+    });
+
+    // The text `pixel setup` deployed names commands: each one that a plugin
+    // provides must run here, or the agent is taught a command that fails.
+    runner.record("plugins.references", || {
+        Ok(plugin_references_check(
+            &home,
+            options.repo_root.as_deref(),
+            &plugins,
+        ))
+    });
 
     if let Some(root) = &options.repo_root {
         runner.check("repo.task-hook-observations", || {
@@ -1453,6 +1482,148 @@ fn shell_path_check_within(
     ))
 }
 
+/// `pixel web-search` is the pixel-utilities plugin's: with none installed
+/// there is no provider to configure, which is a state and not a defect.
+fn web_search_plugin_absent(plugins: &pixel_plugin::Available) -> (CheckStatus, DoctorCheckDetail) {
+    let why = plugins.blocked("web-search").map_or_else(
+        || {
+            format!(
+                "install it with `{}`",
+                pixel_plugin::install_command("pixel-utilities")
+            )
+        },
+        str::to_owned,
+    );
+    (
+        CheckStatus::Green,
+        DoctorCheckDetail {
+            summary: format!(
+                "`pixel web-search` is the pixel-utilities plugin and does not run here, so there is no provider to check; {why}"
+            ),
+            detail: Some(serde_json::json!({ "plugin": "pixel-utilities", "runnable": false })),
+        },
+    )
+}
+
+/// One file of deployed text and the plugin commands it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PluginReference {
+    path: PathBuf,
+    commands: Vec<&'static str>,
+}
+
+/// Whether `text` names `pixel <command>` as a whole command word.
+fn names_command(text: &str, command: &str) -> bool {
+    let needle = format!("pixel {command}");
+    text.match_indices(&needle).any(|(at, _)| {
+        text[at + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|next| !(next.is_ascii_alphanumeric() || next == '-' || next == '_'))
+    })
+}
+
+/// The moved commands the managed blocks of the files `pixel setup` deploys
+/// name, per file, in the global scope under `home` and in the repository.
+fn deployed_plugin_references(home: &Path, repo_root: Option<&Path>) -> Vec<PluginReference> {
+    let mut scopes = vec![(home, crate::setup::Scope::Global)];
+    if let Some(root) = repo_root.filter(|root| *root != home) {
+        scopes.push((root, crate::setup::Scope::Repository));
+    }
+    let mut references = Vec::new();
+    for (base, scope) in scopes {
+        for path in crate::setup::deployed_files(base, scope) {
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let block = crate::setup::managed_text(&text);
+            let commands: Vec<&'static str> = pixel_plugin::MOVED_COMMANDS
+                .iter()
+                .map(|(command, _)| *command)
+                .filter(|command| !pixel_plugin::stays_in_core(command))
+                .filter(|command| names_command(&block, command))
+                .collect();
+            if !commands.is_empty() {
+                references.push(PluginReference { path, commands });
+            }
+        }
+    }
+    references
+}
+
+/// Yellow when deployed instructions name a plugin command that does not run
+/// here, with the `pixel install` commands for the plugins that are simply
+/// missing; a plugin that is installed but blocked says why instead.
+fn plugin_references_check(
+    home: &Path,
+    repo_root: Option<&Path>,
+    plugins: &pixel_plugin::Available,
+) -> (CheckStatus, DoctorCheckDetail, Remedy) {
+    let references = deployed_plugin_references(home, repo_root);
+    let mut dangling = Vec::new();
+    let mut missing_repos: Vec<&'static str> = Vec::new();
+    let mut blocked = Vec::new();
+    for reference in &references {
+        for command in &reference.commands {
+            if plugins.has(command) {
+                continue;
+            }
+            dangling.push(format!("pixel {command} in {}", reference.path.display()));
+            if let Some(why) = plugins.blocked(command) {
+                if !blocked.contains(&why) {
+                    blocked.push(why);
+                }
+            } else if let Some(repo) = pixel_plugin::repo_of(command)
+                && !missing_repos.contains(&repo)
+            {
+                missing_repos.push(repo);
+            }
+        }
+    }
+    if dangling.is_empty() {
+        return (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: "deployed instructions name no plugin command that is missing".into(),
+                detail: Some(serde_json::json!({
+                    "files_checked": references.len(),
+                })),
+            },
+            Remedy::Catalogue,
+        );
+    }
+    let install = missing_repos
+        .iter()
+        .map(|repo| pixel_plugin::install_command(repo))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let mut summary = format!(
+        "deployed instructions name plugin commands that do not run here: {}",
+        dangling.join(", ")
+    );
+    if !install.is_empty() {
+        summary.push_str(&format!(" — install the plugin: {install}"));
+    }
+    for why in &blocked {
+        summary.push_str(&format!(" — {why}"));
+    }
+    (
+        CheckStatus::Yellow,
+        DoctorCheckDetail {
+            summary,
+            detail: Some(serde_json::json!({
+                "dangling": dangling,
+                "missing_plugins": missing_repos,
+            })),
+        },
+        if install.is_empty() {
+            Remedy::Manual
+        } else {
+            Remedy::Command(install)
+        },
+    )
+}
+
 /// Which web search provider `pixel web-search` resolves to for `home`.
 /// Green when one is configured; yellow, naming the setup command, when the
 /// public chain is the default. The provider is read straight from the
@@ -2285,6 +2456,9 @@ mod tests {
         web_search_provider_check_with, web_search_provider_from,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
+    use super::{
+        PluginReference, deployed_plugin_references, names_command, plugin_references_check,
+    };
     use crate::InstallError;
 
     #[test]
@@ -3914,6 +4088,219 @@ Prose naming `pixel status` is not a table row.
         assert_eq!(
             check.detail.as_ref().unwrap()["pixel_task_hooks_present"],
             true
+        );
+    }
+
+    /// A home with `pixel setup`'s block in the global Claude file, naming
+    /// `text`, and the user's own line around it.
+    fn home_with_block(text: &str) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude/CLAUDE.md");
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        std::fs::write(
+            &claude,
+            format!(
+                "My own rule: use `pixel commit` never.\n{}\n{text}\n{}\n",
+                crate::setup::BLOCK_START,
+                crate::setup::BLOCK_END
+            ),
+        )
+        .unwrap();
+        home
+    }
+
+    #[test]
+    fn names_command_should_match_whole_command_words_only() {
+        assert!(names_command("run `pixel who-wrote`.", "who-wrote"));
+        assert!(names_command("pixel who-wrote", "who-wrote"));
+        assert!(names_command("pixel who-wrote src/a.rs", "who-wrote"));
+        assert!(!names_command("pixel who-wrote-more", "who-wrote"));
+        assert!(!names_command("pixel who-wrote_x", "who-wrote"));
+        assert!(!names_command("pixel diffuse", "diff"));
+        assert!(!names_command("who-wrote alone", "who-wrote"));
+        assert!(names_command("pixel diff`", "diff"));
+    }
+
+    #[test]
+    fn plugin_references_should_read_the_managed_block_and_not_the_users_own_text() {
+        let home =
+            home_with_block("- `pixel impact` and `pixel who-wrote` and `pixel web-search`.");
+        let refs = deployed_plugin_references(home.path(), None);
+        assert_eq!(
+            refs,
+            vec![PluginReference {
+                path: home.path().join(".claude/CLAUDE.md"),
+                commands: vec!["who-wrote", "web-search"],
+            }],
+            "`pixel commit` sits outside the block and is the user's"
+        );
+        // check-release stays in the core: naming it needs no plugin.
+        let home = home_with_block("- `pixel check-release v1`.");
+        assert_eq!(deployed_plugin_references(home.path(), None), vec![]);
+    }
+
+    #[test]
+    fn plugin_references_should_go_yellow_with_the_install_commands_of_the_missing_plugins() {
+        let home = home_with_block("- `pixel who-wrote` and `pixel web-search`.");
+        let (status, detail, remedy) =
+            plugin_references_check(home.path(), None, &pixel_plugin::Available::none());
+        assert_eq!(status, CheckStatus::Yellow);
+        assert_eq!(
+            remedy,
+            Remedy::Command(
+                "pixel install github:Pixel-CLI/pixel-git && pixel install github:Pixel-CLI/pixel-utilities"
+                    .into()
+            )
+        );
+        let claude = home.path().join(".claude/CLAUDE.md").display().to_string();
+        assert_eq!(
+            detail.summary,
+            format!(
+                "deployed instructions name plugin commands that do not run here: pixel who-wrote in {claude}, pixel web-search in {claude} — install the plugin: pixel install github:Pixel-CLI/pixel-git && pixel install github:Pixel-CLI/pixel-utilities"
+            )
+        );
+        assert_eq!(
+            detail.detail.unwrap()["missing_plugins"],
+            serde_json::json!(["pixel-git", "pixel-utilities"])
+        );
+    }
+
+    #[test]
+    fn plugin_references_should_be_green_when_each_named_plugin_runs() {
+        let home = home_with_block("- `pixel who-wrote` and `pixel web-search`.");
+        let plugins = pixel_plugin::Available::of(&["who-wrote", "web-search"]);
+        let (status, detail, remedy) = plugin_references_check(home.path(), None, &plugins);
+        assert_eq!((status, remedy), (CheckStatus::Green, Remedy::Catalogue));
+        assert_eq!(detail.detail.unwrap()["files_checked"], 1);
+        // Only the plugin that is missing is named.
+        let plugins = pixel_plugin::Available::of(&["who-wrote"]);
+        let (status, detail, remedy) = plugin_references_check(home.path(), None, &plugins);
+        assert_eq!(status, CheckStatus::Yellow);
+        assert_eq!(
+            remedy,
+            Remedy::Command("pixel install github:Pixel-CLI/pixel-utilities".into())
+        );
+        assert!(
+            !detail.summary.contains("pixel who-wrote in"),
+            "{}",
+            detail.summary
+        );
+    }
+
+    #[test]
+    fn plugin_references_should_report_a_blocked_plugin_with_its_reason_and_no_install() {
+        let home = home_with_block("- `pixel who-wrote`.");
+        let plugins = pixel_plugin::Available::none().blocking(
+            "who-wrote",
+            "plugin `git` is not enabled: run `pixel plugin enable git`",
+        );
+        let (status, detail, remedy) = plugin_references_check(home.path(), None, &plugins);
+        assert_eq!((status, remedy), (CheckStatus::Yellow, Remedy::Manual));
+        assert!(
+            detail
+                .summary
+                .ends_with(" — plugin `git` is not enabled: run `pixel plugin enable git`"),
+            "{}",
+            detail.summary
+        );
+        assert!(
+            !detail.summary.contains("install the plugin"),
+            "{}",
+            detail.summary
+        );
+    }
+
+    #[test]
+    fn plugin_references_should_find_the_repository_files_too_and_not_twice_when_repo_is_home() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let claude = repo.path().join("CLAUDE.md");
+        std::fs::write(
+            &claude,
+            format!(
+                "{}\n- `pixel plan-rollback \"x\"`\n{}\n",
+                crate::setup::BLOCK_START,
+                crate::setup::BLOCK_END
+            ),
+        )
+        .unwrap();
+        let refs = deployed_plugin_references(home.path(), Some(repo.path()));
+        assert_eq!(
+            refs,
+            vec![PluginReference {
+                path: claude,
+                commands: vec!["plan-rollback"],
+            }]
+        );
+        // A repository that is the home directory: its global file is read once.
+        let global = home_with_block("- `pixel who-wrote`.");
+        assert_eq!(
+            deployed_plugin_references(global.path(), Some(global.path())).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_doctor_should_run_the_references_check_and_carry_the_install_command_as_its_fix() {
+        let home = home_with_block("- `pixel who-wrote`.");
+        let run = |plugins: pixel_plugin::Available| {
+            super::doctor(&super::DoctorOptions {
+                home: Some(home.path().to_path_buf()),
+                executable_path: Some(PathBuf::from("/opt/pixel/pixel")),
+                only: vec!["plugins.references".into()],
+                plugins: Some(plugins),
+                ..Default::default()
+            })
+            .unwrap()
+            .checks
+            .remove(0)
+        };
+        let missing = run(pixel_plugin::Available::none());
+        assert_eq!(missing.status, CheckStatus::Yellow, "{missing:?}");
+        assert_eq!(
+            missing.fix.as_deref(),
+            Some("pixel install github:Pixel-CLI/pixel-git")
+        );
+        assert!(
+            missing.repair.is_none(),
+            "a network install is the user's call"
+        );
+        let present = run(pixel_plugin::Available::of(&["who-wrote"]));
+        assert_eq!(present.status, CheckStatus::Green, "{present:?}");
+        assert_eq!(present.fix, None);
+    }
+
+    #[test]
+    fn the_web_search_check_should_not_ask_for_a_provider_when_its_plugin_does_not_run() {
+        let home = tempfile::tempdir().unwrap();
+        let run = |plugins: pixel_plugin::Available| {
+            super::doctor(&super::DoctorOptions {
+                home: Some(home.path().to_path_buf()),
+                executable_path: Some(PathBuf::from("/opt/pixel/pixel")),
+                only: vec!["web-search.provider".into()],
+                plugins: Some(plugins),
+                ..Default::default()
+            })
+            .unwrap()
+            .checks
+            .remove(0)
+        };
+        let absent = run(pixel_plugin::Available::none());
+        assert_eq!(absent.status, CheckStatus::Green, "{absent:?}");
+        assert!(
+            absent
+                .summary
+                .ends_with("install it with `pixel install github:Pixel-CLI/pixel-utilities`"),
+            "{}",
+            absent.summary
+        );
+        // With the plugin the provider is judged as before: none configured is yellow.
+        let present = run(pixel_plugin::Available::of(&["web-search"]));
+        assert_eq!(present.status, CheckStatus::Yellow, "{present:?}");
+        assert!(
+            present
+                .summary
+                .contains("no web search provider configured")
         );
     }
 }

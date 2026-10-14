@@ -287,9 +287,10 @@ model names do not attest the gateway's underlying implementation.
 plugin (`crates/pixel-plugin`, dispatched from `plugin_cmd::dispatch`):
 a trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), a user plugin
 (`~/.pixel/plugins/<name>/`), then an executable `pixel-<name>` on PATH. The
-plugin replaces the pixel process (`exec`) and runs with the user's
-privileges, network included; `pixel plugin list|add|remove|enable|trust`
-manage them. Controls, in the order a lookup applies them:
+plugin runs as a child of the pixel process (stdio inherited, its exit
+code returned) with the user's privileges, network included; `pixel
+install <source>` and `pixel uninstall <name>` add and remove them and
+`pixel plugin list|enable|trust` manage them. Controls, in the order a lookup applies them:
 
 - **Trust for repo plugins.** The repository chooses what its own `.pixel/`
   holds, so a repo plugin runs only after `pixel plugin trust <name>`
@@ -334,8 +335,17 @@ manage them. Controls, in the order a lookup applies them:
   `pixel install github:Pixel-CLI/<repo>` and exits 2; the pre-rename
   spellings (`rescue`, `update`, `savings`, `rewrite`, `replay-flow`) resolve
   to the plugin of the current name (`plugin_cmd::moved_name`). The core
-  binary does not contain their code, so it does not log their arguments: the
-  dispatch `exec`s before the action log is written.
+  binary does not contain their code, but it logs every run of one: after the
+  child exits, `plugin_cmd::log_run` appends the same record a core command
+  gets to `.pixel/actions.jsonl` (command, arguments through `logged_args`,
+  outcome, duration), so a credential in the arguments is masked the same
+  way. Plugin output is not metered. Text that `pixel setup` deploys, and the
+  next-step suggestions of `classify --task-intent`, `audit`, `plan` and the
+  brief, name a plugin command only when `pixel_plugin::Available` finds a
+  plugin that runs it; `pixel doctor`'s `plugins.references` check reports a
+  deployed instruction file that names a command no plugin provides, with the
+  `pixel install` command that would (it never runs a network install by
+  itself).
 
 ## 4. Threats
 
@@ -596,9 +606,9 @@ hold.
   argv unredacted (the sink keeps the whole output of every failed `sniper
   run`, structured RSpec/RuboCop/Minitest runs included, for 7 days and
   at most 200 outputs); `logged_args` masks only `config remote-key` values,
-  `auth_url` and a plugin source's credentials; `pixel flow` is a plugin that
-  `exec`s before any log line is written, so its `--var` values do not reach
-  `actions.jsonl`. The brief log masks key shapes and URL credentials,
+  `auth_url` and a plugin source's credentials, which also covers a plugin run
+  (`pixel flow … --var auth_url=…` is logged with the value redacted; any other
+  `--var` value is logged as typed). The brief log masks key shapes and URL credentials,
   not a secret typed as ordinary words, which stays in that 0600 file until
   the log wraps or is deleted.
 
@@ -627,7 +637,7 @@ hold.
 - **Mitigation**: nothing is sent without an explicit command or setting:
   `classify` sends its capped input to the configured endpoint (including
   `https://api.openai.com/v1/decisions` for the OpenAI preset), `web-search`
-  sends its query, and the automatic prompt-submit brief judge is pinned to an
+  (the pixel-utilities plugin) sends its query, and the automatic prompt-submit brief judge is pinned to an
   already-warm loopback Ollaya endpoint with no remote fallback; the release
   check sends no repository data (SECURITY.md, "Security model").
 - **Status**: Mitigated.
@@ -762,12 +772,13 @@ hold.
   privileges and network once allowed; `network` is a declaration gated by
   `enable`, not a sandbox, and the host cannot stop a plugin that declares
   `false` from using the network.
-  The five moved commands lost the property of being fixed built-ins: a
+  The moved commands lost the property of being fixed built-ins: a
   `pixel-squash-branch` (force-push with lease), `pixel-fast-forward` or
   `pixel-plan-rollback` (`--apply` rewrites files) earlier on `PATH`, in
   `~/.pixel/plugins/` or in a trusted repo plugin is what `pixel squash-branch`
-  runs. They are installed from source with `cargo install` and `pixel plugin
-  add`, so the reviewer of that install is the user.
+  runs. They are installed with `pixel install github:Pixel-CLI/<repo>` (a
+  release asset checked against its `.sha256` when one is published, else
+  `cargo install`), so the reviewer of that install is the user.
 
 ### Summary
 

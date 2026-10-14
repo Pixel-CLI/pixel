@@ -400,6 +400,12 @@ pub(crate) trait Evidence: Sync {
         let _ = (phrase, limit);
         Err("history unsupported".to_string())
     }
+    /// The moved commands a plugin runs here. A `next:` line names a command
+    /// the reader can run, so it names a plugin's only when the plugin runs;
+    /// a source that does not know says none.
+    fn plugins(&self) -> pixel_plugin::Available {
+        pixel_plugin::Available::none()
+    }
     /// Prompt-start task facts (`targets_facts`): files the stored task
     /// model names, or an `Err` when the route cannot serve it.
     fn task_facts(&self, task: &str, _deadline: Instant) -> Result<Vec<String>, String> {
@@ -2113,12 +2119,16 @@ fn rationale_evidence(
     let Some(phrase) = plan.concept.clone() else {
         return;
     };
-    edit(state, |brief| {
-        brief.next = Some(format!(
-            "pixel dig-history --phrase {}",
-            super::routes::q(&phrase)
-        ));
-    });
+    // The history below is read through the library; the command is only the
+    // reader's next step, and a plugin provides it.
+    if evidence.plugins().has("dig-history") {
+        edit(state, |brief| {
+            brief.next = Some(format!(
+                "pixel dig-history --phrase {}",
+                super::routes::q(&phrase)
+            ));
+        });
+    }
     if !spend(state, deadline) {
         return;
     }
@@ -3800,6 +3810,8 @@ mod tests {
         /// Files a `lines_at` read answers from, by path.
         sources: Vec<(String, Vec<String>)>,
         pause: Duration,
+        /// The plugins the fake models as running.
+        plugins: pixel_plugin::Available,
         log: Arc<Mutex<Vec<String>>>,
     }
 
@@ -3826,6 +3838,7 @@ mod tests {
                 source: None,
                 sources: Vec::new(),
                 pause: Duration::ZERO,
+                plugins: pixel_plugin::Available::none(),
                 log: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -3902,6 +3915,9 @@ mod tests {
         ) -> Result<(Vec<HistoryHit>, Vec<String>), String> {
             self.note(format!("history {phrase} limit {limit}"));
             self.history.clone()
+        }
+        fn plugins(&self) -> pixel_plugin::Available {
+            self.plugins.clone()
         }
         fn task_facts(&self, task: &str, _: Instant) -> Result<Vec<String>, String> {
             self.note(format!("task_facts {task}"));
@@ -4371,6 +4387,27 @@ mod tests {
     }
 
     #[test]
+    fn a_rationale_prompt_should_read_history_but_name_no_command_when_its_plugin_does_not_run() {
+        let mut fake = Fake::new();
+        fake.status = Ok(StatusProbe {
+            facts_fresh: Some(true),
+        });
+        fake.history = Ok((
+            vec![history("abc12345", "introduce the retry loop")],
+            Vec::new(),
+        ));
+        let brief = chain("when was `retry_loop` introduced", &fake, SECOND);
+        assert_eq!(brief.history.len(), 1, "the library read needs no plugin");
+        // The concept search's own next step stands; the history command is not added.
+        assert_eq!(
+            brief.next.as_deref(),
+            Some("pixel find-code 'retry loop introduced'")
+        );
+        let text = render(&brief).unwrap();
+        assert!(!text.contains("dig-history"), "{text}");
+    }
+
+    #[test]
     fn a_rationale_prompt_should_probe_then_run_history_when_facts_are_fresh() {
         let mut fake = Fake::new();
         fake.status = Ok(StatusProbe {
@@ -4383,6 +4420,7 @@ mod tests {
             ],
             Vec::new(),
         ));
+        fake.plugins = pixel_plugin::Available::of(&["dig-history"]);
         let brief = chain("when was `retry_loop` introduced", &fake, SECOND);
         assert_eq!(brief.kind, Some(QuestionKind::Rationale));
         let calls = fake.calls();
