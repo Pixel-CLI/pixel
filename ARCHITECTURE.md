@@ -133,8 +133,8 @@ Per repository, under `.pixel/` (git-ignored):
 | Path | Owner | Contents |
 | --- | --- | --- |
 | `base.shard`, `delta.shard`, `state.json`, `build.lock` | `pixel-index` | Base shard for all tracked files at a pinned commit, delta shard for files changed between that commit and HEAD, and `state.json` as the delta-layer sidecar (tombstones for superseded base paths). The dirty working-tree overlay is in memory only. First process to hold `build.lock` builds; others wait. |
-| `graph.v2.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. The name moves with the schema (`pixel_daemon::api::GRAPH_DB_FILE`); user-facing messages still say `graph.db`. |
-| `.pixel-mvp/` (`graph.db` + journals, `index.lock`, `.gitignore`, `checked`) | `mvp-store`, through `pixel-graph`'s `mvp_adapter` | pixel-mvp's index of the Rust and Ruby files, written when the graph's root holds a `Cargo.toml` and the Rust source switch is not `PIXEL_GRAPH_SOURCE_RUST=v1` (see "Indexes and freshness"), and refreshed by every graph build and update; rebuildable, one writer at a time behind `index.lock`, a damaged or foreign `graph.db` rebuilt. Opened only after `pixel_git::sidecar::check`. |
+| `graph.v2.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. A graph built with `PIXEL_GRAPH_SOURCE_RUBY=hybrid` also holds `ruby_hybrid_edges` and `ruby_hybrid_unresolved`, the undo of the Ruby merge. The name moves with the schema (`pixel_daemon::api::GRAPH_DB_FILE`); user-facing messages still say `graph.db`. |
+| `.pixel-mvp/` (`graph.db` + journals, `index.lock`, `.gitignore`, `checked`) | `mvp-store`, through `pixel-graph`'s `mvp_adapter` | pixel-mvp's index of the Rust and Ruby files, written when the graph's root holds a `Cargo.toml` and the Rust source switch is not `PIXEL_GRAPH_SOURCE_RUST=v1`, or when `PIXEL_GRAPH_SOURCE_RUBY=hybrid` (see "Indexes and freshness"), and refreshed by every graph build and update; rebuildable, one writer at a time behind `index.lock`, a damaged or foreign `graph.db` rebuilt. Opened only after `pixel_git::sidecar::check`. |
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
@@ -402,9 +402,9 @@ envelope talks to the daemon socket directly.
   `Cargo.toml` at the root, the root is not the top level of a git work
   tree, a tracked `.pixel/`), the graph keeps this resolver's Rust edges
   and records `rust=v1, pixel-mvp unavailable`, which counts as current
-  while the switch is on. Ruby and every other language keep this
-  resolver. Known limits of the Rust source, kept here until pixel-mvp
-  fixes them:
+  while the switch is on. Every other language keeps this resolver; Ruby
+  too, unless the Ruby switch below merges. Known limits of the Rust
+  source, kept here until pixel-mvp fixes them:
   - Rust test code (`#[test]` functions, `#[cfg(test)]` modules) has no
     symbols in this graph, so its calls are dropped (`pixel graph-shadow`
     counts them);
@@ -422,6 +422,30 @@ envelope talks to the daemon socket directly.
     (`b2d22eee`, `dev-release` build) the first graph command after a
     one-file edit takes about 0.85 s instead of 0.22 s, and `.pixel/` holds
     about 44 MB more.
+- The Ruby source switch, `PIXEL_GRAPH_SOURCE_RUBY` (`hybrid` on; unset or
+  anything else off, the default; `pixel_graph::mvp_adapter::ruby_switch`),
+  read like the Rust one. With it on, the full build and every incremental
+  update refresh pixel-mvp's index in `.pixel/.pixel-mvp/` (any git work
+  tree, no `Cargo.toml` needed) and merge its Ruby answer into this
+  resolver's rows site by site (`mvp_adapter::ruby`, ADR-0037 of the
+  pixel-mvp research repository): where pixel-mvp resolves a site, its
+  targets replace this resolver's edges there (calls `exact`, references
+  `probable`; a target with no symbol here leaves an `unresolved_calls`
+  row); where it abstains or has no such site, this resolver's edge stays
+  in its tier; a site only pixel-mvp has (an ancestor, a route) gains its
+  edge. An edge of this resolver goes only where pixel-mvp proves another
+  target, so its right edges stay, and so do its wrong ones where
+  pixel-mvp abstains. The merge records its undo in `ruby_hybrid_edges`
+  and `ruby_hybrid_unresolved`: `write_rows` restores this resolver's rows
+  first, runs its passes as without the switch, then merges again. The
+  graph records `graph_source_ruby` (`ruby=hybrid <commit> <extractor>`,
+  or `ruby=v1, pixel-mvp unavailable` outside a git work tree's top
+  level; absent when off, and a full build drops the side tables), and a
+  graph whose Ruby source differs from the switch's is rebuilt whole.
+  Cost on antiwork/gumroad (`b996417e`, `dev-release`): a one-file edit
+  then a graph command 0.79 s → 7.5 s (pixel-mvp's refresh and its
+  970 000 sites read on every update), a cold build 5.1 s → 13.1 s,
+  `.pixel/` 174 MB → 494 MB; that is why it is off by default.
 - Ruby constant receivers are resolved in `pixel-graph/src/resolve/ruby.rs`
   against class/module scopes, preserving the difference between nested
   declarations and `class A::B`. Unique class and constructor targets are

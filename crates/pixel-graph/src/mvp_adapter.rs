@@ -43,6 +43,7 @@ use mvp_model::{Graph, Lang};
 use crate::store::{EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, Tier};
 
 pub mod ruby;
+pub mod ruby_switch;
 
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
