@@ -1,0 +1,1 @@
+**cli:** the core no longer builds the flow libraries: `pixel-flow` and `pixel-ultraflow` moved into the `Pixel-CLI/pixel-flow` plugin repository, and `pixel plan` reads the saved flows' names and tags directly.

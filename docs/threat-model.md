@@ -597,7 +597,7 @@ hold.
   keys, flow fill values, transcripts or `.env` copies.
 - **Mitigation**: `~/.pixel/config.yaml` is written 0600
   (`config_cmd::write_private`); flows live in a 0700 directory with 0600
-  files (`pixel_flow::store::ensure_flow_dir`, `write_atomic`); `.pixel/` is
+  files (`ensure_flow_dir`, `write_atomic` in the `pixel-flow` plugin's `pixel-flow` crate); `.pixel/` is
   0700 and `actions.jsonl` 0600 (`pixel-actionlog`, `open_log_file`); the
   recall directory is 0700 (`pixel_recall::ensure_recall_dir`); the error
   sink is 0700/0600 (`pixel-session`); `pixel-ops` state directories are

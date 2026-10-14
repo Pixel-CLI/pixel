@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use pixel_daemon::api::Request;
 use pixel_graph::plan::{FindingKind, PlanFinding, Prereq, PrereqKind, Severity};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::plan_state;
 
@@ -174,19 +174,46 @@ fn prereqs_of(data: &serde_json::Value) -> Result<Vec<Prereq>, String> {
     }
 }
 
-/// Names of saved flows tagged `auth` or `login` — the replays a gate can
-/// name. Sorted lexicographically and deduplicated so the gate label is
-/// reproducible across runs (filesystem order from `pixel_flow::list` is
-/// not a stable ordering). A missing or unreadable flow dir is "no flows",
-/// never a failure.
-fn auth_flow_names() -> Vec<String> {
-    let Ok(value) = pixel_flow::list() else {
+/// Where the `pixel-flow` plugin saves flows: `$PIXEL_FLOW_DIR`, else
+/// `~/.local/share/pixel/flows/`. The core only reads it, to name a login
+/// replay in a plan gate.
+fn flow_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("PIXEL_FLOW_DIR").filter(|d| !d.is_empty()) {
+        return Some(dir.into());
+    }
+    std::env::var_os("HOME").map(|home| {
+        std::path::PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("pixel")
+            .join("flows")
+    })
+}
+
+/// The saved flows' JSON documents in `dir` (corrupt files skipped).
+fn saved_flows(dir: &std::path::Path) -> Vec<Value> {
+    let Ok(read) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut names: Vec<String> = value
-        .as_array()
-        .into_iter()
-        .flatten()
+    read.flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .collect()
+}
+
+/// Names of saved flows tagged `auth` or `login` — the replays a gate can
+/// name. Sorted lexicographically and deduplicated so the gate label is
+/// reproducible across runs (filesystem order is not a stable ordering).
+/// A missing or unreadable flow dir is "no flows", never a failure.
+fn auth_flow_names() -> Vec<String> {
+    auth_flow_names_in(&flow_dir().map(|dir| saved_flows(&dir)).unwrap_or_default())
+}
+
+fn auth_flow_names_in(flows: &[Value]) -> Vec<String> {
+    let mut names: Vec<String> = flows
+        .iter()
         .filter(|f| {
             f["tags"].as_array().into_iter().flatten().any(|t| {
                 t.as_str().is_some_and(|t| {
@@ -497,6 +524,22 @@ fn file_count(findings: &[PlanFinding]) -> usize {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn auth_flows_should_be_read_from_the_flow_dir_sorted_and_deduplicated() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| std::fs::write(dir.path().join(name), body).unwrap();
+        write("b.json", r#"{"name":"sso-login","tags":["Login"]}"#);
+        write("a.json", r#"{"name":"admin","tags":["auth","x"]}"#);
+        write("c.json", r#"{"name":"checkout","tags":["cart"]}"#);
+        write("d.json", r#"{"name":"admin","tags":["AUTH"]}"#);
+        write("e.json", "not json");
+        write("f.txt", r#"{"name":"ignored","tags":["auth"]}"#);
+        let flows = saved_flows(dir.path());
+        assert_eq!(flows.len(), 4);
+        assert_eq!(auth_flow_names_in(&flows), ["admin", "sso-login"]);
+        assert!(saved_flows(&dir.path().join("missing")).is_empty());
+    }
     fn flow_plugin() -> pixel_plugin::Available {
         pixel_plugin::Available::of(&["flow"])
     }

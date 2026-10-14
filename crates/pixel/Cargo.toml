@@ -37,7 +37,6 @@ pixel-facts = { path = "../pixel-facts" }
 pixel-install = { path = "../pixel-install" }
 pixel-proto = { path = "../pixel-proto" }
 pixel-actionlog = { path = "../pixel-actionlog" }
-pixel-flow = { path = "../pixel-flow" }
 pixel-release = { path = "../pixel-release" }
 pixel-task = { path = "../pixel-task" }
 pixel-plugin = { path = "../pixel-plugin" }

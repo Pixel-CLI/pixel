@@ -441,7 +441,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full map. The short version:
 | `crates/pixel-daemon` | `Service::dispatch`, one arm per op |
 | `crates/pixel-ops` | Git mutation ops (publish, reconcile, branch, ...) |
 | `crates/pixel-index`, `pixel-graph`, `pixel-rank`, `pixel-context` | Retrieval: trigram index, code graph, ranking, budgeted context |
-| `crates/pixel-facts`, `pixel-recall`, `pixel-session`, `pixel-actionlog`, `pixel-flow` | History facts, semantic recall, session recall, action log, browser flows |
+| `crates/pixel-facts`, `pixel-recall`, `pixel-session`, `pixel-actionlog` | History facts, semantic recall, session recall, action log |
 | `crates/pixel-install` | `pixel setup` / `doctor` / `uninstall`, hook scripts, the agent prompt asset |
 | `crates/pixel-bench` | Criterion benches. Not shipped. |
 | `scripts/` | install, smoke test, demos, bench wrappers, disk reclamation |

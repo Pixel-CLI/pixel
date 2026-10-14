@@ -2040,7 +2040,6 @@ dependencies = [
  "pixel-actionlog",
  "pixel-daemon",
  "pixel-facts",
- "pixel-flow",
  "pixel-git",
  "pixel-graph",
  "pixel-index",
@@ -2108,16 +2107,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "xxhash-rust",
-]
-
-[[package]]
-name = "pixel-flow"
-version = "0.7.1"
-dependencies = [
- "mutants",
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -2311,15 +2300,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "uuid",
-]
-
-[[package]]
-name = "pixel-ultraflow"
-version = "0.7.1"
-dependencies = [
- "mutants",
- "pixel-flow",
- "serde",
 ]
 
 [[package]]
