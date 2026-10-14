@@ -27,8 +27,11 @@ def main():
     words = [w for w in dict.fromkeys(re.findall(r"[a-z]{4,}", prompt.lower())) if w not in STOP]
     if not words:
         return
-    hits = subprocess.run(["rg", "-n", "--sort", "path", "-j", "1", "-m", "1", "-w", words[0], "."], cwd=root,
-                          capture_output=True, text=True, timeout=5).stdout.splitlines()
+    try:
+        hits = subprocess.run(["rg", "-n", "--sort", "path", "-j", "1", "-m", "1", "-w", words[0], "."], cwd=root,
+                              capture_output=True, text=True, timeout=5).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return   # a missing tool or a slow one is nothing to say, never an error
     for hit in hits[:3]:
         path, line, _ = hit.split(":", 2)
         lines = (Path(root) / path).read_text(errors="replace").splitlines()

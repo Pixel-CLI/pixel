@@ -24,7 +24,11 @@ MIN_QUOTE, MIN_WORDS, CALLER_LINES, LEVELS, MAX_LINES, MAX_BYTES = 12, 3, 14, 2,
 
 
 def rg(root, *args):
-    return subprocess.run([*RG, *args], cwd=root, capture_output=True, text=True, timeout=10).stdout.splitlines()
+    """Lines of `rg`; without ripgrep (or past its time) the probe has nothing to say."""
+    try:
+        return subprocess.run([*RG, *args], cwd=root, capture_output=True, text=True, timeout=10).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return []
 
 
 def quoted(prompt):

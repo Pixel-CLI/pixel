@@ -34,7 +34,12 @@ def words(text):
 
 
 def rg(root, *args):
-    return subprocess.run(["rg", "--sort", "path", "-j", "1", "--glob", "!.pixel", *args], cwd=root, capture_output=True, text=True, timeout=10).stdout.splitlines()
+    """Lines of `rg`; without ripgrep (or past its time) the probe has nothing to say."""
+    try:
+        return subprocess.run(["rg", "--sort", "path", "-j", "1", "--glob", "!.pixel", *args], cwd=root,
+                              capture_output=True, text=True, timeout=10).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return []
 
 
 def body(path, lo, count):

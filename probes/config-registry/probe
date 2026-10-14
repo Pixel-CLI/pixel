@@ -55,7 +55,10 @@ def scan(clone):
     cmd = ["rg", "-n", "--no-heading", "--no-messages", "--max-columns", "300", "--hidden", "-g", "!.git", "-g", "!.pixel", "--max-filesize", "400K"]
     for g in RG_EXCL: cmd += ["-g", g]
     for p in PATTERNS: cmd += ["-e", p]
-    out = subprocess.run(cmd + ["."], cwd=clone, capture_output=True, text=True, timeout=60).stdout
+    try:
+        out = subprocess.run(cmd + ["."], cwd=clone, capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []   # no ripgrep, or too slow: no registry
     rows = []
     for l in out.splitlines():
         m = re.match(r"\./(.+?):(\d+):(.*)$", l)

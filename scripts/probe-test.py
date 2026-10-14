@@ -35,6 +35,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -802,6 +803,7 @@ class SelfTest(unittest.TestCase):
             self.assertTrue(any(p.startswith("flaky: not deterministic") for p in problems), problems)
             self.assertFalse(any(p.startswith("ok:") for p in problems), problems)
 
+    @unittest.skipUnless(shutil.which("rg"), "ripgrep is not installed")
     def test_error_origin_finds_the_raise_site_its_callers_and_a_test_and_keeps_to_the_origins_directory(self):
         probe = Path(__file__).resolve().parent.parent / "probes" / "error-origin"
         with tempfile.TemporaryDirectory() as tmp:

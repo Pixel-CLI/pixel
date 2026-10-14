@@ -54,8 +54,12 @@ def with_context(root, header):
     out = [f"### {path}:{first}-{last} — {names} (constant, with context)"]
     out += [f"{i}| {source[i - 1][:160]}" for i in range(first, last + 1)]
     for name in [n.strip() for n in names.split(",")][:2]:
-        hits = subprocess.run(["rg", "-n", "-w", "--no-heading", "--sort", "path", "-j", "1", "-m", "3", name, "--glob", "!**/tests/**", "--glob", "!.pixel", "."],
-                              cwd=root, capture_output=True, text=True, timeout=10).stdout.splitlines()
+        try:
+            hits = subprocess.run(["rg", "-n", "-w", "--no-heading", "--sort", "path", "-j", "1", "-m", "3", name,
+                                   "--glob", "!**/tests/**", "--glob", "!.pixel", "."],
+                                  cwd=root, capture_output=True, text=True, timeout=10).stdout.splitlines()
+        except (OSError, subprocess.SubprocessError):
+            hits = []   # no ripgrep: the constant keeps its context but shows no uses
         uses = [h for h in hits if not re.search(rf"const {re.escape(name)}\b", h)][:USES]
         if uses:
             out.append(f"uses of {name}:")
