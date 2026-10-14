@@ -54,11 +54,21 @@ pub(crate) fn changes(
     };
     let diff_args = ["--no-color", "--no-ext-diff", "--no-renames", "-U0"];
     let (label, subject, diff) = match scope {
-        ChangeScope::Latest => {
-            let subject = text(LINE_BYTES, &["log", "-1", "--format=%h %s"]).ok();
+        ChangeScope::Latest | ChangeScope::Commit(_) => {
+            let rev = match &scope {
+                ChangeScope::Commit(sha)
+                    if (7..=40).contains(&sha.len())
+                        && sha.chars().all(|ch| ch.is_ascii_hexdigit()) =>
+                {
+                    sha.as_str()
+                }
+                ChangeScope::Commit(_) => return Err("not a commit id".to_string()),
+                _ => "HEAD",
+            };
+            let subject = text(LINE_BYTES, &["log", "-1", "--format=%h %s", rev]).ok();
             let mut args = vec!["show", "--format="];
             args.extend(diff_args);
-            args.push("HEAD");
+            args.push(rev);
             let label = subject
                 .as_deref()
                 .and_then(|line| line.split_whitespace().next())
@@ -336,6 +346,27 @@ deleted file mode 100644
                 .any(|file| file.path == "b.txt" && file.status == 'A')
         );
 
+        // A commit by id; a made-up or malformed id is refused before git runs.
+        let sha = latest
+            .subject
+            .as_deref()
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string();
+        std::fs::write(dir.join("later.txt"), "x\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "third"]);
+        let older = changes(&dir, ChangeScope::Commit(sha), soon()).unwrap();
+        assert!(older.subject.as_deref().unwrap().ends_with("second change"));
+        assert!(older.files.iter().all(|file| file.path != "later.txt"));
+        assert_eq!(
+            changes(&dir, ChangeScope::Commit("--output=x".into()), soon()).unwrap_err(),
+            "not a commit id"
+        );
+        assert!(changes(&dir, ChangeScope::Commit("abcdef0".into()), soon()).is_err());
+
         // The branch left `main` one commit ago: the same files.
         let branch = changes(&dir, ChangeScope::Branch, soon()).unwrap();
         assert!(
@@ -343,7 +374,7 @@ deleted file mode 100644
             "{}",
             branch.label
         );
-        assert_eq!(branch.files.len(), 2);
+        assert_eq!(branch.files.len(), 3);
 
         // A clean working tree has nothing to review; an edit is the change.
         assert!(changes(&dir, ChangeScope::Working, soon()).is_err());

@@ -293,7 +293,7 @@ pub(crate) fn asks(typed: &str) -> Ask {
 /// `word` without a verb ending or a plural, in the form [`answer::tokens`]
 /// gives the words of a text, so that a term and the text it is looked for
 /// in compare equal (`redirecting` and `redirects` are both `redirect`).
-fn stem(word: &str) -> String {
+pub(crate) fn stem(word: &str) -> String {
     let mut word = word.to_string();
     for suffix in ["ing", "ied", "ed"] {
         if let Some(rest) = word.strip_suffix(suffix)
@@ -304,6 +304,12 @@ fn stem(word: &str) -> String {
         }
     }
     answer::tokens(&word).into_iter().next().unwrap_or(word)
+}
+
+/// Whether `word` says nothing about what is asked (a question word, a
+/// verb or noun of any question about code).
+pub(crate) fn is_generic(word: &str) -> bool {
+    GENERIC_WORDS.contains(&word) || META_WORDS.contains(&word) || TEST_WORDS.contains(&word)
 }
 
 /// The content words of `typed` worth a search, stems, in prompt order:

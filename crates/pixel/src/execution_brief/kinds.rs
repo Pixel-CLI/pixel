@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use super::answer::{self, Receipt};
-use super::chain::{Evidence, SymbolHit};
+use super::chain::{Evidence, HistoryHit, SymbolHit};
 use super::locator;
 use super::region_pack::{self, Block, DefSite};
 use super::routes::{QuestionKind, has_phrase, plain};
@@ -62,10 +62,12 @@ pub(crate) struct RepoMap {
 }
 
 /// Which change a review is about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ChangeScope {
     /// The commit at HEAD.
     Latest,
+    /// The commit with this abbreviated or full hex id.
+    Commit(String),
     /// Everything since the branch left the default branch.
     Branch,
     /// The working tree against HEAD.
@@ -1147,6 +1149,255 @@ fn flow_blocks(input: &KindInput, evidence: &dyn Evidence, deadline: Instant) ->
 }
 
 // ---------------------------------------------------------------------------
+// History: which commit, when, and what it touched
+// ---------------------------------------------------------------------------
+
+/// Commits listed at most, and paths shown under each.
+const MAX_COMMITS: usize = 8;
+const PATHS_PER_COMMIT: usize = 3;
+/// Commits whose changes are read (one git call each), and files shown.
+const DETAILED_COMMITS: usize = 2;
+const CHANGED_FILES: usize = 6;
+/// Rows each history search asks for.
+const HISTORY_ROWS: usize = 40;
+/// Words of the prompt searched together in the first search.
+const HISTORY_WORDS: usize = 3;
+/// Shortest changed line worth looking for in the current file.
+const MIN_LINE_CHARS: usize = 8;
+/// Words that ask about history and name nothing to search for.
+const HISTORY_NOISE: &[&str] = &[
+    "when",
+    "commit",
+    "commits",
+    "change",
+    "changed",
+    "changes",
+    "start",
+    "started",
+    "added",
+    "introduced",
+    "introduce",
+    "removed",
+    "since",
+    "which",
+    "history",
+    "first",
+    "land",
+    "landed",
+    "appeared",
+    "version",
+    "release",
+    "released",
+    "happen",
+    "happened",
+    "exactly",
+    "file",
+    "files",
+    "code",
+    "did",
+    "does",
+    "was",
+];
+
+/// One commit of a history answer, with where it touched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Commit {
+    pub(crate) sha: String,
+    pub(crate) date: String,
+    pub(crate) subject: String,
+    /// `(path, a changed line)` for each path the search matched.
+    pub(crate) touched: Vec<(String, Option<String>)>,
+    /// What the commit changed, one `path:line +a -r` per file, when read.
+    pub(crate) changed: Vec<String>,
+    /// How many hits (of any facet, of any search) named the commit.
+    pub(crate) hits: usize,
+}
+
+/// The hits grouped by commit, the commit most hits name first and the most
+/// recent among equals, at most [`MAX_COMMITS`].
+pub(crate) fn group_commits(hits: &[HistoryHit]) -> Vec<Commit> {
+    let mut commits: Vec<Commit> = Vec::new();
+    for hit in hits {
+        let index = match commits.iter().position(|commit| commit.sha == hit.sha) {
+            Some(index) => index,
+            None => {
+                commits.push(Commit {
+                    sha: hit.sha.clone(),
+                    date: hit.at.chars().take(10).collect(),
+                    subject: hit.subject.clone(),
+                    touched: Vec::new(),
+                    changed: Vec::new(),
+                    hits: 0,
+                });
+                commits.len() - 1
+            }
+        };
+        let commit = &mut commits[index];
+        commit.hits += 1;
+        if commit.date.is_empty() {
+            commit.date = hit.at.chars().take(10).collect();
+        }
+        if let Some(path) = &hit.path {
+            match commit.touched.iter_mut().find(|(held, _)| held == path) {
+                Some((_, line)) if line.is_none() => *line = hit.snippet.clone(),
+                Some(_) => {}
+                None => commit.touched.push((path.clone(), hit.snippet.clone())),
+            }
+        }
+    }
+    commits.sort_by(|a, b| b.hits.cmp(&a.hits).then_with(|| b.date.cmp(&a.date)));
+    commits.truncate(MAX_COMMITS);
+    commits
+}
+
+/// The 1-based line of `lines` that holds a line of `snippet` (an added or a
+/// removed line of a diff, with its `+`/`-` marker), the first that is long
+/// enough to mean something.
+pub(crate) fn locate_changed_line(lines: &[String], snippet: &str) -> Option<u64> {
+    snippet
+        .lines()
+        .map(|line| line.trim_start_matches(['+', '-', ' ']).trim())
+        .filter(|line| line.chars().count() >= MIN_LINE_CHARS)
+        .find_map(|wanted| {
+            lines
+                .iter()
+                .position(|line| line.trim() == wanted)
+                .map(|at| at as u64 + 1)
+        })
+}
+
+/// The lines of the history block: `sha date subject`, then each touched path
+/// as `path:line` (the line of the current file that holds a line the commit
+/// changed) or bare when no such line is found.
+pub(crate) fn history_lines(
+    commits: &[Commit],
+    line_of: &dyn Fn(&str, &str) -> Option<u64>,
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for commit in commits {
+        let date = if commit.date.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", commit.date)
+        };
+        lines.push(format!("{}{date} {}", commit.sha, commit.subject));
+        lines.extend(
+            commit
+                .changed
+                .iter()
+                .map(|change| format!("  changed {change}")),
+        );
+        for (path, snippet) in commit.touched.iter().take(PATHS_PER_COMMIT) {
+            let place = snippet
+                .as_deref()
+                .and_then(|snippet| line_of(path, snippet))
+                .map_or_else(|| path.clone(), |line| format!("{path}:{line}"));
+            lines.push(format!("  touched {place}"));
+        }
+    }
+    lines
+}
+
+/// The raw content words of the prompt a history search can use, rarest first
+/// by the probe's weight; a word the probe found everywhere is left out.
+pub(crate) fn history_words(typed: &str, receipt: Option<&Receipt>) -> Vec<String> {
+    let mut words: Vec<(String, f64)> = Vec::new();
+    for word in super::brief_keywords(super::brief_task(typed)) {
+        let word = word.to_lowercase();
+        let stem = locator::stem(&word);
+        if word.len() < 4
+            || HISTORY_NOISE.contains(&word.as_str())
+            || locator::is_generic(&word)
+            || words.iter().any(|(held, _)| *held == word)
+        {
+            continue;
+        }
+        match receipt.and_then(|receipt| receipt.weight_of(&stem)) {
+            Some(weight) if weight <= 0.0 => {}
+            weight => words.push((word, weight.unwrap_or(1.0))),
+        }
+    }
+    words.sort_by(|a, b| b.1.total_cmp(&a.1));
+    words.into_iter().map(|(word, _)| word).collect()
+}
+
+/// The history block: the commits that match the prompt's words, as the
+/// history index has them.
+fn history_blocks(input: &KindInput, evidence: &dyn Evidence, deadline: Instant) -> Vec<Block> {
+    let words = history_words(input.typed, input.receipt);
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut queries = vec![
+        words
+            .iter()
+            .take(HISTORY_WORDS)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" "),
+    ];
+    if words.len() > 1 {
+        queries.push(words[0].clone());
+    }
+    let mut hits: Vec<HistoryHit> = Vec::new();
+    for query in queries {
+        if Instant::now() >= deadline {
+            break;
+        }
+        if let Ok((found, _)) = evidence.history(&query, HISTORY_ROWS, deadline) {
+            hits.extend(found);
+        }
+    }
+    let mut commits = group_commits(&hits);
+    if commits.is_empty() {
+        return Vec::new();
+    }
+    // What the best commits changed, at the lines of the version they made.
+    for commit in commits.iter_mut().take(DETAILED_COMMITS) {
+        if Instant::now() >= deadline {
+            break;
+        }
+        if let Ok(change) = evidence.changes(ChangeScope::Commit(commit.sha.clone()), deadline) {
+            commit.changed = change
+                .files
+                .iter()
+                .take(CHANGED_FILES)
+                .map(|file| {
+                    let line = file
+                        .hunks
+                        .first()
+                        .map_or(String::new(), |(first, _)| format!(":{first}"));
+                    format!("{}{line} +{} -{}", file.path, file.added, file.removed)
+                })
+                .collect();
+        }
+    }
+    let cache: std::cell::RefCell<BTreeMap<String, Option<Vec<String>>>> =
+        std::cell::RefCell::default();
+    let lines = history_lines(&commits, &|path, snippet| {
+        let mut held = cache.borrow_mut();
+        let source = held
+            .entry(path.to_string())
+            .or_insert_with(|| evidence.lines_at(path, 1, 20_000, deadline).ok());
+        source
+            .as_ref()
+            .and_then(|lines| locate_changed_line(lines, snippet))
+    });
+    vec![Block::new(
+        format!(
+            "history — commits matching {}",
+            words
+                .iter()
+                .take(HISTORY_WORDS)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        lines,
+    )]
+}
+
+// ---------------------------------------------------------------------------
 // The entry point
 // ---------------------------------------------------------------------------
 
@@ -1170,6 +1421,7 @@ pub(crate) fn blocks(input: &KindInput, evidence: &dyn Evidence, deadline: Insta
     match input.kind {
         QuestionKind::Overview => overview_blocks(evidence, deadline),
         QuestionKind::Review => review_blocks(input.typed, evidence, deadline),
+        QuestionKind::History => history_blocks(input, evidence, deadline),
         QuestionKind::Flow => flow_blocks(input, evidence, deadline),
         _ => Vec::new(),
     }
@@ -1178,7 +1430,10 @@ pub(crate) fn blocks(input: &KindInput, evidence: &dyn Evidence, deadline: Insta
 /// Whether the pack of `kind` replaces the regions closest to the question:
 /// those would be the files of a few words, not the repository or the change.
 pub(crate) const fn owns_the_pack(kind: QuestionKind) -> bool {
-    matches!(kind, QuestionKind::Overview | QuestionKind::Review)
+    matches!(
+        kind,
+        QuestionKind::Overview | QuestionKind::Review | QuestionKind::History
+    )
 }
 
 #[cfg(test)]
@@ -1614,6 +1869,7 @@ mod tests {
         callers: Vec<(String, Vec<CallerHit>)>,
         trees: Vec<(String, Vec<FlowNode>)>,
         like: Vec<SymbolHit>,
+        history: Vec<HistoryHit>,
     }
 
     impl World {
@@ -1658,8 +1914,26 @@ mod tests {
         fn changes(&self, scope: ChangeScope, _: Instant) -> Result<Changes, String> {
             self.changes
                 .clone()
-                .filter(|_| scope == ChangeScope::Latest)
+                .filter(|_| matches!(scope, ChangeScope::Latest | ChangeScope::Commit(_)))
                 .ok_or_else(|| "no changes".to_string())
+        }
+        fn history(
+            &self,
+            phrase: &str,
+            _: usize,
+            _: Instant,
+        ) -> Result<(Vec<HistoryHit>, Vec<String>), String> {
+            if self.history.is_empty() {
+                return Err("facts index absent".to_string());
+            }
+            let words: Vec<&str> = phrase.split_whitespace().collect();
+            let found = self
+                .history
+                .iter()
+                .filter(|hit| words.iter().all(|word| hit.subject.contains(word)))
+                .cloned()
+                .collect();
+            Ok((found, Vec::new()))
         }
         fn find_symbols(
             &self,
@@ -2139,5 +2413,220 @@ mod tests {
             expired,
         );
         assert!(none.is_empty());
+    }
+
+    // ---- history ---------------------------------------------------------------
+
+    fn commit_hit(
+        sha: &str,
+        at: &str,
+        subject: &str,
+        path: Option<&str>,
+        snippet: Option<&str>,
+    ) -> HistoryHit {
+        HistoryHit {
+            sha: sha.to_string(),
+            subject: subject.to_string(),
+            at: at.to_string(),
+            path: path.map(str::to_string),
+            snippet: snippet.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn group_commits_should_put_the_commit_most_hits_name_first_and_collect_its_paths() {
+        let hits = vec![
+            commit_hit(
+                "aaa",
+                "2023-01-02T10:00:00Z",
+                "ignore: skip unreachable",
+                None,
+                None,
+            ),
+            commit_hit(
+                "bbb",
+                "2024-05-06T10:00:00Z",
+                "unrelated",
+                Some("b.rs"),
+                None,
+            ),
+            commit_hit(
+                "aaa",
+                "2023-01-02T10:00:00Z",
+                "ignore: skip unreachable",
+                Some("walk.rs"),
+                None,
+            ),
+            commit_hit(
+                "aaa",
+                "2023-01-02T10:00:00Z",
+                "ignore: skip unreachable",
+                Some("walk.rs"),
+                Some("+ let x = 1;"),
+            ),
+            commit_hit(
+                "aaa",
+                "2023-01-02T10:00:00Z",
+                "ignore: skip unreachable",
+                Some("dir.rs"),
+                None,
+            ),
+        ];
+        let commits = group_commits(&hits);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].sha, "aaa");
+        assert_eq!(commits[0].date, "2023-01-02");
+        assert_eq!(commits[0].hits, 4);
+        // A path keeps the first changed line a hit gave it.
+        assert_eq!(
+            commits[0].touched,
+            [
+                ("walk.rs".to_string(), Some("+ let x = 1;".to_string())),
+                ("dir.rs".to_string(), None)
+            ]
+        );
+        assert_eq!(commits[1].sha, "bbb");
+        let many: Vec<HistoryHit> = (0..MAX_COMMITS + 4)
+            .map(|n| commit_hit(&format!("s{n}"), "2024-01-01", "x", None, None))
+            .collect();
+        assert_eq!(group_commits(&many).len(), MAX_COMMITS);
+    }
+
+    #[test]
+    fn locate_changed_line_should_find_a_line_of_the_diff_in_the_current_file() {
+        let source = strings(&[
+            "fn a() {",
+            "    if reachable(x) {",
+            "        skip_it();",
+            "    }",
+            "}",
+        ]);
+        assert_eq!(
+            locate_changed_line(&source, "+        skip_it();\n+    }"),
+            Some(3)
+        );
+        assert_eq!(
+            locate_changed_line(&source, "- gone_line_removed();\n+ if reachable(x) {"),
+            Some(2)
+        );
+        // Too short to mean anything, or not in the file at all.
+        assert_eq!(locate_changed_line(&source, "+ }"), None);
+        assert_eq!(
+            locate_changed_line(&source, "+ not in the file at all"),
+            None
+        );
+    }
+
+    #[test]
+    fn history_lines_should_show_sha_date_subject_what_changed_and_where() {
+        let commits = vec![Commit {
+            sha: "435f59fc4b".into(),
+            date: "2026-07-29".into(),
+            subject: "ignore: skip loading unreachable ignore files".into(),
+            touched: vec![
+                (
+                    "crates/ignore/src/walk.rs".into(),
+                    Some("+ skip_it();".into()),
+                ),
+                ("crates/ignore/src/dir.rs".into(), None),
+            ],
+            changed: vec!["crates/ignore/src/walk.rs:639 +31 -3".into()],
+            hits: 3,
+        }];
+        let lines = history_lines(&commits, &|path, _| {
+            (path.ends_with("walk.rs")).then_some(642)
+        });
+        assert_eq!(
+            lines,
+            [
+                "435f59fc4b 2026-07-29 ignore: skip loading unreachable ignore files",
+                "  changed crates/ignore/src/walk.rs:639 +31 -3",
+                "  touched crates/ignore/src/walk.rs:642",
+                "  touched crates/ignore/src/dir.rs"
+            ]
+        );
+        let undated = vec![Commit {
+            date: String::new(),
+            changed: Vec::new(),
+            touched: Vec::new(),
+            ..commits[0].clone()
+        }];
+        assert_eq!(
+            history_lines(&undated, &|_, _| None)[0],
+            "435f59fc4b ignore: skip loading unreachable ignore files"
+        );
+    }
+
+    #[test]
+    fn history_words_should_keep_the_raw_content_words_and_drop_what_only_asks_for_history() {
+        let words = history_words(
+            "when did ignore start skipping unreachable ignore files, which commit was it and what did it change",
+            None,
+        );
+        assert_eq!(words, ["ignore", "skipping", "unreachable"]);
+    }
+
+    #[test]
+    fn a_history_question_should_list_the_commits_with_what_they_changed() {
+        let world = World {
+            history: vec![
+                commit_hit(
+                    "435f59fc4b",
+                    "2026-07-29T08:00:00Z",
+                    "ignore: skip unreachable ignore files",
+                    Some("walk.rs"),
+                    Some("+        skip_it();"),
+                ),
+                commit_hit(
+                    "1111111111",
+                    "2020-01-01T08:00:00Z",
+                    "docs: typo",
+                    None,
+                    None,
+                ),
+            ],
+            changes: Some(Changes {
+                label: "commit 435f59f".into(),
+                subject: Some("435f59f ignore: skip unreachable ignore files".into()),
+                files: vec![changed("walk.rs", 'M', 31, 3, &[(5, 9)])],
+                truncated: false,
+            }),
+            ..World::default()
+        }
+        .with_file(
+            "walk.rs",
+            &[
+                "fn walk() {",
+                "    a();",
+                "    b();",
+                "    c();",
+                "    skip_it();",
+            ],
+        );
+        let typed = "when did ignore start skipping unreachable files, which commit was it";
+        let out = blocks(
+            &input(QuestionKind::History, typed, &[], &[], &[]),
+            &world,
+            soon(),
+        );
+        assert_eq!(out.len(), 1);
+        let text = out[0].text();
+        assert!(text.starts_with("### history — commits matching"), "{text}");
+        assert!(
+            text.contains("435f59fc4b 2026-07-29 ignore: skip unreachable ignore files"),
+            "{text}"
+        );
+        assert!(text.contains("  changed walk.rs:5 +31 -3"), "{text}");
+        assert!(text.contains("  touched walk.rs:5"), "{text}");
+        // No history index: nothing is said.
+        assert!(
+            blocks(
+                &input(QuestionKind::History, typed, &[], &[], &[]),
+                &World::default(),
+                soon()
+            )
+            .is_empty()
+        );
+        assert!(owns_the_pack(QuestionKind::History));
     }
 }

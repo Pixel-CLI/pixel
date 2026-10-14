@@ -41,6 +41,10 @@ pub(crate) enum QuestionKind {
     /// each crate or module is for. The evidence is the repository itself
     /// (its map, the head of its architecture document), not a symbol.
     Overview,
+    /// When, why or by whom something changed, asked in so many words:
+    /// "which commit", "when did", "who added". The evidence is the
+    /// commits of the history index that touched it.
+    History,
     /// A review of a change: the latest commit, a diff, a branch, the
     /// working tree. The evidence is the change and the code around it.
     Review,
@@ -235,6 +239,25 @@ const WALKTHROUGH: &[&str] = &[
     "life of a",
     "journey of",
 ];
+/// Phrases that ask about the history of the code in so many words; the
+/// plain `when` or `why` of a rationale question is not enough.
+const HISTORY_PHRASES: &[&str] = &[
+    "which commit",
+    "what commit",
+    "which pr",
+    "when did",
+    "since when",
+    "since which",
+    "who added",
+    "who wrote",
+    "who introduced",
+    "who changed",
+    "who removed",
+    "who broke",
+    "git log",
+    "git blame",
+    "blame",
+];
 /// Words that report a defect: a strong prompt names its symbol, so a
 /// bugfix brief can come from the heuristic too, not only from a verdict.
 const BUGFIX_WORDS: &[&str] = &[
@@ -305,6 +328,9 @@ impl QuestionKind {
         if asks_review(typed) {
             return Self::Review;
         }
+        if asks_phrase(typed, HISTORY_PHRASES) && !asks(TEST_WORDS) {
+            return Self::History;
+        }
         let walkthrough =
             asks_phrase(typed, WALKTHROUGH) && !asks(TEST_WORDS) && !asks(BUGFIX_WORDS);
         let flow = walkthrough
@@ -341,6 +367,7 @@ impl QuestionKind {
             Self::Feature => "feature",
             Self::Overview => "overview",
             Self::Review => "review",
+            Self::History => "history",
         }
     }
 }
@@ -640,6 +667,7 @@ mod tests {
             QuestionKind::Feature,
             QuestionKind::Overview,
             QuestionKind::Review,
+            QuestionKind::History,
         ]
         .into_iter()
         .map(QuestionKind::as_str)
@@ -655,7 +683,8 @@ mod tests {
                 "bugfix",
                 "feature",
                 "overview",
-                "review"
+                "review",
+                "history"
             ]
         );
     }
@@ -664,5 +693,32 @@ mod tests {
     fn q_should_single_quote_and_escape_inner_quotes() {
         assert_eq!(q("handleError"), "'handleError'");
         assert_eq!(q("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn heuristic_should_route_a_question_about_history_in_so_many_words_to_history() {
+        for prompt in [
+            "when did ignore start skipping unreachable ignore files, which commit was it and what did it change",
+            "who added the retry loop",
+            "since which commit does the cache expire",
+            "when did the daemon idle timeout change",
+            "git blame on the parser",
+        ] {
+            assert_eq!(kind_of(prompt), QuestionKind::History, "{prompt}");
+        }
+        // A plain `why` or `when` stays a rationale question, a tests question
+        // stays one, and a walkthrough is not history.
+        assert_eq!(
+            kind_of("why was the cache removed"),
+            QuestionKind::Rationale
+        );
+        assert_eq!(
+            kind_of("which tests cover the change when it was added"),
+            QuestionKind::Tests
+        );
+        assert_eq!(
+            kind_of("what happens when a prompt is submitted"),
+            QuestionKind::Flow
+        );
     }
 }

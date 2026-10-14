@@ -1086,7 +1086,21 @@ fn history_hits(data: &Value) -> Result<Vec<HistoryHit>, String> {
                 .and_then(Value::as_str)
                 .map(|s| s.lines().next().unwrap_or("").trim().to_string())
                 .unwrap_or_default();
-            Some(HistoryHit { sha, subject })
+            let text = |key: &str| {
+                row.get(key)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty())
+            };
+            Some(HistoryHit {
+                sha,
+                subject,
+                at: text("at")
+                    .or_else(|| text("committed_at"))
+                    .unwrap_or_default(),
+                path: text("path"),
+                snippet: text("snippet"),
+            })
         })
         .collect())
 }
@@ -1836,7 +1850,8 @@ mod tests {
             live.history("retry", 3, deadline).unwrap().0,
             [HistoryHit {
                 sha: "0123456789".into(),
-                subject: "add the retry loop".into()
+                subject: "add the retry loop".into(),
+                ..HistoryHit::default()
             }]
         );
         assert_eq!(
@@ -1953,13 +1968,29 @@ mod tests {
             [
                 HistoryHit {
                     sha: "0123456789".into(),
-                    subject: "first line".into()
+                    subject: "first line".into(),
+                    ..HistoryHit::default()
                 },
                 HistoryHit {
                     sha: "abc".into(),
-                    subject: "subject via message".into()
+                    subject: "subject via message".into(),
+                    ..HistoryHit::default()
                 }
             ]
+        );
+        // A diff hit says when, where and what.
+        let rich = json!({"candidates": [{
+            "oid": "fedcba9876543210", "subject": "skip unreachable files", "at": "2023-04-02T10:00:00Z",
+            "path": "crates/ignore/src/dir.rs", "snippet": "+ if unreachable { continue }", "kind": "diff"
+        }]});
+        let hit = history_hits(&rich).unwrap().remove(0);
+        assert_eq!(
+            (hit.at.as_str(), hit.path.as_deref(), hit.snippet.as_deref()),
+            (
+                "2023-04-02T10:00:00Z",
+                Some("crates/ignore/src/dir.rs"),
+                Some("+ if unreachable { continue }")
+            )
         );
         assert_eq!(
             history_hits(&json!({})).unwrap_err(),

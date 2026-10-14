@@ -268,10 +268,16 @@ pub(crate) struct StatusProbe {
 }
 
 /// One history row: the commit's short sha and its subject line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HistoryHit {
     pub(crate) sha: String,
     pub(crate) subject: String,
+    /// When the commit was made (the index's timestamp), if it said.
+    pub(crate) at: String,
+    /// The path the hit is about (a path or diff hit), if any.
+    pub(crate) path: Option<String>,
+    /// The changed lines the hit matched (a diff hit), if any.
+    pub(crate) snippet: Option<String>,
 }
 
 /// One declaration `find-symbol` reports; `uid` is `path#name#kind`.
@@ -857,6 +863,7 @@ impl Admission {
                 QuestionKind::Overview => "kind: overview",
                 QuestionKind::Review => "kind: review",
                 QuestionKind::Flow => "kind: flow",
+                QuestionKind::History => "kind: history",
                 _ => "kind",
             }),
             Self::Unjudged | Self::Open => None,
@@ -1331,7 +1338,10 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
 fn pack_evidence(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Instant) {
     let mut brief = edit(state, |brief| brief.clone());
     // History rows answer a rationale question better than regions do.
-    if !brief.pack_limit.on() || Instant::now() >= deadline || !brief.history.is_empty() {
+    if !brief.pack_limit.on()
+        || Instant::now() >= deadline
+        || (!brief.history.is_empty() && plan.kind != QuestionKind::History)
+    {
         return;
     }
     // A routed kind that reads no ranges of its own (a rationale whose
@@ -2016,7 +2026,9 @@ fn run_kind(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, deadline
         QuestionKind::Flow => flow_evidence(plan, evidence, state, deadline),
         QuestionKind::Tests => tests_evidence(evidence, state, deadline),
         QuestionKind::Config => config_evidence(plan, evidence, state, deadline),
-        QuestionKind::Rationale => rationale_evidence(plan, evidence, state, deadline),
+        QuestionKind::Rationale | QuestionKind::History => {
+            rationale_evidence(plan, evidence, state, deadline);
+        }
         QuestionKind::Bugfix => {
             edit(state, |brief| {
                 brief.next = brief
@@ -2959,7 +2971,7 @@ const FLOW_MIN_SHARED: usize = 2;
 fn admitted_by_kind(kind: QuestionKind, scored: Option<&relevance::Verdict>) -> bool {
     match kind {
         QuestionKind::Overview | QuestionKind::Review => true,
-        QuestionKind::Flow => scored.is_some_and(|scored| {
+        QuestionKind::Flow | QuestionKind::History => scored.is_some_and(|scored| {
             scored.features.shared >= FLOW_MIN_SHARED && scored.features.structural_files > 0
         }),
         _ => false,
@@ -3656,6 +3668,7 @@ mod tests {
         HistoryHit {
             sha: sha.into(),
             subject: subject.into(),
+            ..HistoryHit::default()
         }
     }
 
@@ -8326,6 +8339,16 @@ mod tests {
             assert_eq!(
                 refusal(signal, &off_with(2, 1), true, true, QuestionKind::Flow),
                 None,
+                "{signal:?}"
+            );
+            // Asked about in so many words, history needs the same footing.
+            assert_eq!(
+                refusal(signal, &off_with(2, 1), true, true, QuestionKind::History),
+                None,
+                "{signal:?}"
+            );
+            assert!(
+                refusal(signal, &off_with(0, 4), true, true, QuestionKind::History).is_some(),
                 "{signal:?}"
             );
             assert!(

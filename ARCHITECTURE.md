@@ -952,7 +952,17 @@ the call trace and the body of each call, from the symbol the prompt names,
 the call path the chain found, or the function whose name carries the rare
 words of the prompt and from which most of the others are reached
 (`entry_score`). The regions closest to a few words are left out of the pack of
-a tour and of a review. The reads add no brief operation and fail open.
+a tour and of a review. A question about history in so many words ("which commit", "when did",
+"who added", `blame`) is `QuestionKind::History`: it is admitted like a
+walkthrough, and its pack is the commits of the history index
+(`build-index --history`, read through the daemon's read-only `history` op:
+no ingest, no plugin) that match the prompt's content words, as `sha date
+subject`, what the two best commits changed (`path:line +a -r`, one bounded git
+call each) and the paths and changed lines the search matched. An absent
+history index leaves the prompt as it was. A TS/JS class property holding an
+arrow function is a method of its class in the graph (extractor 25), so a
+walkthrough can start at a handler written that way.
+The reads add no brief operation and fail open.
 
 **Keeping a daemon behind the brief.** Without a daemon the brief has no
 `meaning` leads, and a daemon exits after thirty minutes idle or becomes
