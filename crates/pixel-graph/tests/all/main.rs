@@ -13,6 +13,7 @@ mod concept_tests;
 mod crux_lines;
 mod env_read_concepts;
 mod import_resolution;
+mod mvp_adapter;
 mod rails_routes;
 mod resolve_receiver_shadowing;
 mod ruby_ancestors;

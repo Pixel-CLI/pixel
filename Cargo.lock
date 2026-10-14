@@ -2148,6 +2148,9 @@ name = "pixel-graph"
 version = "0.7.1"
 dependencies = [
  "mutants",
+ "mvp-index",
+ "mvp-model",
+ "mvp-store",
  "pixel-git",
  "pixel-index",
  "rayon",

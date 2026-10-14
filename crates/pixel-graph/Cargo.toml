@@ -14,6 +14,11 @@ workspace = true
 rusqlite = { version = "0.40", features = ["bundled"] }
 pixel-git = { path = "../pixel-git" }
 pixel-index = { path = "../pixel-index" }
+# pixel-mvp's index, vendored (crates/mvp-*/VENDORED.md): the adapter in
+# `mvp_adapter` reads it.
+mvp-index = { path = "../mvp-index" }
+mvp-model = { path = "../mvp-model" }
+mvp-store = { path = "../mvp-store" }
 tree-sitter = "0.27"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.25"
