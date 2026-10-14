@@ -544,6 +544,8 @@ jobs:
           python3 scripts/probe-test.py --self-test
           python3 scripts/probe-translate.py --self-test
           python3 scripts/probe-loop.py --self-test
+          python3 scripts/probe-chain.py --self-test
+          python3 scripts/extract-probes.py --self-test
           python3 scripts/brief-bench.py --self-test
           python3 scripts/brief-bench.py check
 
