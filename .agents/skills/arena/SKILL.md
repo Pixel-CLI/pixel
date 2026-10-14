@@ -37,7 +37,7 @@ $S abort [lookup]                         # interrupt, close the panes
    login `auth.json` is copied (never printed); `config.toml` copies the
    user's model, effort, sandbox and approval settings and nothing else (no
    hooks, MCP servers, plugins, notify). The pixel arm's `hooks.json` holds
-   one hook, the `UserPromptSubmit` entry `pixel install` writes for Codex
+   one hook, the `UserPromptSubmit` entry `pixel setup` writes for Codex
    (`run-hook task-event --provider codex --event prompt-submit`) at the
    pinned binary; it is a global-home hook, so no repo review is needed (Codex
    still asks for the one-time hook trust in that private home; the script
