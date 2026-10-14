@@ -2639,7 +2639,12 @@ where
     // definition read, no fallback search.
     if edit(state, |brief| brief.tier()) == Some(Tier::Low) {
         answer_evidence(evidence.as_ref(), state, deadline);
-        edit(state, |brief| brief.finished = true);
+        edit(state, |brief| {
+            brief.finished = true;
+            // A maybe gets at most one part of regions, as a lead.
+            brief.pack_limit.parts = brief.pack_limit.parts.min(1);
+        });
+        pack_evidence(&plan, evidence.as_ref(), state, deadline);
         return;
     }
     let plan = seeded(plan, state);
@@ -3058,7 +3063,8 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
     if brief.silenced || brief.answered == 0 {
         return None;
     }
-    if brief.tier() == Some(Tier::Low) {
+    let low = brief.tier() == Some(Tier::Low);
+    if low && !brief.pack_limit.on() {
         return render_low(brief).map(|text| (text, AnswerStats::default()));
     }
     if let Some(pack) = brief
@@ -3067,7 +3073,7 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
         .filter(|pack| brief.pack_limit.on() && pack.has_evidence())
     {
         // The packet was cut short: the pack says it is a lead, not an answer.
-        let text = pack.text_hedged(brief.cut);
+        let text = pack.text_hedged(brief.cut || low);
         let stats = AnswerStats {
             answer: true,
             excerpt_bytes: text.len(),
@@ -3085,6 +3091,9 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
             ..AnswerStats::default()
         };
         return Some((text, stats));
+    }
+    if low {
+        return render_low(brief).map(|text| (text, AnswerStats::default()));
     }
     let receipt = !brief.receipt_lines().is_empty();
     let cap = byte_cap(
@@ -6314,6 +6323,51 @@ mod tests {
         );
         assert_eq!((record.ops, record.answered), (2, 2));
         assert!(record.bytes <= LOW_BRIEF_BYTES, "{}", record.bytes);
+    }
+
+    #[test]
+    fn a_prose_prompt_in_the_low_tier_should_get_one_part_of_regions_as_a_lead() {
+        let source: Vec<String> = [
+            "/// Wait until the watcher has caught up with the startup scan.",
+            "fn watch_ready() {",
+            "    while !caught_up() {",
+            "        std::thread::yield_now();",
+            "    }",
+            "    mark_ready();",
+            "}",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![lead(DAEMON, 2, "fn watch_ready() {")]);
+        fake.sources = vec![(DAEMON.to_string(), source)];
+        let finished = try_start_with(
+            PROSE,
+            OPEN,
+            SECOND,
+            move |_| Box::new(fake),
+            verdict("question"),
+            model_low,
+            Around {
+                pack: region_pack::Limit::of(3),
+                ..Around::default()
+            },
+        )
+        .expect("the prompt starts a brief")
+        .finish_with_record();
+        let text = finished.text.expect("a brief");
+        assert!(text.starts_with("[PIXEL:BRIEF]\nregion pack"), "{text}");
+        assert!(text.contains("2| fn watch_ready() {"), "{text}");
+        assert!(
+            text.ends_with(region_pack::LEAD),
+            "a maybe is a lead: {text}"
+        );
+        assert!(!text.contains(region_pack::DIRECTIVE));
+        assert_eq!(finished.record.tier, Some("low"));
+        assert_eq!(finished.record.pack_parts, 1);
+        assert_eq!(finished.record.pack_bytes, text.len());
     }
 
     #[test]

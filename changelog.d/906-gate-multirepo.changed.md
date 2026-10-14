@@ -1,0 +1,1 @@
+**brief:** the relevance gate is refitted on four repositories (pixel, excalidraw, requests, ripgrep) instead of Pixel alone, with a fifth feature (`coverage`, the share of the keywords one file holds) and thresholds calibrated out of fold: it no longer closes most of the census prompts (6 of the 19 the gate sees opened before, 9 now). Task #906.

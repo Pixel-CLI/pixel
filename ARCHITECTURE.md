@@ -726,16 +726,21 @@ no language model in it. From the daemon's `facts.relevance` (`targets_facts`
 with `relevance_only`, which skips the target ranking and is accepted only from
 an `algorithm_version` 2 result; in process over the index and graph when no
 daemon answers) and the
-typed prompt it computes four features: `struct_per_mille` (how many files a
+typed prompt it computes five features: `struct_per_mille` (how many files a
 keyword of positive weight names by path or symbol, per thousand indexed
 files, as a log), `question` (the prompt ends on `?` or opens with a question
 word), `ops_share` (the share of keywords that name a git, release or CI
-operation) and `struct_ratio` (the heaviest structural co-file's weight over
-the keywords' total). A fixed logistic model scores them, and two thresholds
+operation), `struct_ratio` (the heaviest structural co-file's weight over
+the keywords' total) and `coverage` (the share of the informative keywords the
+heaviest co-file holds, whatever the size of the repository). A fixed logistic model scores them, and two thresholds
 cut the score into a tier. The weights are the daemon's
 (`pixel_daemon::relevance::row_weight`, `CoFile::weight`), never recomputed.
 The model is an L2 logistic regression fitted on the English dev rows of the
-brief-gate set (`scripts/research-gate/results/gate-model.json`, whose SHA-256
+brief-gate sets of Pixel (`eval/brief-gate/prompts.jsonl`) and of four repositories
+(`prompts-multirepo.jsonl`: pixel, excalidraw, requests, ripgrep; an earlier
+model fitted on Pixel alone closed 7 of 13 census answer prompts and 13 of the 19 census prompts the gate sees), thresholds
+calibrated out of fold at 5 and 10 % of the off-topic rows
+(`scripts/research-gate/results/gate-model.json`, whose SHA-256
 `gate_model.rs` cites and a test checks, with `gate_reference.py` as the
 executable definition the parity test holds the Rust score to). It does not
 apply without a code graph or without a keyword to weigh: such a plain prompt
@@ -858,7 +863,8 @@ setting (1 to 8, default 3: the hooks `pixel install` registers), overridden
 by `PIXEL_BRIEF_PARTS`; the `brief` command, which the Pi and OpenCode
 extensions run and which they drop above 4 000 bytes, prints at most
 `CLI_CHARS` (3 900) unless that variable is set. `PIXEL_BRIEF_PACK=0|false|off`
-brings the packet back. A pack of regions alone, with no symbol or passage behind it, ends on
+brings the packet back. A low-tier ("maybe") prompt gets at most one part of it, always as a lead.
+A pack of regions alone, with no symbol or passage behind it, ends on
 a lead ("not a verified answer") instead of the directive, and one the window
 ended before it finished says so. It is built from lines read at HEAD
 (`Evidence::lines_at`, refused for a credential-shaped path) and spends none of

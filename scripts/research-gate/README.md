@@ -63,3 +63,40 @@ resident index of PR #886 (`gate_features.rs`, `trace_method.rs.txt`, `make_inpu
 
 The features and models were designed on dev only. A threshold is a point of the out-of-fold scores of 35
 off-topic prompts; refit it when the prompt set grows, and read `test` once, after the choice.
+
+## Multi-repository refit (#906)
+
+The first model was fitted on prompts about Pixel alone and closed 7 of the 13 answer prompts of the tool census
+(excalidraw, requests, ripgrep, pixel) and 13 of the 19 prompts the gate sees (the 20th names a symbol and skips it). `results/gate-model.json` is now the refit on
+`eval/brief-gate/prompts-multirepo.jsonl` plus the English rows of `prompts.jsonl`; the Pixel-only model is kept as
+`results/gate-model-pixel-only.json`.
+
+| | first gate (Pixel only) | this gate |
+| --- | --- | --- |
+| features | struct_per_mille, question, ops_share, struct_ratio | + `coverage` (shared / informative keywords) |
+| HIGH / LOW | 1.298 / 0.731 | 1.184 / 0.612 |
+| multirepo test, high tier: TPR / FPR | 0.52 / 0.00 | 0.58 / 0.00 |
+| multirepo test, high or low: TPR / FPR | 0.63 / 0.00 | 0.73 / 0.00 |
+| Pixel set test, high tier | 0.62 / 0.12 | 0.65 / 0.12 |
+| Pixel set test, high or low | 0.74 / 0.19 | 0.85 / 0.15 |
+| Pixel set dev (out of fold), high / high or low | 0.64 / 0.03, 0.70 / 0.10 | 0.67 / 0.07, 0.85 / 0.10 |
+
+`results/multirepo-fit.txt` is the full output. Rates weigh an off-topic multirepo prompt once (it is scored
+against four repositories). `scripts/research-gate/multirepo_set.py` writes the set; `results/multirepo-features.json`
+holds the gate's own features per (prompt, repository) as `pixel brief --json` logs them (harvested with the
+first gate's binary at the pinned commits, indexed with `pixel prepare-repo`), so the fit needs no cargo dump:
+
+```bash
+python3 scripts/research-gate/gate_multirepo.py scripts/research-gate/results/multirepo-features.json \
+  scripts/research-gate/results/gate-model.json --template scripts/research-gate/results/gate-model-pixel-only.json
+```
+
+What was tried on dev only (grouped repeated 5-fold, then train-on-one-set/test-on-the-other): widening
+`question` to imperatives and first-person openers lowered out-of-fold TPR (off-topic prompts open the same way);
+`log(files_considered)` and the prompt's word count raised it inside the pooled dev rows but did not transfer between
+the Pixel set and the multirepo set, so neither is in the model; `coverage` helped both ways. The model without
+`coverage` was also scored on `test` as an ablation (high tier 0.64 / 0.07, high or low 0.72 / 0.07 on all test rows)
+after the choice was made on dev; it did not decide anything. Of those 19 census prompts, 6 opened under the first gate,
+9 under this one (pixel-5, excalidraw-1, excalidraw-3, ripgrep-3 gained; ripgrep-5 fell to off, 0.76 to 0.43).
+The overview, review and flow prompts (pixel-3, requests-3, excalidraw-4, excalidraw-5) stay closed: their
+words are not the repository's words.
