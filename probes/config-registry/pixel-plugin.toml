@@ -1,0 +1,13 @@
+name = "config-registry"
+version = "0.1.0"
+api = 1
+description = "A registry of the configuration keys a setting question asks about"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "pixel"
+when_kinds = ["config"]
+when_prompt = "(?i)\\b(config\\w*|settings?|env(ironment)?|variables?|flags?|options?|defaults?|ports?|overrid\\w+)\\b"
+budget_ms = 1000
+mode = "lead"

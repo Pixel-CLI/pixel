@@ -539,7 +539,12 @@ def main(argv=None):
         raise SystemExit("no answer-only census session selected")
     arms = ("brief", "nobrief") if args.arm == "both" else (args.arm,)
     units = [(sid, repo, sha, prompt, arm) for sid, repo, sha, prompt in sessions for arm in arms]
-    census.prepare_cache(root)
+    # prepare_cache checks the shared cache clones out: two runs starting together collide on git's index.lock.
+    import fcntl
+    (root / "cache").mkdir(parents=True, exist_ok=True)
+    with open(root / "cache" / ".prepare.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        census.prepare_cache(root)
     (root / "work").mkdir(parents=True, exist_ok=True)
     run = Run(args, census)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:

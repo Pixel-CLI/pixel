@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+"""history-fallback: a history question whose brief has no history block (no history index, a lookup that missed
+the window) is answered from git itself: `log --grep` on the prompt's rarest words, a `-S` pickaxe on the
+rarest, then the top commit's message, stat, patch and first tag. Read-only git, deterministic."""
+import json
+import re
+import subprocess
+import sys
+
+STOP = {"which", "start", "started", "change", "changed", "commit", "skipping", "when", "what", "that", "this",
+        "with", "from", "they", "have", "does", "about"}
+PATCH_LINES = 90
+
+
+def git(root, *args):
+    return subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=20).stdout
+
+
+def main():
+    req = json.load(sys.stdin)
+    root, prompt, brief = req["repo_root"], req["prompt"], req.get("brief", "")
+    if re.search(r"^### history", brief, re.M):
+        return
+    words = [w for w in dict.fromkeys(re.findall(r"[a-z]{5,}", prompt.lower())) if w not in STOP]
+    shown = []
+    for k in (3, 2, 1):
+        args = ["log", "-i", "--all-match", "-n", "6", "--format=%h %as %s"] + [f"--grep={w}" for w in words[:k]]
+        out = git(root, *args).strip()
+        if out:
+            shown = out.splitlines()
+            break
+    pick = []
+    if words:
+        pick = git(root, "log", "-S" + words[0], "-n", "5", "--format=%h %as %s", "--", "*.rs", "*.py", "*.ts",
+                   "*.js", "*.go").strip().splitlines()
+    shas = [line.split()[0] for line in shown] or [line.split()[0] for line in pick]
+    if not shas:
+        return
+    sha = shas[0]
+    body = git(root, "show", "--format=%h %ad %an%n%B", "--date=short", "--stat=100", "--patch", "-U2",
+               "--no-ext-diff", sha).splitlines()
+    tags = git(root, "tag", "--contains", sha, "--sort=creatordate").split("\n")
+    print(f"### history — commits matching {', '.join(words[:3])}")
+    print("\n".join(shown or pick))
+    print(f"### commit {sha} — message, files and patch")
+    print("\n".join(line[:160] for line in body[:PATCH_LINES]))
+    if tags and tags[0]:
+        print(f"first tag containing it: {tags[0]}")
+
+
+main()

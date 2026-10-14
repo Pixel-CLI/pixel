@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+"""flow-rank: a walkthrough question is answered by the callees that carry its words, not by a depth-first prefix
+of the entry's calls. Reads every callee of the entry the brief's trace names (who-calls pages), ranks them by the
+question's words (generic words weigh little, tests are left out, an exact edge weighs a little more), follows the
+best six one level at a time down to depth 3, and shows the entry in full and each ranked body. It replaces the
+brief's own flow blocks. Needs `pixel` (PIXEL_BIN, else PATH) and its daemon; prints nothing without them."""
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+GENERIC = {"element", "elements", "scene", "file", "files", "data", "state", "value", "type"}
+NOISE = {"walk", "through", "happens", "happen", "someone", "until", "from", "shows", "when", "onto", "that", "file",
+         "with", "what", "into"}
+ENTRY_LINES, BODY_LINES, MAX_RANKED, MIN_SCORE = 160, 130, 12, 1.0
+
+
+def pixel(root, *args):
+    exe = os.environ.get("PIXEL_BIN") or "pixel"
+    try:
+        return subprocess.run([exe, *args], cwd=root, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def callees(root, uid):
+    out, offset = [], 0
+    while offset <= 200:
+        text = pixel(root, "who-calls", "--role", "callees", "--metrics", "off", "--json", "--offset", str(offset),
+                     uid, ".")
+        try:
+            data = json.loads(text)
+        except ValueError:
+            break
+        edges = data.get("edges", [])
+        out += edges
+        if len(edges) < data.get("edge_limit", 20):
+            break
+        offset += len(edges)
+    return out
+
+
+def numbered(root, path, lo, hi, cap):
+    try:
+        lines = (Path(root) / path).read_text(errors="replace").splitlines()
+    except OSError:
+        return [], lo
+    hi = min(hi, lo + cap - 1, len(lines))
+    return [f"{n}| {lines[n - 1][:200]}" for n in range(lo, hi + 1)], hi
+
+
+def main():
+    req = json.load(sys.stdin)
+    root, prompt, brief = req["repo_root"], req["prompt"], req.get("brief", "")
+    m = re.search(r"^entry (\S+) — (\S+?):(\d+)-(\d+)", brief, re.M)
+    if not m or "### call trace" not in brief:
+        return
+    name, path, lo, hi = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
+    found = json.loads(pixel(root, "find-symbol", "--metrics", "off", "--json", name, ".") or "{}")
+    rows = found.get("symbols") or found.get("hits") or []
+    uid = next((s["uid"] for s in rows if s.get("path") == path and s.get("start_line") == lo), None)
+    if uid is None:
+        return
+    terms = [w for w in dict.fromkeys(w.lower() for w in re.findall(r"[A-Za-z]{4,}", prompt)) if w not in NOISE]
+    pool = {}
+
+    def scored():
+        res = []
+        for sym, tier, depth in pool.values():
+            n, p = sym["name"].lower(), sym["path"].lower()
+            weight = {t: (0.35 if t in GENERIC else 1.2) for t in terms}
+            score = sum(weight[t] for t in terms if t in n) + sum(0.3 * weight[t] for t in terms if t in p)
+            score += 0.3 if tier == "exact" else 0.0
+            if "test" in p or "polyfill" in p:
+                score -= 9
+            res.append((score - 0.25 * (depth - 1), sym["uid"], sym, depth))
+        return sorted(res, key=lambda r: (-r[0], r[1]))
+
+    frontier = [uid]
+    for depth in (1, 2, 3):
+        for u in frontier[:6]:
+            for edge in callees(root, u):
+                sym = edge["symbol"]
+                if sym["uid"] != uid and sym["uid"] not in pool:
+                    pool[sym["uid"]] = (sym, edge["tier"], depth)
+        frontier = [r[1] for r in scored() if r[3] == depth and r[0] > MIN_SCORE]
+    ranked = [r for r in scored() if r[0] > MIN_SCORE][:MAX_RANKED]
+    if not ranked:
+        return
+    print("drop: .")
+    print("### call trace, ranked by the question")
+    print(f"entry {name} — {path}:{lo}-{hi}")
+    for _, _, sym, depth in ranked:
+        print(f"{'  ' * depth}calls {sym['name']} — {sym['path']}:{sym['start_line']}-{sym['end_line']}")
+    body, last = numbered(root, path, lo, hi, ENTRY_LINES)
+    print(f"### {path}:{lo}-{last} — {name} definition (method)")
+    print("\n".join(body))
+    if last < hi:
+        print(f"… {name} continues past line {last}")
+    for _, _, sym, _ in ranked:
+        body, last = numbered(root, sym["path"], sym["start_line"], sym["end_line"], BODY_LINES)
+        print(f"### {sym['path']}:{sym['start_line']}-{last} — {sym['name']} definition ({sym['kind']})")
+        print("\n".join(body))
+
+
+main()

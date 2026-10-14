@@ -1,0 +1,12 @@
+name = "name-files"
+version = "0.1.0"
+api = 1
+description = "Locates code names and files that the question's adjacent words spell"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "pixel"
+skip_kinds = ["overview", "review", "flow", "history"]
+budget_ms = 600
+mode = "lead"

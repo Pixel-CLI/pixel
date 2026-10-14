@@ -1,0 +1,12 @@
+name = "rank-blocks"
+version = "0.1.0"
+api = 1
+description = "Puts the blocks that share the question's words first and drops the ones that share none"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "pixel"
+skip_kinds = ["overview", "review", "flow", "history"]
+budget_ms = 300
+mode = "lead"

@@ -1,0 +1,12 @@
+name = "flow-rank"
+version = "0.1.0"
+api = 1
+description = "Ranks the callees of a walkthrough's entry by the question's words and shows their bodies"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "pixel"
+when_kinds = ["flow"]
+budget_ms = 1000
+mode = "lead"

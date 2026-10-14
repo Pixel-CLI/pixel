@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+"""name-files: two locators the brief lacks. (a) Adjacent prompt words joined into a code name ("smart case" ->
+SmartCase, smart_case, smart-case) located with rg, the definition shown. (b) Source files whose stem is a word of
+the prompt ("config" -> flags/config.rs), shown whole when short. Blocks of the brief that share no content word
+with the prompt are dropped. Read-only (rg, file reads), deterministic."""
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+STOP = {"what", "where", "which", "that", "this", "with", "from", "does", "the", "and", "how", "is", "a", "of", "it",
+        "defined", "define", "number", "returns", "return", "set", "get", "use", "used", "make", "could", "there"}
+GENERIC = {"for", "to", "in", "on", "my", "its", "keep", "file", "line", "code", "thing", "error", "change", "nothing",
+           "make", "read", "ignored", "get", "files", "lines", "work", "works", "happens", "nothing", "time"}
+SRC = ("*.rs", "*.ts", "*.tsx", "*.js", "*.py", "*.go")
+FILE_LINES, DEFINITION_LINES, MAX_FILE_LINES = 180, 60, 220
+
+
+def stem(word):
+    word = word.lower()
+    for suffix in ("ing", "es", "s"):
+        if len(word) > 4 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def words(text):
+    parts = re.findall(r"[A-Za-z][a-z]+|[A-Z]+(?![a-z])", text)
+    return {stem(p) for p in parts if len(p) > 2 and p.lower() not in STOP and p.lower() not in GENERIC}
+
+
+def rg(root, *args):
+    return subprocess.run(["rg", "--sort", "path", "-j", "1", *args], cwd=root, capture_output=True, text=True, timeout=10).stdout.splitlines()
+
+
+def body(path, lo, count):
+    try:
+        source = Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    hi = min(len(source), lo + count - 1)
+    return [f"{i}| {source[i - 1][:160]}" for i in range(lo, hi + 1)]
+
+
+def common_dirs(a, b):
+    """Leading directories two paths share: a file named by a prompt word is a lead only beside what the brief shows."""
+    shared = 0
+    for x, y in zip(Path(a).parent.parts, Path(b).parent.parts):
+        if x != y:
+            break
+        shared += 1
+    return shared
+
+
+def compounds(prompt):
+    tokens = re.findall(r"[a-z]+", prompt.lower())
+    out = []
+    for a, b in zip(tokens, tokens[1:]):
+        if {a, b} & (STOP | GENERIC) or len(a) < 3 or len(b) < 3:
+            continue
+        out.append((a.capitalize() + b.capitalize(), f"{a}_{b}", f"{a}-{b}"))
+    return out
+
+
+def main():
+    req = json.load(sys.stdin)
+    root, prompt, brief = req["repo_root"], req["prompt"], req.get("brief", "")
+    globs = sum((["-g", g] for g in SRC), [])
+    found = []
+    for camel, snake, kebab in compounds(prompt):
+        hits = rg(root, "-n", "--no-heading", *globs,
+                  rf"(struct|class|fn|def|const|enum|interface|type)\s+({camel}|{snake})\b", ".")
+        for hit in hits[:2]:
+            path, line = hit.split(":", 2)[:2]
+            found.append(f"### {path.lstrip('./')}:{line} — {camel} definition (named by the prompt: '{kebab.replace('-', ' ')}')")
+            found += body(Path(root) / path, max(1, int(line) - 3), DEFINITION_LINES)
+    stems = {w for w in re.findall(r"[a-z]{4,}", prompt.lower()) if w not in STOP and w not in GENERIC}
+    near = [h.split(":")[0].split(" ")[0] for h in re.findall(r"^### (\S+)", brief, re.M)]
+    candidates = []
+    for name in sorted(f.lstrip("./") for f in rg(root, "--files", *globs, ".")):
+        if Path(name).stem.lower() not in stems or "test" in name.lower():
+            continue
+        shared = max((common_dirs(name, other) for other in near), default=0)
+        if shared:
+            candidates.append((-shared, name))
+    for _, name in sorted(candidates)[:1]:
+        path = Path(root) / name
+        count = sum(1 for _ in path.open(errors="replace"))
+        if count > MAX_FILE_LINES:
+            continue
+        found.append(f"### {name}:1-{min(count, FILE_LINES)} — file named '{path.stem}' (a word of the prompt)")
+        found += body(path, 1, FILE_LINES)
+    if not found:
+        return
+    want = words(prompt)
+    added = [h[4:].split(":")[0] for h in found if h.startswith("### ")]
+    for block in brief.split("\n### ")[1:]:
+        header = block.split("\n", 1)[0]
+        path = header.split(":")[0].split(" ")[0]
+        # Noise is a block that names none of the prompt's words and lies away from what was just located.
+        if not want & words(header) and not any(common_dirs(path, other) for other in added):
+            print(f"drop: ^{re.escape(header)}$")
+    print("\n".join(found))
+
+
+main()
