@@ -34,6 +34,7 @@ mod prompt_brief_cli;
 mod publish_cli;
 mod recall_cli;
 mod reference_cli;
+mod region_pack_cli;
 mod regions_cli;
 mod release_check_cli;
 mod rename_cli;

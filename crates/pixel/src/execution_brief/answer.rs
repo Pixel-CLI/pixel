@@ -379,7 +379,7 @@ const SIGNATURE_STARTS: &[&str] = &[
     "interface ",
 ];
 
-fn is_signature(line: &str) -> bool {
+pub(crate) fn is_signature(line: &str) -> bool {
     SIGNATURE_STARTS
         .iter()
         .any(|start| line.trim_start().starts_with(start))
@@ -401,7 +401,7 @@ fn is_attribute(line: &str) -> bool {
 
 /// Index of the first line of the doc comment right above `sig`, skipping
 /// attributes between them.
-fn doc_above(window: &[String], sig: usize) -> Option<usize> {
+pub(crate) fn doc_above(window: &[String], sig: usize) -> Option<usize> {
     let mut at = sig;
     while at > 0 && is_attribute(&window[at - 1]) {
         at -= 1;
@@ -902,7 +902,7 @@ pub(crate) fn flow_excerpt(hops: &[Hop]) -> Vec<String> {
         .collect()
 }
 
-fn word_in(haystack: &str, needle: &str) -> bool {
+pub(crate) fn word_in(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }

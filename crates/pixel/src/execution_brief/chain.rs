@@ -41,6 +41,7 @@ use super::answer::{self, Excerpt, Hop, Receipt};
 use super::autostart;
 use super::decision_log::{self, Record};
 use super::intent::Verdict;
+use super::region_pack;
 use super::relevance::{self, Basis, GateInput, RelevanceInput, Tier};
 use super::routes::QuestionKind;
 use super::{SOURCE_EXTENSIONS, Signal, brief_signal, names_code};
@@ -869,6 +870,13 @@ pub(crate) struct Brief {
     /// The symbol lookup resolved to exactly one uid: `pack-context` can
     /// follow without a disambiguation round-trip.
     unambiguous_def: bool,
+    /// The symbol lookup could not answer (a stale or missing graph, or a
+    /// daemon that did not): the region pack falls back to the text search.
+    symbols_failed: bool,
+    /// Parts the region pack may fill; `0`: no pack.
+    pack_limit: region_pack::Limit,
+    /// The region pack, as complete as the window allowed.
+    pack: Option<region_pack::Pack>,
     excluded: Vec<String>,
     unresolved: Vec<String>,
     ops: usize,
@@ -1166,6 +1174,7 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
                 }
             }
             Err(reason) => edit(state, |brief| {
+                brief.symbols_failed = true;
                 brief
                     .unresolved
                     .push(format!("find-symbol {name}: {reason}"));
@@ -1237,7 +1246,104 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
     } else {
         answer_evidence(evidence, state, deadline);
     }
+    // The packet is complete here; the pack is an extra that may outlive the
+    // window without making the packet partial.
     edit(state, |brief| brief.finished = true);
+    pack_evidence(plan, evidence, state, deadline);
+}
+
+/// The region pack: the source the agent would read before answering, for
+/// the symbols of the prompt (or, for plain words, the regions the chain
+/// picked). Nothing is spent from the op budget — the pack is an extra, its
+/// absence leaves the packet as it was — and it is published after each stage
+/// so a window that ends first still renders complete blocks.
+fn pack_evidence(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Instant) {
+    let mut brief = edit(state, |brief| brief.clone());
+    // History rows answer a rationale question better than regions do.
+    if !brief.pack_limit.on() || Instant::now() >= deadline || !brief.history.is_empty() {
+        return;
+    }
+    // A routed kind that reads no ranges of its own (a rationale whose
+    // history is out of reach) still has its best files to read from.
+    if brief.reads.is_empty()
+        && brief.signal != Some(Signal::Strong)
+        && brief.tier() == Some(Tier::High)
+    {
+        let terms: &[String] = brief.receipt.as_ref().map_or(&[], Receipt::terms);
+        brief.reads = read_evidence(evidence, &brief, terms, deadline);
+    }
+    let names: Vec<String> = plan
+        .anchors
+        .names()
+        .map(|name| name.rsplit("::").next().unwrap_or(name).to_string())
+        .collect();
+    let strong = brief.signal == Some(Signal::Strong);
+    let first_rows = (strong && brief.searched && !plan.anchors.names().any(|n| n.contains("::")))
+        .then(|| brief.files.clone())
+        .filter(|rows| !rows.is_empty());
+    let terms: Vec<String> = brief
+        .receipt
+        .as_ref()
+        .map_or(&[][..], Receipt::terms)
+        .to_vec();
+    // Where a name the prompt's words spell may be found: the matched text of
+    // the best files, the symbols of the meaning search's chunks, the symbols
+    // of the regions picked.
+    let hints: Vec<String> = brief
+        .files
+        .iter()
+        .filter_map(|hit| hit.text.clone())
+        .chain(brief.leads.iter().filter_map(|lead| lead.symbol.clone()))
+        .chain(brief.reads.iter().filter_map(|read| read.symbol.clone()))
+        .collect();
+    let input = region_pack::Input {
+        names,
+        phrases: region_pack::quoted_phrases(&plan.typed),
+        hints,
+        terms,
+        paths: plan
+            .anchors
+            .paths()
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        defined: brief
+            .defined
+            .iter()
+            .map(region_pack::DefSite::from)
+            .collect(),
+        graph_down: brief.symbols_failed,
+        first_rows,
+        callers: brief
+            .callers
+            .iter()
+            .map(|caller| (caller.path.clone(), caller.line))
+            .collect(),
+        regions: !strong,
+        reads: brief
+            .reads
+            .iter()
+            .map(|read| region_pack::ReadRegion {
+                path: read.path.clone(),
+                first: read.first,
+                last: read.last,
+                symbol: read.symbol.clone(),
+            })
+            .collect(),
+        facts: brief
+            .flow
+            .iter()
+            .map(|flow| format!("flow: {}", clean_n(flow, DEF_BODY_CHARS)))
+            .collect(),
+        wants_tests: brief.wants_tests,
+        wants_docs: brief.wants_docs,
+        limit: brief.pack_limit,
+    };
+    let mut publish =
+        |pack: &region_pack::Pack| edit(state, |brief| brief.pack = Some(pack.clone()));
+    if let Some(pack) = region_pack::build(&input, evidence, deadline, &mut publish) {
+        publish(&pack);
+    }
 }
 
 /// Whether the op budget and the window still allow an extra read. Unlike
@@ -2170,6 +2276,10 @@ pub(crate) fn declined_record(declined: Declined, prompt: &str) -> Record {
         receipt: false,
         answer: false,
         excerpt_bytes: 0,
+        pack_bytes: 0,
+        pack_parts: 0,
+        pack_targets: 0,
+        fallback: false,
         elapsed_ms: 0,
         route: None,
         daemon: None,
@@ -2190,6 +2300,8 @@ pub(crate) struct Around {
     pub(crate) log: Option<PathBuf>,
     /// How a daemon is started for the prompt, when one may be.
     pub(crate) starter: Option<Starter>,
+    /// What the region pack may be; the default leaves the packet as it was.
+    pub(crate) pack: region_pack::Limit,
 }
 
 impl Around {
@@ -2199,6 +2311,7 @@ impl Around {
         Self {
             log: Some(path),
             starter: None,
+            pack: region_pack::Limit::default(),
         }
     }
 }
@@ -2288,6 +2401,10 @@ impl Pending {
             receipt: stats.receipt,
             answer: stats.answer,
             excerpt_bytes: stats.excerpt_bytes,
+            pack_bytes: stats.pack_bytes,
+            pack_parts: stats.pack_parts,
+            pack_targets: stats.pack_targets,
+            fallback: stats.fallback,
             elapsed_ms,
             route: brief.route,
             daemon,
@@ -2305,16 +2422,36 @@ impl Pending {
 /// Start the brief for `prompt` in `root`, or decline: a switched-off brief,
 /// a repository without an index and a prompt that asks nothing about code
 /// start no thread and run no lookup.
-pub(crate) fn start(prompt: &str, root: &Path) -> Option<Pending> {
-    try_start(prompt, root).ok()
+///
+/// `parts` is how many hooks deliver the brief (`brief_parts`, or 1 for a host
+/// with one hook): the region pack may fill that many.
+pub(crate) fn start(prompt: &str, root: &Path, parts: u8) -> Option<Pending> {
+    try_start(prompt, root, parts).ok()
 }
 
 /// [`start`], saying why it declined.
-pub(crate) fn try_start(prompt: &str, root: &Path) -> Result<Pending, Declined> {
+pub(crate) fn try_start(prompt: &str, root: &Path, parts: u8) -> Result<Pending, Declined> {
+    try_start_as(prompt, root, false, parts)
+}
+
+/// [`start`] for the `brief` command, which hosts without a prompt hook (Pi,
+/// OpenCode) run and which they drop above 4 000 bytes: a region pack stays
+/// under that unless `PIXEL_BRIEF_PARTS` says the host takes more.
+pub(crate) fn start_for_command(prompt: &str, root: &Path) -> Option<Pending> {
+    try_start_for_command(prompt, root).ok()
+}
+
+/// [`start_for_command`], saying why it declined.
+pub(crate) fn try_start_for_command(prompt: &str, root: &Path) -> Result<Pending, Declined> {
+    try_start_as(prompt, root, true, 1)
+}
+
+fn try_start_as(prompt: &str, root: &Path, command: bool, parts: u8) -> Result<Pending, Declined> {
     let log = decision_log::path_for(root);
     let gate = Gate::read(root);
     let root = root.to_path_buf();
     let for_start = root.clone();
+    let pack = region_pack::limit_from_env(command, parts);
     try_start_with(
         prompt,
         gate,
@@ -2325,6 +2462,7 @@ pub(crate) fn try_start(prompt: &str, root: &Path) -> Result<Pending, Declined> 
         Around {
             log,
             starter: Some(Box::new(move || autostart::start_for_prompt(&for_start))),
+            pack,
         },
     )
 }
@@ -2373,7 +2511,7 @@ where
     F: FnOnce(Instant) -> Box<dyn Evidence> + Send + 'static,
     J: Fn(&str, Instant) -> Option<Verdict> + Send + Sync + 'static,
 {
-    let Around { log, starter } = around;
+    let Around { log, starter, pack } = around;
     if !gate.open() {
         return Err(if gate.enabled {
             Declined::Unindexed
@@ -2398,6 +2536,7 @@ where
     let deadline = started + window;
     let state = Arc::new(Mutex::new(Brief {
         signal: Some(signal),
+        pack_limit: pack,
         ..Brief::default()
     }));
     let (finished, done) = mpsc::channel();
@@ -2500,7 +2639,12 @@ where
     // definition read, no fallback search.
     if edit(state, |brief| brief.tier()) == Some(Tier::Low) {
         answer_evidence(evidence.as_ref(), state, deadline);
-        edit(state, |brief| brief.finished = true);
+        edit(state, |brief| {
+            brief.finished = true;
+            // A maybe gets at most one part of regions, as a lead.
+            brief.pack_limit.parts = brief.pack_limit.parts.min(1);
+        });
+        pack_evidence(&plan, evidence.as_ref(), state, deadline);
         return;
     }
     let plan = seeded(plan, state);
@@ -2904,6 +3048,14 @@ pub(crate) struct AnswerStats {
     pub(crate) answer: bool,
     /// Bytes of the excerpt lines (and their headers) in the block.
     pub(crate) excerpt_bytes: usize,
+    /// Bytes of the region pack, when the block is one.
+    pub(crate) pack_bytes: usize,
+    /// Hook parts the pack's text fills.
+    pub(crate) pack_parts: usize,
+    /// Symbols the pack is about.
+    pub(crate) pack_targets: usize,
+    /// The text search stood in for a graph that could not answer.
+    pub(crate) fallback: bool,
 }
 
 /// [`render`], with the answer evidence it kept.
@@ -2911,7 +3063,36 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
     if brief.silenced || brief.answered == 0 {
         return None;
     }
-    if brief.tier() == Some(Tier::Low) {
+    let low = brief.tier() == Some(Tier::Low);
+    if low && !brief.pack_limit.on() {
+        return render_low(brief).map(|text| (text, AnswerStats::default()));
+    }
+    if let Some(pack) = brief
+        .pack
+        .as_ref()
+        .filter(|pack| brief.pack_limit.on() && pack.has_evidence())
+    {
+        // The packet was cut short: the pack says it is a lead, not an answer.
+        let text = pack.text_hedged(brief.cut || low);
+        let stats = AnswerStats {
+            answer: true,
+            excerpt_bytes: text.len(),
+            pack_bytes: text.len(),
+            pack_parts: crate::brief_parts::split(
+                &text,
+                crate::brief_parts::Limits {
+                    chars: brief.pack_limit.chars,
+                    bytes: usize::MAX,
+                },
+            )
+            .len(),
+            pack_targets: pack.targets(),
+            fallback: pack.fallback(),
+            ..AnswerStats::default()
+        };
+        return Some((text, stats));
+    }
+    if low {
         return render_low(brief).map(|text| (text, AnswerStats::default()));
     }
     let receipt = !brief.receipt_lines().is_empty();
@@ -2935,6 +3116,7 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
         receipt,
         answer: !excerpt.is_empty(),
         excerpt_bytes: excerpt.iter().map(|line| line.len() + 1).sum(),
+        ..AnswerStats::default()
     };
     Some((text, stats))
 }
@@ -6144,6 +6326,51 @@ mod tests {
     }
 
     #[test]
+    fn a_prose_prompt_in_the_low_tier_should_get_one_part_of_regions_as_a_lead() {
+        let source: Vec<String> = [
+            "/// Wait until the watcher has caught up with the startup scan.",
+            "fn watch_ready() {",
+            "    while !caught_up() {",
+            "        std::thread::yield_now();",
+            "    }",
+            "    mark_ready();",
+            "}",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![lead(DAEMON, 2, "fn watch_ready() {")]);
+        fake.sources = vec![(DAEMON.to_string(), source)];
+        let finished = try_start_with(
+            PROSE,
+            OPEN,
+            SECOND,
+            move |_| Box::new(fake),
+            verdict("question"),
+            model_low,
+            Around {
+                pack: region_pack::Limit::of(3),
+                ..Around::default()
+            },
+        )
+        .expect("the prompt starts a brief")
+        .finish_with_record();
+        let text = finished.text.expect("a brief");
+        assert!(text.starts_with("[PIXEL:BRIEF]\nregion pack"), "{text}");
+        assert!(text.contains("2| fn watch_ready() {"), "{text}");
+        assert!(
+            text.ends_with(region_pack::LEAD),
+            "a maybe is a lead: {text}"
+        );
+        assert!(!text.contains(region_pack::DIRECTIVE));
+        assert_eq!(finished.record.tier, Some("low"));
+        assert_eq!(finished.record.pack_parts, 1);
+        assert_eq!(finished.record.pack_bytes, text.len());
+    }
+
+    #[test]
     fn a_weak_prompt_in_the_low_tier_should_get_the_compact_maybe_and_no_concept_search() {
         let mut fake = Fake::new();
         fake.relevance = Ok(on_topic_answer());
@@ -6465,6 +6692,7 @@ mod tests {
             Around {
                 log,
                 starter: Some(starter),
+                pack: region_pack::Limit::default(),
             },
         )
     }
@@ -7634,5 +7862,198 @@ mod tests {
             strong_answer(&fake, &state, &case, Instant::now() + SECOND);
             assert!(!state.into_inner().unwrap().zero());
         }
+    }
+
+    // ---- the region pack -------------------------------------------------
+
+    const PACK_PROMPT: &str = "What does handleError do and who uses it?";
+
+    fn pack_source() -> Fake {
+        let mut fake = Fake::new();
+        fake.rows = Some(Ok(rfound(vec![
+            rhit(
+                "src/ui.ts",
+                1,
+                "export function handleError(e: Error): string {",
+            ),
+            rhit("src/page.ts", 3, "  return handleError(e as Error);"),
+            rhit("docs/errors.md", 2, "handleError is documented here"),
+        ])));
+        fake.files = Ok(found(vec![hit("src/ui.ts", 1), hit("src/page.ts", 3)]));
+        fake.symbols = Ok(vec![SymbolHit {
+            uid: "src/ui.ts#handleError#function".into(),
+            name: "handleError".into(),
+            kind: "function".into(),
+            path: "src/ui.ts".into(),
+            start_line: 1,
+            end_line: 3,
+        }]);
+        fake.sources = vec![
+            (
+                "src/ui.ts".into(),
+                vec![
+                    "export function handleError(e: Error): string {".into(),
+                    "  return \"boom \" + e.message;".into(),
+                    "}".into(),
+                ],
+            ),
+            (
+                "src/page.ts".into(),
+                vec![
+                    "export function Page() {".into(),
+                    "  try { return 1; } catch (e) {".into(),
+                    "  return handleError(e as Error);".into(),
+                    "  }".into(),
+                    "}".into(),
+                ],
+            ),
+        ];
+        fake
+    }
+
+    fn packed(fake: Fake, parts: usize) -> Finished {
+        try_start_with(
+            PACK_PROMPT,
+            OPEN,
+            SECOND,
+            move |_| Box::new(fake),
+            no_verdict,
+            model_high,
+            Around {
+                pack: region_pack::Limit::of(parts),
+                ..Around::default()
+            },
+        )
+        .expect("the prompt starts a brief")
+        .finish_with_record()
+    }
+
+    #[test]
+    fn a_pack_should_replace_the_packet_of_a_prompt_that_names_a_symbol() {
+        let finished = packed(pack_source(), 1);
+        let text = finished.text.expect("a brief");
+        assert!(text.starts_with("[PIXEL:BRIEF]\nregion pack — searched handleError in the symbol graph and text index"), "{text}");
+        assert!(text.contains("### src/ui.ts:1-3 — handleError definition (function)\n1| export function handleError(e: Error): string {"), "{text}");
+        assert!(
+            text.contains("### src/page.ts:1-5 — handleError usage in Page\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("3|   return handleError(e as Error);"),
+            "{text}"
+        );
+        assert!(text.ends_with(region_pack::DIRECTIVE), "{text}");
+        for gone in [
+            "\nfiles:",
+            "\nread:",
+            "\ncoverage:",
+            "\nkind:",
+            "docs/errors.md",
+        ] {
+            assert!(!text.contains(gone), "{gone}: {text}");
+        }
+        let record = finished.record;
+        assert_eq!(record.bytes, text.len());
+        assert_eq!(
+            (
+                record.pack_bytes,
+                record.pack_parts,
+                record.pack_targets,
+                record.fallback
+            ),
+            (text.len(), 1, 1, false)
+        );
+    }
+
+    #[test]
+    fn the_kill_switch_should_leave_the_packet_as_it_was() {
+        let finished = packed(pack_source(), 0);
+        let text = finished.text.expect("a brief");
+        assert!(text.contains("\nfiles: "), "{text}");
+        assert!(
+            text.contains("\nread: src/ui.ts:1-3 — handleError"),
+            "{text}"
+        );
+        assert!(!text.contains("region pack"), "{text}");
+        let record = finished.record;
+        assert_eq!(
+            (
+                record.pack_bytes,
+                record.pack_parts,
+                record.pack_targets,
+                record.fallback
+            ),
+            (0, 0, 0, false)
+        );
+    }
+
+    #[test]
+    fn a_stale_graph_should_fall_back_to_the_text_search_for_the_definition() {
+        let mut fake = pack_source();
+        fake.symbols = Err("the graph is stale".into());
+        let finished = packed(fake, 1);
+        let text = finished.text.expect("a brief");
+        assert!(
+            text.contains("text index (graph stale: text fallback)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("### src/ui.ts:1-3 — handleError definition (function)"),
+            "{text}"
+        );
+        assert!(text.ends_with(region_pack::DIRECTIVE), "{text}");
+        assert!(!text.contains("find-symbol"), "{text}");
+        assert!(!text.contains("packet partial"), "{text}");
+        assert!(finished.record.fallback);
+    }
+
+    #[test]
+    fn a_pack_with_nothing_to_show_should_leave_the_packet_in_place() {
+        let mut fake = pack_source();
+        fake.symbols = Ok(Vec::new());
+        fake.rows = Some(Ok(rfound(vec![rhit(
+            "docs/errors.md",
+            2,
+            "handleError is documented here",
+        )])));
+        fake.files = Ok(found(vec![hit("docs/errors.md", 2)]));
+        let finished = packed(fake, 1);
+        let text = finished.text.expect("a brief");
+        assert!(text.contains("\nfiles: docs/errors.md:2"), "{text}");
+        assert!(!text.contains("region pack"), "{text}");
+        assert_eq!(finished.record.pack_bytes, 0);
+    }
+
+    #[test]
+    fn a_pack_should_not_spend_the_operation_budget() {
+        let with = packed(pack_source(), 1).record;
+        let without = packed(pack_source(), 0).record;
+        assert_eq!((with.ops, with.answered), (without.ops, without.answered));
+    }
+
+    #[test]
+    fn the_pack_stage_should_publish_into_the_brief_and_do_nothing_when_off_or_late() {
+        let plan = Plan::from_prompt(PACK_PROMPT).unwrap();
+        let brief = |parts| Brief {
+            signal: Some(Signal::Strong),
+            pack_limit: region_pack::Limit::of(parts),
+            answered: 1,
+            searched: true,
+            ..Brief::default()
+        };
+        let repo = pack_source();
+        let on = Mutex::new(brief(1));
+        pack_evidence(&plan, &repo, &on, Instant::now() + SECOND);
+        let shown = on.into_inner().unwrap();
+        assert!(shown.pack.is_some());
+        let text = fit(&shown).unwrap().0;
+        assert!(text.starts_with("[PIXEL:BRIEF]\nregion pack"), "{text}");
+        let off = Mutex::new(brief(0));
+        pack_evidence(&plan, &repo, &off, Instant::now() + SECOND);
+        assert!(off.into_inner().unwrap().pack.is_none());
+        let late = Mutex::new(brief(1));
+        let past = Instant::now().checked_sub(SECOND).unwrap();
+        pack_evidence(&plan, &repo, &late, past);
+        assert!(late.into_inner().unwrap().pack.is_none());
     }
 }

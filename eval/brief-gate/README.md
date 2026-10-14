@@ -124,3 +124,11 @@ Keep the strata balanced (add rows in pairs, one for each split), give the row a
 fresh `id`, and for `expected_files` read the code first and write the evidence.
 A new row changes the set's SHA-256, which the runner records: a before and an
 after must use the same file.
+
+## `prompts-multirepo.jsonl` (#906)
+
+The same idea for four repositories at their pinned commits (`sha`): the 20 prompts of the tool census plus 30 written
+for each of excalidraw, requests and ripgrep (150 rows with the 40 off-topic ones). Off-topic rows have `repo`
+`any` and `sha` null: they are scored against every repository. `split` is dealt alternately by the SHA-256 of the text
+inside each (repo, on-topic) stratum. Built by `scripts/research-gate/multirepo_set.py`; used by
+`scripts/research-gate/gate_multirepo.py`. It has no `expected_files`: it measures the gate, not file retrieval.

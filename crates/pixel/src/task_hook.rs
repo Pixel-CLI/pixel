@@ -1081,7 +1081,7 @@ fn process(
     }
     // The brief runs beside the ledger: it needs neither, and a slow ledger
     // must not use up its window.
-    let brief = start_brief(provider, event, &payload);
+    let brief = start_brief(provider, event, &payload, part.map_or(1, |part| part.count));
     if let Some(root) = session_start_root(provider, event, &payload) {
         // A start is a nicety: whatever it came to, the hook goes on.
         let _ = crate::execution_brief::autostart::warm(&root);
@@ -1244,10 +1244,11 @@ fn start_brief(
     provider: TaskProvider,
     event: TaskHookEvent,
     payload: &Value,
+    parts: u8,
 ) -> Option<crate::execution_brief::chain::Pending> {
     let prompt = brief_prompt(provider, event, payload)?;
     let root = crate::discover_root(&payload_cwd(payload)).ok()?;
-    crate::execution_brief::chain::start(&prompt, &root)
+    crate::execution_brief::chain::start(&prompt, &root, parts)
 }
 
 /// The latest user turn in the transcript `transcriptPath` points at. The
@@ -2336,23 +2337,27 @@ mod tests {
         let root = root.canonicalize().unwrap();
         let prompt = json!({"prompt":"callers of `fetchUser`","cwd":root});
         for provider in [TaskProvider::Claude, TaskProvider::Codex] {
-            assert!(start_brief(provider, TaskHookEvent::PromptSubmit, &prompt).is_some());
+            assert!(start_brief(provider, TaskHookEvent::PromptSubmit, &prompt, 1).is_some());
             for event in [
                 TaskHookEvent::PreToolUse,
                 TaskHookEvent::PostToolUse,
                 TaskHookEvent::Stop,
                 TaskHookEvent::SessionStart,
             ] {
-                assert!(start_brief(provider, event, &prompt).is_none(), "{event:?}");
+                assert!(
+                    start_brief(provider, event, &prompt, 1).is_none(),
+                    "{event:?}"
+                );
             }
         }
-        assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());
+        assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt, 1).is_none());
         let no_prompt = json!({"cwd":root});
         assert!(
             start_brief(
                 TaskProvider::Claude,
                 TaskHookEvent::PromptSubmit,
-                &no_prompt
+                &no_prompt,
+                1
             )
             .is_none()
         );
@@ -2361,7 +2366,8 @@ mod tests {
             start_brief(
                 TaskProvider::Claude,
                 TaskHookEvent::PromptSubmit,
-                &elsewhere
+                &elsewhere,
+                1
             )
             .is_none()
         );

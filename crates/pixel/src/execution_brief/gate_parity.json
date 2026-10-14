@@ -213,7 +213,7 @@
    "structural_files": 49
   },
   "expected": {
-   "score": 1.593186562862246,
+   "score": 1.8168249330348374,
    "tier": "high"
   }
  },
@@ -426,12 +426,12 @@
    "structural_files": 68
   },
   "expected": {
-   "score": 0.8118989114578987,
+   "score": 1.0725833883919575,
    "tier": "low"
   }
  },
  {
-  "why": "dev row bg-001: on topic, scored off",
+  "why": "dev row bg-001: on topic, scored off by the Pixel-only gate, low tier by the multi-repository one",
   "prompt": "the metrics line is missing when i run the pie harness can you figure out why",
   "block": {
    "caps": [
@@ -677,8 +677,8 @@
    "structural_files": 204
   },
   "expected": {
-   "score": 0.2982139852510999,
-   "tier": "off"
+   "score": 1.0070148942386101,
+   "tier": "low"
   }
  },
  {
@@ -827,7 +827,7 @@
    "structural_files": 58
   },
   "expected": {
-   "score": -4.860105063766883,
+   "score": -7.106662847434919,
    "tier": "off"
   }
  },
@@ -883,7 +883,7 @@
    ]
   },
   "expected": {
-   "score": -2.3487004385511616,
+   "score": -2.56084409116851,
    "tier": "off"
   }
  },
@@ -1043,7 +1043,7 @@
    "structural_files": 55
   },
   "expected": {
-   "score": 1.6615415375559284,
+   "score": 1.9076608335004028,
    "tier": "high"
   }
  },
@@ -1230,7 +1230,7 @@
    "structural_files": 43
   },
   "expected": {
-   "score": 1.5162568091336848,
+   "score": 1.714519736365685,
    "tier": "high"
   }
  }

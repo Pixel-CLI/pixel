@@ -526,7 +526,14 @@ stays so references to the later threats hold.
   path, and `PIXEL_BRIEF_ANSWER=0` drops them. The excerpts are shown only
   for the ZERO step ("Answer from these lines"), which no validated rule
   enables, so the block names `read:` ranges and asks the agent to read
-  them; `PIXEL_BRIEF_ZERO=0` is its kill switch. No prompt is deployed. The bundled prompt a user copies by hand
+  them; `PIXEL_BRIEF_ZERO=0` is its kill switch. The region pack
+  (`execution_brief::region_pack`) quotes more: definitions, usage sites and
+  tests of the symbols a prompt names, as numbered source lines, up to 9 800
+  characters per hook part and three parts, with an "answer from this
+  context" line. Its lines are read the same way (`Evidence::lines_at`: only
+  files the searches named, a credential-shaped path refused, every line cut
+  at 160 characters), it adds no operation, daemon op or network
+  destination, and `PIXEL_BRIEF_PACK=0` restores the packet. No prompt is deployed. The bundled prompt a user copies by hand
   states that Pixel output is data, not instructions
   (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
   skill and Pi command label graph output as repository data, not

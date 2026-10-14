@@ -260,9 +260,20 @@ fn extract(input: &GateInput) -> Features {
     }
 }
 
+/// Informative keywords the heaviest co-file holds, over all the informative
+/// ones: how much of what the prompt says one file covers; `0` without any.
+fn coverage(features: &Features) -> f64 {
+    if features.informative == 0 {
+        0.0
+    } else {
+        features.shared as f64 / features.informative as f64
+    }
+}
+
 /// The model's score of `features`.
 fn linear(features: &Features) -> f64 {
     gate_model::INTERCEPT
+        + gate_model::COVERAGE * coverage(features)
         + gate_model::STRUCT_PER_MILLE * features.struct_per_mille
         + gate_model::QUESTION * f64::from(u8::from(features.question))
         + gate_model::OPS_SHARE * features.ops_share
@@ -577,13 +588,16 @@ mod tests {
             question: true,
             ops_share: 0.5,
             struct_ratio: 0.25,
+            informative: 4,
+            shared: 3,
             ..Features::default()
         };
         let expected = gate_model::INTERCEPT
             + gate_model::STRUCT_PER_MILLE * 2.0
             + gate_model::QUESTION
             + gate_model::OPS_SHARE * 0.5
-            + gate_model::STRUCT_RATIO * 0.25;
+            + gate_model::STRUCT_RATIO * 0.25
+            + gate_model::COVERAGE * 0.75;
         assert!(near(linear(&features), expected));
         assert!(near(linear(&Features::default()), gate_model::INTERCEPT));
         let plain = Features {
@@ -591,6 +605,19 @@ mod tests {
             ..features
         };
         assert!(near(linear(&plain), expected - gate_model::QUESTION));
+    }
+
+    #[test]
+    fn coverage_should_be_the_share_of_informative_keywords_one_file_holds() {
+        let held = |informative, shared| Features {
+            informative,
+            shared,
+            ..Features::default()
+        };
+        assert!(near(coverage(&held(4, 3)), 0.75));
+        assert!(near(coverage(&held(2, 2)), 1.0));
+        assert!(near(coverage(&held(5, 0)), 0.0));
+        assert!(near(coverage(&held(0, 0)), 0.0), "no informative keyword");
     }
 
     #[test]

@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use pixel_daemon::Request;
@@ -65,6 +65,9 @@ struct Live {
     /// The graph, opened read-only and checked for currency on first use;
     /// the failure is kept so the next operation does not repeat the check.
     graph: Mutex<Option<Result<GraphStore, String>>>,
+    /// The text index, opened once for the several searches of one brief
+    /// (the region pack makes a handful); the failure is kept too.
+    set: Mutex<Option<Result<Arc<IndexSet>, String>>>,
 }
 
 /// The live source for `root`: the daemon when its socket answers a ping on
@@ -84,6 +87,7 @@ impl Live {
             root: root.to_path_buf(),
             route,
             graph: Mutex::new(None),
+            set: Mutex::new(None),
         }
     }
 
@@ -108,12 +112,22 @@ impl Live {
         }
     }
 
+    /// The text index, once proven to only need reading.
+    fn index_set(&self) -> Result<Arc<IndexSet>, String> {
+        let mut slot = self.set.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.get_or_insert_with(|| {
+            if !index_current(&self.root) {
+                return Err("the text index does not cover HEAD".to_string());
+            }
+            IndexSet::open_or_build(&self.root, Box::new(TrigramExtractor))
+                .map(Arc::new)
+                .map_err(|error| error.to_string())
+        })
+        .clone()
+    }
+
     fn local_rows(&self, anchor: &str) -> Result<RichFound, String> {
-        if !index_current(&self.root) {
-            return Err("the text index does not cover HEAD".into());
-        }
-        let set = IndexSet::open_or_build(&self.root, Box::new(TrigramExtractor))
-            .map_err(|error| error.to_string())?;
+        let set = self.index_set()?;
         let (rows, stats) = set
             .search_page_filtered(&regex::escape(anchor), 0, Some(SEARCH_ROWS), None, None)
             .map_err(|error| error.to_string())?;
@@ -255,11 +269,7 @@ impl Live {
     /// `targets_facts`. Without a graph no keyword is structural and the block
     /// says so.
     fn local_relevance(&self, typed: &str) -> Result<Relevance, String> {
-        if !index_current(&self.root) {
-            return Err("the text index does not cover HEAD".into());
-        }
-        let set = IndexSet::open_or_build(&self.root, Box::new(TrigramExtractor))
-            .map_err(|error| error.to_string())?;
+        let set = self.index_set()?;
         if self.with_graph(|_| Ok(())).is_ok() {
             self.with_graph(|store| relevance_on(&set, Some(store), typed))
         } else {

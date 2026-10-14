@@ -43,7 +43,15 @@ def features(model, block, text):
     q = sum(row_weight(r, n) for r in rows)
     best_structural = max((c["weight"] for c in block.get("cofiles", []) if c.get("structural")), default=0.0)
     first_words = words(text)[:3]
+    informative = [r for r in rows if row_weight(r, n) > 0]
+    heaviest = None
+    for c in block.get("cofiles", []):
+        if heaviest is None or c["weight"] > heaviest["weight"]:
+            heaviest = c
+    held = set(heaviest.get("keywords", [])) if heaviest else set()
+    shared = sum(r["keyword"] in held for r in informative)
     return {
+        "coverage": shared / len(informative) if informative else 0.0,
         "n_kw": float(len(rows)),
         "question": float(text.strip().endswith("?") or any(w in constants["question_words"] for w in first_words)),
         "ops_share": sum(r["keyword"] in constants["ops_vocab"] for r in rows) / len(rows) if rows else 0.0,

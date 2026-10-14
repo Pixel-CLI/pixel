@@ -81,6 +81,8 @@ fn hook(root: &Path, provider: &str, prompt: &str, env: &[(&str, &str)]) -> Valu
     });
     run_hook(root, provider, "prompt-submit", &payload, |command| {
         command.env_remove("PIXEL_BRIEF");
+        // These tests are about the packet; the region pack has its own.
+        command.env("PIXEL_BRIEF_PACK", "0");
         for (key, value) in env {
             command.env(key, value);
         }
@@ -308,6 +310,7 @@ fn the_brief_command_should_print_the_brief_or_stay_silent() {
     let root = indexed("brief-cmd");
     let output = pixel_command()
         .current_dir(&*root)
+        .env("PIXEL_BRIEF_PACK", "0")
         .args(["brief", RENAME, "--metrics", "off"])
         .output()
         .unwrap();
@@ -342,6 +345,7 @@ fn brief_json(root: &Path, prompt: &str, env: &[(&str, &str)]) -> Value {
     let mut command = pixel_command();
     command
         .current_dir(root)
+        .env("PIXEL_BRIEF_PACK", "0")
         .args(["brief", prompt, "--json", "--metrics", "off"]);
     for (key, value) in env {
         command.env(key, value);
@@ -665,10 +669,13 @@ fn printed(output: std::process::Output) -> Option<Value> {
 #[test]
 #[cfg(debug_assertions)]
 fn the_three_parts_of_an_oversized_brief_concatenate_to_the_whole_one() {
+    // The packet, not the pack: the pack's size follows the part count, and
+    // this test is about cutting one brief.
+    const PADDED_PACKET: [(&str, &str); 2] = [PADDED, ("PIXEL_BRIEF_PACK", "0")];
     let root = indexed("parts");
     let payload = part_payload(&root);
     // The whole brief, from the hook with no `--part`: oversized.
-    let whole = hook(&root, "claude", RENAME, &[PADDED]);
+    let whole = hook(&root, "claude", RENAME, &PADDED_PACKET);
     let whole = context(&whole).to_owned();
     assert!(whole.starts_with("[PIXEL:BRIEF]"), "{}", &whole[..200]);
     assert!(
@@ -678,10 +685,10 @@ fn the_three_parts_of_an_oversized_brief_concatenate_to_the_whole_one() {
     );
 
     // Parts 3 and 2 start first and wait for part 1.
-    let three = spawn_part(&root, "claude", "3/3", &payload, &[PADDED]);
-    let two = spawn_part(&root, "claude", "2/3", &payload, &[PADDED]);
+    let three = spawn_part(&root, "claude", "3/3", &payload, &PADDED_PACKET);
+    let two = spawn_part(&root, "claude", "2/3", &payload, &PADDED_PACKET);
     std::thread::sleep(Duration::from_millis(200));
-    let one = spawn_part(&root, "claude", "1/3", &payload, &[PADDED]);
+    let one = spawn_part(&root, "claude", "1/3", &payload, &PADDED_PACKET);
     let parts: Vec<Value> = [one, two, three]
         .into_iter()
         .map(|handle| printed(handle.join().unwrap()).expect("every part prints"))

@@ -73,6 +73,14 @@ pub(crate) struct Record {
     pub(crate) answer: bool,
     /// Bytes of those excerpts.
     pub(crate) excerpt_bytes: usize,
+    /// Bytes of the region pack when the block is one; `0` otherwise.
+    pub(crate) pack_bytes: usize,
+    /// Hook parts the region pack's text fills.
+    pub(crate) pack_parts: usize,
+    /// Symbols the region pack is about.
+    pub(crate) pack_targets: usize,
+    /// The text search stood in for a graph that could not answer.
+    pub(crate) fallback: bool,
     pub(crate) elapsed_ms: u64,
     /// Where the evidence came from: `daemon` or `local`.
     pub(crate) route: Option<&'static str>,
@@ -184,6 +192,10 @@ impl Record {
             "receipt": self.receipt,
             "answer": self.answer,
             "excerpt_bytes": self.excerpt_bytes,
+            "pack_bytes": self.pack_bytes,
+            "pack_parts": self.pack_parts,
+            "pack_targets": self.pack_targets,
+            "fallback": self.fallback,
             "elapsed_ms": self.elapsed_ms,
             "route": self.route,
             "daemon": self.daemon,
@@ -308,6 +320,10 @@ mod tests {
             receipt: true,
             answer: true,
             excerpt_bytes: 1300,
+            pack_bytes: 5200,
+            pack_parts: 1,
+            pack_targets: 2,
+            fallback: true,
             elapsed_ms: 188,
             route: Some("daemon"),
             daemon: Some("running"),
@@ -361,6 +377,10 @@ mod tests {
                 "receipt": true,
                 "answer": true,
                 "excerpt_bytes": 1300,
+                "pack_bytes": 5200,
+                "pack_parts": 1,
+                "pack_targets": 2,
+                "fallback": true,
                 "elapsed_ms": 188,
                 "route": "daemon",
                 "daemon": "running",

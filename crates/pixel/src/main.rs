@@ -5092,7 +5092,7 @@ fn run_command(
         Command::Brief { prompt, path, json } => {
             let root = discover_root(&path)?;
             if json {
-                let finished = execution_brief::chain::try_start(&prompt, &root)
+                let finished = execution_brief::chain::try_start_for_command(&prompt, &root)
                     .map(execution_brief::chain::Pending::finish_with_record);
                 let (record, text) = match finished {
                     Ok(finished) => (finished.record, finished.text),
@@ -5104,7 +5104,7 @@ fn run_command(
                 let mut decision = record.to_json();
                 decision["brief"] = text.map_or(Value::Null, Value::from);
                 write_stdout(&format!("{decision}\n"))
-            } else if let Some(text) = execution_brief::chain::start(&prompt, &root)
+            } else if let Some(text) = execution_brief::chain::start_for_command(&prompt, &root)
                 .and_then(execution_brief::chain::Pending::finish)
             {
                 write_stdout(&text)
