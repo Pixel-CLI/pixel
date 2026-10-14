@@ -207,11 +207,19 @@ repository state is touched by `pixel setup`.
       `#[arg]` docs; `pixel setup --print` is the non-interactive surface and
       prints plain text only (no `--json`: the wizard's output is a Markdown
       block, and a JSON envelope would wrap one string in an object).
-- [x] Interactive wizard: both questions are one numbered list answered by
-      index (`ask_list`) — there is no arrow-key picker and no `y/n` prompt in
-      this command, because a 9-row and a 12-row multi-select is not a
-      yes/no question. `q` and end-of-input cancel; `Esc` is not handled and
-      is left to the terminal. Cancel writes nothing and says so.
+- [x] Interactive wizard, drawn like GitButler's: a titled rule for the run, a
+      `Step N of 3` banner per question, one checkbox row per option with the
+      focused row's help under the list, and a final Apply/Cancel list
+      (`docs/design/but-agent-setup-reference.md`, "The flow"). Two input
+      modes over the same rows: on a terminal the arrows move, space toggles,
+      `a`/`n` answer all or none, enter continues and esc cancels
+      (`prompt_key::{decode_list_byte, ListState}`); where raw mode is
+      unavailable the answer is typed as indices (`ask_list_lines`), a row this
+      scope cannot use carries its reason under the list, and `q` or
+      end-of-input cancels. Cancel writes nothing and says so.
+- [x] Every drawn line is truncated to the terminal width (`fit`, one column
+      short of it): the arrow-key list repaints in place by moving the cursor
+      up whole lines, and a wrapped row would make it step one line too far.
 - [x] Temporary non-interactive flags (`--selected-agents`,
       `--selected-features`, `--dummy-apply`) per answer to question 8; every
       out-of-range index is an error naming the valid range.

@@ -30,6 +30,7 @@ use pixel_install::install::{InstallOptions, InstallReport, InstallStep};
 use pixel_install::setup::{AgentTarget, Feature, Scope, SetupPlan};
 
 use crate::config_cmd;
+use crate::prompt_key::KeyReader;
 
 /// Where a run writes, and how its answers are read.
 pub struct SetupOptions {
@@ -106,9 +107,25 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
     // `false`: `is_guided` has already required a terminal.
     let scripted = dev::scripted(&options.dev);
     let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+    // One raw-mode reader for the whole run: the arrow-key lists use it, and a
+    // terminal without it falls back to typing the numbers.
+    let keys = KeyReader::enable();
+    // Agents, features, review: the wizard's three screens.
+    let mut screens = Screens {
+        steps: Steps::new(3),
+        color,
+        keys: &keys,
+    };
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stderr().lock();
-    let answers = collect(&options, &base, scope, color, &mut input, &mut output)?;
+    let answers = collect(
+        &options,
+        &base,
+        scope,
+        &mut screens,
+        &mut input,
+        &mut output,
+    )?;
     let Some(answers) = answers else {
         writeln!(output).map_err(io)?;
         writeln!(
@@ -139,8 +156,10 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
         Some(&selection),
     )
     .map_err(|e| e.to_string())?;
-    write_review(&mut output, &plan, &hook_preview.steps, color)?;
-    if !scripted && !confirm(&mut input, &mut output, color)? {
+    write_review(&mut output, &plan, &hook_preview.steps, &mut screens)?;
+    writeln!(output).map_err(io)?;
+    writeln!(output, "Apply these changes?").map_err(io)?;
+    if !scripted && !ask_confirm(&mut input, &mut output, &mut screens)? {
         writeln!(output, "Cancelled. Nothing was written.").map_err(io)?;
         return Ok(());
     }
@@ -156,7 +175,7 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
             config_cmd::set_global_key(key.key, key.value.to_json())?;
         }
     }
-    report(&mut output, &plan, &written, &hooks, scripted)
+    report(&mut output, &plan, &written, &hooks, scripted, &screens)
 }
 
 /// The installer options for a plan, in the plan's scope. Under `--dummy-apply` the home directory is the dummy root
@@ -231,24 +250,133 @@ fn collect(
     options: &SetupOptions,
     base: &Path,
     scope: Scope,
-    color: bool,
+    screens: &mut Screens<'_>,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<Option<Answers>, String> {
     let running = running_agent();
-    write_intro(output, base, scope, running, color)?;
+    write_intro(output, base, scope, running, screens)?;
     // TEMPORARY (dev-flags): these four lines are `dev`'s; without them every
     // answer comes from the prompts below.
     if let Some(answers) = dev::answers(&options.dev, scope)? {
         return Ok(Some(answers));
     }
-    let Some(agents) = ask_agents(input, output, base, scope, running, color)? else {
+    let Some(agents) = ask_agents(input, output, screens, base, scope, running)? else {
         return Ok(None);
     };
-    let Some(features) = ask_features(input, output, scope, color)? else {
+    let Some(features) = ask_features(input, output, screens, scope)? else {
         return Ok(None);
     };
     Ok(Some(Answers { agents, features }))
+}
+
+// ── display ────────────────────────────────────────────────────────────────
+//
+// The wizard's screens follow GitButler's `but agent setup` (see
+// `docs/design/but-agent-setup-reference.md`): a titled rule for the run, a
+// banner per step with a right-aligned `Step N of M`, one checkbox row per
+// option, and the focused row's help in dim text under the list.
+
+/// Width of a banner rule and of the right-aligned step counter. Clamped so a
+/// header reads the same on a narrow and on a very wide terminal; GitButler's
+/// wizard clamps the same `40..=72`.
+fn banner_width() -> usize {
+    crate::select::terminal_width().clamp(40, 72)
+}
+
+/// A dim horizontal rule, the width of the banner.
+fn rule(color: bool) -> String {
+    paint(color, "2", &"─".repeat(banner_width()))
+}
+
+/// The columns a drawn line may use. One less than the terminal, so the last
+/// column does not wrap: every line the wizard draws has to be one terminal
+/// row, or the in-place repaint steps one line too far.
+fn row_width() -> usize {
+    crate::select::terminal_width().saturating_sub(1)
+}
+
+/// Truncate `text` to `width` visible columns, counting ANSI sequences as zero
+/// width and marking a cut with `…`.
+///
+/// Every line the wizard draws has to fit on one terminal row: the arrow-key
+/// list repaints in place by moving the cursor up whole lines, and a wrapped
+/// row would make it step one line too far.
+fn fit(text: &str, width: usize) -> String {
+    if crate::select::visible_len(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut visible = 0usize;
+    let mut escape = false;
+    for ch in text.chars() {
+        if escape {
+            out.push(ch);
+            if ch.is_ascii_alphabetic() {
+                escape = false;
+            }
+            continue;
+        }
+        if ch == '\x1b' {
+            escape = true;
+            out.push(ch);
+            continue;
+        }
+        if visible + 1 >= width {
+            break;
+        }
+        out.push(ch);
+        visible += 1;
+    }
+    out.push('…');
+    // Close a style the cut left open, so the ellipsis and the line after it
+    // do not inherit it.
+    if out.contains("\x1b[") {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
+
+/// The wizard's position, so every screen says which step it is.
+struct Steps {
+    current: usize,
+    total: usize,
+}
+
+impl Steps {
+    fn new(total: usize) -> Self {
+        Self { current: 0, total }
+    }
+
+    /// The step's banner: its title on the left, `Step N of M` on the right,
+    /// and a rule under both.
+    fn banner(&mut self, output: &mut impl Write, title: &str, color: bool) -> Result<(), String> {
+        self.current += 1;
+        let right = format!("Step {} of {}", self.current, self.total);
+        let gap = banner_width()
+            .saturating_sub(title.chars().count() + right.chars().count())
+            .max(1);
+        writeln!(output).map_err(io)?;
+        writeln!(
+            output,
+            "{}{}{}",
+            paint(color, "1", title),
+            " ".repeat(gap),
+            paint(color, "2", &right)
+        )
+        .map_err(io)?;
+        writeln!(output, "{}", rule(color)).map_err(io)?;
+        Ok(())
+    }
+}
+
+/// The state every screen shares: the wizard's position, whether colour is on,
+/// and which key mode this run has. One value, so a question takes the answers
+/// rather than a fistful of terminal details.
+struct Screens<'a> {
+    steps: Steps,
+    color: bool,
+    keys: &'a KeyReader,
 }
 
 fn write_intro(
@@ -256,45 +384,23 @@ fn write_intro(
     base: &Path,
     scope: Scope,
     detected: Option<AgentTarget>,
-    color: bool,
+    screens: &Screens<'_>,
 ) -> Result<(), String> {
+    let color = screens.color;
+    let keys = screens.keys;
     writeln!(output).map_err(io)?;
-    writeln!(
-        output,
-        "{}",
-        paint(color, "1;32", "pixel setup — agents and features")
-    )
-    .map_err(io)?;
-    writeln!(output, "Writes under: {}", base.display()).map_err(io)?;
-    writeln!(
-        output,
-        "Scope: {}",
-        match scope {
-            Scope::Global => "this machine ($HOME)",
-            Scope::Repository => "this repository",
-        }
-    )
-    .map_err(io)?;
+    writeln!(output, "{}", paint(color, "1;32", "pixel · setup")).map_err(io)?;
+    writeln!(output, "{}", rule(color)).map_err(io)?;
+    writeln!(output, "Set up your coding agent to work well with pixel.").map_err(io)?;
     writeln!(output).map_err(io)?;
-    writeln!(output, "This does:").map_err(io)?;
-    writeln!(
-        output,
-        "  {} Write a managed pixel block into each agent's instruction file",
-        paint(color, "2", "•")
-    )
-    .map_err(io)?;
-    writeln!(
-        output,
-        "  {} Register the hooks of the agents and features you pick",
-        paint(color, "2", "•")
-    )
-    .map_err(io)?;
-    writeln!(
-        output,
-        "  {} Store the settings the features you pick need",
-        paint(color, "2", "•")
-    )
-    .map_err(io)?;
+    writeln!(output, "Here's what this does:").map_err(io)?;
+    for line in [
+        "Write a managed pixel block into each agent's instruction file",
+        "Register the hooks of the agents and features you pick",
+        "Store the settings the features you pick need",
+    ] {
+        writeln!(output, "  {} {line}", paint(color, "2", "•")).map_err(io)?;
+    }
     writeln!(output).map_err(io)?;
     writeln!(
         output,
@@ -302,56 +408,82 @@ fn write_intro(
         paint(
             color,
             "2",
-            "Nothing is written until you confirm. `q`, Esc or Ctrl-C cancels."
+            "Nothing is written until you review and confirm — you'll see exactly what changes first."
         )
     )
     .map_err(io)?;
-    if let Some(agent) = detected {
-        writeln!(
-            output,
-            "{}",
-            paint(color, "2", &format!("Detected agent: {}", agent.name()))
+    writeln!(output, "{}", paint(color, "2", &list_keys_hint(keys))).map_err(io)?;
+    let where_ = match scope {
+        Scope::Global => "this machine ($HOME)",
+        Scope::Repository => "this repository",
+    };
+    let driving = detected.map_or(String::new(), |agent| {
+        format!("  ·  driving: {}", agent.name())
+    });
+    writeln!(
+        output,
+        "{}",
+        paint(
+            color,
+            "2",
+            &fit(&format!("Writes under {}", base.display()), row_width())
         )
-        .map_err(io)?;
-    }
+    )
+    .map_err(io)?;
+    writeln!(
+        output,
+        "{}",
+        paint(color, "2", &format!("{where_}{driving}"))
+    )
+    .map_err(io)?;
     Ok(())
 }
 
-/// The agent question: one numbered list, answered by index.
+/// The key hints the list questions share, for the input mode this run has.
+fn list_keys_hint(keys: &KeyReader) -> String {
+    if keys.active() {
+        "↑/↓ move · space select · a all · n none · enter continue · esc cancel".to_string()
+    } else {
+        "Type numbers (1,3), `all` or `none` · enter keeps the shown defaults · q cancels"
+            .to_string()
+    }
+}
+
+/// The agent question: a list of harnesses, pre-checked from detection.
 fn ask_agents(
     input: &mut impl BufRead,
     output: &mut impl Write,
+    screens: &mut Screens<'_>,
     base: &Path,
     scope: Scope,
     running: Option<AgentTarget>,
-    color: bool,
 ) -> Result<Option<Vec<AgentTarget>>, String> {
     let defaults = default_agents(base, scope, running);
-    let mut lines = Vec::new();
-    for agent in AgentTarget::ALL {
-        let checked = defaults.contains(&agent);
-        let note = if Some(agent) == running {
-            " (driving now)"
-        } else if checked {
-            " (detected)"
-        } else {
-            ""
-        };
-        lines.push(format!(
-            "  {}{} {}{}",
-            paint(color, "1", &format!("{}.", agent.index())),
-            if checked { "x" } else { " " },
-            agent.name(),
-            note
-        ));
-    }
+    let rows: Vec<Row> = AgentTarget::ALL
+        .iter()
+        .map(|agent| {
+            let note = if Some(*agent) == running {
+                " (driving now)"
+            } else if defaults.contains(agent) {
+                " (detected)"
+            } else {
+                ""
+            };
+            Row {
+                label: format!("{}. {}{note}", agent.index(), agent.name()),
+                help: agent.help(),
+                disabled: false,
+            }
+        })
+        .collect();
     let picked = ask_list(
         input,
         output,
+        screens,
+        "Agents",
         "Which agents should pixel write for?",
-        &lines,
+        &rows,
         &indices(&defaults, |agent| agent.index()),
-        color,
     )?;
     let Some(indices) = picked else {
         return Ok(None);
@@ -367,37 +499,38 @@ fn ask_agents(
     Ok(Some(agents))
 }
 
-/// The feature question: one numbered list, answered by index.
+/// The feature question: a list of pixel features, pre-checked from the
+/// catalog defaults this scope can honour.
 fn ask_features(
     input: &mut impl BufRead,
     output: &mut impl Write,
+    screens: &mut Screens<'_>,
     scope: Scope,
-    color: bool,
 ) -> Result<Option<Vec<Feature>>, String> {
     let defaults = default_features(scope);
-    let mut lines = Vec::new();
-    for feature in Feature::ALL {
-        let disabled = feature.repo_local_only() && scope != Scope::Repository;
-        let checked = defaults.contains(&feature);
-        lines.push(format!(
-            "  {}{} {}{}",
-            paint(color, "1", &format!("{}.", feature.index())),
-            if checked { "x" } else { " " },
-            feature.label(),
-            if disabled {
-                " (this scope cannot use it; re-run with --repo <path>)"
-            } else {
-                ""
+    let rows: Vec<Row> = Feature::ALL
+        .iter()
+        .map(|feature| {
+            let disabled = feature.repo_local_only() && scope != Scope::Repository;
+            Row {
+                label: format!("{}. {}", feature.index(), feature.label()),
+                help: if disabled {
+                    feature.repo_local_help()
+                } else {
+                    feature.help()
+                },
+                disabled,
             }
-        ));
-    }
+        })
+        .collect();
     let picked = ask_list(
         input,
         output,
+        screens,
+        "Features",
         "Which features should be on?",
-        &lines,
+        &rows,
         &indices(&defaults, |feature| feature.index()),
-        color,
     )?;
     let Some(indices) = picked else {
         return Ok(None);
@@ -414,21 +547,155 @@ fn ask_features(
     ))
 }
 
-/// A numbered list question. The answer is a list of indices; an empty line
-/// keeps `default`, `all` and `none` are accepted, and `q` cancels.
+/// One selectable row: what it says, the help shown while the cursor is on it,
+/// and whether this scope can use it at all.
+struct Row {
+    label: String,
+    help: &'static str,
+    disabled: bool,
+}
+
+/// How a row is drawn: the cursor, the checkbox, the label. A row this scope
+/// cannot use is dimmed and carries its reason.
+fn row_line(row: &Row, cursor: bool, checked: bool, color: bool) -> String {
+    let pointer = if cursor { ">" } else { " " };
+    let checkbox = if checked { "[x]" } else { "[ ]" };
+    let line = format!("{pointer} {checkbox} {}", row.label);
+    if row.disabled {
+        paint(color, "2", &format!("{line}   (not in this scope)"))
+    } else if cursor {
+        format!(
+            "{pointer} {} {}",
+            paint(color, "1;32", checkbox),
+            paint(color, "1", &row.label)
+        )
+    } else {
+        line
+    }
+}
+
+/// A numbered question over `rows`. On a live terminal the arrows move, space
+/// toggles and enter answers; otherwise the answer is typed as indices. An
+/// empty line keeps `default`, `all` and `none` are accepted, `q` cancels.
 fn ask_list(
     input: &mut impl BufRead,
     output: &mut impl Write,
-    label: &str,
-    lines: &[String],
+    screens: &mut Screens<'_>,
+    title: &str,
+    question: &str,
+    rows: &[Row],
+    default: &[usize],
+) -> Result<Option<Vec<usize>>, String> {
+    let color = screens.color;
+    screens.steps.banner(output, title, color)?;
+    if screens.keys.active()
+        && let Some(mut raw) = crate::prompt_key::RawGuard::new()
+    {
+        writeln!(output, "{question}").map_err(io)?;
+        return ask_list_keys(output, rows, default, &mut raw, color);
+    }
+    ask_list_lines(input, output, question, rows, default, color)
+}
+
+/// The arrow-key list: the same rows, repainted in place as the cursor and the
+/// checkboxes move, with the focused row's help under them.
+#[cfg_attr(test, mutants::skip)] // the raw branch needs a real tty; the key map and the state machine are tested pure in `prompt_key`, the line branch below
+fn ask_list_keys(
+    output: &mut impl Write,
+    rows: &[Row],
+    default: &[usize],
+    raw: &mut crate::prompt_key::RawGuard,
+    color: bool,
+) -> Result<Option<Vec<usize>>, String> {
+    use crate::prompt_key::{ListOutcome, ListState};
+
+    let disabled: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.disabled)
+        .map(|(index, _)| index + 1)
+        .collect();
+    let mut state = ListState::new(rows.len(), default);
+    let mut drawn = 0usize;
+    loop {
+        // Rewind over the block drawn last time (the rows and the help line)
+        // and paint it again: every line is one terminal row, because `fit`
+        // truncated it, so the count is exact.
+        if drawn > 0 {
+            write!(output, "\x1b[{drawn}A").map_err(io)?;
+        }
+        let help = rows.get(state.cursor).map_or("", |row| row.help);
+        for (index, row) in rows.iter().enumerate() {
+            let cursor = index == state.cursor;
+            writeln!(
+                output,
+                "{}",
+                fit(
+                    &row_line(row, cursor, state.checked[index], color),
+                    row_width()
+                )
+            )
+            .map_err(io)?;
+        }
+        writeln!(
+            output,
+            "  {}",
+            paint(color, "2", &fit(help, row_width() - 2))
+        )
+        .map_err(io)?;
+        drawn = rows.len() + 1;
+        output.flush().map_err(io)?;
+
+        match state.apply(raw.read_list_key(), &disabled) {
+            ListOutcome::Redraw => {}
+            ListOutcome::Confirm => return Ok(Some(state.picked())),
+            ListOutcome::Cancel => return Ok(None),
+            ListOutcome::Ignored => {
+                // Nothing changed, so nothing is repainted: rewind anyway so
+                // the next key does not paint one line too low.
+                write!(output, "\x1b[{drawn}A").map_err(io)?;
+                drawn = 0;
+            }
+        }
+    }
+}
+
+/// The line-driven list: the rows, then the answer as numbers.
+fn ask_list_lines(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    question: &str,
+    rows: &[Row],
     default: &[usize],
     color: bool,
 ) -> Result<Option<Vec<usize>>, String> {
-    let total = lines.len();
+    let total = rows.len();
+    // The typed answer replaces the selection, so nothing here toggles: the
+    // checkboxes only show which rows the default already has on.
+    let checked: Vec<bool> = (1..=total).map(|index| default.contains(&index)).collect();
     loop {
-        writeln!(output).map_err(io)?;
-        for line in lines {
-            writeln!(output, "{line}").map_err(io)?;
+        // The question is repeated with the list: an answer the reader could
+        // not parse re-asks here, and a screen that had scrolled away leaves
+        // the reader the question to answer.
+        writeln!(output, "{question}").map_err(io)?;
+        for (index, row) in rows.iter().enumerate() {
+            writeln!(
+                output,
+                "{}",
+                fit(&row_line(row, false, checked[index], color), row_width())
+            )
+            .map_err(io)?;
+        }
+        // The typed path has no cursor, so the focused row's help is never
+        // shown: a row this scope cannot use has to carry its reason here, or
+        // the reader never learns how to enable it.
+        for row in rows.iter().filter(|row| row.disabled) {
+            writeln!(
+                output,
+                "  {}",
+                paint(color, "2", &fit(row.help, row_width() - 2))
+            )
+            .map_err(io)?;
         }
         write!(
             output,
@@ -437,7 +704,7 @@ fn ask_list(
                 color,
                 "1",
                 &format!(
-                    "{label} [{total} numbers, `all`, `none`] default [{}]",
+                    "Your answer [{total} numbers, `all`, `none`] default [{}]",
                     default
                         .iter()
                         .map(usize::to_string)
@@ -462,6 +729,7 @@ fn ask_list(
             Ok(None) => return Ok(None),
             Err(err) => {
                 writeln!(output, "{err}").map_err(io)?;
+                writeln!(output).map_err(io)?;
             }
         }
     }
@@ -503,21 +771,18 @@ fn write_review(
     output: &mut impl Write,
     plan: &SetupPlan,
     hooks: &[InstallStep],
-    color: bool,
+    screens: &mut Screens<'_>,
 ) -> Result<(), String> {
-    writeln!(output).map_err(io)?;
+    let color = screens.color;
+    screens.steps.banner(output, "Review", color)?;
     writeln!(
         output,
-        "{}",
-        paint(
-            color,
-            "1;32",
-            &format!("pixel setup will write under {}", plan.base.display())
-        )
+        "pixel setup will write under {}.",
+        paint(color, "1", &plan.base.display().to_string())
     )
     .map_err(io)?;
     if !plan.instruction_writes.is_empty() {
-        writeln!(output, "Instruction files:").map_err(io)?;
+        writeln!(output, "{}", paint(color, "1", "Instruction files")).map_err(io)?;
         for write in &plan.instruction_writes {
             let agents = write
                 .agents
@@ -536,7 +801,7 @@ fn write_review(
         }
     }
     if !plan.rule_writes.is_empty() {
-        writeln!(output, "Rule files:").map_err(io)?;
+        writeln!(output, "{}", paint(color, "1", "Rule files")).map_err(io)?;
         for write in &plan.rule_writes {
             writeln!(
                 output,
@@ -551,7 +816,12 @@ fn write_review(
     if !hooks.is_empty() {
         writeln!(
             output,
-            "Hooks and agent configuration (what the installer will do, from its dry run):"
+            "{}",
+            paint(
+                color,
+                "1",
+                "Hooks and agent configuration (from the installer's dry run)"
+            )
         )
         .map_err(io)?;
         for step in hooks {
@@ -569,7 +839,12 @@ fn write_review(
         }
     }
     if !plan.config_writes.is_empty() {
-        writeln!(output, "Global settings (~/.pixel/config.yaml):").map_err(io)?;
+        writeln!(
+            output,
+            "{}",
+            paint(color, "1", "Global settings (~/.pixel/config.yaml)")
+        )
+        .map_err(io)?;
         for key in &plan.config_writes {
             writeln!(
                 output,
@@ -596,7 +871,81 @@ fn write_review(
     Ok(())
 }
 
-/// The one question between the review and the writes.
+/// The question between the review and the writes: an Apply/Cancel list on a
+/// live terminal, a `[Y/n]` line everywhere else.
+fn ask_confirm(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    screens: &mut Screens<'_>,
+) -> Result<bool, String> {
+    let color = screens.color;
+    if screens.keys.active()
+        && let Some(mut raw) = crate::prompt_key::RawGuard::new()
+    {
+        return Ok(ask_confirm_keys(output, &mut raw, color)?.unwrap_or(false));
+    }
+    confirm(input, output, color)
+}
+
+/// The Apply/Cancel list: the cursor moves, enter answers, esc cancels.
+#[cfg_attr(test, mutants::skip)] // the raw branch needs a real tty; the line branch below is what the tests drive
+fn ask_confirm_keys(
+    output: &mut impl Write,
+    raw: &mut crate::prompt_key::RawGuard,
+    color: bool,
+) -> Result<Option<bool>, String> {
+    use crate::prompt_key::ListKey;
+
+    const CHOICES: [(&str, &str); 2] = [
+        (
+            "Apply",
+            "Register the hooks, install the skills and write the files now.",
+        ),
+        ("Cancel", "Change nothing and exit."),
+    ];
+    let mut picked = 0usize;
+    let mut drawn = 0usize;
+    loop {
+        // Rewind over the block drawn last time, then paint it again: one
+        // terminal row per line, because `fit` truncated it.
+        if drawn > 0 {
+            write!(output, "\x1b[{drawn}A").map_err(io)?;
+        }
+        for (index, (label, _)) in CHOICES.iter().enumerate() {
+            let line = if index == picked {
+                format!("> {}", paint(color, "1", label))
+            } else {
+                format!("  {label}")
+            };
+            writeln!(output, "{}", fit(&line, row_width())).map_err(io)?;
+        }
+        writeln!(
+            output,
+            "  {}",
+            paint(color, "2", &fit(CHOICES[picked].1, row_width() - 2))
+        )
+        .map_err(io)?;
+        drawn = CHOICES.len() + 1;
+        output.flush().map_err(io)?;
+
+        match raw.read_list_key() {
+            ListKey::Up | ListKey::Down => picked = 1 - picked,
+            ListKey::Enter => return Ok(Some(picked == 0)),
+            ListKey::Cancel => return Ok(None),
+            // `n` reads as "no" to this question, and doing nothing on it
+            // would look like a dropped keypress.
+            ListKey::None => return Ok(Some(false)),
+            // Space and `a`: nothing this question uses, so nothing is
+            // repainted; the rewind leaves the next key writing in place.
+            ListKey::Space | ListKey::All => {
+                write!(output, "\x1b[{drawn}A").map_err(io)?;
+                drawn = 0;
+            }
+        }
+    }
+}
+
+/// The line-driven confirmation: `[Y/n]`.
 fn confirm(input: &mut impl BufRead, output: &mut impl Write, color: bool) -> Result<bool, String> {
     write!(
         output,
@@ -622,12 +971,15 @@ fn report(
     written: &[PathBuf],
     hooks: &InstallReport,
     scripted: bool,
+    screens: &Screens<'_>,
 ) -> Result<(), String> {
+    let color = screens.color;
     writeln!(output).map_err(io)?;
+    writeln!(output, "{}", rule(color)).map_err(io)?;
     if written.is_empty() && plan.config_writes.is_empty() && hooks.steps.is_empty() {
         writeln!(output, "pixel setup wrote nothing.").map_err(io)?;
     } else {
-        writeln!(output, "pixel setup complete:").map_err(io)?;
+        writeln!(output, "{}", paint(color, "1;32", "pixel setup complete")).map_err(io)?;
         for path in written {
             writeln!(output, "  updated {}", path.display()).map_err(io)?;
         }
@@ -825,10 +1177,86 @@ mod tests {
         (result, String::from_utf8(output).unwrap())
     }
 
+    /// Rows for a test list.
+    fn rows(labels: &[&str]) -> Vec<Row> {
+        labels
+            .iter()
+            .map(|label| Row {
+                label: (*label).to_string(),
+                help: "the help line",
+                disabled: false,
+            })
+            .collect()
+    }
+
+    /// The shared screen state of a test run, with the typed input mode:
+    /// `KeyReader::inert` keeps the path a test can drive.
+    fn screens(keys: &KeyReader) -> Screens<'_> {
+        Screens {
+            steps: Steps::new(3),
+            color: true,
+            keys,
+        }
+    }
+
+    /// One line-driven question.
+    fn ask(
+        input: &mut std::io::Cursor<Vec<u8>>,
+        output: &mut Vec<u8>,
+        rows: &[Row],
+        default: &[usize],
+    ) -> Result<Option<Vec<usize>>, String> {
+        let keys = KeyReader::inert();
+        ask_list(
+            input,
+            output,
+            &mut screens(&keys),
+            "Pick",
+            "Pick one:",
+            rows,
+            default,
+        )
+    }
+
+    #[test]
+    fn the_list_screen_is_a_step_banner_over_checkbox_rows() {
+        let (_, written) = with_input("\n", |input, output| {
+            ask(input, output, &rows(&["a", "b", "c"]), &[1, 3])
+        });
+        let banner = written.find("Pick").expect("the step title");
+        let rule = written.find('─').expect("a rule under the banner");
+        let question = written.find("Pick one:").expect("the question");
+        assert!(banner < rule && rule < question, "got {written}");
+        assert!(written.contains("Step 1 of 3"), "got {written}");
+        assert!(written.contains("  [x] a"), "got {written}");
+        assert!(written.contains("  [ ] b"), "got {written}");
+        assert!(written.contains("  [x] c"), "got {written}");
+        assert!(
+            written.contains("Your answer [3 numbers, `all`, `none`] default [1,3]"),
+            "the answer line names the default it will keep: {written}"
+        );
+    }
+
+    #[test]
+    fn a_disabled_row_is_marked_and_its_reason_is_printed_below() {
+        let mut rows = rows(&["usable", "land"]);
+        rows[1].disabled = true;
+        rows[1].help = "Re-run with --repo <path> to land work on the target branch.";
+        let (_, written) = with_input("\n", |input, output| ask(input, output, &rows, &[1]));
+        assert!(
+            written.contains("[ ] land   (not in this scope)"),
+            "the row says what it is: {written}"
+        );
+        assert!(
+            written.contains("Re-run with --repo <path>"),
+            "and the reason follows, because a typed answer has no cursor to move onto it: {written}"
+        );
+    }
+
     #[test]
     fn the_list_prompt_asks_again_after_an_answer_it_cannot_read() {
         let (picked, written) = with_input("nonsense\n2\n", |input, output| {
-            ask_list(input, output, "Pick", &["a".into(), "b".into()], &[1], true)
+            ask(input, output, &rows(&["a", "b"]), &[1])
         });
         assert_eq!(picked.unwrap(), Some(vec![2]));
         assert!(
@@ -836,7 +1264,7 @@ mod tests {
             "the reader has to say what was wrong: {written}"
         );
         assert_eq!(
-            written.matches("Pick").count(),
+            written.matches("Pick one:").count(),
             2,
             "the list is shown again: {written}"
         );
@@ -845,14 +1273,7 @@ mod tests {
     #[test]
     fn the_list_prompt_keeps_the_shown_default_on_an_empty_line() {
         let (picked, _) = with_input("\n", |input, output| {
-            ask_list(
-                input,
-                output,
-                "Pick",
-                &["a".into(), "b".into()],
-                &[1, 2],
-                true,
-            )
+            ask(input, output, &rows(&["a", "b"]), &[1, 2])
         });
         assert_eq!(picked.unwrap(), Some(vec![1, 2]));
     }
@@ -860,13 +1281,26 @@ mod tests {
     #[test]
     fn the_list_prompt_cancels_on_q_and_on_end_of_input() {
         let (cancelled, _) = with_input("q\n", |input, output| {
-            ask_list(input, output, "Pick", &["a".into()], &[1], true)
+            ask(input, output, &rows(&["a"]), &[1])
         });
         assert_eq!(cancelled.unwrap(), None);
-        let (ended, _) = with_input("", |input, output| {
-            ask_list(input, output, "Pick", &["a".into()], &[1], true)
-        });
+        let (ended, _) = with_input("", |input, output| ask(input, output, &rows(&["a"]), &[1]));
         assert_eq!(ended.unwrap(), None, "a closed stdin is not an answer");
+    }
+
+    #[test]
+    fn a_long_line_is_cut_to_one_terminal_row_and_a_short_one_is_left_alone() {
+        assert_eq!(fit("short", 40), "short");
+        let cut = fit(&"x".repeat(200), 40);
+        assert!(
+            crate::select::visible_len(&cut) <= 40,
+            "a wrapped row breaks the in-place repaint: {cut:?}"
+        );
+        assert!(cut.ends_with('…'), "{cut:?}");
+        // The cut closes the style it interrupted, so the line after it does
+        // not inherit an unterminated colour.
+        let colored = fit(&paint(true, "1;32", &"y".repeat(200)), 20);
+        assert!(colored.ends_with("\x1b[0m"), "{colored:?}");
     }
 
     #[test]
@@ -905,8 +1339,10 @@ mod tests {
         )
         .unwrap();
         let hooks = [step("hooks.claude", "would register the task-event hooks")];
-        let (rendered, written) =
-            with_input("", |_, output| write_review(output, &plan, &hooks, true));
+        let keys = KeyReader::inert();
+        let (rendered, written) = with_input("", |_, output| {
+            write_review(output, &plan, &hooks, &mut screens(&keys))
+        });
         rendered.unwrap();
 
         assert!(written.contains(".claude/CLAUDE.md"), "{written}");
@@ -966,8 +1402,10 @@ mod tests {
             step("hooks.claude", "would register the task-event hooks"),
             step("hooks.codex", "would register codex hooks"),
         ];
-        let (rendered, written) =
-            with_input("", |_, output| write_review(output, &plan, &hooks, false));
+        let keys = KeyReader::inert();
+        let (rendered, written) = with_input("", |_, output| {
+            write_review(output, &plan, &hooks, &mut screens(&keys))
+        });
         rendered.unwrap();
 
         assert!(
@@ -987,7 +1425,9 @@ mod tests {
             "the hooks are part of the review, not an afterthought"
         );
 
-        let (none, plain) = with_input("", |_, output| write_review(output, &plan, &[], false));
+        let (none, plain) = with_input("", |_, output| {
+            write_review(output, &plan, &[], &mut screens(&keys))
+        });
         none.unwrap();
         assert!(
             !plain.contains("Hooks and agent configuration"),
@@ -1085,6 +1525,7 @@ mod tests {
         )
         .unwrap();
         let hooks = install_report(vec![step("hooks.claude", "registered the hooks")]);
+        let keys = KeyReader::inert();
         let (_, written) = with_input("", |_, output| {
             report(
                 output,
@@ -1092,6 +1533,7 @@ mod tests {
                 &[scratch.join(".claude/CLAUDE.md")],
                 &hooks,
                 false,
+                &screens(&keys),
             )
         });
         assert!(written.contains("updated"), "{written}");
@@ -1102,7 +1544,14 @@ mod tests {
         assert!(written.contains("pixel doctor"), "{written}");
 
         let (_, empty) = with_input("", |_, output| {
-            report(output, &plan, &[], &install_report(Vec::new()), true)
+            report(
+                output,
+                &plan,
+                &[],
+                &install_report(Vec::new()),
+                true,
+                &screens(&keys),
+            )
         });
         assert!(empty.contains("wrote nothing"), "{empty}");
         assert!(
