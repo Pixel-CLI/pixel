@@ -403,3 +403,76 @@ fn a_dirty_file_should_brief_a_short_follow_up_in_a_session_with_no_transcript()
         .unwrap_or_else(|| panic!("no brief in {briefed}"));
     assert!(text.contains("files: apps/web/page.tsx"), "{text}");
 }
+
+fn blocks_of(output: &Value) -> usize {
+    output["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .matches("\n### ")
+        .count()
+}
+
+fn with_pack(command: &mut std::process::Command) {
+    command.env("PIXEL_BRIEF_PACK", "1");
+}
+
+/// The blocks of the pack `ask` gets, asked again while a loaded machine ends
+/// the brief's 750 ms window before the pack has any (nothing was sent then, so
+/// asking again sends the same pack).
+fn blocks_eventually(ask: &dyn Fn() -> Value) -> usize {
+    (0..5)
+        .map(|_| blocks_of(&ask()))
+        .find(|blocks| *blocks > 0)
+        .unwrap_or(0)
+}
+
+#[test]
+fn a_session_should_not_be_sent_the_same_source_twice_until_the_host_starts_it_over() {
+    let root = indexed("dedupe");
+    let ask = |session: &str, configure: &dyn Fn(&mut std::process::Command)| {
+        let payload = prompt_payload(&root, session);
+        hook(&root, "prompt-submit", None, &payload, |command| {
+            with_pack(command);
+            configure(command);
+        })
+    };
+    let first = blocks_eventually(&|| ask(SESSION, &|_| {}));
+    assert!(first >= 1, "the first prompt of a session gets the pack");
+    let sessions = root.join(".pixel/brief-sessions");
+    let files: Vec<_> = std::fs::read_dir(&sessions).unwrap().flatten().collect();
+    assert_eq!(files.len(), 1, "one file for the session");
+    let text = std::fs::read_to_string(files[0].path()).unwrap();
+    assert!(
+        !text.contains("handleError") && !text.contains(SESSION),
+        "keys only: {text}"
+    );
+
+    // The same question, the same session: the source it was sent is not repeated.
+    assert_eq!(blocks_of(&ask(SESSION, &|_| {})), 0);
+    // Another session holds none of it; the switch sends it all again.
+    assert!(blocks_eventually(&|| ask("another-session", &|_| {})) > 0);
+    let off = |command: &mut std::process::Command| {
+        command.env("PIXEL_BRIEF_DEDUPE", "0");
+    };
+    assert!(blocks_eventually(&|| ask(SESSION, &off)) > 0);
+
+    // A resume keeps the same context; a compaction or a clear does not.
+    for (source, again) in [("resume", false), ("compact", true), ("clear", true)] {
+        hook(
+            &root,
+            "session-start",
+            None,
+            &json!({"session_id": SESSION, "cwd": &*root, "source": source,
+                    "hook_event_name": "SessionStart"}),
+            |_| {},
+        );
+        if again {
+            assert!(
+                blocks_eventually(&|| ask(SESSION, &|_| {})) > 0,
+                "{source}: sent again after a start-over"
+            );
+        }
+        // Whatever was just sent, or kept, is withheld from the next prompt.
+        assert_eq!(blocks_of(&ask(SESSION, &|_| {})), 0, "{source}");
+    }
+}

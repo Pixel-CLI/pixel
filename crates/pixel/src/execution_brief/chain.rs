@@ -46,6 +46,7 @@ use super::kinds::{self, ChangeScope, Changes, FlowNode, KindInput, RepoMap};
 use super::region_pack;
 use super::relevance::{self, Basis, GateInput, RelevanceInput, Tier};
 use super::routes::QuestionKind;
+use super::sent::{self, Seen};
 use super::session_paths::{self, SessionPaths};
 use super::{SOURCE_EXTENSIONS, Signal, brief_signal, names_code};
 
@@ -890,6 +891,8 @@ pub(crate) struct Brief {
     silenced: bool,
     /// The relevance decision, when the probe answered.
     relevance: Option<relevance::Verdict>,
+    /// Ranges an earlier pack sent to this session.
+    seen: Seen,
     /// A short follow-up the gate would have closed was let through on the
     /// session's files: the brief is a maybe, whatever the words scored.
     lifted: bool,
@@ -1504,6 +1507,7 @@ fn pack_evidence(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, dea
         wants_docs: brief.wants_docs,
         locators: located,
         limit: brief.pack_limit,
+        seen: brief.seen.clone(),
     };
     let mut publish = |pack: &region_pack::Pack| {
         edit(state, |brief| {
@@ -2486,6 +2490,9 @@ pub(crate) const CONTEXT_ENV: &str = "PIXEL_BRIEF_CONTEXT";
 /// What a host tells the brief about the session a prompt belongs to.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Session {
+    /// The host's id for the session, when it names one: the key of what the
+    /// session has been sent (see `sent`).
+    pub(crate) id: Option<String>,
     /// The host's transcript of the session, when it names one.
     pub(crate) transcript: Option<PathBuf>,
 }
@@ -2501,6 +2508,11 @@ pub(crate) struct Around {
     pub(crate) pack: region_pack::Limit,
     /// The files the session is working on, when the host's hook has a session.
     pub(crate) context: Option<ContextSource>,
+    /// Ranges an earlier pack sent to this session: the pack leaves them out.
+    pub(crate) seen: Seen,
+    /// Where the ranges this pack sends are remembered: the repository and
+    /// the session.
+    pub(crate) sent: Option<(PathBuf, String)>,
 }
 
 impl Around {
@@ -2510,8 +2522,7 @@ impl Around {
         Self {
             log: Some(path),
             starter: None,
-            pack: region_pack::Limit::default(),
-            context: None,
+            ..Self::default()
         }
     }
 }
@@ -2529,6 +2540,8 @@ pub(crate) struct Pending {
     /// The text the brief judged: the typed prompt, or its last paragraph.
     task: String,
     signal: Signal,
+    /// Where the ranges the pack sends are remembered for the session.
+    sent: Option<(PathBuf, String)>,
 }
 
 /// A finished brief: the block, when there is one, and what was decided.
@@ -2624,6 +2637,12 @@ impl Pending {
         } else {
             Vec::new()
         };
+        // What the pack just sent is not sent to this session again.
+        if let (Some((root, session)), Some(pack), true) =
+            (&self.sent, &brief.pack, stats.pack_bytes > 0)
+        {
+            let _ = sent::record(root, session, &pack.ranges(), pixel_task::now_ms());
+        }
         Finished {
             text,
             record,
@@ -2669,6 +2688,16 @@ fn try_start_as(
     let root = root.to_path_buf();
     let for_start = root.clone();
     let for_context = root.clone();
+    let dedupe = sent::enabled();
+    let session_id = session.as_ref().and_then(|session| session.id.clone());
+    // What this session was sent by earlier prompts, and where this prompt's
+    // pack is remembered.
+    let seen = session_id
+        .as_deref()
+        .filter(|_| dedupe)
+        .map(|id| sent::load(&root, id, pixel_task::now_ms()))
+        .unwrap_or_default();
+    let sent_to = session_id.filter(|_| dedupe).map(|id| (root.clone(), id));
     let context: Option<ContextSource> = session
         .filter(|_| decision_log::enabled(std::env::var(CONTEXT_ENV).ok().as_deref()))
         .map(|session| -> ContextSource {
@@ -2689,6 +2718,8 @@ fn try_start_as(
             starter: Some(Box::new(move || autostart::start_for_prompt(&for_start))),
             pack,
             context,
+            seen,
+            sent: sent_to,
         },
     )
 }
@@ -2742,6 +2773,8 @@ where
         starter,
         pack,
         context,
+        seen,
+        sent,
     } = around;
     if !gate.open() {
         return Err(if gate.enabled {
@@ -2768,6 +2801,7 @@ where
     let state = Arc::new(Mutex::new(Brief {
         signal: Some(signal),
         pack_limit: pack,
+        seen,
         ..Brief::default()
     }));
     let (finished, done) = mpsc::channel();
@@ -2812,6 +2846,7 @@ where
         kicked,
         task,
         signal,
+        sent,
     })
 }
 
@@ -7180,8 +7215,7 @@ mod tests {
             Around {
                 log,
                 starter: Some(starter),
-                pack: region_pack::Limit::default(),
-                context: None,
+                ..Around::default()
             },
         )
     }
@@ -8991,5 +9025,72 @@ mod tests {
             lib < api,
             "the file the session just read ranks above a lead it did not: {files}"
         );
+    }
+
+    /// A pack for `PACK_PROMPT` in session `s` of `root`, with what the
+    /// session was sent already.
+    fn packed_in(root: &Path, seen: Seen) -> Finished {
+        try_start_with(
+            PACK_PROMPT,
+            OPEN,
+            SECOND,
+            move |_| Box::new(pack_source()),
+            no_verdict,
+            model_high,
+            Around {
+                pack: region_pack::Limit::of(1),
+                seen,
+                sent: Some((root.to_path_buf(), "s".to_string())),
+                ..Around::default()
+            },
+        )
+        .expect("the prompt starts a brief")
+        .finish_with_record()
+    }
+
+    #[test]
+    fn a_pack_should_be_remembered_for_the_session_and_not_sent_to_it_again() {
+        let root = scratch_dir("sent-once");
+        std::fs::create_dir_all(root.join(".pixel")).unwrap();
+        let now = || pixel_task::now_ms();
+        let first = packed_in(&root, Seen::default());
+        assert!(first.record.pack_bytes > 0, "{:?}", first.text);
+        let seen = sent::load(&root, "s", now());
+        assert!(seen.overlaps("src/ui.ts", 1, 3), "the definition was sent");
+        assert!(seen.overlaps("src/page.ts", 3, 3), "the usage was sent");
+        // The next prompt of the session finds the same code and sends none of it.
+        let second = packed_in(&root, seen);
+        assert_eq!(second.record.pack_bytes, 0, "{:?}", second.text);
+        assert!(
+            !second.text.unwrap_or_default().contains("\n### "),
+            "no block of source is repeated"
+        );
+        // A session the host started over is sent the pack again.
+        sent::reset(&root, "s");
+        let third = packed_in(&root, sent::load(&root, "s", now()));
+        assert_eq!(third.record.pack_bytes, first.record.pack_bytes);
+    }
+
+    #[test]
+    fn a_brief_with_no_pack_should_remember_nothing() {
+        let root = scratch_dir("sent-none");
+        std::fs::create_dir_all(root.join(".pixel")).unwrap();
+        let finished = try_start_with(
+            PACK_PROMPT,
+            OPEN,
+            SECOND,
+            move |_| Box::new(pack_source()),
+            no_verdict,
+            model_high,
+            Around {
+                pack: region_pack::Limit::of(0),
+                sent: Some((root.clone(), "s".to_string())),
+                ..Around::default()
+            },
+        )
+        .unwrap()
+        .finish_with_record();
+        assert!(finished.text.is_some());
+        assert!(sent::load(&root, "s", pixel_task::now_ms()).is_empty());
     }
 }

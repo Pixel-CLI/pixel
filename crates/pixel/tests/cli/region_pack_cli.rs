@@ -255,6 +255,8 @@ fn hook_context(root: &Path, part: Option<&str>) -> String {
         .env_remove("PIXEL_BRIEF")
         .env_remove("PIXEL_BRIEF_PACK")
         .env_remove("PIXEL_BRIEF_PARTS")
+        // The same prompt, asked again in one session, would be withheld.
+        .env("PIXEL_BRIEF_DEDUPE", "0")
         .args(["run-hook", "task-event", "--provider", "claude"])
         .args(["--event", "prompt-submit"])
         .stdin(Stdio::piped())

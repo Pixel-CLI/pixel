@@ -173,7 +173,7 @@ pub(crate) fn cache_path(root: &Path, session: Option<&str>, prompt: &str) -> Pa
 /// Refuse a store whose `.pixel` or `brief-parts` directory is a symbolic
 /// link: a clone can commit either, and the brief would be written wherever
 /// it points. A directory that does not exist yet is fine.
-fn refuse_linked_dirs(path: &Path) -> io::Result<()> {
+pub(crate) fn refuse_linked_dirs(path: &Path) -> io::Result<()> {
     let dir = path.parent().unwrap_or(path);
     for linked in [dir.parent().unwrap_or(dir), dir] {
         if fs::symlink_metadata(linked).is_ok_and(|meta| meta.file_type().is_symlink()) {

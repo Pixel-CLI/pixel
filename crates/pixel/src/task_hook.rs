@@ -1085,6 +1085,7 @@ fn process(
     // The brief runs beside the ledger: it needs neither, and a slow ledger
     // must not use up its window.
     let brief = start_brief(provider, event, &payload, part.map_or(1, |part| part.count));
+    forget_sent(event, &payload);
     if let Some(root) = session_start_root(provider, event, &payload) {
         // A start is a nicety: whatever it came to, the hook goes on.
         let _ = crate::execution_brief::autostart::warm(&root);
@@ -1358,6 +1359,24 @@ fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -
     }
 }
 
+/// A session the host starts over (`SessionStart` with source `compact` or
+/// `clear`) no longer holds what the packs sent it: forget what was sent, so
+/// the next pack carries it again. A `resume` keeps the same context, so it
+/// keeps the record too.
+fn forget_sent(event: TaskHookEvent, payload: &Value) {
+    if event != TaskHookEvent::SessionStart
+        || !matches!(string(payload, &["source"]), Some("compact" | "clear"))
+    {
+        return;
+    }
+    let Some(session) = string(payload, &["session_id", "sessionId"]) else {
+        return;
+    };
+    if let Ok(root) = crate::discover_root(&payload_cwd(payload)) {
+        crate::execution_brief::sent::reset(&root, session);
+    }
+}
+
 /// The repository whose daemon a session starting should keep warm for the
 /// brief: the briefed providers' `SessionStart`, in a discoverable repository.
 fn session_start_root(
@@ -1385,6 +1404,7 @@ fn start_brief(
     // calls and the dirty files of the tree. Only the path is taken here; the
     // transcript is read, for paths alone, inside the brief's own window.
     let session = crate::execution_brief::chain::Session {
+        id: string(payload, &["session_id", "sessionId"]).map(str::to_string),
         transcript: string(payload, &["transcript_path", "transcriptPath"])
             .map(std::path::PathBuf::from),
     };

@@ -27,6 +27,7 @@ use regex::Regex;
 use super::answer;
 use super::chain::{BRIEF_TAG, Evidence, RichHit, SymbolHit};
 use super::decision_log;
+use super::sent::Seen;
 
 /// Environment kill switch of the pack (`0`, `false` or `off`): the brief is
 /// then the packet it was before the pack existed.
@@ -250,6 +251,12 @@ impl Pack {
             }
         }
         paths
+    }
+
+    /// The `(path, first line, last line)` of every block that shows a range:
+    /// what this pack sends, for the session's record.
+    pub(crate) fn ranges(&self) -> Vec<(String, u64, u64)> {
+        self.blocks.iter().filter_map(block_range).collect()
     }
 
     /// Symbols the pack is about.
@@ -1075,6 +1082,9 @@ pub(crate) struct Input {
     pub(crate) locators: Vec<Block>,
     /// How much the host takes.
     pub(crate) limit: Limit,
+    /// Ranges this session was sent by an earlier pack: none of them is sent
+    /// again, and the room they would have taken goes to blocks it has not got.
+    pub(crate) seen: Seen,
 }
 
 /// A symbol (or a region standing for one) the pack is about.
@@ -1385,7 +1395,12 @@ pub(crate) fn build(
             block: Block::new("call graph facts".to_string(), input.facts.clone()),
         });
     }
-    for (rank, block) in input.locators.iter().enumerate() {
+    for (rank, block) in input
+        .locators
+        .iter()
+        .filter(|block| !is_seen(&input.seen, block))
+        .enumerate()
+    {
         base.push(Candidate {
             priority: rank,
             order: (usize::MAX - 1, rank, 0),
@@ -1413,11 +1428,14 @@ pub(crate) fn build(
                 deadline,
                 files: &mut files,
             };
-            let (mut level, listed) = target_level(index, target, detail, &mut context);
-            // A region another block already shows adds nothing.
-            level
-                .blocks
-                .retain(|candidate| target.region.is_none() || !overlaps(&taken, &candidate.block));
+            let (mut level, mut listed) = target_level(index, target, detail, &mut context);
+            // A region another block already shows adds nothing, nor does one
+            // this session was sent by an earlier pack.
+            level.blocks.retain(|candidate| {
+                (target.region.is_none() || !overlaps(&taken, &candidate.block))
+                    && !is_seen(&input.seen, &candidate.block)
+            });
+            listed.retain(|candidate| !is_seen(&input.seen, &candidate.block));
             if step == 0 {
                 tests.extend(listed);
                 shown = level
@@ -1498,6 +1516,11 @@ pub(crate) fn block_range(block: &Block) -> Option<(String, u64, u64)> {
     let (path, range) = place.rsplit_once(':')?;
     let (first, last) = range.split_once('-')?;
     Some((path.to_string(), first.parse().ok()?, last.parse().ok()?))
+}
+
+/// Whether `block` shows lines an earlier pack already sent to this session.
+fn is_seen(seen: &Seen, block: &Block) -> bool {
+    block_range(block).is_some_and(|(path, first, last)| seen.overlaps(&path, first, last))
 }
 
 /// Whether `block` shows lines some block already taken shows.
@@ -1737,25 +1760,45 @@ fn usage_candidates(
         .as_ref()
         .map(|site| site.path.as_str())
         .or_else(|| target.region.as_ref().map(|region| region.path.as_str()));
+    // Sites the session was sent already do not count against the cap: with
+    // some sent, twice as many are weighed, and the first `target.sites` that
+    // are new are shown.
+    let ask = if context.input.seen.is_empty() {
+        target.sites
+    } else {
+        target.sites.saturating_mul(2)
+    };
     let sites = pick_sites(
         &target.rows,
         &target.name,
         definition,
         like,
         context.input.wants_docs,
-        target.sites,
+        ask,
     );
     let mut out: Vec<Candidate> = Vec::new();
     let mut inline_tests: Vec<String> = Vec::new();
     let mut funcs: Vec<String> = Vec::new();
     let mut by_file: Vec<(String, Vec<(usize, Window)>)> = Vec::new();
+    let mut fresh = 0;
     for (rank, site) in sites.code.iter().enumerate() {
+        if fresh >= target.sites {
+            break;
+        }
         let Some(lines) = context.files.get(&site.path) else {
             continue;
         };
         let Some(window) = site_window(lines, site.line, detail) else {
             continue;
         };
+        if context
+            .input
+            .seen
+            .overlaps(&site.path, window.first, window.last)
+        {
+            continue;
+        }
+        fresh += 1;
         if window.test {
             if !inline_tests.contains(&site.path) {
                 inline_tests.push(site.path.clone());
@@ -1868,6 +1911,13 @@ fn caller_candidates(
             };
             // The function's own declaration is not a call.
             if window.test || window.funcs.iter().any(|held| held == func) {
+                continue;
+            }
+            if context
+                .input
+                .seen
+                .overlaps(&site.path, window.first, window.last)
+            {
                 continue;
             }
             let caller = if window.funcs.is_empty() {
@@ -3019,6 +3069,7 @@ mod tests {
             wants_docs: false,
             locators: Vec::new(),
             limit: Limit::of(parts),
+            seen: Seen::default(),
         }
     }
 
@@ -3556,5 +3607,92 @@ mod tests {
             "{heads:?}"
         );
         assert_eq!(pack.located(), 1);
+    }
+
+    #[test]
+    fn a_pack_should_leave_out_the_ranges_a_session_was_sent_and_keep_the_rest() {
+        let repo = repo();
+        let first = built(&input(1), &repo).expect("a pack");
+        let ranges = first.ranges();
+        let in_file = |path: &str| -> Vec<(String, u64, u64)> {
+            ranges
+                .iter()
+                .filter(|(held, _, _)| held == path)
+                .cloned()
+                .collect()
+        };
+        assert!(
+            !in_file("src/api.rs").is_empty() && !in_file("src/main.rs").is_empty(),
+            "{ranges:?}"
+        );
+        // Everything sent: the same pack says nothing new.
+        let mut all = input(1);
+        all.seen = Seen::default().with(&ranges, 0);
+        assert!(built(&all, &repo).is_none_or(|pack| !pack.has_evidence()));
+        // Only the usage in main.rs sent: the definition is still shown, the usage is not.
+        let mut some = input(1);
+        some.seen = Seen::default().with(&in_file("src/main.rs"), 0);
+        let rest = built(&some, &repo)
+            .expect("the definition remains")
+            .ranges();
+        assert!(
+            rest.iter().all(|(path, _, _)| path != "src/main.rs"),
+            "{rest:?}"
+        );
+        assert!(
+            rest.iter().any(|(path, _, _)| path == "src/api.rs"),
+            "{rest:?}"
+        );
+        // Another file of the same name is another file.
+        let mut other = input(1);
+        other.seen = Seen::default().with(&[("elsewhere/main.rs".to_string(), 1, 1_000)], 0);
+        assert_eq!(built(&other, &repo).unwrap().ranges(), ranges);
+    }
+
+    #[test]
+    fn the_room_a_sent_site_would_take_should_go_to_a_site_the_session_has_not_got() {
+        // Ten files use the constant; a pack shows eight sites at most.
+        let usage: Vec<RichHit> = (0..10)
+            .map(|n| {
+                row(
+                    &format!("src/user_{n}.rs"),
+                    2,
+                    "    let x = SEARCH_DEFAULT_ROWS;",
+                )
+            })
+            .collect();
+        let sources: Vec<(String, Vec<String>)> = (0..10)
+            .map(|n| {
+                (
+                    format!("src/user_{n}.rs"),
+                    lines(&["fn run() {", "    let x = SEARCH_DEFAULT_ROWS;", "}"]),
+                )
+            })
+            .chain(std::iter::once(("src/api.rs".to_string(), api_source())))
+            .collect();
+        let repo = Repo {
+            sources,
+            rows: vec![("SEARCH_DEFAULT_ROWS".into(), usage)],
+            symbols: repo().symbols,
+        };
+        let first = built(&input(3), &repo).expect("a pack").ranges();
+        let used = |ranges: &[(String, u64, u64)]| {
+            ranges
+                .iter()
+                .filter(|(path, _, _)| path.starts_with("src/user_"))
+                .count()
+        };
+        let sent = used(&first);
+        assert!((1..=MAX_SITES).contains(&sent), "{first:?}");
+        let mut again = input(3);
+        again.seen = Seen::default().with(&first, 0);
+        let second = built(&again, &repo).expect("new sites remain").ranges();
+        assert!(used(&second) > 0, "{second:?}");
+        assert!(
+            second.iter().all(|(path, a, b)| !first
+                .iter()
+                .any(|(held, x, y)| held == path && x <= b && a <= y)),
+            "nothing is sent twice: {second:?} against {first:?}"
+        );
     }
 }
