@@ -1126,7 +1126,7 @@ mod tests {
     fn path_words_should_split_directories_and_drop_only_the_extension() {
         assert_eq!(
             path_words("crates/pixel-setup/src/claude_settings.rs"),
-            ["crates", "pixel", "install", "src", "claude", "settings"]
+            ["crates", "pixel", "setup", "src", "claude", "settings"]
         );
         assert_eq!(path_words("Cargo.toml"), ["cargo"]);
         assert_eq!(path_words("src/HttpServer.ts"), ["src", "http", "server"]);
