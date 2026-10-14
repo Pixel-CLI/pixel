@@ -1405,6 +1405,37 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_line_sets_the_focused_help_off_from_the_rows() {
+        let list = rows(&["a", "b"]);
+        let block = list_block(&list, 1, &[true, false], 40, false);
+        let help = block
+            .iter()
+            .position(|line| line.contains("the help line"))
+            .expect("the focused row's help");
+        assert_eq!(
+            block[help - 1],
+            "",
+            "the help reads as another row without it: {block:?}"
+        );
+        assert_eq!(
+            block[help - 2],
+            "> [ ] b",
+            "the row above the gap is the cursor's own row: {block:?}"
+        );
+
+        // The typed path draws the same gap before its answer line.
+        let (_, written) = with_input("\n", |input, output| {
+            ask(input, output, &rows(&["a", "b"]), &[1])
+        });
+        let lines: Vec<&str> = written.lines().collect();
+        let answer = lines
+            .iter()
+            .position(|line| line.contains("Your answer"))
+            .expect("the answer line");
+        assert_eq!(lines[answer - 1], "", "got {written}");
+    }
+
+    #[test]
     fn a_step_banner_is_always_preceded_by_a_blank_line() {
         let keys = KeyReader::inert();
         let mut screens = Screens {
@@ -1464,12 +1495,10 @@ mod tests {
             &pixel_plugin::Available::none(),
         )
         .unwrap();
-        plan.notes = vec![
-            "a note long enough to wrap onto several lines, because the terminal it is \
-             printed to is never as wide as the sentence wants to be, and the sentence \
-             is what the reader has to read to know what to do by hand"
-                .to_string(),
-        ];
+        // A note that fills the two-column reservation twice over, so the wrap
+        // and the indent are both at the boundary they have to hold.
+        let note_width = row_width().saturating_sub(2);
+        plan.notes = vec!["x".repeat(note_width * 2 + 1)];
         let keys = KeyReader::inert();
         let (rendered, written) = with_input("", |_, output| {
             write_review(output, &plan, &[], &mut screens(&keys))
@@ -1489,6 +1518,13 @@ mod tests {
             note_lines[0].starts_with('\u{26a0}'),
             "the first line carries the warning mark: {after_heading:?}"
         );
+        for line in &note_lines {
+            assert!(
+                crate::select::visible_len(line) <= row_width(),
+                "the warning mark and the indent are inside the reservation, \
+                 so no line reaches the terminal's last column: {after_heading:?}"
+            );
+        }
         for line in &note_lines[1..] {
             assert_eq!(
                 line.chars().take_while(|c| *c == ' ').count(),
@@ -1497,37 +1533,6 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&scratch).ok();
-    }
-
-    #[test]
-    fn a_blank_line_sets_the_focused_help_off_from_the_rows() {
-        let list = rows(&["a", "b"]);
-        let block = list_block(&list, 1, &[true, false], 40, false);
-        let help = block
-            .iter()
-            .position(|line| line.contains("the help line"))
-            .expect("the focused row's help");
-        assert_eq!(
-            block[help - 1],
-            "",
-            "the help reads as another row without it: {block:?}"
-        );
-        assert_eq!(
-            block[help - 2],
-            "> [ ] b",
-            "the row above the gap is the cursor's own row: {block:?}"
-        );
-
-        // The typed path draws the same gap before its answer line.
-        let (_, written) = with_input("\n", |input, output| {
-            ask(input, output, &rows(&["a", "b"]), &[1])
-        });
-        let lines: Vec<&str> = written.lines().collect();
-        let answer = lines
-            .iter()
-            .position(|line| line.contains("Your answer"))
-            .expect("the answer line");
-        assert_eq!(lines[answer - 1], "", "got {written}");
     }
 
     #[test]
