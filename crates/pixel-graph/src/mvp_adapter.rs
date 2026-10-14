@@ -30,6 +30,9 @@
 //! to a caller of another language ([`rust_is_walled`]): a name-only match
 //! across languages is what the comparison found wrong (1 116 Rust calls
 //! into Python and TypeScript on pixel's repository, 1 302 the other way).
+//!
+//! Ruby is merged, not replaced: [`ruby`] keeps this graph's edge wherever
+//! pixel-mvp abstains (ADR-0037 there).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -38,6 +41,8 @@ use std::time::Duration;
 use mvp_model::{Graph, Lang};
 
 use crate::store::{EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, Tier};
+
+pub mod ruby;
 
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
