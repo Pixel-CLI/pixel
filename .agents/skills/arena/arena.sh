@@ -243,8 +243,11 @@ wait_ready() {
   return 1
 }
 
-# Codex asks a human to review hooks it did not write. The arena wrote this
-# one, so trust it in this run's own CODEX_HOME.
+# Codex asks a human to review hooks it did not write, either as the modal
+# "Hooks need review" (key 2 trusts) or as the /hooks panel "N hooks need
+# review" (t trusts all, esc closes it). The arena wrote this hook, so it is
+# trusted in this run's own CODEX_HOME; the panel appears when the first
+# prompt-submit actually runs the hooks, not necessarily at session start.
 review_hooks_if_asked() {
   local pane=$1 screen
   screen=$(hd agent read "$pane" --source visible 2>/dev/null || true)
