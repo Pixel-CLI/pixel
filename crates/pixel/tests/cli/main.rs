@@ -50,4 +50,5 @@ mod uninstall_cli;
 #[cfg(unix)]
 mod update_notice_cli;
 mod upgrade_cli;
+mod vendored_boundary;
 mod version_cli;
