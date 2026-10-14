@@ -9,8 +9,10 @@ use std::path::Path;
 use pixel_install::config::{MANAGED_BEGIN, MANAGED_END, PI_SETTINGS_FILE};
 use pixel_install::doctor::{CHECKS, CheckStatus, DoctorOptions, doctor};
 use pixel_install::install::{
-    CheckStatus as StepStatus, InstallOptions, InstallReport, InstallStep, install,
+    CheckStatus as StepStatus, InstallOptions, InstallReport, InstallSelection, InstallStep,
+    install, install_selected,
 };
+use pixel_install::setup::AgentTarget;
 use pixel_install::uninstall::{UninstallOptions, uninstall};
 use tempfile::TempDir;
 
@@ -7174,4 +7176,145 @@ fn install_should_replace_prompt_entries_without_the_fail_open_tail() {
     let after = prompt_submit_commands(&read_json(&path));
     assert_eq!(after.len(), 3, "{after:?}");
     assert!(after.iter().all(|c| c.ends_with(" || true")), "{after:?}");
+}
+
+// ---------------------------------------------------------------------------
+// `install_selected`: what a guided `pixel setup` run picked
+// ---------------------------------------------------------------------------
+
+fn options_for(home: &Path) -> InstallOptions {
+    InstallOptions {
+        repo: None,
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: None,
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    }
+}
+
+fn step_ids(report: &InstallReport) -> Vec<&str> {
+    report.steps.iter().map(|step| step.id.as_str()).collect()
+}
+
+#[test]
+fn no_selection_is_the_unattended_install() {
+    let plain = TempDir::new().expect("tempdir");
+    let none = TempDir::new().expect("tempdir");
+    for home in [plain.path(), none.path()] {
+        fs::create_dir_all(home.join(".codex")).unwrap();
+    }
+
+    let a = install(&options_for(plain.path())).expect("install");
+    let b = install_selected(&options_for(none.path()), None).expect("install_selected");
+
+    assert_eq!(
+        step_ids(&a),
+        step_ids(&b),
+        "the same steps, in the same order"
+    );
+    // The hook commands name the fake executable inside each home.
+    let settings = |home: &Path| {
+        fs::read_to_string(home.join(".claude/settings.json"))
+            .unwrap()
+            .replace(home.to_str().unwrap(), "<home>")
+    };
+    assert_eq!(settings(plain.path()), settings(none.path()));
+}
+
+#[test]
+fn a_selection_deploys_only_the_agents_and_hook_groups_it_names() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+
+    let report = install_selected(
+        &options_for(home),
+        Some(&InstallSelection {
+            agents: vec![AgentTarget::Codex],
+            task_hooks: true,
+            codex_hooks: true,
+            pi_extension: true,
+        }),
+    )
+    .expect("install_selected");
+
+    assert!(
+        fs::read_to_string(home.join(".codex/hooks.json"))
+            .unwrap()
+            .contains("task-event --provider codex"),
+        "Codex was picked with its hook group"
+    );
+    assert!(
+        !home.join(".claude/settings.json").exists(),
+        "Claude Code was not picked: its settings are not written"
+    );
+    assert!(
+        !step_ids(&report).contains(&"hooks.claude"),
+        "{:?}",
+        step_ids(&report)
+    );
+    assert!(
+        !step_ids(&report).contains(&"hooks.pi-impact"),
+        "pi was not picked, whatever the hook group says: {:?}",
+        step_ids(&report)
+    );
+}
+
+#[test]
+fn a_picked_agent_without_its_hook_group_gets_no_hook() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+
+    install_selected(
+        &options_for(home),
+        Some(&InstallSelection {
+            agents: vec![AgentTarget::ClaudeCode, AgentTarget::Codex],
+            task_hooks: false,
+            codex_hooks: false,
+            pi_extension: false,
+        }),
+    )
+    .expect("install_selected");
+
+    assert!(!home.join(".claude/settings.json").exists());
+    assert!(!home.join(".codex/hooks.json").exists());
+}
+
+#[test]
+fn a_selected_dry_run_reports_the_steps_and_writes_nothing() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let selection = InstallSelection {
+        agents: vec![AgentTarget::ClaudeCode],
+        task_hooks: true,
+        codex_hooks: false,
+        pi_extension: false,
+    };
+
+    let preview = install_selected(
+        &InstallOptions {
+            dry_run: true,
+            ..options_for(home)
+        },
+        Some(&selection),
+    )
+    .expect("dry run");
+    assert!(preview.dry_run);
+    assert!(step_ids(&preview).contains(&"hooks.claude"));
+    assert!(
+        !home.join(".claude/settings.json").exists(),
+        "a preview writes no hook"
+    );
+
+    let applied = install_selected(&options_for(home), Some(&selection)).expect("apply");
+    assert_eq!(
+        step_ids(&preview),
+        step_ids(&applied),
+        "the review shows the steps the apply runs"
+    );
 }

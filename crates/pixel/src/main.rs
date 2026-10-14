@@ -65,6 +65,7 @@ mod reference_cmd;
 mod search_compat;
 mod search_filter;
 mod serve_trace;
+mod setup_cmd;
 mod task_bridge;
 mod task_commands;
 mod task_config;
@@ -759,10 +760,56 @@ enum Command {
         json: bool,
     },
     // -----------------------------------------------------------------
-    // M5/M6 — install / doctor / migrate / hook
+    // M5/M6 — setup / doctor / migrate / hook
     // -----------------------------------------------------------------
-    /// Idempotently deploy agent integrations while preserving native retrieval.
-    /// `--remove` takes everything back out.
+    /// Set pixel up for your agents, on this machine or in one repository
+    /// (`--repo`). `--remove` takes everything back out.
+    ///
+    /// In a terminal this is a guided setup: it detects the agent CLIs, asks
+    /// which of them to write for and which features to switch on, lists every
+    /// instruction file, rule file, hook, setting and note it would write, with
+    /// the exact text of the managed block (`<!-- pixel:setup:start -->` …
+    /// `:end -->`), and writes nothing until you confirm. Cancelling writes
+    /// nothing.
+    ///
+    /// Without a terminal on stdin and stdout, in CI, or with `--yes`,
+    /// `--json` or `--print`, it does not ask: it deploys the agent
+    /// integrations while preserving native retrieval (task lifecycle hooks,
+    /// the Pi impact extension when Pi is configured, retired registrations
+    /// removed) and reports what changed, exactly as `pixel install` did
+    /// before `pixel install <source>` became the plugin installer.
+    ///
+    /// ## Examples
+    ///
+    /// Set up this machine (guided in a terminal, unattended otherwise):
+    ///
+    /// ```text
+    /// pixel setup
+    /// ```
+    ///
+    /// Set up one repository (its own agents, its own instruction files):
+    ///
+    /// ```text
+    /// pixel setup --repo .
+    /// ```
+    ///
+    /// Never ask, whatever the terminal:
+    ///
+    /// ```text
+    /// pixel setup --yes
+    /// ```
+    ///
+    /// Print the block the default answers produce, changing nothing:
+    ///
+    /// ```text
+    /// pixel setup --print
+    /// ```
+    ///
+    /// Take everything back out:
+    ///
+    /// ```text
+    /// pixel setup --remove
+    /// ```
     Setup {
         #[arg(long)]
         json: bool,
@@ -772,14 +819,15 @@ enum Command {
         /// whose wrapper block is removed.
         #[arg(long)]
         shell: Option<String>,
-        /// Set up project-local integrations in this repository only,
-        /// skipping every global step. Remove retired Claude and Codex
-        /// retrieval hooks, restore adopted RTK/foreign hooks from matching
-        /// backups, and preserve independent task controls. Tracked Codex
-        /// hooks are left alone. Remove the retired Devin guard and Pi project
-        /// extension, and retired Pixel retrieval blocks from AGENTS.md and
-        /// Codex config. Adds no guard. Foreign instructions and native tools
-        /// are preserved.
+        /// Set up this repository instead of the machine, skipping every
+        /// global step: project-local hooks and, in the guided setup, the
+        /// agents' instruction files under the repository root. Retired
+        /// Claude and Codex retrieval hooks are removed, adopted RTK/foreign
+        /// hooks are restored from matching backups, independent task
+        /// controls are preserved, tracked Codex hooks are left alone, the
+        /// retired Devin guard and Pi project extension are removed, and
+        /// retired Pixel retrieval blocks go from AGENTS.md and Codex config.
+        /// Adds no guard. Foreign instructions and native tools are preserved.
         /// Files: `.claude/settings.local.json`, `.claude/pixel-rtk-hooks.json`,
         /// `.codex/config.toml`, `.codex/hooks.json`,
         /// `.codex/pixel-composed-guard-backup.json`, and `AGENTS.md`.
@@ -787,12 +835,22 @@ enum Command {
         /// With `--remove`, only the project-local artifacts that
         /// `pixel setup --repo` wrote are removed and every global removal
         /// step is skipped.
-        #[arg(long)]
+        #[arg(long, value_name = "PATH")]
         repo: Option<PathBuf>,
+        /// Do not ask: deploy the integrations as an unattended run does,
+        /// even in a terminal.
+        #[arg(long, conflicts_with_all = ["remove", "print"])]
+        yes: bool,
+        /// Print the block the default answers produce, without prompting or
+        /// writing anything.
+        #[arg(long, conflicts_with = "remove")]
+        print: bool,
         /// Remove everything `pixel setup` wrote: managed blocks from
-        /// agent-config files, hook entries from all settings files, hook
-        /// scripts, the Pi impact package, the rule source file, and the
-        /// pixel binary itself. Idempotent: safe to re-run.
+        /// agent-config files, the `pixel:setup` block and the rule files from
+        /// every instruction file the guided setup owns, hook entries from all
+        /// settings files, hook scripts, the Pi impact package, the rule
+        /// source file, and the pixel binary itself. Idempotent: safe to
+        /// re-run.
         #[arg(long)]
         remove: bool,
         /// With `--remove`: preview what would be removed without making any
@@ -808,6 +866,33 @@ enum Command {
         /// reports in a profile the login shell never loads.
         #[arg(long, requires = "remove")]
         wrappers_only: bool,
+        // TEMPORARY (dev-flags) start: three development-only args, removed
+        // before the release. The removal recipe is in `setup_cmd.rs`; the
+        // three args below and the `dev:` field at the construction site are
+        // the whole command-surface part of it.
+        /// Answer the agent question with 1-based indices into the list
+        /// `pixel setup` prints, comma-separated, and run the guided setup
+        /// without a terminal or a confirmation. Needs
+        /// `--selected-features`. Temporary.
+        #[arg(
+            long,
+            value_name = "LIST",
+            hide = true,
+            requires = "selected_features",
+            conflicts_with_all = ["remove", "yes", "print"]
+        )]
+        selected_agents: Option<String>,
+        /// Answer the feature question with 1-based indices into the list
+        /// `pixel setup` prints, comma-separated. Needs `--selected-agents`.
+        /// Temporary.
+        #[arg(long, value_name = "LIST", hide = true, requires = "selected_agents")]
+        selected_features: Option<String>,
+        /// Redirect every write under `tests/setup/` in this repository
+        /// instead of a real home or repository, and leave the real global
+        /// configuration and hook files alone. Temporary.
+        #[arg(long, hide = true, conflicts_with_all = ["remove", "yes", "print"])]
+        dummy_apply: bool,
+        // TEMPORARY (dev-flags) end.
     },
     /// Install a plugin from `github:<owner>/<repo>[@<ref>]`, a git URL
     /// (https://, ssh://, file://, git@host:path) or a local directory
@@ -5267,15 +5352,37 @@ fn run_command(
             json,
             shell,
             repo,
+            yes,
+            print,
             remove,
             dry_run,
             binary_path,
             wrappers_only,
+            selected_agents,
+            selected_features,
+            dummy_apply,
         } => {
             if remove {
                 setup_remove(json, shell, repo, dry_run, binary_path, wrappers_only)
             } else {
-                setup_install(json, shell, repo)
+                let options = setup_cmd::SetupOptions {
+                    repo,
+                    shell,
+                    print,
+                    // TEMPORARY (dev-flags): this one field, the three args above
+                    // and the three clap args in the `Setup` variant are the
+                    // whole removal in the command surface.
+                    dev: setup_cmd::DevOptions {
+                        selected_agents,
+                        selected_features,
+                        dummy_apply,
+                    },
+                };
+                if print || setup_cmd::is_guided(&options, yes, json) {
+                    setup_cmd::run(options)
+                } else {
+                    setup_install(json, options.shell, options.repo)
+                }
             }
         }
         Command::Install { source, name } => {

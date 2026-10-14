@@ -16,6 +16,7 @@ use serde::Serialize;
 
 use crate::InstallError;
 use crate::config;
+use crate::setup::AgentTarget;
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
@@ -89,6 +90,57 @@ pub struct InstallOptions {
     pub repo: Option<PathBuf>,
 }
 
+/// What a guided `pixel setup` run asked the installer to deploy; see
+/// [`install_selected`].
+///
+/// An agent that is not selected is not touched, retirement sweeps included;
+/// a selected agent gets the hook group its feature names, and only that.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstallSelection {
+    /// The agents selected.
+    pub agents: Vec<AgentTarget>,
+    /// Register the task-event hooks of Claude Code, Devin, Gemini CLI,
+    /// Antigravity and OpenCode.
+    pub task_hooks: bool,
+    /// Register Codex's task hooks.
+    pub codex_hooks: bool,
+    /// Install the pi impact extension.
+    pub pi_extension: bool,
+}
+
+impl InstallSelection {
+    /// Whether `agent` was selected.
+    fn selected(&self, agent: AgentTarget) -> bool {
+        self.agents.contains(&agent)
+    }
+}
+
+/// Which steps of an install run apply: everything when no selection was
+/// made, else only what the selection names.
+#[derive(Clone, Copy)]
+struct Wants<'a>(Option<&'a InstallSelection>);
+
+impl Wants<'_> {
+    /// The retirement sweep of `agent`'s configuration.
+    fn sweep(self, agent: AgentTarget) -> bool {
+        self.0.is_none_or(|s| s.selected(agent))
+    }
+    /// The task-event hooks of `agent`.
+    fn task_hooks(self, agent: AgentTarget) -> bool {
+        self.0.is_none_or(|s| s.selected(agent) && s.task_hooks)
+    }
+    /// Codex's task hooks.
+    fn codex_hooks(self) -> bool {
+        self.0
+            .is_none_or(|s| s.selected(AgentTarget::Codex) && s.codex_hooks)
+    }
+    /// The pi impact extension.
+    fn pi_extension(self) -> bool {
+        self.0
+            .is_none_or(|s| s.selected(AgentTarget::Pi) && s.pi_extension)
+    }
+}
+
 /// First executable file named `name` on PATH.
 #[cfg(test)]
 pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
@@ -128,6 +180,20 @@ pub(crate) fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBu
 /// `claude()` shell wrapper is removed because native task hooks now provide
 /// the lifecycle integration.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
+    install_selected(options, None)
+}
+
+/// [`install`], limited to what a guided `pixel setup` run picked.
+///
+/// `None` is the unattended install: every configured host, exactly as before
+/// the guided setup existed. With a selection, an agent that was not picked is
+/// not touched (retirement sweeps included), and a picked agent gets the hook
+/// group its feature names, and only that. `options.dry_run` makes it the
+/// preview the guided review prints.
+pub fn install_selected(
+    options: &InstallOptions,
+    selection: Option<&InstallSelection>,
+) -> Result<InstallReport> {
     let home = options
         .home
         .clone()
@@ -141,25 +207,28 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 
     let dry_run = options.dry_run;
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
+    let wants = Wants(selection);
     if let Some(repo) = &options.repo {
-        return install_project(repo, &home, &codex_home, &exe, dry_run);
+        return install_project(repo, &home, &codex_home, &exe, dry_run, wants);
     }
     // How many hooks carry the prompt brief: a host caps what each injects.
     let prompt_parts = crate::config::brief_parts(&home, None);
-    let mut steps = vec![
-        // Prompts are no longer deployed for any host: retire earlier copies
-        // and the automatic block in Pi's APPEND_SYSTEM.md.
-        crate::uninstall::remove_agent_prompt(&home, dry_run)?,
-        crate::pi_global::install(
+    // Prompts are no longer deployed for any host: retire earlier copies
+    // and the automatic block in Pi's APPEND_SYSTEM.md.
+    let mut steps = vec![crate::uninstall::remove_agent_prompt(&home, dry_run)?];
+    if wants.pi_extension() {
+        steps.push(crate::pi_global::install(
             &crate::pi_global::PiPaths::resolve(&home, options.home.is_some()),
             &exe,
             options.home.is_none() && crate::pi_global::pi_on_path(),
             dry_run,
-        )?,
-        // Keep task accounting and configured task gates available to every
-        // Claude session. Automatic retrieval guidance, post-edit advice and
-        // metrics are excluded from the native-default profile.
-        crate::routing::install_at_scoped(
+        )?);
+    }
+    // Keep task accounting and configured task gates available to every
+    // Claude session. Automatic retrieval guidance, post-edit advice and
+    // metrics are excluded from the native-default profile.
+    if wants.task_hooks(AgentTarget::ClaudeCode) {
+        steps.push(crate::routing::install_at_scoped(
             &home,
             &crate::routing::Provider::Claude.path(&home),
             &exe,
@@ -167,69 +236,103 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             crate::routing::HookScope::TaskEventsOnly { prompt_parts },
             &[],
             dry_run,
-        )?,
-        // The zsh `claude()` wrapper only ever fired for human login shells
-        // and would now double-inject alongside SessionStart — strip it.
-        remove_legacy_wrappers(&home, options.shell.as_deref(), dry_run)?,
-        crate::codex_config::remove_developer_instructions(&codex_home, dry_run)?,
-        crate::codex_config::install_task_hooks(&codex_home, &exe, prompt_parts, dry_run)?,
-    ];
+        )?);
+    }
+    // The zsh `claude()` wrapper only ever fired for human login shells
+    // and would now double-inject alongside SessionStart — strip it.
+    if wants.sweep(AgentTarget::ClaudeCode) {
+        steps.push(remove_legacy_wrappers(
+            &home,
+            options.shell.as_deref(),
+            dry_run,
+        )?);
+    }
+    if wants.sweep(AgentTarget::Codex) {
+        steps.push(crate::codex_config::remove_developer_instructions(
+            &codex_home,
+            dry_run,
+        )?);
+    }
+    if wants.codex_hooks() {
+        steps.push(crate::codex_config::install_task_hooks(
+            &codex_home,
+            &exe,
+            prompt_parts,
+            dry_run,
+        )?);
+    }
     // The Gemini CLI brief hook: BeforeAgent in ~/.gemini/settings.json,
     // only where the file already exists.
-    steps.push(crate::antigravity::install_gemini_brief(
-        &home, &exe, dry_run,
-    )?);
+    if wants.task_hooks(AgentTarget::Gemini) {
+        steps.push(crate::antigravity::install_gemini_brief(
+            &home, &exe, dry_run,
+        )?);
+    }
     // Every other host keeps its native retrieval: install writes no prompt,
     // rewrite, approval or pre-invocation hook for it, and removes the ones
     // an earlier release wrote. Each step runs only where that host's
     // configuration exists, so a machine without it is left untouched.
     let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
     if opencode_dir.is_dir() {
-        steps.push(crate::opencode_config::remove_opencode(
-            &opencode_dir,
-            &home,
-            dry_run,
-        )?);
-        steps.push(crate::opencode_config::install_brief(
-            &opencode_dir,
-            &exe,
-            dry_run,
-        )?);
+        if wants.sweep(AgentTarget::OpenCode) {
+            steps.push(crate::opencode_config::remove_opencode(
+                &opencode_dir,
+                &home,
+                dry_run,
+            )?);
+        }
+        if wants.task_hooks(AgentTarget::OpenCode) {
+            steps.push(crate::opencode_config::install_brief(
+                &opencode_dir,
+                &exe,
+                dry_run,
+            )?);
+        }
     }
     if home.join(crate::config::DEVIN_CONFIG_DIR).is_dir() {
-        steps.push(crate::uninstall::remove_retired_devin_hooks(
-            &home, &exe, dry_run,
-        )?);
+        if wants.sweep(AgentTarget::Devin) {
+            steps.push(crate::uninstall::remove_retired_devin_hooks(
+                &home, &exe, dry_run,
+            )?);
+        }
         // Devin shares Claude's hook schema and reads every configured
         // hooks file; its task events include prompt-submit, which carries
         // the brief. Registered after the retired-entry sweep so a stale
         // install does not re-add what was just removed.
-        steps.push(crate::routing::install_at_scoped(
-            &home,
-            &crate::routing::Provider::Devin.path(&home),
-            &exe,
-            crate::routing::Provider::Devin,
-            crate::routing::HookScope::TaskEventsOnly { prompt_parts: 1 },
-            &[],
-            dry_run,
-        )?);
+        if wants.task_hooks(AgentTarget::Devin) {
+            steps.push(crate::routing::install_at_scoped(
+                &home,
+                &crate::routing::Provider::Devin.path(&home),
+                &exe,
+                crate::routing::Provider::Devin,
+                crate::routing::HookScope::TaskEventsOnly { prompt_parts: 1 },
+                &[],
+                dry_run,
+            )?);
+        }
     }
     if crate::antigravity::antigravity_config_dir(&home).is_dir() {
-        steps.push(crate::antigravity::remove_antigravity(
-            &home, &exe, dry_run,
-        )?);
+        if wants.sweep(AgentTarget::Antigravity) {
+            steps.push(crate::antigravity::remove_antigravity(
+                &home, &exe, dry_run,
+            )?);
+        }
         // The Antigravity brief hook: PreInvocation in the global
         // hooks.json, written after the removal sweep so a stale copy the
         // sweep just deleted is not re-added before removal runs.
-        steps.push(crate::antigravity::install_antigravity_brief(
-            &home, &exe, dry_run,
-        )?);
+        if wants.task_hooks(AgentTarget::Antigravity) {
+            steps.push(crate::antigravity::install_antigravity_brief(
+                &home, &exe, dry_run,
+            )?);
+        }
     }
+    // Copilot CLI and zcode have no setup target: their retired entries are
+    // always swept.
     if crate::copilot_config::copilot_hooks_dir(&home).is_some() {
         steps.push(crate::copilot_config::remove_copilot_hooks(&home, dry_run)?);
     }
     steps.push(crate::uninstall::remove_zcode_hooks(&home, dry_run)?);
-    if home.join(".cursor").is_dir() {
+    if home.join(".cursor").is_dir() && wants.sweep(AgentTarget::Cursor) {
         steps.push(crate::uninstall::remove_cursor_hooks(&home, &exe, dry_run)?);
     }
 
@@ -294,17 +397,25 @@ fn install_project(
     codex_home: &Path,
     exe: &Path,
     dry_run: bool,
+    wants: Wants<'_>,
 ) -> Result<InstallReport> {
     let codex_dir = repo.join(".codex");
     let codex_hooks = codex_dir.join(crate::codex_config::HOOKS_FILE);
     // These two cleanup steps are independent of hook ownership. Run them
     // before validating project hooks so a foreign hook conflict cannot leave
     // the retired always-on Codex guidance in place.
-    let retired_codex_instructions =
-        crate::codex_config::remove_developer_instructions(&codex_dir, dry_run)?;
+    let retired_codex_instructions = if wants.sweep(AgentTarget::Codex) {
+        Some(crate::codex_config::remove_developer_instructions(
+            &codex_dir, dry_run,
+        )?)
+    } else {
+        None
+    };
     let retired_pixel_first_rules = crate::pixel_first::uninstall_rules(repo, dry_run)?;
-    let codex_step = if crate::repo_git::is_tracked(repo, CODEX_PROJECT_HOOKS) {
-        InstallStep {
+    let codex_step = if !wants.codex_hooks() {
+        None
+    } else if crate::repo_git::is_tracked(repo, CODEX_PROJECT_HOOKS) {
+        Some(InstallStep {
             id: "hooks.codex".into(),
             status: CheckStatus::Yellow,
             summary: dry_run_summary(
@@ -312,26 +423,35 @@ fn install_project(
                 "codex project guard not installed: .codex/hooks.json is tracked by git, and the guard would carry this machine's pixel path into every clone",
             ),
             detail: Some(codex_hooks.display().to_string()),
-        }
+        })
     } else {
-        crate::routing::install_project_codex_at(
+        Some(crate::routing::install_project_codex_at(
             home,
             &codex_home.join(crate::codex_config::HOOKS_FILE),
             &codex_hooks,
             exe,
             dry_run,
-        )?
+        )?)
     };
-    let steps = vec![
-        crate::routing::install_project_claude_at(repo, home, exe, dry_run)?,
-        retired_codex_instructions,
-        codex_step,
-        crate::uninstall::remove_project_devin_hooks(repo, exe, dry_run)?,
-        crate::pi_project::remove(repo, dry_run)?,
-        crate::warp::retire(repo, dry_run)?,
-        retired_pixel_first_rules,
-        exclude_project_artifacts(repo, dry_run)?,
-    ];
+    let mut steps = Vec::new();
+    if wants.task_hooks(AgentTarget::ClaudeCode) {
+        steps.push(crate::routing::install_project_claude_at(
+            repo, home, exe, dry_run,
+        )?);
+    }
+    steps.extend(retired_codex_instructions);
+    steps.extend(codex_step);
+    if wants.sweep(AgentTarget::Devin) {
+        steps.push(crate::uninstall::remove_project_devin_hooks(
+            repo, exe, dry_run,
+        )?);
+    }
+    if wants.sweep(AgentTarget::Pi) {
+        steps.push(crate::pi_project::remove(repo, dry_run)?);
+    }
+    steps.push(crate::warp::retire(repo, dry_run)?);
+    steps.push(retired_pixel_first_rules);
+    steps.push(exclude_project_artifacts(repo, dry_run)?);
 
     Ok(install_report(exe, repo, dry_run, steps))
 }
