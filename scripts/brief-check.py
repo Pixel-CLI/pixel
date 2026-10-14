@@ -4,7 +4,7 @@
 
 """Fast per-change loop for the prompt-submit brief (issue #906): no LLM, a few seconds per question.
 
-For one answer-only census question it rebuilds the binary incrementally, runs ``pixel brief`` (the
+For one answer-only census question it runs ``pixel brief`` (the
 path of the prompt-submit hook, 3 parts) in a pinned clone that is indexed once and then reused, and
 REPLAYS the tool calls Codex made on that question in the recorded live runs (the brief arm and the
 no-brief arm, from the saved ``codex exec --json`` event logs) against the brief:
@@ -437,7 +437,8 @@ def main(argv=None):
     parser.add_argument("--bin", default=str(WORKTREE / "target" / "dev-release" / "pixel"))
     parser.add_argument("--root", default=str(DEFAULT_ROOT))
     parser.add_argument("--census-dir", default=None)
-    parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--build", action="store_true", help="rebuild with cargo first (default: use --bin as it is)")
+    parser.add_argument("--no-build", action="store_true", help=argparse.SUPPRESS)  # the default now; kept for old callers
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--extra-cmd", default=None)
@@ -452,7 +453,7 @@ def main(argv=None):
     if not args.question and not args.all:
         parser.error("a question id or --all")
     sb = load_module("score_brief", args.census_dir)
-    build(args.bin, args.no_build)
+    build(args.bin, not args.build)
     binary = str(Path(args.bin).resolve())
     ids = question_ids(args.root) if args.all else [args.question]
     if args.all:
