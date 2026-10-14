@@ -1312,6 +1312,18 @@ fn note_event(
     };
 }
 
+/// Whether the 🟩 prompt-submit line joins the response: the `metrics`
+/// configuration for the payload's repository, vetoed by `PIXEL_METRICS=0`.
+fn metrics_on(raw: Option<&str>) -> bool {
+    if std::env::var_os("PIXEL_METRICS").is_some_and(|v| v == "0") {
+        return false;
+    }
+    let root = raw
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|payload| crate::discover_root(&payload_cwd(&payload)).ok());
+    crate::config_cmd::metrics_enabled(root.as_deref())
+}
+
 /// Part 1 of a split brief: finish the brief, store it whole for the other
 /// parts (an empty one too, so they do not wait for nothing) and return the
 /// first slice for this hook to print.
@@ -1535,11 +1547,12 @@ fn bounded_decision(
 /// `part` is the slice of a split prompt-submit brief this hook serves (see
 /// [`brief_parts`]); on another event it means nothing and is ignored.
 pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>) -> ! {
+    let started = std::time::Instant::now();
     if provider == TaskProvider::Claude && imported_config_host().is_some() {
         std::process::exit(0);
     }
     let raw = crate::hook_input::read_bounded(&mut std::io::stdin(), MAX_INPUT);
-    let output = if let Some(raw) = &raw {
+    let mut output = if let Some(raw) = &raw {
         let later = part.filter(|part| part.index > 1 && event == TaskHookEvent::PromptSubmit);
         if let Some(part) = later {
             // Nothing to say is nothing printed: a hook that cannot get its
@@ -1559,6 +1572,21 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
     } else {
         Some(envelope(provider, event, &unavailable(event, None, true)))
     };
+    // A hook has no terminal: the metrics line a person would read on stderr
+    // rides the response as `systemMessage`, which the host surfaces as a
+    // warning next to the prompt. Only a delivered brief earns one — a `{}`
+    // abstention should not light up every prompt.
+    if event == TaskHookEvent::PromptSubmit
+        && part.is_none_or(|part| part.index == 1)
+        && let Some(output) = &mut output
+        && output.get("hookSpecificOutput").is_some()
+        && metrics_on(raw.as_deref())
+    {
+        output["systemMessage"] = json!(format!(
+            "🟩 pixel prompt-submit ❀ {:.1}ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
+    }
     // Flush the only response before exit terminates any stalled evaluator.
     if let Some(output) = &output {
         let mut stdout = std::io::stdout().lock();

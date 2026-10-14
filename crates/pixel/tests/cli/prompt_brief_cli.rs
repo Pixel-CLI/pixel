@@ -130,6 +130,29 @@ fn context(output: &Value) -> &str {
         .unwrap_or_else(|| panic!("no additional context in {output}"))
 }
 
+#[test]
+fn a_delivered_brief_carries_the_metrics_line_as_a_system_message() {
+    let root = indexed("metrics-line");
+    for provider in ["claude", "codex"] {
+        let output = hook(&root, provider, RENAME, &[("PIXEL_METRICS", "")]);
+        // env_remove cannot be passed through `env`, so clear the veto by
+        // pointing it at a non-"0" value.
+        let message = output["systemMessage"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no systemMessage in {output}"));
+        assert!(
+            message.starts_with("🟩 pixel prompt-submit ❀ "),
+            "{provider}: {message}"
+        );
+    }
+
+    let silenced = hook(&root, "codex", RENAME, &[("PIXEL_METRICS", "0")]);
+    assert!(
+        silenced.get("systemMessage").is_none(),
+        "the veto silences the line: {silenced}"
+    );
+}
+
 fn stamp(path: &Path) -> (u64, SystemTime) {
     let meta = std::fs::metadata(path).unwrap();
     (meta.len(), meta.modified().unwrap())
