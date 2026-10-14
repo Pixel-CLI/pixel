@@ -387,9 +387,7 @@ impl Steps {
     fn banner(&mut self, output: &mut impl Write, title: &str, color: bool) -> Result<(), String> {
         self.current += 1;
         let right = format!("Step {} of {}", self.current, self.total);
-        let gap = banner_width()
-            .saturating_sub(title.chars().count() + right.chars().count())
-            .max(1);
+        let gap = banner_gap(title, &right, banner_width());
         writeln!(output).map_err(io)?;
         writeln!(
             output,
@@ -402,6 +400,26 @@ impl Steps {
         writeln!(output, "{}", rule(color)).map_err(io)?;
         Ok(())
     }
+}
+
+/// The spaces between a step's title and its right-aligned counter: at least
+/// one, so a title longer than the banner never runs into the counter.
+fn banner_gap(title: &str, right: &str, width: usize) -> usize {
+    width
+        .saturating_sub(title.chars().count() + right.chars().count())
+        .max(1)
+}
+
+/// Move the cursor back over the `drawn` lines last written and erase them.
+///
+/// Rewinding alone only overwrites: a new line shorter than the old one — a
+/// help sentence that now wraps onto fewer lines, a label that got shorter —
+/// leaves the old tail visible after it, and a block with fewer lines leaves
+/// its last line under the list. `\r` goes to the start of the line and
+/// `ESC [ J` erases from there to the end of the screen, which is the block: it
+/// is the last thing the wizard draws.
+fn rewind_block(output: &mut impl Write, drawn: usize) -> Result<(), String> {
+    write!(output, "\x1b[{drawn}A\r\x1b[J").map_err(io)
 }
 
 /// The state every screen shares: the wizard's position, whether colour is on,
@@ -695,11 +713,11 @@ fn ask_list_keys(
     let mut state = ListState::new(rows.len(), default);
     let mut drawn = 0usize;
     loop {
-        // Rewind over the block drawn last time (the rows and the help line)
-        // and paint it again: every line is one terminal row, because `fit`
-        // truncated it, so the count is exact.
+        // Erase the block drawn last time and paint it again: every line is
+        // one terminal row, because `wrap` fitted it to the width, so the
+        // count is exact.
         if drawn > 0 {
-            write!(output, "\x1b[{drawn}A").map_err(io)?;
+            rewind_block(output, drawn)?;
         }
         let width = row_width();
         let mut block: Vec<String> = Vec::new();
@@ -727,8 +745,10 @@ fn ask_list_keys(
             ListOutcome::Cancel => return Ok(None),
             ListOutcome::Ignored => {
                 // Nothing changed, so nothing is repainted: rewind anyway so
-                // the next key does not paint one line too low.
-                write!(output, "\x1b[{drawn}A").map_err(io)?;
+                // the next key does not paint one line too low. The erase
+                // leaves the screen blank until then, which is what the next
+                // key's paint fills.
+                rewind_block(output, drawn)?;
                 drawn = 0;
             }
         }
@@ -976,10 +996,10 @@ fn ask_confirm_keys(
     let mut picked = 0usize;
     let mut drawn = 0usize;
     loop {
-        // Rewind over the block drawn last time, then paint it again: one
-        // terminal row per line, because `fit` truncated it.
+        // Erase the block drawn last time, then paint it again: one terminal
+        // row per line, because `wrap` fitted it to the width.
         if drawn > 0 {
-            write!(output, "\x1b[{drawn}A").map_err(io)?;
+            rewind_block(output, drawn)?;
         }
         let width = row_width();
         let mut block: Vec<String> = Vec::new();
@@ -1287,6 +1307,62 @@ mod tests {
             rows,
             default,
         )
+    }
+
+    #[test]
+    fn the_step_banner_right_aligns_the_counter_and_never_touches_the_title() {
+        // "Agents" is 6 columns and "Step 1 of 3" is 11, so a 40-column banner
+        // leaves 23 spaces between them.
+        assert_eq!(banner_gap("Agents", "Step 1 of 3", 40), 23);
+        assert_eq!(
+            banner_gap("Agents", "Step 1 of 3", 17),
+            1,
+            "a title that exactly fills the banner still gets one space"
+        );
+        assert_eq!(
+            banner_gap("A title past the banner", "Step 1 of 3", 18),
+            1,
+            "a title longer than the banner keeps one space, it is not cut"
+        );
+    }
+
+    #[test]
+    fn both_key_hints_are_the_ones_each_input_mode_shows() {
+        assert_eq!(
+            list_keys_hint(&KeyReader::forced(true)),
+            "↑/↓ move · space select · a all · n none · enter continue · esc cancel"
+        );
+        assert_eq!(
+            list_keys_hint(&KeyReader::forced(false)),
+            "Type numbers (1,3), `all` or `none` · enter keeps the shown defaults · q cancels"
+        );
+    }
+
+    #[test]
+    fn erasing_a_block_moves_back_to_its_first_line_and_clears_it() {
+        let mut written = Vec::new();
+        rewind_block(&mut written, 7).unwrap();
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            "\x1b[7A\r\x1b[J",
+            "seven lines up, to the line start, then erase to the end of the screen"
+        );
+    }
+
+    #[test]
+    fn a_repaint_leaves_no_tail_of_the_block_before_it() {
+        // The old help was three lines, the new one is one: the erase is what
+        // stops the last two from staying on screen.
+        let keys = KeyReader::inert();
+        let mut written = Vec::new();
+        let mut steps = Steps::new(1);
+        rewind_block(&mut written, 4).unwrap();
+        let erased = String::from_utf8(written).unwrap();
+        assert!(
+            erased.contains("\x1b[J"),
+            "a repaint that only overwrites leaves the old tail: {erased:?}"
+        );
+        let _ = (&keys, &mut steps);
     }
 
     #[test]

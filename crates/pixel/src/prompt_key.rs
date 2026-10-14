@@ -23,7 +23,7 @@ pub enum ListKey {
     Space,
     /// Check every row this scope can use.
     All,
-    /// Uncheck every row.
+    /// Uncheck every row this scope can use.
     None,
     /// Answer with what is checked.
     Enter,
@@ -98,8 +98,9 @@ impl ListState {
         }
     }
 
-    /// Apply one key. A row in `disabled` cannot be toggled, so `Space` and
-    /// `All` leave it alone; `None` still clears it.
+    /// Apply one key. A row in `disabled` is never changed by any key: the
+    /// picker cannot offer what this scope cannot use, so `Space`, `All` and
+    /// `None` all leave it as it was.
     pub fn apply(&mut self, key: ListKey, disabled: &[usize]) -> ListOutcome {
         let togglable = |index: usize| !disabled.contains(&(index + 1));
         match key {
@@ -492,6 +493,26 @@ mod tests {
         );
         assert_eq!(state.apply(ListKey::None, &[2]), ListOutcome::Redraw);
         assert_eq!(state.picked(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn none_leaves_a_disabled_row_exactly_as_it_was() {
+        // A disabled row can only be checked by the default it came in with,
+        // and no key takes that away: the picker cannot offer what this scope
+        // cannot use, so it does not quietly undo it either.
+        let mut state = ListState::new(2, &[2]);
+        assert_eq!(state.apply(ListKey::None, &[2]), ListOutcome::Redraw);
+        assert_eq!(
+            state.picked(),
+            vec![2],
+            "`none` cleared a row the picker cannot toggle"
+        );
+        assert_eq!(state.apply(ListKey::All, &[2]), ListOutcome::Redraw);
+        assert_eq!(
+            state.picked(),
+            vec![1, 2],
+            "`all` checks the rows it can and leaves the disabled one as it was"
+        );
     }
 
     #[test]
