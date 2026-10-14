@@ -14,9 +14,14 @@ A probe is a script in `probes/<name>/` that adds evidence to the prompt-submit 
 1. **Pick a question still above 0 calls.** `python3 -I scripts/brief-check.py --all` (the last live run's calls
    beside the replay), or read `.pixel/brief-feedback.jsonl` of a real session. The frozen binary, never a rebuild:
    `--bin <pixel>`; `--build` is opt-in.
-2. **Diagnose.** Dump the brief (`brief-check.py <id> --show-brief`), list what each recorded call looked for
-   (`brief-check.py <id>` prints the uncovered targets), and classify the answer:
-   - **missing**: not in the brief at all (a file the words never name, a git diff, a registry);
+2. **Diagnose: translate the vanilla trace.** `python3 -I scripts/probe-translate.py <id> --bin <frozen pixel>`
+   (`--fresh 2` first for two new plain-Codex runs with no hook) turns each tool call of a session without a brief
+   into the deterministic evidence that would have made it unnecessary (a `sed -n a,bp` is that region, an `rg` the
+   matching lines by file, a README read a documentation section, `git log/show` a history block, `--help` the CLI
+   definition region) and says whether the current brief already has it (yes / buried at line N / partly / no)
+   and which probe of `probes/` covers it, or "no probe: candidate". Then `brief-check.py <id> --show-brief`
+   to read the brief itself. Classify each open row:
+   - **missing**: not in the brief at all (a file the words never name, a git diff, a registry, a doc section);
    - **buried**: in the brief, but far from the top or among noise (pixel-4's answer sat at line 145);
    - **wrong**: the brief points at the wrong code (excalidraw-5's trace and its truncated body).
    Only missing needs a lookup; buried needs `drop:`/`first:`; wrong needs `drop:` plus a better block.

@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+"""doc-sections: the brief never carries documentation, and a session asked where a setting lives reads the README's
+configuration section first. Splits the git-tracked Markdown files (README, docs/, top-level guides) into
+sections by heading, keeps the sections whose heading or first paragraph names at least two of the prompt's
+words, ranks them by how many, and shows the best two with up to 40 lines either side of the heading's body.
+Read-only, deterministic (sorted by count, path, line)."""
+import json
+import math
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+STOP = {"what", "where", "which", "that", "this", "with", "from", "does", "the", "and", "how", "is", "a", "of", "it",
+        "defined", "define", "number", "returns", "return", "set", "get", "use", "used", "make", "could", "there",
+        "keep", "keeps", "change", "changes", "behaves", "behave", "when", "should", "would", "about", "have", "for",
+        "its", "are", "not", "you", "can", "any", "all", "but", "was", "has", "our", "your", "into", "than"}
+GENERIC = {"file", "files", "code", "line", "thing", "error", "work", "works", "time", "name", "value"}
+SKIP = re.compile(r"(^|/)(CHANGELOG|HISTORY|LICENSE|NOTICE|CODE_OF_CONDUCT|node_modules|vendor|website|bench)", re.I)
+MAX_FILES, MAX_BYTES, MIN_WORDS, SHOWN, WINDOW, BODY_LINES = 60, 400_000, 2, 2, 40, 80
+
+
+def stem(word):
+    word = word.lower()
+    for suffix in ("ing", "es", "s"):
+        if len(word) > 4 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def words(text):
+    return {stem(w) for w in re.findall(r"[A-Za-z]{3,}", text) if w.lower() not in STOP | GENERIC}
+
+
+def sections(lines):
+    """``[(start, end, heading)]`` (1-based, inclusive) of the heading sections of a Markdown file."""
+    heads = [(i + 1, line.lstrip("# ").strip()) for i, line in enumerate(lines)
+             if re.match(r"#{1,4} \S", line)]
+    out = []
+    for k, (start, title) in enumerate(heads):
+        end = heads[k + 1][0] - 1 if k + 1 < len(heads) else len(lines)
+        out.append((start, end, title))
+    return out
+
+
+def main():
+    req = json.load(sys.stdin)
+    root, prompt = req["repo_root"], req["prompt"]
+    want = words(prompt)
+    if len(want) < MIN_WORDS:
+        return
+    tracked = subprocess.run(["git", "-C", root, "ls-files", "-z", "--", "*.md", "*.mdx"], capture_output=True,
+                             text=True, timeout=10).stdout.split("\0")
+    paths = sorted(p for p in tracked if p and not SKIP.search(p) and (p.count("/") <= 2))[:MAX_FILES]
+    docs = []   # (path, start, end, title, words of the heading and its first paragraph)
+    for path in paths:
+        file = Path(root) / path
+        try:
+            if file.stat().st_size > MAX_BYTES:
+                continue
+            lines = file.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for start, end, title in sections(lines):
+            head = " ".join([title] + [l for l in lines[start:start + 12] if l.strip()][:4])
+            docs.append((path, start, end, title, words(head)))
+    # A word that heads most sections (the project's own name) says little: weigh by how few sections carry it.
+    df = {}
+    for *_, ws in docs:
+        for w in ws:
+            df[w] = df.get(w, 0) + 1
+    weight = {w: math.log((len(docs) + 1) / df[w]) for w in want if w in df}
+    found = []
+    for path, start, end, title, ws in docs:
+        hits = want & ws
+        if len(hits) >= MIN_WORDS:
+            score = sum(weight[w] for w in hits)
+            found.append((-round(score, 3), path, start, end, title))
+    found.sort()
+    shown = 0
+    held = []
+    for _, path, start, end, title in found:
+        if shown >= SHOWN:
+            break
+        if any(p == path and not (end < s or start > e) for p, s, e in held):
+            continue
+        lines = (Path(root) / path).read_text(errors="replace").splitlines()
+        first = max(1, start - 0)
+        last = min(len(lines), end, start + BODY_LINES + WINDOW)
+        held.append((path, first, last))
+        print(f"### {path}:{first}-{last} — {title} (documentation section)")
+        print("\n".join(f"{i}| {lines[i - 1][:160]}" for i in range(first, last + 1)))
+        shown += 1
+
+
+main()
