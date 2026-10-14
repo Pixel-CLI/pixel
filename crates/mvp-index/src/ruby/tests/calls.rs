@@ -383,7 +383,8 @@ tool
 /// A region the grammar cannot parse gives no definition and no call: error
 /// recovery loses the class around its `def`s, which would read as
 /// top-level functions any caller could reach (tree-sitter-ruby 0.23 reads
-/// no anonymous block argument after a line continuation). On
+/// no anonymous block argument after a line continuation, and #107's
+/// rewrite leaves one that has no blank before it). On
 /// once-campfire, v1 linked `MessagesHelper#message_tag`'s `render` to the
 /// `render` of a presenter broken this way.
 #[test]
@@ -396,7 +397,7 @@ class Card
   def render(&)
     form_with \\
       model: 1,
-      &
+&
   end
 
   def frame

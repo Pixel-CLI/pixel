@@ -1,8 +1,8 @@
 # mvp-index (vendored)
 
 This crate is a copy of `crates/pixel-index` of pixel-mvp, the
-experimental successor of Pixel's index, at commit `d5c7cf7fd006ade26a4de78c0bb9ba720cc6ca4e`
-(`d5c7cf7`), made by `scripts/vendor-mvp.sh`. ADR-0035 of the pixel-mvp
+experimental successor of Pixel's index, at commit `4b23d4cdf72a283f5d60bc474c1d7bae1b6689bb`
+(`4b23d4c`), made by `scripts/vendor-mvp.sh`. ADR-0035 of the pixel-mvp
 research repository decided the copy: the MVP's Rust and Ruby index
 becomes the source of Pixel's code graph for the languages where it is
 shown to be right, behind a switch.

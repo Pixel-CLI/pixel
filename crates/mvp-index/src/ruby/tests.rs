@@ -24,6 +24,7 @@ mod definers;
 mod projects;
 mod rails;
 mod references;
+mod scoped;
 mod unplaced;
 
 use std::collections::{BTreeSet, HashMap};
@@ -48,6 +49,13 @@ type Row = (String, EdgeKind, u32, String);
 fn index(files: &[(&str, &str)]) -> Vec<FileRows> {
     let delta = run(files, &[]);
     delta.add
+}
+
+/// The facts extraction records for `code`, written as `lib/x.rb`.
+pub(in crate::ruby) fn facts_of(code: &str) -> Vec<super::Fact> {
+    let rows = index(&[("lib/x.rb", code)]);
+    let file = rows.iter().find(|r| r.file.path == "lib/x.rb");
+    super::Fact::decode_all(&file.expect("lib/x.rb").facts)
 }
 
 /// Indexes `files` as a run after `before` does: the files whose content

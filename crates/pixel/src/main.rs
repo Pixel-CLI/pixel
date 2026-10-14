@@ -5408,10 +5408,15 @@ fn run_command(
                         dummy_apply,
                     },
                 };
-                if print || setup_cmd::is_guided(&options, yes, json) {
-                    setup_cmd::run(options)
-                } else {
-                    setup_install(json, options.shell, options.repo)
+                // TEMPORARY (dev-flags): a released binary refuses the flags
+                // here, before the guided/unattended decision, so a refused
+                // flag never reaches a write.
+                match setup_cmd::refuse_dev_flags(&options.dev) {
+                    Some(refusal) => Err(refusal),
+                    None if print || setup_cmd::is_guided(&options, yes, json) => {
+                        setup_cmd::run(options)
+                    }
+                    None => setup_install(json, options.shell, options.repo),
                 }
             }
         }

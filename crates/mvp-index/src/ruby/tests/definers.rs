@@ -667,3 +667,92 @@ end
     );
     assert_unresolved(&rows, &[("K#run", Call, 5, "b"), ("K2.run", Call, 13, "z")]);
 }
+
+/// A string a binding evaluates runs on a `self` the rules cannot name,
+/// so a method it defines may be any object's, a subclass's override of
+/// `Bank#kind` among them: `Bank#to_hash` proves nothing of `kind`. A
+/// Redis script (`$redis.eval(<<~LUA)`, gumroad's offer-code job) defines
+/// nothing on any `self`, so it changes no class, and the self call keeps
+/// its edge (#111). Ruby 3.3: with `$r = binding`, `Sub.new.to_hash` is
+/// `:sub` once the string defining `Sub#kind` ran; a string of calls only
+/// leaves it `:bank`.
+#[test]
+fn c10_ruby_an_evaluated_string_that_defines_nothing_changes_no_class() {
+    // #111, R7-03
+    let bank = "class Bank
+  def to_hash; kind; end
+  def kind; :bank; end
+end
+";
+    let script = "class Job
+  def perform(id)
+    $redis.eval(<<~LUA, keys: [\"lock:#{id}\"])
+      if redis.call('GET', KEYS[1]) == ARGV[1] then
+        return redis.call('DEL', KEYS[1])
+      end
+    LUA
+  end
+end
+";
+    let rows = index(&[("lib/bank.rb", bank), ("lib/job.rb", script)]);
+    assert!(resolved(&rows).is_superset(&labelled(&[("Bank#to_hash", Call, 2, "Bank#kind")])));
+    let defining = "class Job
+  def perform
+    $r.eval(\"class Sub < Bank; def kind; :sub; end; end\")
+  end
+end
+";
+    let rows = index(&[("lib/bank.rb", bank), ("lib/job.rb", defining)]);
+    assert_unresolved(&rows, &[("Bank#to_hash", Call, 2, "kind")]);
+}
+
+const HELPER: &str = "module Helper
+  def a; b; end
+  def b; end
+end
+class Report
+  include Helper
+end
+";
+
+/// A module `Module.new` builds where it is mixed in is none of the
+/// graph's: prepending it to a gem's singleton class (gumroad's
+/// `Alterity.singleton_class.prepend(Module.new do … end)`) puts no
+/// module of the graph anywhere, so `Helper#a -> Helper#b` stays proven;
+/// a module a method returns may be `Helper` itself, mixed in where no
+/// lookup replays it, so the same call proves nothing (R8-05, #111).
+#[test]
+fn c10_ruby_a_mixin_of_a_new_module_leaves_the_graphs_modules_alone() {
+    // #111, R8-05
+    let fresh = "Alterity.singleton_class.prepend(Module.new do
+  def execute_alter(t); Helper; end
+end)
+";
+    let rows = index(&[("lib/helper.rb", HELPER), ("config/alterity.rb", fresh)]);
+    assert!(resolved(&rows).is_superset(&labelled(&[("Helper#a", Call, 2, "Helper#b")])));
+    let rows = index(&[
+        ("lib/helper.rb", HELPER),
+        (
+            "config/alterity.rb",
+            "Alterity.singleton_class.prepend(Cfg.mod)\n",
+        ),
+    ]);
+    assert_unresolved(&rows, &[("Helper#a", Call, 2, "b")]);
+}
+
+/// Code a string evaluates on an object the rules cannot name mixes what
+/// it names into that object: written in a spec (`@klass.class_eval
+/// "include Helper"`, gumroad's search-index spec), a stub only a test's
+/// callers may meet, so the application's `Helper#a -> Helper#b` stays
+/// proven; written in the application, any object may hold `Helper`
+/// first, and the call proves nothing (R5-04, R6-14, #106, #111).
+#[test]
+fn c10_ruby_a_string_mixin_on_an_unnamed_object_is_a_stub_in_a_test() {
+    // #111, #106
+    let eval =
+        "class Setup\n  def run(klass)\n    klass.class_eval \"include Helper\"\n  end\nend\n";
+    let rows = index(&[("lib/helper.rb", HELPER), ("spec/support/setup.rb", eval)]);
+    assert!(resolved(&rows).is_superset(&labelled(&[("Helper#a", Call, 2, "Helper#b")])));
+    let rows = index(&[("lib/helper.rb", HELPER), ("lib/setup.rb", eval)]);
+    assert_unresolved(&rows, &[("Helper#a", Call, 2, "b")]);
+}

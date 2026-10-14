@@ -86,10 +86,18 @@ struct Line {
     names: HashSet<String>,
 }
 
+/// A Ruby file is re-parsed as its rules read it: past the anonymous
+/// forwarding tree-sitter-ruby cannot parse, which a byte-for-byte rewrite
+/// of the same offsets reads (#107); no line moves.
 fn reparse(lang: Lang, content: &str) -> HashMap<u32, Line> {
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&grammar(lang)).expect("grammar loads");
-    let tree = parser.parse(content, None).expect("a parse");
+    let tree = match lang {
+        Lang::Ruby => crate::ruby::tree(content.as_bytes()).expect("a parse"),
+        Lang::Rust => {
+            let mut parser = tree_sitter::Parser::new();
+            parser.set_language(&grammar(lang)).expect("grammar loads");
+            parser.parse(content, None).expect("a parse")
+        }
+    };
     let mut lines: HashMap<u32, Line> = HashMap::new();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
