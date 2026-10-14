@@ -19,7 +19,7 @@ Claude Code (``run-hook task-event --provider claude --event prompt-submit --par
 and runs ``claude -p`` with those hooks, the census tool set and a ``pixel`` that is visibly
 absent from PATH, so the only Pixel the agent sees is the brief.
 
-    brief-zero-calls.py --brief-bin <pixel> [--only id,id] [--parts 3] [--concurrency 4]
+    brief-zero-calls.py --brief-bin <pixel> [--only id,id] [--parts 3] [--jobs 13]
     brief-zero-calls.py --self-test
 
 The questions, the answers and the transcripts are private: the questions are read from
@@ -230,7 +230,8 @@ def main(argv=None):
     parser.add_argument("--run-id", default=time.strftime("zc-%Y%m%d-%H%M%S"))
     parser.add_argument("--only", default=None, help="comma-separated question ids")
     parser.add_argument("--parts", type=int, default=3, help="UserPromptSubmit hooks (brief_parts)")
-    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--jobs", "--concurrency", dest="jobs", type=int, default=1,
+                        help="questions run in parallel, each in its own clone and output file (default 1)")
     parser.add_argument("--model", default=None)
     parser.add_argument("--effort", default=None)
     parser.add_argument("--budget", type=float, default=2.0)
@@ -251,7 +252,7 @@ def main(argv=None):
         raise SystemExit("no answer-only census session selected")
     census.prepare_cache(root)
     run = Run(args, census)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
         for future in concurrent.futures.as_completed(
                 [pool.submit(run.unit, sid, repo, sha, prompt, len(sessions)) for sid, repo, sha, prompt in sessions]):
             future.result()
