@@ -1,1 +1,1 @@
-Pi and OpenCode now receive the brief's probe blocks: `pixel brief --parts N` gives the command the budget of an N-part prompt hook, and both extensions pass `--parts 3` (up to 30 000 bytes) instead of dropping anything over 4 000.
+**brief:** Pi and OpenCode now receive the brief's probe blocks: `pixel brief --parts N` gives the command the budget of an N-part prompt hook, and both extensions pass `--parts 3` (up to 30 000 bytes) instead of dropping anything over 4 000.
