@@ -83,3 +83,36 @@ fn examples_are_capped() {
     crate::mvp_adapter::fixture(&root);
     assert_eq!(shadow(&root, 1).unwrap().examples.v1_only.len(), 1);
 }
+
+/// `--lang ruby` on the Ruby fixture (`mvp_adapter_ruby.rs`): the merge's
+/// counts, each traced to a site.
+#[test]
+fn the_ruby_shadow_counts_the_merge_site_by_site() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    crate::mvp_adapter_ruby::fixture(&root);
+    let report = pixel_graph::shadow::ruby::shadow(&root, 10).unwrap();
+    // Calls: `title` replaced (pixel-mvp proves the `attr_accessor` reader),
+    // `item.save` and `sort` (into JavaScript) kept, `compute`, `Box.new`
+    // and `.pack` in both.
+    assert_eq!(
+        (
+            report.calls.v1,
+            report.calls.hybrid,
+            report.calls.both,
+            report.calls.v1_kept,
+            report.calls.v1_replaced
+        ),
+        (6, 5, 3, 2, 1)
+    );
+    assert_eq!((report.routes.both, report.associations.both), (2, 1));
+    // The replaced site stays unresolved: one row more.
+    assert_eq!(report.unresolved.hybrid, report.unresolved.v1 + 1);
+    assert_eq!(
+        report.examples.v1_replaced,
+        vec!["Card#label -> Book#title (app/models/card.rb:8)"]
+    );
+    assert!(report.examples.mvp_added.is_empty());
+    // Nothing under the repository: both graphs live in a scratch directory.
+    assert!(!root.join(".pixel").exists());
+}
