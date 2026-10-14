@@ -47,10 +47,23 @@ def locate(root, message):
         if len(fragment.split()) < MIN_WORDS:
             break
         hits = [h for h in rg(root, "-n", "--no-heading", "-F", *SRC_GLOBS, fragment, ".")
-                if not is_test_path(h.split(":")[0])]
+                if not is_test_path(h.split(":")[0]) and in_string(h, fragment)]
         if hits:
             return hits
     return []
+
+
+def in_string(hit, fragment):
+    """The fragment sits inside a string literal of a code line: a quote before it, and the line is not a comment."""
+    text = hit.split(":", 2)[2] if hit.count(":") >= 2 else ""
+    at = text.find(fragment)
+    return at > 0 and any(q in text[:at] for q in "\"'`") and not re.match(r"\s*(//|#|\*|/\*)", text)
+
+
+def definitions(root, name):
+    """Files that define a function called `name`."""
+    pattern = rf"\b(fn|def|function)\s+{re.escape(name)}\b"
+    return sorted({h.split(":")[0].lstrip("./") for h in rg(root, "-n", "--no-heading", *SRC_GLOBS, pattern, ".")})
 
 
 def enclosing(lines, index, js=False):
@@ -78,9 +91,14 @@ def read(root, rel, cache):
     return cache[rel]
 
 
-def callers(root, name, cache, seen, depth, out, home):
+def callers(root, name, cache, seen, depth, out, home, defined_in):
+    """Callers of `name`, defined in `defined_in`. When another file defines a function of that name too, only the
+    callers beside the selected definition count: a call by name alone cannot tell the two apart."""
     if depth == 0 or len(out) > MAX_LINES:
         return
+    near = None
+    if len(definitions(root, name)) > 1:
+        near = defined_in.rsplit("/", 1)[0] + "/" if "/" in defined_in else ""
     for hit in rg(root, "-n", "--no-heading", *SRC_GLOBS, rf"\b{re.escape(name)}\s*\(", ".")[:40]:
         path, line, text = hit.split(":", 2)
         rel = path.lstrip("./")
@@ -89,6 +107,8 @@ def callers(root, name, cache, seen, depth, out, home):
         lines = read(root, rel, cache)
         index = int(line) - 1
         if in_test(rel, lines, index):
+            continue
+        if near is not None and not rel.startswith(near):
             continue
         if home and depth < LEVELS and not rel.startswith(home + "/"):
             continue  # deeper levels stay in the origin's directory; `crates/pixel/` is not `crates/pixel-x/`
@@ -100,17 +120,17 @@ def callers(root, name, cache, seen, depth, out, home):
         if lo > start + 4:
             out += show(rel, lines, start + 1, start + 3, f"{caller} calls {name} (header)")
         out += show(rel, lines, lo, index + 4, f"{caller} → {name}: the lines leading to the call")
-        callers(root, caller, cache, seen, depth - 1, out, home)
+        callers(root, caller, cache, seen, depth - 1, out, home, rel)
 
 
 def main():
     req = json.load(sys.stdin)
     root, prompt = req["repo_root"], req["prompt"]
     out, cache, seen = [], {}, set()
-    for message in quoted(prompt)[:1]:
+    for message in quoted(prompt)[:3]:
         hits = locate(root, message)
         if not hits:
-            continue
+            continue   # this quote is not raised anywhere: try the next
         path, line, _ = hits[0].split(":", 2)
         rel = path.lstrip("./")
         lines = read(root, rel, cache)
@@ -118,9 +138,9 @@ def main():
         name, _start = enclosing(lines, index, rel.endswith(JS_EXT))
         out.append(f"### error origin — the quoted message is raised at {rel}:{line}" + (f" in {name}" if name else ""))
         if not name:
-            continue
+            break
         seen.add((rel, name))
-        callers(root, name, cache, seen, LEVELS, out, "/".join(rel.split("/")[:2]))
+        callers(root, name, cache, seen, LEVELS, out, "/".join(rel.split("/")[:2]), rel)
         for hit in rg(root, "-n", "--no-heading", *SRC_GLOBS, rf"\b{re.escape(name)}\s*\(", "."):
             other, at, _ = hit.split(":", 2)
             other = other.lstrip("./")
@@ -129,6 +149,7 @@ def main():
                 test, tstart = enclosing(tlines, int(at) - 1)
                 out += show(other, tlines, tstart + 1, tstart + 24, f"test {test} exercising {name}")
                 break
+        break
     text = "\n".join(out)
     if text:
         sys.stdout.write(text[:MAX_BYTES].rsplit("\n", 1)[0] + "\n")

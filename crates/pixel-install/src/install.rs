@@ -263,7 +263,14 @@ pub fn install_selected(
     }
     // The first-party brief probes the prompt-submit brief runs: with Claude's
     // or Codex's brief hook, the probes that make it complete come along.
-    if wants.task_hooks(AgentTarget::ClaudeCode) || wants.codex_hooks() {
+    if wants.task_hooks(AgentTarget::ClaudeCode)
+        || wants.codex_hooks()
+        || wants.task_hooks(AgentTarget::Gemini)
+        || wants.task_hooks(AgentTarget::Devin)
+        || wants.task_hooks(AgentTarget::OpenCode)
+        || wants.task_hooks(AgentTarget::Antigravity)
+        || wants.pi_extension()
+    {
         steps.push(crate::bundled_probes::install(&home, dry_run)?);
     }
     // The Gemini CLI brief hook: BeforeAgent in ~/.gemini/settings.json,

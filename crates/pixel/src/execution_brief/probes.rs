@@ -179,7 +179,8 @@ fn run_one(
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let body = request.to_owned();
-    let feeder = std::thread::spawn(move || {
+    // Detached: a probe that never reads its input must not hold the brief.
+    std::thread::spawn(move || {
         if let Some(mut stdin) = stdin {
             let _ = stdin.write_all(body.as_bytes());
         }
@@ -206,7 +207,6 @@ fn run_one(
             Err(_) => break None,
         }
     };
-    let _ = feeder.join();
     let Some(status) = status else {
         return (None, run("timeout", 0));
     };

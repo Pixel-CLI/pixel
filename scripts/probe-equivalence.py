@@ -41,7 +41,13 @@ def native(binary, clone, prompt, home, probes):
     procs = [subprocess.Popen([binary, "run-hook", "task-event", "--provider", "codex", "--event", "prompt-submit",
                                "--part", f"{k}/3"], cwd=clone, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                               text=True) for k in (1, 2, 3)]
-    outs = [p.communicate(payload, timeout=60)[0] for p in procs]
+    outs = []
+    for proc in procs:
+        try:
+            outs.append(proc.communicate(payload, timeout=60)[0])
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            outs.append("")   # a hook that did not answer is a part the host would not have received
     text = ""
     for out in outs:
         try:

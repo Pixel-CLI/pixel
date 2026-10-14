@@ -833,6 +833,15 @@ class SelfTest(unittest.TestCase):
             self.assertIn("after_a_lone_cfg_test", text, "a lone #[cfg(test)] does not make the rest of the file test code")
             self.assertNotIn("pixel-other", text, "crates/pixel/ is not crates/pixel-other/")
             self.assertNotIn("let x = (", text.split("test refuses")[0].split("run → parse")[0], "a Rust `let x = (` is not a JS arrow")
+            # A comment that mentions the message is not its raise site; an ambiguous function name only counts callers
+            # beside the selected definition; a second quote is tried when the first is raised nowhere.
+            (repo / "crates/pixel/src/notes.rs").write_text("// remote decisions refused the decision: see decide.rs\nfn notes() {}\n")
+            (repo / "crates/pixel-other/src/dup.rs").write_text("fn parse() {}\nfn uses_the_other_parse() { parse(); }\n")
+            second = dict(request, prompt="no 'a message that is nowhere in the code' but 'remote decisions refused the decision: x' yes")
+            again = subprocess.run([str(probe / "probe")], input=json.dumps(second), capture_output=True, text=True, cwd=repo).stdout
+            self.assertIn("raised at crates/pixel/src/decide.rs:4 in parse", again, "the comment is skipped, the second quote tried")
+            self.assertNotIn("uses_the_other_parse", again, "parse is defined twice: callers beside the selected one only")
+            self.assertIn("run → parse", again)
             quiet = dict(request, prompt="where is the retry limit defined")
             nothing = subprocess.run([str(probe / "probe")], input=json.dumps(quiet), capture_output=True, text=True, cwd=repo)
             self.assertEqual(nothing.stdout, "", "no quoted message: nothing to add")

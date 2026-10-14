@@ -184,6 +184,11 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
     };
     let commands = parse_commands(&doc)?;
     let probe = if capabilities.contains(&Capability::BriefProbe) {
+        if network {
+            return Err(
+                "a brief probe uses no network: `network` must be absent or false".to_owned(),
+            );
+        }
         Some(parse_probe(&doc)?)
     } else if doc.get("brief-probe").is_some() {
         return Err("a `[brief-probe]` table needs the \"brief-probe\" capability".to_owned());

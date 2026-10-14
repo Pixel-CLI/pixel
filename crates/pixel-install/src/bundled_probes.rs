@@ -90,7 +90,18 @@ pub(crate) fn install(home: &Path, dry_run: bool) -> Result<InstallStep> {
             continue;
         }
         if dry_run {
-            changed += usize::from(!dir.join(MARKER).is_file());
+            // What a real run would write: a file missing or different.
+            let differs = |file: &str, content: &str| {
+                fs::read_to_string(dir.join(file)).map_or(true, |have| have != content)
+            };
+            if differs("pixel-plugin.toml", manifest)
+                || differs("probe", program)
+                || !dir.join(MARKER).is_file()
+            {
+                changed += 1;
+            } else {
+                kept += 1;
+            }
             continue;
         }
         fs::create_dir_all(&dir)?;
@@ -133,7 +144,11 @@ pub(crate) fn remove(home: &Path, dry_run: bool) -> Result<InstallStep> {
         let dir = plugins.join(name);
         if dir.join(MARKER).is_file() {
             if !dry_run {
-                fs::remove_dir_all(&dir)?;
+                // Only the files setup wrote; whatever the user put in the directory stays, and so does it.
+                for file in ["pixel-plugin.toml", "probe", MARKER] {
+                    let _ = fs::remove_file(dir.join(file));
+                }
+                let _ = fs::remove_dir(&dir);
             }
             removed += 1;
         }
@@ -233,6 +248,59 @@ mod tests {
         assert_eq!(
             fs::read_to_string(own.join("pixel-plugin.toml")).unwrap(),
             "mine"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_reports_what_a_real_run_would_write_and_remove_keeps_what_the_user_added() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(
+            install(home.path(), true)
+                .unwrap()
+                .summary
+                .contains("7 written, 0 current")
+        );
+        install(home.path(), false).unwrap();
+        assert!(
+            install(home.path(), true)
+                .unwrap()
+                .summary
+                .contains("0 written, 7 current")
+        );
+        let probe = home.path().join(PLUGINS_REL).join("rank-blocks/probe");
+        fs::write(&probe, "old version").unwrap();
+        assert!(
+            install(home.path(), true)
+                .unwrap()
+                .summary
+                .contains("1 written, 6 current")
+        );
+        assert_eq!(
+            fs::read_to_string(&probe).unwrap(),
+            "old version",
+            "a dry run never writes"
+        );
+        let mine = home.path().join(PLUGINS_REL).join("flow-rank/notes.txt");
+        fs::write(&mine, "mine").unwrap();
+        remove(home.path(), false).unwrap();
+        assert!(
+            mine.is_file(),
+            "a file of the user's inside a bundled directory survives --remove"
+        );
+        assert!(
+            !home
+                .path()
+                .join(PLUGINS_REL)
+                .join("flow-rank/probe")
+                .exists()
+        );
+        assert!(
+            !home
+                .path()
+                .join(PLUGINS_REL)
+                .join("config-registry")
+                .exists(),
+            "an emptied directory goes"
         );
     }
 
