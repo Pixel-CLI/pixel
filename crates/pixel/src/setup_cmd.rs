@@ -692,9 +692,13 @@ fn list_block(
     block
 }
 
-/// One line of dim help, wrapped, with its two-space indent.
+/// The focused row's help, dim, wrapped, indented two columns.
+///
+/// `wrap` is asked for no indent of its own: the two spaces are added here to
+/// every line, so a continuation would otherwise carry four and drift right of
+/// the sentence it continues.
 fn help_lines(text: &str, width: usize, color: bool) -> Vec<String> {
-    wrap(text, width.saturating_sub(2), 2)
+    wrap(text, width.saturating_sub(2), 0)
         .into_iter()
         .map(|line| format!("  {}", paint(color, "2", &line)))
         .collect()
@@ -986,7 +990,7 @@ fn write_review(
                 output,
                 "{} {}",
                 paint(color, "1;33", "\u{26a0}"),
-                wrap(note, row_width().saturating_sub(2), 2).join("\n  ")
+                wrap(note, row_width().saturating_sub(2), 0).join("\n  ")
             )
             .map_err(io)?;
         }
@@ -1429,6 +1433,70 @@ mod tests {
             lines[title + 1].chars().all(|c| c == '─'),
             "the rule follows the title: {text:?}"
         );
+    }
+
+    #[test]
+    fn a_wrapped_help_continuation_is_indented_once_not_twice() {
+        let help = "one two three four five six seven eight nine ten eleven twelve";
+        let lines = help_lines(help, 20, false);
+        assert!(lines.len() > 1, "the help wraps: {lines:?}");
+        for line in &lines {
+            assert_eq!(
+                line.chars().take_while(|c| *c == ' ').count(),
+                2,
+                "every line of the help is indented two columns, once: {lines:?}"
+            );
+            assert!(
+                crate::select::visible_len(line) <= 20,
+                "and fits the width it was given: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_manual_notes_are_indented_once_too() {
+        let scratch = scratch_dir("notes-indent");
+        let mut plan = SetupPlan::new(
+            &scratch,
+            Scope::Global,
+            &[AgentTarget::ClaudeCode],
+            &[Feature::Prompt],
+            &pixel_plugin::Available::none(),
+        )
+        .unwrap();
+        plan.notes = vec![
+            "a note long enough to wrap onto several lines, because the terminal it is \
+             printed to is never as wide as the sentence wants to be, and the sentence \
+             is what the reader has to read to know what to do by hand"
+                .to_string(),
+        ];
+        let keys = KeyReader::inert();
+        let (rendered, written) = with_input("", |_, output| {
+            write_review(output, &plan, &[], &mut screens(&keys))
+        });
+        rendered.unwrap();
+        let after_heading = written
+            .split("Heads up")
+            .nth(1)
+            .expect("the heads-up section");
+        let note_lines: Vec<&str> = after_heading
+            .lines()
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .collect();
+        assert!(note_lines.len() > 1, "the note wraps: {after_heading:?}");
+        assert!(
+            note_lines[0].starts_with('\u{26a0}'),
+            "the first line carries the warning mark: {after_heading:?}"
+        );
+        for line in &note_lines[1..] {
+            assert_eq!(
+                line.chars().take_while(|c| *c == ' ').count(),
+                2,
+                "a wrapped note lines up two columns in, not four: {after_heading:?}"
+            );
+        }
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     #[test]
