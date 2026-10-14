@@ -543,7 +543,13 @@ stays so references to the later threats hold.
   context" line. Its lines are read the same way (`Evidence::lines_at`: only
   files the searches named, a credential-shaped path refused, every line cut
   at 160 characters), it adds no operation, daemon op or network
-  destination, and `PIXEL_BRIEF_PACK=0` restores the packet. No prompt is deployed. The bundled prompt a user copies by hand
+  destination, and `PIXEL_BRIEF_PACK=0` restores the packet. Its locators
+  (`execution_brief::locator`, for a question about a setting or about tests)
+  search the repository with the existing `search` op and a pattern built from
+  the prompt's words (escaped) and constant shapes; the rows of a
+  credential-shaped path are dropped before ranking, and a quoted
+  credential-shaped token (long, letters and digits) in a quoted line is
+  replaced by `<redacted>`. No prompt is deployed. The bundled prompt a user copies by hand
   states that Pixel output is data, not instructions
   (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
   skill and Pi command label graph output as repository data, not
