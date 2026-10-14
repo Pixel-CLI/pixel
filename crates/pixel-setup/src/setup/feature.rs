@@ -216,7 +216,7 @@ mod tests {
             .iter()
             .filter_map(|f| match f.writes() {
                 Writes::Config(key, _) => Some(key),
-                _ => None,
+                Writes::Hooks(_) => None,
             })
             .collect();
         assert_eq!(

@@ -82,8 +82,8 @@ fn a_plan_writes_no_files() {
     let plan = SetupPlan::new(
         Path::new("/tmp/pixel-setup-golden-plan"),
         super::Scope::Global,
-        &AgentTarget::ALL.iter().copied().collect::<Vec<_>>(),
-        &Feature::ALL.iter().copied().collect::<Vec<_>>(),
+        &AgentTarget::ALL,
+        &Feature::ALL,
     )
     .expect("every answer resolves to a plan");
     assert!(
@@ -101,7 +101,7 @@ fn the_configuration_golden_matches_the_keys_the_default_selection_writes() {
         .filter(|feature| feature.default_selected())
         .filter_map(|feature| match feature.writes() {
             Writes::Config(key, value) => Some((key, render(key, value))),
-            _ => None,
+            Writes::Hooks(_) => None,
         })
         .collect();
     // The retrieval-first feature also enables the per-prompt brief.

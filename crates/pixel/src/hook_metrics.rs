@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel run-hook metrics` — the PostToolUse relay that replays a pixel
 //! invocation's finalized 🟩 metrics line to hosts whose tool results drop
 //! stderr (Codex) or keep it user-invisible (Claude's Bash result). The hook

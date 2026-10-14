@@ -123,7 +123,7 @@ impl SetupPlan {
             .iter()
             .filter_map(|feature| match feature.writes() {
                 Writes::Config(key, value) => Some(ConfigWrite { key, value }),
-                _ => None,
+                Writes::Hooks(_) => None,
             })
             .collect();
         // The retrieval-first feature is also the brief feature: it installs the
