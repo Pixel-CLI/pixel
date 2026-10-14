@@ -6,7 +6,7 @@
 
 For each census question, in its pinned clone: the native binary's brief with probes OFF (PIXEL_BRIEF_PROBES=0) is the
 input; ``scripts/probe-chain.py``'s chain (the reference merge of ``probe-test.py``) runs the same probes on it; the
-native binary's brief with probes ON must equal that, byte for byte. The probes are found under ``--home``
+native binary's brief with probes ON must equal that, byte for byte. The brief is what the three prompt-submit hook parts deliver. The probes are found under ``--home``
 (``pixel setup`` wrote them there; the real HOME is never touched). Prompts are read from census.db and never printed.
 
     probe-equivalence.py --bin <native pixel> --home <fake home> [--ids a,b]
@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -32,16 +33,28 @@ def load(name, filename):
 
 
 def native(binary, clone, prompt, home, probes):
-    env = {**os.environ, "HOME": str(home), "PIXEL_BRIEF_PARTS": "3", "PIXEL_BRIEF_WINDOW_MS": "3000",
-           "PIXEL_BRIEF_PROBES": "1" if probes else "0"}
+    """The brief a Codex host receives: the three prompt-submit hook parts run together, their contexts joined, plus
+    the last decision the hook logged (its kind, gate and probe runs)."""
+    env = {**os.environ, "HOME": str(home), "PIXEL_BRIEF_PROBES": "1" if probes else "0"}
     env.pop("ANTHROPIC_API_KEY", None)
-    out = subprocess.run([binary, "brief", "--json", "--metrics", "off", prompt, "."], cwd=clone, env=env,
-                         capture_output=True, text=True, timeout=120).stdout
+    payload = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "equiv-" + uuid.uuid4().hex, "cwd": str(clone), "prompt": prompt})
+    procs = [subprocess.Popen([binary, "run-hook", "task-event", "--provider", "codex", "--event", "prompt-submit",
+                               "--part", f"{k}/3"], cwd=clone, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              text=True) for k in (1, 2, 3)]
+    outs = [p.communicate(payload, timeout=60)[0] for p in procs]
+    text = ""
+    for out in outs:
+        try:
+            text += (json.loads(out).get("hookSpecificOutput") or {}).get("additionalContext", "")
+        except ValueError:
+            pass
+    meta = {}
     try:
-        meta = json.loads(out)
-    except ValueError:
-        return None, {}
-    return meta.get("brief"), meta
+        lines = [l for l in (Path(clone) / ".pixel" / "brief-decisions.jsonl").read_text().splitlines() if l.strip()]
+        meta = json.loads(lines[-1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return (text or None), meta
 
 
 def main(argv=None):
