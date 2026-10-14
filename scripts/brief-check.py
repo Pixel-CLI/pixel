@@ -246,46 +246,63 @@ def question_ids(root):
     return [r[0] for r in rows]
 
 
+def clone_is_sound(dest, sha):
+    """The clone holds the repository at ``sha`` at its top level: HEAD is the sha and no tracked file is missing.
+    A ``cp -R`` into a directory that already existed nests the repository one level down and fails the second."""
+    try:
+        head = sh(["git", "rev-parse", "HEAD"], cwd=dest, timeout=60).stdout.strip()
+        missing = sh(["git", "ls-files", "-d"], cwd=dest, timeout=120).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return head == sha and not missing and (dest / ".git").exists()
+
+
 def checked_clone(root, binary, repo, sha, history=True):
     """A clone of the census repository at ``sha`` that stays between runs: indexed (graph, history, meaning vectors)
-    the first time, and only given a daemon of the binary under test afterwards."""
+    the first time, and only given a daemon of the binary under test afterwards. Creation is serialised by a file
+    lock, because several questions of one repository (and several processes) ask for the same clone at once."""
+    import fcntl
     dest = Path(root) / "score" / "check" / f"{repo}-{sha[:8]}{'' if history else '-nohist'}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
     marker = dest / ".pixel" / "brief-check.json"
     digest = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
     env = env_for_brief()
-    first = not marker.exists()
-    if first:
-        shutil.rmtree(dest, ignore_errors=True)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        sh(["cp", "-c", "-R", Path(root) / "cache" / repo, dest], timeout=600)
-        shutil.rmtree(dest / ".pixel", ignore_errors=True)
-    try:
-        held = json.loads(marker.read_text()).get("sha256") if marker.exists() else None
-    except ValueError:
-        held = None
-    if held == digest:
-        return dest
-    sh([binary, "daemon", "stop", "."], cwd=dest, timeout=60, env=env)
-    sh([binary, "prepare-repo", "."], cwd=dest, timeout=1800, env=env)
-    if first:
-        promisor = "promisor" in (dest / ".git" / "config").read_text(errors="replace")
-        if history and not promisor:
-            try:
-                sh([binary, "build-index", "--history", "."], cwd=dest, timeout=HISTORY_BUDGET_S, env=env)
-            except subprocess.TimeoutExpired:
-                pass
-        sh([binary, "search-meaning", "how does this code work", "."], cwd=dest, timeout=1800, env=env)
-    last, same = None, 0
-    for _ in range(14):
-        out = sh([binary, "brief", "--metrics", "off", "where is the main entry point of this program defined", "."],
-                 cwd=dest, timeout=600, env=env).stdout
-        same = same + 1 if out == last else 1
-        last = out
-        if same >= 3:
-            break
-        time.sleep(1)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({"sha256": digest}))
+    with open(dest.parent / f".lock-{dest.name}", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        first = not marker.exists() or not clone_is_sound(dest, sha)
+        if first:
+            shutil.rmtree(dest, ignore_errors=True)
+            sh(["cp", "-c", "-R", Path(root) / "cache" / repo, dest], timeout=600)
+            shutil.rmtree(dest / ".pixel", ignore_errors=True)
+            if not clone_is_sound(dest, sha):
+                raise SystemExit(f"{dest}: the clone of {repo} is not at {sha[:8]} with its files at the top level")
+        try:
+            held = json.loads(marker.read_text()).get("sha256") if marker.exists() else None
+        except ValueError:
+            held = None
+        if held == digest:
+            return dest
+        sh([binary, "daemon", "stop", "."], cwd=dest, timeout=60, env=env)
+        sh([binary, "prepare-repo", "."], cwd=dest, timeout=1800, env=env)
+        if first:
+            promisor = "promisor" in (dest / ".git" / "config").read_text(errors="replace")
+            if history and not promisor:
+                try:
+                    sh([binary, "build-index", "--history", "."], cwd=dest, timeout=HISTORY_BUDGET_S, env=env)
+                except subprocess.TimeoutExpired:
+                    pass
+            sh([binary, "search-meaning", "how does this code work", "."], cwd=dest, timeout=1800, env=env)
+        last, same = None, 0
+        for _ in range(14):
+            out = sh([binary, "brief", "--metrics", "off", "where is the main entry point of this program defined", "."],
+                     cwd=dest, timeout=600, env=env).stdout
+            same = same + 1 if out == last else 1
+            last = out
+            if same >= 3:
+                break
+            time.sleep(1)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"sha256": digest}))
     return dest
 
 
@@ -534,6 +551,31 @@ class SelfTest(unittest.TestCase):
         worse = {"a": {"bytes": 700, "residual": 2, "nb_quoted": 0.3}, "c": {"bytes": 1, "residual": 9, "nb_quoted": 0.0}}
         self.assertEqual(regressions(old, worse), ["a: brief 1000 -> 700 B", "a: residual calls 0 -> 2",
                                                    "a: no-brief reads quoted 50% -> 30%"])
+
+    def test_a_clone_nested_one_level_down_by_cp_is_not_sound(self):
+        def git(cwd, *args):
+            return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd,
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            git(repo, "init", "-q")
+            (repo / "a.txt").write_text("x\n")
+            git(repo, "add", ".")
+            git(repo, "commit", "-q", "-m", "one")
+            sha = git(repo, "rev-parse", "HEAD")
+            self.assertTrue(clone_is_sound(repo, sha))
+            self.assertFalse(clone_is_sound(repo, "0" * 40), "another commit than the pinned one")
+            # `cp -R repo dest` when dest already exists puts the repository at dest/repo: the files are gone from
+            # the top level, which is how pixel-4 lost `crates/` and quoted `pixel/crates/...` paths.
+            nested = Path(tmp) / "dest"
+            nested.mkdir()
+            shutil.copytree(repo, nested / "repo")
+            shutil.rmtree(nested / ".git", ignore_errors=True)
+            shutil.copytree(repo / ".git", nested / ".git")
+            self.assertFalse(clone_is_sound(nested, sha))
+            (repo / "a.txt").unlink()
+            self.assertFalse(clone_is_sound(repo, sha), "a tracked file missing")
 
 
 if __name__ == "__main__":
