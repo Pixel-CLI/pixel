@@ -661,6 +661,37 @@ fn row_lines(row: &Row, cursor: bool, checked: bool, width: usize, color: bool) 
         .collect()
 }
 
+/// The lines the list draws: every row, a blank line, then the help of the row
+/// under the cursor.
+///
+/// The blank line is not decoration: with the help directly under the rows it
+/// reads as one more option, which is how a reader takes it at a glance.
+fn list_block(
+    rows: &[Row],
+    cursor: usize,
+    checked: &[bool],
+    width: usize,
+    color: bool,
+) -> Vec<String> {
+    let mut block: Vec<String> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        block.extend(row_lines(
+            row,
+            index == cursor,
+            checked.get(index).copied().unwrap_or(false),
+            width,
+            color,
+        ));
+    }
+    block.push(String::new());
+    block.extend(help_lines(
+        rows.get(cursor).map_or("", |row| row.help),
+        width,
+        color,
+    ));
+    block
+}
+
 /// One line of dim help, wrapped, with its two-space indent.
 fn help_lines(text: &str, width: usize, color: bool) -> Vec<String> {
     wrap(text, width.saturating_sub(2), 2)
@@ -719,19 +750,7 @@ fn ask_list_keys(
         if drawn > 0 {
             rewind_block(output, drawn)?;
         }
-        let width = row_width();
-        let mut block: Vec<String> = Vec::new();
-        for (index, row) in rows.iter().enumerate() {
-            block.extend(row_lines(
-                row,
-                index == state.cursor,
-                state.checked[index],
-                width,
-                color,
-            ));
-        }
-        let help = rows.get(state.cursor).map_or("", |row| row.help);
-        block.extend(help_lines(help, width, color));
+        let block = list_block(rows, state.cursor, &state.checked, row_width(), color);
         for line in &block {
             writeln!(output, "{line}").map_err(io)?;
         }
@@ -781,11 +800,16 @@ fn ask_list_lines(
         }
         // The typed path has no cursor, so the focused row's help is never
         // shown: a row this scope cannot use has to carry its reason here, or
-        // the reader never learns how to enable it.
+        // the reader never learns how to enable it. The blank line keeps both
+        // the reasons and the answer line clear of the list above them.
+        writeln!(output).map_err(io)?;
         for row in rows.iter().filter(|row| row.disabled) {
             for line in help_lines(row.help, width, color) {
                 writeln!(output, "{line}").map_err(io)?;
             }
+        }
+        if rows.iter().any(|row| row.disabled) {
+            writeln!(output).map_err(io)?;
         }
         write!(
             output,
@@ -865,14 +889,24 @@ fn write_review(
 ) -> Result<(), String> {
     let color = screens.color;
     screens.steps.banner(output, "Review", color)?;
+    let what = match plan.scope {
+        Scope::Global => "this machine",
+        Scope::Repository => "this project",
+    };
+    writeln!(output, "Here's what pixel setup will set up for {what}.").map_err(io)?;
     writeln!(
         output,
-        "pixel setup will write under {}.",
-        paint(color, "1", &plan.base.display().to_string())
+        "{}",
+        paint(
+            color,
+            "2",
+            &format!("Writes under {}", display_base(&plan.base, plan.scope))
+        )
     )
     .map_err(io)?;
+
     if !plan.instruction_writes.is_empty() {
-        writeln!(output, "{}", paint(color, "1", "Instruction files")).map_err(io)?;
+        section(output, color, "Instruction files")?;
         for write in &plan.instruction_writes {
             let agents = write
                 .agents
@@ -880,85 +914,138 @@ fn write_review(
                 .map(|agent| agent.name())
                 .collect::<Vec<_>>()
                 .join(", ");
-            writeln!(
+            item(
                 output,
-                "  {} {}{}",
-                paint(color, "2", "•"),
-                write.path.display(),
-                paint(color, "2", &format!("  ({agents})"))
-            )
-            .map_err(io)?;
+                color,
+                &format!(
+                    "{} {}",
+                    display_path(&write.path, &plan.base, plan.scope),
+                    paint(color, "2", &format!("({agents})"))
+                ),
+            )?;
         }
     }
     if !plan.rule_writes.is_empty() {
-        writeln!(output, "{}", paint(color, "1", "Rule files")).map_err(io)?;
+        section(output, color, "Rule files")?;
         for write in &plan.rule_writes {
-            writeln!(
+            item(
                 output,
-                "  {} {}  ({})",
-                paint(color, "2", "•"),
-                write.path.display(),
-                write.agent.name()
-            )
-            .map_err(io)?;
+                color,
+                &format!(
+                    "{} {}",
+                    write.agent.name(),
+                    paint(
+                        color,
+                        "2",
+                        &format!(
+                            "\u{2192} {}",
+                            display_path(&write.path, &plan.base, plan.scope)
+                        )
+                    )
+                ),
+            )?;
         }
     }
     if !hooks.is_empty() {
+        section(output, color, "Hooks and agent configuration")?;
         writeln!(
             output,
             "{}",
             paint(
                 color,
-                "1",
-                "Hooks and agent configuration (from the installer's dry run)"
+                "2",
+                "What the installer will do, from its own dry run."
             )
         )
         .map_err(io)?;
         for step in hooks {
-            writeln!(
-                output,
-                "  {} {}: {}",
-                paint(color, "2", "•"),
-                step.id,
-                step.summary
-            )
-            .map_err(io)?;
+            item(output, color, &format!("{}: {}", step.id, step.summary))?;
             if let Some(detail) = &step.detail {
-                writeln!(output, "      {}", paint(color, "2", detail)).map_err(io)?;
+                writeln!(output, "    {}", paint(color, "2", detail)).map_err(io)?;
             }
         }
     }
     if !plan.config_writes.is_empty() {
-        writeln!(
-            output,
-            "{}",
-            paint(color, "1", "Global settings (~/.pixel/config.yaml)")
-        )
-        .map_err(io)?;
+        section(output, color, "Global settings")?;
         for key in &plan.config_writes {
+            item(
+                output,
+                color,
+                &format!(
+                    "{}: {}",
+                    key.key.join("."),
+                    render_value(key.value.to_json())
+                ),
+            )?;
+        }
+    }
+    if !plan.notes.is_empty() {
+        section(output, color, "Heads up")?;
+        for note in &plan.notes {
             writeln!(
                 output,
-                "  {} {}: {}",
-                paint(color, "2", "•"),
-                key.key.join("."),
-                render_value(key.value.to_json())
+                "{} {}",
+                paint(color, "1;33", "\u{26a0}"),
+                wrap(note, row_width().saturating_sub(2), 2).join("\n  ")
             )
             .map_err(io)?;
         }
     }
-    if !plan.notes.is_empty() {
-        writeln!(output).map_err(io)?;
-        writeln!(output, "Not written:").map_err(io)?;
-        for note in &plan.notes {
-            writeln!(output, "  {} {note}", paint(color, "2", "•")).map_err(io)?;
-        }
-    }
-    writeln!(output).map_err(io)?;
-    writeln!(output, "The exact text:").map_err(io)?;
+
+    section(output, color, "The exact text")?;
     for line in plan.block.lines() {
-        writeln!(output, "  {line}").map_err(io)?;
+        writeln!(output, "{line}").map_err(io)?;
     }
     Ok(())
+}
+
+/// A review section: a bold title, set off from what comes before it by a blank
+/// line. Every section carries its own, so a multi-line help or a long item
+/// cannot crowd the next one.
+fn section(output: &mut impl Write, color: bool, title: &str) -> Result<(), String> {
+    writeln!(output).map_err(io)?;
+    writeln!(output, "{}", paint(color, "1", title)).map_err(io)
+}
+
+/// One line of what the run will do: a check, then the thing itself.
+fn item(output: &mut impl Write, color: bool, text: &str) -> Result<(), String> {
+    writeln!(output, "{} {text}", paint(color, "1;32", "\u{2714}")).map_err(io)
+}
+
+/// The home directory, for collapsing a path to `~`.
+fn home_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The run's base as the review shows it: `~` when it is the home directory,
+/// its own path otherwise (a repository, or the development dummy root).
+fn display_base(base: &Path, scope: Scope) -> String {
+    match scope {
+        Scope::Global if home_path().as_deref() == Some(base) => "~".to_string(),
+        _ => base.display().to_string(),
+    }
+}
+
+/// A written path as the review shows it: relative to the run's base, with the
+/// home directory collapsed to `~` for a machine-wide run.
+///
+/// `but` shows the same two forms — `.codex/skills/gitbutler` in a repository
+/// and `~/.claude/CLAUDE.md` on a machine — and for the same reason: an
+/// absolute home path is the reader's own name read back at them, in the middle
+/// of the list of files that actually change.
+fn display_path(path: &Path, base: &Path, scope: Scope) -> String {
+    let Ok(relative) = path.strip_prefix(base) else {
+        return path.display().to_string();
+    };
+    let stripped = relative.display().to_string();
+    let text = stripped.strip_prefix("./").unwrap_or(&stripped).to_string();
+    if scope == Scope::Global && home_path().as_deref() == Some(base) {
+        format!("~/{text}")
+    } else {
+        text
+    }
 }
 
 /// The question between the review and the writes: an Apply/Cancel list on a
@@ -1011,6 +1098,8 @@ fn ask_confirm_keys(
             };
             block.push(line);
         }
+        // The blank line the list questions use, for the same reason.
+        block.push(String::new());
         block.extend(help_lines(CHOICES[picked].1, width, color));
         for line in &block {
             writeln!(output, "{line}").map_err(io)?;
@@ -1310,6 +1399,68 @@ mod tests {
     }
 
     #[test]
+    fn a_step_banner_is_always_preceded_by_a_blank_line() {
+        let keys = KeyReader::inert();
+        let mut screens = Screens {
+            steps: Steps::new(2),
+            color: false,
+            keys: &keys,
+        };
+        let mut out = Vec::new();
+        // The block a list draws, help and all, then the next step's banner.
+        for line in list_block(&rows(&["a"]), 0, &[true], 20, false) {
+            writeln!(out, "{line}").unwrap();
+        }
+        screens.steps.banner(&mut out, "Review", false).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let title = lines
+            .iter()
+            .position(|line| line.starts_with("Review"))
+            .expect("the banner title");
+        assert_eq!(
+            lines[title - 1],
+            "",
+            "a step starts on its own line, however long the help above it was: {text:?}"
+        );
+        assert!(
+            lines[title + 1].chars().all(|c| c == '─'),
+            "the rule follows the title: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_blank_line_sets_the_focused_help_off_from_the_rows() {
+        let list = rows(&["a", "b"]);
+        let block = list_block(&list, 1, &[true, false], 40, false);
+        let help = block
+            .iter()
+            .position(|line| line.contains("the help line"))
+            .expect("the focused row's help");
+        assert_eq!(
+            block[help - 1],
+            "",
+            "the help reads as another row without it: {block:?}"
+        );
+        assert_eq!(
+            block[help - 2],
+            "> [ ] b",
+            "the row above the gap is the cursor's own row: {block:?}"
+        );
+
+        // The typed path draws the same gap before its answer line.
+        let (_, written) = with_input("\n", |input, output| {
+            ask(input, output, &rows(&["a", "b"]), &[1])
+        });
+        let lines: Vec<&str> = written.lines().collect();
+        let answer = lines
+            .iter()
+            .position(|line| line.contains("Your answer"))
+            .expect("the answer line");
+        assert_eq!(lines[answer - 1], "", "got {written}");
+    }
+
+    #[test]
     fn the_step_banner_right_aligns_the_counter_and_never_touches_the_title() {
         // "Agents" is 6 columns and "Step 1 of 3" is 11, so a 40-column banner
         // leaves 23 spaces between them.
@@ -1589,7 +1740,7 @@ mod tests {
             written.contains("<!-- pixel:setup:start -->"),
             "the exact text is shown: {written}"
         );
-        let text = written.find("The exact text:").unwrap();
+        let text = written.find("The exact text").unwrap();
         let path = written.find(".claude/CLAUDE.md").unwrap();
         assert!(path < text, "the paths come before the text they belong to");
         std::fs::remove_dir_all(&scratch).ok();
@@ -1654,7 +1805,7 @@ mod tests {
             "the file a hook step writes is named: {written}"
         );
         assert!(
-            written.find("hooks.claude").unwrap() < written.find("The exact text:").unwrap(),
+            written.find("hooks.claude").unwrap() < written.find("The exact text").unwrap(),
             "the hooks are part of the review, not an afterthought"
         );
 
