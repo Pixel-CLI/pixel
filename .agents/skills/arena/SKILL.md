@@ -39,9 +39,11 @@ $S abort [lookup]                         # interrupt, close the panes
    hooks, MCP servers, plugins, notify). The pixel arm's `hooks.json` holds
    one hook, the `UserPromptSubmit` entry `pixel setup` writes for Codex
    (`run-hook task-event --provider codex --event prompt-submit`) at the
-   pinned binary; it is a global-home hook, so no repo review is needed (Codex
-   still asks for the one-time hook trust in that private home; the script
-   answers it). The no-pixel arm has no hook and `PIXEL_BRIEF=0`. `pixel` on
+   pinned binary; it is a global-home hook, so no repo review is needed. The
+   pixel arm launches `codex --dangerously-bypass-hook-trust` so the one-time
+   trust review can never block the prompt (the arena vets and writes the hook
+   itself); `review_hooks_if_asked` still patrols as a fallback. The no-pixel
+   arm has no hook and `PIXEL_BRIEF=0`. `pixel` on
    `PATH` is a shim: the pinned binary in the pixel arm, "command not found"
    in the no-pixel arm.
 4. **Preflight without a model**: the hook must return `[PIXEL:BRIEF]` and
