@@ -236,6 +236,24 @@ pub(crate) const TASK_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SubagentStop", "subagent-stop"),
 ];
 
+/// The task-event boundaries `provider` accepts: the shared table plus the
+/// provider's extra boundary (`PostToolUseFailure` for Claude, `Interrupt`
+/// for Codex). Devin accepts only PreToolUse, PostToolUse,
+/// PermissionRequest, UserPromptSubmit, Stop, PostCompaction, SessionStart
+/// and SessionEnd and rejects a `hooks` object that names any other event,
+/// so its set drops the subagent boundaries and takes no extra.
+fn provider_task_events(provider: Provider) -> Vec<(&'static str, &'static str)> {
+    let mut events = TASK_HOOK_EVENTS.to_vec();
+    match provider {
+        Provider::Claude => events.push(("PostToolUseFailure", "tool-failure")),
+        Provider::Devin => {
+            events.retain(|(event, _)| !matches!(*event, "SubagentStart" | "SubagentStop"));
+        }
+        Provider::Codex => events.push(("Interrupt", "interrupt")),
+    }
+    events
+}
+
 /// One `task-event` hook verb taken apart: the provider and event words and,
 /// for a split prompt-submit brief, the `--part K/N` it serves.
 struct TaskVerb<'a> {
@@ -354,17 +372,31 @@ pub(crate) fn merge_task_hooks(
                 .is_none_or(|inner| !inner.is_empty())
         });
     }
-    let extra = if provider == Provider::Claude {
-        ("PostToolUseFailure", "tool-failure")
-    } else {
-        ("Interrupt", "interrupt")
-    };
+    if provider == Provider::Devin {
+        // A previous install wrote the events Devin does not accept; the
+        // purge above emptied their groups, and a key left empty still makes
+        // Devin reject the whole `hooks` object.
+        for event in [
+            "SubagentStart",
+            "SubagentStop",
+            "Interrupt",
+            "PostToolUseFailure",
+        ] {
+            if hooks
+                .get(event)
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
+                hooks.remove(event);
+            }
+        }
+    }
     let split = if matches!(provider, Provider::Claude | Provider::Codex) {
         prompt_parts.clamp(1, config::BRIEF_PARTS_MAX)
     } else {
         1
     };
-    for &(event, name) in TASK_HOOK_EVENTS.iter().chain(std::iter::once(&extra)) {
+    for &(event, name) in &provider_task_events(provider) {
         let groups = hooks
             .entry(event)
             .or_insert_with(|| json!([]))
@@ -468,21 +500,13 @@ pub(crate) fn prompt_parts(value: &Value, provider: Provider, exe: &Path) -> Res
 }
 
 pub(crate) fn task_hooks_registered(value: &Value, provider: Provider, exe: &Path) -> bool {
-    let extra = if provider == Provider::Claude {
-        ("PostToolUseFailure", "tool-failure")
-    } else {
-        ("Interrupt", "interrupt")
-    };
-    TASK_HOOK_EVENTS
-        .iter()
-        .chain(std::iter::once(&extra))
-        .all(|(event, name)| {
-            if *name == "prompt-submit" {
-                return prompt_parts(value, provider, exe).is_ok();
-            }
-            let expected = format!("task-event --provider {} --event {name}", provider.name());
-            eligible_verbs(value, event, exe).contains(&expected.as_str())
-        })
+    provider_task_events(provider).iter().all(|(event, name)| {
+        if *name == "prompt-submit" {
+            return prompt_parts(value, provider, exe).is_ok();
+        }
+        let expected = format!("task-event --provider {} --event {name}", provider.name());
+        eligible_verbs(value, event, exe).contains(&expected.as_str())
+    })
 }
 
 /// Preserve outer matchers and co-located foreign/security hooks.
@@ -3604,6 +3628,49 @@ mod tests {
             vec!["'/tmp/pixel' run-hook task-event --provider devin --event prompt-submit || true"],
             "a host with no known cap keeps one hook"
         );
+        // Devin accepts only these hook events and rejects a `hooks` object
+        // that names any other — no Subagent*/Interrupt/PostToolUseFailure key.
+        let keys: std::collections::BTreeSet<_> = devin["hooks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "PostToolUse",
+                "PreToolUse",
+                "SessionEnd",
+                "SessionStart",
+                "Stop",
+                "UserPromptSubmit",
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert!(task_hooks_registered(&devin, Provider::Devin, exe));
+        // An install over the events an older release wrote drops the keys
+        // it emptied, not just their groups.
+        let mut stale = devin.clone();
+        for (event, name) in [
+            ("SubagentStart", "subagent-start"),
+            ("SubagentStop", "subagent-stop"),
+            ("Interrupt", "interrupt"),
+        ] {
+            stale["hooks"][event] = json!([hook_group(
+                format!("'/tmp/pixel' run-hook task-event --provider devin --event {name}"),
+                None,
+            )]);
+        }
+        merge_task_hooks(
+            stale["hooks"].as_object_mut().unwrap(),
+            Provider::Devin,
+            exe,
+            1,
+        )
+        .unwrap();
+        assert_eq!(stale, devin, "stale Devin event keys are removed");
     }
 
     #[test]
