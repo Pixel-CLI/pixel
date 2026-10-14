@@ -17,8 +17,8 @@
 //!   undocumented);
 //! - ARCHITECTURE.md's `## Crates` table has one row per workspace member,
 //!   and its `Depends on` cell matches that member's `Cargo.toml`;
-//! - the docs page's per-project list and `pixel install --help` name exactly
-//!   the files `pixel install --repo` writes (`REPO_ARTIFACTS`).
+//! - the docs page's per-project list and `pixel setup --help` name exactly
+//!   the files `pixel setup --repo` writes (`REPO_ARTIFACTS`).
 //!
 //! `pixel doctor` already dry-runs the *installed* prompt's command lines
 //! against the parser at run time; this test does it for the tree at build
@@ -67,12 +67,16 @@ fn subcommands_in_help_order() -> Vec<String> {
 }
 
 /// What a document or a printed hint may tell the reader to run: the
-/// subcommands of `pixel --help` and the commands that moved to plugins
-/// (`pixel-plugins`), which `pixel <name>` still answers to, by running the
-/// plugin or by printing how to install it.
+/// subcommands of `pixel --help` and the commands that move to plugin
+/// repositories (`pixel_plugin::MOVED_COMMANDS`), which `pixel <name>` answers
+/// to by running the plugin or by printing how to install it.
 fn documentable_commands() -> BTreeSet<String> {
     let mut known = subcommands();
-    known.extend(pixel_plugin::MOVED_COMMANDS.iter().map(ToString::to_string));
+    known.extend(
+        pixel_plugin::MOVED_COMMANDS
+            .iter()
+            .map(|(name, _)| (*name).to_string()),
+    );
     known
 }
 
@@ -200,7 +204,7 @@ fn comparison_pages_are_listed_from_the_tree() {
     assert!(pages.iter().all(|p| p.ends_with(".md")), "{pages:?}");
 }
 
-/// `<code>pixel install</code>` read as `` `pixel install` ``, so HTML goes
+/// `<code>pixel setup</code>` read as `` `pixel setup` ``, so HTML goes
 /// through the same `referenced_commands` as Markdown.
 fn html_code_as_backticks(text: &str) -> String {
     text.replace("<code>", "`").replace("</code>", "`")
@@ -209,11 +213,11 @@ fn html_code_as_backticks(text: &str) -> String {
 #[test]
 fn html_code_spans_count_as_quoted_commands() {
     let html = "<p><code>pixel search-content</code> keeps grep's syntax; \
-                <code>pixel install --repo</code> adds a guard. The pixel binary.</p>";
+                <code>pixel setup --repo</code> adds a guard. The pixel binary.</p>";
     let got: Vec<String> = referenced_commands(&html_code_as_backticks(html))
         .into_iter()
         .collect();
-    assert_eq!(got, ["install", "search-content"]);
+    assert_eq!(got, ["search-content", "setup"]);
 }
 
 #[test]
@@ -813,7 +817,7 @@ fn docs_per_project_list_should_name_exactly_the_repo_install_files() {
 #[test]
 fn install_repo_help_should_name_exactly_the_repo_install_files() {
     let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
-        .args(["install", "--help"])
+        .args(["setup", "--help"])
         .env("PIXEL_DAEMON_AUTO_START", "0")
         .output()
         .unwrap();
@@ -832,7 +836,7 @@ fn repo_paths_should_read_only_backticked_repo_prefixed_tokens() {
 }
 
 // ---------------------------------------------------------------------------
-// website/data/agents.toml: what the site says `pixel install` writes for
+// website/data/agents.toml: what the site says `pixel setup` writes for
 // each agent, held to what a real install writes.
 // ---------------------------------------------------------------------------
 
@@ -920,7 +924,7 @@ fn claim_mismatch_should_match_files_and_whole_directories() {
     assert_eq!(unmatched, ["d"]);
 }
 
-/// The agent pages tell a reader which files `pixel install` puts in their
+/// The agent pages tell a reader which files `pixel setup` puts in their
 /// home. Run the real command into an empty one, with the config directories
 /// its Pi step and cleanup steps look for (OpenCode's, Devin's, Antigravity's,
 /// Pi's), and hold the data to exactly what landed: a file the install starts
@@ -941,13 +945,13 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
         std::fs::create_dir_all(home.join(dir)).unwrap();
     }
     let out = crate::support::pixel_command()
-        .args(["install", "--shell", "zsh", "--json"])
+        .args(["setup", "--shell", "zsh", "--json"])
         .env("HOME", &*home)
         .env_remove("CODEX_HOME")
         .env_remove("XDG_CONFIG_HOME")
         .output()
         .unwrap();
-    assert!(out.status.success(), "pixel install: {out:?}");
+    assert!(out.status.success(), "pixel setup: {out:?}");
     let mut written = BTreeSet::new();
     files_under(&home, &home, &mut written);
 
@@ -968,13 +972,13 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
         .collect();
     assert!(
         unclaimed.is_empty() && unwritten.is_empty(),
-        "website/data/agents.toml disagrees with `pixel install`:\n\
+        "website/data/agents.toml disagrees with `pixel setup`:\n\
          written but not listed: {unclaimed:?}\n\
          listed but not written: {unwritten:?}"
     );
 }
 
-/// The same contract for `pixel install --repo`: the data's `repo` lists are
+/// The same contract for `pixel setup --repo`: the data's `repo` lists are
 /// exactly `REPO_ARTIFACTS`, and a real run into an empty repository writes
 /// every one of them but the conditional ones, and nothing outside them.
 #[test]
@@ -1006,12 +1010,12 @@ fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
     let repo = root.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     let out = crate::support::pixel_command()
-        .args(["install", "--json", "--repo"])
+        .args(["setup", "--json", "--repo"])
         .arg(&repo)
         .env("HOME", root.join("home"))
         .output()
         .unwrap();
-    assert!(out.status.success(), "pixel install --repo: {out:?}");
+    assert!(out.status.success(), "pixel setup --repo: {out:?}");
     let mut written = BTreeSet::new();
     files_under(&repo, &repo, &mut written);
     // Every command run on a repository appends to its action log; that file
@@ -1020,7 +1024,7 @@ fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
     let (unclaimed, unmatched) = claim_mismatch(&claimed, &written);
     assert!(
         unclaimed.is_empty(),
-        "`pixel install --repo` wrote files agents.toml does not list: {unclaimed:?}"
+        "`pixel setup --repo` wrote files agents.toml does not list: {unclaimed:?}"
     );
     // The pages promise these files to anyone who runs the command, so an
     // install that writes nothing must fail here too. Only the conditional
@@ -1031,7 +1035,7 @@ fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
         .collect();
     assert!(
         missing.is_empty(),
-        "`pixel install --repo` did not write files agents.toml lists: {missing:?} (wrote {written:?})"
+        "`pixel setup --repo` did not write files agents.toml lists: {missing:?} (wrote {written:?})"
     );
 }
 
@@ -1063,13 +1067,13 @@ fn repo_install_should_preserve_and_rewrite_documented_migration_files() {
     .unwrap();
 
     let out = crate::support::pixel_command()
-        .args(["install", "--json", "--repo"])
+        .args(["setup", "--json", "--repo"])
         .arg(&repo)
         .env("HOME", root.join("home"))
         .env_remove("CODEX_HOME")
         .output()
         .unwrap();
-    assert!(out.status.success(), "pixel install --repo: {out:?}");
+    assert!(out.status.success(), "pixel setup --repo: {out:?}");
 
     let codex = std::fs::read_to_string(&codex_path).unwrap();
     let codex: toml_edit::DocumentMut = codex.parse().unwrap();

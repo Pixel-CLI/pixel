@@ -31,7 +31,7 @@
 question = "Will my agent actually use it?"
 audience = "dev"
 answer = [
-  '''Not every time: agents fall back to <code>grep</code>. <code>pixel install</code> puts Pixel's protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files; it advises, never blocks. In one Opus 5.5 medium trial on a low-research scoping task, hooks were slower (+11%), with more tokens read (+12%) and higher provider-reported API cost (+31%). This is not a general result. <a class="link" href="{bench}#on-whole-agent-tasks">Method and limits</a>''',
+  '''Not every time: agents fall back to <code>grep</code>. <code>pixel setup</code> puts Pixel's protocol into every session, and <code>pixel setup --repo</code> adds a guard that flags untargeted reads of large files; it advises, never blocks. In one Opus 5.5 medium trial on a low-research scoping task, hooks were slower (+11%), with more tokens read (+12%) and higher provider-reported API cost (+31%). This is not a general result. <a class="link" href="{bench}#on-whole-agent-tasks">Method and limits</a>''',
 ]
 check = '''<code>pixel action-log</code> what Pixel ran in this repository, and how it went'''
 
@@ -65,9 +65,9 @@ check = '''<code>pixel config</code> every setting and the file it comes from'''
 question = "How do I remove it?"
 audience = "team"
 answer = [
-  '''<code>pixel uninstall</code> removes every block, hook and file <code>pixel install</code> wrote, then the binary; <code>pixel uninstall --repo</code> does the same for one repository. The index is the <code>.pixel/</code> folder: delete it.''',
+  '''<code>pixel setup --remove</code> removes every block, hook and file <code>pixel setup</code> wrote, then the binary; <code>pixel setup --remove --repo</code> does the same for one repository. The index is the <code>.pixel/</code> folder: delete it.''',
 ]
-check = '''<code>pixel uninstall --dry-run</code> the list, before anything is removed'''
+check = '''<code>pixel setup --remove --dry-run</code> the list, before anything is removed'''
 
 [[objection]]
 question = "Pixel or semble?"

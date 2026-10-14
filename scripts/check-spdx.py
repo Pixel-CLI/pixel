@@ -49,7 +49,7 @@ EXTRA = {
 
 # Path prefixes left out, and why.
 EXCLUDED = {
-    # Written verbatim into users' agent configurations by `pixel install`
+    # Written verbatim into users' agent configurations by `pixel setup`
     # (the pi guard extension, the OpenCode plugin): a header there changes
     # installed content. The root LICENSE covers them.
     "crates/pixel-install/assets/",

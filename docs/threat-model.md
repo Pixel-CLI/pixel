@@ -37,7 +37,7 @@ model providers, and the website under `website/`.
 | Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `brief-decisions.jsonl`, `config.yaml`, `tasks/` | what the agent reads as ground truth; `actions.jsonl` and `brief-decisions.jsonl` (the typed prompt) can hold secrets; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.pixel/plugins/`, `~/.pixel/trusted.toml` and `~/.pixel/plugins.toml` (the plugin host's installs, trust records and network opt-ins), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
-| Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
+| Agent configurations | what `pixel setup` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
 | User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project) | credential theft, billing abuse |
 | Benchmark credentials | OAuth storage or an explicitly selected Claude gateway settings file read by `eval/claude_skill_pair.py` | credentials must reach only the selected model connection and stay out of benchmark receipts |
 | Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
@@ -47,7 +47,7 @@ model providers, and the website under `website/`.
 
 | Actor | Trust | Reaches Pixel through |
 | --- | --- | --- |
-| The user | trusted: Pixel acts with the user's privileges | the CLI, `pixel install`, the global config |
+| The user | trusted: Pixel acts with the user's privileges | the CLI, `pixel setup`, the global config |
 | The coding agent and the model driving it | semi-trusted: acts with the user's privileges, and can be steered by prompt injection from anything it reads, including Pixel's own output | CLI arguments, hook payloads, the daemon socket |
 | Repository content | untrusted when the repository is not the user's own: files, commit messages, branch names, a committed `.pixel/` or `.codex/`, git configuration that came with an archive | the walkers, tree-sitter, git, every sidecar reader |
 | Other processes of the same user | trusted by the operating system; not distinguished by Pixel | the daemon socket, every file Pixel writes |
@@ -62,7 +62,7 @@ The boundaries a change can cross, referred to below as B1 to B7:
  hostile repo ──B1──▶ pixel (parse, index, git) ──B3──▶ agent context (prompt)
  agent/model  ──B2──▶ pixel CLI / hooks
  same-user process ──B4──▶ daemon socket ──▶ git mutations on the repository
- pixel install ──B5──▶ agent configs (hooks run on every tool call)
+ pixel setup ──B5──▶ agent configs (hooks run on every tool call)
  pixel ◀──B6──▶ network (models, classify, web search, release check)
  contributor ──B7──▶ CI ──▶ release ──▶ every user's machine
 ```
@@ -111,7 +111,7 @@ embed the repository by sending it, which it could do with `search`.
 `pixel run-hook task-event` reads one JSON payload from the agent host on
 stdin (ARCHITECTURE.md, hook table). The payload's `cwd`, `tool_input` and
 session fields are agent-controlled. `task-event` is the only hook `pixel
-install` registers: it gates edits and completion for a task contract and, on
+setup` registers: it gates edits and completion for a task contract and, on
 `prompt-submit`, returns the bounded `[PIXEL:BRIEF]` evidence block. It never
 executes `tool_input.command` and never rewrites or approves a command.
 
@@ -237,7 +237,7 @@ repository file.
 
 ### 3.9 Install, update, uninstall (B5, B7)
 
-`pixel install` edits agent configs in place, rewriting only its own managed
+`pixel setup` edits agent configs in place, rewriting only its own managed
 blocks and hook entries, refusing files that do not parse, and leaving a
 `<file>.pixel-bak.<nanos>-<seq>` copy of each file it changes
 (`pixel_install::config::backup_if_changing`). Hook commands embed the
@@ -304,27 +304,38 @@ manage them. Controls, in the order a lookup applies them:
   manifest parser also refuses an absolute `run` or a `..` component.
 - **Network opt-in.** A manifest with `network = true` runs only after
   `pixel plugin enable <name>` (`~/.pixel/plugins.toml`), for every tier.
-- **`add` takes data, not code from the URL.** A git source must start with
-  `https://`, `ssh://`, `file://` or `git@` (`ext::` and `fd::` transports
-  run commands), is cloned shallowly through `GitRunner` (timeout, redacted
-  stderr) into a temporary directory, and only the plugin directory is
-  copied (`.git` left behind). A URL's userinfo is removed before the source
-  is recorded or shown, and `logged_args` removes it from the action log.
+- **`install` takes data, not code from the URL.** A git source must start
+  with `https://`, `ssh://`, `file://` or `git@` (`ext::` and `fd::`
+  transports run commands), is cloned shallowly through `GitRunner` (timeout,
+  redacted stderr) into a temporary directory, and only the plugin directory
+  is copied (`.git` left behind). A URL's userinfo is removed before the
+  source is recorded or shown, and `logged_args` removes it from the action
+  log. `github:<owner>/<repo>[@<ref>]` is parsed first (ASCII names, no
+  option form, no `..`), then built into an `https://github.com` clone URL;
+  `PIXEL_GITHUB_BASE_URL` (the user's own environment) redirects it to a
+  mirror or a `file://` tree and must itself be one of the allowed schemes.
+  A program the repository does not ship is downloaded by `curl` restricted
+  to `https` (redirects included), capped at 256 MiB and 300 s, into the
+  plugin directory only (no symlink on the path is followed), made executable
+  and compared with `<asset>.sha256` when the release publishes one; a
+  mismatch removes the file and leaves the plugin not runnable. A release
+  without a digest is installed unverified and says so.
 - **PATH lookup skips empty entries**, which a shell reads as the working
   directory, so a file in the repository is not found as `pixel-<name>`.
 - **Environment.** A plugin receives `PIXEL_API`, `PIXEL_REPO_ROOT`,
   `PIXEL_GRAPH_DB` and `PIXEL_BIN`; it inherits the rest of the caller's environment unchanged; Pixel adds no
   secret to it.
-- **Moved commands (#878).** `flow`, `plan-rollback`,
-  `token-savings`, `squash-branch` and
-  `fast-forward` are plugins of `Pixel-CLI/pixel-plugins`
-  (`pixel_plugin::MOVED_COMMANDS`), looked up in the order above like any
-  other name. Without one, `pixel <name>` prints the install hint and exits 2;
-  the pre-rename spellings (`rescue`, `update`, `savings`,
-  `rewrite`, `replay-flow`) resolve to the plugin of the current name
-  (`plugin_cmd::moved_name`). The core binary no longer contains their code, so
-  it no longer logs their arguments: the dispatch `exec`s before the action
-  log is written.
+- **Moved commands (#878).** `pixel_plugin::MOVED_COMMANDS` maps each command
+  that lives in a `Pixel-CLI` plugin repository (`pixel-git`, `pixel-flow`,
+  `pixel-recall`, `pixel-telemetry`, `pixel-utilities`) to it. A name the core
+  does not build in (`flow`, `plan-rollback`, `token-savings`,
+  `squash-branch`, `fast-forward`) is looked up in the order above like any
+  other name. Without a plugin, `pixel <name>` prints
+  `pixel install github:Pixel-CLI/<repo>` and exits 2; the pre-rename
+  spellings (`rescue`, `update`, `savings`, `rewrite`, `replay-flow`) resolve
+  to the plugin of the current name (`plugin_cmd::moved_name`). The core
+  binary does not contain their code, so it does not log their arguments: the
+  dispatch `exec`s before the action log is written.
 
 ## 4. Threats
 
@@ -482,7 +493,7 @@ boundary it crosses.
   bytes instead of being allocated in full; over-cap `task-event` input emits
   its unavailable response, which denies `PreToolUse` on an enforced session;
   the task binds by worktree, provider and session (ARCHITECTURE.md, Agent
-  integration); `pixel install` registers a 10 s timeout (`HOOK_TIMEOUT`).
+  integration); `pixel setup` registers a 10 s timeout (`HOOK_TIMEOUT`).
 - **Status**: Mitigated.
 - **Residual**: the cap bounds allocation, not the wait: a host that writes
   fewer than `MAX_HOOK_INPUT + 1` bytes and holds the pipe open still stalls
@@ -538,7 +549,7 @@ stays so references to the later threats hold.
 ### T13. Withdrawn
 
 Pixel no longer composes a repository's Codex `PreToolUse` hooks behind its own
-wrapper. `pixel install --repo` restores the original registrations from the
+wrapper. `pixel setup --repo` restores the original registrations from the
 private backup of an earlier release only while the backup and the managed
 hook still match their owned contract, skips tracked `.codex/hooks.json` and
 paths that alias the global hook file, and removes duplicate project task
@@ -547,7 +558,7 @@ approved each current definition (T14). A leftover `composed-guard`
 registration answers nothing. The id stays so references to the later threats
 hold.
 
-### T14. `pixel install` damages or weakens agent configurations (T, I, B5)
+### T14. `pixel setup` damages or weakens agent configurations (T, I, B5)
 
 - **Scenario**: an install loses a user's settings, or leaves a copy of a
   config that holds keys readable by others.

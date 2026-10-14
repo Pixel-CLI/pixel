@@ -11,7 +11,7 @@
 //! The other verbs (`guard`, `composed-guard`, `session-start`,
 //! `prompt-submit`, `post-compaction`, `post-tool-use`, `metrics`) are
 //! retired. A settings file written by an older release keeps naming them
-//! until the user runs `pixel install` again, and a verb that stopped parsing
+//! until the user runs `pixel setup` again, and a verb that stopped parsing
 //! would exit 2, which a host reads as a block on the tool call. They stay
 //! accepted, with the flags those releases wrote, and answer nothing.
 

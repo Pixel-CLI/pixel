@@ -27,7 +27,7 @@ pixel --metrics off doctor . --only install.agent-prompt --only install.pi-promp
 The last line says which prompt the agents in the transcripts were
 reading (`--only` is newer than 0.4.0: on an older binary, run `pixel
 doctor .` and read those two checks). A stale one — red, or the `note:
-agent-prompt.md deployed by \`pixel install\` differs…` line every command
+agent-prompt.md deployed by \`pixel setup\` differs…` line every command
 prints since #243 — means the misuses in the window may follow an older
 release's command map: judge them against that prompt, not the current one.
 
@@ -104,8 +104,8 @@ Drop the noise before counting (verified 2026-09):
   counts; report the leak itself once as a finding while it lasts.
 - **The stale-prompt note and a side build.** A `pixel-dev` never prints it.
   The managed `pixel` printing it on every call while `~/.claude/settings.json`
-  runs `pixel-dev run-hook …` means a global `pixel-dev install` took the home
-  install: report it once, with `pixel install` as the hand-back, not as drift.
+  runs `pixel-dev run-hook …` means a global `pixel-dev setup` took the home
+  install: report it once, with `pixel setup` as the hand-back, not as drift.
 - **Refusals that are the contract.** `fast-forward` refusing a non-ff,
   `commit` refusing a dirty or empty stage, a `--request-id` replay: an
   error is a friction only if the agent had to work around it (Step 2 says
@@ -123,7 +123,7 @@ Drop the noise before counting (verified 2026-09):
 | empty or truncated answer | `pixel recall search '\b(unresolved|capped)\b' --role tool --since $W` |
 | human complaint | `pixel recall search 'pixel' --role user --human-only --since $W` (`--human-only` alone keeps assistant and tool turns, it only drops injected user text), read for "marche pas", "lent", "pourquoi", "bug", "encore", "wrong" |
 | harness or install drift | `pixel recall search '(doctor|install\.|daemon (lock|not running)|stale)' --role tool --since $W` |
-| prompts older than the binary | `pixel recall search 'deployed by .pixel install. differs? from' --role tool --since $W` (#243): how many sessions ran on a stale prompt, and whether the agent or the user acted on it |
+| prompts older than the binary | `pixel recall search 'deployed by .pixel setup. differs? from' --role tool --since $W` (#243): how many sessions ran on a stale prompt, and whether the agent or the user acted on it |
 | old command names | `pixel recall search "note: '[a-z-]+' is now '" --role tool --since $W`: an agent still calling pre-rename names, i.e. a prompt, skill or script that was never updated; outside the pixel repo only, where the string also sits in `rename_note`'s tests |
 
 Sessions that ran in the pixel repo itself are mostly about pixel's code:
@@ -249,7 +249,7 @@ Session memory and a single log line both lie. For every candidate:
 | Agent misuse of a flag or command | the prompt pixel installs: `crates/pixel-install/assets/pixel-agent-prompt.md` (and `pixel-subagent-prompt.md`), or the clap help text |
 | Agent bypassed pixel because the answer was worse | the command's output (truth markers, caps, ranking) — not the prompt; a stronger "MUST" does not fix a weak answer |
 | Slow read op | profile first, suggest only with a measured number |
-| Install, doctor or daemon drift | first check whether a rerun of the install would clear it, without running it on the user's machine (Step 2 forbids replaying host-wide commands, and `--repo` writes into their repository): run it against a copy, `HOME=<scratch> CODEX_HOME=<scratch>/.codex XDG_CONFIG_HOME=<scratch>/.config pixel install --shell <shell>` then `pixel doctor` with the same three variables (all on the command line: `CODEX_HOME` and `XDG_CONFIG_HOME` otherwise point the install back at the real files), or for a `repo.*` check `pixel install --repo <fixture>` on a `git init` fixture seeded with the drifted file; failing that, read the install code path. If a rerun clears it, the install is fine and the friction is that nobody reran it: an upgrade path that skips it, a note nobody read. Propose a change to `pixel-install` only when the install itself leaves the check red, or a `pixel doctor` check when nothing reported the drift at all |
+| Install, doctor or daemon drift | first check whether a rerun of the install would clear it, without running it on the user's machine (Step 2 forbids replaying host-wide commands, and `--repo` writes into their repository): run it against a copy, `HOME=<scratch> CODEX_HOME=<scratch>/.codex XDG_CONFIG_HOME=<scratch>/.config pixel setup --shell <shell>` then `pixel doctor` with the same three variables (all on the command line: `CODEX_HOME` and `XDG_CONFIG_HOME` otherwise point the install back at the real files), or for a `repo.*` check `pixel setup --repo <fixture>` on a `git init` fixture seeded with the drifted file; failing that, read the install code path. If a rerun clears it, the install is fine and the friction is that nobody reran it: an upgrade path that skips it, a note nobody read. Propose a change to `pixel-install` only when the install itself leaves the check red, or a `pixel doctor` check when nothing reported the drift at all |
 | Repo rule or skill gap | `.agents/rules/*.md` or `.agents/skills/*/SKILL.md` |
 | Not pixel's (user repo, git, another tool) | one line in the report, then drop it |
 

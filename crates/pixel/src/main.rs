@@ -1135,15 +1135,17 @@ enum Command {
     // M5/M6 — install / doctor / migrate / hook
     // -----------------------------------------------------------------
     /// Idempotently deploy agent integrations while preserving native retrieval.
-    Install {
+    /// `--remove` takes everything back out.
+    Setup {
         #[arg(long)]
         json: bool,
         /// Shell whose profile is checked for the retired `claude()` wrapper
         /// (default: account login shell, then $SHELL). Pass e.g. `fish`
-        /// to select the profile explicitly.
+        /// to select the profile explicitly. With `--remove`, the shell
+        /// whose wrapper block is removed.
         #[arg(long)]
         shell: Option<String>,
-        /// Install project-local integrations into this repository only,
+        /// Set up project-local integrations in this repository only,
         /// skipping every global step. Remove retired Claude and Codex
         /// retrieval hooks, restore adopted RTK/foreign hooks from matching
         /// backups, and preserve independent task controls. Tracked Codex
@@ -1155,36 +1157,45 @@ enum Command {
         /// `.codex/config.toml`, `.codex/hooks.json`,
         /// `.codex/pixel-composed-guard-backup.json`, and `AGENTS.md`.
         /// Machine-specific files naming this binary go into `info/exclude`.
+        /// With `--remove`, only the project-local artifacts that
+        /// `pixel setup --repo` wrote are removed and every global removal
+        /// step is skipped.
         #[arg(long)]
         repo: Option<PathBuf>,
-    },
-    /// Remove everything `pixel install` wrote: managed blocks from
-    /// agent-config files, hook entries from all settings files, hook
-    /// scripts, the Pi impact package, the rule source file, and the
-    /// pixel binary itself. Idempotent: safe to re-run.
-    Uninstall {
+        /// Remove everything `pixel setup` wrote: managed blocks from
+        /// agent-config files, hook entries from all settings files, hook
+        /// scripts, the Pi impact package, the rule source file, and the
+        /// pixel binary itself. Idempotent: safe to re-run.
         #[arg(long)]
-        json: bool,
-        /// Preview what would be removed without making any changes.
-        #[arg(long)]
+        remove: bool,
+        /// With `--remove`: preview what would be removed without making any
+        /// changes.
+        #[arg(long, requires = "remove")]
         dry_run: bool,
-        /// Path to the pixel binary to remove (default: the running binary,
-        /// left in place when Homebrew or mise installed it).
-        #[arg(long)]
+        /// With `--remove`: path to the pixel binary to remove (default: the
+        /// running binary, left in place when Homebrew or mise installed it).
+        #[arg(long, requires = "remove")]
         binary_path: Option<PathBuf>,
-        /// Shell whose wrapper block should be removed (default: the
-        /// account's login shell, then $SHELL).
-        #[arg(long)]
-        shell: Option<String>,
-        /// Remove only that shell's wrapper block and keep everything else
-        /// installed: the fix for a block `pixel doctor` reports in a
-        /// profile the login shell never loads.
-        #[arg(long)]
+        /// With `--remove`: remove only that shell's wrapper block and keep
+        /// everything else installed: the fix for a block `pixel doctor`
+        /// reports in a profile the login shell never loads.
+        #[arg(long, requires = "remove")]
         wrappers_only: bool,
-        /// Remove only the project-local artifacts `pixel install --repo`
-        /// wrote in this repository. Skips all global removal steps.
+    },
+    /// Install a plugin from `github:<owner>/<repo>[@<ref>]`, a git URL
+    /// (https://, ssh://, file://, git@host:path) or a local directory
+    /// holding `pixel-plugin.toml`. `pixel uninstall <name>` removes it.
+    Install {
+        /// The plugin source. `npm:<package>` is not supported yet.
+        source: String,
+        /// The plugin to install, when the source holds several.
         #[arg(long)]
-        repo: Option<PathBuf>,
+        name: Option<String>,
+    },
+    /// Delete an installed plugin and forget its source and network opt-in.
+    Uninstall {
+        /// The plugin's name, as `pixel plugin list` shows it.
+        name: String,
     },
     /// Check that a release tag is consistent with the tree before anything
     /// is built or published: crates/pixel/Cargo.toml carries the version,
@@ -1279,7 +1290,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Host hook entry points (task-event) registered by `pixel install`.
+    /// Host hook entry points (task-event) registered by `pixel setup`.
     #[command(alias = "hook")]
     RunHook {
         #[command(subcommand)]
@@ -1385,9 +1396,10 @@ enum Command {
     /// `replay` follows the composed document, and re-decides a step whose
     /// page moved on, recording the new branch with `--update`.
     Ultraflow(ultraflow_cmd::UltraflowOptions),
-    /// Manage plugins: external commands that `pixel <name> [args…]` runs
-    /// when the core has no such command. A repo plugin
-    /// (`<repo>/.pixel/plugins/<name>/`) runs only after `pixel plugin
+    /// List, enable and trust plugins: external commands that `pixel <name>
+    /// [args…]` runs when the core has no such command. `pixel install
+    /// <source>` adds one and `pixel uninstall <name>` removes it. A repo
+    /// plugin (`<repo>/.pixel/plugins/<name>/`) runs only after `pixel plugin
     /// trust <name>`; your own live in `~/.pixel/plugins/`; an executable
     /// `pixel-<name>` on PATH is a plugin too.
     Plugin {
@@ -1546,7 +1558,7 @@ struct RetiredHook {
 
 #[derive(Subcommand)]
 enum ConfigCmd {
-    /// Guided global setup in a terminal; also offered by pixel install.
+    /// Guided global setup in a terminal; also offered by pixel setup.
     Setup,
     /// Enable or disable all classify calls, including explicit --engine flags.
     Classify {
@@ -1623,7 +1635,7 @@ enum ConfigCmd {
     /// (Cloudflare's Clef-flash decision model through Ollama, or on Workers
     /// AI behind a Cloudflare API token — remote engine on that preset), or
     /// `auto` (probe local, fall back to remote — the default). `pixel
-    /// install` sets this when you choose an engine.
+    /// setup` sets this when you choose an engine.
     ClassifyEngine {
         /// The engine preference to store.
         #[arg(value_parser = ["local", "remote", "jev", "clef-ollama", "clef-cloudflare", "auto"])]
@@ -4237,12 +4249,15 @@ fn logged_args(args: &[String]) -> String {
         .windows(2)
         .position(|pair| pair[0] == "config" && pair[1] == "remote-key")
         .map(|at| at + 3);
-    // `plugin add https://user:token@host/…` carries the credential of a
-    // private plugin repository in its URL.
-    let plugin_add_from = args
-        .windows(2)
-        .position(|pair| pair[0] == "plugin" && pair[1] == "add")
-        .map(|at| at + 2);
+    // `install https://user:token@host/…` carries the credential of a
+    // private plugin repository in its URL. Only the command word counts:
+    // `search-content install` is a query.
+    let with_program: Vec<String> = std::iter::once(String::new())
+        .chain(args.iter().cloned())
+        .collect();
+    let plugin_install_from = pixel_plugin::command_word(&with_program)
+        .filter(|(_, word)| *word == "install")
+        .map(|(at, _)| at);
     #[cfg(feature = "readify")]
     let url_name = ai_cli_readify::auth::AUTH_URL_VAR;
     #[cfg(not(feature = "readify"))]
@@ -4262,7 +4277,7 @@ fn logged_args(args: &[String]) -> String {
                 format!("{url_name}=<redacted>")
             } else if secret_from.is_some_and(|from| i >= from) && !arg.starts_with("--") {
                 "<redacted>".to_string()
-            } else if plugin_add_from.is_some_and(|from| i >= from) {
+            } else if plugin_install_from.is_some_and(|from| i >= from) {
                 pixel_plugin::redact_source(arg)
             } else {
                 arg.clone()
@@ -4289,17 +4304,17 @@ fn rename_note(argv: &[String], unprotected: bool) -> Option<String> {
     ))
 }
 
-/// Whether this invocation checks the prompts `pixel install` deployed:
-/// every command but the protected streams, the three that already deal
-/// with them (`install` rewrites them, `doctor` reports them, `uninstall`
-/// removes them), and any command of a developer build
+/// Whether this invocation checks the prompts `pixel setup` deployed:
+/// every command but the protected streams, the two that already deal
+/// with them (`setup` rewrites and removes them, `doctor` reports them),
+/// and any command of a developer build
 /// ([`is_developer_build`]: `pixel-dev`, or a binary run from `target/`).
 /// The deployed prompts are the managed `pixel`'s: a build from another
 /// commit differs from them by construction while printing the same
-/// version, and the fix the note names, `pixel install`, would hand the
+/// version, and the fix the note names, `pixel setup`, would hand the
 /// whole machine's hooks and prompts to that build (#549).
 fn checks_deployed_prompts(command_label: &str, protected: bool, developer_build: bool) -> bool {
-    !protected && !developer_build && !matches!(command_label, "install" | "doctor" | "uninstall")
+    !protected && !developer_build && !matches!(command_label, "setup" | "doctor")
 }
 
 /// The command labels the update close may relaunch. The relaunch executes
@@ -4388,7 +4403,7 @@ fn bounded_result_note(basis: &str, cap_hits: &[Value], truncation_warned: bool)
     (!rest.is_empty()).then(|| format!("{tier}; caps: {}", rest.join("; ")))
 }
 
-/// One stderr line naming the prompts an earlier `pixel install` deployed:
+/// One stderr line naming the prompts an earlier `pixel setup` deployed:
 /// this release deploys none, and nothing outside `pixel doctor` said so.
 fn stale_prompt_note(stale: &[&str]) -> Option<String> {
     if stale.is_empty() {
@@ -4400,7 +4415,7 @@ fn stale_prompt_note(stale: &[&str]) -> Option<String> {
         ("are", "them")
     };
     Some(format!(
-        "note: {} deployed by an earlier `pixel install` {verb} retired in this pixel ({}) — run `pixel install` to remove {pronoun}\n",
+        "note: {} deployed by an earlier `pixel setup` {verb} retired in this pixel ({}) — run `pixel setup` to remove {pronoun}\n",
         stale.join(" and "),
         env!("CARGO_PKG_VERSION")
     ))
@@ -4674,6 +4689,70 @@ fn run() -> Result<(), String> {
         std::process::exit(code);
     }
     result
+}
+
+/// `pixel setup`: deploy the agent integrations (globally, or into one
+/// repository with `--repo`) and report what changed.
+fn setup_install(json: bool, shell: Option<String>, repo: Option<PathBuf>) -> Result<(), String> {
+    let is_global_install = repo.is_none();
+    let config_root = repo.clone();
+    let stdout_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let interactive_banner = should_render_install_banner(json, stdout_tty);
+    let color = banner_color(std::env::var_os("NO_COLOR").as_deref());
+    if interactive_banner {
+        let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+        if install_intro::should_play(json, stdout_tty, stdin_tty, |key| std::env::var_os(key)) {
+            install_intro::play();
+        }
+        write_stdout(&pixel_install::banner::render_start(color))?;
+    }
+    let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
+        shell,
+        repo,
+        ..Default::default()
+    })
+    .map_err(|e| e.to_string())?;
+    config_cmd::ensure_template(config_root.as_deref())?;
+    // Interactive UX goes to stderr so `--json` stdout stays pure.
+    let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let stderr_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    if should_offer_classify_setup(is_global_install, json, stdin_tty, stderr_tty) {
+        config_cmd::setup()?;
+    }
+    let report_value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+    // A person at a terminal reads the banner; `--json` and a piped
+    // stdout keep the machine-readable report an agent parses.
+    if json || !stdout_tty {
+        print_data(&report_value, json)
+    } else {
+        operation_metrics::observe(&report_value);
+        write_stdout(&pixel_install::banner::render_result(&report, color))
+    }
+}
+
+/// `pixel setup --remove`: take back everything `pixel setup` wrote.
+fn setup_remove(
+    json: bool,
+    shell: Option<String>,
+    repo: Option<PathBuf>,
+    dry_run: bool,
+    binary_path: Option<PathBuf>,
+    wrappers_only: bool,
+) -> Result<(), String> {
+    let report = pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
+        binary_path,
+        running_binary: std::env::current_exe().ok(),
+        dry_run,
+        shell,
+        wrappers_only,
+        repo,
+        ..Default::default()
+    })
+    .map_err(|e| e.to_string())?;
+    print_data(
+        &serde_json::to_value(&report).map_err(|e| e.to_string())?,
+        json,
+    )
 }
 
 fn run_command(
@@ -5970,68 +6049,25 @@ fn run_command(
         // -------------------------------------------------------------
         // M5/M6 — install / doctor / migrate / hook
         // -------------------------------------------------------------
-        Command::Install { json, shell, repo } => {
-            let is_global_install = repo.is_none();
-            let config_root = repo.clone();
-            let stdout_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-            let interactive_banner = should_render_install_banner(json, stdout_tty);
-            let color = banner_color(std::env::var_os("NO_COLOR").as_deref());
-            if interactive_banner {
-                let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
-                if install_intro::should_play(json, stdout_tty, stdin_tty, |key| {
-                    std::env::var_os(key)
-                }) {
-                    install_intro::play();
-                }
-                write_stdout(&pixel_install::banner::render_start(color))?;
-            }
-            let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
-                shell,
-                repo,
-                ..Default::default()
-            })
-            .map_err(|e| e.to_string())?;
-            config_cmd::ensure_template(config_root.as_deref())?;
-            // Interactive UX goes to stderr so `--json` stdout stays pure.
-            let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
-            let stderr_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
-            if should_offer_classify_setup(is_global_install, json, stdin_tty, stderr_tty) {
-                config_cmd::setup()?;
-            }
-            let report_value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
-            // A person at a terminal reads the banner; `--json` and a piped
-            // stdout keep the machine-readable report an agent parses.
-            if json || !stdout_tty {
-                print_data(&report_value, json)
-            } else {
-                operation_metrics::observe(&report_value);
-                write_stdout(&pixel_install::banner::render_result(&report, color))
-            }
-        }
-        Command::Uninstall {
+        Command::Setup {
             json,
+            shell,
+            repo,
+            remove,
             dry_run,
             binary_path,
-            shell,
             wrappers_only,
-            repo,
         } => {
-            let report =
-                pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
-                    binary_path,
-                    running_binary: std::env::current_exe().ok(),
-                    dry_run,
-                    shell,
-                    wrappers_only,
-                    repo,
-                    ..Default::default()
-                })
-                .map_err(|e| e.to_string())?;
-            print_data(
-                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
-                json,
-            )
+            if remove {
+                setup_remove(json, shell, repo, dry_run, binary_path, wrappers_only)
+            } else {
+                setup_install(json, shell, repo)
+            }
         }
+        Command::Install { source, name } => {
+            plugin_cmd::install(&source, name.as_deref(), owned_exit)
+        }
+        Command::Uninstall { name } => plugin_cmd::uninstall(&name),
         Command::CheckRelease {
             version,
             repo,
@@ -7442,7 +7478,7 @@ mod tests {
             r#"pixel fetch <remote> /path/to/repo [--json]"#,
             r#"pixel status /path/to/repo"#,
             r#"pixel build-index --history ."#,
-            r#"pixel install"#,
+            r#"pixel setup"#,
             r#"pixel doctor"#,
         ];
         let mut failures = Vec::new();
@@ -8052,8 +8088,9 @@ mod renamed_command_tests {
         // without updating the table fails here, not in a user's script.
         // The renames of the commands that moved to plugins are the
         // exception: no variant carries them, `plugin_cmd::dispatch` maps
-        // them to the plugin (`plugin_cli.rs` runs each one).
-        let registered = on_big_stack(|| {
+        // them to the plugin (`plugin_cli.rs` runs each one). A rename is an
+        // alias exactly when its target is a command the core builds in.
+        let (registered, built_in) = on_big_stack(|| {
             let cli = Cli::command();
             let mut registered = BTreeSet::new();
             for sub in cli.get_subcommands() {
@@ -8061,11 +8098,15 @@ mod renamed_command_tests {
                     registered.insert((alias.to_string(), sub.get_name().to_string()));
                 }
             }
-            registered
+            let built_in: BTreeSet<String> = cli
+                .get_subcommands()
+                .map(|sub| sub.get_name().to_string())
+                .collect();
+            (registered, built_in)
         });
         let table: BTreeSet<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
             .iter()
-            .filter(|(_, new)| !pixel_plugin::MOVED_COMMANDS.contains(new))
+            .filter(|(_, new)| built_in.contains(*new))
             .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
             .collect();
         assert_eq!(registered, table);
@@ -8178,29 +8219,36 @@ mod renamed_command_tests {
         let argv = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
         assert_eq!(
             logged_args(&argv(&[
-                "plugin",
-                "add",
+                "install",
                 "https://user:ghp_secret@github.com/acme/private.git",
                 "--name",
                 "x"
             ])),
-            "plugin add https://github.com/acme/private.git --name x"
+            "install https://github.com/acme/private.git --name x"
         );
         assert_eq!(
             logged_args(&argv(&[
                 "--metrics",
                 "off",
-                "plugin",
-                "add",
+                "install",
                 "https://t@h.test/p"
             ])),
-            "--metrics off plugin add https://h.test/p",
+            "--metrics off install https://h.test/p",
             "a global option before the command does not move the mask"
         );
         assert_eq!(
             logged_args(&argv(&["search-content", "https://a:b@c.test/d"])),
             "search-content https://a:b@c.test/d",
             "other commands are logged verbatim"
+        );
+        assert_eq!(
+            logged_args(&argv(&[
+                "search-content",
+                "install",
+                "https://a:b@c.test/d"
+            ])),
+            "search-content install https://a:b@c.test/d",
+            "the word `install` in a query does not start the mask"
         );
     }
 
@@ -8269,14 +8317,14 @@ mod renamed_command_tests {
         assert_eq!(
             one,
             format!(
-                "note: agent-prompt.md deployed by an earlier `pixel install` is retired in this pixel ({}) — run `pixel install` to remove it\n",
+                "note: agent-prompt.md deployed by an earlier `pixel setup` is retired in this pixel ({}) — run `pixel setup` to remove it\n",
                 env!("CARGO_PKG_VERSION")
             )
         );
         let both = stale_prompt_note(&["agent-prompt.md", "subagent-prompt.md"]).unwrap();
         assert!(
             both.starts_with(
-                "note: agent-prompt.md and subagent-prompt.md deployed by an earlier `pixel install` are retired"
+                "note: agent-prompt.md and subagent-prompt.md deployed by an earlier `pixel setup` are retired"
             ) && both.ends_with("remove them\n"),
             "{both}"
         );
@@ -8365,7 +8413,7 @@ mod renamed_command_tests {
         assert!(checks_deployed_prompts("search-content", false, false));
         assert!(checks_deployed_prompts("self-update", false, false));
         assert!(!checks_deployed_prompts("search-content", true, false));
-        for owner in ["install", "doctor", "uninstall"] {
+        for owner in ["setup", "doctor"] {
             assert!(!checks_deployed_prompts(owner, false, false), "{owner}");
         }
     }

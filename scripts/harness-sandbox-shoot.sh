@@ -52,7 +52,7 @@ orb -m "$VM" bash -lc '
     }
     /home/linuxbrew/.linuxbrew/bin/brew upgrade pixel >/dev/null 2>&1 \
         || echo "  (keeping the installed pixel; the tap has no newer bottle yet)" >&2
-    /home/linuxbrew/.linuxbrew/bin/pixel install >/dev/null 2>&1 || true
+    /home/linuxbrew/.linuxbrew/bin/pixel setup >/dev/null 2>&1 || true
     python3 - << "PY"
 import json, os
 # pre-accept every consent Claude Code can raise: folder trust, bypass-mode

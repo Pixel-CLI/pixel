@@ -28,7 +28,7 @@ are estimates, not billed savings. The website captions state that distinction.
 `AgentDemo` replays two recorded Claude Code runs side by side on one clock:
 the same task and model in the archived Sonnet recording, with an appended
 Pixel prompt on one side, without the install hooks. The script now uses
-the hooks `pixel install` writes; that is a different protocol. Nothing in it is written by hand: every
+the hooks `pixel setup` writes; that is a different protocol. Nothing in it is written by hand: every
 command, time and token count comes from a recording.
 
 1. `scripts/record-demo.sh <dir> [reps] [model]` (Opus at medium effort by

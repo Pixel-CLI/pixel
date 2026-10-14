@@ -80,7 +80,7 @@ pub struct InstallOptions {
     /// creation. Safe to run against a real `$HOME` to preview an install.
     pub dry_run: bool,
     /// Repository root for native-hook cleanup and project task adapters
-    /// (`pixel install --repo <path>`). When set, ONLY repo-local steps run:
+    /// (`pixel setup --repo <path>`). When set, ONLY repo-local steps run:
     /// retired retrieval callbacks are removed from Claude and Codex while
     /// native hooks are preserved; Devin task hooks and the Pi project guard
     /// are installed. Retired Pixel material is also removed from
@@ -117,7 +117,7 @@ pub(crate) fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBu
     })
 }
 
-/// Run `pixel install`. Idempotent: safe to re-run.
+/// Run `pixel setup`. Idempotent: safe to re-run.
 ///
 /// Global install deploys the shared agent prompt, keeps task-lifecycle
 /// accounting hooks for configured hosts, and removes retired automatic
@@ -262,7 +262,7 @@ pub(crate) fn install_report(
     }
 }
 
-/// Repo-local install (`pixel install --repo <path>`): project-scoped agent
+/// Repo-local install (`pixel setup --repo <path>`): project-scoped agent
 /// enforcement instead of the global prompt deploy. Writes:
 ///   - `<repo>/.codex/config.toml` — any retired Pixel
 ///     `developer_instructions` block is removed while user text is preserved;
@@ -375,7 +375,7 @@ fn stable_exe_path_in(executable_path: PathBuf, paths: &std::ffi::OsStr) -> Path
         .unwrap_or(canonical)
 }
 
-/// A file `pixel install --repo` may write, relative to the repository.
+/// A file `pixel setup --repo` may write, relative to the repository.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepoArtifact {
     /// Path relative to the repository root.
@@ -385,7 +385,7 @@ pub struct RepoArtifact {
     pub machine_local: bool,
 }
 
-/// Every file `pixel install --repo` may write. This includes the two
+/// Every file `pixel setup --repo` may write. This includes the two
 /// portable migration targets, which are rewritten only when they contain a
 /// retired Pixel block. The per-project list in `website/content/docs.md` and
 /// the `--repo` help name exactly these paths, which `docs_drift::` checks.
@@ -473,7 +473,7 @@ pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-sub
 /// owns only the managed block inside it.
 pub(crate) const PI_PROMPT_REL: &str = ".pi/agent/APPEND_SYSTEM.md";
 
-/// The prompt files an earlier `pixel install` deployed under `home`, by file
+/// The prompt files an earlier `pixel setup` deployed under `home`, by file
 /// name. No install deploys them any more and the next one removes them; until
 /// then a hand-wired integration may still read one.
 pub fn retired_prompts(home: &Path) -> Vec<&'static str> {
@@ -822,7 +822,7 @@ pub(crate) fn shell_profile_for(shell: &str, home: &Path) -> (ShellKind, PathBuf
     }
 }
 
-/// The profiles of the other shells `pixel install` knows, with their
+/// The profiles of the other shells `pixel setup` knows, with their
 /// shell name, that hold a pixel-managed block: the residue of an install
 /// that targeted the wrong shell (an agent's `$SHELL` on a fish machine).
 /// `resolved_profile` is the one the current shell loads and is skipped.

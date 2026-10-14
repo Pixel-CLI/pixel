@@ -9,7 +9,7 @@ const MAX_OUTPUT = 12_000;
 
 export default function (pi: ExtensionAPI) {
   // Pi collects commands while it loads the factory; one install path per
-  // machine (`pixel install` or `pi install`) keeps the name unique.
+  // machine (`pixel setup` or `pi install`) keeps the name unique.
   pi.registerCommand("pixel-impact", {
     description: "Inspect existing-graph callers and impact for a symbol",
     handler: async (args, ctx) => {

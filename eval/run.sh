@@ -8,12 +8,12 @@
 #   baseline   no pixel: hooks stripped, AGENTS.md block stripped, no pixel
 #              skill, no .pixel index, and (BASELINE_PIXEL=hidden, the default)
 #              a `pixel` on PATH that answers "command not found"
-#   quiet      the install, session-start doctrine only: `pixel install --repo`
+#   quiet      the install, session-start doctrine only: `pixel setup --repo`
 #              in the scratch worktree + the deployed prompt, every hook
 #              filtered down to `run-hook session-start` / `post-compaction`
 #              (no prompt-submit task packet, metrics relay, guard, task events)
 #   full       the install default: every pixel hook the operator's
-#              `pixel install` wrote, plus `pixel install --repo` in the worktree
+#              `pixel setup` wrote, plus `pixel setup --repo` in the worktree
 #   on         legacy: one clean pixel hook set + committed AGENTS.md block +
 #              eval/variants/frozen-main payload
 #   v<name>    legacy: payload from eval/variants/<name>/agent-prompt.md +
@@ -50,7 +50,7 @@ SCEN_DIR="$EVAL_DIR/scenarios"
 # Per-invocation scratch by default: concurrent runs must not share worktrees,
 # configs, or the deployed-prompt swap. Override to reuse a warm scratch.
 # Under /tmp on purpose: the operator's Codex config trusts /tmp, which
-# project-scoped .codex/ files written by `pixel install --repo` need.
+# project-scoped .codex/ files written by `pixel setup --repo` need.
 SCRATCH="${SCRATCH:-/tmp/pixel-eval-run-$$}"
 # Every run changes into its scenario worktree: a relative RESULTS or SCRATCH
 # would then name a path under that worktree, and the first transcript write
@@ -155,7 +155,7 @@ for cli in $CLIS; do record "$CAMPAIGN" "version_$cli=$(version_of "$cli")"; don
 
 DEPLOY_BACKUP="$(mktemp -t pixel-eval-prompt.XXXXXX)"
 AGY_BACKUP="$(mktemp -t pixel-eval-agy.XXXXXX)"
-# `pixel install --repo` in a linked scratch worktree appends to the shared
+# `pixel setup --repo` in a linked scratch worktree appends to the shared
 # info/exclude; put the operator's file back byte for byte on exit.
 EXCLUDE_FILE="$(git -C "$REPO" rev-parse --path-format=absolute --git-path info/exclude)"
 EXCLUDE_BACKUP="$(mktemp -t pixel-eval-exclude.XXXXXX)"
@@ -283,8 +283,8 @@ build_arm() {  # arm commit
       rm -rf "$wt/.agents/skills/pixel"
       ;;
     quiet|full)
-      "$PIXEL_BIN" install --repo "$wt" > "$SCRATCH/install-$arm.log" 2>&1 \
-        || { echo "pixel install --repo failed for arm $arm (see $SCRATCH/install-$arm.log)" >&2; exit 2; }
+      "$PIXEL_BIN" setup --repo "$wt" > "$SCRATCH/install-$arm.log" 2>&1 \
+        || { echo "pixel setup --repo failed for arm $arm (see $SCRATCH/install-$arm.log)" >&2; exit 2; }
       # Its backups would hand the agent a second copy of AGENTS.md.
       rm -f "$wt"/AGENTS.md.pixel-bak.* "$wt"/.codex/*.pixel-bak.* "$wt/.pixel/actions.jsonl"
       if [ "$arm" = quiet ]; then
@@ -324,7 +324,7 @@ build_arm() {  # arm commit
   else
     filter_hooks_py "$mode" < "$HOME/.claude/settings.json" > "$cfg/settings.json"
     grep -q 'run-hook session-start' "$cfg/settings.json" \
-      || { echo "arm $arm: ~/.claude/settings.json has no pixel session-start hook — run \`pixel install\` first" >&2; exit 2; }
+      || { echo "arm $arm: ~/.claude/settings.json has no pixel session-start hook — run \`pixel setup\` first" >&2; exit 2; }
   fi
   [ -f "$HOME/.claude/CLAUDE.md" ] && cp "$HOME/.claude/CLAUDE.md" "$cfg/CLAUDE.md" || true
   for name in plugins agents commands context-mode advanced-memory; do

@@ -133,7 +133,7 @@ checked = 2026-09-30
 [[answer]]
 slug = "will-my-agent-use-the-tool"
 gist = "wire the protocol into each session, then check actual calls in the local action log."
-short = '''Agents can fall back to their familiar search and read tools. <code>pixel install</code> puts Pixel's protocol into each supported session; <code>pixel action-log</code> lets you check which commands your agent actually ran.'''
+short = '''Agents can fall back to their familiar search and read tools. <code>pixel setup</code> puts Pixel's protocol into each supported session; <code>pixel action-log</code> lets you check which commands your agent actually ran.'''
 bench = ["on-whole-agent-tasks"]
 limits = '''Adoption rates with the current install hooks are not quantified here. The per-repository guard advises and never blocks, so an agent can still read a whole file. Tool use does not itself establish a time or cost gain.'''
 related = ["for/", "for/claude-code/"]

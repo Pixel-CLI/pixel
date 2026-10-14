@@ -11,6 +11,9 @@
 //! `pixel plugin trust <name>` recorded a digest of its directory in
 //! `~/.pixel/trusted.toml`; any change to the directory revokes that. A
 //! plugin that declares `network = true` also needs `pixel plugin enable`.
+//! `pixel install <source>` puts a plugin in the user tier (a directory, a
+//! git URL or `github:<owner>/<repo>[@<ref>]`) and `pixel uninstall <name>`
+//! takes it out.
 //!
 //! Every input the host reads from the world (home, repo root, PATH) is a
 //! field of [`Host`]; the CLI fills it from the process, tests from a
@@ -18,23 +21,30 @@
 
 mod discover;
 mod error;
+mod fetch;
 mod hash;
 mod install;
 mod invoke;
 mod manifest;
+mod source;
 mod state;
 
 pub use discover::{
     Host, Place, Resolved, Row, contained_program, find_on_path, list, render, resolve,
 };
 pub use error::Error;
+pub use fetch::{Downloaded, asset_name, release_target};
 pub use hash::dir_digest;
-pub use install::{Added, Enabled, add, enable, looks_like_git_url, redact_source, remove, trust};
+pub use install::{
+    Added, Binary, Enabled, add, cargo_install_command, enable, looks_like_git_url, redact_source,
+    remove, trust,
+};
 pub use invoke::{
-    Env, HINT_EXIT, MOVED_COMMANDS, PIXEL_API, PLUGINS_REPO, command, command_word, moved_hint,
-    os_args,
+    Env, HINT_EXIT, MOVED_COMMANDS, PIXEL_API, PLUGINS_ORG, command, command_word, is_moved,
+    moved_hint, os_args,
 };
 pub use manifest::{API_VERSION, Capability, MANIFEST_FILE, Manifest, valid_name};
+pub use source::{DEFAULT_GITHUB_BASE, GITHUB_PREFIX, GitHubSource, NPM_PREFIX};
 pub use state::{CONFIG_FILE, Config, TRUST_FILE, TrustStore};
 
 #[cfg(test)]
@@ -66,6 +76,7 @@ pub(crate) mod testutil {
             home,
             repo_root: Some(repo),
             path: bin.into_os_string(),
+            github_base: None,
         };
         Fixture { tmp, host }
     }

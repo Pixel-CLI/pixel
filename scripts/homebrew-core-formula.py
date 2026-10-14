@@ -24,7 +24,7 @@ its own bottles). This one is what a homebrew-core pull request carries:
   `PIXEL_DAEMON_AUTO_START=0` so no daemon outlives `brew test`;
 - built with `PIXEL_UPDATE_CHECK=off`: that binary never checks for a
   release nor offers to upgrade itself, Homebrew owning updates;
-- no caveats and nothing written outside the keg: `pixel install`, which
+- no caveats and nothing written outside the keg: `pixel setup`, which
   wires the agents in the user's home, stays the user's step.
 
 `.github/workflows/homebrew-core.yml` builds it from source on macOS and

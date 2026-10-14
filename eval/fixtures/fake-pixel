@@ -7,7 +7,7 @@ matter to arm isolation, and logs each call to $FAKE_PIXEL_LOG:
   --version                        a fixed version line
   build-index --history <dir>      creates <dir>/.pixel
   prepare-repo --no-daemon <dir>   adds the graph file
-  install --repo <wt>              the repo-local install: a Claude guard in
+  setup --repo <wt>                the repo-local setup: a Claude guard in
                                    .claude/settings.local.json, a Codex
                                    session-start + composed-guard hooks.json,
                                    the AGENTS.md block, an AGENTS.md backup
@@ -40,7 +40,7 @@ def main():
         (root / ".pixel/state.json").write_text('{"fixture": true}\n')
     elif argv[:1] == ["prepare-repo"]:
         (Path(argv[-1]) / ".pixel/graph.v2.db").write_text("graph\n")
-    elif argv[:2] == ["install", "--repo"]:
+    elif argv[:2] == ["setup", "--repo"]:
         wt = Path(argv[2])
         me = os.path.abspath(sys.argv[0])
         (wt / ".claude").mkdir(exist_ok=True)

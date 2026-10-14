@@ -1,9 +1,9 @@
 # Manual Setup
 
-Prefer to control your own setup, or using an agent `pixel install` does not
-wire (Cursor, Copilot, ...)? You don't need `pixel install`.
+Prefer to control your own setup, or using an agent `pixel setup` does not
+wire (Cursor, Copilot, ...)? You don't need `pixel setup`.
 
-`pixel install` does these things, and you can do each of them by hand:
+`pixel setup` does these things, and you can do each of them by hand:
 
 1. **Keep Claude and Codex task lifecycle hooks**, preserving foreign hooks,
    while removing Pixel's automatic retrieval prompts and metrics callbacks.
@@ -16,7 +16,7 @@ wire (Cursor, Copilot, ...)? You don't need `pixel install`.
    keeps its native tools.
 
 The Codex and Claude plugins ship no skill and register no hooks; the
-per-prompt evidence brief comes from the task hook `pixel install` writes.
+per-prompt evidence brief comes from the task hook `pixel setup` writes.
 The CLI and the plugins are separate installations.
 
 ## 1. Install the binary
@@ -45,11 +45,11 @@ Homebrew installed: update those with `mise`/`brew`, try a local build with
 
 ## 2. Wire it into your agent
 
-`pixel install` deploys no prompt. To give an agent Pixel's full protocol
+`pixel setup` deploys no prompt. To give an agent Pixel's full protocol
 anyway, copy
 [`crates/pixel-install/assets/pixel-agent-prompt.md`](../crates/pixel-install/assets/pixel-agent-prompt.md)
 into that agent's own instruction file (see [Any other agent](#any-other-agent)),
-not under `~/.local/share/pixel/`: `pixel install` deletes the
+not under `~/.local/share/pixel/`: `pixel setup` deletes the
 `agent-prompt.md` and `subagent-prompt.md` earlier releases deployed there.
 
 ### Claude Code
@@ -60,7 +60,7 @@ prompt that names a symbol and asks to change it or find its callers.
 Ordinary work keeps the usual tools. The native Pixel plugin ships no skill,
 injects no session prompt and registers no retrieval hooks.
 
-`pixel install` removes its retired retrieval, post-edit advice, compaction
+`pixel setup` removes its retired retrieval, post-edit advice, compaction
 and metrics registrations from Claude's user settings. Independent task-event
 hooks remain available for configured task contracts. Repository installation
 preserves foreign hooks and restores adopted RTK registrations, removing the
@@ -95,9 +95,9 @@ By hand, add the package path to `packages` in Pi's `settings.json`, or
 install the repository as a Pi package (`pi install git:github.com/Pixel-CLI/pixel`),
 not both. See [Pi integration](pi-harness.md) for the files.
 
-`pixel install` removes its managed and recognized historical automatic
+`pixel setup` removes its managed and recognized historical automatic
 instructions from `~/.pi/agent/APPEND_SYSTEM.md`, preserving user text.
-`pixel install --repo .` removes the retired project extension
+`pixel setup --repo .` removes the retired project extension
 `.pi/extensions/pixel-guard.ts`. No Pixel-first block is added to project
 `AGENTS.md`.
 
@@ -125,7 +125,7 @@ look beyond the returned list when task correctness requires it.
 
 ### Any other agent
 
-`pixel install` wires only the agents above; the website's
+`pixel setup` wires only the agents above; the website's
 [per-agent pages](https://pixel-cli.dev/for/) list what it writes or removes
 for each, and the plugins or rules files for the others. To give any tool the
 full protocol, put the text of the bundled
@@ -133,7 +133,7 @@ full protocol, put the text of the bundled
 always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
 `.github/copilot-instructions.md`), a system-prompt flag, or a global
 `AGENTS.md`. Copy it verbatim rather than a summary, and re-copy it after an
-upgrade. `pixel install` does not manage that copy, and `pixel doctor` does
+upgrade. `pixel setup` does not manage that copy, and `pixel doctor` does
 not check it.
 
 ## Renamed commands
@@ -158,7 +158,7 @@ shipped and later removed.
 
 ## Uninstall
 
-Run `pixel uninstall` (and `pixel uninstall --repo .` for repository
+Run `pixel setup --remove` (and `pixel setup --remove --repo .` for repository
 integration). It removes Pixel-owned registrations and managed text while
 preserving unrelated configuration. Remove separately installed plugins
 through the host's plugin manager. Do not delete a shared settings or

@@ -516,7 +516,7 @@ pub fn check_antigravity_install(
     }
     if !left.is_empty() {
         return Err(format!(
-            "retired Pixel Antigravity integration remains: {} — run `pixel install` to remove it",
+            "retired Pixel Antigravity integration remains: {} — run `pixel setup` to remove it",
             left.join(", ")
         ));
     }
@@ -526,7 +526,7 @@ pub fn check_antigravity_install(
     ))
 }
 
-/// Remove Antigravity integration during `pixel uninstall`.
+/// Remove Antigravity integration during `pixel setup --remove`.
 pub fn remove_antigravity(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     remove_antigravity_with_agy(home, exe, dry_run, OsStr::new("agy"))
 }

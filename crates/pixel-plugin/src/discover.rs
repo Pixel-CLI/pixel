@@ -27,9 +27,20 @@ pub struct Host {
     pub home: PathBuf,
     pub repo_root: Option<PathBuf>,
     pub path: OsString,
+    /// Where `github:<owner>/<repo>` sources are cloned and their releases
+    /// downloaded from (`None`: `https://github.com`). A mirror, GitHub
+    /// Enterprise or, in tests, a `file://` directory laid out the same way.
+    pub github_base: Option<String>,
 }
 
 impl Host {
+    /// The base URL of `github:` sources.
+    pub fn github_base(&self) -> &str {
+        self.github_base
+            .as_deref()
+            .unwrap_or(crate::source::DEFAULT_GITHUB_BASE)
+    }
+
     /// `~/.pixel`.
     pub fn state_dir(&self) -> PathBuf {
         self.home.join(STATE_DIR)
@@ -86,6 +97,9 @@ pub struct Resolved {
     pub program: PathBuf,
     /// The plugin directory (`None` for `pixel-<name>` on PATH).
     pub dir: Option<PathBuf>,
+    /// The command word to hand the program first: set when the manifest
+    /// lists `commands`, so one binary serves several (`<run> <command> …`).
+    pub command: Option<String>,
 }
 
 /// A directory plugin as found on disk: manifest read, nothing else checked.
@@ -106,6 +120,46 @@ pub(crate) fn find_in(plugins: &Path, name: &str) -> Result<Option<Found>, Error
     Ok(manifest::load(&dir, Some(name))?.map(|manifest| Found { dir, manifest }))
 }
 
+/// The plugin of `plugins` that answers to `command`: the one whose manifest
+/// lists it in `commands`, else the one named like it (when it lists none).
+/// Two answering is an error naming both: which one runs must not depend on
+/// directory order.
+pub(crate) fn find_serving(plugins: &Path, command: &str) -> Result<Option<Found>, Error> {
+    let mut serving: Vec<Found> = Vec::new();
+    if let Some(found) = find_in(plugins, command)?
+        && found.manifest.serves_command(command)
+    {
+        serving.push(found);
+    }
+    if let Ok(entries) = std::fs::read_dir(plugins) {
+        let mut others: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n != command && manifest::valid_name(n))
+            .collect();
+        others.sort();
+        for other in others {
+            // A broken manifest elsewhere does not stop `pixel <command>`:
+            // `list` reports it under its own name.
+            if let Ok(Some(found)) = find_in(plugins, &other)
+                && found.manifest.commands.iter().any(|c| c == command)
+            {
+                serving.push(found);
+            }
+        }
+    }
+    let mut serving = serving.into_iter();
+    match (serving.next(), serving.next()) {
+        (Some(first), Some(second)) => Err(Error::Conflict {
+            command: command.to_owned(),
+            first: first.manifest.name,
+            second: second.manifest.name,
+            dir: plugins.to_path_buf(),
+        }),
+        (found, _) => Ok(found),
+    }
+}
+
 /// Resolve `name` for execution. `Ok(None)`: nothing by that name anywhere.
 /// A repo plugin that exists but is untrusted is an error, not a fall-through:
 /// the repo claimed the name.
@@ -114,23 +168,25 @@ pub fn resolve(host: &Host, name: &str) -> Result<Option<Resolved>, Error> {
         return Ok(None);
     }
     if let Some(plugins) = host.repo_plugins()
-        && let Some(found) = find_in(&plugins, name)?
+        && let Some(found) = find_serving(&plugins, name)?
     {
-        return runnable(host, Place::Repo, found).map(Some);
+        return runnable(host, Place::Repo, found, name).map(Some);
     }
-    if let Some(found) = find_in(&host.user_plugins(), name)? {
-        return runnable(host, Place::User, found).map(Some);
+    if let Some(found) = find_serving(&host.user_plugins(), name)? {
+        return runnable(host, Place::User, found, name).map(Some);
     }
     Ok(find_on_path(name, &host.path).map(|program| Resolved {
         name: name.to_owned(),
         place: Place::Path,
         program,
         dir: None,
+        command: None,
     }))
 }
 
-fn runnable(host: &Host, place: Place, found: Found) -> Result<Resolved, Error> {
+fn runnable(host: &Host, place: Place, found: Found, command: &str) -> Result<Resolved, Error> {
     let Found { dir, manifest } = found;
+    let command = (!manifest.commands.is_empty()).then(|| command.to_owned());
     if !manifest.has_command() {
         return Err(Error::NoCommandCapability(manifest.name));
     }
@@ -149,6 +205,7 @@ fn runnable(host: &Host, place: Place, found: Found) -> Result<Resolved, Error> 
         place,
         program,
         dir: Some(dir),
+        command,
     })
 }
 
@@ -206,11 +263,14 @@ pub struct Row {
     pub version: String,
     pub api: String,
     pub capabilities: Vec<Capability>,
+    /// The commands it lists in its manifest; empty when it serves its own name.
+    pub commands: Vec<String>,
     /// `None` when the plugin has no network access to opt into.
     pub enabled: Option<bool>,
     /// `None` outside the repo tier, where nothing is trust-gated.
     pub trusted: Option<bool>,
-    /// Why the plugin cannot run, when its manifest is invalid.
+    /// Why the plugin cannot run: its manifest is invalid, its program is not
+    /// there, or another plugin of the tier answers to the same command.
     pub problem: Option<String>,
 }
 
@@ -219,11 +279,67 @@ pub struct Row {
 pub fn list(host: &Host) -> Result<Vec<Row>, Error> {
     let mut rows = Vec::new();
     if let Some(plugins) = host.repo_plugins() {
-        rows.extend(dir_rows(host, Place::Repo, &plugins)?);
+        let mut tier = dir_rows(host, Place::Repo, &plugins)?;
+        mark_conflicts(&mut tier);
+        rows.extend(tier);
     }
-    rows.extend(dir_rows(host, Place::User, &host.user_plugins())?);
+    let mut tier = dir_rows(host, Place::User, &host.user_plugins())?;
+    mark_conflicts(&mut tier);
+    rows.extend(tier);
     rows.extend(path_rows(&host.path));
     Ok(rows)
+}
+
+/// The commands a row answers to.
+fn row_serves(row: &Row) -> Vec<&str> {
+    if row
+        .problem
+        .as_ref()
+        .is_some_and(|p| !p.starts_with("not runnable"))
+    {
+        return Vec::new();
+    }
+    if row.commands.is_empty() {
+        vec![row.name.as_str()]
+    } else {
+        row.commands.iter().map(String::as_str).collect()
+    }
+}
+
+/// Flag every pair of plugins of one tier that answer to the same command:
+/// `pixel <command>` refuses to pick, and `list` says who is in the way.
+fn mark_conflicts(rows: &mut [Row]) {
+    let mut notes: Vec<(usize, String)> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        for command in row_serves(row) {
+            let others: Vec<&str> = rows
+                .iter()
+                .enumerate()
+                .filter(|(j, other)| *j != i && row_serves(other).contains(&command))
+                .map(|(_, other)| other.name.as_str())
+                .collect();
+            if !others.is_empty() {
+                notes.push((
+                    i,
+                    format!(
+                        "command `{command}` is also provided by {}",
+                        others
+                            .iter()
+                            .map(|o| format!("`{o}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+    for (i, note) in notes {
+        let row = &mut rows[i];
+        row.problem = Some(match row.problem.take() {
+            Some(existing) => format!("{existing}; {note}"),
+            None => note,
+        });
+    }
 }
 
 fn dir_rows(host: &Host, place: Place, plugins: &Path) -> Result<Vec<Row>, Error> {
@@ -247,6 +363,7 @@ fn dir_rows(host: &Host, place: Place, plugins: &Path) -> Result<Vec<Row>, Error
                 version: "-".to_owned(),
                 api: "-".to_owned(),
                 capabilities: Vec::new(),
+                commands: Vec::new(),
                 enabled: None,
                 trusted: None,
                 problem: Some(message),
@@ -275,10 +392,28 @@ fn manifest_row(host: &Host, place: Place, found: &Found) -> Result<Row, Error> 
         version: m.version.clone(),
         api: m.api.to_string(),
         capabilities: m.capabilities.clone(),
+        commands: m.commands.clone(),
         enabled,
         trusted,
-        problem: None,
+        problem: unrunnable(&found.dir, m),
     })
+}
+
+/// Why a plugin that should run a program cannot: its `run` is missing (a
+/// `github:` plugin installed before its binary was built), or escapes the
+/// plugin directory. `None` for a runnable plugin and for one with no
+/// `command` capability, which runs nothing.
+fn unrunnable(dir: &Path, manifest: &Manifest) -> Option<String> {
+    if !manifest.has_command() {
+        return None;
+    }
+    match contained_program(dir, manifest) {
+        Ok(_) => None,
+        Err(Error::BadRun { run, why, .. }) => {
+            Some(format!("not runnable: `run` = \"{run}\" {why}"))
+        }
+        Err(other) => Some(format!("not runnable: {other}")),
+    }
 }
 
 fn path_rows(path: &OsStr) -> Vec<Row> {
@@ -305,6 +440,7 @@ fn path_rows(path: &OsStr) -> Vec<Row> {
             version: "-".to_owned(),
             api: "1".to_owned(),
             capabilities: vec![Capability::Command],
+            commands: Vec::new(),
             enabled: None,
             trusted: None,
             problem: None,
@@ -322,7 +458,7 @@ pub fn render(rows: &[Row]) -> String {
         Some(true) => "yes",
         Some(false) => "no",
     };
-    let cells: Vec<[String; 7]> = rows
+    let cells: Vec<[String; 8]> = rows
         .iter()
         .map(|r| {
             let caps = if r.capabilities.is_empty() {
@@ -342,6 +478,11 @@ pub fn render(rows: &[Row]) -> String {
                 caps,
                 yes_no(r.enabled).to_owned(),
                 yes_no(r.trusted).to_owned(),
+                if r.commands.is_empty() {
+                    "-".to_owned()
+                } else {
+                    r.commands.join(",")
+                },
             ]
         })
         .collect();
@@ -353,6 +494,7 @@ pub fn render(rows: &[Row]) -> String {
         "CAPABILITIES",
         "ENABLED",
         "TRUSTED",
+        "COMMANDS",
     ];
     let widths: Vec<usize> = (0..header.len())
         .map(|i| {
@@ -710,6 +852,7 @@ mod tests {
                 version: "1.0.0".into(),
                 api: "1".into(),
                 capabilities: vec![Capability::Command],
+                commands: vec!["a".into(), "b".into()],
                 enabled: Some(true),
                 trusted: Some(false),
                 problem: None,
@@ -720,6 +863,7 @@ mod tests {
                 version: "-".into(),
                 api: "-".into(),
                 capabilities: vec![],
+                commands: vec![],
                 enabled: None,
                 trusted: None,
                 problem: Some("broken".into()),
@@ -728,9 +872,127 @@ mod tests {
         let text = render(&rows);
         assert_eq!(
             text,
-            "NAME  PLACE  VERSION  API  CAPABILITIES  ENABLED  TRUSTED\n\
-             flow  repo   1.0.0    1    command       yes      no\n\
-             x     user   -        -    -             -        -\n  ! x: broken\n"
+            "NAME  PLACE  VERSION  API  CAPABILITIES  ENABLED  TRUSTED  COMMANDS\n\
+             flow  repo   1.0.0    1    command       yes      no       a,b\n\
+             x     user   -        -    -             -        -        -\n  ! x: broken\n"
         );
+    }
+
+    /// A multi-command plugin: `<plugins>/<name>/` whose manifest lists `commands`.
+    fn multi(plugins: &Path, name: &str, commands: &[&str]) -> PathBuf {
+        let list = commands
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        plugin_dir(plugins, name, &format!("commands = [{list}]"))
+    }
+
+    #[test]
+    fn a_listed_command_resolves_to_its_plugin_and_is_handed_to_the_program() {
+        let f = fixture();
+        let dir = multi(&f.host.user_plugins(), "git", &["commit", "push"]);
+        for command in ["commit", "push"] {
+            let got = resolve(&f.host, command).unwrap().unwrap();
+            assert_eq!(got.name, "git", "{command}");
+            assert_eq!(got.place, Place::User);
+            assert_eq!(got.program, dir.join("run.sh").canonicalize().unwrap());
+            assert_eq!(got.command.as_deref(), Some(command));
+        }
+        assert_eq!(
+            resolve(&f.host, "git").unwrap(),
+            None,
+            "the plugin name is not a command once commands are listed"
+        );
+        assert_eq!(resolve(&f.host, "fetch").unwrap(), None);
+    }
+
+    #[test]
+    fn a_plugin_without_commands_still_serves_its_own_name_with_no_extra_word() {
+        let f = fixture();
+        plugin_dir(&f.host.user_plugins(), "tool", "");
+        let got = resolve(&f.host, "tool").unwrap().unwrap();
+        assert_eq!(got.command, None);
+    }
+
+    #[test]
+    fn the_repo_tier_still_wins_and_still_needs_trust_for_a_listed_command() {
+        let f = fixture();
+        multi(&f.host.user_plugins(), "git", &["commit"]);
+        let repo = multi(&f.host.repo_plugins().unwrap(), "repo-git", &["commit"]);
+        let err = resolve(&f.host, "commit").unwrap_err();
+        assert!(matches!(err, Error::Untrusted { .. }), "{err}");
+        trust(&f.host, "repo-git");
+        let got = resolve(&f.host, "commit").unwrap().unwrap();
+        assert_eq!((got.name.as_str(), got.place), ("repo-git", Place::Repo));
+        assert_eq!(got.program, repo.join("run.sh").canonicalize().unwrap());
+    }
+
+    #[test]
+    fn two_plugins_of_a_tier_answering_to_one_command_are_an_error_naming_both() {
+        let f = fixture();
+        multi(&f.host.user_plugins(), "git", &["commit", "push"]);
+        multi(&f.host.user_plugins(), "other", &["push"]);
+        let err = resolve(&f.host, "push").unwrap_err();
+        assert!(matches!(err, Error::Conflict { .. }), "{err}");
+        let text = err.to_string();
+        assert!(
+            text.contains("`push`") && text.contains("`git`") && text.contains("`other`"),
+            "{text}"
+        );
+        assert!(
+            resolve(&f.host, "commit").unwrap().is_some(),
+            "other commands still run"
+        );
+
+        // A plugin named like a command another one lists collides the same way.
+        plugin_dir(&f.host.user_plugins(), "commit", "");
+        let err = resolve(&f.host, "commit").unwrap_err().to_string();
+        assert!(err.contains("`commit`") && err.contains("`git`"), "{err}");
+    }
+
+    #[test]
+    fn a_broken_manifest_elsewhere_does_not_stop_a_listed_command() {
+        let f = fixture();
+        multi(&f.host.user_plugins(), "git", &["commit"]);
+        let broken = f.host.user_plugins().join("broken");
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join("pixel-plugin.toml"), "not toml [").unwrap();
+        assert_eq!(resolve(&f.host, "commit").unwrap().unwrap().name, "git");
+    }
+
+    #[test]
+    fn list_shows_the_commands_and_flags_a_shared_one_on_both_plugins() {
+        let f = fixture();
+        multi(&f.host.user_plugins(), "git", &["commit", "push"]);
+        multi(&f.host.user_plugins(), "other", &["push"]);
+        plugin_dir(&f.host.user_plugins(), "tool", "");
+        let rows = list(&f.host).unwrap();
+        let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap();
+        assert_eq!(row("git").commands, ["commit", "push"]);
+        assert_eq!(
+            row("git").problem.as_deref(),
+            Some("command `push` is also provided by `other`")
+        );
+        assert_eq!(
+            row("other").problem.as_deref(),
+            Some("command `push` is also provided by `git`")
+        );
+        assert_eq!(row("tool").problem, None);
+        let text = render(&rows);
+        assert!(text.contains("commit,push"), "{text}");
+        assert!(
+            text.contains("  ! git: command `push` is also provided by `other`\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_repo_plugin_and_a_user_plugin_sharing_a_command_is_shadowing_not_a_conflict() {
+        let f = fixture();
+        multi(&f.host.user_plugins(), "git", &["commit"]);
+        multi(&f.host.repo_plugins().unwrap(), "repo-git", &["commit"]);
+        let rows = list(&f.host).unwrap();
+        assert!(rows.iter().all(|r| r.problem.is_none()), "{rows:?}");
     }
 }

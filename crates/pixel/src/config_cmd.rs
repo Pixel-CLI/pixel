@@ -11,7 +11,7 @@
 //!
 //! The `policy` key is the retired guard's switch. No hook reads it any more:
 //! the guard and its rewrite or deny of native retrieval are gone, and
-//! `pixel install` registers only the task-event hook. The key stays readable
+//! `pixel setup` registers only the task-event hook. The key stays readable
 //! and writable so an existing configuration file keeps validating, and
 //! `pixel config` still reports it. `PIXEL_POLICY` overrides it for one
 //! environment and the legacy `PIXEL_TARGETS_GUARD=0` kill switch still reads
@@ -294,7 +294,7 @@ fn validate(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// How many `UserPromptSubmit` hooks `pixel install` registers for the prompt
+/// How many `UserPromptSubmit` hooks `pixel setup` registers for the prompt
 /// brief: `brief_parts` from the repository layer, then the global one, else 3.
 fn brief_parts(root: Option<&Path>) -> u8 {
     let home = std::env::var_os("HOME")

@@ -3,7 +3,7 @@
 
 //! Retirement of the Warp MCP server entry older installs wrote.
 //!
-//! Up to 0.6.1, `pixel install --repo` added a `pixel mcp` server to Warp's
+//! Up to 0.6.1, `pixel setup --repo` added a `pixel mcp` server to Warp's
 //! `.warp/.mcp.json`. Pixel ships no MCP server any more, so an entry left
 //! there points Warp at a command that is gone. Install and uninstall both
 //! remove this repository's entry, and `pixel doctor` reports one that

@@ -22,7 +22,7 @@ pub(crate) const CLAUDE_LOCAL_SETTINGS: &str = ".claude/settings.local.json";
 /// Devin CLI's personal per-project config; its `hooks` key is read like
 /// `.devin/hooks.v1.json`, but it is not shared with the team.
 pub(crate) const DEVIN_LOCAL_CONFIG: &str = ".devin/config.local.json";
-/// Where an earlier `pixel install --repo` wrote the Devin guard. Devin CLI
+/// Where an earlier `pixel setup --repo` wrote the Devin guard. Devin CLI
 /// never reads this file; install and uninstall take pixel's entry out of it.
 pub(crate) const DEVIN_LEGACY_HOOKS: &str = ".devin/hooks.json";
 /// Project-local snapshot of Codex `PreToolUse` groups adopted by the composed
@@ -799,8 +799,8 @@ pub(crate) fn load_rtk_backup(home: &Path) -> crate::Result<Vec<Value>> {
 }
 
 /// The RTK backup under `home` when no pixel guard in
-/// `~/.claude/settings.json` delegates to it: a leftover that `pixel install`
-/// never applies, such as one an `install --repo` build wrote under `$HOME`
+/// `~/.claude/settings.json` delegates to it: a leftover that `pixel setup`
+/// never applies, such as one an `setup --repo` build wrote under `$HOME`
 /// before the repository backup moved into the repository.
 pub(crate) fn orphan_rtk_backup(home: &Path, exe: &Path) -> Option<PathBuf> {
     let backup = home.join(RTK_BACKUP);
@@ -1246,7 +1246,7 @@ pub(crate) fn install_project_codex_at(
 ///
 /// `backup_root` is the directory whose `.claude/pixel-rtk-hooks.json` holds
 /// an adopted RTK group: `$HOME` for the global install, the repository for
-/// `pixel install --repo`, so a repo's adoption never reaches the global
+/// `pixel setup --repo`, so a repo's adoption never reaches the global
 /// settings. `inherited` is passed through to [`configure_scoped`].
 pub(crate) fn install_at_scoped(
     backup_root: &Path,
@@ -1537,7 +1537,7 @@ pub(crate) fn stacked_pixel_hooks(value: &Value, exe: &Path) -> Vec<String> {
 }
 
 /// The executables pixel's `run-hook` entries in a settings value run that
-/// are not `exe`, each once, in the order met. A `pixel-dev install` leaves
+/// are not `exe`, each once, in the order met. A `pixel-dev setup` leaves
 /// every hook on the side build and a package-manager upgrade can leave them
 /// on the previous version's path; either way the hooks are complete and
 /// counted once, so only the executable tells the managed binary that its

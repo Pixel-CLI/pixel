@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! Managing plugins: add, remove, enable, trust.
+//! Managing plugins: install (`add`), uninstall (`remove`), enable, trust.
 
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -11,8 +11,10 @@ use pixel_git::{GitOptions, GitRunner};
 
 use crate::Error;
 use crate::discover::{Found, Host, contained_program, find_in};
+use crate::fetch::{self, Downloaded};
 use crate::hash::dir_digest;
 use crate::manifest::{self, MANIFEST_FILE, Manifest};
+use crate::source::{GITHUB_PREFIX, GitHubSource, NPM_PREFIX, NPM_UNSUPPORTED};
 use crate::state::{Config, TrustStore};
 
 /// A shallow clone of a plugin repository may take a while on a slow link.
@@ -31,6 +33,26 @@ pub struct Added {
     pub name: String,
     pub dir: PathBuf,
     pub manifest: Manifest,
+    pub binary: Binary,
+}
+
+/// The state of the program a plugin's `run` names, once installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Binary {
+    /// The source shipped it.
+    Present,
+    /// A `github:` source did not ship it; a release asset was downloaded.
+    Downloaded(Downloaded),
+    /// A `github:` source did not ship it and no release asset could be
+    /// fetched: the plugin is installed and cannot run until it is built.
+    Missing {
+        /// The git URL `cargo install --git` builds from.
+        git_url: String,
+        /// The ref the plugin was cloned at, when one was asked for.
+        reference: Option<String>,
+        /// Why no release asset was used.
+        download_error: String,
+    },
 }
 
 pub fn looks_like_git_url(source: &str) -> bool {
@@ -50,51 +72,65 @@ pub fn redact_source(source: &str) -> String {
     }
 }
 
-/// Install a plugin into `~/.pixel/plugins/<name>/` from a local directory
-/// or a git URL. `name` picks one plugin out of a repository that holds
-/// several; without it the source must hold exactly one manifest.
+/// Install a plugin into `~/.pixel/plugins/<name>/` from a local directory,
+/// a git URL or `github:<owner>/<repo>[@<ref>]`. `name` picks one plugin out
+/// of a repository that holds several; without it the source must hold
+/// exactly one manifest.
+///
+/// A `github:` source whose manifest names a program the repository does not
+/// contain (it is built, not committed) gets the release asset
+/// `pixel-<name>-<target>`; without one the plugin is still installed, with
+/// [`Binary::Missing`] saying how to build it.
 pub fn add(host: &Host, source: &str, name: Option<&str>) -> Result<Added, Error> {
     if let Some(name) = name
         && !manifest::valid_name(name)
     {
         return Err(Error::InvalidName(name.to_owned()));
     }
-    let shown = redact_source(source);
+    if source.starts_with(NPM_PREFIX) {
+        return Err(Error::Unsupported(NPM_UNSUPPORTED.to_owned()));
+    }
+    let github = source
+        .strip_prefix(GITHUB_PREFIX)
+        .map(GitHubSource::parse)
+        .transpose()?;
+    let shown = github
+        .as_ref()
+        .map_or_else(|| redact_source(source), GitHubSource::shown);
     // Held until the copy is done: a clone is removed when it drops.
     let clone;
-    let base: PathBuf = if Path::new(source).is_dir() {
+    let base: PathBuf = if let Some(github) = &github {
+        let url = github.clone_url(host.github_base());
+        if !looks_like_git_url(&url) {
+            return Err(Error::Source(format!(
+                "the GitHub base URL {} must start with https://, ssh://, file:// or git@",
+                redact_source(host.github_base())
+            )));
+        }
+        clone = clone_repo(&url, github.reference.as_deref(), &shown)?;
+        clone.path().join("clone")
+    } else if Path::new(source).is_dir() {
         PathBuf::from(source)
     } else if looks_like_git_url(source) {
-        clone = tempfile::tempdir().map_err(|e| Error::io("create a clone directory", e))?;
-        let checkout = clone.path().join("clone");
-        let runner = GitRunner::with_options(
-            clone.path(),
-            GitOptions {
-                timeout: Some(CLONE_TIMEOUT),
-                max_output_bytes: Some(pixel_git::DEFAULT_MAX_OUTPUT_BYTES),
-            },
-        );
-        runner
-            .run(&["clone", "--depth", "1", "--", source, "clone"])
-            .map_err(|e| {
-                // Git echoes the URL it was given, userinfo included.
-                let reason = e.to_string().replace(source, &shown);
-                Error::Source(format!("cannot clone {shown}: {reason}"))
-            })?;
-        checkout
+        clone = clone_repo(source, None, &shown)?;
+        clone.path().join("clone")
     } else {
         return Err(Error::Source(format!(
             "{shown} is neither a directory nor a git URL (https://, ssh://, file:// or git@host:path)"
         )));
     };
     let (from, manifest) = locate(&base, name, &shown)?;
-    contained_program(&from, &manifest)?;
+    let unbuilt = github.is_some() && program_is_absent(&from, &manifest);
+    if !unbuilt {
+        contained_program(&from, &manifest)?;
+    }
 
     let plugins = host.user_plugins();
     let dest = plugins.join(&manifest.name);
     if std::fs::symlink_metadata(&dest).is_ok() {
         return Err(Error::AlreadyInstalled(manifest.name));
     }
+    ensure_no_shared_command(&plugins, &manifest)?;
     std::fs::create_dir_all(&plugins)
         .map_err(|e| Error::io(format!("create {}", plugins.display()), e))?;
     let staging = tempfile::Builder::new()
@@ -103,6 +139,10 @@ pub fn add(host: &Host, source: &str, name: Option<&str>) -> Result<Added, Error
         .map_err(|e| Error::io(format!("stage in {}", plugins.display()), e))?;
     let staged = staging.path().join(&manifest.name);
     copy_tree(&from, &staged)?;
+    let binary = match (&github, unbuilt) {
+        (Some(github), true) => fetch_program(host, github, &staged, &manifest),
+        _ => Binary::Present,
+    };
     std::fs::rename(&staged, &dest)
         .map_err(|e| Error::io(format!("install {}", dest.display()), e))?;
     Config::at(host.config_file()).record_source(&manifest.name, &shown)?;
@@ -110,7 +150,130 @@ pub fn add(host: &Host, source: &str, name: Option<&str>) -> Result<Added, Error
         name: manifest.name.clone(),
         dir: dest,
         manifest,
+        binary,
     })
+}
+
+/// Refuse a plugin that answers to a command an installed one already does:
+/// `pixel <command>` would stop running either.
+fn ensure_no_shared_command(plugins: &Path, manifest: &Manifest) -> Result<(), Error> {
+    let Ok(entries) = std::fs::read_dir(plugins) else {
+        return Ok(());
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| manifest::valid_name(n))
+        .collect();
+    names.sort();
+    for name in names {
+        let Ok(Some(installed)) = find_in(plugins, &name) else {
+            continue;
+        };
+        let incoming = manifest.serves();
+        if let Some(command) = installed
+            .manifest
+            .serves()
+            .into_iter()
+            .find(|c| incoming.contains(c))
+        {
+            return Err(Error::Conflict {
+                command: command.to_owned(),
+                first: installed.manifest.name,
+                second: manifest.name.clone(),
+                dir: plugins.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Shallow-clone `url` (at `reference`, a branch or tag) into `<tmp>/clone`.
+/// The directory is removed when the returned handle drops.
+fn clone_repo(url: &str, reference: Option<&str>, shown: &str) -> Result<tempfile::TempDir, Error> {
+    let clone = tempfile::tempdir().map_err(|e| Error::io("create a clone directory", e))?;
+    let runner = GitRunner::with_options(
+        clone.path(),
+        GitOptions {
+            timeout: Some(CLONE_TIMEOUT),
+            max_output_bytes: Some(pixel_git::DEFAULT_MAX_OUTPUT_BYTES),
+        },
+    );
+    let mut args = vec!["clone", "--depth", "1"];
+    if let Some(reference) = reference {
+        args.extend(["--branch", reference]);
+    }
+    args.extend(["--", url, "clone"]);
+    runner.run(&args).map_err(|e| {
+        // Git echoes the URL it was given, userinfo included.
+        let reason = e.to_string().replace(url, shown);
+        Error::Source(format!("cannot clone {shown}: {reason}"))
+    })?;
+    Ok(clone)
+}
+
+/// Whether the file `run` names is absent from `dir` (not merely unusable:
+/// a dangling or escaping link is a defect to report, not a build to do).
+fn program_is_absent(dir: &Path, manifest: &Manifest) -> bool {
+    std::fs::symlink_metadata(dir.join(&manifest.run))
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Put the release asset of `manifest` at `<staged>/<run>`, or say why not.
+fn fetch_program(host: &Host, github: &GitHubSource, staged: &Path, manifest: &Manifest) -> Binary {
+    let missing = |download_error: String| Binary::Missing {
+        git_url: redact_source(&github.clone_url(host.github_base())),
+        reference: github.reference.clone(),
+        download_error,
+    };
+    let Some(target) = fetch::release_target() else {
+        return missing("no release asset is published for this platform".to_owned());
+    };
+    let asset = fetch::asset_name(&manifest.name, &target);
+    let url = format!("{}/{asset}", github.release_url(host.github_base()));
+    let parent = match fetch::program_parent(staged, &manifest.run) {
+        Ok(parent) => parent,
+        Err(reason) => return missing(reason),
+    };
+    let Some(file_name) = Path::new(&manifest.run).file_name() else {
+        return missing(format!("`run` = \"{}\" names no file", manifest.run));
+    };
+    let dest = parent.join(file_name);
+    let allow_file = host.github_base().starts_with("file://");
+    match fetch::download_program(&url, &dest, allow_file) {
+        Ok(downloaded) => match contained_program(staged, manifest) {
+            Ok(_) => Binary::Downloaded(downloaded),
+            Err(e) => {
+                let _ = std::fs::remove_file(&dest);
+                missing(e.to_string())
+            }
+        },
+        Err(reason) => missing(reason),
+    }
+}
+
+/// `cargo install --git <url> [--rev <ref>] --root <root>`: builds the
+/// plugin's program into `<root>/bin/`, quoted for a POSIX shell.
+pub fn cargo_install_command(git_url: &str, reference: Option<&str>, root: &Path) -> String {
+    let mut command = format!("cargo install --git {}", shell_quote(git_url));
+    if let Some(reference) = reference {
+        command.push_str(&format!(" --rev {}", shell_quote(reference)));
+    }
+    command.push_str(&format!(" --root {}", shell_quote(&root.to_string_lossy())));
+    command
+}
+
+/// `text` as one POSIX shell word, single-quoted unless it is plainly safe.
+fn shell_quote(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-:@".contains(c));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
 }
 
 /// The directory under `base` that holds the plugin to install, and its
@@ -278,7 +441,9 @@ fn locate_installed(host: &Host, name: &str) -> Result<Found, Error> {
 mod tests {
     use super::*;
     use crate::discover::{Place, resolve};
-    use crate::testutil::{Fixture, fixture, plugin_dir};
+    use crate::hash::hex;
+    use crate::testutil::{Fixture, fixture, manifest_text, plugin_dir};
+    use sha2::{Digest, Sha256};
     use std::fs;
 
     fn source_dir(f: &Fixture, name: &str, extra: &str) -> PathBuf {
@@ -444,10 +609,7 @@ mod tests {
         fs::write(f.host.user_plugins().join("tool/marker"), "mine").unwrap();
         let err = add(&f.host, src.to_str().unwrap(), None).unwrap_err();
         assert!(matches!(err, Error::AlreadyInstalled(_)), "{err}");
-        assert!(
-            err.to_string().contains("`pixel plugin remove tool`"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("`pixel uninstall tool`"), "{err}");
         assert_eq!(
             fs::read_to_string(f.host.user_plugins().join("tool/marker")).unwrap(),
             "mine"
@@ -615,5 +777,366 @@ mod tests {
                 .is_trusted("esc", "x")
                 .unwrap()
         );
+    }
+
+    // ---- github: sources -------------------------------------------------
+
+    /// A `github:`-shaped directory tree under the fixture: `<base>/<owner>/<repo>.git`
+    /// is a bare clone of a work repository that `seed` filled.
+    fn github_base(f: &mut Fixture, owner: &str, repo: &str, seed: impl FnOnce(&Path)) -> PathBuf {
+        let work = f.tmp.path().join(format!("work-{repo}"));
+        fs::create_dir_all(&work).unwrap();
+        seed(&work);
+        crate::testutil::git(&work, &["init", "-q"]);
+        crate::testutil::git(&work, &["add", "."]);
+        crate::testutil::git(&work, &["commit", "-q", "-m", "seed"]);
+        crate::testutil::git(&work, &["tag", "v1"]);
+        let base = f.tmp.path().join("gh");
+        fs::create_dir_all(base.join(owner)).unwrap();
+        let bare = base.join(owner).join(format!("{repo}.git"));
+        crate::testutil::git(
+            f.tmp.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                work.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        f.host.github_base = Some(format!("file://{}", base.display()));
+        base
+    }
+
+    /// A plugin whose manifest names `bin/tool`, which the repository does not ship.
+    fn unbuilt(work: &Path) {
+        fs::write(
+            work.join("pixel-plugin.toml"),
+            manifest_text("tool", "").replace("run.sh", "bin/tool"),
+        )
+        .unwrap();
+    }
+
+    fn publish_asset(base: &Path, tail: &str, name: &str, bytes: &[u8]) -> PathBuf {
+        let target = fetch::release_target().expect("a platform with release assets");
+        let dir = base.join("acme/tool/releases").join(tail);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(fetch::asset_name(name, &target));
+        fs::write(&file, bytes).unwrap();
+        file
+    }
+
+    #[test]
+    fn github_clones_the_default_branch_and_records_the_typed_source() {
+        let mut f = fixture();
+        github_base(&mut f, "acme", "tool", |work| {
+            plugin_dir(work, "tool", "");
+        });
+        let added = add(&f.host, "github:acme/tool", None).unwrap();
+        assert_eq!(added.name, "tool");
+        assert_eq!(added.binary, Binary::Present);
+        assert!(added.dir.join("run.sh").is_file());
+        assert!(!added.dir.join(".git").exists());
+        assert_eq!(
+            Config::at(f.host.config_file())
+                .source("tool")
+                .unwrap()
+                .as_deref(),
+            Some("github:acme/tool")
+        );
+        assert_eq!(
+            resolve(&f.host, "tool").unwrap().unwrap().place,
+            Place::User
+        );
+    }
+
+    #[test]
+    fn github_at_a_ref_installs_that_tag_not_the_default_branch() {
+        let mut f = fixture();
+        let base = github_base(&mut f, "acme", "tool", |work| {
+            plugin_dir(work, "tool", "");
+        });
+        // A later commit on the default branch that the tag does not hold.
+        let work = f.tmp.path().join("work-tool");
+        fs::write(work.join("tool/later.txt"), "later").unwrap();
+        crate::testutil::git(&work, &["add", "."]);
+        crate::testutil::git(&work, &["commit", "-q", "-m", "later"]);
+        let bare = base.join("acme/tool.git");
+        crate::testutil::git(
+            &work,
+            &[
+                "push",
+                "-q",
+                bare.to_str().unwrap(),
+                "HEAD:refs/heads/main2",
+            ],
+        );
+        crate::testutil::git(&bare, &["symbolic-ref", "HEAD", "refs/heads/main2"]);
+
+        let pinned = add(&f.host, "github:acme/tool@v1", None).unwrap();
+        assert!(!pinned.dir.join("later.txt").exists());
+        assert_eq!(
+            Config::at(f.host.config_file())
+                .source("tool")
+                .unwrap()
+                .as_deref(),
+            Some("github:acme/tool@v1")
+        );
+        remove(&f.host, "tool").unwrap();
+        let newest = add(&f.host, "github:acme/tool", None).unwrap();
+        assert!(newest.dir.join("later.txt").is_file());
+    }
+
+    #[test]
+    fn a_missing_program_is_fetched_from_the_latest_release_and_verified() {
+        let mut f = fixture();
+        let base = github_base(&mut f, "acme", "tool", unbuilt);
+        let asset = publish_asset(&base, "latest/download", "tool", b"#!/bin/sh\necho built\n");
+        let digest = hex(&Sha256::digest(fs::read(&asset).unwrap()));
+        fs::write(
+            format!("{}.sha256", asset.display()),
+            format!("{digest}  asset\n"),
+        )
+        .unwrap();
+
+        let added = add(&f.host, "github:acme/tool", None).unwrap();
+        let Binary::Downloaded(got) = &added.binary else {
+            panic!("expected a download: {:?}", added.binary);
+        };
+        assert!(got.verified);
+        assert!(got.url.ends_with(&format!(
+            "/acme/tool/releases/latest/download/{}",
+            fetch::asset_name("tool", &fetch::release_target().unwrap())
+        )));
+        assert_eq!(
+            fs::read_to_string(added.dir.join("bin/tool")).unwrap(),
+            "#!/bin/sh\necho built\n"
+        );
+        let resolved = resolve(&f.host, "tool").unwrap().unwrap();
+        assert_eq!(
+            resolved.program,
+            added.dir.join("bin/tool").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_pinned_ref_downloads_from_that_tags_release_without_a_digest() {
+        let mut f = fixture();
+        let base = github_base(&mut f, "acme", "tool", unbuilt);
+        publish_asset(&base, "download/v1", "tool", b"#!/bin/sh\n");
+        publish_asset(&base, "latest/download", "tool", b"newest");
+        let added = add(&f.host, "github:acme/tool@v1", None).unwrap();
+        let Binary::Downloaded(got) = &added.binary else {
+            panic!("expected a download: {:?}", added.binary);
+        };
+        assert!(!got.verified, "no .sha256 was published");
+        assert!(got.url.contains("/releases/download/v1/"), "{}", got.url);
+        assert_eq!(
+            fs::read_to_string(added.dir.join("bin/tool")).unwrap(),
+            "#!/bin/sh\n"
+        );
+    }
+
+    #[test]
+    fn a_wrong_digest_installs_the_plugin_without_the_program() {
+        let mut f = fixture();
+        let base = github_base(&mut f, "acme", "tool", unbuilt);
+        let asset = publish_asset(&base, "latest/download", "tool", b"payload");
+        fs::write(format!("{}.sha256", asset.display()), "00".repeat(32)).unwrap();
+        let added = add(&f.host, "github:acme/tool", None).unwrap();
+        let Binary::Missing { download_error, .. } = &added.binary else {
+            panic!("expected the build hint: {:?}", added.binary);
+        };
+        assert!(
+            download_error.contains("does not match its published sha256"),
+            "{download_error}"
+        );
+        assert!(
+            !added.dir.join("bin/tool").exists(),
+            "the rejected file is gone"
+        );
+        assert!(
+            added.dir.join("pixel-plugin.toml").is_file(),
+            "the plugin itself is installed"
+        );
+    }
+
+    #[test]
+    fn without_a_release_asset_the_plugin_is_installed_but_not_runnable() {
+        let mut f = fixture();
+        github_base(&mut f, "acme", "tool", unbuilt);
+        let added = add(&f.host, "github:acme/tool@v1", None).unwrap();
+        let Binary::Missing {
+            git_url,
+            reference,
+            download_error,
+        } = &added.binary
+        else {
+            panic!("expected the build hint: {:?}", added.binary);
+        };
+        assert_eq!(git_url, &format!("{}/acme/tool.git", f.host.github_base()));
+        assert_eq!(reference.as_deref(), Some("v1"));
+        assert!(
+            download_error.starts_with("cannot download "),
+            "{download_error}"
+        );
+
+        let err = resolve(&f.host, "tool").unwrap_err().to_string();
+        assert!(err.contains("`run` = \"bin/tool\""), "{err}");
+        let rows = crate::list(&f.host).unwrap();
+        let row = rows.iter().find(|r| r.name == "tool").unwrap();
+        let problem = row.problem.as_deref().unwrap();
+        assert!(
+            problem.starts_with("not runnable: `run` = \"bin/tool\""),
+            "{problem}"
+        );
+        assert!(crate::render(&rows).contains("  ! tool: not runnable:"));
+    }
+
+    #[test]
+    fn a_dangling_program_link_is_a_defect_not_a_build_to_do() {
+        let mut f = fixture();
+        github_base(&mut f, "acme", "tool", |work| {
+            plugin_dir(work, "tool", "");
+            fs::remove_file(work.join("tool/run.sh")).unwrap();
+            std::os::unix::fs::symlink("/no/such/program", work.join("tool/run.sh")).unwrap();
+        });
+        let err = add(&f.host, "github:acme/tool", None).unwrap_err();
+        assert!(matches!(err, Error::BadRun { .. }), "{err}");
+        assert!(!f.host.user_plugins().join("tool").exists());
+    }
+
+    #[test]
+    fn a_download_never_follows_a_link_out_of_the_plugin() {
+        let mut f = fixture();
+        let outside = f.tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let base = github_base(&mut f, "acme", "tool", |work| {
+            unbuilt(work);
+            std::os::unix::fs::symlink(&outside, work.join("bin")).unwrap();
+        });
+        publish_asset(&base, "latest/download", "tool", b"payload");
+        let added = add(&f.host, "github:acme/tool", None).unwrap();
+        let Binary::Missing { download_error, .. } = &added.binary else {
+            panic!("expected the build hint: {:?}", added.binary);
+        };
+        assert!(
+            download_error.contains("not a directory in the plugin"),
+            "{download_error}"
+        );
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing written outside"
+        );
+    }
+
+    #[test]
+    fn another_source_kind_never_downloads_a_program() {
+        let f = fixture();
+        let src = source_dir(&f, "tool", "");
+        fs::remove_file(src.join("run.sh")).unwrap();
+        let err = add(&f.host, src.to_str().unwrap(), None).unwrap_err();
+        assert!(matches!(err, Error::BadRun { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_malformed_github_source_is_refused_before_anything_is_fetched() {
+        let f = fixture();
+        for bad in [
+            "github:",
+            "github:acme",
+            "github:acme/tool@",
+            "github:-x/y",
+            "github:a/b/c",
+        ] {
+            let err = add(&f.host, bad, None).unwrap_err();
+            assert!(matches!(err, Error::Source(_)), "{bad}: {err}");
+            assert!(
+                err.to_string().contains("github:<owner>/<repo>[@<ref>]"),
+                "{bad}: {err}"
+            );
+        }
+        assert!(!f.host.user_plugins().exists());
+    }
+
+    #[test]
+    fn a_github_base_that_is_not_a_git_url_is_refused() {
+        let mut f = fixture();
+        f.host.github_base = Some("ext::sh -c id".to_owned());
+        let err = add(&f.host, "github:acme/tool", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("GitHub base URL ext::sh -c id must start with"),
+            "{err}"
+        );
+        f.host.github_base = Some("https://user:secret@ghe.example".to_owned());
+        let err = add(&f.host, "github:acme/tool", None)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("secret"), "{err}");
+    }
+
+    #[test]
+    fn a_failed_github_clone_names_the_source_by_its_typed_form() {
+        let mut f = fixture();
+        f.host.github_base = Some(format!("file://{}/nowhere", f.tmp.path().display()));
+        let err = add(&f.host, "github:acme/tool", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("cannot clone github:acme/tool: "), "{err}");
+        assert!(!err.contains("file://"), "the URL is shown as typed: {err}");
+    }
+
+    #[test]
+    fn npm_sources_are_not_supported_yet() {
+        let f = fixture();
+        let err = add(&f.host, "npm:@acme/tool", None).unwrap_err();
+        assert!(matches!(err, Error::Unsupported(_)), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "npm sources are not supported yet; use github:<owner>/<repo> or a local path"
+        );
+        assert!(!f.host.user_plugins().exists());
+    }
+
+    #[test]
+    fn the_build_command_quotes_what_a_shell_would_split() {
+        let root = Path::new("/home/o'neil/.pixel/plugins/tool");
+        assert_eq!(
+            cargo_install_command("https://github.com/acme/tool.git", None, root),
+            "cargo install --git https://github.com/acme/tool.git --root '/home/o'\\''neil/.pixel/plugins/tool'"
+        );
+        assert_eq!(
+            cargo_install_command("file:///a b/tool.git", Some("release/v1"), Path::new("/p")),
+            "cargo install --git 'file:///a b/tool.git' --rev release/v1 --root /p"
+        );
+    }
+
+    #[test]
+    fn a_plugin_answering_to_an_installed_plugins_command_is_refused() {
+        let f = fixture();
+        let git = plugin_dir(
+            &f.tmp.path().join("src"),
+            "git",
+            "commands = [\"commit\", \"push\"]",
+        );
+        add(&f.host, git.to_str().unwrap(), None).unwrap();
+        let other = plugin_dir(&f.tmp.path().join("src"), "other", "commands = [\"push\"]");
+        let err = add(&f.host, other.to_str().unwrap(), None).unwrap_err();
+        assert!(matches!(err, Error::Conflict { .. }), "{err}");
+        assert!(
+            err.to_string().contains("`git`") && err.to_string().contains("`other`"),
+            "{err}"
+        );
+        assert!(!f.host.user_plugins().join("other").exists());
+        let named = plugin_dir(&f.tmp.path().join("src"), "commit", "");
+        assert!(matches!(
+            add(&f.host, named.to_str().unwrap(), None).unwrap_err(),
+            Error::Conflict { .. }
+        ));
+        let fine = plugin_dir(&f.tmp.path().join("src"), "fetch", "");
+        add(&f.host, fine.to_str().unwrap(), None).unwrap();
     }
 }

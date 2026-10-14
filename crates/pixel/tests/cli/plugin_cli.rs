@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! `pixel plugin …` and `pixel <plugin> …` through the real binary, with a
-//! scratch HOME, a scratch git repository and a PATH of its own.
+//! `pixel install`, `pixel uninstall`, `pixel plugin …` and `pixel <plugin> …`
+//! through the real binary, with a scratch HOME, a scratch git repository and
+//! a PATH of its own.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -49,6 +50,11 @@ impl World {
 
     /// `pixel <args>` from inside the repository.
     fn pixel(&self, args: &[&str]) -> Output {
+        self.pixel_with(args, &[])
+    }
+
+    /// `pixel <args>` with more environment variables.
+    fn pixel_with(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
         pixel_command()
             .current_dir(self.repo())
             .env("HOME", self.home())
@@ -57,6 +63,7 @@ impl World {
                 format!("{}:/usr/bin:/bin", self.scratch.join("bin").display()),
             )
             .env("PIXEL_METRICS", "0")
+            .envs(envs.iter().copied())
             .args(args)
             .output()
             .unwrap()
@@ -105,10 +112,10 @@ fn list_is_empty_on_a_clean_machine() {
 }
 
 #[test]
-fn an_added_plugin_runs_with_the_args_the_environment_and_its_exit_code() {
+fn an_installed_plugin_runs_with_the_args_the_environment_and_its_exit_code() {
     let world = World::new("run");
     let source = world.source("tool", "");
-    let added = world.pixel(&["plugin", "add", source.to_str().unwrap()]);
+    let added = world.pixel(&["install", source.to_str().unwrap()]);
     assert!(
         ok(&added).starts_with("installed plugin tool 1.4.2 in "),
         "{added:?}"
@@ -118,7 +125,7 @@ fn an_added_plugin_runs_with_the_args_the_environment_and_its_exit_code() {
     let row = listed.lines().find(|l| l.starts_with("tool")).unwrap();
     assert_eq!(
         row.split_whitespace().collect::<Vec<_>>(),
-        ["tool", "user", "1.4.2", "1", "command", "-", "-"]
+        ["tool", "user", "1.4.2", "1", "command", "-", "-", "-"]
     );
 
     let out = world.pixel(&["--metrics", "off", "tool", "a", "--flag", "b c"]);
@@ -172,7 +179,7 @@ fn a_repo_plugin_needs_trust_and_loses_it_when_a_file_changes() {
         listed
             .lines()
             .any(|l| l.split_whitespace().collect::<Vec<_>>()
-                == ["tool", "repo", "1.4.2", "1", "command", "-", "yes"]),
+                == ["tool", "repo", "1.4.2", "1", "command", "-", "yes", "-"]),
         "{listed}"
     );
 
@@ -208,7 +215,7 @@ fn a_run_that_escapes_through_a_symlink_never_executes() {
 fn a_network_plugin_is_refused_until_it_is_enabled() {
     let world = World::new("network");
     let source = world.source("net", "network = true");
-    let added = ok(&world.pixel(&["plugin", "add", source.to_str().unwrap()]));
+    let added = ok(&world.pixel(&["install", source.to_str().unwrap()]));
     assert!(added.contains("run `pixel plugin enable net`"), "{added}");
 
     let refused = world.pixel(&["net"]);
@@ -226,7 +233,7 @@ fn a_network_plugin_is_refused_until_it_is_enabled() {
         listed
             .lines()
             .any(|l| l.split_whitespace().collect::<Vec<_>>()
-                == ["net", "user", "1.4.2", "1", "command", "yes", "-"]),
+                == ["net", "user", "1.4.2", "1", "command", "yes", "-", "-"]),
         "{listed}"
     );
 }
@@ -247,7 +254,7 @@ fn an_executable_pixel_name_on_path_is_a_plugin_without_a_manifest() {
         listed
             .lines()
             .any(|l| l.split_whitespace().collect::<Vec<_>>()
-                == ["hello", "path", "-", "1", "command", "-", "-"]),
+                == ["hello", "path", "-", "1", "command", "-", "-", "-"]),
         "{listed}"
     );
 }
@@ -271,12 +278,12 @@ fn a_user_plugin_shadows_path_and_a_trusted_repo_plugin_shadows_both() {
 }
 
 #[test]
-fn remove_deletes_the_plugin() {
+fn uninstall_deletes_the_plugin() {
     let world = World::new("remove");
     let source = world.source("tool", "");
-    ok(&world.pixel(&["plugin", "add", source.to_str().unwrap()]));
+    ok(&world.pixel(&["install", source.to_str().unwrap()]));
     assert_eq!(
-        ok(&world.pixel(&["plugin", "remove", "tool"])),
+        ok(&world.pixel(&["uninstall", "tool"])),
         "removed plugin tool\n"
     );
     assert!(!world.user_plugins().join("tool").exists());
@@ -286,7 +293,7 @@ fn remove_deletes_the_plugin() {
         Some(2),
         "back to clap's unknown-command error: {gone:?}"
     );
-    let missing = world.pixel(&["plugin", "remove", "tool"]);
+    let missing = world.pixel(&["uninstall", "tool"]);
     assert_eq!(missing.status.code(), Some(1));
     assert!(stderr(&missing).contains("plugin `tool` is not installed"));
 }
@@ -306,14 +313,14 @@ fn an_unknown_command_without_a_plugin_keeps_clap_error() {
 }
 
 #[test]
-fn add_reports_a_bad_source_and_keeps_the_credentials_of_a_url_out_of_the_log() {
+fn install_reports_a_bad_source_and_keeps_the_credentials_of_a_url_out_of_the_log() {
     let world = World::new("addbad");
-    let out = world.pixel(&["plugin", "add", "/definitely/not/here"]);
+    let out = world.pixel(&["install", "/definitely/not/here"]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(stderr(&out).contains("neither a directory nor a git URL"));
 
     let url = "file://user:ghp_topsecret@/definitely/not/here";
-    let out = world.pixel(&["plugin", "add", url]);
+    let out = world.pixel(&["install", url]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(!stderr(&out).contains("ghp_topsecret"), "{}", stderr(&out));
     let log =
@@ -322,7 +329,7 @@ fn add_reports_a_bad_source_and_keeps_the_credentials_of_a_url_out_of_the_log() 
 }
 
 /// The pre-rename spellings that stood for a command now shipped as a
-/// plugin, with the plugin they resolve to.
+/// plugin and not built into the core, with the plugin they resolve to.
 const MOVED_ALIASES: [(&str, &str); 5] = [
     ("replay-flow", "flow"),
     ("rescue", "plan-rollback"),
@@ -331,29 +338,62 @@ const MOVED_ALIASES: [(&str, &str); 5] = [
     ("update", "fast-forward"),
 ];
 
+/// The moved commands the core no longer builds in: the only names the
+/// moved-command hint is for. The rest still run from the binary until the
+/// change that removes them from it.
+fn unbuilt_moved() -> Vec<(&'static str, &'static str)> {
+    let built_in = super::support::built_in_commands();
+    pixel_plugin::MOVED_COMMANDS
+        .iter()
+        .copied()
+        .filter(|(name, _)| !built_in.contains(*name))
+        .collect()
+}
+
 fn moved_hint(name: &str) -> String {
-    format!(
-        "pixel: \"{name}\" moved to a plugin: pixel plugin add https://github.com/Pixel-CLI/pixel-plugins --name {name}\n"
-    )
+    let (_, repo) = pixel_plugin::MOVED_COMMANDS
+        .iter()
+        .find(|(command, _)| *command == name)
+        .unwrap();
+    format!("pixel: \"{name}\" moved to a plugin: pixel install github:Pixel-CLI/{repo}\n")
 }
 
 #[test]
-fn the_alias_list_is_every_rename_that_points_at_a_moved_command() {
+fn the_alias_list_is_every_rename_that_points_at_an_unbuilt_moved_command() {
+    let unbuilt: Vec<&str> = unbuilt_moved().iter().map(|(name, _)| *name).collect();
     let derived: Vec<(&str, &str)> = pixel_proto::commands::RENAMED_COMMANDS
         .iter()
         .copied()
-        .filter(|(_, new)| pixel_plugin::MOVED_COMMANDS.contains(new))
+        .filter(|(_, new)| unbuilt.contains(new))
         .collect();
     assert_eq!(derived, MOVED_ALIASES);
 }
 
 #[test]
-fn a_moved_command_and_each_of_its_aliases_without_a_plugin_print_the_hint_and_exit_two() {
+fn the_unbuilt_moved_commands_are_the_ones_the_core_already_dropped() {
+    let unbuilt: Vec<&str> = unbuilt_moved().iter().map(|(name, _)| *name).collect();
+    for name in [
+        "flow",
+        "plan-rollback",
+        "token-savings",
+        "squash-branch",
+        "fast-forward",
+    ] {
+        assert!(unbuilt.contains(&name), "{name}: {unbuilt:?}");
+    }
+}
+
+#[test]
+fn an_unbuilt_moved_command_and_each_of_its_aliases_without_a_plugin_print_the_hint_and_exit_two() {
     let world = World::new("hints");
-    for name in pixel_plugin::MOVED_COMMANDS {
+    for (name, repo) in unbuilt_moved() {
         let out = world.pixel(&[name, "anything", "--json"]);
         assert_eq!(out.status.code(), Some(2), "{name}: {out:?}");
-        assert_eq!(stderr(&out), moved_hint(name), "{name}");
+        assert_eq!(
+            stderr(&out),
+            format!("pixel: \"{name}\" moved to a plugin: pixel install github:Pixel-CLI/{repo}\n"),
+            "{name}"
+        );
         assert_eq!(stdout(&out), "", "{name}");
     }
     for (alias, name) in MOVED_ALIASES {
@@ -369,26 +409,52 @@ fn a_moved_command_and_each_of_its_aliases_without_a_plugin_print_the_hint_and_e
 }
 
 #[test]
-fn the_pruned_surface_lists_no_moved_command() {
-    let world = World::new("help");
-    let help = ok(&world.pixel(&["--help"]));
-    let commands = help
-        .split("Commands:")
-        .nth(1)
-        .and_then(|rest| rest.split("Options:").next())
-        .unwrap();
-    let listed: Vec<&str> = commands
-        .lines()
-        .filter_map(|line| line.strip_prefix("  "))
-        .filter(|line| !line.starts_with(' '))
-        .filter_map(|line| line.split_whitespace().next())
-        .collect();
-    assert!(listed.contains(&"plugin"), "{listed:?}");
-    for name in pixel_plugin::MOVED_COMMANDS {
-        assert!(
-            !listed.contains(&name),
-            "{name} is still listed: {listed:?}"
+fn the_hint_names_the_repository_each_command_moves_to() {
+    let world = World::new("hint-repos");
+    for (name, repo) in [
+        ("flow", "pixel-flow"),
+        ("plan-rollback", "pixel-git"),
+        ("squash-branch", "pixel-git"),
+        ("fast-forward", "pixel-git"),
+        ("token-savings", "pixel-telemetry"),
+    ] {
+        let out = world.pixel(&[name]);
+        assert_eq!(
+            stderr(&out),
+            format!("pixel: \"{name}\" moved to a plugin: pixel install github:Pixel-CLI/{repo}\n")
         );
+    }
+}
+
+#[test]
+fn a_moved_command_that_is_still_built_in_runs_instead_of_hinting() {
+    let world = World::new("still-built-in");
+    let help = world.pixel(&["commit-history", "--help"]);
+    assert_eq!(help.status.code(), Some(0), "{help:?}");
+    assert!(
+        stdout(&help).contains("Usage: pixel commit-history"),
+        "{}",
+        stdout(&help)
+    );
+    assert!(
+        !stderr(&help).contains("moved to a plugin"),
+        "{}",
+        stderr(&help)
+    );
+    assert!(super::support::built_in_commands().contains("recall"));
+}
+
+#[test]
+fn the_pruned_surface_lists_no_unbuilt_moved_command() {
+    let listed = super::support::built_in_commands();
+    assert!(listed.contains("plugin"), "{listed:?}");
+    assert!(
+        listed.contains("install") && listed.contains("uninstall"),
+        "{listed:?}"
+    );
+    assert!(listed.contains("setup"), "{listed:?}");
+    for (name, _) in unbuilt_moved() {
+        assert!(!listed.contains(name), "{name} is still listed: {listed:?}");
     }
 }
 
@@ -400,12 +466,12 @@ fn path_plugin(world: &World, name: &str) {
 }
 
 #[test]
-fn a_moved_command_runs_the_plugin_by_name_and_by_alias_with_its_own_args_and_exit_code() {
+fn an_unbuilt_moved_command_runs_the_plugin_by_name_and_by_alias_with_its_own_args_and_exit_code() {
     let world = World::new("moved-run");
-    for name in pixel_plugin::MOVED_COMMANDS {
+    for (name, _) in unbuilt_moved() {
         path_plugin(&world, name);
     }
-    for name in pixel_plugin::MOVED_COMMANDS {
+    for (name, _) in unbuilt_moved() {
         let out = world.pixel(&[name, "list", "--json"]);
         assert!(
             ok(&out).starts_with("args=list --json\napi=1\n"),
@@ -452,19 +518,382 @@ fn an_alias_resolves_to_the_plugin_of_the_canonical_name_only() {
 }
 
 #[test]
-fn a_plugin_installed_with_plugin_add_serves_the_moved_name() {
+fn an_installed_plugin_serves_the_moved_name() {
     let world = World::new("moved-add");
     let source = world.source("flow", "");
-    ok(&world.pixel(&["plugin", "add", source.to_str().unwrap()]));
+    ok(&world.pixel(&["install", source.to_str().unwrap()]));
     assert!(ok(&world.pixel(&["flow", "list"])).starts_with("args=list\napi=1\n"));
     let by_alias = world.pixel(&["replay-flow", "list"]);
     assert!(
         ok(&by_alias).starts_with("args=list\napi=1\n"),
         "{by_alias:?}"
     );
-    // Another moved command is still only a hint.
+    // Another unbuilt moved command is still only a hint.
     assert_eq!(
-        stderr(&world.pixel(&["token-savings"])),
-        moved_hint("token-savings")
+        stderr(&world.pixel(&["plan-rollback"])),
+        moved_hint("plan-rollback")
     );
+}
+
+#[test]
+fn plugin_keeps_list_enable_and_trust_only() {
+    let world = World::new("plugin-subs");
+    for retired in ["add", "remove"] {
+        let out = world.pixel(&["plugin", retired, "x"]);
+        assert_eq!(out.status.code(), Some(2), "plugin {retired}: {out:?}");
+        assert!(
+            stderr(&out).contains(&format!("unrecognized subcommand '{retired}'")),
+            "{}",
+            stderr(&out)
+        );
+    }
+    let help = ok(&world.pixel(&["plugin", "--help"]));
+    let commands = help
+        .split("Commands:")
+        .nth(1)
+        .and_then(|rest| rest.split("Options:").next())
+        .unwrap();
+    let listed: Vec<&str> = commands
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .collect();
+    assert_eq!(listed, ["list", "enable", "trust"]);
+}
+
+#[test]
+fn install_of_an_npm_package_says_not_yet_and_exits_two() {
+    let world = World::new("npm");
+    let out = world.pixel(&["install", "npm:@acme/tool"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert_eq!(
+        stderr(&out),
+        "pixel: npm sources are not supported yet; use github:<owner>/<repo> or a local path\n"
+    );
+    assert_eq!(stdout(&out), "");
+    assert!(!world.user_plugins().exists(), "nothing installed");
+}
+
+/// A `github:`-shaped base directory: `<base>/acme/<repo>.git` is a bare
+/// clone of a work repository holding the plugin source.
+fn github_base(world: &World, repo: &str, manifest_run: &str, tracked_run: bool) -> PathBuf {
+    let work = world.scratch.join(format!("work-{repo}"));
+    std::fs::create_dir_all(work.join("bin")).unwrap();
+    std::fs::write(
+        work.join("pixel-plugin.toml"),
+        format!(
+            "name = \"{repo}\"\nversion = \"2.0.0\"\napi = 1\ndescription = \"fixture\"\nrun = \"{manifest_run}\"\ncapabilities = [\"command\"]\n"
+        ),
+    )
+    .unwrap();
+    if tracked_run {
+        let run = work.join(manifest_run);
+        std::fs::write(&run, RUN_SCRIPT).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+    } else {
+        std::fs::write(work.join("bin/.gitkeep"), "").unwrap();
+    }
+    git(&work, &["init", "-q"]);
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-qm", "seed"]);
+    let base = world.scratch.join("gh");
+    std::fs::create_dir_all(base.join("acme")).unwrap();
+    let bare = base.join(format!("acme/{repo}.git"));
+    git(
+        &world.scratch,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            work.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    base
+}
+
+fn base_url(base: &Path) -> String {
+    format!("file://{}", base.display())
+}
+
+#[test]
+fn install_github_clones_the_repo_and_the_plugin_runs() {
+    let world = World::new("github");
+    let base = github_base(&world, "hello", "run.sh", true);
+    let out = world.pixel_with(
+        &["install", "github:acme/hello"],
+        &[("PIXEL_GITHUB_BASE_URL", &base_url(&base))],
+    );
+    assert!(
+        ok(&out).starts_with("installed plugin hello 2.0.0 in "),
+        "{out:?}"
+    );
+    assert!(world.user_plugins().join("hello/run.sh").is_file());
+    assert!(ok(&world.pixel(&["hello", "a b"])).starts_with("args=a b\napi=1\n"));
+    let listed = ok(&world.pixel(&["plugin", "list"]));
+    assert!(
+        listed
+            .lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>()
+                == ["hello", "user", "2.0.0", "1", "command", "-", "-", "-"]),
+        "{listed}"
+    );
+    let sources = std::fs::read_to_string(world.home().join(".pixel/plugins.toml")).unwrap();
+    assert!(
+        sources.contains("hello = \"github:acme/hello\""),
+        "{sources}"
+    );
+}
+
+#[test]
+fn install_github_downloads_the_release_asset_for_an_unbuilt_program() {
+    let world = World::new("github-asset");
+    let base = github_base(&world, "built", "bin/built", false);
+    let target = pixel_plugin::release_target().expect("a platform with release assets");
+    let dir = base.join("acme/built/releases/latest/download");
+    std::fs::create_dir_all(&dir).unwrap();
+    let asset = dir.join(format!("pixel-built-{target}"));
+    std::fs::write(&asset, RUN_SCRIPT).unwrap();
+    let out = world.pixel_with(
+        &["install", "github:acme/built"],
+        &[("PIXEL_GITHUB_BASE_URL", &base_url(&base))],
+    );
+    let text = ok(&out);
+    assert!(
+        text.starts_with("installed plugin built 2.0.0 in "),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("downloaded {}/acme/built/releases/latest/download/pixel-built-{target} (no .sha256 published: checksum not verified)", base_url(&base))),
+        "{text}"
+    );
+    assert!(ok(&world.pixel(&["built", "go"])).starts_with("args=go\napi=1\n"));
+}
+
+#[test]
+fn install_github_without_an_asset_leaves_the_plugin_not_runnable_and_prints_the_build() {
+    let world = World::new("github-unbuilt");
+    let base = github_base(&world, "unbuilt", "bin/unbuilt", false);
+    let out = world.pixel_with(
+        &["install", "github:acme/unbuilt"],
+        &[("PIXEL_GITHUB_BASE_URL", &base_url(&base))],
+    );
+    let text = ok(&out);
+    let dir = world.user_plugins().join("unbuilt");
+    assert!(
+        text.starts_with("installed plugin unbuilt 2.0.0 in "),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "unbuilt is installed but not runnable: its program `bin/unbuilt` is not built"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "build it with: cargo install --git {}/acme/unbuilt.git --root {}\n",
+            base_url(&base),
+            dir.display()
+        )),
+        "{text}"
+    );
+    let listed = ok(&world.pixel(&["plugin", "list"]));
+    assert!(
+        listed.contains("  ! unbuilt: not runnable: `run` = \"bin/unbuilt\""),
+        "{listed}"
+    );
+    let ran = world.pixel(&["unbuilt"]);
+    assert_eq!(ran.status.code(), Some(1), "{ran:?}");
+    assert_eq!(stdout(&ran), "");
+}
+
+#[test]
+fn install_github_reports_a_malformed_source_and_a_repository_that_is_not_there() {
+    let world = World::new("github-bad");
+    let bad = world.pixel(&["install", "github:acme"]);
+    assert_eq!(bad.status.code(), Some(1), "{bad:?}");
+    assert!(
+        stderr(&bad).contains("github:<owner>/<repo>[@<ref>]"),
+        "{}",
+        stderr(&bad)
+    );
+    let missing = world.pixel_with(
+        &["install", "github:acme/none"],
+        &[(
+            "PIXEL_GITHUB_BASE_URL",
+            &base_url(&world.scratch.join("gh")),
+        )],
+    );
+    assert_eq!(missing.status.code(), Some(1), "{missing:?}");
+    assert!(
+        stderr(&missing).contains("cannot clone github:acme/none"),
+        "{}",
+        stderr(&missing)
+    );
+}
+
+#[test]
+fn install_twice_points_at_uninstall() {
+    let world = World::new("twice");
+    let source = world.source("tool", "");
+    ok(&world.pixel(&["install", source.to_str().unwrap()]));
+    let again = world.pixel(&["install", source.to_str().unwrap()]);
+    assert_eq!(again.status.code(), Some(1), "{again:?}");
+    assert!(
+        stderr(&again).contains("run `pixel uninstall tool` first"),
+        "{}",
+        stderr(&again)
+    );
+}
+
+#[test]
+fn install_name_picks_one_plugin_out_of_a_repository() {
+    let world = World::new("named");
+    let repo = world.scratch.join("many");
+    plugin_dir(&repo.join("a"), "one", "");
+    plugin_dir(&repo.join("b"), "two", "");
+    let ambiguous = world.pixel(&["install", repo.to_str().unwrap()]);
+    assert_eq!(ambiguous.status.code(), Some(1), "{ambiguous:?}");
+    assert!(
+        stderr(&ambiguous).contains("--name"),
+        "{}",
+        stderr(&ambiguous)
+    );
+    let named = world.pixel(&["install", repo.to_str().unwrap(), "--name", "two"]);
+    assert!(
+        ok(&named).starts_with("installed plugin two 1.4.2 in "),
+        "{named:?}"
+    );
+    assert!(world.user_plugins().join("two").is_dir());
+    assert!(!world.user_plugins().join("one").exists());
+}
+
+#[test]
+fn the_retired_install_and_uninstall_flags_are_gone() {
+    let world = World::new("old-flags");
+    let out = world.pixel(&["uninstall", "--wrappers-only"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let out = world.pixel(&["install", "--shell", "zsh"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+}
+
+/// A plugin named `git` whose manifest lists the commands one binary serves.
+fn multi_plugin(world: &World, name: &str, commands: &[&str]) -> PathBuf {
+    let list = commands
+        .iter()
+        .map(|c| format!("\"{c}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    plugin_dir(&world.user_plugins(), name, &format!("commands = [{list}]"))
+}
+
+#[test]
+fn a_listed_command_runs_the_plugin_with_the_command_word_first() {
+    let world = World::new("multi");
+    multi_plugin(&world, "git", &["fast-forward", "plan-rollback"]);
+    let out = world.pixel(&["fast-forward", "origin", "--json"]);
+    assert!(
+        ok(&out).starts_with("args=fast-forward origin --json\napi=1\n"),
+        "{out:?}"
+    );
+    let second = world.pixel(&["plan-rollback", "fail"]);
+    assert!(
+        ok(&second).starts_with("args=plan-rollback fail\n"),
+        "{second:?}"
+    );
+    // The pre-rename spelling of a listed command reaches it too.
+    let alias = world.pixel(&["update", "x"]);
+    assert!(ok(&alias).starts_with("args=fast-forward x\n"), "{alias:?}");
+    // The plugin's own name is not a command, and an unlisted moved one hints.
+    let by_name = world.pixel(&["git"]);
+    assert_eq!(by_name.status.code(), Some(2), "{by_name:?}");
+    assert_eq!(
+        stderr(&world.pixel(&["squash-branch"])),
+        moved_hint("squash-branch")
+    );
+}
+
+#[test]
+fn list_shows_each_plugins_commands_and_a_single_name_plugin_still_works() {
+    let world = World::new("multi-list");
+    multi_plugin(&world, "git", &["fast-forward", "plan-rollback"]);
+    let source = world.source("tool", "");
+    ok(&world.pixel(&["install", source.to_str().unwrap()]));
+    let listed = ok(&world.pixel(&["plugin", "list"]));
+    let rows: Vec<Vec<&str>> = listed
+        .lines()
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    assert!(
+        rows.contains(&vec![
+            "git",
+            "user",
+            "1.4.2",
+            "1",
+            "command",
+            "-",
+            "-",
+            "fast-forward,plan-rollback"
+        ]),
+        "{listed}"
+    );
+    assert!(
+        rows.contains(&vec![
+            "tool", "user", "1.4.2", "1", "command", "-", "-", "-"
+        ]),
+        "{listed}"
+    );
+    assert!(ok(&world.pixel(&["tool", "a"])).starts_with("args=a\n"));
+}
+
+#[test]
+fn two_plugins_listing_one_command_fail_naming_both_and_list_flags_them() {
+    let world = World::new("multi-conflict");
+    multi_plugin(&world, "git", &["fast-forward"]);
+    multi_plugin(&world, "other", &["fast-forward"]);
+    let out = world.pixel(&["fast-forward"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let message = stderr(&out);
+    assert!(
+        message
+            .contains("command `fast-forward` is provided by both plugin `git` and plugin `other`"),
+        "{message}"
+    );
+    assert_eq!(stdout(&out), "");
+    let listed = ok(&world.pixel(&["plugin", "list"]));
+    assert!(
+        listed.contains("  ! git: command `fast-forward` is also provided by `other`"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("  ! other: command `fast-forward` is also provided by `git`"),
+        "{listed}"
+    );
+}
+
+#[test]
+fn install_refuses_a_plugin_that_shares_a_command_with_an_installed_one() {
+    let world = World::new("multi-install");
+    let first = plugin_dir(
+        &world.scratch.join("src"),
+        "git",
+        "commands = [\"fast-forward\"]",
+    );
+    ok(&world.pixel(&["install", first.to_str().unwrap()]));
+    let second = plugin_dir(
+        &world.scratch.join("src"),
+        "other",
+        "commands = [\"fast-forward\"]",
+    );
+    let out = world.pixel(&["install", second.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr(&out).contains("`git` and plugin `other`"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!world.user_plugins().join("other").exists());
 }

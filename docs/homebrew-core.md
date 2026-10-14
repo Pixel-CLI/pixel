@@ -16,7 +16,7 @@ GitHub serves for the tag.
 | no self-updating software | the formula builds with `PIXEL_UPDATE_CHECK=off`: that binary never checks for a release, never prints the notice and never offers to upgrade itself (`update_notice.rs`); `pixel self-update` already refuses a binary Homebrew owns |
 | a DFSG-compatible licence | MIT (`LICENSE`, `license "MIT"`) |
 | a test that exercises the software | `brew test` indexes a Python file and searches it, offline, with `PIXEL_DAEMON_AUTO_START=0` so no daemon outlives the test |
-| no manual install steps, nothing written outside the keg | no caveats, no `post_install`; `pixel install` (agent wiring in the user's home) is documented as the user's own step |
+| no manual install steps, nothing written outside the keg | no caveats, no `post_install`; `pixel setup` (agent wiring in the user's home) is documented as the user's own step |
 | `brew style`, `brew audit --strict --new` clean | `.github/workflows/homebrew-core.yml` builds the formula from a `git archive` of the tree on macOS and Linux, runs `brew test`, `brew linkage --test`, `brew style` and `brew audit --strict --new`, on every change to its inputs and weekly |
 | `livecheck` and `head` | both declared |
 | a free name | `pixel` is neither a formula nor a cask (formulae.brew.sh API, 2026-09-30) |

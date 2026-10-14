@@ -166,8 +166,8 @@ class Audit:
         self.call("fetch", ["fetch", "origin", "--json"], json_output=True)
         self.call("sync-branch", ["sync-branch", "--strategy", "report", "--push", "none", "--json"], json_output=True)
         # fast-forward, squash-branch (and plan-rollback,
-        # token-savings) are plugins of Pixel-CLI/pixel-plugins: their
-        # boundaries are audited there, not through this binary.
+        # token-savings) are plugins (Pixel-CLI/pixel-git, pixel-telemetry):
+        # their boundaries are audited there, not through this binary.
 
     def sniper(self):
         self.call("list-errors run", ["list-errors", "run", "--", "/bin/sh", "-c", "printf audit_wrapper_failure >&2; exit 9"], exit_code=9)
@@ -192,7 +192,7 @@ class Audit:
         self.call("build-index", ["build-index", "--history"])
         self.call("prepare-repo", ["prepare-repo", "--json"], json_output=True)
         self.call("scope-task", ["scope-task", "fix login_user", "--json"], contains="lib.rs", json_output=True)
-        # `pixel install` registers only `run-hook task-event`. The verbs earlier
+        # `pixel setup` registers only `run-hook task-event`. The verbs earlier
         # releases registered stay accepted so an old registration cannot fail a
         # host: each must exit 0 and print nothing, whatever the payload says.
         payload = {"cwd": str(self.repo), "session_id": "hook-audit", "hook_event_name": "PreToolUse", "tool_name": "shell", "tool_input": {"command": "grep -n login_user lib.rs"}}

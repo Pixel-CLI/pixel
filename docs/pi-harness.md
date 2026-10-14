@@ -7,7 +7,7 @@ policy check on Pi's tool calls.
 
 ## Install
 
-`pixel install` writes a local Pi package when Pi's agent directory
+`pixel setup` writes a local Pi package when Pi's agent directory
 (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) exists or `pi` is on `PATH`:
 
 | Path | Content |
@@ -33,7 +33,7 @@ and `pixel-impact:2`: use one install path per machine.
 
 `pixel doctor` reports the package as `install.pi-impact`: red when it is
 missing from `packages` or bound to another binary, green when it is current or
-Pi is absent. `pixel uninstall` removes the package and its `packages` entry.
+Pi is absent. `pixel setup --remove` removes the package and its `packages` entry.
 
 ## The command
 
@@ -46,7 +46,7 @@ never builds or refreshes the index. If the graph is missing, run
 
 ## Per repository
 
-`pixel install --repo .` writes nothing for Pi. It removes the project
+`pixel setup --repo .` writes nothing for Pi. It removes the project
 extension `.pi/extensions/pixel-guard.ts` (and the older `.pi/agent/` copy)
 that earlier releases wrote, which carried task gates, a retrieval tool and a
 native-tool policy. A file under that name that Pixel did not write stays.

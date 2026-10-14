@@ -13,10 +13,10 @@
 #                                               # login shell is not the one
 #                                               # `claude` is launched from
 #
-# Read-only: nothing under $HOME is written. Run `pixel install` first; the
+# Read-only: nothing under $HOME is written. Run `pixel setup` first; the
 # doctor section reports what it left non-green. Exit 1 on any failure.
 #
-# `pixel run-hook task-event` is the only hook `pixel install` registers. The
+# `pixel run-hook task-event` is the only hook `pixel setup` registers. The
 # verbs earlier releases registered (guard, composed-guard, session-start,
 # prompt-submit, post-compaction, post-tool-use, metrics) stay accepted as
 # silent no-ops so a registration an old install left behind can never block
@@ -105,18 +105,18 @@ for c in d["checks"]:
     if c["status"]!="green": print("  ", c["status"].upper(), c["id"], "—", c["summary"])
 sys.exit(0 if d["ok"] else 1)' && ok "doctor: ok" || no "doctor" "not ok (non-green checks listed above; PIXEL_SHELL=<shell> if only install.legacy-wrappers is red)"
 
-echo "=== 4. Install surface (what \`pixel install\` leaves, read through doctor) ==="
+echo "=== 4. Install surface (what \`pixel setup\` leaves, read through doctor) ==="
 for id in install.agent-prompt install.pi-prompt install.pi-impact install.legacy-wrappers install.codex-config install.claude-hooks; do
     st=$(json_field "$DOC" "next(c['status'] for c in d['checks'] if c['id']=='$id')")
     [ "$st" = green ] && ok "doctor $id green" || no "doctor $id" "status '${st:-missing}'"
 done
-[ ! -e "$HOME/.local/share/pixel/agent-prompt.md" ] && ok "no agent-prompt.md deployed" || no "agent-prompt.md" "retired file remains at ~/.local/share/pixel (run: pixel install)"
+[ ! -e "$HOME/.local/share/pixel/agent-prompt.md" ] && ok "no agent-prompt.md deployed" || no "agent-prompt.md" "retired file remains at ~/.local/share/pixel (run: pixel setup)"
 
 echo "=== 5. Mandatory workflows + release gate — help surface ==="
 for cmd in scope-task find-code sync-branch check-release self-update; do
     "$PIXEL" "$cmd" --help 2>&1 | grep -F -q "Usage: $PIXEL_NAME $cmd" && ok "$cmd --help" || no "$cmd --help" "no usage line"
 done
-"$PIXEL" uninstall --help 2>&1 | grep -q -- "--wrappers-only" && ok "uninstall --wrappers-only documented" || no "uninstall --help" "no --wrappers-only"
+"$PIXEL" setup --help 2>&1 | grep -q -- "--wrappers-only" && ok "setup --remove --wrappers-only documented" || no "setup --help" "no --wrappers-only"
 
 echo "=== 6. Renamed commands — old and new names answer alike ==="
 # old_and_new <old> <new> <args…>: both spellings exit 0 with one JSON

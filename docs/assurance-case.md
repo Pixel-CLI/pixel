@@ -22,7 +22,7 @@ gave them.** It breaks down into the security requirements of
 | R2 | Another local user cannot reach the daemon or read Pixel's state | T2, T15 |
 | R3 | A hook never runs a command from its payload, rewrites or approves a command, or blocks a host through a stale registration | T10 |
 | R4 | Nothing leaves the machine without an explicit command or setting, and a key goes only to the endpoint it was configured for, over TLS | T16, T17, T18 |
-| R5 | `pixel install` changes only what it manages, and can be undone | T14 |
+| R5 | `pixel setup` changes only what it manages, and can be undone | T14 |
 | R6 | A release is built from the tagged source by the project's workflow, and a user can verify it | T20, T21, T22 |
 
 The claims hold for the trust model of threat-model.md, section 2: the user
@@ -59,7 +59,7 @@ them. Each line names the mechanism; the threat it belongs to gives the code.
   that fails on any other `Command::new("git")` (T8); one confinement check,
   `pixel_git::repo_path::confine`, for every path read back from the index or
   the graph (T6).
-- **Economy of mechanism.** The one hook `pixel install` registers,
+- **Economy of mechanism.** The one hook `pixel setup` registers,
   `task-event`, interprets no shell (section 3.3); 0.7.0 removed the MCP
   servers and the task worker runtime, so the CLI and that hook are the whole
   surface.
@@ -72,7 +72,7 @@ them. Each line names the mechanism; the threat it belongs to gives the code.
 - **Least common mechanism.** Each daemon serves one repository root (T1);
   the global configuration, which holds keys and endpoints, is never
   overridden by a repository's configuration (section 3.7, T16).
-- **Psychological acceptability.** `pixel install` wires every agent in one
+- **Psychological acceptability.** `pixel setup` wires every agent in one
   command and `pixel doctor` reports what is wrong with the fix to run (T14);
   release verification is one documented `gh attestation verify` command
   (SECURITY.md, "Verifying a release").

@@ -3,7 +3,7 @@ title: "Documentation"
 description: "Install Pixel, wire it into your agents, and read what its answers promise and what they do not."
 ---
 
-<!-- Every `pixel <command>` quoted here must exist: crates/pixel/tests/cli/docs_drift.rs reads this page. The per-repository list must name exactly the files `pixel install --repo` writes (REPO_ARTIFACTS). Keep it in step with ARCHITECTURE.md. -->
+<!-- Every `pixel <command>` quoted here must exist: crates/pixel/tests/cli/docs_drift.rs reads this page. The per-repository list must name exactly the files `pixel setup --repo` writes (REPO_ARTIFACTS). Keep it in step with ARCHITECTURE.md. -->
 
 ## Install
 
@@ -47,7 +47,7 @@ To build from source, see [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/b
 Then let your agents use it, and check the result:
 
 ```bash
-pixel install         # once, from anywhere
+pixel setup         # once, from anywhere
 pixel prepare-repo .  # optional: index, graph and a warm daemon for this repository
 pixel doctor .        # optional: health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
@@ -55,21 +55,21 @@ pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel,
 
 The index, the code graph and the optional history data live in `.pixel/` at the repository root and stay on your machine, and there is no telemetry beyond an optional release check. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search`, the embedding model downloaded from Hugging Face on first use, and a release check throttled to at most once per day when a person is at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) ([security model](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md)).
 
-## What pixel install wires
+## What pixel setup wires
 
-`pixel install` is global: run it once, from anywhere. It deploys no agent prompt and no retrieval guard: every agent keeps its native search, and `pixel install` removes the prompts, guards and plugins earlier releases wrote. Claude Code and Codex keep task lifecycle hooks; Pi gets an explicit impact command:
+`pixel setup` is global: run it once, from anywhere. It deploys no agent prompt and no retrieval guard: every agent keeps its native search, and `pixel setup` removes the prompts, guards and plugins earlier releases wrote. Claude Code and Codex keep task lifecycle hooks; Pi gets an explicit impact command:
 
 {{% agents-install %}}
 
-Each agent's page under [For your agent](../for/) names the files, the check and the removal, including the agents `pixel install` leaves alone.
+Each agent's page under [For your agent](../for/) names the files, the check and the removal, including the agents `pixel setup` leaves alone.
 
-At a terminal, `pixel install` opens with a short animation before its summary: an agent grepping its way through a repository, then the same task in three Pixel calls. Any key skips it; `PIXEL_NO_INTRO=1` (or `NO_COLOR`, `CI`, `--json`, a pipe, a `TERM` of `dumb` or unset, or a terminal narrower than 64 columns or shorter than 18 rows) turns it off.
+At a terminal, `pixel setup` opens with a short animation before its summary: an agent grepping its way through a repository, then the same task in three Pixel calls. Any key skips it; `PIXEL_NO_INTRO=1` (or `NO_COLOR`, `CI`, `--json`, a pipe, a `TERM` of `dumb` or unset, or a terminal narrower than 64 columns or shorter than 18 rows) turns it off.
 
-`pixel uninstall` removes everything `pixel install` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it (`mise uninstall pixel`, or the Homebrew equivalent).
+`pixel setup --remove` removes everything `pixel setup` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it (`mise uninstall pixel`, or the Homebrew equivalent).
 
 ### Per-repository cleanup
 
-`pixel install --repo <path>` updates project-local integration and skips global steps. It adds no guard:
+`pixel setup --repo <path>` updates project-local integration and skips global steps. It adds no guard:
 
 - `<repo>/.claude/settings.local.json` and `.claude/settings.json`: removes owned retrieval guards and restores RTK hook groups from `<repo>/.claude/pixel-rtk-hooks.json`, preserving foreign hooks and independent task controls
 - `<repo>/.codex/config.toml`: removes retired Pixel `developer_instructions` while preserving foreign text
@@ -95,7 +95,7 @@ Upgrading replaces the binary only. The per-agent config keys belong to you, not
 Then, whatever the channel:
 
 ```bash
-pixel install
+pixel setup
 pixel doctor . --fix   # runs each repair a flagged check names, then re-checks
 ```
 
@@ -103,7 +103,7 @@ pixel doctor . --fix   # runs each repair a flagged check names, then re-checks
 
 ## Plugins
 
-The Codex and Claude plugins ship no skill and no retrieval hooks; the per-prompt evidence brief comes from `pixel install`. Pi's package provides `/pixel-impact <symbol>`. The binary must be installed separately. The Pi command makes one bounded query against an existing fresh graph; missing binaries, unsupported versions or stale indexes fall back to native tools. Other agent packages retain their existing protocol integration.
+The Codex and Claude plugins ship no skill and no retrieval hooks; the per-prompt evidence brief comes from `pixel setup`. Pi's package provides `/pixel-impact <symbol>`. The binary must be installed separately. The Pi command makes one bounded query against an existing fresh graph; missing binaries, unsupported versions or stale indexes fall back to native tools. Other agent packages retain their existing protocol integration.
 
 | Tool | Install |
 | --- | --- |
@@ -114,13 +114,13 @@ The Codex and Claude plugins ship no skill and no retrieval hooks; the per-promp
 | Pi | `pi install git:github.com/Pixel-CLI/pixel` |
 | Cursor, Kiro, Cline, Qoder | rules ship under `.cursor/rules/`, `.kiro/steering/`, `.clinerules/` and `.qoder/rules/`: copy them into your project |
 
-OpenCode has no Pixel plugin package published yet, so it is not in the table: `pixel install` puts the protocol in its global `AGENTS.md` instead ([Pixel for OpenCode](../for/opencode/)).
+OpenCode has no Pixel plugin package published yet, so it is not in the table: `pixel setup` puts the protocol in its global `AGENTS.md` instead ([Pixel for OpenCode](../for/opencode/)).
 
 Any other agent: paste [`PIXEL.md`](https://github.com/Pixel-CLI/pixel/blob/main/PIXEL.md), the plain-Markdown protocol, into whatever instruction surface it offers. [Manual setup](https://github.com/Pixel-CLI/pixel/blob/main/docs/manual-setup.md) covers wiring the full prompt by hand.
 
 ### Command plugins
 
-Five commands are plugins, not part of the binary: `flow`, `plan-rollback`, `token-savings`, `squash-branch` and `fast-forward`. Without one installed, `pixel <name>` prints how to get it and exits 2. Install the command (`pixel plugin add https://github.com/Pixel-CLI/pixel-plugins --name flow`) and its binary (`cargo install --git https://github.com/Pixel-CLI/pixel-plugins pixel-flow`); `pixel plugin list` shows what is installed. The old names (`rescue`, `update`, `savings`, `rewrite`, `replay-flow`) run the plugin of the current name.
+Commands move out of the binary into plugins, one repository each under `Pixel-CLI`: `pixel-git` (`commit`, `push`, `plan-rollback`, `squash-branch`, `fast-forward` and the other git commands), `pixel-flow` (`flow`, `ultraflow`), `pixel-recall` (`recall`), `pixel-telemetry` (`token-savings`, `action-log`, `list-errors`, `record-event`, `space`) and `pixel-utilities` (`web-search`, `check-release`, `ai-cli-readify`). Today `flow`, `plan-rollback`, `token-savings`, `squash-branch` and `fast-forward` are already plugins: without one installed, `pixel <name>` prints how to get it (`pixel install github:Pixel-CLI/pixel-flow`) and exits 2. `pixel install <source>` takes `github:<owner>/<repo>[@<ref>]`, a git URL or a local directory; a program the repository does not ship comes from the release asset `pixel-<name>-<target-triple>` (checked against its `.sha256` when published), otherwise `pixel install` prints the `cargo install --git` command to build it and the plugin stays not runnable until it is. `npm:<package>` is not supported yet. `pixel plugin list` shows what is installed, `pixel uninstall <plugin>` removes one. The old names (`rescue`, `update`, `savings`, `rewrite`, `replay-flow`) run the plugin of the current name.
 
 ## The workflow
 

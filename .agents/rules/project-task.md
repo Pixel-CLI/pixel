@@ -49,7 +49,7 @@ Recorded procedure, verified live on 2026-10-07:
    dev-release -p pixel-cli"` — green (~1.2s rebuild, installs
    `target/dev-release/pixel` to `~/.local/bin/pixel-dev`).
 2. `pixel-dev build-index --history .` (fresh, 2413 commits, 100% diff
-   coverage) then `pixel-dev install --repo .` — 8 green, 0 yellow, 0 red.
+   coverage) then `pixel-dev setup --repo .` — 8 green, 0 yellow, 0 red.
 3. Enter the key at a non-echoing prompt, then pipe it to Pixel's config
    command (the key is neither a command argument nor printed back):
 

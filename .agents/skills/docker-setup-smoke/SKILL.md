@@ -85,7 +85,7 @@ sh .agents/skills/docker-setup-smoke/scripts/run.sh --agents --source main
    `~/.pixel/config.yaml`, which `pixel config --global` wrote; a release
    without that step gets a `NOTE` instead.
 
-A personal `PreToolUse` hook matching Bash makes `pixel install --repo` skip the
+A personal `PreToolUse` hook matching Bash makes `pixel setup --repo` skip the
 Claude guard (yellow `claude guard not installed`); the fixture matches
 Edit|Write so the guard is installed. The checks add such a hook for one extra
 project copy (then restore `settings.json` byte for byte): the install step must

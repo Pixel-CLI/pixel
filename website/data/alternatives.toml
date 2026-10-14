@@ -447,7 +447,7 @@ slug = "rtk"
 name = "RTK"
 about = "A Rust proxy that rewrites an agent's shell commands and compresses what they print: build logs, test runs, Git output."
 measure = "design"
-answer = '''They cut different tokens, so they add up. RTK shortens what a command prints once the agent has run it; Pixel shortens what the agent reads to find its way, by answering from an index instead of whole files. In Claude Code, <code>pixel install</code> keeps an existing RTK hook working: Pixel's guard takes the searches it rewrites and hands every other shell call to RTK, so one hook answers each call.'''
+answer = '''They cut different tokens, so they add up. RTK shortens what a command prints once the agent has run it; Pixel shortens what the agent reads to find its way, by answering from an index instead of whole files. In Claude Code, <code>pixel setup</code> keeps an existing RTK hook working: Pixel's guard takes the searches it rewrites and hands every other shell call to RTK, so one hook answers each call.'''
 wins = "it compresses the output of builds, tests, Git and other shell commands, which Pixel leaves as they are."
 checked = 2026-09-26
 
@@ -476,7 +476,7 @@ checked = 2026-09-26
   [[tool.row]]
   label = "Running both in Claude Code"
   pixel = "One guard hook, RTK delegated"
-  other = "Its hook, adopted by <code>pixel install</code>"
+  other = "Its hook, adopted by <code>pixel setup</code>"
 
 [[tool]]
 slug = "semble"
@@ -664,6 +664,6 @@ checked = 2026-09-25
 
   [[tool.row]]
   label = "Setup"
-  pixel = "<code>pixel install</code>"
+  pixel = "<code>pixel setup</code>"
   other = "None"
   win = "other"

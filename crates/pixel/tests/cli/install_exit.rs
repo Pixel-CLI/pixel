@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! The `pixel install` exit: `--json` and a piped stdout keep the
+//! The `pixel setup` exit: `--json` and a piped stdout keep the
 //! machine-readable report; the human banner (`pixel_install::banner`) is
 //! a stdout-is-a-TTY path unit-tested in the pixel-install crate. These
 //! tests pin the contract the banner branch must never break.
@@ -12,7 +12,7 @@ use crate::support::{Scratch, pixel_command};
 fn json_flag_prints_the_machine_readable_report() {
     let home = Scratch::for_test("install-exit", "json");
     let out = pixel_command()
-        .args(["install", "--shell", "zsh", "--json"])
+        .args(["setup", "--shell", "zsh", "--json"])
         .env("HOME", &*home)
         .env("CODEX_HOME", home.join(".codex"))
         .current_dir(&*home)
@@ -29,7 +29,7 @@ fn json_flag_prints_the_machine_readable_report() {
 fn a_piped_stdout_keeps_the_json_report_without_the_flag() {
     let home = Scratch::for_test("install-exit", "piped");
     let out = pixel_command()
-        .args(["install", "--shell", "zsh"])
+        .args(["setup", "--shell", "zsh"])
         .env("HOME", &*home)
         .env("CODEX_HOME", home.join(".codex"))
         .current_dir(&*home)
@@ -52,4 +52,57 @@ fn a_piped_stdout_keeps_the_json_report_without_the_flag() {
     assert!(!stdout.contains("installed."), "{stdout}");
     assert!(!stdout.contains("pixel-cli.dev"), "{stdout}");
     assert!(!stdout.contains('\x1b'), "{stdout}");
+}
+
+/// `pixel setup` is the old `pixel install`: it writes the Claude task hooks
+/// into the home it is given, and nothing else answers to the old name.
+#[test]
+fn setup_writes_the_claude_task_hooks_into_a_temporary_home() {
+    let home = Scratch::for_test("install-exit", "setup-writes");
+    let out = pixel_command()
+        .args(["setup", "--shell", "zsh", "--json"])
+        .env("HOME", &*home)
+        .env("CODEX_HOME", home.join(".codex"))
+        .current_dir(&*home)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let settings = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+    assert!(
+        settings.contains("run-hook task-event --provider claude --event session-start"),
+        "{settings}"
+    );
+    let codex = std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
+    assert!(
+        codex.contains("run-hook task-event --provider codex"),
+        "{codex}"
+    );
+}
+
+/// `--remove` owns the flags that only make sense when removing: without it
+/// they are a usage error instead of being silently ignored by a real setup.
+#[test]
+fn the_removal_flags_need_remove() {
+    let home = Scratch::for_test("install-exit", "needs-remove");
+    for flag in [
+        &["--dry-run"][..],
+        &["--wrappers-only"],
+        &["--binary-path", "/nonexistent/pixel"],
+    ] {
+        let out = pixel_command()
+            .arg("setup")
+            .args(flag)
+            .env("HOME", &*home)
+            .env("CODEX_HOME", home.join(".codex"))
+            .current_dir(&*home)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{flag:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("--remove"), "{flag:?}: {stderr}");
+    }
+    assert!(
+        !home.join(".claude").exists(),
+        "a rejected setup wrote nothing"
+    );
 }

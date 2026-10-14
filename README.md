@@ -105,7 +105,7 @@ These are benchmark accuracy scores, not per-decision probabilities.
 
 ```bash
 curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
-pixel install      # once: wires Claude Code, Codex, Pi, OpenCode and Antigravity
+pixel setup      # once: wires Claude Code, Codex, Pi, OpenCode and Antigravity
 pixel doctor .     # optional health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
@@ -122,7 +122,7 @@ Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the
 whether `pixel doctor .` is green.
 ```
 
-If you are that agent: run the Install one-liner, tell the user it writes to their home configuration, then run `pixel install` (idempotent) and `pixel doctor . --json` — report every check that is not green, do not claim success otherwise. Restart the session to load updated integrations. Codex and Claude keep native retrieval and receive a bounded evidence brief on each code prompt (`PIXEL_BRIEF=0` turns it off). Pi exposes `/pixel-impact <symbol>`. [Manual setup](docs/manual-setup.md) explains each surface.
+If you are that agent: run the Install one-liner, tell the user it writes to their home configuration, then run `pixel setup` (idempotent) and `pixel doctor . --json` — report every check that is not green, do not claim success otherwise. Restart the session to load updated integrations. Codex and Claude keep native retrieval and receive a bounded evidence brief on each code prompt (`PIXEL_BRIEF=0` turns it off). Pi exposes `/pixel-impact <symbol>`. [Manual setup](docs/manual-setup.md) explains each surface.
 
 ## Now build this harness
 
@@ -170,7 +170,7 @@ flowchart TD
     class X stop
 ```
 
-`plan-rollback` and `fast-forward` ship as plugins, like `flow`, `token-savings` and `squash-branch`: `pixel plugin add https://github.com/Pixel-CLI/pixel-plugins --name plan-rollback`, and the `pixel-plan-rollback` binary from `cargo install --git https://github.com/Pixel-CLI/pixel-plugins pixel-plan-rollback`.
+`flow`, `plan-rollback`, `token-savings`, `squash-branch` and `fast-forward` ship as plugins: `pixel install github:Pixel-CLI/pixel-flow`, `github:Pixel-CLI/pixel-git` (`plan-rollback`, `squash-branch`, `fast-forward`) or `github:Pixel-CLI/pixel-telemetry` (`token-savings`). `pixel uninstall <plugin>` removes one.
 
 - Red is the LLM — reasoning, meaning, edits
 - Orange is `pixel classify` — a model system one like Jev

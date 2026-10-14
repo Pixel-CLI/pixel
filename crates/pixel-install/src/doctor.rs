@@ -57,10 +57,10 @@ const fn entry(id: &'static str, fix: Option<&'static str>) -> CheckSpec {
     CheckSpec { id, fix }
 }
 
-/// Command that rewrites everything `pixel install` deploys in the home.
-const FIX_INSTALL: Option<&str> = Some("pixel install");
+/// Command that rewrites everything `pixel setup` deploys in the home.
+const FIX_INSTALL: Option<&str> = Some("pixel setup");
 /// Command that rewrites the repo-local enforcement files.
-const FIX_REPO_INSTALL: Option<&str> = Some("pixel install --repo {root}");
+const FIX_REPO_INSTALL: Option<&str> = Some("pixel setup --repo {root}");
 /// Command that builds the text index and the graph, and warms the daemon.
 const FIX_PREPARE: Option<&str> = Some("pixel prepare-repo {root}");
 
@@ -214,7 +214,7 @@ pub struct DoctorOptions {
     /// install-state checks run.
     pub repo_root: Option<PathBuf>,
     /// Shell whose wrapper block should be checked, as a `$SHELL`-style value.
-    /// Defaults to `$SHELL`. Must match what `pixel install` was given, or the
+    /// Defaults to `$SHELL`. Must match what `pixel setup` was given, or the
     /// check looks at the wrong profile.
     pub shell: Option<String>,
     /// The `claude` executable whose version decides which wrapper block is
@@ -308,7 +308,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         "install.agent-prompt",
         || -> std::result::Result<DoctorCheckDetail, String> {
             // No host reads a deployed Pixel prompt any more; copies an
-            // earlier release wrote are retired by `pixel install`.
+            // earlier release wrote are retired by `pixel setup`.
             let dir = home.join(".local/share/pixel");
             let left: Vec<String> = ["agent-prompt.md", install::SUBAGENT_PROMPT_FILE]
                 .iter()
@@ -318,7 +318,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 .collect();
             if !left.is_empty() {
                 return Err(format!(
-                    "retired Pixel prompt file(s) remain: {} — run `pixel install` to remove them",
+                    "retired Pixel prompt file(s) remain: {} — run `pixel setup` to remove them",
                     left.join(", ")
                 ));
             }
@@ -339,7 +339,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     config::strip_managed_block(&install::strip_unmarked_pi_prompts(&content));
                 if content != cleaned {
                     return Err(format!(
-                        "{} still contains Pixel's retired automatic prompt — run `pixel install`",
+                        "{} still contains Pixel's retired automatic prompt — run `pixel setup`",
                         path.display()
                     ));
                 }
@@ -376,7 +376,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 (CheckStatus::Yellow, reason, Remedy::Manual)
             }
             crate::pi_global::PiImpactState::NeedsInstall(reason) => {
-                return Err(format!("{reason}; run `pixel install`"));
+                return Err(format!("{reason}; run `pixel setup`"));
             }
         };
         Ok((status, DoctorCheckDetail { summary, detail }, remedy))
@@ -437,7 +437,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     );
 
-    // The one hook `pixel install` registers for Claude is `run-hook
+    // The one hook `pixel setup` registers for Claude is `run-hook
     // task-event` (the task lifecycle gates and the prompt brief). Verify the
     // registration: matchers, commands and the executable this binary's
     // install would write, not just a `pixel` substring.
@@ -446,10 +446,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         || -> std::result::Result<(CheckStatus, DoctorCheckDetail, Remedy), String> {
             let path = home.join(".claude/settings.json");
             if !path.is_file() {
-                return Err(format!(
-                    "{} not found — run `pixel install`",
-                    path.display()
-                ));
+                return Err(format!("{} not found — run `pixel setup`", path.display()));
             }
             let value = install::read_settings(&path).map_err(|e| e.to_string())?;
             let mut missing = Vec::new();
@@ -469,21 +466,21 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
             if !missing.is_empty() {
                 return Err(format!(
-                    "missing pixel lifecycle hooks in {}: {} — run `pixel install`",
+                    "missing pixel lifecycle hooks in {}: {} — run `pixel setup`",
                     path.display(),
                     missing.join(", ")
                 ));
             }
             if has_unexpected_pixel_hooks(&value, crate::routing::Provider::Claude, &exe) {
                 return Err(format!(
-                    "retired Pixel retrieval or metrics hooks remain in {}; run `pixel install`",
+                    "retired Pixel retrieval or metrics hooks remain in {}; run `pixel setup`",
                     path.display()
                 ));
             }
             let stacked = crate::routing::stacked_pixel_hooks(&value, &exe);
             if !stacked.is_empty() {
                 return Err(format!(
-                    "pixel hooks registered more than once in {}: {} — run `pixel install`",
+                    "pixel hooks registered more than once in {}: {} — run `pixel setup`",
                     path.display(),
                     stacked.join(", ")
                 ));
@@ -506,7 +503,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
 
     // Devin keeps its task hooks and its prompt brief; a Pixel hook of any
     // other kind left in its global config by an earlier release is red until
-    // `pixel install` removes it. With no `~/.config/devin/` the check is
+    // `pixel setup` removes it. With no `~/.config/devin/` the check is
     // green-absent.
     runner.check(
         "install.devin-hooks",
@@ -518,7 +515,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 let value = install::read_settings(&path).map_err(|e| e.to_string())?;
                 if crate::routing::has_retired_pixel_hook(&value, &exe) {
                     return Err(format!(
-                        "retired Pixel hooks remain in {} — run `pixel install` to remove them",
+                        "retired Pixel hooks remain in {} — run `pixel setup` to remove them",
                         path.display()
                     ));
                 }
@@ -568,7 +565,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
             if !blocks.is_empty() {
                 return Err(format!(
-                    "stale pixel shell wrapper in {} — run `pixel install` to remove its unsolicited prompt injection",
+                    "stale pixel shell wrapper in {} — run `pixel setup` to remove its unsolicited prompt injection",
                     blocks.join(", ")
                 ));
             }
@@ -594,7 +591,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         runner.check("repo.task-hook-observations", || {
             task_hook_observations(root)
         });
-        // Repo-local enforcement (`pixel install --repo <path>`). A check is
+        // Repo-local enforcement (`pixel setup --repo <path>`). A check is
         // red only when the file carries evidence of a Pixel install (a
         // Pixel entry, marker or sidecar) and that install is broken. An
         // absent file, or one the project keeps for itself with nothing of
@@ -626,7 +623,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             let sidecar = root.join(".codex").join(crate::routing::CODEX_COMPOSED_BACKUP);
             if sidecar.is_file() {
                 return Err(format!(
-                    "retired composed-guard backup {} remains — run `pixel install --repo` to restore native Codex hooks",
+                    "retired composed-guard backup {} remains — run `pixel setup --repo` to restore native Codex hooks",
                     sidecar.display()
                 ));
             }
@@ -642,7 +639,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
             if has_unexpected_repo_pixel_hooks(&value, &exe) {
                 return Err(format!(
-                    "{} still has a retired Pixel callback — run `pixel install --repo` to restore native Codex hooks",
+                    "{} still has a retired Pixel callback — run `pixel setup --repo` to restore native Codex hooks",
                     hooks_path.display()
                 ));
             }
@@ -708,7 +705,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 ],
                 &exe,
                 &format!(
-                    "pixel install --repo {}",
+                    "pixel setup --repo {}",
                     crate::routing::quoted_executable(root)
                 ),
             )
@@ -739,7 +736,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 ));
             }
             Err(format!(
-                "{} still starts Pixel's retired MCP server — run `pixel install --repo {}`",
+                "{} still starts Pixel's retired MCP server — run `pixel setup --repo {}`",
                 path.display(),
                 crate::routing::quoted_executable(root)
             ))
@@ -756,7 +753,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     },
                 )),
                 Some(_) => Err(format!(
-                    "retired Pixel-first block remains in {} — run `pixel install --repo {}` to remove it",
+                    "retired Pixel-first block remains in {} — run `pixel setup --repo {}` to remove it",
                     path.display(),
                     crate::routing::quoted_executable(root)
                 )),
@@ -771,7 +768,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 let value = install::read_settings(&shared).map_err(|e| e.to_string())?;
                 if crate::routing::has_pixel_guard(&value, "run-hook guard", &exe) {
                     return Err(format!(
-                        "retired Pixel guard in shared {} — run `pixel install --repo` to restore native Claude retrieval",
+                        "retired Pixel guard in shared {} — run `pixel setup --repo` to restore native Claude retrieval",
                         shared.display()
                     ));
                 }
@@ -785,7 +782,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             let rtk_backup = root.join(crate::routing::RTK_BACKUP);
             if has_unexpected_repo_pixel_hooks(&value, &exe) {
                 return Err(format!(
-                    "retired Pixel callbacks remain in {}; run `pixel install --repo` to restore native Claude retrieval",
+                    "retired Pixel callbacks remain in {}; run `pixel setup --repo` to restore native Claude retrieval",
                     path.display()
                 ));
             }
@@ -794,7 +791,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     CheckStatus::Yellow,
                     DoctorCheckDetail {
                         summary: format!(
-                            "stale Claude RTK backup {} remains; run `pixel install --repo` to complete native cleanup",
+                            "stale Claude RTK backup {} remains; run `pixel setup --repo` to complete native cleanup",
                             rtk_backup.display()
                         ),
                         detail: Some(serde_json::json!({
@@ -1127,7 +1124,7 @@ fn pi_guard_check(
         GuardState::Retired(path) | GuardState::Legacy(path) => path,
     };
     Err(format!(
-        "retired Pixel Pi project extension remains at {} — run `pixel install --repo {}` to remove it",
+        "retired Pixel Pi project extension remains at {} — run `pixel setup --repo {}` to remove it",
         path.display(),
         crate::routing::quoted_executable(root)
     ))
@@ -1156,7 +1153,7 @@ fn claude_hooks_owner_check(
         CheckStatus::Yellow,
         DoctorCheckDetail {
             summary: format!(
-                "claude task-event hooks in {} run {}, not this pixel ({}); every session uses that binary — run `pixel install` to point them here",
+                "claude task-event hooks in {} run {}, not this pixel ({}); every session uses that binary — run `pixel setup` to point them here",
                 path.display(),
                 others.join(", "),
                 exe.display()
@@ -1171,11 +1168,11 @@ fn claude_hooks_owner_check(
 
 /// Yellow outcome when the brief is installed in `installed` hooks but the
 /// configuration asks for `configured`: the settings predate the change of
-/// `brief_parts`, and `pixel install` rewrites them.
+/// `brief_parts`, and `pixel setup` rewrites them.
 fn brief_parts_drift(path: &Path, installed: u8, configured: u8) -> Option<DoctorCheckDetail> {
     (installed != configured).then(|| DoctorCheckDetail {
         summary: format!(
-            "the prompt brief is registered in {installed} hook(s) in {}, but `brief_parts` is {configured} — run `pixel install`",
+            "the prompt brief is registered in {installed} hook(s) in {}, but `brief_parts` is {configured} — run `pixel setup`",
             path.display()
         ),
         detail: Some(serde_json::json!({
@@ -1228,7 +1225,7 @@ fn has_unexpected_pixel_hooks(
 }
 
 /// Whether a repo-local settings file retains a Pixel callback that
-/// `pixel install --repo` removes; it keeps task-event hooks of every
+/// `pixel setup --repo` removes; it keeps task-event hooks of every
 /// provider, so those are not reported.
 fn has_unexpected_repo_pixel_hooks(value: &serde_json::Value, exe: &Path) -> bool {
     has_retired_pixel_hooks(value, exe, crate::routing::native_cleanup_retires)
@@ -1587,7 +1584,7 @@ struct Runner<'a> {
     only: &'a [String],
     skip: &'a [String],
     root: Option<&'a Path>,
-    /// The `--shell` override, handed on to the `pixel install` a fix runs.
+    /// The `--shell` override, handed on to the `pixel setup` a fix runs.
     shell: Option<&'a str>,
     checks: Vec<DoctorCheck>,
     skipped: usize,
@@ -1720,7 +1717,7 @@ fn validate_selection(only: &[String], skip: &[String]) -> Result<()> {
 /// The repair command a check reports: none on green, otherwise what the
 /// outcome names, with `{root}` in a catalogue command replaced by the quoted
 /// repository root (`.` when there is none) and `shell` handed to a
-/// home-wide `pixel install`.
+/// home-wide `pixel setup`.
 fn fix_for(
     spec: &CheckSpec,
     status: CheckStatus,
@@ -1765,7 +1762,7 @@ fn repair_for(
 }
 
 /// The argv after `pixel` of each `&&`-joined command in `template`, with
-/// `{root}` replaced by `root`. The home-wide `pixel install` also gets
+/// `{root}` replaced by `root`. The home-wide `pixel setup` also gets
 /// `--shell <shell>` when one was given, so the repair reads the profile the
 /// check read.
 fn catalogue_steps(template: &str, root: &str, shell: Option<&str>) -> Vec<Vec<String>> {
@@ -1784,7 +1781,7 @@ fn catalogue_steps(template: &str, root: &str, shell: Option<&str>) -> Vec<Vec<S
                 })
                 .collect();
             if let Some(shell) = shell
-                && argv == ["install"]
+                && argv == ["setup"]
             {
                 argv.extend(["--shell".to_owned(), shell.to_owned()]);
             }
@@ -1821,7 +1818,7 @@ pub struct Repair {
 
 /// `plan` split into the repairs a `--fix` runs and those it leaves to the
 /// managed `pixel`. A side build (`side_build`) never runs one that rewrites
-/// the home install — a `pixel install` step without `--repo`: that install
+/// the home install — a `pixel setup` step without `--repo`: that install
 /// is the managed binary's, and running it through `pixel-dev` would move
 /// every repository's hooks and prompts onto the side build. The checks it
 /// targets keep their `fix:` line and their colour.
@@ -1830,7 +1827,7 @@ pub fn split_home_repairs(plan: Vec<Repair>, side_build: bool) -> (Vec<Repair>, 
     plan.into_iter().partition(|repair| {
         !side_build
             || !repair.steps.iter().any(|argv| {
-                argv.first().is_some_and(|verb| verb == "install")
+                argv.first().is_some_and(|verb| verb == "setup")
                     && !argv.iter().any(|arg| arg == "--repo")
             })
     })
@@ -2465,7 +2462,7 @@ mod tests {
                     "install.agent-prompt",
                     CheckStatus::Red,
                     Some("stale\n  prompt"),
-                    Some("pixel install"),
+                    Some("pixel setup"),
                 ),
                 finding("daemon.epistemics", CheckStatus::Yellow, None, None),
             ],
@@ -2475,7 +2472,7 @@ mod tests {
         let expected = [
             "pixel doctor: ran 4 check(s), skipped 2 — 1 green, 2 yellow, 1 red",
             "  [red] install.agent-prompt: stale prompt",
-            "    fix: pixel install",
+            "    fix: pixel setup",
             "  [yellow] facts.freshness: facts.freshness summary",
             "    fix: pixel build-index --history '/r'",
             "  [yellow] daemon.epistemics: daemon.epistemics summary",
@@ -2546,7 +2543,7 @@ mod tests {
     }
 
     /// Hooks that run another binary are yellow for the managed `pixel`,
-    /// naming that binary and the `pixel install` that points them back;
+    /// naming that binary and the `pixel setup` that points them back;
     /// green when they run this one, and green for a side build, whose
     /// sessions are meant to run the managed binary.
     #[test]
@@ -2565,7 +2562,7 @@ mod tests {
         assert_eq!(status, CheckStatus::Yellow);
         assert_eq!(
             detail.summary,
-            "claude task-event hooks in /h/.claude/settings.json run /h/.local/bin/pixel-dev, not this pixel (/h/.local/share/mise/installs/pixel/0.6.1/bin/pixel); every session uses that binary — run `pixel install` to point them here"
+            "claude task-event hooks in /h/.claude/settings.json run /h/.local/bin/pixel-dev, not this pixel (/h/.local/share/mise/installs/pixel/0.6.1/bin/pixel); every session uses that binary — run `pixel setup` to point them here"
         );
         assert_eq!(
             detail.detail.unwrap()["running"],
@@ -2655,7 +2652,7 @@ mod tests {
     fn fix_for_should_name_a_command_only_for_a_check_that_needs_one() {
         let repo = CheckSpec {
             id: "repo.pi-guard",
-            fix: Some("pixel install --repo {root}"),
+            fix: Some("pixel setup --repo {root}"),
         };
         let root = Path::new("/tmp/it's here");
         assert_eq!(
@@ -2670,11 +2667,11 @@ mod tests {
         );
         assert_eq!(
             fix_for(&repo, CheckStatus::Red, Remedy::Catalogue, Some(root), None).as_deref(),
-            Some("pixel install --repo '/tmp/it'\\''s here'")
+            Some("pixel setup --repo '/tmp/it'\\''s here'")
         );
         assert_eq!(
             fix_for(&repo, CheckStatus::Yellow, Remedy::Catalogue, None, None).as_deref(),
-            Some("pixel install --repo .")
+            Some("pixel setup --repo .")
         );
         assert_eq!(
             fix_for(
@@ -2730,16 +2727,16 @@ mod tests {
     #[test]
     fn catalogue_steps_should_hand_the_shell_to_the_home_install_only() {
         assert_eq!(
-            catalogue_steps("pixel install", "/r", Some("fish")),
-            argv(&[&["install", "--shell", "fish"]])
+            catalogue_steps("pixel setup", "/r", Some("fish")),
+            argv(&[&["setup", "--shell", "fish"]])
         );
         assert_eq!(
-            catalogue_steps("pixel install", "/r", None),
-            argv(&[&["install"]])
+            catalogue_steps("pixel setup", "/r", None),
+            argv(&[&["setup"]])
         );
         assert_eq!(
-            catalogue_steps("pixel install --repo {root}", "/r", Some("fish")),
-            argv(&[&["install", "--repo", "/r"]])
+            catalogue_steps("pixel setup --repo {root}", "/r", Some("fish")),
+            argv(&[&["setup", "--repo", "/r"]])
         );
     }
 
@@ -2755,7 +2752,7 @@ mod tests {
                 Some("fish")
             )
             .as_deref(),
-            Some("pixel install --shell fish")
+            Some("pixel setup --shell fish")
         );
         assert_eq!(
             fix_for(
@@ -2766,7 +2763,7 @@ mod tests {
                 Some("my sh")
             )
             .as_deref(),
-            Some("pixel install --shell 'my sh'")
+            Some("pixel setup --shell 'my sh'")
         );
         assert_eq!(
             fix_for(
@@ -3149,11 +3146,11 @@ mod tests {
                 Some(root),
                 None
             ),
-            Some(argv(&[&["install", "--repo", "/tmp/it's here"]]))
+            Some(argv(&[&["setup", "--repo", "/tmp/it's here"]]))
         );
         assert_eq!(
             repair_for(repo, CheckStatus::Red, &Remedy::Catalogue, None, None),
-            Some(argv(&[&["install", "--repo", "."]]))
+            Some(argv(&[&["setup", "--repo", "."]]))
         );
         assert_eq!(
             repair_for(
@@ -3192,10 +3189,10 @@ mod tests {
         );
     }
 
-    /// Twelve checks share `pixel install`: the plan runs it once, lists
+    /// Twelve checks share `pixel setup`: the plan runs it once, lists
     /// every check it repairs, and keeps the report's order.
     /// A side build's `--fix` keeps every repair but the home install's: a
-    /// `pixel install` step without `--repo`, even inside a chain, is left to
+    /// `pixel setup` step without `--repo`, even inside a chain, is left to
     /// the managed pixel, while the managed pixel itself runs everything.
     #[test]
     fn split_home_repairs_should_leave_the_home_install_to_the_managed_pixel() {
@@ -3204,12 +3201,12 @@ mod tests {
             steps: argv(steps),
             checks: ids(&["x"]),
         };
-        let home = repair("pixel install", &[&["install", "--shell", "fish"]]);
+        let home = repair("pixel setup", &[&["setup", "--shell", "fish"]]);
         let chained = repair(
-            "pixel daemon stop && pixel install",
-            &[&["daemon", "stop", "/r"], &["install"]],
+            "pixel daemon stop && pixel setup",
+            &[&["daemon", "stop", "/r"], &["setup"]],
         );
-        let repo = repair("pixel install --repo /r", &[&["install", "--repo", "/r"]]);
+        let repo = repair("pixel setup --repo /r", &[&["setup", "--repo", "/r"]]);
         let prepare = repair("pixel prepare-repo /r", &[&["prepare-repo", "/r"]]);
         let plan = vec![home.clone(), chained.clone(), repo.clone(), prepare.clone()];
         assert_eq!(
@@ -3221,7 +3218,7 @@ mod tests {
 
     #[test]
     fn repair_plan_should_run_each_command_once_in_report_order() {
-        let install: &[&[&str]] = &[&["install"]];
+        let install: &[&[&str]] = &[&["setup"]];
         let prepare: &[&[&str]] = &[&["prepare-repo", "/r"]];
         let plan = repair_plan(&report(
             vec![
@@ -3229,7 +3226,7 @@ mod tests {
                 repairable(
                     "install.agent-prompt",
                     CheckStatus::Red,
-                    "pixel install",
+                    "pixel setup",
                     install,
                 ),
                 finding(
@@ -3238,7 +3235,7 @@ mod tests {
                     None,
                     Some("rm '/h/rtk.json'"),
                 ),
-                repairable("rule.parity", CheckStatus::Yellow, "pixel install", install),
+                repairable("rule.parity", CheckStatus::Yellow, "pixel setup", install),
                 repairable(
                     "index.freshness",
                     CheckStatus::Yellow,
@@ -3258,7 +3255,7 @@ mod tests {
             plan,
             vec![
                 Repair {
-                    command: "pixel install".into(),
+                    command: "pixel setup".into(),
                     steps: argv(install),
                     checks: ids(&["install.agent-prompt", "rule.parity"]),
                 },
@@ -3314,9 +3311,9 @@ mod tests {
     #[test]
     fn run_repair_should_report_a_binary_that_cannot_start() {
         let error =
-            run_repair(Path::new("/nonexistent/pixel"), &sh_repair(&[&["install"]])).unwrap_err();
+            run_repair(Path::new("/nonexistent/pixel"), &sh_repair(&[&["setup"]])).unwrap_err();
         assert!(
-            error.starts_with("`pixel install` could not start: "),
+            error.starts_with("`pixel setup` could not start: "),
             "{error}"
         );
     }
@@ -3766,7 +3763,7 @@ Prose naming `pixel status` is not a table row.
 
         let missing = check(current_exe);
         assert_eq!(missing.status, CheckStatus::Red, "{missing:?}");
-        assert_eq!(missing.fix.as_deref(), Some("pixel install"));
+        assert_eq!(missing.fix.as_deref(), Some("pixel setup"));
 
         crate::pi_global::install(&paths, old_exe, false, false).unwrap();
         let stale = check(current_exe);

@@ -35,7 +35,7 @@ checklist below defines readiness to merge, with required gates run in CI.
 - [ ] The branch was created from an up-to-date `main` and the pull request targets `main` (a maintainer's maintenance-release branch instead starts from an up-to-date `origin/release/x.y` and its pull request targets `release/x.y`, so no unreleasable `main` commit rides along; see "Branches").
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
 - [ ] If a command or op was added or renamed: `ARCHITECTURE.md` (its `## Command surface` table, in `pixel --help` order), `pixel --help` output, and the agent prompt in `crates/pixel-install/assets/pixel-agent-prompt.md` agree with each other. `cargo test -p pixel-cli --test cli docs_drift::` enforces both directions.
-- [ ] If the change moves anything `ARCHITECTURE.md` describes (a crate or an internal dependency, a file on disk, the wire contract, what `pixel install` writes, a hook, a CI job), the matching section is updated in the same pull request ([`.agents/rules/architecture-doc.md`](.agents/rules/architecture-doc.md) maps change to section; `docs_drift::` checks the command and crate tables).
+- [ ] If the change moves anything `ARCHITECTURE.md` describes (a crate or an internal dependency, a file on disk, the wire contract, what `pixel setup` writes, a hook, a CI job), the matching section is updated in the same pull request ([`.agents/rules/architecture-doc.md`](.agents/rules/architecture-doc.md) maps change to section; `docs_drift::` checks the command and crate tables).
 - [ ] If the change crosses a trust boundary of [`docs/threat-model.md`](docs/threat-model.md) (a new entry point, a file under `.pixel/` or the machine-wide state, a network destination, a secret, a hook or install target, an op on the daemon socket, a listed mitigation, or a workflow's triggers, permissions or secrets), the matching threat and attack-surface entries are updated in the same pull request. A suspected vulnerability goes to the private advisory (SECURITY.md), not into that file.
 - [ ] The PR distinguishes CI evidence, optional local checks and any requested local deployment; no reinstall is required for publication.
 - [ ] Every CodeRabbit finding on the pull request has an answer in its own thread — a fix naming its commit, or the reason it does not apply — and the thread is resolved (see "CodeRabbit reviews").
@@ -323,15 +323,15 @@ refused (overwriting it leaves the manager listing a version that is gone):
 `pixel self-update --dev` installs the build as `~/.local/bin/pixel-dev`
 instead, and `--install-path <path>` overwrites a managed binary on purpose.
 The home install (Claude hooks, deployed prompts, Codex and pi config) stays
-the managed binary's: a side build runs `pixel-dev install --repo .` and
+the managed binary's: a side build runs `pixel-dev setup --repo .` and
 `pixel-dev doctor . --fix --fail-on yellow --skip 'install.*'`, and touches
 the home install only for a change to what it writes, handing it back with
-`pixel install` afterwards (AGENTS.md, "Side build").
+`pixel setup` afterwards (AGENTS.md, "Side build").
 
 ```bash
 pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
 pixel build-index --history .   # rebuild facts/history index
-pixel install             # redeploy the agent prompt and hooks, Codex config
+pixel setup             # redeploy the agent prompt and hooks, Codex config
 pixel doctor . --fix --fail-on yellow   # must exit 0; report any non-green check in the PR
                                         # (a worktree Codex never runs in: --skip repo.codex-hook-review, see AGENTS.md)
 scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
@@ -341,7 +341,7 @@ scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
 incremental rebuild takes seconds and the binary is optimised the same way.
 Drop `--build` for the exact shipped `release` profile.
 
-`pixel install` removes the retired `claude()` shell wrapper from the
+`pixel setup` removes the retired `claude()` shell wrapper from the
 account's login-shell profile, and `pixel doctor` reports one that remains
 (`install.legacy-wrappers`). The login shell is read from the user database
 rather than `$SHELL`: a coding agent's command tool frequently runs under
@@ -411,7 +411,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full map. The short version:
 | `crates/pixel-ops` | Git mutation ops (publish, reconcile, branch, ...) |
 | `crates/pixel-index`, `pixel-graph`, `pixel-rank`, `pixel-context` | Retrieval: trigram index, code graph, ranking, budgeted context |
 | `crates/pixel-facts`, `pixel-recall`, `pixel-session`, `pixel-actionlog`, `pixel-flow` | History facts, semantic recall, session recall, action log, browser flows |
-| `crates/pixel-install` | `pixel install` / `doctor` / `uninstall`, hook scripts, the agent prompt asset |
+| `crates/pixel-install` | `pixel setup` / `doctor` / `uninstall`, hook scripts, the agent prompt asset |
 | `crates/pixel-bench` | Criterion benches. Not shipped. |
 | `scripts/` | install, smoke test, demos, bench wrappers, disk reclamation |
 | `docs/` | user docs, demos, manual setup |
@@ -583,7 +583,7 @@ which GitHub pre-fills, section by section (agents follow
    (for example the musl cross-build or the smoke test).
 3. **Merge Danger**: the **door** (two-way when a revert restores every
    user's state; one-way for an `EXTRACTOR_VERSION` or `PROTOCOL_VERSION`
-   bump, a file format under `.pixel/`, what `pixel install` writes, a
+   bump, a file format under `.pixel/`, what `pixel setup` writes, a
    release tag) and the **blast radius** (who a bad merge breaks).
 4. **Docs touched**: `changelog.d/`, `ARCHITECTURE.md`, agent prompt, README.
 

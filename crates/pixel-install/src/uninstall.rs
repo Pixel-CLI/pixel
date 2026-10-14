@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! `pixel uninstall` — the inverse of `pixel install`.
+//! `pixel setup --remove` — the inverse of `pixel setup`.
 //!
-//! Removes every trace pixel install wrote:
+//! Removes every trace pixel setup wrote:
 //!   - managed blocks from CLAUDE.md / AGENTS.md / .zcode/AGENTS.md /
 //!     .pi/agent/AGENTS.md
 //!   - pixel run-hook entries from Claude, Devin, Codex, Gemini, zcode, Cursor,
@@ -60,8 +60,8 @@ pub struct UninstallOptions {
     /// never loads it (`pixel doctor` names the file) without losing the
     /// install that works.
     pub wrappers_only: bool,
-    /// Repository root whose project-local artifacts `pixel install --repo`
-    /// wrote (`pixel uninstall --repo <path>`). When set, ONLY repo-local
+    /// Repository root whose project-local artifacts `pixel setup --repo`
+    /// wrote (`pixel setup --remove --repo <path>`). When set, ONLY repo-local
     /// removal runs: `.codex/hooks.json` + composed backup,
     /// `.codex/config.toml`, `.claude/settings.local.json`,
     /// `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` (plus
@@ -72,7 +72,7 @@ pub struct UninstallOptions {
 }
 
 /// Markers that identify pixel-authored hook entries in any settings file.
-/// Each corresponds to a hook script filename installed by `pixel install`.
+/// Each corresponds to a hook script filename installed by `pixel setup`.
 /// Substrings here delete any nested entry whose command merely contains
 /// them, so they stay provider-qualified: the broad `run-hook guard` /
 /// `run-hook metrics` phrases would take a foreign command that merely
@@ -90,7 +90,7 @@ const PIXEL_HOOK_MARKERS: &[&str] = &[
     "run-hook guard --provider zcode",
 ];
 
-/// Run `pixel uninstall`. Idempotent: safe to re-run.
+/// Run `pixel setup --remove`. Idempotent: safe to re-run.
 pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
     let home = options
         .home
@@ -181,8 +181,8 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
     Ok(install::install_report(&binary_path, &home, dry_run, steps))
 }
 
-/// Repo-scoped uninstall (`pixel uninstall --repo <path>`): removes exactly
-/// the artifacts `pixel install --repo` writes, nothing global:
+/// Repo-scoped uninstall (`pixel setup --remove --repo <path>`): removes exactly
+/// the artifacts `pixel setup --repo` writes, nothing global:
 ///   - `<repo>/.codex/hooks.json` — restores the snapshotted PreToolUse groups
 ///     from the composed-guard sidecar (or strips pixel entries when no
 ///     sidecar exists), preserving a diverged file for manual reconciliation;
@@ -268,7 +268,7 @@ fn uninstall_project(
 }
 
 /// Take Pixel's hooks out of `<repo>/.devin/config.local.json` and the
-/// legacy `.devin/hooks.json`, keeping every foreign entry. `install --repo`
+/// legacy `.devin/hooks.json`, keeping every foreign entry. `setup --repo`
 /// runs it too: Devin keeps its native tools.
 pub(crate) fn remove_project_devin_hooks(
     repo: &Path,
@@ -1348,7 +1348,7 @@ fn parent_of(root: &Path, rel: &str) -> PathBuf {
         .map_or_else(|| root.to_path_buf(), Path::to_path_buf)
 }
 
-/// Every directory where a global `pixel install` or `pixel uninstall`
+/// Every directory where a global `pixel setup` or `pixel setup --remove`
 /// rewrites a file, hence may have left a backup beside it.
 fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![
@@ -1384,7 +1384,7 @@ fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Ve
     dirs
 }
 
-/// Every directory where `pixel install --repo` or `pixel uninstall --repo`
+/// Every directory where `pixel setup --repo` or `pixel setup --remove --repo`
 /// rewrites a file inside `repo`.
 fn project_backup_dirs(repo: &Path) -> Vec<PathBuf> {
     vec![

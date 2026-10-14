@@ -1054,10 +1054,10 @@ mod tests {
     fn metrics_should_render_only_identity_when_no_policy_applies() {
         let metrics = OperationMetrics::new(Duration::from_millis(3), 100, None)
             .with_comparison_gap(ComparisonGap::NoPolicy);
-        let mut event = ActionEvent::new("install", ".").with_metrics(metrics);
+        let mut event = ActionEvent::new("setup", ".").with_metrics(metrics);
         event.invocation_id = Some("test-abcdef".to_owned());
         let line = event.finalize_metrics_line().unwrap();
-        assert_eq!(line, "🟩 pixel install ❀ 3.0ms ❀ #abcdef");
+        assert_eq!(line, "🟩 pixel setup ❀ 3.0ms ❀ #abcdef");
         assert_eq!(
             event.metrics.as_ref().unwrap().reporting_bytes,
             line.len() as u64 + 2

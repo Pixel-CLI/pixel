@@ -47,7 +47,7 @@ Pixel has a `pixel-qa` bot that uses Pixel to fix pull requests efficiently: the
 - **Open source**: the code, its history and every review are public on [GitHub](https://github.com/Pixel-CLI/pixel), under the [MIT License](https://github.com/Pixel-CLI/pixel/blob/main/LICENSE).
 - **Local by design**: the index stays in `.pixel/` on your machine, and the binary sends no telemetry beyond an optional release check ([Privacy Policy](/legal/privacy-policy/)).
 - **Public releases**: each version is a tag on `main`, with its [changelog](https://github.com/Pixel-CLI/pixel/blob/main/CHANGELOG.md) and a [release](https://github.com/Pixel-CLI/pixel/releases) you can follow as a feed.
-- **Easy to leave**: one `pixel uninstall` undoes the setup.
+- **Easy to leave**: one `pixel setup --remove` undoes the setup.
 
 ## Try it on your own code
 

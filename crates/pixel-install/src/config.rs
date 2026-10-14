@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! Agent-config rewrite helpers for `pixel install` / `pixel migrate`.
+//! Agent-config rewrite helpers for `pixel setup` / `pixel migrate`.
 //!
 //! Finds the Claude/agent config files (CLAUDE.md, AGENTS.md, settings.json),
 //! applies the managed-marker wrapping (`<!-- pixel:managed:begin/end -->`),
@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 /// Managed-marker begin tag. Everything between this and [`MANAGED_END`] is
-/// owned by pixel and rewritten on every `pixel install`.
+/// owned by pixel and rewritten on every `pixel setup`.
 pub const MANAGED_BEGIN: &str = "<!-- pixel:managed:begin -->";
 /// Managed-marker end tag. See [`MANAGED_BEGIN`].
 pub const MANAGED_END: &str = "<!-- pixel:managed:end -->";
@@ -99,7 +99,7 @@ pub fn brief_parts(home: &Path, repo: Option<&Path>) -> u8 {
 
 /// The canonical pixel usage-rule file (relative to home). This is the real,
 /// full rule text (the five mandatory scenarios, the doctrine, the git-op
-/// table) that `pixel install` embeds into the managed CLAUDE.md/AGENTS.md
+/// table) that `pixel setup` embeds into the managed CLAUDE.md/AGENTS.md
 /// block — not the short 3-line summary. It lives outside the repo so the
 /// rules can be edited without a rebuild.
 pub const PIXEL_RULES_REL: &str = ".agent-config/rules/pixel.md";
@@ -224,7 +224,7 @@ pub struct ScrubOutcome {
     pub backup_path: Option<PathBuf>,
 }
 
-/// The Markdown-style agent-config files `pixel install` manages with
+/// The Markdown-style agent-config files `pixel setup` manages with
 /// managed-marker rewriting, in a stable order. Returns only paths that
 /// exist on disk.
 ///
@@ -300,7 +300,7 @@ pub fn apply_managed_markers(original: &str, managed: &str) -> String {
                 // OLD end marker is that same canonical newline, not user
                 // content — strip exactly one so it isn't duplicated on every
                 // re-install (previously this grew the file by one byte per
-                // `pixel install` run: 295, 296, 297, ... forever). Anything
+                // `pixel setup` run: 295, 296, 297, ... forever). Anything
                 // beyond that first newline is genuine trailing content and
                 // is preserved untouched.
                 after.strip_prefix('\n').unwrap_or(after)

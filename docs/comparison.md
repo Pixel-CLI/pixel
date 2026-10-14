@@ -155,7 +155,7 @@ are obvious from the table: **semble for search, pixel for graph, history and
 git ops** costs ~5 100 always-on tokens and beats either alone on its own axis.
 Adding stacklit's map is another ~420.
 
-One installer caveat: **`pixel install` deletes GitNexus' generated section**
+One installer caveat: **`pixel setup` deletes GitNexus' generated section**
 from `CLAUDE.md` and `AGENTS.md` (the `# GitNexus — Code Intelligence` block and
 its subsections — `crates/pixel-install/src/config.rs`, `strip_stale_blocks`).
 It is regenerable with `gitnexus analyze`. Removal is bounded to a real
@@ -164,7 +164,7 @@ survives verbatim; there is a regression test for that case. pixel's hook router
 also recognises GitNexus' passive Claude context hook and coexists with it
 (`crates/pixel-install/src/routing.rs`). semble and stacklit are untouched.
 
-`pixel uninstall` removes everything `pixel install` wrote and is idempotent. It
+`pixel setup --remove` removes everything `pixel setup` wrote and is idempotent. It
 does not restore the GitNexus block.
 
 ## Command mapping

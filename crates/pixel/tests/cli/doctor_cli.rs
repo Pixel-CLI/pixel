@@ -39,7 +39,7 @@ fn doctor_should_exit_1_with_the_fix_when_a_check_is_red() {
     // A bare home has no Claude task hooks: red, with the install as the fix.
     assert!(
         text.contains(&format!(
-            "  [red] install.claude-hooks: {} not found — run `pixel install`\n",
+            "  [red] install.claude-hooks: {} not found — run `pixel setup`\n",
             home.join(".claude/settings.json").display()
         )),
         "{text}"
@@ -47,7 +47,7 @@ fn doctor_should_exit_1_with_the_fix_when_a_check_is_red() {
     // No Pixel prompt is deployed any more, so its absence is healthy.
     assert!(!text.contains("install.agent-prompt"), "{text}");
     assert!(
-        text.contains("    fix: pixel install --shell zsh\n"),
+        text.contains("    fix: pixel setup --shell zsh\n"),
         "{text}"
     );
     assert!(
@@ -71,7 +71,7 @@ fn doctor_json_should_keep_the_exit_code_and_carry_the_fix() {
     assert!(find("install.pi-prompt").is_none(), "--skip left it out");
     assert_eq!(
         find("install.claude-hooks").unwrap()["fix"],
-        "pixel install --shell zsh",
+        "pixel setup --shell zsh",
         "the home install reads the profile of the shell the check read"
     );
     // A home with no deployed prompt is green, so the check carries no fix.
@@ -166,7 +166,7 @@ fn doctor_list_should_name_every_check_with_its_fix() {
 }
 
 /// No release deploys a Pixel prompt any more, so a copy an earlier
-/// `pixel install` left is retired whatever its content, the bundled text
+/// `pixel setup` left is retired whatever its content, the bundled text
 /// included: every ordinary command of an installed `pixel` names it in one
 /// stderr line, while `doctor`, which reports it itself, a home where nothing
 /// was ever deployed, and the developer builds (`pixel-dev`, a binary run
@@ -197,12 +197,12 @@ fn a_retired_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
     let never_installed = ordinary();
     assert!(never_installed.status.success(), "{never_installed:?}");
     let stderr = String::from_utf8_lossy(&never_installed.stderr).into_owned();
-    assert!(!stderr.contains("pixel install"), "{stderr}");
+    assert!(!stderr.contains("pixel setup"), "{stderr}");
 
     let deployed = home.join(".local/share/pixel");
     std::fs::create_dir_all(&deployed).unwrap();
     let note = format!(
-        "note: agent-prompt.md deployed by an earlier `pixel install` is retired in this pixel ({}) — run `pixel install` to remove it",
+        "note: agent-prompt.md deployed by an earlier `pixel setup` is retired in this pixel ({}) — run `pixel setup` to remove it",
         env!("CARGO_PKG_VERSION")
     );
     // An older release's text and the text this release still bundles are
@@ -229,7 +229,7 @@ fn a_retired_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
 
     // The same binary as a developer build: installed as the `pixel-dev`
     // side build, or run from cargo's `target/` as built. The deployed
-    // prompts are the managed pixel's, and the `pixel install` the note
+    // prompts are the managed pixel's, and the `pixel setup` the note
     // names would move every repository's hooks onto this build.
     for developer_build in [
         install("pixel-dev"),
@@ -239,7 +239,7 @@ fn a_retired_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
         assert!(quiet.status.success(), "{quiet:?}");
         let stderr = String::from_utf8_lossy(&quiet.stderr).into_owned();
         assert!(
-            !stderr.contains("pixel install"),
+            !stderr.contains("pixel setup"),
             "{}: {stderr}",
             developer_build.display()
         );
@@ -250,10 +250,10 @@ fn a_retired_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
     assert!(!stderr.contains("note: agent-prompt.md"), "{stderr}");
     let text = String::from_utf8_lossy(&report.stdout).into_owned();
     // No host reads a deployed prompt any more: doctor calls the copy an
-    // earlier release left retired, and `pixel install` removes it.
+    // earlier release left retired, and `pixel setup` removes it.
     assert!(
         text.contains(&format!(
-            "  [red] install.agent-prompt: retired Pixel prompt file(s) remain: {} — run `pixel install` to remove them\n",
+            "  [red] install.agent-prompt: retired Pixel prompt file(s) remain: {} — run `pixel setup` to remove them\n",
             deployed.join("agent-prompt.md").display()
         )),
         "{text}"
@@ -288,16 +288,16 @@ fn a_side_build_doctor_fix_should_leave_the_home_install_alone() {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
-        stderr.contains("pixel doctor --fix: left pixel install --shell zsh to the managed pixel"),
+        stderr.contains("pixel doctor --fix: left pixel setup --shell zsh to the managed pixel"),
         "{stderr}"
     );
-    assert!(!stderr.contains("running pixel install"), "{stderr}");
+    assert!(!stderr.contains("running pixel setup"), "{stderr}");
     for written in [".claude", ".codex", ".local/share/pixel", ".pi"] {
         assert!(!home.join(written).exists(), "{written} written: {stderr}");
     }
     assert!(
         stdout.contains(&format!(
-            "  [red] install.claude-hooks: {} not found — run `pixel install`\n    fix: pixel install --shell zsh\n",
+            "  [red] install.claude-hooks: {} not found — run `pixel setup`\n    fix: pixel setup --shell zsh\n",
             home.join(".claude/settings.json").display()
         )),
         "{stdout}"
@@ -309,7 +309,7 @@ fn a_side_build_doctor_fix_should_leave_the_home_install_alone() {
     );
 }
 
-/// `doctor` with `XDG_CONFIG_HOME` removed, so the `pixel install` a `--fix`
+/// `doctor` with `XDG_CONFIG_HOME` removed, so the `pixel setup` a `--fix`
 /// runs writes nothing outside the scratch home.
 fn doctor_fixing(home: &Path, repo: &Path, args: &[&str]) -> Output {
     pixel_command()
@@ -325,7 +325,7 @@ fn doctor_fixing(home: &Path, repo: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
-/// The reason `--fix` exists: two checks share `pixel install`, which runs
+/// The reason `--fix` exists: two checks share `pixel setup`, which runs
 /// once, with the `--shell` the checks read, and the verdict and exit code
 /// come from the checks re-run afterwards, not from the first pass. The
 /// prompts an earlier release deployed are red, and the install removes them.
@@ -360,14 +360,14 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
     );
     assert!(
         text.contains(&format!(
-            "  [red] install.agent-prompt: retired Pixel prompt file(s) remain: {}, {} — run `pixel install` to remove them\n",
+            "  [red] install.agent-prompt: retired Pixel prompt file(s) remain: {}, {} — run `pixel setup` to remove them\n",
             deployed.join("agent-prompt.md").display(),
             deployed.join("subagent-prompt.md").display()
         )),
         "{text}"
     );
     assert!(
-        text.contains("    fix: pixel install --shell zsh\n"),
+        text.contains("    fix: pixel setup --shell zsh\n"),
         "{text}"
     );
 
@@ -378,7 +378,7 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
         text,
         [
             "pixel doctor --fix: ran 1 repair(s) — 1 fixed, 0 not converged, 0 failed",
-            "  [fixed] pixel install --shell zsh (install.agent-prompt, install.pi-impact)",
+            "  [fixed] pixel setup --shell zsh (install.agent-prompt, install.pi-impact)",
             "pixel doctor: ran 2 check(s), skipped 28 — 2 green, 0 yellow, 0 red",
             "",
         ]
@@ -393,7 +393,7 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
     for retired in ["agent-prompt.md", "subagent-prompt.md"] {
         assert!(
             !deployed.join(retired).exists(),
-            "`pixel install` removes {retired}"
+            "`pixel setup` removes {retired}"
         );
     }
 }
@@ -404,7 +404,7 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
 #[test]
 fn doctor_fix_json_should_report_a_repair_that_failed() {
     let (home, repo) = fixture("fix-json");
-    // `~/.claude` is a file: `pixel install` cannot write its settings.
+    // `~/.claude` is a file: `pixel setup` cannot write its settings.
     std::fs::write(home.join(".claude"), "not a directory\n").unwrap();
     let out = doctor_fixing(
         &home,
@@ -415,13 +415,13 @@ fn doctor_fix_json_should_report_a_repair_that_failed() {
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let repairs = report["repairs"].as_array().expect("repairs");
     assert_eq!(repairs.len(), 1, "{report}");
-    assert_eq!(repairs[0]["command"], "pixel install --shell zsh");
+    assert_eq!(repairs[0]["command"], "pixel setup --shell zsh");
     assert_eq!(repairs[0]["status"], "failed", "{report}");
     assert!(
         repairs[0]["error"]
             .as_str()
             .unwrap()
-            .starts_with("`pixel install --shell zsh` failed (exit status: "),
+            .starts_with("`pixel setup --shell zsh` failed (exit status: "),
         "{report}"
     );
     assert_eq!(
@@ -445,7 +445,7 @@ fn doctor_without_fix_should_leave_the_home_untouched() {
     assert!(report.get("repairs").is_none(), "{report}");
     assert_eq!(report["checks"][0]["status"], "red", "{report}");
     assert_eq!(
-        report["checks"][0]["fix"], "pixel install --shell zsh",
+        report["checks"][0]["fix"], "pixel setup --shell zsh",
         "{report}"
     );
     assert_eq!(
@@ -659,7 +659,7 @@ fn devin_hooks(entries: &[(&str, &str)]) -> serde_json::Value {
 
 /// Devin keeps its native retrieval. The check is green with no
 /// `~/.config/devin`, green on a config that holds only foreign hooks naming
-/// the same verbs, and red while retired Pixel hooks remain. `pixel install`
+/// the same verbs, and red while retired Pixel hooks remain. `pixel setup`
 /// removes those retired hooks, registers current task hooks, and keeps the
 /// foreign hooks intact.
 #[test]
@@ -716,18 +716,18 @@ fn doctor_devin_hooks_is_green_without_a_pixel_hook_and_red_until_install_remove
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains(&format!(
-            "  [red] install.devin-hooks: retired Pixel hooks remain in {} — run `pixel install` to remove them\n    fix: pixel install --shell zsh\n",
+            "  [red] install.devin-hooks: retired Pixel hooks remain in {} — run `pixel setup` to remove them\n    fix: pixel setup --shell zsh\n",
             config.display()
         )),
         "{text}"
     );
 
-    // The repair: `pixel install` takes Pixel's hooks out and keeps the rest.
+    // The repair: `pixel setup` takes Pixel's hooks out and keeps the rest.
     let out = doctor_fixing(&home, &repo, &["--only", "install.devin-hooks", "--fix"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("  [fixed] pixel install --shell zsh (install.devin-hooks)\n"),
+        text.contains("  [fixed] pixel setup --shell zsh (install.devin-hooks)\n"),
         "{text}"
     );
     let value: serde_json::Value =

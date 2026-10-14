@@ -53,7 +53,7 @@ verify_pixel_brief() {
   output_file=$(mktemp)
   receipt_file="/out/pixel-brief-hook-${REP:-1}.json"
   # `run-hook prompt-submit` is a retired no-op verb (RetiredHookCmd); the live
-  # brief path is the task-event hook `pixel install` registers for Codex's
+  # brief path is the task-event hook `pixel setup` registers for Codex's
   # UserPromptSubmit. The probe prompt carries a strong code signal
   # (`README.md` names code by its source extension, `tested` is a code word)
   # so an indexed repository can answer with a real [PIXEL:BRIEF] block; a
@@ -169,9 +169,9 @@ prep_pixel() {
   if [ "${PIXEL_ARENA_PREP_GRAPH:-0}" = "1" ]; then
     prep_start_ms=$(date +%s%3N) || return $?
   fi
-  pixel install || return $?
+  pixel setup || return $?
  if [ "${ARENA_REVIEWED_PIXEL_HOOKS:-0}" != "1" ]; then
-   pixel install --repo "$REPO_DIR" || return $?
+   pixel setup --repo "$REPO_DIR" || return $?
  fi
   # The classify skill is the conditional-routing surface Codex sees;
   # non-interactive installs skip the wizard, so deploy it explicitly.
@@ -185,9 +185,9 @@ prep_pixel() {
       return 1
     fi
     prep_end_ms=$(date +%s%3N) || return $?
-    prepare_commands='["pixel install"]'
+    prepare_commands='["pixel setup"]'
     if [ "${ARENA_REVIEWED_PIXEL_HOOKS:-0}" != "1" ]; then
-      prepare_commands='["pixel install", "pixel install --repo /repo"]'
+      prepare_commands='["pixel setup", "pixel setup --repo /repo"]'
     fi
     prepare_commands="${prepare_commands%]}, \"pixel prepare-repo --no-daemon /repo\"]"
     python3 -c 'import json,sys; graph=sys.argv[1]; json.dump({"arm":"pixel","rep":sys.argv[4],"prepare_commands":json.loads(sys.argv[6]),"duration_ms":int(sys.argv[2])-int(sys.argv[3]),"graph_db":graph,"graph_db_bytes":__import__("pathlib").Path(graph).stat().st_size},open(sys.argv[5],"w"),indent=2); open(sys.argv[5],"a").write("\n")' \
@@ -278,7 +278,7 @@ case "${ARM_TOOL:-raw}" in
   stacklit) codex mcp add stacklit -- npx -y stacklit serve ;;
   gitnexus) : ;;   # gitnexus setup wrote its own MCP entries
   gortex)   : ;;   # registered in prep_gortex
-  pixel)    : ;;   # pixel wires itself via pixel install
+  pixel)    : ;;   # pixel wires itself via pixel setup
 esac
 
 if [ "${ARENA_WATCH_ONLY:-0}" = "1" ]; then

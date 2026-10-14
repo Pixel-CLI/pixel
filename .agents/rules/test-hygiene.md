@@ -32,7 +32,7 @@ Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
   that file exists after the tests. It also points `HOME` at an empty
   directory (`support::neutral_home()`): a test that spawns the binary
   itself sets `HOME` too, or a machine with another release's
-  `pixel install` adds a stale-prompt note to every stderr it reads.
+  `pixel setup` adds a stale-prompt note to every stderr it reads.
 - **A fixture's commit is not unique.** Two fixtures with the same tree,
   committed in the same second by the same identity, get the same OID, and
   the base-shard cache (`$XDG_CACHE_HOME/pixel/shards`, else under the

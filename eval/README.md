@@ -35,8 +35,8 @@ with no pixel guidance at all.
 | arm | hooks | AGENTS.md block | session-start payload | pixel binary + `.pixel` index |
 | --- | --- | --- | --- | --- |
 | `baseline` | none | stripped | n/a | hidden (`BASELINE_PIXEL=hidden`, default): `pixel` on PATH answers "command not found", no index, no pixel skill |
-| `quiet` | the installed set filtered to `run-hook session-start` / `post-compaction` (global and repo-local) | `pixel install --repo` | the deployed prompt | present |
-| `full` | every hook the operator's `pixel install` wrote + `pixel install --repo` (Claude guard, Codex composed guard) | `pixel install --repo` | the deployed prompt | present |
+| `quiet` | the installed set filtered to `run-hook session-start` / `post-compaction` (global and repo-local) | `pixel setup --repo` | the deployed prompt | present |
+| `full` | every hook the operator's `pixel setup` wrote + `pixel setup --repo` (Claude guard, Codex composed guard) | `pixel setup --repo` | the deployed prompt | present |
 | `on` | one clean pixel set | committed (current `RULES_BODY`) | `variants/frozen-main` | present |
 | `v<name>` | one clean pixel set | `variants/<name>/rules-body.md` | `variants/<name>/agent-prompt.md` | present |
 
@@ -145,7 +145,7 @@ commit that already contains its own scenario or verifier.
 
 One campaign per host, so each has its own identity and results directory
 and the two are never pooled. A shared `SCRATCH` reuses the per-commit
-indexes and the warm build caches between them. `pixel install` must have
+indexes and the warm build caches between them. `pixel setup` must have
 run on the machine: `quiet` and `full` start from the installed hooks.
 
 ```bash
@@ -408,7 +408,7 @@ For project-scoped Codex configuration, the private user config must also mark
 Generate fixtures using the Pixel version being evaluated. In particular, the
 source `pi-pixel.ts` asset contains an unrendered binary placeholder and is not
 a runnable extension. A bootstrap may instead run the image's pinned
-`pixel install --repo /workspace` before the host: it writes
+`pixel setup --repo /workspace` before the host: it writes
 `.claude/settings.local.json`, `.codex/config.toml`, `.codex/hooks.json`, and
 `.pi/extensions/pixel-guard.ts`. Then point the host at those generated files
 instead of the `/runner` examples, and retain the same bootstrap in all arms.

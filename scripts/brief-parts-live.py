@@ -51,13 +51,13 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-FAIL_OPEN = " || true"  # what `pixel install` ends every prompt-submit command with
+FAIL_OPEN = " || true"  # what `pixel setup` ends every prompt-submit command with
 
 
 def settings(binary, arm, old_binary):
     """One UserPromptSubmit entry per part (``split``) or one for the whole brief (``single``).
 
-    The commands are the ones ``pixel install`` writes, tail included. ``split`` also
+    The commands are the ones ``pixel setup`` writes, tail included. ``split`` also
     registers a stand-in for a ``pixel`` older than ``--part``, which exits 2 on the
     flag: were its failure not swallowed Claude Code would block the prompt.
     """

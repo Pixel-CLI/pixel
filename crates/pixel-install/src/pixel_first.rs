@@ -3,7 +3,7 @@
 
 //! The Pixel-first retrieval rule in a repository's root `AGENTS.md`.
 //!
-//! `pixel install --repo` removes the managed Pixel block from `AGENTS.md`.
+//! `pixel setup --repo` removes the managed Pixel block from `AGENTS.md`.
 //! Text outside the markers belongs to the user and is kept byte for byte.
 
 use std::fs;

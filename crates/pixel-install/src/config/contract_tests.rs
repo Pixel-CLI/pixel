@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! Contract tests for the agent-config rewrite helpers: what `pixel install`
+//! Contract tests for the agent-config rewrite helpers: what `pixel setup`
 //! may write into a user's CLAUDE.md / AGENTS.md / settings.json, what it must
 //! leave alone, and what a dry run must never touch.
 
