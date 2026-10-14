@@ -125,10 +125,26 @@ pub(super) struct Facts {
     /// Every method name defined on an object the rules cannot name
     /// exactly, and whether one may be any name ([`Fact::Tainted`]).
     tainted: Names,
+    /// The same for the definitions written in test files
+    /// ([`super::test_file`]), which taint lookups only when
+    /// [`Facts::with_tests`] says so: the callers in test files (#106).
+    test_tainted: Names,
+    tests: bool,
+    /// Owner → the names its instance methods define on the singleton
+    /// class of the object they run on (`define_singleton_method(n)` in a
+    /// `def`, [`Fact::Fronted`]): an object whose chain
+    /// holds the owner's instance step may hold one in front of its whole
+    /// chain, and no other object can (#106).
+    fronts: HashMap<String, Names>,
+    /// Every name one of them defines, and whether one may define any.
+    front_names: Names,
     /// The modules mixed into an object the rules cannot name, as written:
     /// path, nesting ([`Fact::Spread`]); once placed, the modules.
     spread: Vec<(String, Vec<String>)>,
     spread_into: HashSet<String>,
+    /// The same written in test files: mixed in only for the callers in
+    /// test files ([`Facts::with_tests`], #106).
+    test_spread: Vec<(String, Vec<String>)>,
 }
 
 /// Method names, some of them patterns of the names they may be
@@ -331,6 +347,7 @@ impl Facts {
             }
         }
         for (path, encoded) in files.iter().filter(|(path, _)| visible(path)) {
+            let path_of = path.as_str();
             for fact in Fact::decode_all(encoded) {
                 match fact {
                     Fact::Unknown { owner, side, name } => {
@@ -414,8 +431,28 @@ impl Facts {
                         };
                         facts.opaque.push((path, scope, side, prepend));
                     }
+                    // `o.extend(M)` in a test file is a stub as well.
+                    Fact::Spread { path, scope } if super::test_file(path_of) => {
+                        facts.test_spread.push((path, scope));
+                    }
                     Fact::Spread { path, scope } => facts.spread.push((path, scope)),
+                    // A test file's definition on an object the rules
+                    // cannot name is a stub, as `allow(x).to receive(:m)`
+                    // or `x.stubs(:m)` are, which the rules do not read
+                    // either: only a test runner loads the file, so only
+                    // the callers in test files may meet it (#106).
+                    Fact::Tainted { name } if super::test_file(path_of) => {
+                        facts.test_tainted.insert(name.as_deref());
+                    }
                     Fact::Tainted { name } => facts.taint(name.as_deref()),
+                    Fact::Fronted { owner, name } => {
+                        facts.front_names.insert(name.as_deref());
+                        facts
+                            .fronts
+                            .entry(owner)
+                            .or_default()
+                            .insert(name.as_deref());
+                    }
                     Fact::Definee {
                         name,
                         written,
@@ -848,7 +885,49 @@ impl Facts {
     /// Whether a method `name` may be defined on an object the rules
     /// cannot name: no lookup of it proves anything.
     pub(super) fn tainted(&self, name: &str) -> bool {
-        self.tainted.fit(name)
+        self.tainted.fit(name) || self.tests && self.test_tainted.fit(name)
+    }
+
+    /// Whether the definitions test files make on objects the rules
+    /// cannot name taint lookups: for the callers in test files.
+    /// Read before anything is placed.
+    pub(super) fn with_tests(&mut self, tests: bool) {
+        self.tests = tests;
+        if tests {
+            self.spread.append(&mut self.test_spread);
+        }
+    }
+
+    /// Whether a test file defines a method on an object the rules cannot
+    /// name, or mixes a module into one.
+    pub(super) fn test_tainted(&self) -> bool {
+        self.test_tainted.any
+            || self.test_tainted.iter().next().is_some()
+            || !self.test_spread.is_empty()
+    }
+
+    /// Whether an instance method of some owner may define `name` on the
+    /// singleton class of the object it runs on ([`Facts::fronts`]).
+    pub(super) fn front_named(&self, name: &str) -> bool {
+        !self.fronts.is_empty() && self.front_names.fit(name)
+    }
+
+    /// Whether an instance method of `owner` may define `name` on the
+    /// singleton class of the object it runs on.
+    pub(super) fn fronts(&self, owner: &str, name: &str) -> bool {
+        self.fronts.get(owner).is_some_and(|names| names.fit(name))
+    }
+
+    /// Whether the instance methods of `owner` may define some name on the
+    /// singleton class of the object they run on.
+    pub(super) fn fronting(&self, owner: &str) -> bool {
+        self.fronts.contains_key(owner)
+    }
+
+    /// Whether some owner's instance methods may define a name on the
+    /// singleton class of the object they run on.
+    pub(super) fn any_front(&self) -> bool {
+        !self.fronts.is_empty()
     }
 
     /// The code evaluated on a constant's class from outside its body
@@ -1077,7 +1156,7 @@ mod tests {
     #[test]
     fn an_unread_region_costs_its_owners_plus_its_names() {
         let classes = 2_000;
-        let mut text = "class Finder\n  def self.find(&)\n    lookup 1, &\n  end\nend\n".to_owned();
+        let mut text = "class Finder\n  def self.find(&)\n    lookup 1,&\n  end\nend\n".to_owned();
         for i in 0..classes {
             text.push_str(&format!(
                 "class Model{i} < Base\n  def action_{i}; \"class Other{i}\"; end\nend\n"

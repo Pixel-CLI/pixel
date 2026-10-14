@@ -809,8 +809,9 @@ end
     assert!(names.contains(&"Inc::Foo::Bar#v".to_owned()), "{names:?}");
 }
 
-/// A region tree-sitter-ruby cannot parse still defines what Ruby reads
-/// there: `Admin::User` with `find`, a reopened `Post` with `save`. A
+/// A region tree-sitter-ruby cannot parse (here an anonymous `,&` with no
+/// blank before it, which #107's rewrite leaves) still defines what
+/// Ruby reads there: `Admin::User` with `find`, a reopened `Post` with `save`. A
 /// constant path through a name such a region may define, a lookup
 /// through a class it may reopen, and a top-level function of a name it
 /// may define prove nothing; a class it cannot touch keeps its edges
@@ -827,7 +828,7 @@ fn c10_ruby_shadowing_an_unread_region_proves_nothing_it_may_define() {
   class User
     def initialize; end
     def self.find(&)
-      lookup 1, &
+      lookup 1,&
     end
     def self.lookup(*); end
   end
@@ -857,7 +858,7 @@ end
             "lib/post_ext.rb",
             "class Post
   def save(&)
-    store 1, &
+    store 1,&
   end
   def self.store(*); end
 end
@@ -908,7 +909,7 @@ def link_to(*) = nil
 def wrap(x, **opts, &)
   link_to x, **opts, data: {
     a: 1
-  }.merge(opts), &
+  }.merge(opts),&
 end
 Base.prepend(Module.new { def hook; :patched; end })
 def tagged(klass) = klass.define_method(:tag) { :t }

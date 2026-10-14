@@ -382,7 +382,7 @@ impl<'a> Index<'a> {
                         None
                     } else if self.quiet(owner, side) {
                         Some(Quiet::Yes)
-                    } else if self.facts.touches(owner, side) {
+                    } else if self.touched(owner, side) {
                         Some(Quiet::Touched)
                     } else {
                         Some(Quiet::Blocked)

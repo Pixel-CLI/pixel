@@ -26,7 +26,7 @@ fn a_walk_past_the_cap_keeps_one_chain_per_owner() {
         g.mixin("chain.rb", &class, line, "superclass", &parent, &[]);
     }
     let world = g.world();
-    let index = Index::build(&world, &|_| true);
+    let index = Index::build(&world, &|_| true, false);
     index.contained();
     let chains = &index.walks.chains;
     let whole = chains.whole.borrow();
@@ -74,7 +74,7 @@ fn c10_ruby_subclasses_with_the_same_chain_share_one_lookup() {
     assert_eq!(dst[halt], None);
 
     let world = g.world();
-    let index = Index::build(&world, &|_| true);
+    let index = Index::build(&world, &|_| true, false);
     let held = index.held("Base", Side::Instance).expect("a share");
     assert_eq!((held.shares.len(), held.single.len()), (1, 0));
 }
@@ -127,7 +127,7 @@ fn c10_ruby_models_with_mixins_of_their_own_share_one_lookup() {
     assert_eq!(dst[tuck].as_deref(), Some("shared.rb#Shared#tuck#method"));
 
     let world = g.world();
-    let index = Index::build(&world, &|_| true);
+    let index = Index::build(&world, &|_| true, false);
     for owner in ["Base", "Shared"] {
         let held = index.held(owner, Side::Instance).expect("a share");
         assert_eq!((held.shares.len(), held.single.len()), (1, 0), "{owner}");
@@ -201,7 +201,7 @@ fn c10_ruby_models_a_block_or_a_macro_defines_on_still_share_one_lookup() {
     assert_eq!((dst[dd].as_deref(), dst[flag].as_deref()), (None, None));
 
     let world = g.world();
-    let index = Index::build(&world, &|_| true);
+    let index = Index::build(&world, &|_| true, false);
     for owner in ["Base", "Shared"] {
         let held = index.held(owner, Side::Instance).expect("a share");
         assert_eq!((held.shares.len(), held.single.len()), (1, 0), "{owner}");

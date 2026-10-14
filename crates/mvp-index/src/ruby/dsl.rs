@@ -595,13 +595,6 @@ pub(super) fn outside(w: &mut Walker, call: Node, method: &str) {
     if string && args.is_empty() {
         return;
     }
-    // Code a string evaluates may mix in any module it names (R6-14).
-    if string
-        && let Some(code) = args.last().and_then(|code| eval_code(w, *code, call))
-        && MIXIN_METHODS.iter().any(|verb| code.contains(verb))
-    {
-        mixed_in_text(w, &code);
-    }
     let receiver = call.child_by_field_name("receiver");
     let text = receiver.map(|r| w.text(r));
     let constant = receiver.and_then(|r| {
@@ -612,6 +605,24 @@ pub(super) fn outside(w: &mut Walker, call: Node, method: &str) {
                 .flatten()
         })
     });
+    // Code a string evaluates may mix in any module it names (R6-14): into
+    // the object it runs on, which, for a receiver the rules cannot name,
+    // is an object they cannot name (R5-04; in a test file, a stub, #106).
+    if string
+        && let Some(code) = args.last().and_then(|code| eval_code(w, *code, call))
+        && MIXIN_METHODS.iter().any(|verb| code.contains(verb))
+    {
+        let unnamed = constant.is_none()
+            && text.as_deref().is_some_and(|text| {
+                !matches!(text, "self" | "singleton_class" | "self.singleton_class")
+                    && !w.hook_base().is_some_and(|base| on_base(text, base))
+            });
+        if unnamed {
+            spread_in_text(w, &code);
+        } else {
+            mixed_in_text(w, &code);
+        }
+    }
     let names = touched(w, definer, &args, call);
     // The side of the code a string evaluates: `class_eval` code defines
     // instance methods, but where it names the singleton class or adds an
@@ -719,7 +730,9 @@ pub(super) fn outside(w: &mut Walker, call: Node, method: &str) {
 /// evaluated in a binding the rules do not follow, whose `self` may be
 /// `main` (R7-03). What it may define lands on an object the rules cannot
 /// name, the modules it names may be mixed in anywhere, and `Object`, whose
-/// methods the top-level functions are, may change for any name.
+/// methods the top-level functions are, may change for any name. Code
+/// that can define nothing on any `self` (a Redis script) changes nothing
+/// ([`inert`], #111).
 fn eval_elsewhere(w: &mut Walker, call: Node) {
     let args = call
         .child_by_field_name("arguments")
@@ -728,6 +741,9 @@ fn eval_elsewhere(w: &mut Walker, call: Node) {
     let Some(code) = args.last().and_then(|code| eval_code(w, *code, call)) else {
         return;
     };
+    if inert::inert(&code) {
+        return;
+    }
     if MIXIN_METHODS.iter().any(|verb| code.contains(verb)) {
         mixed_in_text(w, &code);
     }
@@ -830,70 +846,6 @@ fn iterated(w: &Walker, arg: Node) -> Vec<(String, Vec<String>)> {
         at = node.parent();
     }
     Vec::new()
-}
-
-/// Records each module `args` names as mixed into an object whose own
-/// lookup the rules do not replay ([`Fact::Mixed`], R5-05): any constant
-/// an argument that is no module constant writes (`(P1)`, `c ? nil : P1`,
-/// `P1.itself`) may be the one (R7-05).
-fn mixed(w: &mut Walker, args: &[Node]) {
-    for &arg in args {
-        let mut paths = mixed_paths(w, arg);
-        if paths.is_empty() {
-            let scope = w.context("", "").cref;
-            paths = written_constants(&w.text(arg))
-                .into_iter()
-                .map(|path| (path, scope.clone()))
-                .collect();
-        }
-        for (path, scope) in paths {
-            w.facts.push(Fact::Mixed { path, scope });
-        }
-    }
-}
-
-/// Records an unknown step on the class or module the constant `path`
-/// names, in the nesting `scope`, for the mixin `op` there (on its
-/// singleton class, `singleton`) of an argument that is no constant path
-/// (`Cfg.mod`, `const_get(name)`, `*mods`): a module the rules cannot
-/// name, which may be any of the graph's, on that chain ([`Fact::Opaque`],
-/// R8-05). An `extend` of a singleton class acts on its own singleton,
-/// which no lookup reads.
-fn opaque(
-    w: &mut Walker,
-    path: &str,
-    scope: Vec<String>,
-    op: &str,
-    singleton: bool,
-    args: &[Node],
-) {
-    let side = match (op, singleton) {
-        ("extend", true) => return,
-        ("extend", false) | (_, true) => '.',
-        _ => '#',
-    };
-    if args.iter().all(|&arg| constant_text(w, arg).is_some()) {
-        return;
-    }
-    w.facts.push(Fact::Opaque {
-        path: path.to_owned(),
-        scope,
-        side,
-        prepend: op == "prepend",
-    });
-}
-
-/// Records as [`Fact::Mixed`] every constant code the rules do not read
-/// may name ([`written_constants`]): it may mix that module in where no
-/// lookup replays it (R6-08, R6-14).
-fn mixed_in_text(w: &mut Walker, text: &str) {
-    let scope = w.context("", "").cref;
-    for path in written_constants(text) {
-        w.facts.push(Fact::Mixed {
-            path,
-            scope: scope.clone(),
-        });
-    }
 }
 
 /// Every constant `text` may name, written as a path, a symbol or in a
@@ -1963,5 +1915,10 @@ pub(super) fn drop_overridden(w: &mut Walker, unsettled: &[String]) {
     w.generated.clear();
 }
 
+mod fresh;
+mod mixed;
+pub(super) use fresh::fresh_module;
+use mixed::{mixed, mixed_in_text, opaque, spread_in_text};
+mod inert;
 #[cfg(test)]
 mod tests;

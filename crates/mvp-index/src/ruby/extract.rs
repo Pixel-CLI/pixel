@@ -30,8 +30,10 @@
 //! - a region the grammar could not parse (an `ERROR` node) yields its
 //!   `require`s only: error recovery loses the class around a `def`, so
 //!   neither the qualified name of a definition nor the `self` of a call
-//!   written there can be read (tree-sitter-ruby 0.23 cannot parse an
-//!   anonymous block argument, `link_to url, &`);
+//!   written there can be read; a bare anonymous `&` or `**` ending the
+//!   arguments of a call without parentheses (`link_to url, &`), which
+//!   tree-sitter-ruby 0.23.1 cannot parse, is read as `&1` (`**1`) over
+//!   the same bytes (#107, `forwarding`);
 //! - a `def` in a block outside every class and module is a method of no
 //!   owner, not a top-level function: the block may run on any object a
 //!   DSL chooses (`Module.new do`, `describe do`);
@@ -99,6 +101,7 @@ pub use crate::guard::PARSE_BUDGET;
 
 mod constants;
 mod flow;
+mod forwarding;
 mod hidden;
 mod locals;
 mod taint;
@@ -130,7 +133,7 @@ pub fn extract(path: &str, content: &[u8]) -> Extraction {
 }
 
 fn extract_tree(path: &str, content: &[u8]) -> Extraction {
-    let Some(tree) = parse(content, PARSE_BUDGET) else {
+    let Some(tree) = readable(content) else {
         return Extraction::default();
     };
     let root = tree.root_node();
@@ -162,6 +165,11 @@ fn extract_tree(path: &str, content: &[u8]) -> Extraction {
 /// The Ruby tree of `content`, or `None` past `budget` (`guard::parse`).
 pub fn parse(content: &[u8], budget: Duration) -> Option<Tree> {
     crate::guard::parse(&tree_sitter_ruby::LANGUAGE.into(), content, budget)
+}
+
+/// The tree the walk reads of `content` ([`forwarding::parse`]).
+pub(super) fn readable(content: &[u8]) -> Option<Tree> {
+    forwarding::parse(content)
 }
 
 /// The walk's state: what it found, and where in the tree it stands.
@@ -895,6 +903,18 @@ impl<'a> Walker<'a> {
             };
         match self.field_text(call, "method").as_deref() {
             Some(method) if ITERATORS.contains(&method) => BlockKind::Keeps,
+            // A core collection's iterator yields to its block where it is
+            // written: on a literal, or on a constant (`TYPES.each_value do
+            // |t| define_method("#{t}?")`, #106), read as the core
+            // collection it holds, as `each` on any receiver is.
+            Some(method)
+                if COLLECTION_ITERATORS.contains(&method)
+                    && call
+                        .child_by_field_name("receiver")
+                        .is_some_and(|r| self.collection(r)) =>
+            {
+                BlockKind::Keeps
+            }
             Some(method @ ("included" | "prepended")) if bare => BlockKind::Included {
                 prepended: method == "prepended",
             },
@@ -918,6 +938,17 @@ impl<'a> Walker<'a> {
             }
             _ => BlockKind::Foreign,
         }
+    }
+
+    /// Whether `receiver` is a literal collection or a constant, whose
+    /// iterators are read as a core collection's: a constant holding an
+    /// object of the application's whose `each_value` evaluates its block
+    /// elsewhere is a known residual, as `each` on any receiver is.
+    fn collection(&self, receiver: Node) -> bool {
+        matches!(
+            receiver.kind(),
+            "array" | "hash" | "string_array" | "symbol_array"
+        ) || dsl::constant_text(self, receiver).is_some()
     }
 
     /// Where the `def`s of a [`BlockKind::Foreign`] block written here may
@@ -1290,10 +1321,15 @@ impl<'a> Walker<'a> {
     /// on (B7).
     pub(super) fn macro_defines(&mut self, side: char, name: Option<String>) {
         if let Some((owner, method)) = self.enclosing_method() {
-            // An instance method defines on one object's singleton class
-            // (R5-04).
+            // An instance method defines on the singleton class of the
+            // object it runs on, one whose chain holds the owner's instance
+            // step: lookups from such objects alone prove nothing of the
+            // name (R5-04, #106).
             if method == '#' && side == '.' {
-                self.taint(name.clone());
+                self.facts.push(Fact::Fronted {
+                    owner: owner.clone(),
+                    name: name.clone(),
+                });
             }
             self.facts.push(Fact::Macro {
                 owner,
@@ -1888,6 +1924,23 @@ enum BlockKind {
 
 /// The iterators whose block Ruby runs with the definee around it.
 const ITERATORS: &[&str] = &["each", "each_with_index", "times", "map"];
+
+/// The iterators of a core collection (`Hash`, `Array`, `Enumerable`)
+/// whose block Ruby runs with the definee around it, read so only on a
+/// literal or a constant receiver ([`Walker::collection`]).
+const COLLECTION_ITERATORS: &[&str] = &[
+    "each_value",
+    "each_key",
+    "each_pair",
+    "each_with_object",
+    "each_slice",
+    "each_cons",
+    "reverse_each",
+    "flat_map",
+    "filter_map",
+    "select",
+    "reject",
+];
 
 /// The methods that evaluate a block or a string with their receiver as
 /// `self`, and a class or module receiver (or its singleton class) as

@@ -44,7 +44,7 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 /// The pixel-mvp commit the `mvp-*` crates were copied from. A test holds it
 /// equal to the one `crates/mvp-index/VENDORED.md` names, so a sync that
 /// forgets it fails.
-pub const MVP_COMMIT: &str = "d5c7cf7";
+pub const MVP_COMMIT: &str = "4b23d4c";
 
 /// Meta key: where the graph's Rust edges come from. Absent when they are
 /// this graph's own resolver's, so a graph built with the switch off is
