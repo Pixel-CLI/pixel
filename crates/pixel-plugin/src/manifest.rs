@@ -46,7 +46,7 @@ impl Capability {
 }
 
 /// Longest wall time a probe may ask for.
-pub const MAX_PROBE_BUDGET_MS: u64 = 1_000;
+pub const MAX_PROBE_BUDGET_MS: u64 = 2_500;
 
 /// Where a probe's blocks go relative to the brief's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,6 +470,7 @@ mode = "lead"
     fn a_broken_probe_table_is_refused_with_its_reason() {
         for (from, to, expect) in [
             ("budget_ms = 800", "budget_ms = 5000", "budget_ms"),
+            ("budget_ms = 800", "budget_ms = 2501", "budget_ms"),
             ("budget_ms = 800", "budget_ms = 0", "budget_ms"),
             ("budget_ms = 800\n", "", "budget_ms"),
             ("owner = \"pixel\"\n", "", "owner"),

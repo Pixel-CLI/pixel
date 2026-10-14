@@ -1137,18 +1137,19 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 `probes/<name>/` holds scripts that add blocks to the prompt-submit brief (contract: `CONTRIBUTING.md`, "Write a
 probe"). A probe is a plugin of the host (`pixel-plugin`): a `pixel-plugin.toml` with `capabilities =
 ["brief-probe"]` and a `[brief-probe]` table (`owner`, `when_kinds` / `skip_kinds` / `when_prompt`, `budget_ms` at
-most 1000, `mode` lead or append) beside an executable named by `run`. `pixel_plugin::probes` lists the probes that
+most 2500, `mode` lead or append) beside an executable named by `run`. `pixel_plugin::probes` lists the probes that
 may run: the user tier (`~/.pixel/plugins/<name>/`, first-party and the user's own) as installed, the repo tier
 (`<repo>/.pixel/plugins/<name>/`) only at the digest `pixel plugin trust` recorded, minus the ones
 `pixel plugin disable` switched off (`disabled` in `~/.pixel/plugins.toml`; `enable` undoes it).
 
-`pixel setup` writes the six first-party probes (embedded from `probes/` by `pixel-install::bundled_probes`, each
+`pixel setup` writes the seven first-party probes (embedded from `probes/` by `pixel-install::bundled_probes`, each
 directory marked so setup updates only its own copies and `--remove` deletes only them) next to the Claude or Codex
 brief hook; `PIXEL_BRIEF_PROBES=0` runs none. In `execution_brief::chain::Pending::finish_with_record`, once `fit`
 has rendered the brief and only when the gate is open, `execution_brief::probes::apply` starts every probe whose
 `when` fits the question in parallel, each with `{prompt, repo_root, brief, kind, session_files}` as JSON on
 stdin, in an emptied environment (`PATH`, `HOME`, `LANG`, `PIXEL_BIN`), inside `min(budget_ms, what is left of the
-window)`. A probe that overruns is killed; one that fails, prints nothing or is not due is skipped: fail open.
+window)` (the chain leaves them at least 1.2 s even when it used the window up, and none outlives 5 s after the
+prompt). A probe that overruns is killed; one that fails, prints nothing or is not due is skipped: fail open.
 `probes::merge` folds what they print into the brief: `drop: <regex>` removes the brief's blocks whose header
 matches, `first: <regex>` moves them to the front, lead blocks go before the brief's and append blocks after, one
 block per header, the whole within the hook parts the host takes (3 x 9,800 characters) with append blocks shed

@@ -69,6 +69,8 @@ def scan(clone):
             continue
         if re.search(r"(^|/)(test|tests|__tests__|fixtures?|node_modules)/|\.(test|spec)\.", path): continue
         rows.append((path, n, text))
+    # rg searches files in parallel: a stable order makes the registry (first reads, first declarations) deterministic.
+    rows.sort(key=lambda row: (row[0], row[1]))
     return rows
 
 

@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+"""error-origin: a prompt that quotes an error message ("where does 'remote decisions refused the decision' come
+from, what triggers it") is answered by the code that raises it. Finds the longest leading run (three words or more)
+of the quoted text literally in non-test source, cutting at `(` or `{` since format placeholders differ; shows the
+function that raises it, its callers up to two levels with the lines leading to each call (where the condition that
+selects the path is), and one test that exercises the function. Level 2 stays inside the origin's directory
+(`<top>/<second>/`), test code is excluded (a tests path, or inside `mod tests`: a lone `#[cfg(test)]` marks only its
+own item). Read-only, deterministic."""
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SRC_GLOBS = ["-g", "*.rs", "-g", "*.py", "-g", "*.ts", "-g", "*.tsx", "-g", "*.js", "-g", "*.go"]
+RG = ["rg", "--sort", "path", "-j", "1", "-g", "!.pixel"]
+FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|def|function)\s+([A-Za-z_]\w*)"
+                r"|^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(")
+JS_EXT = (".js", ".ts", ".tsx", ".jsx")
+MIN_QUOTE, MIN_WORDS, CALLER_LINES, LEVELS, MAX_LINES, MAX_BYTES = 12, 3, 14, 2, 220, 9000
+
+
+def rg(root, *args):
+    return subprocess.run([*RG, *args], cwd=root, capture_output=True, text=True, timeout=10).stdout.splitlines()
+
+
+def quoted(prompt):
+    return re.findall(r"""['"`‘“]([^'"`’”]{%d,})['"`’”]""" % MIN_QUOTE, prompt)
+
+
+def is_test_path(rel):
+    return bool(re.search(r"(^|/)tests?/|_test\.|test_", rel))
+
+
+def locate(root, message):
+    """Hits of the longest leading run of `message` (at least MIN_WORDS words) found literally in non-test source."""
+    words = re.split(r"(\s+)", message.strip())
+    for n in range(len(words), MIN_WORDS + 1, -2):
+        fragment = "".join(words[:n]).split("(")[0].split("{")[0].strip(" :")
+        if len(fragment.split()) < MIN_WORDS:
+            break
+        hits = [h for h in rg(root, "-n", "--no-heading", "-F", *SRC_GLOBS, fragment, ".")
+                if not is_test_path(h.split(":")[0])]
+        if hits:
+            return hits
+    return []
+
+
+def enclosing(lines, index, js=False):
+    """`(name, line index)` of the function a line is in; the `const x = (` form only counts in JS and TS."""
+    for j in range(index, -1, -1):
+        match = FN.match(lines[j])
+        if match and (match.group(1) or js):
+            return (match.group(1) or match.group(2)), j
+    return None, 0
+
+
+def show(rel, lines, lo, hi, label):
+    lo, hi = max(1, lo), min(len(lines), hi)
+    return [f"### {rel}:{lo}-{hi} — {label}"] + [f"{k}| {lines[k - 1][:160]}" for k in range(lo, hi + 1)]
+
+
+def in_test(rel, lines, index):
+    """Test code: a tests path, or after a `mod tests`; an attribute alone marks nothing."""
+    return is_test_path(rel) or any(re.match(r"\s*(pub\s+)?mod tests\b", l) for l in lines[:index])
+
+
+def read(root, rel, cache):
+    if rel not in cache:
+        cache[rel] = (Path(root) / rel).read_text(errors="replace").splitlines()
+    return cache[rel]
+
+
+def callers(root, name, cache, seen, depth, out, home):
+    if depth == 0 or len(out) > MAX_LINES:
+        return
+    for hit in rg(root, "-n", "--no-heading", *SRC_GLOBS, rf"\b{re.escape(name)}\s*\(", ".")[:40]:
+        path, line, text = hit.split(":", 2)
+        rel = path.lstrip("./")
+        if re.search(rf"\b(fn|def|function)\s+{re.escape(name)}\b", text):
+            continue
+        lines = read(root, rel, cache)
+        index = int(line) - 1
+        if in_test(rel, lines, index):
+            continue
+        if home and depth < LEVELS and not rel.startswith(home + "/"):
+            continue  # deeper levels stay in the origin's directory; `crates/pixel/` is not `crates/pixel-x/`
+        caller, start = enclosing(lines, index, rel.endswith(JS_EXT))
+        if not caller or (rel, caller) in seen:
+            continue
+        seen.add((rel, caller))
+        lo = max(start + 1, index + 1 - CALLER_LINES)
+        if lo > start + 4:
+            out += show(rel, lines, start + 1, start + 3, f"{caller} calls {name} (header)")
+        out += show(rel, lines, lo, index + 4, f"{caller} → {name}: the lines leading to the call")
+        callers(root, caller, cache, seen, depth - 1, out, home)
+
+
+def main():
+    req = json.load(sys.stdin)
+    root, prompt = req["repo_root"], req["prompt"]
+    out, cache, seen = [], {}, set()
+    for message in quoted(prompt)[:1]:
+        hits = locate(root, message)
+        if not hits:
+            continue
+        path, line, _ = hits[0].split(":", 2)
+        rel = path.lstrip("./")
+        lines = read(root, rel, cache)
+        index = int(line) - 1
+        name, _start = enclosing(lines, index, rel.endswith(JS_EXT))
+        out.append(f"### error origin — the quoted message is raised at {rel}:{line}" + (f" in {name}" if name else ""))
+        if not name:
+            continue
+        seen.add((rel, name))
+        callers(root, name, cache, seen, LEVELS, out, "/".join(rel.split("/")[:2]))
+        for hit in rg(root, "-n", "--no-heading", *SRC_GLOBS, rf"\b{re.escape(name)}\s*\(", "."):
+            other, at, _ = hit.split(":", 2)
+            other = other.lstrip("./")
+            tlines = read(root, other, cache)
+            if in_test(other, tlines, int(at) - 1):
+                test, tstart = enclosing(tlines, int(at) - 1)
+                out += show(other, tlines, tstart + 1, tstart + 24, f"test {test} exercising {name}")
+                break
+    text = "\n".join(out)
+    if text:
+        sys.stdout.write(text[:MAX_BYTES].rsplit("\n", 1)[0] + "\n")
+
+
+main()

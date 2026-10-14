@@ -8,5 +8,5 @@ capabilities = ["brief-probe"]
 [brief-probe]
 owner = "pixel"
 when_kinds = ["flow"]
-budget_ms = 1000
+budget_ms = 1500
 mode = "lead"

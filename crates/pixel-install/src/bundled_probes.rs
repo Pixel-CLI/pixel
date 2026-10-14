@@ -35,6 +35,11 @@ const BUNDLED: &[(&str, &str, &str)] = &[
         include_str!("../../../probes/doc-sections/probe"),
     ),
     (
+        "error-origin",
+        include_str!("../../../probes/error-origin/pixel-plugin.toml"),
+        include_str!("../../../probes/error-origin/probe"),
+    ),
+    (
         "flow-rank",
         include_str!("../../../probes/flow-rank/pixel-plugin.toml"),
         include_str!("../../../probes/flow-rank/probe"),
@@ -183,18 +188,18 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let first = install(home.path(), false).unwrap();
         assert!(
-            first.summary.contains("6 first-party brief probes"),
+            first.summary.contains("7 first-party brief probes"),
             "{}",
             first.summary
         );
         assert!(
-            first.summary.contains("6 written, 0 current"),
+            first.summary.contains("7 written, 0 current"),
             "{}",
             first.summary
         );
         let again = install(home.path(), false).unwrap();
         assert!(
-            again.summary.contains("0 written, 6 current"),
+            again.summary.contains("0 written, 7 current"),
             "{}",
             again.summary
         );
@@ -206,7 +211,10 @@ mod tests {
                 .summary
                 .contains("1 written")
         );
-        assert_eq!(fs::read_to_string(&probe).unwrap(), BUNDLED[2].2);
+        assert_eq!(
+            fs::read_to_string(&probe).unwrap(),
+            BUNDLED.iter().find(|b| b.0 == "flow-rank").unwrap().2
+        );
         assert_eq!(
             fs::metadata(&probe).unwrap().permissions().mode() & 0o777,
             0o755
@@ -244,7 +252,7 @@ mod tests {
         )
         .unwrap();
         let step = remove(home.path(), false).unwrap();
-        assert!(step.summary.contains("5 first-party"), "{}", step.summary);
+        assert!(step.summary.contains("6 first-party"), "{}", step.summary);
         assert!(own.is_dir());
         assert!(
             home.path().join(PLUGINS_REL).join("doc-sections").is_dir(),

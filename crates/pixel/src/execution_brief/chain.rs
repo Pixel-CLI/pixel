@@ -2577,6 +2577,23 @@ impl Around {
     }
 }
 
+/// What a probe is always given at least once the chain is done, even when
+/// the chain used the window up: a loaded machine slows the chain and the
+/// probes alike, and a probe that never gets to run is a brief without it.
+const PROBE_FLOOR: Duration = Duration::from_millis(1_200);
+/// No probe outlives this after the prompt arrived: under the six seconds the
+/// hook decision is given (`DECISION_TIMEOUT` in `task_hook.rs`) with room to
+/// print, and under what the parts after the first wait for part 1.
+const PROBE_CEILING: Duration = Duration::from_millis(5_000);
+
+/// When the probes must be done: the end of the brief's window, or `now` plus
+/// the floor if the chain left less than that, and never past the ceiling.
+fn probe_deadline(started: Instant, window_end: Instant, now: Instant) -> Instant {
+    window_end
+        .max(now + PROBE_FLOOR)
+        .min(started + PROBE_CEILING)
+}
+
 /// A brief on its way: the worker is running, the deadline is fixed.
 pub(crate) struct Pending {
     state: Arc<Mutex<Brief>>,
@@ -2644,7 +2661,7 @@ impl Pending {
             root: &setup.root,
             prompt: &self.task,
             kind,
-            deadline: self.deadline,
+            deadline: probe_deadline(self.started, self.deadline, Instant::now()),
             cap: setup.cap,
         };
         match probes::apply(&stage, text.as_deref().unwrap_or("")) {
@@ -8968,6 +8985,20 @@ mod tests {
             fit(&brief).is_none(),
             "the packet of a kind admission says nothing"
         );
+    }
+
+    #[test]
+    fn probes_get_the_rest_of_the_window_a_floor_when_the_chain_used_it_up_and_never_past_the_ceiling()
+     {
+        let started = Instant::now();
+        let at = |ms: u64| started + Duration::from_millis(ms);
+        // Plenty of window left: the end of the window.
+        assert_eq!(probe_deadline(started, at(3_000), at(500)), at(3_000));
+        // The chain used it up at 2.9 s: the floor is added from now.
+        assert_eq!(probe_deadline(started, at(3_000), at(2_900)), at(4_100));
+        // Late, and the floor would cross the ceiling: the ceiling wins.
+        assert_eq!(probe_deadline(started, at(3_000), at(4_500)), at(5_000));
+        assert_eq!(probe_deadline(started, at(4_500), at(100)), at(4_500));
     }
 
     #[test]

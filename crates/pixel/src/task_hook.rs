@@ -24,6 +24,8 @@ const DECISION_TIMEOUT: Duration = Duration::from_secs(6);
 const _: () = assert!(
     pixel_install::config::BRIEF_WINDOW_MAX_MS + 1_500 <= DECISION_TIMEOUT.as_millis() as u64
 );
+// The probes' ceiling (5 s after the prompt) leaves a second of the decision to print the merged brief.
+const _: () = assert!(5_000 + 1_000 <= DECISION_TIMEOUT.as_millis() as u64);
 const UNAVAILABLE: &str = "Pixel task state is unavailable. Reads and recovery remain available; edits and completion require a working task ledger.";
 
 /// Hosts with a verified task lifecycle adapter.

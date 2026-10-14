@@ -9,5 +9,5 @@ capabilities = ["brief-probe"]
 owner = "pixel"
 when_kinds = ["config"]
 when_prompt = "(?i)\\b(config\\w*|settings?|env(ironment)?|variables?|flags?|options?|defaults?|ports?|overrid\\w+)\\b"
-budget_ms = 1000
+budget_ms = 2000
 mode = "lead"

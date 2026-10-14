@@ -14,7 +14,7 @@ A probe is a directory ``probes/<name>/`` with a ``pixel-plugin.toml`` (``capabi
 
 A probe is read-only, uses no network and is deterministic (the same input gives the same bytes). ``.env*``
 files may be read only when git tracks them, with secret-looking values masked. ``mode = "lead"`` puts its
-blocks before the brief's, ``"append"`` after; ``budget_ms`` (at most 1000) is the wall time it gets, and a
+blocks before the brief's, ``"append"`` after; ``budget_ms`` (at most 2500) is the wall time it gets, and a
 probe that overruns, fails or prints nonsense is skipped.
 
     probe-test.py <probe-dir-or-name> [--set census|bench] [--bin PIXEL] [--ids a,b] [--report-dir D]
@@ -45,7 +45,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 WORKTREE = HERE.parent
-MAX_BUDGET_MS = 1000
+MAX_BUDGET_MS = 2500
 MODES = ("append", "lead")
 KINDS = ("overview", "review", "flow", "history", "config", "lookup", "tests", "impact", "diagnosis",
          "error-origin", "feature", "bugfix", "rationale", "other")
@@ -801,6 +801,39 @@ class SelfTest(unittest.TestCase):
             self.assertTrue(any(p.startswith("noisy: lines outside") for p in problems), problems)
             self.assertTrue(any(p.startswith("flaky: not deterministic") for p in problems), problems)
             self.assertFalse(any(p.startswith("ok:") for p in problems), problems)
+
+    def test_error_origin_finds_the_raise_site_its_callers_and_a_test_and_keeps_to_the_origins_directory(self):
+        probe = Path(__file__).resolve().parent.parent / "probes" / "error-origin"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            files = {
+                "crates/pixel/src/decide.rs": "// header\nfn parse(answer: &str) -> Result<(), String> {\n    if answer.is_empty() {\n"
+                                              "        return Err(\"remote decisions refused the decision: (no reason given)\".into());\n    }\n    Ok(())\n}\n"
+                                              "\n#[cfg(test)]\nfn helper() {}\n\nfn after_a_lone_cfg_test() { parse(\"\").ok(); }\n",
+                "crates/pixel/src/run.rs": "fn run(preset: u8) {\n    let decisions = preset == 3;\n    let x = (decisions, 1);\n    parse(\"a\").ok();\n}\n",
+                "crates/pixel/src/main.rs": "fn main() { run(3); }\n",
+                "crates/pixel-other/src/lib.rs": "fn run(p: u8) { other(p); }\nfn other(p: u8) { run(p); }\nfn caller_of_run() { run(1); }\n",
+                "crates/pixel/tests/decide_test.rs": "fn refuses_an_empty_answer() {\n    parse(\"\").ok();\n}\n",
+            }
+            for rel, text in files.items():
+                (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                (repo / rel).write_text(text)
+            request = {"prompt": "where does 'remote decisions refused the decision: (nothing)' come from, what triggers it",
+                       "repo_root": str(repo), "brief": "[PIXEL:BRIEF]\n", "kind": None, "session_files": []}
+            done = subprocess.run([str(probe / "probe")], input=json.dumps(request), capture_output=True, text=True,
+                                  cwd=repo)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            text = done.stdout
+            self.assertIn("### error origin — the quoted message is raised at crates/pixel/src/decide.rs:4 in parse", text)
+            self.assertIn("run → parse: the lines leading to the call", text)
+            self.assertIn("let decisions = preset == 3;", text, "the lines that select the path")
+            self.assertIn("test refuses_an_empty_answer exercising parse", text)
+            self.assertIn("after_a_lone_cfg_test", text, "a lone #[cfg(test)] does not make the rest of the file test code")
+            self.assertNotIn("pixel-other", text, "crates/pixel/ is not crates/pixel-other/")
+            self.assertNotIn("let x = (", text.split("test refuses")[0].split("run → parse")[0], "a Rust `let x = (` is not a JS arrow")
+            quiet = dict(request, prompt="where is the retry limit defined")
+            nothing = subprocess.run([str(probe / "probe")], input=json.dumps(quiet), capture_output=True, text=True, cwd=repo)
+            self.assertEqual(nothing.stdout, "", "no quoted message: nothing to add")
 
     def test_a_valid_probe_has_no_problems_and_each_broken_one_names_its_problem(self):
         with tempfile.TemporaryDirectory() as tmp:

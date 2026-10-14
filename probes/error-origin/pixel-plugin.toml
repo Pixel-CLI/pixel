@@ -1,0 +1,12 @@
+name = "error-origin"
+version = "0.1.0"
+api = 1
+description = "Shows where a quoted error message is raised, who calls it and the condition that selects the path"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "pixel"
+when_prompt = "['\"`‘“][^'\"`’”]{12,}['\"`’”]"
+budget_ms = 2000
+mode = "append"
