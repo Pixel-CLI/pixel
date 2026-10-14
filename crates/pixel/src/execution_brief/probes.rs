@@ -58,6 +58,9 @@ pub(crate) struct Stage<'a> {
     pub(crate) deadline: Instant,
     /// Characters the merged brief may hold.
     pub(crate) cap: usize,
+    /// Bytes it may hold when the host drops a longer one; a merge over it is
+    /// not used at all.
+    pub(crate) max_bytes: Option<usize>,
 }
 
 /// Whether the opt-out switches probes off.
@@ -127,7 +130,11 @@ pub(crate) fn apply(stage: &Stage, brief: &str) -> (Option<String>, Vec<ProbeRun
     if outputs.is_empty() {
         return (None, runs);
     }
-    (Some(merge(&input, &outputs, stage.cap)), runs)
+    let merged = merge(&input, &outputs, stage.cap);
+    if stage.max_bytes.is_some_and(|max| merged.len() > max) {
+        return (None, runs);
+    }
+    (Some(merged), runs)
 }
 
 /// Run one probe inside `min(budget, what is left of the window)`.
@@ -435,6 +442,7 @@ mod tests {
             kind,
             deadline: Instant::now() + Duration::from_millis(ms),
             cap: 3 * 9_800,
+            max_bytes: None,
         }
     }
 
@@ -501,6 +509,29 @@ mod tests {
             merged.unwrap(),
             "[PIXEL:BRIEF]\n### z.rs:1-1 — z\n1| z\n### a.rs:1-1 — a\n1| a\n"
         );
+    }
+
+    #[test]
+    fn a_merge_over_the_hosts_byte_limit_is_not_used() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fixture_probe(
+            &home,
+            "wide",
+            "#!/bin/sh\ncat >/dev/null\nprintf \'### w.rs:1-1 — w\\n1| \'; head -c 600 /dev/zero | tr \'\\0\' \'é\'; echo\n",
+            "",
+        );
+        let (h, root) = (host(&home), tmp.path().to_path_buf());
+        let mut s = stage(&h, &root, None, 2_000);
+        s.max_bytes = Some(1_000);
+        let (merged, runs) = apply(&s, "[PIXEL:BRIEF]\n");
+        assert!(merged.is_none(), "{merged:?}");
+        assert_eq!(
+            runs[0].outcome, "ok",
+            "it ran; only its output was not used"
+        );
+        s.max_bytes = Some(2_000);
+        assert!(apply(&s, "[PIXEL:BRIEF]\n").0.is_some());
     }
 
     #[test]

@@ -2563,6 +2563,12 @@ pub(crate) struct ProbeSetup {
     /// whatever the tier shrank the region pack to (a maybe's pack is one
     /// part, but a probe that answers it may fill all of them).
     pub(crate) cap: usize,
+    /// What the probes are given at least after the chain: [`PROBE_FLOOR`] for a
+    /// hook, nothing for the `brief` command (Pi kills it at 1.2 s).
+    pub(crate) floor: Duration,
+    /// Bytes the merged brief may hold when the host drops a longer one (the
+    /// `brief` command's Pi and OpenCode extensions drop above 4 000).
+    pub(crate) max_bytes: Option<usize>,
 }
 
 impl Around {
@@ -2585,13 +2591,14 @@ const PROBE_FLOOR: Duration = Duration::from_millis(1_200);
 /// hook decision is given (`DECISION_TIMEOUT` in `task_hook.rs`) with room to
 /// print, and under what the parts after the first wait for part 1.
 const PROBE_CEILING: Duration = Duration::from_millis(5_000);
+/// What the `brief` command may print once probes added to it: the Pi and
+/// OpenCode extensions that run it drop a brief over 4 000 bytes.
+const COMMAND_MAX_BYTES: usize = 3_990;
 
 /// When the probes must be done: the end of the brief's window, or `now` plus
 /// the floor if the chain left less than that, and never past the ceiling.
-fn probe_deadline(started: Instant, window_end: Instant, now: Instant) -> Instant {
-    window_end
-        .max(now + PROBE_FLOOR)
-        .min(started + PROBE_CEILING)
+fn probe_deadline(started: Instant, window_end: Instant, now: Instant, floor: Duration) -> Instant {
+    window_end.max(now + floor).min(started + PROBE_CEILING)
 }
 
 /// A brief on its way: the worker is running, the deadline is fixed.
@@ -2661,8 +2668,9 @@ impl Pending {
             root: &setup.root,
             prompt: &self.task,
             kind,
-            deadline: probe_deadline(self.started, self.deadline, Instant::now()),
+            deadline: probe_deadline(self.started, self.deadline, Instant::now(), setup.floor),
             cap: setup.cap,
+            max_bytes: setup.max_bytes,
         };
         match probes::apply(&stage, text.as_deref().unwrap_or("")) {
             (Some(merged), runs) => (Some(merged), runs),
@@ -2820,6 +2828,8 @@ fn try_start_as(
             host,
             root: root.clone(),
             cap: pack.parts.max(1) * pack.chars,
+            floor: if command { Duration::ZERO } else { PROBE_FLOOR },
+            max_bytes: command.then_some(COMMAND_MAX_BYTES),
         });
     try_start_with(
         prompt,
@@ -8993,12 +9003,33 @@ mod tests {
         let started = Instant::now();
         let at = |ms: u64| started + Duration::from_millis(ms);
         // Plenty of window left: the end of the window.
-        assert_eq!(probe_deadline(started, at(3_000), at(500)), at(3_000));
+        assert_eq!(
+            probe_deadline(started, at(3_000), at(500), PROBE_FLOOR),
+            at(3_000)
+        );
         // The chain used it up at 2.9 s: the floor is added from now.
-        assert_eq!(probe_deadline(started, at(3_000), at(2_900)), at(4_100));
+        assert_eq!(
+            probe_deadline(started, at(3_000), at(2_900), PROBE_FLOOR),
+            at(4_100)
+        );
         // Late, and the floor would cross the ceiling: the ceiling wins.
-        assert_eq!(probe_deadline(started, at(3_000), at(4_500)), at(5_000));
-        assert_eq!(probe_deadline(started, at(4_500), at(100)), at(4_500));
+        assert_eq!(
+            probe_deadline(started, at(3_000), at(4_500), PROBE_FLOOR),
+            at(5_000)
+        );
+        assert_eq!(
+            probe_deadline(started, at(4_500), at(100), PROBE_FLOOR),
+            at(4_500)
+        );
+        // The `brief` command has no floor: the window is all there is, even when it is over.
+        assert_eq!(
+            probe_deadline(started, at(750), at(700), Duration::ZERO),
+            at(750)
+        );
+        assert_eq!(
+            probe_deadline(started, at(750), at(900), Duration::ZERO),
+            at(900)
+        );
     }
 
     #[test]
