@@ -9,7 +9,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const PIXEL_BIN = __PIXEL_BIN__;
-const MAX_OUTPUT = 4_000;
+// Three hook-sized parts (`--parts 3`), as Claude Code and Codex get them.
+const PARTS = 3;
+const MAX_OUTPUT = 30_000;
 // `pixel brief` is budgeted internally; the timeout only shields Pi from a
 // wedged binary.
 const TIMEOUT_MS = 1_200;
@@ -20,7 +22,7 @@ export default function (pi: ExtensionAPI) {
     if (!prompt || prompt.length > 8_000) return;
     try {
       const result = await pi.exec(PIXEL_BIN, [
-        "brief", prompt, "--metrics", "off",
+        "brief", prompt, "--parts", String(PARTS), "--metrics", "off",
       ], { cwd: ctx.cwd, timeout: TIMEOUT_MS, signal: ctx.signal });
       if (result.code !== 0 || result.killed) return;
       const brief = result.stdout.trim();

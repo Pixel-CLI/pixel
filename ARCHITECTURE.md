@@ -881,9 +881,11 @@ exceed one hook's 10 000-character cap: `Pack::text` is the whole of it and
 `split_parts` cuts it at block boundaries into parts of `PART_CHARS` (9 800)
 characters, at most `MAX_PARTS` (8). The count is the `brief_parts`
 setting (1 to 8, default 3: the hooks `pixel install` registers), overridden
-by `PIXEL_BRIEF_PARTS`; the `brief` command, which the Pi and OpenCode
-extensions run and which they drop above 4 000 bytes, prints at most
-`CLI_CHARS` (3 900) unless that variable is set. `PIXEL_BRIEF_PACK=0|false|off`
+by `PIXEL_BRIEF_PARTS`; the `brief` command prints at most `CLI_CHARS`
+(3 900) unless that variable is set or its caller passes `--parts N`, which
+gives it the budget of an N-part hook (pack and probes) as one text. The Pi
+and OpenCode extensions pass `--parts 3` and accept up to 30 000 bytes, so
+they get what the three Claude and Codex hooks carry. `PIXEL_BRIEF_PACK=0|false|off`
 brings the packet back. A low-tier ("maybe") prompt gets at most one part of it, always as a lead.
 A pack of regions alone, with no symbol or passage behind it, ends on
 a lead ("not a verified answer") instead of the directive, and one the window

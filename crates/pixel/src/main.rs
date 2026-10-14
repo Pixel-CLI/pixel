@@ -369,6 +369,11 @@ enum Command {
         /// rendered brief as one JSON object, also when no brief was made.
         #[arg(long)]
         json: bool,
+        /// Hook-sized parts the caller accepts (1 = one message under 4 000
+        /// bytes). Above 1 the brief and its probes get the budget of an
+        /// N-part prompt hook, printed as one text.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=8))]
+        parts: u8,
     },
     /// Build a deterministic, bounded execution brief from scope-task evidence.
     ExecutionBrief {
@@ -4610,10 +4615,15 @@ fn run_command(
             }
             Ok(())
         }
-        Command::Brief { prompt, path, json } => {
+        Command::Brief {
+            prompt,
+            path,
+            json,
+            parts,
+        } => {
             let root = discover_root(&path)?;
             if json {
-                let finished = execution_brief::chain::try_start_for_command(&prompt, &root)
+                let finished = execution_brief::chain::try_start_for_command(&prompt, &root, parts)
                     .map(execution_brief::chain::Pending::finish_with_record);
                 let (record, text) = match finished {
                     Ok(finished) => (finished.record, finished.text),
@@ -4625,8 +4635,9 @@ fn run_command(
                 let mut decision = record.to_json();
                 decision["brief"] = text.map_or(Value::Null, Value::from);
                 write_stdout(&format!("{decision}\n"))
-            } else if let Some(text) = execution_brief::chain::start_for_command(&prompt, &root)
-                .and_then(execution_brief::chain::Pending::finish)
+            } else if let Some(text) =
+                execution_brief::chain::start_for_command(&prompt, &root, parts)
+                    .and_then(execution_brief::chain::Pending::finish)
             {
                 write_stdout(&text)
             } else {

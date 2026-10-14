@@ -134,7 +134,9 @@ pub(crate) fn limit_for(
     }
     match parts.and_then(|value| value.trim().parse::<usize>().ok()) {
         Some(count) => Limit::of(count.clamp(1, MAX_PARTS)),
-        None if command => Limit {
+        // The `brief` command fits one 4 000-byte message unless its caller
+        // asked for more parts (`pixel brief --parts N`).
+        None if command && setting <= 1 => Limit {
             parts: 1,
             chars: CLI_CHARS,
         },
@@ -2238,8 +2240,12 @@ mod tests {
             parts: 1,
             chars: CLI_CHARS,
         };
-        assert_eq!(limit_for(None, None, true, 3), command);
+        assert_eq!(limit_for(None, None, true, 1), command);
+        assert_eq!(limit_for(None, None, true, 0), command);
         assert_eq!(command.chars, 3_900);
+        // `pixel brief --parts N`: the caller takes N hook-sized parts.
+        assert_eq!(limit_for(None, None, true, 3), Limit::of(3));
+        assert_eq!(limit_for(None, None, true, 2), Limit::of(2));
         // An explicit part count is the host saying what it takes.
         assert_eq!(limit_for(None, Some("2"), true, 3), Limit::of(2));
         assert_eq!(limit_for(Some("off"), None, true, 3), Limit::default());

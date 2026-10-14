@@ -2591,8 +2591,9 @@ const PROBE_FLOOR: Duration = Duration::from_millis(1_200);
 /// hook decision is given (`DECISION_TIMEOUT` in `task_hook.rs`) with room to
 /// print, and under what the parts after the first wait for part 1.
 const PROBE_CEILING: Duration = Duration::from_millis(5_000);
-/// What the `brief` command may print once probes added to it: the Pi and
-/// OpenCode extensions that run it drop a brief over 4 000 bytes.
+/// What the one-part `brief` command may print once probes added to it: a
+/// caller that did not ask for more parts (`--parts`) takes one 4 000-byte
+/// message.
 const COMMAND_MAX_BYTES: usize = 3_990;
 
 /// When the probes must be done: the end of the brief's window, or `now` plus
@@ -2781,13 +2782,19 @@ pub(crate) fn start_in(prompt: &str, root: &Path, parts: u8, session: Session) -
 /// [`start_in`] for the `brief` command, which hosts without a prompt hook (Pi,
 /// OpenCode) run and which they drop above 4 000 bytes: a region pack stays
 /// under that unless `PIXEL_BRIEF_PARTS` says the host takes more.
-pub(crate) fn start_for_command(prompt: &str, root: &Path) -> Option<Pending> {
-    try_start_for_command(prompt, root).ok()
+pub(crate) fn start_for_command(prompt: &str, root: &Path, parts: u8) -> Option<Pending> {
+    try_start_for_command(prompt, root, parts).ok()
 }
 
-/// [`start_for_command`], saying why it declined.
-pub(crate) fn try_start_for_command(prompt: &str, root: &Path) -> Result<Pending, Declined> {
-    try_start_as(prompt, root, true, 1, None)
+/// [`start_for_command`], saying why it declined. `parts` is the hook-sized
+/// pieces the caller takes (`pixel brief --parts N`, 1 by default): above 1
+/// the pack and the probes get the same budget as an N-part prompt hook.
+pub(crate) fn try_start_for_command(
+    prompt: &str,
+    root: &Path,
+    parts: u8,
+) -> Result<Pending, Declined> {
+    try_start_as(prompt, root, true, parts.max(1), None)
 }
 
 fn try_start_as(
@@ -2829,7 +2836,7 @@ fn try_start_as(
             root: root.clone(),
             cap: pack.parts.max(1) * pack.chars,
             floor: if command { Duration::ZERO } else { PROBE_FLOOR },
-            max_bytes: command.then_some(COMMAND_MAX_BYTES),
+            max_bytes: (command && pack.parts <= 1).then_some(COMMAND_MAX_BYTES),
         });
     try_start_with(
         prompt,

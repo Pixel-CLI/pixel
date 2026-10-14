@@ -10,7 +10,9 @@
 // __MANAGED_END__
 
 const PIXEL_BIN = __PIXEL_BIN__;
-const MAX_OUTPUT = 4_000;
+// Three hook-sized parts (`--parts 3`), as Claude Code and Codex get them.
+const PARTS = 3;
+const MAX_OUTPUT = 30_000;
 
 export const PixelBrief = async ({ $, directory }) => ({
   "chat.message": async (input, output) => {
@@ -22,7 +24,7 @@ export const PixelBrief = async ({ $, directory }) => ({
     if (!userText || userText.length > 8_000) return;
     try {
       const brief = (
-        await $`${PIXEL_BIN} brief ${userText} ${directory ?? "."} --metrics off`
+        await $`${PIXEL_BIN} brief ${userText} ${directory ?? "."} --parts ${String(PARTS)} --metrics off`
           .quiet()
           .nothrow()
           .text()
