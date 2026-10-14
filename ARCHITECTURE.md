@@ -135,7 +135,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
-| `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes (and whether it carried the search receipt and answer excerpts, with the excerpt bytes, and for a region pack its bytes, hook parts, symbols and whether the text search stood in for a stale graph) and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the typed text (never a pasted block, credential shapes masked, cut at 600 characters) and its SHA-256. The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
+| `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes (and whether it carried the search receipt and answer excerpts, with the excerpt bytes, and for a region pack its bytes, hook parts, symbols, located blocks and whether the text search stood in for a stale graph) and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the typed text (never a pasted block, credential shapes masked, cut at 600 characters) and its SHA-256. The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
 | `brief-parts/<session>-<prompt>.txt` | CLI `run-hook task-event --part` (`brief_parts.rs`) | The whole prompt-submit brief of one prompt, stored by part 1 of a brief split over several hooks and read by parts 2 to N (see "Agent integration"). The name is the first 16 hex digits of the SHA-256 of the host's session id, a dash and the SHA-256 of the prompt, so no host text reaches a file name. Written atomically with mode 0600 (`pixel_git::nofollow::write_replace`), never through a link (`.pixel` or `brief-parts` as a symbolic link is refused); an empty file means the prompt got no brief, so the other parts do not wait. Part 1 deletes the entry before it computes the brief, leaves an empty `.done` file with the same stem once its own output is written, and every part-1 write deletes the entries older than one hour. |
 | `reconcile-conflict.json` | `pixel-ops` | Conflict marker `reconcile` writes and clears (no hook reads it). |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
@@ -883,8 +883,42 @@ A pack of regions alone, with no symbol or passage behind it, ends on
 a lead ("not a verified answer") instead of the directive, and one the window
 ended before it finished says so. It is built from lines read at HEAD
 (`Evidence::lines_at`, refused for a credential-shaped path) and spends none of
-the brief's operations. `pack_bytes`, `pack_parts`, `pack_targets` and
-`fallback` are in each decision.
+the brief's operations. `pack_bytes`, `pack_parts`, `pack_targets`,
+`pack_located` and `fallback` are in each decision.
+
+**Locators** (`execution_brief/locator.rs`, asked by `pack_evidence` before the
+pack is built). Two questions have no symbol to resolve: where a setting is
+defined or defaulted ("what port does the dev server use", "which
+environment variables change how it behaves") and which tests cover a topic.
+`locator::asks` reads them from the typed words (`config`, `default`, `port`,
+`env`, a value word such as `limit` inside a question that opens like one
+about a value; `test`, `spec`, `coverage`). The prompt's content words
+(`terms`: no setting or test word, no generic one) are stemmed the way
+`answer::tokens` reads text, narrowed to the four the relevance probe weighs
+heaviest (`pick_terms`: a word it found in too many files is dropped), and
+searched with one `Evidence::grep` each for the shapes that define a setting
+(a constant, an upper-case assignment, a key given a literal, an environment
+read, a flag, a default) and, in parallel, for the upper-case names that carry
+a term (`VITE_APP_PORT`), or for the declarations of tests whose name carries
+it. A term is matched as a word of an identifier (`port` is in `SERVER_PORT`
+and `serverPort`, not in `portal`), and the name a line gives its setting must
+carry a term: the words in a value do not make a setting. The best lines
+(two for each term first, at most fourteen, four per file; test modules of a
+source file, indented lower-case constants, tests and documentation files
+dropped) are cut into windows of exact source (a constant with its doc
+comment and its whole declaration; a short configuration file whole), a
+question about the environment adds the variable names read with the first
+read of each (the repository's own prefix first), and a question about tests
+adds the matching tests by name with `path:line`, the first lines of the best
+eight and, when a manifest vouches for a runner (`pytest`, `vitest`, `jest`,
+`cargo test`, `go test`), the command that runs only them. The blocks join the
+pack after the symbols' own and ahead of nothing but the graph facts; a block
+over lines a definition already shows is dropped, and a pack of locator blocks
+alone ends on the directive. Quoted tokens that read as credentials are
+masked, and a credential-shaped path never reaches the searches' rows
+(`.env*` files stay out of the brief). A locator spends no brief operation,
+lives inside its own 300 ms (`LOCATOR_WINDOW`) and the brief's window, and a
+search that fails leaves the pack as it was.
 
 **Keeping a daemon behind the brief.** Without a daemon the brief has no
 `meaning` leads, and a daemon exits after thirty minutes idle or becomes

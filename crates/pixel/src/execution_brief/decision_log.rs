@@ -79,6 +79,8 @@ pub(crate) struct Record {
     pub(crate) pack_parts: usize,
     /// Symbols the region pack is about.
     pub(crate) pack_targets: usize,
+    /// Blocks a locator (setting or test) contributed to the region pack.
+    pub(crate) pack_located: usize,
     /// The text search stood in for a graph that could not answer.
     pub(crate) fallback: bool,
     pub(crate) elapsed_ms: u64,
@@ -195,6 +197,7 @@ impl Record {
             "pack_bytes": self.pack_bytes,
             "pack_parts": self.pack_parts,
             "pack_targets": self.pack_targets,
+            "pack_located": self.pack_located,
             "fallback": self.fallback,
             "elapsed_ms": self.elapsed_ms,
             "route": self.route,
@@ -323,6 +326,7 @@ mod tests {
             pack_bytes: 5200,
             pack_parts: 1,
             pack_targets: 2,
+            pack_located: 1,
             fallback: true,
             elapsed_ms: 188,
             route: Some("daemon"),
@@ -380,6 +384,7 @@ mod tests {
                 "pack_bytes": 5200,
                 "pack_parts": 1,
                 "pack_targets": 2,
+                "pack_located": 1,
                 "fallback": true,
                 "elapsed_ms": 188,
                 "route": "daemon",

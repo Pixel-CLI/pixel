@@ -161,7 +161,7 @@ pub(crate) struct Block {
 
 impl Block {
     /// A block whose body is cut, at a line, to [`MAX_BLOCK_CHARS`].
-    fn new(head: String, body: Vec<String>) -> Self {
+    pub(crate) fn new(head: String, body: Vec<String>) -> Self {
         let mut size = head.len() + 5;
         let mut kept = Vec::with_capacity(body.len());
         for line in body {
@@ -175,7 +175,14 @@ impl Block {
         Self { head, body: kept }
     }
 
-    fn text(&self) -> String {
+    /// This block with `map` applied to each line of its body.
+    pub(crate) fn map_body(&mut self, map: impl Fn(&str) -> String) {
+        for line in &mut self.body {
+            *line = map(line);
+        }
+    }
+
+    pub(crate) fn text(&self) -> String {
         let mut text = format!("### {}", self.head);
         for line in &self.body {
             text.push('\n');
@@ -193,6 +200,9 @@ enum Part {
     Tests,
     TestBody,
     Facts,
+    /// A block a locator found for a question about a setting or about tests
+    /// (see `locator`): shown after the symbols' own blocks.
+    Locator,
 }
 
 /// A block the pack may carry, and why it ranks where it does.
@@ -217,6 +227,8 @@ pub(crate) struct Pack {
     anchored: bool,
     targets: usize,
     definitions: usize,
+    /// Blocks a locator contributed.
+    locators: usize,
     fallback: bool,
 }
 
@@ -224,12 +236,19 @@ impl Pack {
     /// At least one definition or usage block: a pack of facts alone is not
     /// the regions an agent would have read.
     pub(crate) fn has_evidence(&self) -> bool {
-        self.definitions > 0 || self.blocks.iter().any(|b| b.head.contains(" usage"))
+        self.definitions > 0
+            || self.locators > 0
+            || self.blocks.iter().any(|b| b.head.contains(" usage"))
     }
 
     /// Symbols the pack is about.
     pub(crate) const fn targets(&self) -> usize {
         self.targets
+    }
+
+    /// Blocks a locator contributed.
+    pub(crate) const fn located(&self) -> usize {
+        self.locators
     }
 
     /// The text search stood in for a graph that could not answer.
@@ -456,7 +475,7 @@ pub(crate) fn text_definitions(rows: &[RichHit], name: &str) -> Vec<DefSite> {
 
 /// A path whose lines a question is not about: build output and
 /// credential-shaped files.
-fn is_noise_path(path: &str) -> bool {
+pub(crate) fn is_noise_path(path: &str) -> bool {
     super::chain::is_generated(path)
         || pixel_index::index::credential_path(std::path::Path::new(path))
 }
@@ -584,7 +603,7 @@ pub(crate) fn number_lines(first: u64, lines: &[String]) -> Vec<String> {
 }
 
 /// A block of the lines `first..=last` (1-based, inclusive) of `lines`.
-fn range_block(
+pub(crate) fn range_block(
     label: String,
     path: &str,
     lines: &[String],
@@ -1039,6 +1058,10 @@ pub(crate) struct Input {
     pub(crate) facts: Vec<String>,
     pub(crate) wants_tests: bool,
     pub(crate) wants_docs: bool,
+    /// Blocks a locator found for a question about a setting or about tests,
+    /// best first. They stand beside the symbols' blocks, and alone when the
+    /// prompt names no symbol.
+    pub(crate) locators: Vec<Block>,
     /// How much the host takes.
     pub(crate) limit: Limit,
 }
@@ -1337,7 +1360,7 @@ pub(crate) fn build(
     publish: &mut dyn FnMut(&Pack),
 ) -> Option<Pack> {
     let targets = resolve_targets(input, evidence, deadline);
-    if targets.is_empty() {
+    if targets.is_empty() && input.locators.is_empty() {
         return None;
     }
     let mut files = Files::new(evidence, deadline);
@@ -1349,6 +1372,14 @@ pub(crate) fn build(
             order: (usize::MAX, 0, 0),
             part: Part::Facts,
             block: Block::new("call graph facts".to_string(), input.facts.clone()),
+        });
+    }
+    for (rank, block) in input.locators.iter().enumerate() {
+        base.push(Candidate {
+            priority: rank,
+            order: (usize::MAX - 1, rank, 0),
+            part: Part::Locator,
+            block: block.clone(),
         });
     }
     // The blocks of each target at each level of detail, level zero first so
@@ -1387,6 +1418,10 @@ pub(crate) fn build(
             ladder.push(level);
         }
         taken.extend(shown);
+        // A line the target's own block shows is not located twice.
+        base.retain(|candidate| {
+            candidate.part != Part::Locator || !overlaps(&taken, &candidate.block)
+        });
         if ladder.is_empty() {
             ladder.push(Level::default());
         }
@@ -1984,9 +2019,12 @@ fn assemble(
         searched: String::new(),
         blocks: Vec::new(),
         complete,
-        anchored: targets.iter().any(|target| target.region.is_none()),
+        // A locator's block is found by the prompt's own words.
+        anchored: targets.iter().any(|target| target.region.is_none())
+            || !input.locators.is_empty(),
         targets: targets.len(),
         definitions: 0,
+        locators: 0,
         fallback,
     };
     let mut ranked: Vec<&Candidate> = candidates.iter().collect();
@@ -2006,6 +2044,10 @@ fn assemble(
     pack.definitions = chosen
         .iter()
         .filter(|held| held.part == Part::Definition)
+        .count();
+    pack.locators = chosen
+        .iter()
+        .filter(|held| held.part == Part::Locator)
         .count();
     pack.blocks = chosen.iter().map(|held| held.block.clone()).collect();
     pack.searched = header(input, targets, &chosen, *found_sites, fallback);
@@ -2039,9 +2081,17 @@ fn header(
     } else {
         "symbol graph and text index"
     };
+    let located = match count(Part::Locator) {
+        0 => String::new(),
+        blocks => format!(", {blocks} located block(s)"),
+    };
+    let searched = if names.is_empty() {
+        "the words of the question".to_string()
+    } else {
+        names.join(", ")
+    };
     format!(
-        "region pack — searched {} in the {source}: {} definition(s), {} usage block(s) of {found_sites} code site(s) found, {tests} test(s) listed. Lines are exact source, numbered.",
-        names.join(", "),
+        "region pack — searched {searched} in the {source}: {} definition(s), {} usage block(s) of {found_sites} code site(s) found, {tests} test(s) listed{located}. Lines are exact source, numbered.",
         count(Part::Definition),
         count(Part::Usage),
     )
@@ -2956,6 +3006,7 @@ mod tests {
             facts: Vec::new(),
             wants_tests: false,
             wants_docs: false,
+            locators: Vec::new(),
             limit: Limit::of(parts),
         }
     }
@@ -3413,5 +3464,86 @@ mod tests {
                 .iter()
                 .any(|head| head.starts_with("src/main.rs:") && head.contains("usage in handler"))
         );
+    }
+
+    // ---- locators ----------------------------------------------------------
+
+    fn located(head: &str, line: &str) -> Block {
+        Block::new(head.into(), lines(&[line]))
+    }
+
+    #[test]
+    fn locator_blocks_should_stand_beside_the_symbols_and_count_as_evidence() {
+        let mut with = input(1);
+        with.locators = vec![located("src/conf.py:3-3 — MAX (constant)", "3| MAX = 3")];
+        let pack = built(&with, &repo()).unwrap();
+        let heads = heads(&pack);
+        // After the symbol's own blocks, before nothing but the graph facts.
+        assert_eq!(
+            heads.last().map(String::as_str),
+            Some("src/conf.py:3-3 — MAX (constant)")
+        );
+        assert_eq!(pack.located(), 1);
+        assert!(
+            pack.text().contains(", 1 located block(s)."),
+            "{}",
+            pack.text()
+        );
+        assert!(pack.text().ends_with(DIRECTIVE));
+        // Without locators the header says nothing of them.
+        let plain = built(&input(1), &repo()).unwrap();
+        assert_eq!(plain.located(), 0);
+        assert!(!plain.text().contains("located block"));
+    }
+
+    #[test]
+    fn a_pack_of_locator_blocks_alone_is_evidence_and_an_anchored_answer() {
+        // A prompt that names no symbol: nothing resolves, the locators stand
+        // for the whole pack, and they are found by the prompt's own words.
+        let mut alone = input(1);
+        alone.names = Vec::new();
+        alone.defined = Vec::new();
+        alone.locators = vec![located(
+            "tests/t.py:9-9 — test_x (test)",
+            "9| def test_x():",
+        )];
+        let pack = built(&alone, &repo()).unwrap();
+        assert!(pack.has_evidence());
+        assert_eq!(pack.targets(), 0);
+        assert!(
+            pack.text()
+                .contains("searched the words of the question in")
+        );
+        assert!(pack.text().ends_with(DIRECTIVE), "{}", pack.text());
+        // No symbol and no locator: nothing is worth showing.
+        alone.locators = Vec::new();
+        assert!(built(&alone, &repo()).is_none());
+    }
+
+    #[test]
+    fn a_locator_block_over_lines_a_definition_shows_is_not_shown_twice() {
+        let mut with = input(1);
+        with.locators = vec![
+            located(
+                "src/api.rs:5-5 — SEARCH_DEFAULT_ROWS (constant)",
+                "5| pub const SEARCH_DEFAULT_ROWS: usize = 100;",
+            ),
+            located("src/other.rs:1-1 — OTHER (constant)", "1| OTHER = 1"),
+        ];
+        let pack = built(&with, &repo()).unwrap();
+        let heads = heads(&pack);
+        assert!(
+            !heads
+                .iter()
+                .any(|head| head.contains("(constant)") && head.starts_with("src/api.rs:5-5")),
+            "{heads:?}"
+        );
+        assert!(
+            heads
+                .iter()
+                .any(|head| head.starts_with("src/other.rs:1-1")),
+            "{heads:?}"
+        );
+        assert_eq!(pack.located(), 1);
     }
 }

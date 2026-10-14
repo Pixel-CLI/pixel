@@ -331,6 +331,13 @@ pub(crate) trait Evidence: Sync {
     fn files_matching(&self, anchor: &str, deadline: Instant) -> Result<RichFound, String> {
         self.files_with(anchor, deadline).map(RichFound::from)
     }
+    /// Rows whose line matches the regular expression `pattern` (not
+    /// escaped), at most `limit` of them in path order: what a locator asks
+    /// for when it knows the shape of the line but not the exact text.
+    fn grep(&self, pattern: &str, limit: usize, deadline: Instant) -> Result<RichFound, String> {
+        let _ = (pattern, limit, deadline);
+        Err("pattern search unsupported".to_string())
+    }
     /// Files a free-text concept points at.
     fn concept(&self, phrase: &str, deadline: Instant) -> Result<Found, String>;
     /// The same concept search, keeping the matched text (`raw`/`detail`)
@@ -1302,6 +1309,9 @@ fn pack_evidence(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, dea
         .chain(brief.leads.iter().filter_map(|lead| lead.symbol.clone()))
         .chain(brief.reads.iter().filter_map(|read| read.symbol.clone()))
         .collect();
+    // A question about a setting or about tests is answered by lines found by
+    // their shape, not by a symbol: they stand beside the symbols' blocks.
+    let located = super::locator::locate(&plan.typed, evidence, brief.receipt.as_ref(), deadline);
     let input = region_pack::Input {
         names,
         phrases: region_pack::quoted_phrases(&plan.typed),
@@ -1343,6 +1353,7 @@ fn pack_evidence(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, dea
             .collect(),
         wants_tests: brief.wants_tests,
         wants_docs: brief.wants_docs,
+        locators: located,
         limit: brief.pack_limit,
     };
     let mut publish =
@@ -2289,6 +2300,7 @@ pub(crate) fn declined_record(declined: Declined, prompt: &str) -> Record {
         pack_bytes: 0,
         pack_parts: 0,
         pack_targets: 0,
+        pack_located: 0,
         fallback: false,
         elapsed_ms: 0,
         route: None,
@@ -2414,6 +2426,7 @@ impl Pending {
             pack_bytes: stats.pack_bytes,
             pack_parts: stats.pack_parts,
             pack_targets: stats.pack_targets,
+            pack_located: stats.pack_located,
             fallback: stats.fallback,
             elapsed_ms,
             route: brief.route,
@@ -3064,6 +3077,8 @@ pub(crate) struct AnswerStats {
     pub(crate) pack_parts: usize,
     /// Symbols the pack is about.
     pub(crate) pack_targets: usize,
+    /// Blocks a locator contributed to the pack.
+    pub(crate) pack_located: usize,
     /// The text search stood in for a graph that could not answer.
     pub(crate) fallback: bool,
 }
@@ -3097,6 +3112,7 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
             )
             .len(),
             pack_targets: pack.targets(),
+            pack_located: pack.located(),
             fallback: pack.fallback(),
             ..AnswerStats::default()
         };

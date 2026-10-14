@@ -14,6 +14,7 @@ pub(crate) mod decision_log;
 mod evidence;
 mod gate_model;
 pub(crate) mod intent;
+mod locator;
 pub(crate) mod region_pack;
 pub(crate) mod relevance;
 pub(crate) mod routes;

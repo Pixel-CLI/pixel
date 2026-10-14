@@ -126,10 +126,11 @@ impl Live {
         .clone()
     }
 
-    fn local_rows(&self, anchor: &str) -> Result<RichFound, String> {
+    /// The rows of the local text index whose line matches `pattern`.
+    fn local_grep(&self, pattern: &str, limit: usize) -> Result<RichFound, String> {
         let set = self.index_set()?;
         let (rows, stats) = set
-            .search_page_filtered(&regex::escape(anchor), 0, Some(SEARCH_ROWS), None, None)
+            .search_page_filtered(pattern, 0, Some(limit), None, None)
             .map_err(|error| error.to_string())?;
         Ok(RichFound {
             hits: rows
@@ -359,12 +360,16 @@ impl Evidence for Live {
     }
 
     fn files_matching(&self, anchor: &str, deadline: Instant) -> Result<RichFound, String> {
+        self.grep(&regex::escape(anchor), SEARCH_ROWS, deadline)
+    }
+
+    fn grep(&self, pattern: &str, limit: usize, deadline: Instant) -> Result<RichFound, String> {
         match self.route {
             Route::Daemon => {
                 let request = Request::Search {
-                    pattern: regex::escape(anchor),
+                    pattern: pattern.to_string(),
                     json: true,
-                    limit: Some(SEARCH_ROWS),
+                    limit: Some(limit),
                     offset: None,
                     paths: None,
                     scope: None,
@@ -373,7 +378,7 @@ impl Evidence for Live {
                 };
                 Ok(search_rows(&self.ask(&request, deadline)?))
             }
-            Route::Local => self.local_rows(anchor),
+            Route::Local => self.local_grep(pattern, limit),
         }
     }
 
@@ -1757,6 +1762,12 @@ mod tests {
                 .as_deref(),
             Some("x")
         );
+        // A pattern search sends the pattern as it is, with the row limit
+        // it was given, where a literal search escapes its anchor.
+        assert_eq!(
+            live.grep(r"^\s*X\d+", 7, deadline).unwrap().hits[0].path,
+            "src/a.ts"
+        );
         assert_eq!(
             live.context(&hit, 400, deadline).unwrap().0,
             "fn go() {\n  go_body();\n}"
@@ -1803,6 +1814,7 @@ mod tests {
             ops,
             [
                 "search",
+                "search",
                 "context",
                 "uses",
                 "evaluate",
@@ -1812,19 +1824,23 @@ mod tests {
                 "targets_facts"
             ]
         );
-        assert_eq!(requests[1]["uid"], "src/a.ts#go#function");
-        assert_eq!(requests[1]["budget_tokens"], 400);
-        assert_eq!(requests[2]["uid_or_name"], "src/a.ts#go#function");
-        assert_eq!(requests[2]["role"], "callers");
-        assert_eq!(requests[3]["from"], "go");
-        assert_eq!(requests[3]["to"], "stop");
-        assert_eq!(requests[3]["at_snapshot"], true);
-        assert_eq!(requests[4]["file"], "cfg/x.json");
+        assert_eq!(requests[0]["pattern"], r"a\.b");
+        assert_eq!(requests[0]["limit"], SEARCH_ROWS);
+        assert_eq!(requests[1]["pattern"], r"^\s*X\d+");
+        assert_eq!(requests[1]["limit"], 7);
+        assert_eq!(requests[2]["uid"], "src/a.ts#go#function");
+        assert_eq!(requests[2]["budget_tokens"], 400);
+        assert_eq!(requests[3]["uid_or_name"], "src/a.ts#go#function");
+        assert_eq!(requests[3]["role"], "callers");
+        assert_eq!(requests[4]["from"], "go");
+        assert_eq!(requests[4]["to"], "stop");
+        assert_eq!(requests[4]["at_snapshot"], true);
+        assert_eq!(requests[5]["file"], "cfg/x.json");
         // Read-only history: the flag rides the wire only when set, so its
         // presence here is the contract — an absent flag would let a daemon
         // take the ingest-and-warm path a hook must never start.
-        assert_eq!(requests[6]["read_only"], true);
-        assert_eq!(requests[7]["task"], "add flag");
+        assert_eq!(requests[7]["read_only"], true);
+        assert_eq!(requests[8]["task"], "add flag");
         drop(daemon);
         std::fs::remove_dir_all(&root).unwrap();
     }

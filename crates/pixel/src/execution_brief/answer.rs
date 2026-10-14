@@ -101,10 +101,13 @@ pub(crate) fn answer_enabled() -> bool {
 
 /// What the search of one brief covered, taken from the probes that answered
 /// and from nothing else.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Receipt {
     terms: Vec<String>,
     ignored: Vec<String>,
+    /// Every keyword the probe weighed, with its weight: `0.0` for a word
+    /// too common to say anything.
+    weights: Vec<(String, f64)>,
     files_considered: usize,
     /// Chunks the meaning search returned; `None` when it did not answer.
     chunks: Option<usize>,
@@ -117,6 +120,11 @@ impl Receipt {
     pub(crate) fn new(input: &RelevanceInput, chunks: Option<usize>) -> Option<Self> {
         let mut terms: Vec<String> = Vec::new();
         let mut ignored: Vec<String> = Vec::new();
+        let weights = input
+            .keywords
+            .iter()
+            .map(|stat| (stat.keyword.clone(), stat.weight))
+            .collect();
         for stat in &input.keywords {
             let list = if stat.weight > 0.0 {
                 &mut terms
@@ -130,6 +138,7 @@ impl Receipt {
         (!terms.is_empty()).then_some(Self {
             terms,
             ignored,
+            weights,
             files_considered: input.files_considered,
             chunks,
         })
@@ -138,6 +147,23 @@ impl Receipt {
     /// The terms the probe weighed, as the receipt lists them.
     pub(crate) fn terms(&self) -> &[String] {
         &self.terms
+    }
+
+    /// The probe's weight of the keyword `stem` stands for: a keyword whose
+    /// words (as [`tokens`] reads them) include `stem`, or begin with it when
+    /// it is long enough to be the start of a longer word. `Some(0.0)` for a
+    /// word too common to say anything, `None` for a word the probe did not
+    /// weigh.
+    pub(crate) fn weight_of(&self, stem: &str) -> Option<f64> {
+        self.weights
+            .iter()
+            .filter(|(keyword, _)| {
+                tokens(keyword)
+                    .iter()
+                    .any(|word| word == stem || (stem.len() >= LONG_STEM && word.starts_with(stem)))
+            })
+            .map(|(_, weight)| *weight)
+            .reduce(f64::max)
     }
 
     /// The receipt lines: facts, then the instruction they support. Only
@@ -427,6 +453,9 @@ pub(crate) const CHUNK_BODY_LINES: usize = 6;
 /// Lines a chunk is read for: a chunk the meaning search reports longer than
 /// this is looked at through its first lines only.
 pub(crate) const MAX_CHUNK_LINES: u64 = 60;
+
+/// A stem this long also stands for the longer words that begin with it.
+pub(crate) const LONG_STEM: usize = 6;
 
 /// The stem a keyword is looked for by: a plural loses its `s`.
 fn stem(term: &str) -> String {
@@ -915,7 +944,7 @@ pub(crate) fn word_in(haystack: &str, needle: &str) -> bool {
 }
 
 /// The name of the test function that starts at `lines[index]`, when one does.
-fn test_name(lines: &[String], index: usize) -> Option<String> {
+pub(crate) fn test_name(lines: &[String], index: usize) -> Option<String> {
     let line = lines[index].trim();
     let attributed = || {
         lines[index.saturating_sub(3)..index].iter().any(|before| {
@@ -1083,6 +1112,29 @@ mod tests {
                 .collect(),
             cofiles: Vec::new(),
         }
+    }
+
+    #[test]
+    fn weight_of_should_find_a_stem_among_the_probes_keywords_and_say_when_it_is_unweighed() {
+        let receipt = Receipt::new(
+            &input(&[
+                ("redirects", 2.5),
+                ("server", 0.0),
+                ("port", 1.0),
+                ("portal", 4.0),
+            ]),
+            None,
+        )
+        .unwrap();
+        // A stem is the start of the keyword, or the keyword the start of it;
+        // the heaviest match wins, and a common word weighs nothing.
+        assert_eq!(receipt.weight_of("redirect"), Some(2.5));
+        // A longer word is not the stem of a shorter one: `port` is not `portal`.
+        assert_eq!(receipt.weight_of("redirecting"), None);
+        assert_eq!(receipt.weight_of("server"), Some(0.0));
+        assert_eq!(receipt.weight_of("port"), Some(1.0));
+        assert_eq!(receipt.weight_of("portal"), Some(4.0));
+        assert_eq!(receipt.weight_of("collab"), None);
     }
 
     #[test]
