@@ -145,7 +145,8 @@ under it are written without following links (`pixel_git::nofollow`,
 `SQLITE_OPEN_NOFOLLOW`), and a path read from a shard or the graph is used only
 inside the repository (`pixel_git::repo_path::confine`); see T6.
 With the Rust source switch on (the default unless
-`PIXEL_GRAPH_SOURCE_RUST=v1`) and a `Cargo.toml` at the root, the
+`PIXEL_GRAPH_SOURCE_RUST=v1`) and a `Cargo.toml` at the root, or with
+`PIXEL_GRAPH_SOURCE_RUBY=hybrid`, the
 vendored pixel-mvp store keeps its own index in `.pixel/.pixel-mvp/`:
 `pixel_graph::mvp_adapter::refresh` runs `sidecar::check` before reading
 it, the store refuses a `.pixel-mvp` that is a link or not a directory,
