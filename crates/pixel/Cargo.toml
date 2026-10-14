@@ -22,9 +22,6 @@ fastembed = ["pixel-recall/fastembed"]
 # Pure-Rust embeddings. No ONNX, no OpenSSL, no C++ — builds fine for musl,
 # so the Linux release keeps a working semantic channel without fastembed.
 model2vec = ["pixel-recall/model2vec"]
-# Dev tool excluded from the shipped binary (issue #602): `pixel
-# ai-cli-readify` probes and rewrites agents' CLI configs.
-readify = []
 
 [dependencies]
 mutants = { workspace = true }
@@ -41,7 +38,6 @@ pixel-install = { path = "../pixel-install" }
 pixel-proto = { path = "../pixel-proto" }
 pixel-actionlog = { path = "../pixel-actionlog" }
 pixel-flow = { path = "../pixel-flow" }
-pixel-ultraflow = { path = "../pixel-ultraflow" }
 pixel-release = { path = "../pixel-release" }
 pixel-task = { path = "../pixel-task" }
 pixel-plugin = { path = "../pixel-plugin" }
@@ -59,9 +55,8 @@ ureq = { version = "3", default-features = false, features = ["json", "rustls"] 
 tar = "0.4"
 sha2 = { workspace = true }
 xxhash-rust = { workspace = true }
-# Runtime now, not only a test dependency: the ai-cli-readify rewrite edits
-# `~/.codex/config.toml` in place and has to preserve every key the user
-# already has, so it parses and re-emits rather than replacing the file
-# (src/ai_cli_readify/config.rs, approve.rs). Tests read the same crate to
-# check `website/data/agents.toml` (tests/cli/docs_drift.rs).
+
+[dev-dependencies]
+# Tests read `website/data/agents.toml` and the workspace `Cargo.toml`
+# (tests/cli/docs_drift.rs).
 toml_edit = "0.25.15"

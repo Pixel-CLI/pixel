@@ -17,8 +17,8 @@
 # (`-Zcoverage-options=branch`, which `cargo llvm-cov --branch` passes), so
 # it runs the same suite on a dated nightly, apart from the stable job.
 #
-# The suite is the one CI's Test job runs (nextest `ci` profile, the
-# `readify` feature), so the number covers what CI tests. The CLI tests spawn
+# The suite is the one CI's Test job runs (nextest `ci` profile), so the
+# number covers what CI tests. The CLI tests spawn
 # the built `pixel` binary; cargo-llvm-cov instruments it too and merges the
 # profiles every process writes. Doctests are left out: their coverage needs
 # a nightly toolchain.
@@ -107,7 +107,7 @@ jobs:
         run: |
           status=0
           cargo llvm-cov nextest --workspace --locked --profile ci \
-            --features pixel-cli/readify --no-report || status=$?
+            --no-report || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
 
       - name: Coverage report
@@ -214,7 +214,7 @@ jobs:
         run: |
           status=0
           cargo +"$NIGHTLY" llvm-cov nextest --branch --workspace --locked --profile ci \
-            --features pixel-cli/readify --no-report || status=$?
+            --no-report || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
 
       - name: Branch coverage report

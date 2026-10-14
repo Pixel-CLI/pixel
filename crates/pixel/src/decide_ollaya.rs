@@ -41,13 +41,6 @@ use std::time::Duration;
 /// shared schema ceiling).
 pub const MAX_LABELS: usize = 255;
 
-/// Options one `choice` question may offer the local model, well below the
-/// [`MAX_LABELS`] schema ceiling. Measured on this daemon: 64 labels answer,
-/// 65 is refused with `422`, and the refusal is an error rather than a
-/// truncated decision — so a caller that builds a question (`pixel
-/// ultraflow`, one per browser cycle) has to know the number before it
-/// offers.
-pub const MAX_OPTIONS: usize = 64;
 /// The single question this adapter sends (Pixel's contract is one decision
 /// per spec; Ollaya allows 1–256 questions).
 const QUESTION_ID: &str = "q1";

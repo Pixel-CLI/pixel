@@ -69,12 +69,12 @@ fn repo(base: &Path) -> PathBuf {
 }
 
 /// The commands that wrote through the links on 0.6.1: every logged command
-/// appends to `actions.jsonl`, and a history query takes the history lock.
-fn run_logged_and_history_commands(root: &Path) -> (Output, Output) {
+/// appends to `actions.jsonl`, and a `prepare-repo` takes the build lock.
+fn run_logged_and_prepare_commands(root: &Path) -> (Output, Output) {
     let root = root.to_str().unwrap();
     (
         pixel(&["search-content", "-F", "main", root]),
-        pixel(&["search-history", "main", root]),
+        pixel(&["prepare-repo", root]),
     )
 }
 
@@ -87,17 +87,17 @@ fn committed_pixel_links_should_neither_be_followed_nor_trusted_in_a_clone() {
     // Relative, as a committed link must be to reach a file of the person
     // who clones: from `clone/.pixel/`, two levels up is `base`.
     symlink("../../victim.txt", origin.join(".pixel/actions.jsonl")).unwrap();
-    symlink("../../victim2.txt", origin.join(".pixel/history.db.lock")).unwrap();
+    symlink("../../victim2.txt", origin.join(".pixel/build.lock")).unwrap();
     git(&origin, &["add", "-f", ".pixel"]);
     git(&origin, &["commit", "-qm", "plant"]);
     git(&base, &["clone", "-q", "repo", "clone"]);
     let clone = base.join("clone");
 
-    let (search, history) = run_logged_and_history_commands(&clone);
+    let (search, prepare) = run_logged_and_prepare_commands(&clone);
 
     assert_intact(&log_victim);
     assert_intact(&lock_victim);
-    for output in [&search, &history] {
+    for output in [&search, &prepare] {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             !output.status.success(),
@@ -115,17 +115,14 @@ fn planted_untracked_links_should_not_be_followed() {
     let base = Scratch::for_test("sidecar-trust", "untracked");
     let log_victim = victim(&base, "victim.txt");
     let lock_victim = victim(&base, "victim2.txt");
-    let build_victim = victim(&base, "victim3.txt");
     let root = repo(&base);
     symlink(&log_victim, root.join(".pixel/actions.jsonl")).unwrap();
-    symlink(&lock_victim, root.join(".pixel/history.db.lock")).unwrap();
-    symlink(&build_victim, root.join(".pixel/build.lock")).unwrap();
+    symlink(&lock_victim, root.join(".pixel/build.lock")).unwrap();
 
-    run_logged_and_history_commands(&root);
+    run_logged_and_prepare_commands(&root);
 
     assert_intact(&log_victim);
     assert_intact(&lock_victim);
-    assert_intact(&build_victim);
 }
 
 #[test]
@@ -138,7 +135,7 @@ fn a_linked_pixel_dir_should_be_refused_without_touching_its_target() {
     fs::remove_dir(root.join(".pixel")).unwrap();
     symlink(&elsewhere, root.join(".pixel")).unwrap();
 
-    let (search, _) = run_logged_and_history_commands(&root);
+    let (search, _) = run_logged_and_prepare_commands(&root);
 
     let stderr = String::from_utf8_lossy(&search.stderr);
     assert!(!search.status.success(), "{stderr}");

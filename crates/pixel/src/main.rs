@@ -30,10 +30,6 @@ macro_rules! eprintln {
 macro_rules! eprint {
     ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!($($arg)*)) };
 }
-// Dev tool behind the `readify` feature: probing and rewriting agents'
-// CLI configs is not part of the shipped binary (issue #602).
-#[cfg(feature = "readify")]
-mod ai_cli_readify;
 mod audit_cmd;
 mod brief_parts;
 mod call_guard;
@@ -65,12 +61,10 @@ mod plugin_cmd;
 mod prompt_continuation;
 mod prompt_intent;
 mod prompt_key;
-mod recall_cmd;
 mod reference_cmd;
 mod search_compat;
 mod search_filter;
 mod serve_trace;
-mod sniper_cmd;
 mod task_bridge;
 mod task_commands;
 mod task_config;
@@ -80,7 +74,6 @@ mod task_route;
 mod task_runtime;
 mod task_verify;
 use task_commands::TaskCmd;
-mod ultraflow_cmd;
 
 mod select;
 mod update_notice;
@@ -409,81 +402,6 @@ enum Command {
         #[arg(long)]
         jsonl: bool,
     },
-    /// Probe provider readiness for Codex, Claude Code, Antigravity, and
-    /// Devin by sending one real `POST /chat/completions` ("Reply exactly
-    /// READY.", a 1024-token reservation, 20 s timeout) to Ollama Cloud. A
-    /// 200 that answers with the READY it asked for means the provider is
-    /// ready; a 200 whose body reaches no model carries its own failure
-    /// rather than counting as one. With
-    /// `--apply`, the provider that answered is written into
-    /// `~/.codex/config.toml` (`model`, `model_provider`,
-    /// `[model_providers.recording_cloud]`),
-    /// `~/.claude/settings.json` (`env.ANTHROPIC_BASE_URL` and the model
-    /// slots), and
-    /// `~/.gemini/antigravity-cli/settings.json`
-    /// (`AGY_LLM_GATEWAY_URL`); Devin is verified-only, never rewritten.
-    /// Claude's gateway credential and its `x-litellm-api-key` header are
-    /// left to the shell — a settings file expands neither, and would
-    /// replace the working value — so the report names both exports instead.
-    /// With `--approve`, the workspace named by `--workspace` has its
-    /// startup gate cleared as well.
-    #[cfg(feature = "readify")]
-    AiCliReadify {
-        /// Also rewrite the agents' config files; without this flag the
-        /// command only probes and verifies (safe to re-run).
-        #[arg(long)]
-        apply: bool,
-        /// Probe timeout per provider, in seconds.
-        #[arg(long, default_value_t = 20)]
-        timeout: u64,
-        /// Verify only this subset of agents (repeatable). Default: all
-        /// four (codex, claude, antigravity, devin).
-        #[arg(long = "agent", value_enum)]
-        agents: Vec<ai_cli_readify::AgentFlag>,
-        /// Emit a machine-readable JSON report on stdout.
-        #[arg(long)]
-        json: bool,
-        /// Answer the startup prompts this command knows the key for, instead
-        /// of reporting them and stopping. Off by default: a trust dialog is
-        /// not this command's decision to take, and a prompt with no verified
-        /// answer is reported either way.
-        #[arg(long)]
-        answer_prompts: bool,
-        /// Clear each agent's own startup gate for `--workspace`: Codex's
-        /// workspace trust and its hooks' trust at their current hashes
-        /// (through Codex's own `config/batchWrite` RPC, never by editing
-        /// `config.toml`), and Claude's onboarding and trust dialog in
-        /// `~/.claude.json`. Off by default — a trust write outlives the run,
-        /// and it means "run this folder's hooks and code without asking
-        /// again". Antigravity and Devin have no approval path: their trust
-        /// state is only ever read. `~/.claude.json` belongs to Claude Code,
-        /// so close a running one first: the file is read, merged and
-        /// rewritten, and a write Claude Code makes in between is lost.
-        #[arg(long)]
-        approve: bool,
-        /// The folder `--approve` is about. Defaults to the working
-        /// directory. Exactly this path is written, never a parent: a trust
-        /// level granted to a directory covers everything below it, so a run
-        /// that walked up would grant more than it was asked to.
-        #[arg(long, default_value = ".")]
-        workspace: PathBuf,
-        /// Hand a Claude lane stuck on an auth wall to the installed
-        /// `claude-code-auth-flow`: spawn `claude auth login`, replay the
-        /// flow with the authorize URL it prints (which drives `agent-browser`
-        /// against the user's real browser profile), wait for the login to
-        /// exit, then re-probe the lane once. Off by default, and it fires
-        /// only for the two auth wordings — a quota, a rate limit, a
-        /// transport error or a model-not-found failure leaves the browser
-        /// untouched. A login that prints no authorize URL is refused rather
-        /// than opened at an empty one.
-        #[arg(long)]
-        authenticate: bool,
-        /// The account `--authenticate` should use: passed to
-        /// `claude auth login --email` and to the flow's own account
-        /// shortcut. Only consulted when the chain runs.
-        #[arg(long)]
-        account: Option<String>,
-    },
     /// Look up symbols by name in the code graph.
     #[command(alias = "symbol")]
     FindSymbol {
@@ -777,17 +695,6 @@ enum Command {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
-    /// Search and browse LLM CLI transcripts (machine-wide corpus).
-    Recall {
-        #[command(subcommand)]
-        cmd: recall_cmd::RecallCmd,
-    },
-    /// One-look error capture: query the sniper error sink.
-    #[command(alias = "sniper")]
-    ListErrors {
-        #[command(subcommand)]
-        cmd: sniper_cmd::SniperCmd,
-    },
     /// Decision over a bounded label set through a remote LLM: one
     /// OpenAI-compatible chat completion maps the state, shared framing,
     /// labels and criteria onto a probability distribution — the shape a
@@ -818,51 +725,6 @@ enum Command {
         #[command(subcommand)]
         cmd: ClassifyHistoryCmd,
     },
-    /// Deterministic web lookup for terms the index cannot know — the
-    /// refine step of a gated `pixel plan`. No LLM, no daemon.
-    WebSearch {
-        /// The term or question to resolve.
-        query: String,
-        #[arg(long, default_value_t = web_search::DEFAULT_LIMIT)]
-        limit: usize,
-        #[arg(long)]
-        json: bool,
-    },
-    // -----------------------------------------------------------------
-    // M2 — safe git mutation ops (pixel-ops)
-    // -----------------------------------------------------------------
-    /// Show repo state: HEAD, branch, dirty files, fingerprints.
-    ///
-    /// The answer is compact: the exact `dirty_count`/`clean_count` and the
-    /// dirty files. The tracked-clean file list (200 paths, the bulk of the
-    /// answer on a clean tree) needs `--include-clean`.
-    #[command(alias = "inspect")]
-    RepoState {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Restrict the snapshot to these repo-relative paths.
-        #[arg(long = "files")]
-        files: Vec<String>,
-        /// Include the capped tracked-clean file list (default: count only).
-        #[arg(long)]
-        include_clean: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Review working-tree changes (staged, unstaged, untracked, conflicted).
-    #[command(alias = "review")]
-    ReviewChanges {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Pagination cursor (opaque).
-        #[arg(long)]
-        cursor: Option<String>,
-        /// Cap output bytes.
-        #[arg(long)]
-        byte_cap: Option<usize>,
-        #[arg(long)]
-        json: bool,
-    },
     /// Deterministic pre-review: `what-changed` plus the mechanical rules
     /// (credential-shaped added lines, changed symbols whose callers were
     /// not themselves changed), each finding carrying the witness that
@@ -882,160 +744,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Commit history with detail levels and byte caps.
-    #[command(alias = "history")]
-    CommitHistory {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Ref to log (default HEAD).
-        #[arg(long = "ref")]
-        ref_: Option<String>,
-        /// Max commits (capped at 100).
-        #[arg(long)]
-        limit: Option<usize>,
-        /// compact (oid+subject) or full (oid+author+date+subject+body).
-        #[arg(long, default_value = "compact")]
-        detail: String,
-        /// Pagination cursor (skip N commits).
-        #[arg(long)]
-        cursor: Option<String>,
-        /// Cap output bytes.
-        #[arg(long)]
-        byte_cap: Option<usize>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Structured diff between two refs (or ref → working tree).
-    Diff {
-        from: String,
-        /// Optional target ref; if omitted, diff to working tree.
-        to: Option<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Restrict diff to these paths.
-        #[arg(long)]
-        paths: Vec<String>,
-        /// Cap diff text bytes.
-        #[arg(long)]
-        byte_cap: Option<usize>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Stage files, commit, and optionally push (crash-safe, idempotent).
-    #[command(alias = "publish")]
-    Commit {
-        /// Commit message. Use `--message-file` for a multi-paragraph body.
-        #[arg(
-            short = 'm',
-            long = "message",
-            required_unless_present = "message_file"
-        )]
-        message: Option<String>,
-        /// Read the commit message from this file (`-` for stdin), verbatim
-        /// except for trailing whitespace. Mutually exclusive with `-m`.
-        #[arg(short = 'F', long = "message-file", conflicts_with = "message")]
-        message_file: Option<PathBuf>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Files to stage (repo-relative). Repeat the flag once per file
-        /// (`--files a --files b`) — a single `--files a b` does NOT work:
-        /// `b` silently becomes the trailing PATH argument instead of a
-        /// second file, or errors if a PATH was already given.
-        #[arg(long = "files")]
-        files: Vec<String>,
-        /// Also push after committing.
-        #[arg(long)]
-        push: bool,
-        /// Amend the current commit instead of creating a new one.
-        #[arg(long)]
-        amend: bool,
-        /// Reject if HEAD does not match this OID.
-        #[arg(long)]
-        expected_head: Option<String>,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Leased push to a remote (crash-safe, idempotent).
-    Push {
-        remote: String,
-        refspec: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        force_with_lease: bool,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Publish + push in one op (commit then leased push).
-    #[command(alias = "ship")]
-    CommitAndPush {
-        /// Commit message. Use `--message-file` for a multi-paragraph body.
-        #[arg(
-            short = 'm',
-            long = "message",
-            required_unless_present = "message_file"
-        )]
-        message: Option<String>,
-        /// Read the commit message from this file (`-` for stdin), verbatim
-        /// except for trailing whitespace. Mutually exclusive with `-m`.
-        #[arg(short = 'F', long = "message-file", conflicts_with = "message")]
-        message_file: Option<PathBuf>,
-        // Positional order matches Push: required remote + refspec first,
-        // then the defaulted path. (A defaulted positional BEFORE required
-        // ones trips clap's debug assertions — every debug-build parse
-        // panicked before this reorder.)
-        remote: String,
-        refspec: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Files to stage (repo-relative). Repeat the flag once per file
-        /// (`--files a --files b`) — a single `--files a b` does NOT work:
-        /// `b` silently becomes the trailing PATH argument instead of a
-        /// second file, or errors if a PATH was already given.
-        #[arg(long = "files")]
-        files: Vec<String>,
-        /// Leased force-push (`--force-with-lease`) for the push phase.
-        #[arg(long)]
-        force_with_lease: bool,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Create a new branch from HEAD (or --from <ref>).
-    #[command(alias = "branch")]
-    NewBranch {
-        name: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Base ref (default HEAD).
-        #[arg(long)]
-        from: Option<String>,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Fetch from a remote (idempotent).
-    #[command(alias = "sync")]
-    Fetch {
-        remote: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Optional refspec.
-        #[arg(long)]
-        refspec: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
     // -----------------------------------------------------------------
     // M3/M4 — engines (resolve, history, lifecycle, excavate, reconcile)
     // -----------------------------------------------------------------
@@ -1047,87 +755,6 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         limit: Option<usize>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// M3: history-wide fact + diff search.
-    #[command(alias = "history-search")]
-    SearchHistory {
-        query: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// message | path | diff | all
-        #[arg(long, default_value = "all")]
-        facet: String,
-        #[arg(long)]
-        limit: Option<usize>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Engine 2: lifecycle of a path or token.
-    #[command(alias = "lifecycle")]
-    FileHistory {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Repo-relative path to inspect.
-        #[arg(long)]
-        file: Option<String>,
-        /// Token to inspect.
-        #[arg(long)]
-        token: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Engine 2: history-wide discovery (rescue v2).
-    #[command(alias = "excavate")]
-    DigHistory {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Phrase to search for in diff text.
-        #[arg(long)]
-        phrase: Option<String>,
-        /// Restrict to a repo-relative path (with --show: the path to read).
-        #[arg(long)]
-        file: Option<String>,
-        #[arg(long)]
-        from: Option<String>,
-        #[arg(long)]
-        to: Option<String>,
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Print the FULL content of --file at this commit (safe
-        /// `git show <oid>:<path>` equivalent). When the file does not
-        /// exist at <oid> but does at <oid>^ — i.e. <oid> is the deletion
-        /// commit — the parent's pre-deletion content is returned and
-        /// flagged. One pixel call replaces the `git show` follow-ups.
-        #[arg(long, value_name = "OID")]
-        show: Option<String>,
-        /// With --show: read from the commit's first parent (<oid>^)
-        /// directly, skipping the read at <oid> itself.
-        #[arg(long)]
-        parent: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Engine 4: one-call deterministic branch sync.
-    #[command(alias = "reconcile")]
-    SyncBranch {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// report (default) | rebase-if-clean
-        #[arg(long, default_value = "report")]
-        strategy: String,
-        /// auto (default) | none
-        #[arg(long, default_value = "auto")]
-        push: String,
-        /// Integrate: rebase current branch onto origin/<TARGET>, then
-        /// fast-forward local <TARGET> to the rebased head (never merge).
-        /// `--strategy` is ignored in this mode.
-        #[arg(long, value_name = "TARGET")]
-        into: Option<String>,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1307,43 +934,6 @@ enum Command {
         #[command(subcommand)]
         cmd: TaskCmd,
     },
-    /// Self-assessment: pixel's own action log (what ran, what went wrong).
-    /// Reads <path>/.pixel/actions.jsonl, written asynchronously by every
-    /// pixel invocation.
-    #[command(alias = "log")]
-    ActionLog {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Most recent entries to show.
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-        /// Only show entries that ended in an error.
-        #[arg(long)]
-        errors_only: bool,
-        #[arg(long)]
-        json: bool,
-        /// Delete the action log for this root and exit.
-        #[arg(long)]
-        clear: bool,
-    },
-    /// One-call read-only branch inventory: ahead/behind, merged, stale,
-    /// unpushed — the deterministic "did you push everything?" answer.
-    #[command(alias = "branches")]
-    ListBranches {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Run `git fetch --prune <remote>` first for a live view.
-        #[arg(long)]
-        fetch: bool,
-        /// Remote name.
-        #[arg(long, default_value = "origin")]
-        remote: String,
-        /// Days after which a branch counts as stale.
-        #[arg(long, default_value_t = 30)]
-        stale_days: u64,
-        #[arg(long)]
-        json: bool,
-    },
     /// Deterministic todo list generation from code analysis.
     Plan {
         /// Natural-language prompt (optional if --query is used).
@@ -1386,16 +976,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Drive a browser toward a goal with `pixel classify` one operation at
-    /// a time, save what worked as a `pixel flow`, and replay that saved
-    /// document later — its branch conditions decided by `pixel classify`
-    /// instead of matched text.
-    ///
-    /// `discover` is the jev-style loop: one question per cycle whose
-    /// options are the operation-target pairs the page currently offers.
-    /// `replay` follows the composed document, and re-decides a step whose
-    /// page moved on, recording the new branch with `--update`.
-    Ultraflow(ultraflow_cmd::UltraflowOptions),
     /// List, enable and trust plugins: external commands that `pixel <name>
     /// [args…]` runs when the core has no such command. `pixel install
     /// <source>` adds one and `pixel uninstall <name>` removes it. A repo
@@ -2118,7 +1698,7 @@ fn write_text(out: &mut impl Write, text: &str) -> Result<(), String> {
 /// Whether the parsed invocation asked for JSON on stdout. Read from the
 /// parsed matches, never from argv: `--json` is a flag only where a command
 /// declares it. The walk reaches the deepest subcommand so a nested command
-/// (`list-errors last --json`) answers for its own flag, and a command with no
+/// (`reference list --json`) answers for its own flag, and a command with no
 /// `json` argument reads as `false`.
 fn json_requested(matches: &ArgMatches) -> bool {
     let mut deepest = matches;
@@ -4049,20 +3629,6 @@ fn compact_snapshot(data: &mut Value) {
     }
 }
 
-/// Drop the tracked-clean file list from a `repo-state` answer.
-///
-/// On a clean tree the list is the bulk of the answer (200 of 351 paths,
-/// ~7 KB measured on this repository) and no consumer reads it: `repo-state`
-/// answers "HEAD + branch + dirty" and `clean_count` is what says how clean
-/// the rest of the tree is. `--include-clean` asks for the full, capped list.
-fn compact_repo_state(data: &mut Value) {
-    if let Some(obj) = data.as_object_mut() {
-        obj.remove("clean");
-        obj.remove("clean_list_cap");
-        obj.remove("clean_list_truncated");
-    }
-}
-
 /// Prepare every local GitPixel prerequisite in one deterministic operation.
 ///
 /// The JSON answer is deliberately compact — index counters, graph counters,
@@ -4239,8 +3805,7 @@ fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
 /// `config remote-key <preset>` is masked.
 ///
 /// The auth flow's URL variable is masked for the same reason: its
-/// `code`/`state` query is a bearer token for one login, and
-/// `ai-cli-readify --authenticate` is not the only writer — any command
+/// `code`/`state` query is a bearer token for one login, and any command
 /// given `--var auth_url=…` lands here. (`flow` itself is a plugin now and
 /// is never logged by the core.) The name stays readable, the value never
 /// does.
@@ -4258,9 +3823,6 @@ fn logged_args(args: &[String]) -> String {
     let plugin_install_from = pixel_plugin::command_word(&with_program)
         .filter(|(_, word)| *word == "install")
         .map(|(at, _)| at);
-    #[cfg(feature = "readify")]
-    let url_name = ai_cli_readify::auth::AUTH_URL_VAR;
-    #[cfg(not(feature = "readify"))]
     let url_name = "auth_url";
     let url_var = format!("{url_name}=");
     // Clap takes `--var auth_url=…` and `--var=auth_url=…` as the same
@@ -4320,7 +3882,7 @@ fn checks_deployed_prompts(command_label: &str, protected: bool, developer_build
 /// The command labels the update close may relaunch. The relaunch executes
 /// the command again, so only the read-only surface — retrieval, graph
 /// queries, git and pixel reporting — is ever offered; a mutating command
-/// (`push`, `install`, `scope-task --clear`, ...) finishes and stays
+/// (`build-index`, `install`, `scope-task --clear`, ...) finishes and stays
 /// finished, and its notice stays informative without a prompt. Labels are
 /// clap's kebab-case subcommand names, the same strings
 /// `matches.subcommand_name()` reports.
@@ -4344,36 +3906,17 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "status",
     "coverage",
     "audit",
-    "recall",
-    "list-errors",
-    "repo-state",
-    "review-changes",
-    "commit-history",
-    "diff",
-    "file-history",
-    "search-history",
-    "dig-history",
-    "list-branches",
 ];
 
-/// Whether the parsed invocation may be executed again by the relaunch:
-/// the top-level label and every nested mode must be read-only. A mutating
-/// nested mode (`recall index` ingests, `list-errors gc` applies
-/// retention) or a flag that reaches outward (`list-branches --fetch`
-/// runs `git fetch --prune`) makes the invocation mutating.
+/// Whether the parsed invocation may be executed again by the relaunch: the
+/// top-level label must be read-only. Every retained command in
+/// [`READ_ONLY_COMMANDS`] is a leaf (no nested mode that mutates), so the
+/// label alone decides.
 fn read_only_invocation(matches: &ArgMatches) -> bool {
     let Some(label) = matches.subcommand_name() else {
         return false;
     };
-    if !READ_ONLY_COMMANDS.contains(&label) {
-        return false;
-    }
-    match matches.subcommand() {
-        Some(("recall", nested)) => nested.subcommand_name() != Some("index"),
-        Some(("list-errors", nested)) => nested.subcommand_name() != Some("gc"),
-        Some(("list-branches", nested)) => !nested.get_flag("fetch"),
-        _ => true,
-    }
+    READ_ONLY_COMMANDS.contains(&label)
 }
 
 /// The bounded-result note for search's line output, with the caps the
@@ -4421,30 +3964,6 @@ fn stale_prompt_note(stale: &[&str]) -> Option<String> {
     ))
 }
 
-/// What a missing `--request-id` means, for an agent that copied a command
-/// without it: clap's bare "required arguments were not provided" left one
-/// retrying the same line, or moving on as if the branch existed.
-const REQUEST_ID_TIP: &str = "mutation ops need --request-id <id>: any stable string naming this operation, passed unchanged on a retry so pixel replays its result instead of running it twice";
-
-/// `error` with [`REQUEST_ID_TIP`] as its `tip:` line when the argument it
-/// reports missing is `--request-id`; any other error is returned untouched.
-fn with_request_id_tip(mut error: clap::Error) -> clap::Error {
-    use clap::error::{ContextKind, ContextValue, ErrorKind};
-    let lacks_request_id = error.kind() == ErrorKind::MissingRequiredArgument
-        && matches!(
-            error.get(ContextKind::InvalidArg),
-            Some(ContextValue::Strings(missing))
-                if missing.iter().any(|arg| arg.starts_with("--request-id"))
-        );
-    if lacks_request_id {
-        error.insert(
-            ContextKind::Suggested,
-            ContextValue::StyledStrs(vec![REQUEST_ID_TIP.into()]),
-        );
-    }
-    error
-}
-
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
@@ -4462,7 +3981,7 @@ fn run() -> Result<(), String> {
         if let Some(code) = plugin_cmd::dispatch(&error, &argv) {
             std::process::exit(code);
         }
-        with_request_id_tip(error).exit()
+        error.exit()
     });
     let command_label = matches.subcommand_name().unwrap_or("unknown").to_string();
     let path = operation_path(&matches).unwrap_or_else(|| PathBuf::from("."));
@@ -4487,9 +4006,6 @@ fn run() -> Result<(), String> {
                     warm_meaning: true,
                     ..
                 }
-            }
-            | Command::ListErrors {
-                cmd: sniper_cmd::SniperCmd::Run { .. }
             }
     );
     let root = discover_root(&path).or_else(|_| discover_root(Path::new(".")));
@@ -5053,40 +4569,6 @@ fn run_command(
                 print_data(&brief, true)
             } else {
                 write_stdout(&execution_brief::pretty(&brief))
-            }
-        }
-        #[cfg(feature = "readify")]
-        Command::AiCliReadify {
-            apply,
-            timeout,
-            agents,
-            json,
-            answer_prompts,
-            approve,
-            workspace,
-            authenticate,
-            account,
-        } => {
-            let opts = ai_cli_readify::Options {
-                apply,
-                timeout: Duration::from_secs(timeout),
-                agents: agents
-                    .into_iter()
-                    .map(ai_cli_readify::Agent::from)
-                    .collect(),
-                answer_prompts,
-                approve,
-                workspace,
-                authenticate,
-                account,
-            };
-            let report = ai_cli_readify::run(&opts)?;
-            if json {
-                let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
-                print_data(&value, true)
-            } else {
-                ai_cli_readify::print_report(&report);
-                Ok(())
             }
         }
         Command::FindSymbol { name, path, json } => {
@@ -5728,8 +5210,6 @@ fn run_command(
             DaemonCmd::Stop { path } => daemon_stop(discover_root(&path)?),
             DaemonCmd::Status { path } => daemon_status(discover_root(&path)?),
         },
-        Command::Recall { cmd } => recall_cmd::run_recall(cmd),
-        Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
         Command::Classify(options) => classify::run(options),
         Command::ClassifyEval {
             json,
@@ -5748,188 +5228,6 @@ fn run_command(
             Ok(())
         }
         Command::ClassifyHistory { cmd } => classify_history_cmd::run_classify_history(cmd),
-        Command::WebSearch { query, limit, json } => {
-            web_search::run(web_search::WebSearchOptions { query, limit, json })
-        }
-        // -------------------------------------------------------------
-        // M2 — safe git mutation ops (pixel-ops)
-        // -------------------------------------------------------------
-        Command::RepoState {
-            path,
-            files,
-            include_clean,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let mut data = pixel_ops::inspect::inspect(&root)?;
-            if !files.is_empty() {
-                // Filter the dirty/clean lists to the requested paths.
-                if let Some(dirty) = data.get_mut("dirty").and_then(Value::as_array_mut) {
-                    dirty.retain(|d| {
-                        d.get("path")
-                            .and_then(Value::as_str)
-                            .is_some_and(|p| files.iter().any(|f| f == p))
-                    });
-                }
-                if let Some(clean) = data.get_mut("clean").and_then(Value::as_array_mut) {
-                    clean.retain(|c| c.as_str().is_some_and(|p| files.iter().any(|f| f == p)));
-                }
-                data["dirty_count"] = json!(
-                    data.get("dirty")
-                        .and_then(Value::as_array)
-                        .map_or(0, Vec::len)
-                );
-                data["clean_count"] = json!(
-                    data.get("clean")
-                        .and_then(Value::as_array)
-                        .map_or(0, Vec::len)
-                );
-            }
-            if !include_clean {
-                compact_repo_state(&mut data);
-            }
-            print_data(&data, json)
-        }
-        Command::ReviewChanges {
-            path,
-            cursor,
-            byte_cap,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let data = pixel_ops::review::review(&root, cursor.as_deref(), byte_cap)?;
-            print_data(&data, json)
-        }
-        Command::CommitHistory {
-            path,
-            ref_,
-            limit,
-            detail,
-            cursor,
-            byte_cap,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let data = pixel_ops::history::history(
-                &root,
-                ref_.as_deref(),
-                limit,
-                &detail,
-                cursor.as_deref(),
-                byte_cap,
-            )?;
-            print_data(&data, json)
-        }
-        Command::Diff {
-            from,
-            to,
-            path,
-            paths,
-            byte_cap,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let paths_opt = if paths.is_empty() {
-                None
-            } else {
-                Some(paths.as_slice())
-            };
-            let data = pixel_ops::diff::diff(&root, &from, to.as_deref(), paths_opt, byte_cap)?;
-            print_data(&data, json)
-        }
-        Command::Commit {
-            message,
-            message_file,
-            path,
-            files,
-            push,
-            amend,
-            expected_head,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let message = commit_message(message, message_file.as_deref())?;
-            let opts = pixel_ops::publish::PublishOptions {
-                message,
-                files,
-                expected_head,
-                expected_fingerprints: std::collections::BTreeMap::new(),
-                push,
-                amend,
-                request_id,
-            };
-            let data = pixel_ops::publish::publish(&root, &opts, None)?;
-            print_data(&data, json)
-        }
-        Command::Push {
-            remote,
-            refspec,
-            path,
-            force_with_lease,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::push::PushOptions {
-                remote,
-                refspec,
-                request_id,
-                force_with_lease,
-            };
-            let data = pixel_ops::push::push(&root, &opts, None)?;
-            print_data(&data, json)
-        }
-        Command::CommitAndPush {
-            message,
-            message_file,
-            path,
-            files,
-            remote,
-            refspec,
-            force_with_lease,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let message = commit_message(message, message_file.as_deref())?;
-            let data = pixel_ops::ship::ship_with_lease(
-                &root,
-                &message,
-                &files,
-                &remote,
-                &refspec,
-                &request_id,
-                force_with_lease,
-            )?;
-            print_data(&data, json)
-        }
-        Command::NewBranch {
-            name,
-            path,
-            from,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::branch::BranchOptions {
-                name,
-                from,
-                request_id,
-            };
-            let data = pixel_ops::branch::branch(&root, &opts)?;
-            print_data(&data, json)
-        }
-        Command::Fetch {
-            remote,
-            path,
-            refspec,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let data = pixel_ops::sync::sync(&root, &remote, refspec.as_deref())?;
-            print_data(&data, json)
-        }
         // -------------------------------------------------------------
         // M3/M4 — engines
         // -------------------------------------------------------------
@@ -5961,90 +5259,6 @@ fn run_command(
             } else {
                 print_resolve_human(&data)
             }
-        }
-        Command::SearchHistory {
-            query,
-            path,
-            facet,
-            limit,
-            json,
-        } => {
-            let data = execute(
-                &path,
-                Request::History {
-                    query,
-                    facet: Some(facet),
-                    limit,
-                    read_only: false,
-                },
-                false,
-            )?;
-            print_data(&data, json)
-        }
-        Command::FileHistory {
-            path,
-            file,
-            token,
-            json,
-        } => {
-            let data = execute(
-                &path,
-                Request::Lifecycle {
-                    path: file,
-                    token,
-                    read_only: false,
-                },
-                false,
-            )?;
-            print_data(&data, json)
-        }
-        Command::DigHistory {
-            path,
-            phrase,
-            file,
-            from,
-            to,
-            limit,
-            show,
-            parent,
-            json,
-        } => {
-            if let Some(oid) = show {
-                return excavate_show(&path, &oid, file.as_deref(), parent, json);
-            }
-            let data = execute(
-                &path,
-                Request::Excavate {
-                    phrase,
-                    path: file,
-                    from,
-                    to,
-                    limit,
-                    read_only: false,
-                },
-                false,
-            )?;
-            print_data(&data, json)
-        }
-        Command::SyncBranch {
-            path,
-            strategy,
-            push,
-            into,
-            request_id,
-            json,
-        } => {
-            let data = execute(
-                &path,
-                Request::Reconcile {
-                    strategy: Some(strategy),
-                    push: Some(push),
-                    into,
-                    request_id,
-                },
-                false,
-            )?;
-            print_data(&data, json)
         }
         // -------------------------------------------------------------
         // M5/M6 — install / doctor / migrate / hook
@@ -6383,29 +5597,6 @@ fn run_command(
             }
         },
         Command::TaskState { cmd } => task_commands::run(cmd),
-        Command::ActionLog {
-            path,
-            limit,
-            errors_only,
-            json,
-            clear,
-        } => run_log(&path, limit, errors_only, json, clear),
-        Command::ListBranches {
-            path,
-            fetch,
-            remote,
-            stale_days,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::branches::BranchesOptions {
-                fetch,
-                remote,
-                stale_days,
-            };
-            let data = pixel_ops::branches::branches(&root, &opts)?;
-            print_data(&data, json)
-        }
         Command::Plan {
             prompt,
             path,
@@ -6440,7 +5631,6 @@ fn run_command(
                 json,
             })
         }
-        Command::Ultraflow(options) => ultraflow_cmd::run(options),
         Command::Plugin { cmd } => plugin_cmd::run(cmd),
     }
 }
@@ -6550,6 +5740,12 @@ const LOCATE_MAX_TARGETS: usize = 3;
 /// What every locate answer says about the test files it lists.
 const LOCATE_TESTS_NOTE: &str = "test files among the callers at depth 1; Rust #[test] \
      functions are not indexed, so an empty list is not an absence of tests";
+
+/// Tokens a rendered value costs, by the bytes/4 convention
+/// `pixel_context::estimate_tokens` uses.
+fn estimate_tokens(text: &str) -> usize {
+    text.len().div_ceil(4)
+}
 
 /// `run-recipe --kind locate`: resolve the phrase, show the context of the
 /// symbols it singles out (fresh source only, one shared budget), list the
@@ -6740,7 +5936,7 @@ fn run_locate(
         "next_action": next_action,
         "limits": limits,
     });
-    let tokens = |v: &Value| recall_cmd::estimate_tokens(&v.to_string());
+    let tokens = |v: &Value| estimate_tokens(&v.to_string());
     fit_locate_to_budget(&mut locate, budget, tokens);
     result.evidence.clear();
     let output = json!({
@@ -6808,97 +6004,6 @@ fn render_locate(locate: &Value) -> String {
         out.push_str(&format!("limit: {}\n", limit.as_str().unwrap_or_default()));
     }
     out
-}
-
-/// How many trailing log entries `pixel log` reads. Over-fetch when
-/// filtering to errors so `limit` still means "the last N errors", not "the
-/// last N entries, some of which happen to be errors".
-fn log_fetch_count(limit: usize, errors_only: bool) -> usize {
-    if errors_only {
-        limit.max(1) * 20
-    } else {
-        limit.max(1)
-    }
-}
-
-/// The last `limit` of the tailed entries, errors only when asked.
-fn select_log_events(
-    mut events: Vec<pixel_actionlog::ActionEvent>,
-    limit: usize,
-    errors_only: bool,
-) -> Vec<pixel_actionlog::ActionEvent> {
-    if errors_only {
-        events.retain(|e| e.outcome == pixel_actionlog::Outcome::Error);
-    }
-    if events.len() > limit {
-        let start = events.len() - limit;
-        events.drain(0..start);
-    }
-    events
-}
-
-/// `pixel log` — the self-assessment surface over the async action log every
-/// pixel invocation writes to `<root>/.pixel/actions.jsonl`.
-fn run_log(
-    path: &Path,
-    limit: usize,
-    errors_only: bool,
-    json: bool,
-    clear: bool,
-) -> Result<(), String> {
-    let root = discover_root(path)?;
-    let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
-    if clear {
-        return match std::fs::remove_file(&log_path) {
-            Ok(()) => {
-                println!("action log cleared: {}", log_path.display());
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                println!("no action log at {}", log_path.display());
-                Ok(())
-            }
-            Err(e) => Err(format!("remove {}: {e}", log_path.display())),
-        };
-    }
-    let tailed = pixel_actionlog::tail(&log_path, log_fetch_count(limit, errors_only))
-        .map_err(|e| format!("read {}: {e}", log_path.display()))?;
-    let events = select_log_events(tailed, limit, errors_only);
-    if json {
-        for e in &events {
-            println!("{}", serde_json::to_string(e).map_err(|e| e.to_string())?);
-        }
-        return Ok(());
-    }
-    if events.is_empty() {
-        println!("no recorded actions at {}", log_path.display());
-        return Ok(());
-    }
-    let now = pixel_actionlog::now_ms();
-    for e in &events {
-        let when = relative_time(e.ts_ms, now);
-        match e.outcome {
-            pixel_actionlog::Outcome::Ok => {
-                println!(
-                    "{when:>8}  ok     {:<10} {} ({} ms)",
-                    e.command, e.args, e.duration_ms
-                );
-            }
-            pixel_actionlog::Outcome::Error => {
-                println!(
-                    "{when:>8}  ERROR  {:<10} {} ({} ms) — {}",
-                    e.command,
-                    e.args,
-                    e.duration_ms,
-                    e.error.as_deref().unwrap_or("?")
-                );
-            }
-        }
-        if let Some(line) = pixel_actionlog::format_metrics_line(e) {
-            println!("  {line}");
-        }
-    }
-    Ok(())
 }
 
 /// `pixel ask "<question>"` — semantic code search via static embeddings.
@@ -6974,22 +6079,6 @@ fn run_ask(
     Ok(())
 }
 
-fn relative_time(ts_ms: i64, now_ms: i64) -> String {
-    let delta_ms = (now_ms - ts_ms).max(0);
-    let secs = delta_ms / 1000;
-    if secs < 5 {
-        "just now".to_string()
-    } else if secs < 60 {
-        format!("{secs}s ago")
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
-}
-
 /// Whether a parse error belongs to a `run-hook` invocation and is a real
 /// error (help and version requests are not): a host hook never fails with
 /// clap's exit code 2.
@@ -7002,40 +6091,6 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
     }
-}
-
-/// Dry-run parse one `pixel …` argv (including the leading "pixel") against
-/// this binary's real clap definition — nothing is executed. Used by
-/// `pixel doctor`'s rule-vs-binary parity check so the installed rule text
-/// can never document syntax the parser would reject.
-/// The commit message of `publish`/`ship`: `-m <text>`, or the content of
-/// `--message-file <path>` (`-` reads stdin). Clap guarantees exactly one
-/// of the two is present.
-fn commit_message(inline: Option<String>, file: Option<&Path>) -> Result<String, String> {
-    let raw = match (inline, file) {
-        (Some(text), _) => text,
-        (None, Some(path)) if path == Path::new("-") => {
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
-                .map_err(|e| format!("cannot read commit message from stdin: {e}"))?;
-            text
-        }
-        (None, Some(path)) => std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read commit message file {}: {e}", path.display()))?,
-        (None, None) => return Err("a commit message is required (-m or --message-file)".into()),
-    };
-    normalize_commit_message(&raw)
-}
-
-/// Trailing whitespace goes (an editor's final newline would otherwise
-/// become a blank trailer line); a blank message is refused before git
-/// sees it, so no journal entry is written for a commit git would reject.
-fn normalize_commit_message(raw: &str) -> Result<String, String> {
-    let text = raw.trim_end();
-    if text.trim().is_empty() {
-        return Err("commit message is empty".into());
-    }
-    Ok(text.to_string())
 }
 
 /// Dry-runs one `pixel …` argv against the real clap definition; the
@@ -7107,67 +6162,6 @@ fn variadic_sentinel_misfit(args: &[String]) -> Option<String> {
             arg.get_id()
         )
     })
-}
-
-/// `pixel excavate --show <oid> --file <path>`: full historical file content
-/// in ONE call — the follow-up to an excavate candidate list that previously
-/// forced agents into raw `git show`/`git log` rounds. Reads `<oid>:<path>`
-/// through the safe `pixel_git::GitRunner` (ref-validated, output-capped);
-/// when the file does not exist at `<oid>` (e.g. `<oid>` is the deletion
-/// commit itself) it falls back to `<oid>^:<path>` — the pre-deletion
-/// content — and says so. `--parent` skips straight to the parent read.
-/// Implemented CLI-side (no daemon/proto round-trip): the content lives in
-/// the object store, not the facts db, so a direct git read is exact.
-fn excavate_show(
-    path: &Path,
-    oid: &str,
-    file: Option<&str>,
-    parent: bool,
-    json: bool,
-) -> Result<(), String> {
-    let Some(file) = file else {
-        return Err("dig-history --show requires --file <repo-relative path>".to_string());
-    };
-    let root = discover_root(path)?;
-    let runner = pixel_git::GitRunner::new(&root);
-    let (content, source, parent_fallback) = if parent {
-        let c = runner
-            .show_blob_string_at_parent(oid, file)
-            .map_err(|e| format!("cannot read {oid}^:{file}: {e}"))?;
-        (c, format!("{oid}^:{file}"), false)
-    } else {
-        match runner.show_blob_string(oid, file) {
-            Ok(c) => (c, format!("{oid}:{file}"), false),
-            Err(at_oid_err) => match runner.show_blob_string_at_parent(oid, file) {
-                Ok(c) => (c, format!("{oid}^:{file}"), true),
-                Err(_) => {
-                    return Err(format!(
-                        "{file} exists neither at {oid} nor at {oid}^: {at_oid_err}"
-                    ));
-                }
-            },
-        }
-    };
-    if json {
-        let data = serde_json::json!({
-            "oid": oid,
-            "file": file,
-            "source": source,
-            "parent_fallback": parent_fallback,
-            "content": content,
-        });
-        print_data(&data, true)
-    } else {
-        if parent_fallback {
-            eprintln!(
-                "pixel: {file} does not exist at {oid}; showing the parent's \
-                 pre-deletion content ({source})"
-            );
-        } else {
-            eprintln!("pixel: {source}");
-        }
-        write_stdout(&content)
-    }
 }
 
 #[cfg(test)]
@@ -7387,7 +6381,7 @@ mod tests {
 
     /// The `--json` failure envelope is decided from the parsed flag, not
     /// from argv: `--json` counts only where the command declares it, and it
-    /// counts through a nested subcommand (`list-errors last --json`), whose
+    /// counts through a nested subcommand (`reference list --json`), whose
     /// flag the top-level matches cannot see. Parsed on a thread with a 4 MiB
     /// stack — the derived command tree overflows the 2 MiB a test thread
     /// gets, the same reason `validate_cli_syntax` spawns one.
@@ -7404,7 +6398,7 @@ mod tests {
         }
 
         assert!(parsed(&["pixel", "status", ".", "--json"]));
-        assert!(parsed(&["pixel", "list-errors", "last", "--json"]));
+        assert!(parsed(&["pixel", "reference", "list", "--json"]));
         assert!(!parsed(&["pixel", "status", "."]));
         // A nested command with no `json` argument of its own: false, not a
         // flag inherited from somewhere in argv.
@@ -7456,26 +6450,12 @@ mod tests {
     #[test]
     fn canonical_rule_command_lines_parse_against_the_real_cli() {
         let canonical = [
-            // NOTE: the historical rule text wrote `[--path <path>]` here —
-            // the real flag is `--file`. That drift is exactly what the
-            // runtime `rule.parity` doctor check flags.
-            r#"pixel dig-history --phrase "<what you're looking for>" [--file <path>] [--json]"#,
             r#"pixel find-code "<phrase>" /path/to/repo [--json] [--limit N]"#,
             r#"pixel search-content "<pattern>" /path/to/repo --context 5 [--json] [--limit N]"#,
-            r#"pixel sync-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"#,
             r#"pixel scope-task "<one-line task description>" /path/to/repo [--json] [--limit N]"#,
             r#"pixel scope-task --clear /path/to/repo"#,
             r#"pixel impact <symbol_name_or_uid> /path/to/repo [--direction upstream|downstream] [--depth N] [--json]"#,
             r#"pixel what-changed /path/to/repo [--base <ref>] [--json]"#,
-            r#"pixel repo-state /path/to/repo [--json]"#,
-            r#"pixel review-changes /path/to/repo [--json]"#,
-            r#"pixel commit-history /path/to/repo [--ref <ref>] [--limit N] [--json]"#,
-            r#"pixel diff <from> /path/to/repo [--paths <p1> --paths <p2>] [--json]"#,
-            r#"pixel commit --files <f1> --files <f2> --message "<msg>" --request-id <id> /path/to/repo"#,
-            r#"pixel push <remote> <refspec> /path/to/repo --request-id <id>"#,
-            r#"pixel commit-and-push --files <f1> --files <f2> --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
-            r#"pixel new-branch <name> /path/to/repo --request-id <id>"#,
-            r#"pixel fetch <remote> /path/to/repo [--json]"#,
             r#"pixel status /path/to/repo"#,
             r#"pixel build-index --history ."#,
             r#"pixel setup"#,
@@ -7499,30 +6479,20 @@ mod tests {
         );
     }
 
-    /// `--files` and `--paths` take one value per occurrence, so a rule line
-    /// that shows several values after one flag teaches an agent a command
-    /// the CLI rejects: the parity check must go red on it, not validate the
-    /// single-value reading, even where the extra value parses as a PATH.
+    /// A flag that takes one value per occurrence must not be shown with
+    /// `...`: a rule line that does teaches an agent a command the CLI
+    /// rejects, so the parity check must go red on it, not validate the
+    /// single-value reading. The extra value lands in a multi-value
+    /// positional (`paths`), which takes several values but not this flag's.
     #[test]
     fn variadic_single_value_flags_are_rejected_as_documented() {
-        for line in [
-            r#"pixel commit --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
-            r#"pixel commit-and-push --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
-            // No explicit PATH: the second value would bind to the defaulted
-            // positional and parse, so only the sentinel's trace catches it.
-            r#"pixel commit --files <f>... --message "<msg>" --request-id <id>"#,
-            r#"pixel diff <from> [--paths <p>...] [--json]"#,
-            // The second value lands in a multi-value positional (`paths`),
-            // which takes several values but not this flag's.
-            r#"pixel search-content "<re>" --glob <g>..."#,
-        ] {
-            let argv = pixel_install::doctor::normalize_rule_command(line)
-                .unwrap_or_else(|| panic!("`{line}` did not normalize"));
-            assert!(
-                validate_cli_syntax(&argv).is_err(),
-                "`{line}` → argv {argv:?} should be rejected by the CLI parser"
-            );
-        }
+        let line = r#"pixel search-content "<re>" --glob <g>..."#;
+        let argv = pixel_install::doctor::normalize_rule_command(line)
+            .unwrap_or_else(|| panic!("`{line}` did not normalize"));
+        assert!(
+            validate_cli_syntax(&argv).is_err(),
+            "`{line}` → argv {argv:?} should be rejected by the CLI parser"
+        );
     }
 
     /// An argument that does take several values per occurrence keeps its
@@ -7972,32 +6942,33 @@ mod prompt_asset_parity {
         );
     }
 
-    /// The REPLACEMENT MAP rows that shipped in 0.6.0 must go red, each
-    /// named with clap's reason, or the test above cannot catch their like.
+    /// Rows that show a command without its required arguments must go red,
+    /// each named with clap's reason, or the test above cannot catch their
+    /// like.
     #[test]
     fn the_shipped_replacement_map_rows_are_rejected_by_name() {
         let text = "\
 | Instead of | Run |
 | --- | --- |
-| `git checkout -b` / `git fetch` / `git merge --ff-only` | `pixel new-branch name` / `pixel fetch` / `pixel fast-forward …` |
+| `git log --oneline` | `pixel search-content --json` / `pixel impact` / `pixel find-code …` |
 ";
         let (_, failures) = asset_failures("sample.md", text);
         assert_eq!(failures.len(), 3, "{failures:#?}");
         assert!(
-            failures[0].starts_with("sample.md: `pixel new-branch name` → ")
-                && failures[0].contains("--request-id"),
+            failures[0].starts_with("sample.md: `pixel search-content --json` → ")
+                && failures[0].contains("required"),
             "{}",
             failures[0]
         );
         assert!(
-            failures[1].starts_with("sample.md: `pixel fetch` → ")
-                && failures[1].contains("<REMOTE>"),
+            failures[1].starts_with("sample.md: `pixel impact` → ")
+                && failures[1].contains("required"),
             "{}",
             failures[1]
         );
         assert_eq!(
             failures[2],
-            "sample.md: `pixel fast-forward …` elides its arguments, but no full `pixel fast-forward …` line in this asset parses"
+            "sample.md: `pixel find-code …` elides its arguments, but no full `pixel find-code …` line in this asset parses"
         );
     }
 
@@ -8005,7 +6976,7 @@ mod prompt_asset_parity {
     /// substitutes a real id, so the dummy must not be what fails it.
     #[test]
     fn a_placeholder_for_an_integer_argument_parses() {
-        let text = "| a | `pixel list-errors show <id>` / `pixel list-errors since <cursor>` |\n";
+        let text = "| a | `pixel scope-task \"<task>\" . --limit <n>` / `pixel search-content \"<re>\" . --limit <n>` |\n";
         assert_eq!(asset_failures("sample.md", text), (2, vec![]));
     }
 
@@ -8015,8 +6986,8 @@ mod prompt_asset_parity {
     #[test]
     fn an_elision_needs_a_full_form_and_an_unreadable_line_is_reported() {
         let text = "\
-| a | `pixel recall …` |
-| b | `pixel recall search \"token\" --since 30d` |
+| a | `pixel find-code …` |
+| b | `pixel find-code \"token\" .` |
 | c | `pixel impact a…b` |
 ";
         let (checked, failures) = asset_failures("sample.md", text);
@@ -8133,34 +7104,6 @@ mod renamed_command_tests {
             name(&["pixel", "hook", "session-start"]).as_deref(),
             Some("run-hook")
         );
-    }
-
-    /// A mutation op run without `--request-id` names the flag and says
-    /// what value to give it; an error about another argument, even one of
-    /// a mutation op, carries no such tip.
-    #[test]
-    fn a_missing_request_id_carries_the_tip_and_nothing_else_does() {
-        let rendered = |words: &'static [&'static str]| {
-            on_big_stack(move || {
-                let error = Cli::command().try_get_matches_from(words).unwrap_err();
-                super::with_request_id_tip(error).render().to_string()
-            })
-        };
-        let tip = format!("tip: {}", super::REQUEST_ID_TIP);
-        for words in [
-            &["pixel", "new-branch", "feat/x"][..],
-            &["pixel", "commit", "--files", "a", "-m", "msg"][..],
-            &["pixel", "push", "origin", "feat/x"][..],
-        ] {
-            let text = rendered(words);
-            assert!(text.contains("--request-id <REQUEST_ID>"), "{text}");
-            assert!(text.contains(&tip), "{words:?}: {text}");
-        }
-        let fetch = rendered(&["pixel", "fetch"]);
-        assert!(fetch.contains("<REMOTE>"), "{fetch}");
-        assert!(!fetch.contains("tip:"), "{fetch}");
-        let unknown = rendered(&["pixel", "new-branch", "x", "--request-id", "r", "--nope"]);
-        assert!(!unknown.contains(super::REQUEST_ID_TIP), "{unknown}");
     }
 
     #[test]
@@ -8480,10 +7423,6 @@ mod update_close_tests;
 #[cfg(test)]
 #[path = "main_tests/classify_setup_prompt_tests.rs"]
 mod classify_setup_prompt_tests;
-
-#[cfg(test)]
-#[path = "main_tests/commit_message_tests.rs"]
-mod commit_message_tests;
 
 #[cfg(test)]
 #[path = "main_tests/review_gate_pretty_tests.rs"]

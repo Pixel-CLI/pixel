@@ -415,20 +415,22 @@ mod tests {
         let built_in = |name: &'static str| {
             on_big_stack(move || Cli::command().find_subcommand(name).is_some())
         };
-        // The five commands #899 dropped from the binary reach the hint ...
+        // The moved commands #878 dropped from the binary reach the hint ...
         for name in [
             "flow",
             "plan-rollback",
             "token-savings",
             "squash-branch",
             "fast-forward",
+            "commit-history",
+            "recall",
+            "ultraflow",
         ] {
             assert!(is_moved_name(name) && !built_in(name), "{name}");
         }
-        // ... the commands still built in are clap's, whatever the table says.
-        for name in ["commit-history", "recall", "ultraflow", "check-release"] {
-            assert!(is_moved_name(name) && built_in(name), "{name}");
-        }
+        // ... the one moved command still built in is clap's, whatever the table
+        // says.
+        assert!(is_moved_name("check-release") && built_in("check-release"));
     }
 
     fn is_moved_name(name: &str) -> bool {

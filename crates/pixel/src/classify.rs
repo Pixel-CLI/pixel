@@ -1412,51 +1412,6 @@ pub(crate) fn open_resolved(
     }
 }
 
-/// A decision engine held open across many questions: the same resolution
-/// `pixel classify` does for one invocation, with the same `--engine`,
-/// `--remote-preset` and `--remote-model` inputs, for a caller that asks one
-/// decision per cycle and pays the resolution and the connection once.
-pub(crate) fn open_session(
-    engine: Option<EngineChoice>,
-    ollaya_url: String,
-    preset: Option<crate::decide_remote::Preset>,
-    model: Option<String>,
-) -> Result<Box<dyn DecisionEngine>, String> {
-    if !crate::config_cmd::classify_enabled()? {
-        return Err("classify is disabled; enable it with `pixel config classify on` or `pixel config setup`".into());
-    }
-    let opts = ClassifyOptions {
-        text: None,
-        context: None,
-        labels: Vec::new(),
-        criteria: Vec::new(),
-        remote_preset: preset,
-        remote_model: model.clone(),
-        engine,
-        ollaya_url,
-        jsonl: false,
-        json: false,
-        // A held-open session is an interactive caller, not a prompt hook:
-        // it takes the interaction cap, not the hook's sub-second one.
-        if_warm: false,
-        // Every question it asks carries its own labels, so the built-in
-        // prompt-intent battery (which `task_intent` selects) is never what
-        // it wants.
-        task_intent: false,
-        debug: false,
-        history: false,
-    };
-    let resolved = resolve_engine_for(&opts)?;
-    let resolved_preset =
-        resolve_remote_preset(preset, crate::config_cmd::classify_remote_preset());
-    open_resolved(
-        resolved,
-        resolved_preset,
-        model.or_else(|| stored_remote_model_when_unset(resolved_preset, RemoteOverrides::Shared)),
-        false,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

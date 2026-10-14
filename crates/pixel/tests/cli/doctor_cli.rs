@@ -185,7 +185,7 @@ fn a_retired_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
     };
     let run = |exe: &std::path::Path| {
         std::process::Command::new(exe)
-            .args(["action-log", "--limit", "1"])
+            .args(["plugin", "list"])
             .env("PIXEL_DAEMON_AUTO_START", "0")
             .env("HOME", &*home)
             .current_dir(crate::support::neutral_cwd())

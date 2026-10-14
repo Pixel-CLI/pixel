@@ -329,18 +329,31 @@ fn install_reports_a_bad_source_and_keeps_the_credentials_of_a_url_out_of_the_lo
 }
 
 /// The pre-rename spellings that stood for a command now shipped as a
-/// plugin and not built into the core, with the plugin they resolve to.
-const MOVED_ALIASES: [(&str, &str); 5] = [
+/// plugin and not built into the core, with the command they resolve to.
+const MOVED_ALIASES: [(&str, &str); 19] = [
+    ("branch", "new-branch"),
+    ("branches", "list-branches"),
+    ("excavate", "dig-history"),
+    ("history", "commit-history"),
+    ("history-search", "search-history"),
+    ("inspect", "repo-state"),
+    ("lifecycle", "file-history"),
+    ("log", "action-log"),
+    ("publish", "commit"),
+    ("reconcile", "sync-branch"),
     ("replay-flow", "flow"),
     ("rescue", "plan-rollback"),
+    ("review", "review-changes"),
     ("rewrite", "squash-branch"),
     ("savings", "token-savings"),
+    ("ship", "commit-and-push"),
+    ("sniper", "list-errors"),
+    ("sync", "fetch"),
     ("update", "fast-forward"),
 ];
 
 /// The moved commands the core no longer builds in: the only names the
-/// moved-command hint is for. The rest still run from the binary until the
-/// change that removes them from it.
+/// moved-command hint is for. Only `check-release` was kept in the binary.
 fn unbuilt_moved() -> Vec<(&'static str, &'static str)> {
     let built_in = super::support::built_in_commands();
     pixel_plugin::MOVED_COMMANDS
@@ -429,10 +442,10 @@ fn the_hint_names_the_repository_each_command_moves_to() {
 #[test]
 fn a_moved_command_that_is_still_built_in_runs_instead_of_hinting() {
     let world = World::new("still-built-in");
-    let help = world.pixel(&["commit-history", "--help"]);
+    let help = world.pixel(&["check-release", "--help"]);
     assert_eq!(help.status.code(), Some(0), "{help:?}");
     assert!(
-        stdout(&help).contains("Usage: pixel commit-history"),
+        stdout(&help).contains("Usage: pixel check-release"),
         "{}",
         stdout(&help)
     );
@@ -441,7 +454,7 @@ fn a_moved_command_that_is_still_built_in_runs_instead_of_hinting() {
         "{}",
         stderr(&help)
     );
-    assert!(super::support::built_in_commands().contains("recall"));
+    assert!(super::support::built_in_commands().contains("check-release"));
 }
 
 #[test]

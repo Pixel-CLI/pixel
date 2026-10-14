@@ -44,13 +44,11 @@ fn read_only(args: &[&str]) -> bool {
 fn read_only_should_accept_retrieval_and_refuse_state_changers() {
     assert!(read_only(&["search-content", "pattern"]));
     assert!(read_only(&["impact", "symbol"]));
-    assert!(read_only(&["diff", "HEAD~1"]));
+    assert!(read_only(&["repo-map", "."]));
     // Every one of these re-run would mutate state: the gate must keep
     // the update question away from them.
     for args in [
-        &["push", "origin", "main", "--request-id", "x"][..],
-        &["commit", "--request-id", "x", "--message", "m"],
-        &["setup"],
+        &["setup"][..],
         &["install", "github:acme/tool"],
         &["uninstall", "tool"],
         &["config", "classify-engine", "local"],
@@ -63,15 +61,4 @@ fn read_only_should_accept_retrieval_and_refuse_state_changers() {
     ] {
         assert!(!read_only(args), "{args:?} must not relaunch");
     }
-}
-
-#[test]
-fn nested_mutating_modes_and_outward_flags_should_refuse() {
-    assert!(read_only(&["recall", "search", "pattern"]));
-    assert!(read_only(&["recall", "sessions"]));
-    assert!(!read_only(&["recall", "index"]));
-    assert!(read_only(&["list-errors", "last"]));
-    assert!(!read_only(&["list-errors", "gc"]));
-    assert!(read_only(&["list-branches"]));
-    assert!(!read_only(&["list-branches", "--fetch"]));
 }

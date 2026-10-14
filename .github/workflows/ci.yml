@@ -413,7 +413,7 @@ jobs:
       # run on a flaky result, and kills a test that hangs past 3 minutes.
       - name: Test
         if: ${{ needs.changes.outputs.cargo == 'true' }}
-        run: cargo nextest run --workspace --locked --profile ci --features pixel-cli/readify
+        run: cargo nextest run --workspace --locked --profile ci
 
       # nextest does not run doctests.
       - name: Doctests
@@ -614,7 +614,7 @@ jobs:
           fi
 
       - name: Warnings-denied Clippy
-        run: cargo clippy --workspace --all-targets --features pixel-cli/readify -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Supported CLI feature lanes
         run: |

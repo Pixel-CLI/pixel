@@ -222,15 +222,6 @@ fn html_code_spans_count_as_quoted_commands() {
 
 #[test]
 fn every_documented_pixel_command_exists() {
-    // `ai-cli-readify` ships behind the `readify` feature (issue #602): the
-    // prod binary's help omits it, while the docs keep documenting it.
-    #[cfg(not(feature = "readify"))]
-    let known = {
-        let mut known = documentable_commands();
-        known.insert("ai-cli-readify".to_string());
-        known
-    };
-    #[cfg(feature = "readify")]
     let known = documentable_commands();
     let root = repo_root();
     let mut stale = Vec::new();
@@ -450,15 +441,6 @@ fn command_table_order(section: &str) -> Vec<String> {
 fn the_architecture_command_table_lists_every_subcommand_in_help_order() {
     // The table promises `pixel --help` order: a reader scanning both side
     // by side, or a diff of the two, only works while they agree row for row.
-    // `ai-cli-readify` ships behind the `readify` feature (issue #602) and
-    // is absent from the prod binary's help when the feature is off.
-    #[cfg(not(feature = "readify"))]
-    let documented = {
-        let mut documented = command_table_order(&architecture_section("Command surface"));
-        documented.retain(|c| c != "ai-cli-readify");
-        documented
-    };
-    #[cfg(feature = "readify")]
     let documented = command_table_order(&architecture_section("Command surface"));
     let known = subcommands();
     let missing: Vec<&String> = known.iter().filter(|c| !documented.contains(*c)).collect();

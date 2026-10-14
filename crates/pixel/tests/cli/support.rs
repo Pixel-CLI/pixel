@@ -144,59 +144,6 @@ fn report_leak(root: &Path, leaked: Vec<String>) {
     );
 }
 
-/// A fake recall-daemon socket at `recall_dir`'s socket path: it answers the
-/// client's `Ping` (the probe and the op open separate connections) and then
-/// the first `Recall` with `answer`, so a test can drive the daemon-first
-/// path without a corpus or a model. The caller joins the handle and removes
-/// the socket the thread leaves behind.
-pub fn fake_recall_daemon(
-    recall_dir: &Path,
-    answer: pixel_daemon::Response,
-) -> std::thread::JoinHandle<()> {
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixListener;
-    let listener = UnixListener::bind(pixel_daemon::daemon::socket_path(recall_dir)).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    std::thread::spawn(move || {
-        // Poll with a deadline: a client that never reaches the `Recall` must
-        // fail its own assertion, not hang here.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut served = false;
-        while !served && std::time::Instant::now() < deadline {
-            let Ok((mut stream, _)) = listener.accept() else {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                continue;
-            };
-            // A non-blocking listener hands back a non-blocking socket on
-            // BSD: reset it, or the read races the client's write.
-            let _ = stream.set_nonblocking(false);
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            while !served {
-                let mut line = String::new();
-                let Ok(n) = reader.read_line(&mut line) else {
-                    break;
-                };
-                if n == 0 {
-                    break;
-                }
-                let reply = match serde_json::from_str::<pixel_daemon::Request>(&line).unwrap() {
-                    pixel_daemon::Request::Ping => pixel_daemon::Response::success(
-                        "ping",
-                        serde_json::json!({"pong": true, "protocol_version": pixel_daemon::api::PROTOCOL_VERSION}),
-                    ),
-                    pixel_daemon::Request::Recall { .. } => {
-                        served = true;
-                        answer.clone()
-                    }
-                    other => panic!("unexpected request: {other:?}"),
-                };
-                writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
-            }
-        }
-    })
-}
-
 /// A throwaway directory under the system temp dir. Dereferences to `Path`;
 /// removed on drop, after the daemon leak check.
 pub struct Scratch(PathBuf);

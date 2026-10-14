@@ -227,63 +227,6 @@ fn compact_snapshot_replaces_dirty_list_with_count() {
 }
 
 #[test]
-fn compact_repo_state_drops_the_clean_list_and_keeps_the_count() {
-    let mut d = json!({"root": "/repo", "head": "abc", "branch": "main",
-        "dirty": [], "dirty_count": 0,
-        "clean": ["a", "b"], "clean_count": 2,
-        "clean_list_truncated": false, "clean_list_cap": 200});
-    compact_repo_state(&mut d);
-    assert!(d.get("clean").is_none(), "{d}");
-    assert!(d.get("clean_list_truncated").is_none(), "{d}");
-    assert!(d.get("clean_list_cap").is_none(), "{d}");
-    assert_eq!(d["clean_count"], 2);
-    assert_eq!(d["head"], "abc");
-    // A non-object (never produced today): no-op, no panic.
-    let mut bare = json!([]);
-    compact_repo_state(&mut bare);
-    assert_eq!(bare, json!([]));
-}
-
-fn logged(command: &str, ts_ms: i64, error: bool) -> pixel_actionlog::ActionEvent {
-    let mut e = pixel_actionlog::ActionEvent::new(command, "");
-    e.ts_ms = ts_ms;
-    if error {
-        e.outcome = pixel_actionlog::Outcome::Error;
-    }
-    e
-}
-
-#[test]
-fn log_keeps_the_last_n_entries_or_the_last_n_errors() {
-    assert_eq!(log_fetch_count(2, true), 40);
-    assert_eq!(log_fetch_count(0, true), 20);
-    assert_eq!(log_fetch_count(3, false), 3);
-    assert_eq!(log_fetch_count(0, false), 1);
-    let events = vec![
-        logged("a", 1, true),
-        logged("b", 2, false),
-        logged("c", 3, true),
-        logged("d", 4, true),
-        logged("e", 5, false),
-    ];
-    let names =
-        |v: Vec<pixel_actionlog::ActionEvent>| v.into_iter().map(|e| e.command).collect::<Vec<_>>();
-    assert_eq!(
-        names(select_log_events(events.clone(), 2, true)),
-        ["c", "d"]
-    );
-    assert_eq!(
-        names(select_log_events(events.clone(), 2, false)),
-        ["d", "e"]
-    );
-    assert_eq!(
-        names(select_log_events(events.clone(), 3, true)),
-        ["a", "c", "d"]
-    );
-    assert_eq!(names(select_log_events(events, 9, false)).len(), 5);
-}
-
-#[test]
 fn a_find_code_match_line_shows_a_route_handler_only_when_recorded() {
     let route = json!({
         "path": "config/routes.rb", "start_line": 3, "kind": "route", "score": 1.0,

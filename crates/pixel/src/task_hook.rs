@@ -358,8 +358,6 @@ fn pixel_read_or_recovery(args: &[String]) -> bool {
                 | "impact"
                 | "pack-context"
                 | "what-changed"
-                | "review-changes"
-                | "repo-state"
                 | "list-areas"
                 | "list-flows"
                 | "who-calls"

@@ -4,7 +4,6 @@
 //! Real CLI metrics boundaries: invocation-local accounting, never stream decoration.
 use std::collections::HashSet;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -141,6 +140,25 @@ fn metric_lines(output: &Output) -> Vec<String> {
     blocks
 }
 
+/// `search-content --json` writes one JSON document per line (a match line
+/// per hit, then the envelope). The metrics block must stay on stderr, so
+/// every stdout line is still a non-empty JSON object.
+fn assert_jsonl(output: &Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let documents: Vec<Value> = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("every stdout line is JSON"))
+        .collect();
+    assert!(
+        !documents.is_empty()
+            && documents
+                .iter()
+                .all(|d| d.as_object().is_some_and(|o| !o.is_empty())),
+        "{stdout}"
+    );
+}
+
 fn short_invocation_id(event: &Value) -> String {
     let id = event["invocation_id"].as_str().unwrap();
     id.split('-').nth(1).map_or_else(
@@ -251,7 +269,7 @@ fn concurrent_time_policies_stay_with_their_own_invocations() {
         .map(|policy| {
             let child = fixture
                 .command()
-                .args(["repo-state", ".", "--json"])
+                .args(["search-content", "login_user", ".", "--json", "--no-daemon"])
                 .env("PIXEL_METRICS_ROUND_TRIP_MS", policy.to_string())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -264,12 +282,12 @@ fn concurrent_time_policies_stay_with_their_own_invocations() {
         .into_iter()
         .map(|(policy, child)| (policy, child.wait_with_output().unwrap()))
         .collect();
-    let events = fixture.events("repo-state");
+    let events = fixture.events("search-content");
     assert_eq!(events.len(), 4);
     let mut ids = HashSet::new();
     for (policy, output) in outputs {
         assert_success(&output);
-        serde_json::from_slice::<Value>(&output.stdout).unwrap();
+        assert_jsonl(&output);
         let lines = metric_lines(&output);
         assert_eq!(lines.len(), 1);
         let header = lines[0].lines().next().unwrap();
@@ -297,18 +315,17 @@ fn concurrent_time_policies_stay_with_their_own_invocations() {
 fn time_history_preserves_assumptions_legacy_unavailability_and_exact_lines() {
     use std::io::Write;
     let fixture = Fixture::new();
-    let mut historical_lines = Vec::new();
     for ms in [1000, 3500] {
         let output = fixture
             .command()
-            .args(["repo-state", ".", "--json"])
+            .args(["search-content", "login_user", ".", "--json", "--no-daemon"])
             .env("PIXEL_METRICS_ROUND_TRIP_MS", ms.to_string())
             .output()
             .unwrap();
         assert_success(&output);
-        historical_lines.extend(metric_lines(&output));
     }
-    let originals = fixture.events("repo-state");
+    let originals = fixture.events("search-content");
+    assert_eq!(originals.len(), 2);
     let mut old_metrics = originals[0].clone();
     old_metrics["invocation_id"] = json!("old-token-only-record");
     old_metrics["metrics"]
@@ -342,24 +359,6 @@ fn time_history_preserves_assumptions_legacy_unavailability_and_exact_lines() {
         assert_eq!(
             group["measured"]["duration_us"],
             event["metrics"]["duration_us"]
-        );
-    }
-    // A later invocation's assumption cannot reinterpret saved records.
-    let replay = fixture
-        .command()
-        .args(["action-log", ".", "--metrics=off"])
-        .env("PIXEL_METRICS_ROUND_TRIP_MS", "99999")
-        .output()
-        .unwrap();
-    assert_success(&replay);
-    let replay = String::from_utf8(replay.stdout).unwrap();
-    for line in historical_lines {
-        let header = line.lines().next().unwrap();
-        assert!(
-            replay
-                .lines()
-                .any(|saved| saved.strip_prefix("  ") == Some(header)),
-            "{replay}"
         );
     }
 }
@@ -763,7 +762,7 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
         .map(|_| {
             fixture
                 .command()
-                .args(["repo-state", ".", "--json"])
+                .args(["search-content", "login_user", ".", "--json", "--no-daemon"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -774,7 +773,7 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
         .into_iter()
         .map(|child| child.wait_with_output().unwrap())
         .collect();
-    let events = fixture.events("repo-state");
+    let events = fixture.events("search-content");
     assert_eq!(events.len(), 4);
     let ids: HashSet<_> = events
         .iter()
@@ -783,8 +782,7 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
     assert_eq!(ids.len(), 4);
     for output in outputs {
         assert_success(&output);
-        let document: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(document["head"].as_str().unwrap().len() >= 40);
+        assert_jsonl(&output);
         let lines = metric_lines(&output);
         assert_eq!(lines.len(), 1);
         let event = events
@@ -796,19 +794,24 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
             })
             .expect("each live metrics block must identify its own action record");
         assert_metric_identity(&lines[0], event);
-        assert_eq!(event["metrics"]["output_bytes"], output.stdout.len());
+        // `output_bytes` prices every rendered stream, so it counts a stderr
+        // line a concurrent index rebuild may add (a note), not only stdout;
+        // the reporting block itself is excluded.
+        assert_eq!(
+            event["metrics"]["output_bytes"],
+            output.stdout.len() + output.stderr.len() - lines[0].len() - 2
+        );
         assert_eq!(event["metrics"]["reporting_bytes"], lines[0].len() + 2);
     }
 }
 
 #[test]
-fn action_log_failure_does_not_change_success_or_reporting() {
+fn action_log_write_failure_does_not_change_success_or_reporting() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.0.join(".pixel/actions.jsonl")).unwrap();
-    let output = fixture.run(&["repo-state", ".", "--json"]);
+    let output = fixture.run(&["search-content", "login_user", ".", "--json", "--no-daemon"]);
     assert_success(&output);
-    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(document["dirty_count"], 0);
+    assert_jsonl(&output);
     assert_eq!(metric_lines(&output).len(), 1);
     assert!(fixture.0.join(".pixel/actions.jsonl").is_dir());
 }
@@ -833,7 +836,8 @@ fn config_metrics_off_hides_the_footer_until_turned_back_on() {
             .output()
             .unwrap()
     };
-    let on = run(&["repo-state", ".", "--json"]);
+    let search = ["search-content", "login_user", ".", "--json", "--no-daemon"];
+    let on = run(&search);
     assert_success(&on);
     assert_eq!(metric_lines(&on).len(), 1);
 
@@ -845,12 +849,12 @@ fn config_metrics_off_hides_the_footer_until_turned_back_on() {
             .unwrap();
     assert_eq!(config["metrics"], "off");
 
-    let off = run(&["repo-state", ".", "--json"]);
+    let off = run(&search);
     assert_success(&off);
     assert_eq!(off.stdout, on.stdout, "stdout is untouched by the opt-out");
     assert!(metric_lines(&off).is_empty(), "config off emits no block");
     // Accounting still lands in the journal — the opt-out is presentation.
-    let events = fixture.events("repo-state");
+    let events = fixture.events("search-content");
     assert_eq!(events.len(), 2);
     assert_eq!(events[1]["metrics"]["reporting_bytes"], 0);
     assert!(events[1]["metrics"]["duration_us"].as_u64().unwrap() > 0);
@@ -865,9 +869,11 @@ fn config_metrics_off_hides_the_footer_until_turned_back_on() {
     // Per-invocation vetoes still veto when the config says on.
     let reenable = run(&["config", "metrics", "on"]);
     assert_success(&reenable);
-    let vetoed = run(&["repo-state", ".", "--json", "--metrics=off"]);
+    let mut vetoed_args = search.to_vec();
+    vetoed_args.push("--metrics=off");
+    let vetoed = run(&vetoed_args);
     assert!(metric_lines(&vetoed).is_empty());
-    let on_again = run(&["repo-state", ".", "--json"]);
+    let on_again = run(&search);
     assert_eq!(metric_lines(&on_again).len(), 1);
 }
 
@@ -961,17 +967,9 @@ fn legacy_savings_and_error_details_survive_with_workflow_summary() {
         format!("{legacy}\n"),
     )
     .unwrap();
-    assert_success(&fixture.run(&["repo-state", ".", "--json"]));
+    assert_success(&fixture.run(&["search-content", "login_user", ".", "--json", "--no-daemon"]));
     let failed = fixture.run(&["search-content", "(", ".", "--json", "--no-daemon"]);
     assert!(!failed.status.success());
-    let errors = fixture.run(&["action-log", ".", "--errors-only", "--metrics=off"]);
-    assert_success(&errors);
-    let text = String::from_utf8(errors.stdout).unwrap();
-    assert!(text.contains("search-content ("), "arguments lost: {text}");
-    assert!(
-        text.contains("regex") || text.contains("pattern"),
-        "error lost: {text}"
-    );
     // The snippet-vs-pool report over the same log is the `token-savings`
     // plugin's (its own tests pin 80/20/0.75 for this record); what the core
     // owns is the workflow summary it reads.
@@ -1093,116 +1091,6 @@ fn failure_ends_stderr_on_its_error_and_metrics_off_prints_it_once() {
 }
 
 #[test]
-fn negative_workflow_savings_are_not_clamped() {
-    let fixture = Fixture::new();
-    for i in 0..40 {
-        fs::write(
-            fixture.0.join(format!(
-                "src/{}_{}.rs",
-                "long_fixture_filename".repeat(6),
-                i
-            )),
-            "pub fn item() {}\n",
-        )
-        .unwrap();
-    }
-    let output = fixture.run(&["repo-state", ".", "--json"]);
-    assert_success(&output);
-    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(data["dirty_count"], 40);
-    let lines = metric_lines(&output);
-    assert_eq!(lines.len(), 1);
-    assert!(
-        !lines[0].contains("estimated LLM context saved:"),
-        "negative token savings must not be presented as a saving: {}",
-        lines[0]
-    );
-    let event = &fixture.events("repo-state")[0];
-    let metrics = &event["metrics"];
-    assert!(
-        metrics["native_workflow_bytes"].as_u64().unwrap()
-            < metrics["output_bytes"].as_u64().unwrap()
-                + metrics["reporting_bytes"].as_u64().unwrap()
-    );
-}
-
-#[test]
-fn metrics_preserve_safe_publication_replay_and_head_guard() {
-    let fixture = Fixture::new();
-    for (key, value) in [
-        ("user.name", "Fixture"),
-        ("user.email", "fixture@example.invalid"),
-        ("commit.gpgsign", "false"),
-    ] {
-        assert!(
-            Command::new("git")
-                .args(["config", key, value])
-                .current_dir(&fixture.0)
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
-    let before: Value =
-        serde_json::from_slice(&fixture.run(&["repo-state", "--json"]).stdout).unwrap();
-    let head = before["head"].as_str().unwrap();
-    fs::write(
-        fixture.0.join("src/login.rs"),
-        "pub fn login_user() -> bool { true }\n",
-    )
-    .unwrap();
-    let args = [
-        "commit",
-        "--message",
-        "test: greeting fixture",
-        "--request-id",
-        "metrics-publication",
-        "--expected-head",
-        head,
-        "--files",
-        "src/login.rs",
-        "--json",
-    ];
-    let first = fixture.run(&args);
-    assert_success(&first);
-    let published: Value = serde_json::from_slice(&first.stdout).unwrap();
-    assert_eq!(published["published"], true);
-    assert_ne!(published["head"], before["head"]);
-    let replay = fixture.run(&args);
-    assert_success(&replay);
-    assert_eq!(
-        serde_json::from_slice::<Value>(&replay.stdout).unwrap()["head"],
-        published["head"]
-    );
-    fs::write(
-        fixture.0.join("src/login.rs"),
-        "pub fn login_user() -> bool { false }\n",
-    )
-    .unwrap();
-    let refused = fixture.run(&[
-        "commit",
-        "--message",
-        "test: stale guard",
-        "--request-id",
-        "stale-metrics-publication",
-        "--expected-head",
-        head,
-        "--files",
-        "src/login.rs",
-        "--json",
-    ]);
-    assert_eq!(refused.status.code(), Some(1));
-    assert_eq!(metric_lines(&refused).len(), 1);
-    let after: Value =
-        serde_json::from_slice(&fixture.run(&["repo-state", "--json"]).stdout).unwrap();
-    assert_eq!(after["head"], published["head"]);
-    let events = fixture.events("commit");
-    assert_eq!(events.len(), 3);
-    assert_eq!(events[2]["outcome"], "error");
-    assert_eq!(events[2]["metrics"]["output_scope"], "cli-rendered-streams");
-}
-
-#[test]
 fn daemon_reindex_reports_actual_nested_index_counts() {
     let fixture = Fixture::new();
     assert_success(&fixture.run(&["build-index"]));
@@ -1235,16 +1123,16 @@ fn daemon_reindex_reports_actual_nested_index_counts() {
 #[test]
 fn rename_note_counts_as_rendered_output() {
     let fixture = Fixture::new();
-    let out = fixture.run(&["inspect", "--json", "."]);
+    let out = fixture.run(&["search", "login_user", ".", "--json", "--no-daemon"]);
     assert_success(&out);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.starts_with("note: 'inspect' is now 'repo-state'"),
+        stderr.starts_with("note: 'search' is now 'search-content'"),
         "{stderr}"
     );
     let lines = metric_lines(&out);
     assert_eq!(lines.len(), 1, "{out:?}");
-    let events = fixture.events("repo-state");
+    let events = fixture.events("search-content");
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(
         events[0]["metrics"]["output_bytes"],
@@ -1348,68 +1236,6 @@ fn action_log_records_how_each_request_was_served() {
     assert!(daemon.get("open_ms").is_none(), "{daemon}");
 }
 
-/// `pixel action-log . --limit N | head -1`: the reader closes the pipe while
-/// the process still has lines to write. That is a truncated read, not a
-/// failure — the counted `print!` path must absorb EPIPE instead of panicking
-/// with exit 101.
-#[test]
-fn closed_stdout_pipe_is_success_not_a_panic() {
-    /// More lines than any pipe buffer holds, so the process cannot finish
-    /// writing before the test closes the read end.
-    const SEEDED_LINES: usize = 4000;
-
-    let fixture = Fixture::new();
-    let log = fixture.0.join(".pixel/actions.jsonl");
-    fs::create_dir_all(log.parent().unwrap()).unwrap();
-    let seeded: String = (0..SEEDED_LINES)
-        .map(|n| {
-            format!(
-                "{}\n",
-                json!({
-                    "ts_ms": 1,
-                    "pid": 1,
-                    "command": "search-content",
-                    "args": format!("seed-{n} --path . --budget 4000"),
-                    "cwd": "/fixture",
-                    "outcome": "ok",
-                    "duration_ms": 1,
-                })
-            )
-        })
-        .collect();
-    fs::write(&log, seeded).unwrap();
-
-    let limit = SEEDED_LINES.to_string();
-    let mut child = fixture
-        .command()
-        .args(["action-log", ".", "--limit", limit.as_str()])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    // `| head -1`: keep the first line, then drop the read end.
-    let mut first_line = String::new();
-    {
-        let mut reader = BufReader::new(child.stdout.take().unwrap());
-        reader.read_line(&mut first_line).unwrap();
-    }
-    let output = child.wait_with_output().unwrap();
-
-    assert!(
-        first_line.contains("search-content"),
-        "the first rendered line arrives before the reader closes: {first_line:?}"
-    );
-    assert!(
-        output.status.success(),
-        "a closed stdout reader is a success, not exit 101: {output:?}"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("panicked"),
-        "EPIPE must not panic the process: {stderr}"
-    );
-}
-
 /// No-policy commands keep a compact identity line and a recorded gap.
 /// Applicable comparisons still explain a one-step baseline or capped evidence.
 #[test]
@@ -1429,19 +1255,17 @@ fn live_blocks_state_every_absent_comparison_and_keep_json_stdout_clean() {
     assert!(event["metrics"]["native_workflow_bytes"].is_null());
     assert!(event["metrics"]["time_estimate"].is_null());
 
-    let history = fixture.run(&["commit-history", ".", "--limit", "1", "--json"]);
-    assert_success(&history);
-    serde_json::from_slice::<Value>(&history.stdout).unwrap();
-    let block = &metric_lines(&history)[0];
+    // A one-step baseline (no saved round trip) states the gap instead of
+    // omitting the time row.
+    let one_step = fixture.run(&["what-changed", "--json"]);
+    assert_success(&one_step);
+    serde_json::from_slice::<Value>(&one_step.stdout).unwrap();
+    let block = &metric_lines(&one_step)[0];
     assert!(
         block.contains("├─ ⏱ no estimated time saving (baseline has no saved round trip)"),
         "{block}"
     );
-    assert!(
-        block.contains("├─ § estimated LLM context saved:"),
-        "{block}"
-    );
-    let event = fixture.events("commit-history").pop().unwrap();
+    let event = fixture.events("what-changed").pop().unwrap();
     assert_eq!(event["metrics"]["time_estimate"]["sequential_steps"], 1);
     assert!(event["metrics"]["comparison_gap"].is_null());
 
@@ -1464,53 +1288,6 @@ fn live_blocks_state_every_absent_comparison_and_keep_json_stdout_clean() {
     let event = fixture.events("repo-map").pop().unwrap();
     assert_eq!(event["metrics"]["comparison_gap"], "output_truncated");
     assert!(event["metrics"]["native_workflow_bytes"].is_null());
-}
-
-/// `push` now carries the one-command baseline it replaces (`git push`), so a
-/// removed policy entry is a visible regression in both the live line and the
-/// record, not a silently empty table row.
-#[test]
-fn push_baseline_replaces_git_push_and_states_the_single_step_time_gap() {
-    let fixture = Fixture::new();
-    let remote = fixture.0.join("remote.git");
-    let initialized = Command::new("git")
-        .args(["init", "-q", "--bare"])
-        .arg(&remote)
-        .status()
-        .unwrap();
-    assert!(initialized.success());
-    let added = Command::new("git")
-        .args(["remote", "add", "origin"])
-        .arg(&remote)
-        .current_dir(&fixture.0)
-        .status()
-        .unwrap();
-    assert!(added.success());
-    let output = fixture.run(&[
-        "push",
-        "origin",
-        "HEAD",
-        "--request-id",
-        "metrics-push-golden",
-        "--json",
-    ]);
-    assert_success(&output);
-    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(document["pushed"], true, "{document}");
-    let block = &metric_lines(&output)[0];
-    assert!(
-        block.contains("├─ ⏱ no estimated time saving (baseline has no saved round trip)"),
-        "{block}"
-    );
-    assert!(
-        block.contains("├─ § estimated LLM context saved:"),
-        "{block}"
-    );
-    let event = fixture.events("push").pop().unwrap();
-    assert_eq!(event["metrics"]["evidence"]["native_commands"], 1);
-    assert_eq!(event["metrics"]["native_workflow_bytes"], 1024);
-    assert_eq!(event["metrics"]["time_estimate"]["sequential_steps"], 1);
-    assert!(event["metrics"]["comparison_gap"].is_null());
 }
 
 /// The first result a new user sees: `pixel list-signatures` on a large file
