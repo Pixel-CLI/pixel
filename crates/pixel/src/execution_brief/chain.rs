@@ -3066,12 +3066,20 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
         .as_ref()
         .filter(|pack| brief.pack_limit.on() && pack.has_evidence())
     {
-        let text = pack.text();
+        // The packet was cut short: the pack says it is a lead, not an answer.
+        let text = pack.text_hedged(brief.cut);
         let stats = AnswerStats {
             answer: true,
             excerpt_bytes: text.len(),
             pack_bytes: text.len(),
-            pack_parts: region_pack::split_parts(&text, brief.pack_limit.chars).len(),
+            pack_parts: crate::brief_parts::split(
+                &text,
+                crate::brief_parts::Limits {
+                    chars: brief.pack_limit.chars,
+                    bytes: usize::MAX,
+                },
+            )
+            .len(),
             pack_targets: pack.targets(),
             fallback: pack.fallback(),
             ..AnswerStats::default()

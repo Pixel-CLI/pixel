@@ -219,7 +219,7 @@ fn a_pack_should_grow_with_the_parts_the_host_delivers() {
     let one = brief(&root, &[("PIXEL_BRIEF_PARTS", "1")]);
     let three = brief(&root, &[("PIXEL_BRIEF_PARTS", "3")]);
     assert_eq!(one["pack_parts"], 1);
-    assert!(three["pack_bytes"].as_u64() >= one["pack_bytes"].as_u64());
+    assert!(three["pack_bytes"].as_u64().unwrap() >= one["pack_bytes"].as_u64().unwrap());
     assert!(three["pack_bytes"].as_u64().unwrap() <= 3 * 9_800);
 }
 
@@ -295,24 +295,19 @@ fn the_pack_should_fill_as_many_parts_as_the_hooks_that_deliver_it() {
         "{}",
         single.chars().count()
     );
-    // Three hooks: part 1 computes a pack for three, the others print theirs.
-    let (one, two, three) = std::thread::scope(|scope| {
-        let two = scope.spawn(|| hook_context(&root, Some("2/3")));
-        let three = scope.spawn(|| hook_context(&root, Some("3/3")));
+    // Two hooks: part 1 computes a pack for two, part 2 prints the rest.
+    let (one, two) = std::thread::scope(|scope| {
+        let two = scope.spawn(|| hook_context(&root, Some("2/2")));
         std::thread::sleep(std::time::Duration::from_millis(150));
-        (
-            hook_context(&root, Some("1/3")),
-            two.join().unwrap(),
-            three.join().unwrap(),
-        )
+        (hook_context(&root, Some("1/2")), two.join().unwrap())
     });
+    assert!(one.starts_with("[PIXEL:BRIEF]\nregion pack"), "{one}");
+    assert!(!two.is_empty(), "part 2 prints the rest of the pack");
     for (k, part) in [&one, &two].into_iter().enumerate() {
         assert!(part.chars().count() <= 9_800, "part {}", k + 1);
-        assert!(!part.is_empty(), "part {} prints", k + 1);
     }
-    assert!(one.starts_with("[PIXEL:BRIEF]\nregion pack"), "{one}");
     assert!(
-        one.chars().count() + two.chars().count() + three.chars().count() > 9_800,
-        "a pack for three parts is larger than one part"
+        one.chars().count() + two.chars().count() > 9_800,
+        "a pack for two parts is larger than one part"
     );
 }

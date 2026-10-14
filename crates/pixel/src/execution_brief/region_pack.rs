@@ -240,10 +240,17 @@ impl Pack {
     /// The whole text, whatever its length: the tag line, the header, the
     /// blocks, then the directive (or the note that the window ended).
     pub(crate) fn text(&self) -> String {
+        self.text_hedged(false)
+    }
+
+    /// [`Pack::text`]; `hedge` (the packet it replaces was cut short, so the
+    /// search behind it may have missed something) ends a complete pack on the
+    /// lead line instead of the directive.
+    pub(crate) fn text_hedged(&self, hedge: bool) -> String {
         let mut lines = vec![BRIEF_TAG.to_string(), self.searched.clone()];
         lines.extend(self.blocks.iter().map(Block::text));
         lines.push(
-            match (self.complete, self.anchored) {
+            match (self.complete, self.anchored && !hedge) {
                 (true, true) => DIRECTIVE,
                 (true, false) => LEAD,
                 (false, _) => INCOMPLETE,
@@ -3011,6 +3018,26 @@ mod tests {
         assert!(pack.has_evidence());
         assert_eq!(pack.targets(), 1);
         assert!(!pack.fallback());
+    }
+
+    #[test]
+    fn a_pack_of_a_cut_packet_should_end_on_the_lead_not_the_directive() {
+        let pack = built(&input(1), &repo()).unwrap();
+        assert!(pack.text_hedged(false).ends_with(DIRECTIVE));
+        assert!(pack.text_hedged(true).ends_with(LEAD));
+        assert_eq!(pack.text(), pack.text_hedged(false));
+        // Only the last line differs.
+        let plain = pack.text_hedged(false);
+        let hedged = pack.text_hedged(true);
+        assert_eq!(
+            plain.rsplit_once('\n').unwrap().0,
+            hedged.rsplit_once('\n').unwrap().0
+        );
+        let early = Pack {
+            complete: false,
+            ..pack
+        };
+        assert!(early.text_hedged(true).ends_with(INCOMPLETE));
     }
 
     #[test]
