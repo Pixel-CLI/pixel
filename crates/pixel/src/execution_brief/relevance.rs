@@ -301,13 +301,15 @@ impl Verdict {
                 "confidence: high — {}/{} key terms covered; start with the first file",
                 self.features.shared, self.features.informative
             )),
-            (Basis::Model, Tier::Low) => {
-                Some("confidence: low — possibly related; verify before relying on it".to_string())
-            }
+            (Basis::Model, Tier::Low) => Some(LOW_CONFIDENCE_LINE.to_string()),
             _ => None,
         }
     }
 }
+
+/// The `confidence:` line of a low-tier brief.
+pub(crate) const LOW_CONFIDENCE_LINE: &str =
+    "confidence: low — possibly related; verify before relying on it";
 
 /// Decide whether the prompt behind `input` is about this repository, and
 /// how sure the brief should sound. The one place the model is applied, so

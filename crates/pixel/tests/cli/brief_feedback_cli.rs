@@ -325,3 +325,81 @@ fn every_hook_part_should_log_the_bytes_it_printed_to_the_host() {
         "parts join by the prompt"
     );
 }
+
+/// A transcript outside the repository (a file inside it would be a dirty file
+/// of the tree) whose last tool call read `file`.
+fn transcript_reading(tag: &str, file: &Path) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "pixel-brief-feedback-{tag}-{}.jsonl",
+        std::process::id()
+    ));
+    let line = json!({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Read", "input": {"file_path": file}}]}});
+    std::fs::write(&path, format!("{line}\n")).unwrap();
+    path
+}
+
+fn follow_up_payload(root: &Path, transcript: Option<&Path>) -> Value {
+    json!({"session_id": SESSION, "prompt": "now fix the test", "cwd": root,
+           "transcript_path": transcript, "hook_event_name": "UserPromptSubmit"})
+}
+
+#[test]
+fn a_short_follow_up_should_be_briefed_on_the_files_the_transcript_names() {
+    let root = indexed("follow-up");
+    let page = root.join("apps/web/page.tsx");
+    let transcript = transcript_reading("follow-up", &page);
+    let briefed = hook(
+        &root,
+        "prompt-submit",
+        None,
+        &follow_up_payload(&root, Some(&transcript)),
+        |_| {},
+    );
+    let text = briefed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no brief in {briefed}"));
+    assert!(text.contains("files: apps/web/page.tsx"), "{text}");
+    assert!(
+        !text.contains("now fix the test"),
+        "no prompt text in the brief: {text}"
+    );
+    // The same words with no transcript, and a clean tree, have nothing to lean on.
+    let bare = hook(
+        &root,
+        "prompt-submit",
+        None,
+        &follow_up_payload(&root, None),
+        |_| {},
+    );
+    assert_eq!(bare.get("hookSpecificOutput"), None, "{bare}");
+    // And the switch turns the lift off.
+    let off = hook(
+        &root,
+        "prompt-submit",
+        None,
+        &follow_up_payload(&root, Some(&transcript)),
+        |command| {
+            command.env("PIXEL_BRIEF_CONTEXT", "0");
+        },
+    );
+    assert_eq!(off.get("hookSpecificOutput"), None, "{off}");
+    let _ = std::fs::remove_file(&transcript);
+}
+
+#[test]
+fn a_dirty_file_should_brief_a_short_follow_up_in_a_session_with_no_transcript() {
+    let root = indexed("dirty");
+    std::fs::write(root.join("apps/web/page.tsx"), "export const edited = 1;\n").unwrap();
+    let briefed = hook(
+        &root,
+        "prompt-submit",
+        None,
+        &follow_up_payload(&root, None),
+        |_| {},
+    );
+    let text = briefed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no brief in {briefed}"));
+    assert!(text.contains("files: apps/web/page.tsx"), "{text}");
+}

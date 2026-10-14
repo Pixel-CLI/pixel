@@ -22,6 +22,7 @@ mod locator;
 pub(crate) mod region_pack;
 pub(crate) mod relevance;
 pub(crate) mod routes;
+pub(crate) mod session_paths;
 
 const MAX_CAPS: usize = 32;
 const MAX_EVIDENCE_PER_TARGET: usize = 8;

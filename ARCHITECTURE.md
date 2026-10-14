@@ -921,6 +921,28 @@ masked, and a credential-shaped path never reaches the searches' rows
 lives inside its own 300 ms (`LOCATOR_WINDOW`) and the brief's window, and a
 search that fails leaves the pack as it was.
 
+**The session's files** (`execution_brief/session_paths.rs`, started by the
+hook beside the worker and given `CONTEXT_WINDOW`, 150 ms of the brief's
+750). A prompt of a hook session ("now fix the test") often says too little to
+place in the repository, so the brief also reads where the session already is:
+the files its last tool calls read or edited, found in the structured inputs
+(`file_path`, `path`, a shell `command`) of the last 64 KB of the
+host's `transcript_path` (Claude Code and Codex payloads), newest first, and
+the dirty files of `git status`, most recently written first. Only a path leaves
+the module: a candidate counts when it exists inside the repository once its
+links are resolved and is not credential-shaped, so transcript text reaches
+neither the brief nor a log. The two lists rank as one list that joins the
+fusion of the meaning leads and the relevance co-files as a third, boosting only: a file
+those lists already name gains its reciprocal rank, and a file only the session
+names does not enter, so an unrelated dirty file never displaces a lead. A
+short follow-up (`is_follow_up`: at most ten words that ask for a change or
+lean on what came before) that the gate would have closed is let through
+instead, when the session has files: the files are the brief
+(`Admission::Context`, gate `open`, reason `context: …`, rendered as a low-tier
+maybe) and the off-topic leads of its words are dropped. A source that has not
+answered inside its window adds nothing. `PIXEL_BRIEF_CONTEXT=0|false|off`
+turns it off, and the `brief` command, which has no session, never uses it.
+
 **Question kinds without a symbol** (`execution_brief/kinds.rs`, asked by
 `pack_evidence` beside the locators). `routes::QuestionKind` gained `Overview`
 (a tour: "quick tour", "lay of the land", "what each crate is for"; a

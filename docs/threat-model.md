@@ -617,7 +617,12 @@ hold.
   hashed, a shell command is read only to find the files it names, and a file
   is named only when it exists inside the repository after its links are
   resolved and is not credential-shaped (`feedback::tool_targets`); no prompt,
-  command or tool output reaches it.
+  command or tool output reaches it. The brief also reads the last 64 KB of
+  the transcript the host's hook payload names (`transcript_path`) and the
+  dirty files of `git status`, for paths alone (`execution_brief::session_paths`):
+  only a regular file is read, one candidate path counts only when it passes the
+  same check as the feedback log's, and nothing else of the transcript leaves the
+  function; `PIXEL_BRIEF_CONTEXT=0|false|off` turns it off.
 - **Status**: Partial.
 - **Residual**: the recall corpus and the error sink store transcripts and
   argv unredacted (the sink keeps the whole output of every failed `sniper

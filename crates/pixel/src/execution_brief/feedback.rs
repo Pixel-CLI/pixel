@@ -224,7 +224,7 @@ fn loggable(path: &Path) -> bool {
 /// The words of a shell `command` that may be file names: split at blanks and
 /// shell operators, quotes dropped, options and anything with an expansion
 /// left out.
-fn command_words(command: &str) -> Vec<String> {
+pub(crate) fn command_words(command: &str) -> Vec<String> {
     command
         .split(|ch: char| ch.is_whitespace() || "|;&<>()".contains(ch))
         .map(|word| word.trim_matches(['\'', '"']))
@@ -241,7 +241,7 @@ fn command_words(command: &str) -> Vec<String> {
 /// `candidate` as a path relative to the canonical repository `root`: only a
 /// file that exists, whose canonical path is inside `root` (a link out of the
 /// repository is not followed), and that is not credential-shaped.
-fn repository_file(root: &Path, cwd: &Path, candidate: &str) -> Option<String> {
+pub(crate) fn repository_file(root: &Path, cwd: &Path, candidate: &str) -> Option<String> {
     if candidate.len() > 1_024 || candidate.contains('\0') {
         return None;
     }

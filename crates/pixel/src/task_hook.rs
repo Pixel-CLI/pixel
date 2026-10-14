@@ -1381,7 +1381,14 @@ fn start_brief(
 ) -> Option<crate::execution_brief::chain::Pending> {
     let prompt = brief_prompt(provider, event, payload)?;
     let root = crate::discover_root(&payload_cwd(payload)).ok()?;
-    crate::execution_brief::chain::start(&prompt, &root, parts)
+    // The files the session is working on: its transcript's recent tool
+    // calls and the dirty files of the tree. Only the path is taken here; the
+    // transcript is read, for paths alone, inside the brief's own window.
+    let session = crate::execution_brief::chain::Session {
+        transcript: string(payload, &["transcript_path", "transcriptPath"])
+            .map(std::path::PathBuf::from),
+    };
+    crate::execution_brief::chain::start_in(&prompt, &root, parts, session)
 }
 
 /// The latest user turn in the transcript `transcriptPath` points at. The
