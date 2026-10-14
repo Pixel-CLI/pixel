@@ -7,6 +7,7 @@
 mod changes_consumers;
 mod changes_suggested_tests;
 mod changes_uncovered;
+mod class_arrow_methods;
 mod concept_engine1_audit;
 mod concept_tests;
 mod crux_lines;

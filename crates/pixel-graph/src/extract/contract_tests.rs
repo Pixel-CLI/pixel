@@ -1256,3 +1256,95 @@ fn csharp_generic_calls_alias_usings_and_callback_arguments() {
     assert!(refs.contains(&("OnClick".to_string(), None)), "{refs:?}");
     assert!(!refs.iter().any(|(n, _)| n == "null"), "{refs:?}");
 }
+
+const TS_CLASS_ARROWS: &str = "\
+export class App {
+  private handleDrop = async (event: DragEvent) => {
+    const file = event.dataTransfer?.files[0];
+    insertImage(file);
+    this.refresh();
+  };
+  public refresh = () => this.render();
+  onResize = function () { measure(); };
+  static count = 3;
+  label: string = \"drop\";
+  render() { paint(); }
+}
+";
+
+#[test]
+fn ts_class_property_arrow_functions_should_be_methods_of_their_class() {
+    let fx = extract("src/app.ts", TS_CLASS_ARROWS);
+    let syms = symbols(&fx);
+    for expected in [
+        "App.handleDrop",
+        "App.refresh",
+        "App.onResize",
+        "App.render",
+    ] {
+        assert!(
+            syms.contains(&(expected.to_string(), SymbolKind::Method)),
+            "missing {expected} in {syms:?}"
+        );
+    }
+    // A property that holds data names no function.
+    assert!(
+        !syms
+            .iter()
+            .any(|(q, _)| q == "App.count" || q == "App.label"),
+        "{syms:?}"
+    );
+    let drop = symbol(&fx, "App.handleDrop");
+    assert_eq!((drop.start_line, drop.end_line), (2, 6));
+}
+
+#[test]
+fn ts_calls_made_inside_a_class_property_arrow_should_belong_to_it() {
+    let fx = extract("src/app.ts", TS_CLASS_ARROWS);
+    let owner = |callee: &str| {
+        let call = fx
+            .calls
+            .iter()
+            .find(|call| call.callee_name == callee)
+            .unwrap_or_else(|| panic!("no call to {callee} in {:?}", calls(&fx)));
+        fx.symbols[call
+            .enclosing_index
+            .expect("a call inside a method has an owner")]
+        .qualified
+        .clone()
+    };
+    assert_eq!(owner("insertImage"), "App.handleDrop");
+    assert_eq!(owner("refresh"), "App.handleDrop");
+    assert_eq!(owner("render"), "App.refresh");
+    assert_eq!(owner("measure"), "App.onResize");
+    assert_eq!(owner("paint"), "App.render");
+}
+
+#[test]
+fn js_class_fields_with_a_function_value_should_be_methods_too() {
+    let fx = extract(
+        "src/app.js",
+        "class Board {\n  onDrop = async (e) => { load(e); };\n  size = 4;\n  #secret = () => hide();\n}\n",
+    );
+    let syms = symbols(&fx);
+    assert!(
+        syms.contains(&("Board.onDrop".to_string(), SymbolKind::Method)),
+        "{syms:?}"
+    );
+    assert!(!syms.iter().any(|(q, _)| q == "Board.size"), "{syms:?}");
+    let call = fx
+        .calls
+        .iter()
+        .find(|call| call.callee_name == "load")
+        .unwrap();
+    assert_eq!(
+        fx.symbols[call.enclosing_index.unwrap()].qualified,
+        "Board.onDrop"
+    );
+    // A private name is kept as written, so a call to it can still resolve.
+    assert!(
+        syms.iter()
+            .any(|(q, _)| q.starts_with("Board.") && q.ends_with("secret")),
+        "{syms:?}"
+    );
+}

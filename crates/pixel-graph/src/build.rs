@@ -164,7 +164,10 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 24: Rails routes files yield `route` concepts with their handler and a
 ///    `references` edge to the controller action (`:route` arg_of); Active
 ///    Record associations reference their model class (`:association`).
-pub const EXTRACTOR_VERSION: &str = "24";
+/// 25: TS/JS class properties whose value is an arrow or function expression
+///    (`handle = async (e) => {...}`, `private foo = () => ...`) are methods
+///    of their class, and the calls made inside them belong to them.
+pub const EXTRACTOR_VERSION: &str = "25";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {

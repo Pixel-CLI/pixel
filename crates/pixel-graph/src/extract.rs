@@ -772,6 +772,26 @@ fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
                 w.push_symbol(name, q, SymbolKind::Method, node);
             }
         }
+        // `class C { handle = async (e) => {...} }` (TS: `public_field_definition`,
+        // JS: `field_definition`): a method of the class whose body is the
+        // arrow, so the calls made inside it belong to it.
+        "public_field_definition" | "field_definition" => {
+            let is_fn = node.child_by_field_name("value").is_some_and(|v| {
+                matches!(
+                    v.kind(),
+                    "arrow_function" | "function_expression" | "function"
+                )
+            });
+            if is_fn
+                && let Some(name) = ["name", "property"]
+                    .iter()
+                    .find_map(|f| field_text(w, node, f))
+                    .filter(|name| !name.contains(['{', '[', '(']))
+            {
+                let q = w.qualify(&name, ".");
+                w.push_symbol(name, q, SymbolKind::Method, node);
+            }
+        }
         "variable_declarator" => {
             let is_fn = node.child_by_field_name("value").is_some_and(|v| {
                 matches!(

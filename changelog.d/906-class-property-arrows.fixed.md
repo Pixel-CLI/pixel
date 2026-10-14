@@ -1,0 +1,1 @@
+**graph:** a TS/JS class property whose value is an arrow or function expression (`handleDrop = async (e) => {...}`, `private foo = () => ...`) is now a method of its class, so `find-symbol`, `impact` and `who-calls` see it and the calls made inside it; existing graphs rebuild once (extractor 25). Task #906.
