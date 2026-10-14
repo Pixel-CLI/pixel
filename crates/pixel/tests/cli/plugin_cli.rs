@@ -623,7 +623,7 @@ fn a_moved_command_hint_is_not_a_plugin_run_and_leaves_no_log_record() {
 }
 
 #[test]
-fn plugin_keeps_list_enable_and_trust_only() {
+fn plugin_keeps_list_enable_disable_and_trust_only() {
     let world = World::new("plugin-subs");
     for retired in ["add", "remove"] {
         let out = world.pixel(&["plugin", retired, "x"]);
@@ -647,7 +647,7 @@ fn plugin_keeps_list_enable_and_trust_only() {
         .filter_map(|line| line.split_whitespace().next())
         .filter(|name| *name != "help")
         .collect();
-    assert_eq!(listed, ["list", "enable", "trust"]);
+    assert_eq!(listed, ["list", "enable", "disable", "trust"]);
 }
 
 #[test]

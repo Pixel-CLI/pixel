@@ -39,7 +39,17 @@
 
 # Written by every `pixel setup`, whichever agents are present. No agent
 # prompt is deployed: install removes the copies earlier releases wrote.
-shared = ["~/.pixel/config.yaml"]
+shared = [
+  "~/.pixel/config.yaml",
+  # The first-party brief probes the prompt-submit brief runs (`pixel setup --remove` deletes them).
+  "~/.pixel/plugins/config-registry/",
+  "~/.pixel/plugins/doc-sections/",
+  "~/.pixel/plugins/error-origin/",
+  "~/.pixel/plugins/flow-rank/",
+  "~/.pixel/plugins/history-fallback/",
+  "~/.pixel/plugins/name-files/",
+  "~/.pixel/plugins/rank-blocks/",
+]
 
 # Repo-wide install artifacts and doctor checks, not owned by one agent entry.
 repo_shared = ["AGENTS.md"]
