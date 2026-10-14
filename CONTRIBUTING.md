@@ -312,8 +312,9 @@ would catch it. To skip, add the attribute crate to the crate's
 fn render_banner() { ... }
 ```
 
-Repo-wide exclusions (`impl Debug`, the bench crate) are listed in
-`.cargo/mutants.toml`. Do not skip a business rule because the test is hard
+Repo-wide exclusions (`impl Debug`, the bench crate, the crates vendored from
+pixel-mvp under `crates/mvp-*`, whose survivors can only be fixed upstream)
+are listed in `.cargo/mutants.toml`. Do not skip a business rule because the test is hard
 to write: the missed mutant is the bug report.
 
 ### Nightly checkpoint and optional full sweep

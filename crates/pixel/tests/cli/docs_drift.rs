@@ -468,8 +468,14 @@ fn command_table_order_reads_the_first_cell_of_each_row() {
     assert_eq!(command_table_order(&section), ["status", "build-index"]);
 }
 
+/// Whether a dependency is a workspace member: a `pixel-*` crate, or an
+/// `mvp-*` crate vendored from pixel-mvp (`crates/mvp-*/VENDORED.md`).
+fn is_internal(dep: &str) -> bool {
+    dep.starts_with("pixel-") || dep.starts_with("mvp-")
+}
+
 /// A workspace member's internal dependencies, as its `Cargo.toml` declares
-/// them: `(package name, normal pixel-* deps, dev pixel-* deps)`.
+/// them: `(package name, normal internal deps, dev internal deps)`.
 fn member_deps(root: &Path, member: &str) -> (String, BTreeSet<String>, BTreeSet<String>) {
     let text = std::fs::read_to_string(root.join(member).join("Cargo.toml")).unwrap();
     let doc: toml_edit::DocumentMut = text.parse().unwrap();
@@ -480,7 +486,7 @@ fn member_deps(root: &Path, member: &str) -> (String, BTreeSet<String>, BTreeSet
             .map(|deps| {
                 deps.iter()
                     .map(|(dep, _)| dep.to_string())
-                    .filter(|dep| dep.starts_with("pixel-") && *dep != name)
+                    .filter(|dep| is_internal(dep) && *dep != name)
                     .collect()
             })
             .unwrap_or_default()
@@ -493,8 +499,10 @@ fn member_deps(root: &Path, member: &str) -> (String, BTreeSet<String>, BTreeSet
 }
 
 /// The `Depends on (pixel crates)` cell of the `## Crates` table, read as
-/// `(normal deps, dev deps when the cell lists them)`. `libraries` is every
-/// library crate, which the `every library crate except …` form starts from.
+/// `(normal deps, dev deps when the cell lists them)`. A short name stands
+/// for `pixel-<name>`; a vendored `mvp-*` crate is written in full.
+/// `libraries` is every library crate, which the `every library crate
+/// except …` form starts from.
 fn documented_deps(
     cell: &str,
     libraries: &BTreeSet<String>,
@@ -510,7 +518,13 @@ fn documented_deps(
         text.split(',')
             .map(str::trim)
             .filter(|name| !name.is_empty() && *name != "none")
-            .map(|name| format!("pixel-{name}"))
+            .map(|name| {
+                if name.starts_with("mvp-") {
+                    name.to_string()
+                } else {
+                    format!("pixel-{name}")
+                }
+            })
             .collect()
     };
     if let Some(except) = cell.strip_prefix("every library crate except") {
@@ -537,6 +551,10 @@ fn documented_deps_reads_every_form_of_the_depends_cell() {
     assert_eq!(
         documented_deps("graph, git", &libraries),
         (set(&["pixel-graph", "pixel-git"]), None)
+    );
+    assert_eq!(
+        documented_deps("git, mvp-index", &libraries),
+        (set(&["pixel-git", "mvp-index"]), None)
     );
     assert_eq!(
         documented_deps("index (dev: daemon, proto)", &libraries),

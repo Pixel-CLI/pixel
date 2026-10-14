@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+# Vendored from pixel-mvp (VENDORED.md): `src/` is a copy, this manifest is
+# the workspace's.
+
+[package]
+name = "mvp-model"
+description = "Shared types of pixel-mvp's index and the Graph read trait; depends on nothing. Vendored, see VENDORED.md."
+version = "0.7.1"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# pixel-mvp's lint table, not the workspace's: the vendored source is kept
+# as pixel-mvp checks it, so a sync stays a copy (VENDORED.md).
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[dependencies]

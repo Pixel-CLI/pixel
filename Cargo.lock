@@ -1713,6 +1713,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
 
 [[package]]
+name = "mvp-model"
+version = "0.7.1"
+
+[[package]]
+name = "mvp-store"
+version = "0.7.1"
+dependencies = [
+ "mvp-model",
+ "rusqlite",
+ "rustix",
+ "tempfile",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
