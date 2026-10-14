@@ -217,9 +217,14 @@ repository state is touched by `pixel setup`.
       unavailable the answer is typed as indices (`ask_list_lines`), a row this
       scope cannot use carries its reason under the list, and `q` or
       end-of-input cancels. Cancel writes nothing and says so.
-- [x] Every drawn line is truncated to the terminal width (`fit`, one column
-      short of it): the arrow-key list repaints in place by moving the cursor
-      up whole lines, and a wrapped row would make it step one line too far.
+- [x] Every drawn line is wrapped to the terminal width (`wrap`, one column
+      short of it), never truncated: a help line cut at the edge hides the part
+      of the sentence that says what the feature does, and the reader has no way
+      to ask for the rest. `wrap` normalises whitespace, so a row's label is
+      wrapped *before* its pointer and checkbox are prepended — otherwise the
+      two columns they take would be eaten and every row pulled left. The
+      arrow-key list counts the lines each block takes, because it repaints in
+      place by moving the cursor up whole lines.
 - [x] Temporary non-interactive flags (`--selected-agents`,
       `--selected-features`, `--dummy-apply`) per answer to question 8; every
       out-of-range index is an error naming the valid range.

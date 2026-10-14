@@ -290,51 +290,85 @@ fn rule(color: bool) -> String {
 }
 
 /// The columns a drawn line may use. One less than the terminal, so the last
-/// column does not wrap: every line the wizard draws has to be one terminal
-/// row, or the in-place repaint steps one line too far.
+/// column does not wrap: every line the wizard draws is counted, and the
+/// arrow-key list repaints in place by moving the cursor up whole lines.
 fn row_width() -> usize {
     crate::select::terminal_width().saturating_sub(1)
 }
 
-/// Truncate `text` to `width` visible columns, counting ANSI sequences as zero
-/// width and marking a cut with `…`.
+/// Split `text` into lines of at most `width` columns, on spaces, with
+/// `indent` spaces before every line after the first. Every word is shown: a
+/// word too long for a line is split across two, never dropped.
 ///
-/// Every line the wizard draws has to fit on one terminal row: the arrow-key
-/// list repaints in place by moving the cursor up whole lines, and a wrapped
-/// row would make it step one line too far.
-fn fit(text: &str, width: usize) -> String {
-    if crate::select::visible_len(text) <= width {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    let mut visible = 0usize;
-    let mut escape = false;
-    for ch in text.chars() {
-        if escape {
-            out.push(ch);
-            if ch.is_ascii_alphabetic() {
-                escape = false;
+/// Wrapping rather than truncating is the point: a help line cut at the
+/// terminal edge hides the part of the sentence that says what the feature
+/// does, and the reader has no way to ask for the rest.
+fn wrap(text: &str, width: usize, indent: usize) -> Vec<String> {
+    let width = width.max(indent + 1);
+    let mut lines: Vec<String> = Vec::new();
+    // The line being built, without its indent: the indent is added when the
+    // line is closed, so `current.is_empty()` keeps meaning "no word yet".
+    let mut current = String::new();
+    // The columns used so far on the line being built.
+    let used = |lines: &[String], current: &str| {
+        (if lines.is_empty() { 0 } else { indent }) + current.chars().count()
+    };
+
+    for word in text.split_whitespace() {
+        let mut rest = word;
+        // Bounded by `rest`, which loses at least one character per turn: a
+        // `loop` here would spin on the empty remainder and allocate until the
+        // process is killed (the SIGKILL that started this).
+        while !rest.is_empty() {
+            let used_now = used(&lines, &current);
+            let separator = usize::from(!current.is_empty());
+            let room = width.saturating_sub(used_now + separator);
+
+            // A whole word goes on the line it fits on, even if that is the
+            // next one: splitting it when the line below has room is how
+            // "three" became "th" + "ree".
+            if rest.chars().count() <= room {
+                if separator == 1 {
+                    current.push(' ');
+                }
+                current.push_str(rest);
+                rest = "";
+                continue;
             }
-            continue;
+            if separator == 1 {
+                close_line(&mut lines, &mut current, indent);
+                continue;
+            }
+            // A line of its own and still too long: split it, losing nothing.
+            if room == 0 {
+                close_line(&mut lines, &mut current, indent);
+                continue;
+            }
+            let split = rest
+                .char_indices()
+                .nth(room)
+                .map_or(rest.len(), |(index, _)| index);
+            current.push_str(&rest[..split]);
+            rest = &rest[split..];
+            if !rest.is_empty() {
+                close_line(&mut lines, &mut current, indent);
+            }
         }
-        if ch == '\x1b' {
-            escape = true;
-            out.push(ch);
-            continue;
-        }
-        if visible + 1 >= width {
-            break;
-        }
-        out.push(ch);
-        visible += 1;
     }
-    out.push('…');
-    // Close a style the cut left open, so the ellipsis and the line after it
-    // do not inherit it.
-    if out.contains("\x1b[") {
-        out.push_str("\x1b[0m");
+    if !current.is_empty() || lines.is_empty() {
+        close_line(&mut lines, &mut current, indent);
     }
-    out
+    lines
+}
+
+/// Finish the line being built: the indent belongs to every line but the first.
+fn close_line(lines: &mut Vec<String>, current: &mut String, indent: usize) {
+    let text = std::mem::take(current);
+    if lines.is_empty() {
+        lines.push(text);
+    } else {
+        lines.push(format!("{}{text}", " ".repeat(indent)));
+    }
 }
 
 /// The wizard's position, so every screen says which step it is.
@@ -420,16 +454,13 @@ fn write_intro(
     let driving = detected.map_or(String::new(), |agent| {
         format!("  ·  driving: {}", agent.name())
     });
-    writeln!(
-        output,
-        "{}",
-        paint(
-            color,
-            "2",
-            &fit(&format!("Writes under {}", base.display()), row_width())
-        )
-    )
-    .map_err(io)?;
+    for line in help_lines(
+        &format!("Writes under {}", base.display()),
+        row_width(),
+        color,
+    ) {
+        writeln!(output, "{line}").map_err(io)?;
+    }
     writeln!(
         output,
         "{}",
@@ -555,23 +586,69 @@ struct Row {
     disabled: bool,
 }
 
-/// How a row is drawn: the cursor, the checkbox, the label. A row this scope
-/// cannot use is dimmed and carries its reason.
-fn row_line(row: &Row, cursor: bool, checked: bool, color: bool) -> String {
+/// A row's cursor and checkbox, the columns a wrapped label lines up under.
+fn row_prefix(cursor: bool, checked: bool) -> String {
     let pointer = if cursor { ">" } else { " " };
     let checkbox = if checked { "[x]" } else { "[ ]" };
-    let line = format!("{pointer} {checkbox} {}", row.label);
+    format!("{pointer} {checkbox} ")
+}
+
+/// A row's label, with the note a row this scope cannot use carries. The long
+/// reason is the help line under the list.
+fn row_label(row: &Row) -> String {
     if row.disabled {
-        paint(color, "2", &format!("{line}   (not in this scope)"))
-    } else if cursor {
-        format!(
-            "{pointer} {} {}",
-            paint(color, "1;32", checkbox),
-            paint(color, "1", &row.label)
-        )
+        format!("{} (not in this scope)", row.label)
     } else {
-        line
+        row.label.clone()
     }
+}
+
+/// A row as drawn: the checkbox on the first line, the label wrapped under it,
+/// then styled. A row this scope cannot use is dim; the row under the cursor is
+/// bold, its checkbox green.
+///
+/// The label is wrapped *before* the prefix is added: `wrap` collapses runs of
+/// whitespace, so wrapping the prefixed line would eat the two columns the
+/// cursor and the checkbox occupy and pull every row to the left edge.
+fn row_lines(row: &Row, cursor: bool, checked: bool, width: usize, color: bool) -> Vec<String> {
+    let prefix = row_prefix(cursor, checked);
+    let room = width.saturating_sub(prefix.chars().count());
+    let mut lines = wrap(&row_label(row), room.max(1), prefix.chars().count());
+    let first = lines.first_mut().expect("wrap always returns one line");
+    *first = format!("{prefix}{first}");
+
+    lines
+        .into_iter()
+        .map(|line| {
+            if row.disabled {
+                return paint(color, "2", &line);
+            }
+            let cut = line
+                .char_indices()
+                .nth(prefix.chars().count())
+                .map_or(line.len(), |(at, _)| at);
+            let (box_, label) = line.split_at(cut);
+            let box_ = if checked {
+                paint(color, "1;32", box_)
+            } else {
+                box_.to_string()
+            };
+            let label = if cursor {
+                paint(color, "1", label)
+            } else {
+                label.to_string()
+            };
+            format!("{box_}{label}")
+        })
+        .collect()
+}
+
+/// One line of dim help, wrapped, with its two-space indent.
+fn help_lines(text: &str, width: usize, color: bool) -> Vec<String> {
+    wrap(text, width.saturating_sub(2), 2)
+        .into_iter()
+        .map(|line| format!("  {}", paint(color, "2", &line)))
+        .collect()
 }
 
 /// A numbered question over `rows`. On a live terminal the arrows move, space
@@ -624,26 +701,24 @@ fn ask_list_keys(
         if drawn > 0 {
             write!(output, "\x1b[{drawn}A").map_err(io)?;
         }
-        let help = rows.get(state.cursor).map_or("", |row| row.help);
+        let width = row_width();
+        let mut block: Vec<String> = Vec::new();
         for (index, row) in rows.iter().enumerate() {
-            let cursor = index == state.cursor;
-            writeln!(
-                output,
-                "{}",
-                fit(
-                    &row_line(row, cursor, state.checked[index], color),
-                    row_width()
-                )
-            )
-            .map_err(io)?;
+            block.extend(row_lines(
+                row,
+                index == state.cursor,
+                state.checked[index],
+                width,
+                color,
+            ));
         }
-        writeln!(
-            output,
-            "  {}",
-            paint(color, "2", &fit(help, row_width() - 2))
-        )
-        .map_err(io)?;
-        drawn = rows.len() + 1;
+        let help = rows.get(state.cursor).map_or("", |row| row.help);
+        block.extend(help_lines(help, width, color));
+        for line in &block {
+            writeln!(output, "{line}").map_err(io)?;
+        }
+        // Every drawn line is counted: the rewind below moves by whole lines.
+        drawn = block.len();
         output.flush().map_err(io)?;
 
         match state.apply(raw.read_list_key(), &disabled) {
@@ -678,24 +753,19 @@ fn ask_list_lines(
         // not parse re-asks here, and a screen that had scrolled away leaves
         // the reader the question to answer.
         writeln!(output, "{question}").map_err(io)?;
+        let width = row_width();
         for (index, row) in rows.iter().enumerate() {
-            writeln!(
-                output,
-                "{}",
-                fit(&row_line(row, false, checked[index], color), row_width())
-            )
-            .map_err(io)?;
+            for line in row_lines(row, false, checked[index], width, color) {
+                writeln!(output, "{line}").map_err(io)?;
+            }
         }
         // The typed path has no cursor, so the focused row's help is never
         // shown: a row this scope cannot use has to carry its reason here, or
         // the reader never learns how to enable it.
         for row in rows.iter().filter(|row| row.disabled) {
-            writeln!(
-                output,
-                "  {}",
-                paint(color, "2", &fit(row.help, row_width() - 2))
-            )
-            .map_err(io)?;
+            for line in help_lines(row.help, width, color) {
+                writeln!(output, "{line}").map_err(io)?;
+            }
         }
         write!(
             output,
@@ -911,21 +981,21 @@ fn ask_confirm_keys(
         if drawn > 0 {
             write!(output, "\x1b[{drawn}A").map_err(io)?;
         }
+        let width = row_width();
+        let mut block: Vec<String> = Vec::new();
         for (index, (label, _)) in CHOICES.iter().enumerate() {
             let line = if index == picked {
                 format!("> {}", paint(color, "1", label))
             } else {
                 format!("  {label}")
             };
-            writeln!(output, "{}", fit(&line, row_width())).map_err(io)?;
+            block.push(line);
         }
-        writeln!(
-            output,
-            "  {}",
-            paint(color, "2", &fit(CHOICES[picked].1, row_width() - 2))
-        )
-        .map_err(io)?;
-        drawn = CHOICES.len() + 1;
+        block.extend(help_lines(CHOICES[picked].1, width, color));
+        for line in &block {
+            writeln!(output, "{line}").map_err(io)?;
+        }
+        drawn = block.len();
         output.flush().map_err(io)?;
 
         match raw.read_list_key() {
@@ -1190,11 +1260,12 @@ mod tests {
     }
 
     /// The shared screen state of a test run, with the typed input mode:
-    /// `KeyReader::inert` keeps the path a test can drive.
+    /// `KeyReader::inert` keeps the path a test can drive. Colour is off, so an
+    /// assertion reads the text a reader sees rather than the SGR between it.
     fn screens(keys: &KeyReader) -> Screens<'_> {
         Screens {
             steps: Steps::new(3),
-            color: true,
+            color: false,
             keys,
         }
     }
@@ -1244,7 +1315,7 @@ mod tests {
         rows[1].help = "Re-run with --repo <path> to land work on the target branch.";
         let (_, written) = with_input("\n", |input, output| ask(input, output, &rows, &[1]));
         assert!(
-            written.contains("[ ] land   (not in this scope)"),
+            written.contains("[ ] land (not in this scope)"),
             "the row says what it is: {written}"
         );
         assert!(
@@ -1289,18 +1360,104 @@ mod tests {
     }
 
     #[test]
-    fn a_long_line_is_cut_to_one_terminal_row_and_a_short_one_is_left_alone() {
-        assert_eq!(fit("short", 40), "short");
-        let cut = fit(&"x".repeat(200), 40);
-        assert!(
-            crate::select::visible_len(&cut) <= 40,
-            "a wrapped row breaks the in-place repaint: {cut:?}"
+    fn a_long_line_wraps_on_spaces_and_every_word_is_shown() {
+        assert_eq!(wrap("short", 40, 0), vec!["short"]);
+        assert_eq!(
+            wrap("one two three four", 10, 0),
+            vec!["one two", "three four"],
+            "the break lands between words"
         );
-        assert!(cut.ends_with('…'), "{cut:?}");
-        // The cut closes the style it interrupted, so the line after it does
-        // not inherit an unterminated colour.
-        let colored = fit(&paint(true, "1;32", &"y".repeat(200)), 20);
-        assert!(colored.ends_with("\x1b[0m"), "{colored:?}");
+        assert_eq!(
+            wrap("one two three", 10, 3),
+            vec!["one two", "   three"],
+            "a continuation line lines up under the indent"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_word_is_split_rather_than_dropped() {
+        let lines = wrap(&"x".repeat(25), 10, 0);
+        assert_eq!(
+            lines.concat().len(),
+            25,
+            "not one character of a long word may be lost: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| line.chars().count() <= 10),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn every_wrapped_line_fits_the_width_it_was_given() {
+        let help = "Prefer `pixel search-meaning` for a question about intent, and \
+                    `pixel search-content` when you already have the text.";
+        for width in [20usize, 41, 72] {
+            let lines = wrap(help, width, 2);
+            assert!(
+                lines.iter().all(|line| line.chars().count() <= width),
+                "width {width}: {lines:?}"
+            );
+            assert_eq!(
+                lines.join(" ").split_whitespace().count(),
+                help.split_whitespace().count(),
+                "width {width} dropped a word"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_help_is_one_empty_line_so_the_repaint_count_stays_exact() {
+        assert_eq!(wrap("", 40, 0), vec![String::new()]);
+    }
+
+    #[test]
+    fn a_row_wraps_its_own_label_and_the_continuation_lines_up_under_it() {
+        let row = Row {
+            label: "12. Land on the target branch, and the rest of a long label".into(),
+            help: "help",
+            disabled: false,
+        };
+        let lines = row_lines(&row, true, true, 24, false);
+        assert!(lines.len() > 1, "a label past the width wraps: {lines:?}");
+        assert!(lines[0].starts_with("> [x] "), "{lines:?}");
+        assert_eq!(
+            lines[1].chars().take_while(|c| *c == ' ').count(),
+            row_prefix(true, true).chars().count(),
+            "the continuation lines up under the label: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| line.chars().count() <= 24),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn with_colour_on_the_checkbox_is_green_and_the_cursor_row_is_bold() {
+        let row = Row {
+            label: "3. Cursor".into(),
+            help: "help",
+            disabled: false,
+        };
+        let on = row_lines(&row, true, true, 40, true);
+        assert!(on[0].contains("\x1b[1;32m"), "the checkbox: {on:?}");
+        assert!(
+            on[0].ends_with("\x1b[0m") || on[0].contains("\x1b[1m"),
+            "the label carries the cursor: {on:?}"
+        );
+        let plain = row_lines(&row, true, true, 40, false);
+        assert_eq!(plain, vec!["> [x] 3. Cursor"], "no SGR when colour is off");
+    }
+
+    #[test]
+    fn a_disabled_row_is_dim_and_keeps_its_reason_out_of_the_label() {
+        let row = Row {
+            label: "12. Land".into(),
+            help: "why",
+            disabled: true,
+        };
+        let lines = row_lines(&row, false, false, 40, false);
+        assert_eq!(lines, vec!["  [ ] 12. Land (not in this scope)"]);
     }
 
     #[test]
