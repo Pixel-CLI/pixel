@@ -2,18 +2,43 @@
 // SPDX-License-Identifier: MIT
 
 //! `pixel graph-shadow` — this graph's Rust edges against pixel-mvp's
-//! index ([`pixel_graph::shadow`]). Both graphs are built in a scratch
+//! index ([`pixel_graph::shadow`]), or, with `--lang ruby`, what merging
+//! its Ruby answer site by site does to this graph's
+//! ([`pixel_graph::shadow::ruby`]). Both graphs are built in a scratch
 //! directory, in-process: nothing under the repository is written and no
 //! daemon is asked.
 
 use std::path::Path;
 
+use pixel_graph::shadow::ruby::RubyShadow;
 use pixel_graph::shadow::{LINE_TOLERANCE, Shadow};
 
-pub fn run(path: &Path, examples: usize, json: bool) -> Result<(), String> {
+/// The language `graph-shadow` compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Lang {
+    /// pixel-mvp's edges replace this graph's (`PIXEL_GRAPH_SOURCE_RUST`).
+    Rust,
+    /// pixel-mvp's edges are merged with this graph's, site by site.
+    Ruby,
+}
+
+pub fn run(path: &Path, lang: Lang, examples: usize, json: bool) -> Result<(), String> {
     let root = path
         .canonicalize()
         .map_err(|e| format!("graph-shadow: {}: {e}", path.display()))?;
+    if lang == Lang::Ruby {
+        let report = pixel_graph::shadow::ruby::shadow(&root, examples)
+            .map_err(|e| format!("graph-shadow: {e}"))?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+            );
+        } else {
+            print!("{}", render_ruby(&report));
+        }
+        return Ok(());
+    }
     let report =
         pixel_graph::shadow::shadow(&root, examples).map_err(|e| format!("graph-shadow: {e}"))?;
     if json {
@@ -93,6 +118,58 @@ fn render_human(r: &Shadow) -> String {
     out
 }
 
+/// The plain-text report of the Ruby merge.
+fn render_ruby(r: &RubyShadow) -> String {
+    let s = &r.sites;
+    let mut out = format!(
+        "Ruby edges: this graph (v1) merged with pixel-mvp {} site by site (pixel-mvp's target where it resolves, v1's edge where it does not)\n",
+        r.mvp_commit
+    );
+    out.push_str(&format!(
+        "sites         pixel-mvp resolves {}, abstains {}, mixed {}, has no such site {}\n",
+        s.resolved, s.abstained, s.mixed, s.no_site
+    ));
+    for (title, e) in [
+        ("calls", &r.calls),
+        ("routes", &r.routes),
+        ("associations", &r.associations),
+        ("references", &r.references),
+    ] {
+        out.push_str(&format!(
+            "{title:<13} v1 {}, hybrid {}: both {} ({} raised to exact), v1 kept {}, v1 replaced {}; pixel-mvp added at v1-unresolved sites {}, at mixed sites {}, at its own sites {}\n",
+            e.v1,
+            e.hybrid,
+            e.both,
+            e.raised_to_exact,
+            e.v1_kept,
+            e.v1_replaced,
+            e.mvp_at_unresolved,
+            e.mvp_at_mixed,
+            e.mvp_only_site
+        ));
+    }
+    out.push_str(&format!(
+        "unresolved    v1 {}, hybrid {}\n",
+        r.unresolved.v1, r.unresolved.hybrid
+    ));
+    out.push_str(&format!(
+        "dropped       {} pixel-mvp targets with no symbol here, {} sites with no caller here\n",
+        r.dropped_no_target, r.dropped_no_caller
+    ));
+    for (title, list) in [
+        ("v1 replaced", &r.examples.v1_replaced),
+        ("pixel-mvp added", &r.examples.mvp_added),
+    ] {
+        if !list.is_empty() {
+            out.push_str(&format!("{title}, for example:\n"));
+            for line in list {
+                out.push_str(&format!("  {line}\n"));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +202,40 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("mvp only, for example"), "{text}");
+    }
+
+    #[test]
+    fn the_ruby_text_report_names_each_kind_and_the_examples() {
+        let mut report = RubyShadow {
+            mvp_commit: "abc1234",
+            ..RubyShadow::default()
+        };
+        report.sites.resolved = 3;
+        report.calls.v1 = 10;
+        report.calls.hybrid = 9;
+        report.calls.v1_replaced = 1;
+        report.routes.mvp_only_site = 2;
+        report.examples.v1_replaced =
+            vec!["Card#label -> Book#title (app/models/card.rb:8)".to_string()];
+        let text = render_ruby(&report);
+        assert!(
+            text.starts_with(
+                "Ruby edges: this graph (v1) merged with pixel-mvp abc1234 site by site"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("sites         pixel-mvp resolves 3, abstains 0,"),
+            "{text}"
+        );
+        assert!(text.contains("calls         v1 10, hybrid 9: both 0 (0 raised to exact), v1 kept 0, v1 replaced 1;"), "{text}");
+        assert!(text.contains("at its own sites 2\n"), "{text}");
+        assert!(
+            text.ends_with(
+                "v1 replaced, for example:\n  Card#label -> Book#title (app/models/card.rb:8)\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("pixel-mvp added, for example"), "{text}");
     }
 }

@@ -616,10 +616,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Compare this graph's Rust edges with pixel-mvp's index (both built in a scratch directory).
+    /// Compare this graph's Rust edges with pixel-mvp's index, or (`--lang ruby`) count what merging its Ruby answer site by site would change (both built in a scratch directory).
     GraphShadow {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// `rust`: pixel-mvp's edges against this graph's; `ruby`: what
+        /// merging them site by site does to this graph's.
+        #[arg(long, value_enum, default_value = "rust")]
+        lang: graph_shadow_cmd::Lang,
         /// How many edges each graph alone holds to show as examples.
         #[arg(long, default_value_t = 5)]
         examples: usize,
@@ -5113,10 +5117,11 @@ fn run_command(
             Ok(())
         }
         Command::GraphShadow {
+            lang,
             path,
             examples,
             json,
-        } => graph_shadow_cmd::run(&path, examples, json),
+        } => graph_shadow_cmd::run(&path, lang, examples, json),
         Command::Coverage { path, json } => {
             coverage_cmd::run(coverage_cmd::CoverageOptions { path, json })
         }

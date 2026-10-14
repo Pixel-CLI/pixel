@@ -72,3 +72,43 @@ fn outside_a_git_work_tree_it_fails_with_a_message() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("graph-shadow:"), "{stderr}");
 }
+
+/// `--lang ruby`: a reader pixel-mvp proves (`attr_accessor *FIELDS`)
+/// where this graph links another class's `title` by name.
+#[test]
+fn the_ruby_json_counts_the_merge_and_the_repository_graph_is_not_built() {
+    let dir = Scratch::for_test("graph-shadow-cli", "ruby");
+    std::fs::create_dir_all(dir.join("app/models")).unwrap();
+    std::fs::write(
+        dir.join("app/models/card.rb"),
+        "class Card\n  FIELDS = %i[ title ]\n  attr_accessor *FIELDS\n\n  def label\n    title\n  end\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app/models/book.rb"),
+        "class Book\n  def title\n    \"b\"\n  end\nend\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".gitignore"), ".pixel/\n").unwrap();
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "baseline"]);
+    let out = pixel_command()
+        .args(["graph-shadow", "--lang", "ruby", "--json"])
+        .arg(&*dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["calls"]["v1"], 1, "{report}");
+    assert_eq!(report["calls"]["v1_replaced"], 1, "{report}");
+    assert_eq!(report["calls"]["hybrid"], 0, "{report}");
+    assert_eq!(report["sites"]["resolved"], 1, "{report}");
+    assert_eq!(
+        report["examples"]["v1_replaced"],
+        serde_json::json!(["Card#label -> Book#title (app/models/card.rb:6)"]),
+        "{report}"
+    );
+    assert!(!dir.join(".pixel/graph.v2.db").exists());
+    assert!(!dir.join(".pixel/.pixel-mvp").exists());
+}

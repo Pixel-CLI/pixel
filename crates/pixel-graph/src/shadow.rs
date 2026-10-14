@@ -20,6 +20,8 @@ use serde::Serialize;
 use crate::mvp_adapter::{self, RustRows};
 use crate::store::{EdgeKind, EdgeRow, GraphStore, Tier};
 
+pub mod ruby;
+
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 /// How many lines apart two edges of one caller and callee may sit and
