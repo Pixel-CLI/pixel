@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/examples/pixel-prompt-submit-comparison.webp" width="800" alt="Recorded side-by-side Codex run on Requests: the same repository question reports 36 seconds with Pixel and 1 minute 58 seconds without, after additional searches and file reads." />
+  <img src="docs/examples/pixel-prompt-submit-comparison.webp" width="1000" alt="Recorded Codex run on Requests, Pixel on the left and without Pixel on the right (each pane cropped to its left half): the same repository question reports 36 seconds with Pixel and 1 minute 58 seconds without, after additional searches and file reads." />
 </p>
 
 <p align="center"><sub>Same question, same repo, same Codex. <b>36 s</b> with Pixel. <b>1 min 58 s</b> without. One recorded run, sped up uniformly — <a href="docs/motion/prompt-submit/README.md">source and limits</a>.</sub></p>

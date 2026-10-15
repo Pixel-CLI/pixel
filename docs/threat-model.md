@@ -398,7 +398,9 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   `when_gate_closed = true` requires an explicit prompt matcher and permits evidence recovery after a relevance
   rejection; it never bypasses an intent denial, the brief opt-out, repository trust or plugin disable settings.
   Probes run within their manifest budget and the shared deadline in an emptied environment with only
-  `PATH`, `HOME`, `LANG`, `GIT_CONFIG_NOSYSTEM` and `PIXEL_BIN`. The Cargo-member overview reads only tracked
+  `PATH`, `HOME`, `LANG`, `GIT_CONFIG_NOSYSTEM` and `PIXEL_BIN`, each in a process group of its own that is
+  killed whole when its run ends, so no process a probe starts outlives it (a process that leaves the group
+  with `setsid` or `setpgid` is not followed). The Cargo-member overview reads only tracked
   regular files through descriptor-relative, no-follow opens, with path-count, file-size and output caps.
 - **Moved commands (#878).** `pixel_plugin::MOVED_COMMANDS` maps each command
   that lives in a `Pixel-CLI` plugin repository (`pixel-git`, `pixel-flow`,
@@ -567,16 +569,20 @@ boundary it crosses.
   executes something else, binds another session's task, or reads outside the
   repository.
 - **Mitigation**: the hook never executes `tool_input.command`; it reads its
-  payload through one bounded reader, `hook_input::read_bounded`, capped at
+  payload through one bounded reader, `hook_input::read_within`, capped at
   `MAX_HOOK_INPUT` (1 MiB), so an over-cap payload is refused after `cap + 1`
-  bytes instead of being allocated in full; over-cap `task-event` input emits
-  its unavailable response, which denies `PreToolUse` on an enforced session;
-  the task binds by worktree, provider and session (ARCHITECTURE.md, Agent
-  integration); `pixel setup` registers a 10 s timeout (`HOOK_TIMEOUT`).
+  bytes instead of being allocated in full, and bounded in time: a pipe its
+  host leaves open is waited on for `STDIN_WAIT` (1 s), then the hook goes on
+  with what arrived if it is one whole JSON object and with nothing
+  otherwise, so it answers instead of being killed at the host's timeout;
+  `task-event` input it cannot use emits its unavailable response, which
+  denies `PreToolUse` on an enforced session; the task binds by worktree,
+  provider and session (ARCHITECTURE.md, Agent integration); `pixel setup`
+  registers a 10 s timeout (`HOOK_TIMEOUT`). Every hook exits 0 with one JSON
+  object on one line or nothing on stdout, over hostile payloads, broken
+  state and argument errors (`hook_guarantees_cli.rs`).
 - **Status**: Mitigated.
-- **Residual**: the cap bounds allocation, not the wait: a host that writes
-  fewer than `MAX_HOOK_INPUT + 1` bytes and holds the pipe open still stalls
-  the hook until the host's `HOOK_TIMEOUT` (10 s) ends it.
+- **Residual**: a host that holds the pipe open costs each hook `STDIN_WAIT`.
 
 ### T11. Withdrawn
 
@@ -897,7 +903,7 @@ the later threats hold.
 | Snippets from the semantic index | `Resident::build`, `Meaning::answer` | `build_should_never_index_credential_shaped_paths` (`code_resident.rs`), `answer_should_apply_the_default_limit_and_cap_the_requested_one` and `bounded_query_should_cut_at_a_character_boundary_above_the_cap_only` (`meaning.rs`) |
 | Planted history database | `FactsStore::needs_rebuild`, `_pixel_marker` | `open_should_wipe_a_planted_history_database` (both refusals: no marker, foreign `created_by`; asserts the planted tables are gone and the marker is Pixel's); `concurrent_open_on_poisoned_db_never_ioerrors` covers the rebuild path |
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
-| Hook payload cap | `hook_input::read_bounded` | the `read_bounded` tests in `hook_input.rs` |
+| Hook payload cap and wait | `hook_input::read_within` | the `bounded_read_*` and `timed_read_*` tests in `hook_input.rs`; `hook_guarantees_cli.rs` (exit 0 and one JSON line over hostile payloads, broken state, argument errors, a stdin left open) |
 | Prompt-submit intent judge | `execution_brief::intent::judge` | subprocess JSON, empty stdout and invalid UTF-8 fallback tests in `intent.rs` |
 | Typed prompts in the brief log | `decision_log::{logged_typed, mask_keys, append}` | `logged_typed_should_mask_a_credential_and_cut_at_the_bound`, `logged_typed_should_keep_only_the_last_paragraph_of_a_pasted_log`, `mask_keys_should_hide_a_prefixed_key_and_a_long_run_and_keep_prose`, `append_should_be_owner_only_and_not_create_a_missing_directory`, `append_should_refuse_a_link_at_the_log_and_leave_its_target_alone`, `append_should_refuse_a_linked_directory_and_write_nothing_through_it` (`decision_log.rs`), `the_decision_log_should_stay_off_when_pixel_brief_log_says_so` (`prompt_brief_cli.rs`) |
 | Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask`, `a_plugin_source_url_is_logged_without_its_credentials` (`main.rs`) |
