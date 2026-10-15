@@ -30,9 +30,13 @@ const URL_PREFIXES: [&str; 4] = ["https://", "ssh://", "file://", "git@"];
 /// to the transports of [`URL_PREFIXES`] (`git@host:path` is ssh) wherever a
 /// URL reaches it, not only the one `add` checked: an `insteadOf` rewrite or
 /// an HTTP redirect cannot move the clone to `ext::`, `git://` or `http://`.
-/// `GIT_TERMINAL_PROMPT=0` makes a source that asks for credentials (GitHub
-/// answers a missing repository that way) fail at once instead of waiting
-/// on the terminal, unseen by an agent, until [`CLONE_TIMEOUT`].
+/// `GIT_TERMINAL_PROMPT=0` turns off git's own terminal prompt, so a source
+/// that asks for credentials (GitHub answers a missing repository that way)
+/// fails at once instead of waiting on the terminal, unseen by an agent. It
+/// is the only prompt turned off: a user's `GIT_ASKPASS` or `core.askPass`
+/// program and ssh's own prompt are left alone and wait until
+/// [`CLONE_TIMEOUT`]; `GIT_SSH_COMMAND` is not set to force `BatchMode`,
+/// because it would shadow the user's `core.sshCommand`.
 const CLONE_ENV: [(&str, &str); 2] = [
     ("GIT_ALLOW_PROTOCOL", "https:ssh:file"),
     ("GIT_TERMINAL_PROMPT", "0"),
@@ -200,7 +204,7 @@ fn ensure_no_shared_command(plugins: &Path, manifest: &Manifest) -> Result<(), E
 }
 
 /// Shallow-clone `url` (at `reference`, a branch or tag) into `<tmp>/clone`,
-/// over the transports [`CLONE_ENV`] allows and without a credential prompt.
+/// over the transports [`CLONE_ENV`] allows and without git's terminal prompt.
 /// The directory is removed when the returned handle drops.
 fn clone_repo(url: &str, reference: Option<&str>, shown: &str) -> Result<tempfile::TempDir, Error> {
     let clone = tempfile::tempdir().map_err(|e| Error::io("create a clone directory", e))?;
@@ -731,7 +735,7 @@ mod tests {
                 ("GIT_ALLOW_PROTOCOL", "https:ssh:file"),
                 ("GIT_TERMINAL_PROMPT", "0"),
             ],
-            "every scheme add accepts, and no credential prompt"
+            "every scheme add accepts, and no terminal prompt"
         );
     }
 

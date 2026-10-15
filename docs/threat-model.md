@@ -346,7 +346,9 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   O_NONBLOCK`, reads it only when the descriptor is a regular file, and at
   most 16 KiB of it, so a manifest committed as a link (to `/dev/zero`,
   `/dev/tty` or a manifest elsewhere), a FIFO or an oversized file is an
-  error for that plugin, never a hang or an unbounded read.
+  error for that plugin, never a hang or an unbounded read: `pixel plugin
+  list` shows it under its row, the brief skips the probe with the reason,
+  and `pixel <name>` refuses it with that error.
 - **`run` stays inside the directory.** `pixel_plugin::contained_program`
   canonicalises `<dir>/<run>` and requires it to be a file under the
   canonical directory, so a symlink pointing out of it is refused; the
@@ -360,11 +362,15 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   is copied (`.git` left behind). The clone runs with
   `GIT_ALLOW_PROTOCOL=https:ssh:file`, so git itself refuses any other
   transport wherever the URL comes from (an `insteadOf` rewrite, a redirect),
-  and `GIT_TERMINAL_PROMPT=0`, so a source that asks for credentials fails
-  instead of waiting on the terminal. A URL's userinfo is removed before the
-  source is recorded or shown, and `logged_args` removes it from the action
-  log. `github:<owner>/<repo>[@<ref>]` is parsed first (ASCII names, no
-  option form, no `..`), then built into an `https://github.com` clone URL;
+  and `GIT_TERMINAL_PROMPT=0`, so git does not ask for credentials on the
+  terminal. That is the one prompt it turns off: a user's own `GIT_ASKPASS`
+  or `core.askPass` program and ssh's own prompt are left alone (forcing
+  ssh's `BatchMode` would shadow the user's `core.sshCommand`), and a clone
+  that waits on one is ended by the 300 s clone timeout. A URL's userinfo is
+  removed before the source is recorded or shown, and `logged_args` removes
+  it from the action log. `github:<owner>/<repo>[@<ref>]` is parsed first
+  (ASCII names, no option form, no `..`), then built into an
+  `https://github.com` clone URL;
   `PIXEL_GITHUB_BASE_URL` (the user's own environment) redirects it to a
   mirror or a `file://` tree and must itself be one of the allowed schemes.
   A program the repository does not ship is downloaded by `curl` restricted
@@ -879,7 +885,7 @@ the later threats hold.
 | Typed prompts in the brief log | `decision_log::{logged_typed, mask_keys, append}` | `logged_typed_should_mask_a_credential_and_cut_at_the_bound`, `logged_typed_should_keep_only_the_last_paragraph_of_a_pasted_log`, `mask_keys_should_hide_a_prefixed_key_and_a_long_run_and_keep_prose`, `append_should_be_owner_only_and_not_create_a_missing_directory`, `append_should_refuse_a_link_at_the_log_and_leave_its_target_alone`, `append_should_refuse_a_linked_directory_and_write_nothing_through_it` (`decision_log.rs`), `the_decision_log_should_stay_off_when_pixel_brief_log_says_so` (`prompt_brief_cli.rs`) |
 | Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask`, `a_plugin_source_url_is_logged_without_its_credentials` (`main.rs`) |
 | Repo plugin trust | `pixel_plugin::resolve`, `dir_digest`, `contained_program` | `a_repo_plugin_is_refused_until_trusted_and_again_after_an_edit`, `every_kind_of_change_moves_the_digest`, `a_run_that_escapes_through_a_symlink_is_refused` (`pixel-plugin`); `plugin_cli.rs` |
-| Plugin manifest reads | `pixel_plugin::manifest::load`, `file::open_regular` | `a_manifest_reached_through_a_link_is_refused_and_not_read`, `a_manifest_is_read_up_to_the_bound_and_refused_past_it` (`manifest.rs`), `a_repo_probe_whose_manifest_is_a_link_is_skipped_and_the_others_still_run` (`probe.rs`), `a_fifo_is_refused_without_waiting_for_a_writer` (`file.rs`) |
+| Plugin manifest reads | `pixel_plugin::manifest::load`, `file::open_regular` | `a_manifest_reached_through_a_link_is_refused_and_not_read`, `a_manifest_is_read_up_to_the_bound_and_refused_past_it` (`manifest.rs`), `a_repo_probe_whose_manifest_is_a_link_is_skipped_and_the_others_still_run` (`probe.rs`), `a_manifest_that_is_a_link_is_refused_by_name_and_listed_beside_the_others` (`discover.rs`), `a_fifo_is_refused_without_waiting_for_a_writer` (`file.rs`) |
 | Plugin clone transports | `pixel_plugin::add` (`clone_repo`, `looks_like_git_url`) | `url_schemes_are_a_whitelist`, `a_clone_is_held_to_authenticated_or_local_transports_by_git_itself` (`install.rs`) |
 | Keys over clear text | `sends_in_clear_text` | `a_key_never_leaves_the_machine_over_cleartext_http`, `only_plain_http_to_another_host_counts_as_clear_text` |
 | Untrusted shard files | `Shard::open` | `malformed_shard_rejected_gracefully`, `corrupt_posting_cannot_escape_section_or_overflow_delta` (`shard.rs`) |
