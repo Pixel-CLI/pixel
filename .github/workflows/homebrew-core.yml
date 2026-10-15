@@ -5,7 +5,7 @@
 # pull request that adds it: built from source (a `git archive` of the tree
 # under test, so no tag is needed), `brew test`, `brew audit --strict --new`
 # and `brew style`, on macOS and Linux. The formula comes from
-# scripts/homebrew-core-formula.py, which release.yml runs on every tag and
+# scripts/release/homebrew-core-formula.py, which release.yml runs on every tag and
 # whose text scripts/test-homebrew-core-formula.py pins in CI.
 #
 # Not checked here: `brew audit --online` (the GitHub notability thresholds of
@@ -17,7 +17,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/homebrew-core.yml"
-      - "scripts/homebrew-core-formula.py"
+      - "scripts/release/homebrew-core-formula.py"
       - "scripts/fixtures/homebrew/**"
       - "Cargo.lock"
       - "Cargo.toml"
@@ -75,9 +75,9 @@ jobs:
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pixel/Cargo.toml | head -1)
           src="$RUNNER_TEMP/pixel-$version.tar.gz"
           git archive --format=tar.gz --prefix="pixel-$version/" -o "$src" HEAD
-          python3 scripts/homebrew-core-formula.py "v$version" "$src" "$RUNNER_TEMP/published.rb"
+          python3 scripts/release/homebrew-core-formula.py "v$version" "$src" "$RUNNER_TEMP/published.rb"
           PIXEL_SOURCE_URL="file://$src" \
-            python3 scripts/homebrew-core-formula.py "v$version" "$src" "$RUNNER_TEMP/local.rb"
+            python3 scripts/release/homebrew-core-formula.py "v$version" "$src" "$RUNNER_TEMP/local.rb"
           brew tap-new --no-git local/core
           echo "FORMULA=$(brew --repository)/Library/Taps/local/homebrew-core/Formula/pixel.rb" >> "$GITHUB_ENV"
 

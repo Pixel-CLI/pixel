@@ -26,7 +26,7 @@ all-features = true
 version = 2
 yanked = "deny"
 # osv-scanner.toml repeats this list for OpenSSF Scorecard, which reads that
-# file and not this one; scripts/check-advisory-ignores.py (the `deny` CI
+# file and not this one; scripts/ci/check-advisory-ignores.py (the `deny` CI
 # job) fails when the two lists differ.
 ignore = [
     # `paste` is archived upstream (proc-macro only, no runtime code). It

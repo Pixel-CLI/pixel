@@ -28,7 +28,7 @@ shows only one.
 
 ## What the page shows
 
-`scripts/problem-trace.py` writes `website/data/problem_trace.toml` from the
+`scripts/bench/problem-trace.py` writes `website/data/problem_trace.toml` from the
 `vanilla` arm alone: the run whose call count is the arm's median (10), and
 among those tied, the one whose lines of output are closest to the median
 (`vanilla-3`, 1,206 lines, the median itself). `trace.ts` picks the run with
@@ -42,7 +42,7 @@ cost, and compares nothing: it states what one arm did.
 The chapter after the Problem draws the task packet the `pixel` arm got
 before its first call. The recording keeps no packet text, only whether each
 run got one (`packets.txt`), and the packet depends only on the binary, the
-indexed tree and the prompt, so `scripts/scope-packet.sh` rebuilds the
+indexed tree and the prompt, so `scripts/dev/scope-packet.sh` rebuilds the
 recorded repository the way `record-demo.sh` does and feeds the recorded
 prompt to the prompt-submit hook. It refuses to run with any binary other
 than the recorded one (`meta.txt` `pixel=`). Its output, archived as
@@ -50,7 +50,7 @@ than the recorded one (`meta.txt` `pixel=`). Its output, archived as
 `ca1ce9e`), names five P0 files (`push.rs`, `main.rs`, `decide_remote.rs`,
 `branch.rs`, `journal.rs`) and three P1 files out of 650 indexed.
 
-`scripts/scope-board.py` writes `website/data/scope.toml` from it, and adds
+`scripts/dev/scope-board.py` writes `website/data/scope.toml` from it, and adds
 the board's limit from `runs.json`: the files every `pixel` run named in its
 answer that the packet left out (`api.rs`, `crash_matrix.rs`, `rewrite.rs`,
 `ship.rs`, matched by basename). Two more facts from the same runs, kept here

@@ -5,11 +5,11 @@ description: "Mine this project's local agent transcripts for the tool sequences
 
 # Which tool sequences could the brief replace?
 
-`scripts/extract-probes.py` reads the transcripts this machine already holds and ranks what agents do before they
+`scripts/bench/extract-probes.py` reads the transcripts this machine already holds and ranks what agents do before they
 answer or edit. The ranking tells which probe to write next; the `probe` skill writes and proves it.
 
 ```bash
-python3 -I scripts/extract-probes.py [--since 30d] [--agent all|claude|codex|pi] [--top 20] [--kinds question|all|a,b]
+python3 -I scripts/bench/extract-probes.py [--since 30d] [--agent all|claude|codex|pi] [--top 20] [--kinds question|all|a,b]
 ```
 
 ## Procedure
@@ -27,7 +27,7 @@ python3 -I scripts/extract-probes.py [--since 30d] [--agent all|claude|codex|pi]
    adds the task turns (`other`).
 4. **Map** each row to the probe that covers it (`history-fallback` for `git log/show/diff`, `doc-sections` for
    documentation reads, `config-registry` for config reads, `name-files` for listings) or mark it a candidate.
-5. **Validate** a candidate with `scripts/probe-loop.py --prompt "<a sample prompt of that cluster>"`: the current
+5. **Validate** a candidate with `scripts/bench/probe-loop.py --prompt "<a sample prompt of that cluster>"`: the current
    brief first, 1 live run, stop if it is already zero-call. Write the probe as a generic rule (the `probe` skill's
    overfitting guard applies: no literal path or word from one session).
 6. **Report** the ranked table: pattern -> turns -> calls it costs -> covering probe or candidate -> validation.

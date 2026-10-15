@@ -2,7 +2,7 @@
 
 This crate is a copy of `crates/pixel-model` of pixel-mvp, the
 experimental successor of Pixel's index, at commit `4b23d4cdf72a283f5d60bc474c1d7bae1b6689bb`
-(`4b23d4c`), made by `scripts/vendor-mvp.sh`. ADR-0035 of the pixel-mvp
+(`4b23d4c`), made by `scripts/dev/vendor-mvp.sh`. ADR-0035 of the pixel-mvp
 research repository decided the copy: the MVP's Rust and Ruby index
 becomes the source of Pixel's code graph for the languages where it is
 shown to be right, behind a switch.
@@ -18,5 +18,5 @@ shown to be right, behind a switch.
   table instead of the workspace's, so that a sync stays a copy. The
   nightly mutation campaign leaves the crate out (`.cargo/mutants.toml`):
   a survivor could only be fixed in pixel-mvp.
-- **Sync:** `scripts/vendor-mvp.sh <pixel-mvp checkout> <commit> model`,
+- **Sync:** `scripts/dev/vendor-mvp.sh <pixel-mvp checkout> <commit> model`,
   then the gates, in a pull request that names the commit.

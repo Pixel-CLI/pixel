@@ -96,6 +96,6 @@ peak (runtime included). Record machine load; absent an idle-host check (>=95%
 idle, no concurrent build/inference, no swap-ins during sample), clocks are
 incidental observations, never validated speed evidence. Never stop user jobs.
 
-Run prototype contract tests and `scripts/gates.sh`. No Rust edits planned;
+Run prototype contract tests and `scripts/ci/gates.sh`. No Rust edits planned;
 Cargo gates/install/doctor follow the repository's docs/bench-only exemption.
 No push, PR or publication.

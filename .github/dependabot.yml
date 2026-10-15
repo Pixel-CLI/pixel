@@ -20,7 +20,7 @@ updates:
     groups:
       # Action bumps are low-risk and reviewed together. Workflows pin
       # every action to a commit SHA with a `# vN` comment
-      # (scripts/verify-action-pins.py fails CI otherwise); Dependabot
+      # (scripts/ci/verify-action-pins.py fails CI otherwise); Dependabot
       # moves the SHA and the comment together.
       github-actions:
         patterns: ["*"]

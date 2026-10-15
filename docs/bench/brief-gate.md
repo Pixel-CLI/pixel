@@ -18,7 +18,7 @@ keep them apart:
    anything else gets no brief.
 2. **Relevance**: when it fires, does it name the files the prompt needs?
 3. **Excavation**: does the agent then search less? Measured by
-   `scripts/excavation-count.py`; the live run waits for the part that changes
+   `scripts/bench/excavation-count.py`; the live run waits for the part that changes
    the brief (protocol below).
 
 ## Run identity
@@ -28,7 +28,7 @@ keep them apart:
 | repository under test | `Pixel-CLI/pixel` at `85bede7d9a3c4e385e0a2045241a6466efbd8cbd`: a detached, clean worktree of that commit, indexed with `pixel prepare-repo --no-daemon` (the fixture; `fixture_match` is `true` in every result) |
 | binary | `pixel 0.7.1 / commit: 85bede7d9a3c4e385e0a2045241a6466efbd8cbd`; `CARGO_PROFILE_DEV_DEBUG=0 cargo build --profile dev-release -p pixel-cli` in a clean checkout of that commit |
 | prompt set | `eval/brief-gate/prompts.jsonl`, 218 rows, SHA-256 `bc6ac042d64b1c96c56d1c83b4052853e0947a3dd7ca0c9b2b655e6f036276ad` |
-| runner | `scripts/bench-brief-gate.py`, `--repeat 3`: every prompt run three times, the output identical each time (0 unstable rows over the four runs) and the latency the median of three |
+| runner | `scripts/bench/bench-brief-gate.py`, `--repeat 3`: every prompt run three times, the output identical each time (0 unstable rows over the four runs) and the latency the median of three |
 | machine | `macOS-27.0-arm64-arm-64bit-Mach-O`, Python 3.14.7, shared with other agents: 1-minute load average 11 to 21 over the four runs (16 CPUs) |
 | intent judge | no server listening on the Ollaya port (`ollaya_warm: false`): `pixel classify --if-warm` ran on 53 weak-signal prompts and returned no verdict, so the heuristic plan decided every one. A warm server can silence a brief the heuristic would have sent; the runner prints a note when it sees one |
 
@@ -40,12 +40,12 @@ git worktree add --detach "$FIXTURE" 85bede7d9a3c4e385e0a2045241a6466efbd8cbd
 PIXEL=target/dev-release/pixel                    # the binary under test
 "$PIXEL" prepare-repo "$FIXTURE" --no-daemon
 
-python3 scripts/bench-brief-gate.py --check-set --repo "$FIXTURE"     # labels still hold in the fixture
+python3 scripts/bench/bench-brief-gate.py --check-set --repo "$FIXTURE"     # labels still hold in the fixture
 for split in dev test all; do
-  python3 scripts/bench-brief-gate.py --pixel "$PIXEL" --repo "$FIXTURE" \
+  python3 scripts/bench/bench-brief-gate.py --pixel "$PIXEL" --repo "$FIXTURE" \
     --split "$split" --daemon off --repeat 3 --out "gate-$split-off.json"
 done
-python3 scripts/bench-brief-gate.py --pixel "$PIXEL" --repo "$FIXTURE" \
+python3 scripts/bench/bench-brief-gate.py --pixel "$PIXEL" --repo "$FIXTURE" \
   --split all --daemon on --repeat 3 --out gate-all-on.json
 ```
 
@@ -166,7 +166,7 @@ repository talks about it, a full one (high tier) or a compact "possibly
 related" one (low tier), and none otherwise; a weakly code-shaped prompt goes
 through the same gate; a code-shaped prompt is not gated. The model is English
 only (French is information in every table below). It was fitted on the 78
-English **dev** rows (`scripts/research-gate/results/gate-model.json`), so the
+English **dev** rows (`scripts/bench/research-gate/results/gate-model.json`), so the
 dev numbers are the fitting set and the **test** numbers are the read: the
 test split was run once, after the candidate was frozen, and nothing was
 tuned on it.
@@ -179,7 +179,7 @@ tuned on it.
 | baseline | `pixel 0.7.1 / commit: 85bede7d9a3c4e385e0a2045241a6466efbd8cbd`, built the same way in a clean clone of that commit, run in the same session as the candidate |
 | repository under test | the same fixture as the baseline above: a clean clone checked out at `85bede7d`, indexed with `pixel prepare-repo --no-daemon` (`fixture_match: true` in every result). Not the candidate's own tree: it carries `eval/brief-gate/`, which the runner warns about (the set would index itself), and the labels were read against `85bede7d` |
 | prompt set | `eval/brief-gate/prompts.jsonl`, 218 rows, SHA-256 `bc6ac042d64b1c96c56d1c83b4052853e0947a3dd7ca0c9b2b655e6f036276ad`; test split: 109 rows, 76 English (42 on-topic, 34 off-topic) and 33 French |
-| runner | `scripts/bench-brief-gate.py`, `--repeat 3 --warmup 3`; 0 unstable rows and 0 errors in the four test runs; order baseline off, candidate off, baseline on, candidate on |
+| runner | `scripts/bench/bench-brief-gate.py`, `--repeat 3 --warmup 3`; 0 unstable rows and 0 errors in the four test runs; order baseline off, candidate off, baseline on, candidate on |
 | daemon on | the fixture's daemon started with the binary under test; for the candidate the `meaning` vectors were warmed first (`pixel brief --json` on a plain prompt until two probes answered), because the first calls answer `unavailable` while they build |
 | machine | `macOS-27.0-arm64-arm-64bit-Mach-O`, Python 3.14.7, 16 CPUs, shared with other agents: 1-minute load average 5 to 12 across the test runs; compare latencies of runs taken back to back only |
 | intent judge | no server on the Ollaya port: the judge ran on weak and plain prompts and returned no verdict. The gate does not use it for plain prompts; a warm server can still silence a weak prompt (`none`, 0.5 or more) |
@@ -189,9 +189,9 @@ tuned on it.
 ```bash
 git clone -q --no-checkout "$REPO" "$FIXTURE" && git -C "$FIXTURE" checkout -q 85bede7d
 "$PIXEL" prepare-repo "$FIXTURE" --no-daemon
-python3 scripts/bench-brief-gate.py --check-set --repo "$FIXTURE"
+python3 scripts/bench/bench-brief-gate.py --check-set --repo "$FIXTURE"
 for daemon in off on; do
-  python3 scripts/bench-brief-gate.py --pixel "$PIXEL" --repo "$FIXTURE" \
+  python3 scripts/bench/bench-brief-gate.py --pixel "$PIXEL" --repo "$FIXTURE" \
     --split test --daemon "$daemon" --repeat 3 --warmup 3 --out "gate-test-$daemon.json"
 done
 ```
@@ -311,12 +311,12 @@ not touched again), English rows for the headline.
 
 ```bash
 B=<the binary above>; F=<the fixture>
-python3 scripts/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon on --warm-meaning --out on.json
-python3 scripts/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon off  --compare on.json --out off.json
-python3 scripts/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon cold --compare on.json --out cold.json
-python3 scripts/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon cold --session-start --session-gap 3 --compare on.json --out cold-session.json
+python3 scripts/bench/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon on --warm-meaning --out on.json
+python3 scripts/bench/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon off  --compare on.json --out off.json
+python3 scripts/bench/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon cold --compare on.json --out cold.json
+python3 scripts/bench/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon cold --session-start --session-gap 3 --compare on.json --out cold-session.json
 rm -rf "$F/.pixel/code-vectors"
-python3 scripts/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon cold --compare on.json --out cold-nocache.json
+python3 scripts/bench/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon cold --compare on.json --out cold-nocache.json
 ```
 
 English dev rows (78; hit@8 over the 32 with `expected_files`; any brief).
@@ -377,7 +377,7 @@ What it says:
 ## Excavation: the agent-side metric
 
 *Excavation* is the native exploration an agent does to find the code a prompt
-is about, before it edits or answers. `scripts/excavation-count.py` reads the
+is about, before it edits or answers. `scripts/bench/excavation-count.py` reads the
 agent's own transcript (Claude Code JSONL or pi session JSONL), takes one
 prompt (the first by default) and walks the tool calls that follow it, reading
 each `tool_use` / `toolCall` input. Transcript prose is never pattern-matched; the one
@@ -430,7 +430,7 @@ brief reduce `native` before the first edit or answer?
    pair.
 6. **Count**:
    ```bash
-   python3 scripts/excavation-count.py --require on=brief --require off=no-brief \
+   python3 scripts/bench/excavation-count.py --require on=brief --require off=no-brief \
      --arm off='runs/off/*.jsonl' --arm on='runs/on/*.jsonl' --json excavation.json
    ```
    The report gives per arm the mean, median and p90 of `native`, the means of

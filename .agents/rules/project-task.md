@@ -17,7 +17,7 @@ issue the way GitHub itself understands.
   merges, and `board-sync.yml` reads the same link. A PR that does only part
   of an issue writes `Refs #<number>` instead, so the issue stays open; one
   that closes several lists each (`Closes #1, closes #2`). The branch,
-  commit subjects and the `changelog.d/` fragment may name the issue too;
+  commit subjects and the `.github/changelog.d/` fragment may name the issue too;
   the pull request is one artefact of the task, not the task itself.
 - **The board follows the PR lifecycle, automatically.** The `Status` field
   on project 3 of every issue the PR closes is set from the pull request

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/cancel-stale-runs.sh, the sweep cancel-stale.yml runs
+"""Contract of scripts/ci/cancel-stale-runs.sh, the sweep cancel-stale.yml runs
 when a pull request closes and every ten minutes.
 
 It exists to stop validation runs whose verdict no longer matters. What it

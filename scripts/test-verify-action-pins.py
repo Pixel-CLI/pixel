@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/verify-action-pins.py.
+"""Contract of scripts/ci/verify-action-pins.py.
 
 The check exists for one failure: a `uses:` that runs whatever a movable
 tag points to on the day of the run, in a workflow that holds a publishing
@@ -17,7 +17,7 @@ import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parent.parent
-SPEC = importlib.util.spec_from_file_location("verify_action_pins", REPO / "scripts/verify-action-pins.py")
+SPEC = importlib.util.spec_from_file_location("verify_action_pins", REPO / "scripts/ci/verify-action-pins.py")
 pins = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pins)
 

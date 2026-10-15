@@ -32,7 +32,7 @@ class RangeContract(unittest.TestCase):
         self.git("config", "user.name", "Test")
         self.before = self.commit("initial")
         (self.root / "scripts").mkdir()
-        (self.root / "scripts/mutants-nightly-range.py").write_text("rollout")
+        (self.root / "scripts/ci/mutants-nightly-range.py").write_text("rollout")
         self.rollout = self.commit("rollout")
         self.head = self.commit("next")
 

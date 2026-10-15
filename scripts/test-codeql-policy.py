@@ -57,7 +57,7 @@ class CodeQLPolicy(unittest.TestCase):
         self.assertNotIn("ref:", WORKFLOW)  # Dispatch scans its selected branch.
 
     def test_policy_contract_is_run_by_ci_and_optional_local_gates(self):
-        for path in (".github/workflows/ci.yml", "scripts/gates.sh"):
+        for path in (".github/workflows/ci.yml", "scripts/ci/gates.sh"):
             self.assertIn("python3 scripts/test-codeql-policy.py", (ROOT / path).read_text())
 
 

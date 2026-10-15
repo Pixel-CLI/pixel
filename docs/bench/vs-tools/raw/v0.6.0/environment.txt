@@ -33,7 +33,7 @@ here against 538 ms there (Rust 254 vs 218, TypeScript 1 174 vs 949, Ruby
 load between runs; the arms of one run are interleaved, so their ratio holds.
 
 command:
-  PATH=$PWD/target/dev-release:$PATH python3 scripts/bench-vs/bench-retrieval.py \
+  PATH=$PWD/target/dev-release:$PATH python3 scripts/bench/bench-vs/bench-retrieval.py \
     <repo> docs/bench/vs-tools/cases/queries-<lang>.json "$(command -v semble)" \
     > docs/bench/vs-tools/raw/v0.6.0/retrieval-<corpus>.json
-  python3 scripts/bench-vs/summarize-retrieval.py docs/bench/vs-tools/raw/v0.6.0/retrieval-*.json
+  python3 scripts/bench/bench-vs/summarize-retrieval.py docs/bench/vs-tools/raw/v0.6.0/retrieval-*.json

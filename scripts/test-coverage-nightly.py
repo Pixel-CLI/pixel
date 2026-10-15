@@ -13,7 +13,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC = importlib.util.spec_from_file_location("coverage_nightly", ROOT / "scripts/coverage-nightly.py")
+SPEC = importlib.util.spec_from_file_location("coverage_nightly", ROOT / "scripts/ci/coverage-nightly.py")
 coverage = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(coverage)
 

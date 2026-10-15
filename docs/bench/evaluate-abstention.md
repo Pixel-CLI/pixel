@@ -21,7 +21,7 @@ which refreshes the graph to the checked-out tree and maps the commit's diff
 onto it (`changes::detect`). A commit **abstains** when the report carries a
 non-empty `uncovered_changes` or `unanchored`: under C3 either one turns any
 `diff-reaches` negative into `unknown`. The scripts are in
-[`scripts/bench-abstention/`](../../scripts/bench-abstention/):
+[`scripts/bench/bench-abstention/`](../../scripts/bench/bench-abstention/):
 `run.sh <name> <tree> <n>`, `rerun.sh` for checkouts that failed, and
 `aggregate.py <name>=<clone> …`.
 

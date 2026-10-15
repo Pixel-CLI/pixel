@@ -198,15 +198,15 @@ git clone https://github.com/Pixel-CLI/pixel && cd pixel
 export GITNEXUS_CLI=/path/to/GitNexus/gitnexus/dist/cli/index.js   # or `gitnexus` on PATH
 
 # blast radius, against grep-derived call sites
-python3 scripts/bench-vs/gen-truth.py /path/to/repo rust 8 target,tests > cases.json
-python3 scripts/bench-vs/bench-impact.py /path/to/repo cases.json
+python3 scripts/bench/bench-vs/gen-truth.py /path/to/repo rust 8 target,tests > cases.json
+python3 scripts/bench/bench-vs/bench-impact.py /path/to/repo cases.json
 
 # retrieval, against the repo's own doc comments
-python3 scripts/bench-vs/gen-queries.py /path/to/repo rust 15 target,tests > q.json
-python3 scripts/bench-vs/bench-retrieval.py /path/to/repo q.json "$(command -v semble)"
+python3 scripts/bench/bench-vs/gen-queries.py /path/to/repo rust 15 target,tests > q.json
+python3 scripts/bench/bench-vs/bench-retrieval.py /path/to/repo q.json "$(command -v semble)"
 
 # repo map: size vs coverage
-python3 scripts/bench-vs/bench-map.py /path/to/repo "$(command -v stacklit)"
+python3 scripts/bench/bench-vs/bench-map.py /path/to/repo "$(command -v stacklit)"
 ```
 
 The parameters behind the committed fixtures are recorded in

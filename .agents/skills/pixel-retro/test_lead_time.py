@@ -141,7 +141,7 @@ class Keys(unittest.TestCase):
     def test_commands_group_by_what_actually_ran(self):
         for command, key in [
             ("cd /x && cargo nextest run --workspace", "cargo nextest run"),
-            ("S=/tmp/a && sh scripts/gates.sh --force", "sh gates.sh"),
+            ("S=/tmp/a && sh scripts/ci/gates.sh --force", "sh gates.sh"),
             ("bash -c 'cargo test -p pixel-cli'", "cargo test"),
             ("timeout 600 python3 lead_time.py 3d", "python3 lead_time.py"),
             # Three words at most: every PR's watch lands in one group.

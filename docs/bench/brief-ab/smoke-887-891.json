@@ -125,7 +125,7 @@
   "repo_head": "26d578a37ff0afb6d560e7f9c4141979abd0ea0d",
   "reps": 1,
   "run_id": "smoke-887-891",
-  "script": "scripts/ab-brief-live.py",
+  "script": "scripts/bench/ab-brief-live.py",
   "script_sha256": "9e5c060c57701c3d080d386e295e41abe4a43aa922db3c719f0d7fff42b21bd1",
   "seed": 883,
   "select_seed": "brief-ab-883",

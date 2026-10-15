@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 //! The vendored `mvp-*` crates stay a copy of pixel-mvp
-//! (`crates/mvp-*/VENDORED.md`). A sync is `scripts/vendor-mvp.sh` plus the
+//! (`crates/mvp-*/VENDORED.md`). A sync is `scripts/dev/vendor-mvp.sh` plus the
 //! gates, so these crates may not grow a dependency on a `pixel-*` crate,
 //! and they keep pixel-mvp's own shape: `mvp-model` depends on no internal
 //! crate, every other `mvp-*` crate on `mvp-model` only (pixel-mvp's

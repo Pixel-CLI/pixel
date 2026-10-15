@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/homebrew-core-formula.py: the formula a homebrew-core
+"""Contract of scripts/release/homebrew-core-formula.py: the formula a homebrew-core
 pull request carries, which must build pixel from source.
 
 Each rule below is one homebrew-core would reject the formula over:

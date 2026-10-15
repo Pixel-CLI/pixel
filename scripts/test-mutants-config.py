@@ -35,7 +35,7 @@ import unittest
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / ".cargo/mutants.toml"
-GATE = REPO / "scripts/mutants-gate.py"
+GATE = REPO / "scripts/ci/mutants-gate.py"
 
 #: A bench: the dedicated crate, or a `benches/` directory in any crate.
 BENCH = re.compile(r"^crates/pixel-bench/|(^|/)benches/")
@@ -503,7 +503,7 @@ class DispatchRangeStaysInTheDispatchedBranch(unittest.TestCase):
 
 
 class MutantsGateReport(unittest.TestCase):
-    """Contract of scripts/mutants-gate.py.
+    """Contract of scripts/ci/mutants-gate.py.
 
     The defect it answers: `cargo mutants --in-diff` exits 0 when it produced
     no mutants, so a pull request whose every file is excluded shows a green
@@ -577,7 +577,7 @@ class MutantsGateReport(unittest.TestCase):
             ("README.md", "docs/bench/tree-delta.md"),
             ("crates/pixel-bench/benches/tree_delta.rs",),
             ("crates/pixel/build.rs",),
-            ("Cargo.toml", "changelog.d/204-x.fixed.md"),
+            ("Cargo.toml", ".github/changelog.d/204-x.fixed.md"),
         ):
             with self.subTest(paths=paths):
                 result = self.run_gate(self.diff_touching(*paths), "")
@@ -592,7 +592,7 @@ class MutantsGateReport(unittest.TestCase):
 
 
 class ShardedMutantsGate(unittest.TestCase):
-    """The two roles scripts/mutants-gate.py plays around the shard matrix.
+    """The two roles scripts/ci/mutants-gate.py plays around the shard matrix.
 
     Sizing: the plan job turns the listing into `--shard k/n` values. A gap
     in that list is a slice of the diff no job ever mutates, and a value of

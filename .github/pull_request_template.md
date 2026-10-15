@@ -39,4 +39,4 @@ Blast radius: one word, then what a bad merge would break and for whom. -->
 
 ## Docs touched
 
-<!-- changelog.d/, ARCHITECTURE.md, agent prompt, README — or why none. -->
+<!-- .github/changelog.d/, ARCHITECTURE.md, agent prompt, README — or why none. -->

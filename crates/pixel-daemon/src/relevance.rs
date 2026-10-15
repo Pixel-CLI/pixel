@@ -2879,7 +2879,7 @@ mod tests {
 
     /// The material the co-file ranking works from, before it ranks, for every
     /// prompt of a labelled set: per keyword the files each channel found,
-    /// and what the current rule returns. `scripts/bench-relevance-weights.py`
+    /// and what the current rule returns. `scripts/bench/bench-relevance-weights.py`
     /// reads it to compare weighting rules without recompiling.
     ///
     /// Environment: `PIXEL_WEIGHT_FIXTURE` (a checkout the prompts were

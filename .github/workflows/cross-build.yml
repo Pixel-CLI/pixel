@@ -26,7 +26,7 @@ on:
       - ".cargo/**"
       - ".github/workflows/cross-build.yml"
       - "Cargo.*"
-      - "scripts/release-build-env.sh"
+      - "scripts/release/release-build-env.sh"
       - "crates/**"
       - ".config/deny.toml"
       - "rust-toolchain*"
@@ -150,7 +150,7 @@ jobs:
       # both set the same value.
       - name: Reproducible build environment
         if: steps.dup.outputs.duplicate != 'true'
-        run: scripts/release-build-env.sh --github-env
+        run: scripts/release/release-build-env.sh --github-env
 
       # One entry per target, shared with release-build.yml's build job: a shared
       # key replaces the job id in the cache key, so the tag's build (job

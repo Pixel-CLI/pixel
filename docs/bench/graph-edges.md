@@ -6,7 +6,7 @@ What the graph holds of 160 judged Rust edges of this repository at
 ```bash
 git clone https://github.com/Pixel-CLI/pixel /tmp/pixel-85 && git -C /tmp/pixel-85 checkout 85bede7d
 cargo build --profile dev-release -p pixel-cli
-python3 scripts/bench-graph-edges.py --pixel target/dev-release/pixel --repo /tmp/pixel-85
+python3 scripts/bench/bench-graph-edges.py --pixel target/dev-release/pixel --repo /tmp/pixel-85
 ```
 
 Run on 2026-10-14, the binary built from this stack's last pull request

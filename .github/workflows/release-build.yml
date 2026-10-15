@@ -67,7 +67,7 @@ jobs:
       # cross-build.yml sets the same value for the entry restored below.
       # reproducible-build.yml builds the x86_64 lane twice with it.
       - name: Reproducible build environment
-        run: scripts/release-build-env.sh --github-env
+        run: scripts/release/release-build-env.sh --github-env
 
       # Restores what cross-build.yml saved on main for this target (shared
       # key release-<target>): the dependencies arrive compiled, and only the
@@ -134,7 +134,7 @@ jobs:
           # shellcheck disable=SC2086
           cargo tree --locked -p pixel-cli --target "$TARGET" $FEATURES \
             -e normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/sbom-tree.txt"
-          python3 scripts/release-sbom.py crates/pixel/pixel_bin.cdx.json \
+          python3 scripts/release/release-sbom.py crates/pixel/pixel_bin.cdx.json \
             "$RUNNER_TEMP/sbom-tree.txt" "$TAG" "$TARGET" "pixel-${TAG}-${TARGET}.cdx.json"
 
       - name: Upload artifact
@@ -176,7 +176,7 @@ jobs:
       # held by scripts/test-homebrew-formula.py, which CI runs on every pull
       # request that touches it, so this step changes without a tag.
       - name: Generate the Homebrew formula and the Linux bottles
-        run: python3 scripts/homebrew-formula.py "${GITHUB_REF#refs/tags/}" artifacts .
+        run: python3 scripts/release/homebrew-formula.py "${GITHUB_REF#refs/tags/}" artifacts .
 
       # pixel-core.rb: the formula a homebrew-core pull request carries,
       # built from the source archive GitHub serves for this tag (its sha256
@@ -187,7 +187,7 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           curl -fsSL --retry 3 -o source.tar.gz \
             "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
-          python3 scripts/homebrew-core-formula.py "$TAG" source.tar.gz pixel-core.rb
+          python3 scripts/release/homebrew-core-formula.py "$TAG" source.tar.gz pixel-core.rb
 
       # The SBOM glob below would sign an empty set without complaint: a
       # build job that uploaded its archive without its SBOM stops here.
@@ -219,7 +219,7 @@ jobs:
             artifacts/pixel-*.tar.gz
             artifacts/pixel-*.cdx.json
             pixel-*.bottle.tar.gz
-            scripts/install.sh
+            scripts/release/install.sh
 
       # Everything release.yml publishes, in one artifact: the attested
       # files themselves, not a rebuild or a second checkout of them.
@@ -237,7 +237,7 @@ jobs:
           mkdir release-assets
           cp artifacts/pixel-*.tar.gz artifacts/pixel-*.tar.gz.sha256 \
             artifacts/pixel-*.cdx.json \
-            pixel-*.bottle.tar.gz pixel.rb pixel-core.rb scripts/install.sh \
+            pixel-*.bottle.tar.gz pixel.rb pixel-core.rb scripts/release/install.sh \
             release-assets/
           if [ ! -s "$BUNDLE" ]; then
             echo "::error::actions/attest left no bundle at '$BUNDLE'; the release would ship without its provenance file"

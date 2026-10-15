@@ -180,7 +180,7 @@ annotate compliant code with comments such as "guideline compliant".
 
 Source: <https://microsoft.github.io/rust-guidelines/> (`agents/all.txt`),
 MIT License, Copyright (c) Microsoft Corporation. Refresh with
-`scripts/refresh-guidelines.sh`: it re-downloads the file and prints the
+`scripts/dev/refresh-guidelines.sh`: it re-downloads the file and prints the
 diff of `## … (M-…)` headings, so an added, renamed or removed upstream
 rule is noticed; `crates/pixel/tests/cli/docs_drift.rs` then fails the
 build if this file names an id the new text no longer has.

@@ -672,7 +672,7 @@ cmd_run_set() {
     fi
     prev_case=$id
     say "[$n/$total] $id"
-    [ -d "$srcdir/.git" ] || die "no source clone for $id: $srcdir (bench: scripts/brief-bench.py prepare)"
+    [ -d "$srcdir/.git" ] || die "no source clone for $id: $srcdir (bench: scripts/bench/brief-bench.py prepare)"
     set_base "$repo" "$srcdir" "$csha" "$bin" "$bin_hash"
     local runid run_dir pws nws ph nh hookbin
     runid="$id-$(date -u +%Y%m%dT%H%M%SZ)"; run_dir="$SCRATCH/runs/$runid"

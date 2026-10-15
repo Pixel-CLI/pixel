@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/gates.sh: skip-if-untouched, fail-open, laptop-safe env.
+"""Contract of scripts/ci/gates.sh: skip-if-untouched, fail-open, laptop-safe env.
 
 Runs the real script inside a disposable git repository with a stub `cargo`
 on PATH that records every invocation and the environment it saw.
@@ -25,7 +25,7 @@ class GatesContract(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.repo = self.root / "repo"
         (self.repo / "scripts").mkdir(parents=True)
-        shutil.copy(GATES, self.repo / "scripts/gates.sh")
+        shutil.copy(GATES, self.repo / "scripts/ci/gates.sh")
         # gates.sh runs the repository's script contracts before the cargo
         # gates. Stub them here: this fixture asserts that gates.sh invokes
         # them and honours their exit code, not what the real ones check.
@@ -89,7 +89,7 @@ class GatesContract(unittest.TestCase):
 
     def gates(self, *args, **extra_env):
         return subprocess.run(
-            ["sh", str(self.repo / "scripts/gates.sh"), *args],
+            ["sh", str(self.repo / "scripts/ci/gates.sh"), *args],
             cwd=self.repo, env={**self.env, **extra_env},
             capture_output=True, text=True, timeout=30,
         )

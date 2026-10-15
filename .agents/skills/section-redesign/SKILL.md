@@ -128,7 +128,7 @@ reserved space, a badge over text).
 
 - `cargo test -p pixel-cli --test cli docs_drift::` (it reads
   `index.html`, `agents.toml` and `objections.toml`).
-- No `changelog.d/` fragment: website-only changes ship nothing in the tool
+- No `.github/changelog.d/` fragment: website-only changes ship nothing in the tool
   (CONTRIBUTING.md, "Definition of done").
 - Show the captures and get the user's go before the commit; then commit
   (`docs(website): … for task #N`), push, and open or update the pull

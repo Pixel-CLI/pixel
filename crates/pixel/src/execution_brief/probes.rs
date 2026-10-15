@@ -12,7 +12,7 @@
 //! them into the brief. A probe that times out, fails or prints nothing is
 //! skipped and logged; the brief is never worse for a probe that broke.
 //!
-//! [`merge`] is specified by `scripts/probe-test.py` (`merge`) and pinned by
+//! [`merge`] is specified by `scripts/bench/probe-test.py` (`merge`) and pinned by
 //! the golden cases of `tests/fixtures/probe-merge.json`, which both run.
 
 use std::io::{Read, Write};

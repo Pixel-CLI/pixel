@@ -1,7 +1,7 @@
 # Disk reclamation for a pixel checkout. `just` lists the recipes.
 #
-# The work is scripts/clean.sh, which runs the same way without just
-# (`scripts/clean.sh --help` documents every scope and what it costs to
+# The work is scripts/dev/clean.sh, which runs the same way without just
+# (`scripts/dev/clean.sh --help` documents every scope and what it costs to
 # rebuild): a recipe here only names a scope. Every scope covers all the
 # worktrees `git worktree list` reports, not only the one just runs from --
 # four worktrees carry four workspace builds, and that is where the disk went.
@@ -17,24 +17,24 @@ _default:
 
 # Report every reclaimable byte -- build output, indexes, caches, scratch. Removes nothing.
 disk:
-    @scripts/clean.sh all --dry-run
+    @scripts/dev/clean.sh all --dry-run
 
 # Remove build output: target/ of every worktree, plus the ignored scratch in the tree.
 clean:
-    @scripts/clean.sh build
+    @scripts/dev/clean.sh build
 
 # Remove the .pixel index of every worktree (its daemon is stopped first). Rebuild: pixel build-index --history .
 clean-index:
-    @scripts/clean.sh index
+    @scripts/dev/clean.sh index
 
 # Remove the base-shard cache shared by every worktree (~/.cache/pixel/shards).
 clean-cache:
-    @scripts/clean.sh cache
+    @scripts/dev/clean.sh cache
 
-# Remove the /tmp scratch left by scripts/pixel-bench.sh.
+# Remove the /tmp scratch left by scripts/bench/pixel-bench.sh.
 clean-bench:
-    @scripts/clean.sh bench
+    @scripts/dev/clean.sh bench
 
 # Remove all of the above. The recall corpus and ~/.local/state/pixel are never touched.
 clean-all:
-    @scripts/clean.sh all
+    @scripts/dev/clean.sh all

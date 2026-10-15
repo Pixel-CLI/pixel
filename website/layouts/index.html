@@ -15,11 +15,11 @@
   {{ $agents := hugo.Data.agents.agent }}
   {{/* The prompt a visitor pastes into their agent instead of a shell: the repository README's "Let your agent install it" block, used by the Install terminal. */}}
   {{ $agentPrompt := "Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the \"For AI agents\" section of its README, then tell me what changed and whether `pixel doctor .` is green." }}
-  {{/* The shared Install terminal commands. The one-liner runs the install.sh asset of the latest release (release.yml uploads scripts/install.sh with every tag); $scriptSrc is that file at the tag of the version this site describes (crates/pixel/Cargo.toml, mounted as data/cli.toml, which the release bumps), so "read the script" opens the bytes the one-liner runs. $inspect is the same install for a visitor who reads before running: download, page through, then run. */}}
+  {{/* The shared Install terminal commands. The one-liner runs the install.sh asset of the latest release (release.yml uploads scripts/release/install.sh with every tag); $scriptSrc is that file at the tag of the version this site describes (crates/pixel/Cargo.toml, mounted as data/cli.toml, which the release bumps), so "read the script" opens the bytes the one-liner runs. $inspect is the same install for a visitor who reads before running: download, page through, then run. */}}
   {{ $scriptURL := printf "%s/releases/latest/download/install.sh" site.Params.github_url }}
   {{ $curl := printf "curl -fsSL %s | sh" $scriptURL }}
   {{ $inspect := printf "curl -fsSL -o install.sh %s && less install.sh && sh install.sh" $scriptURL }}
-  {{ $scriptSrc := printf "%s/blob/v%s/scripts/install.sh" site.Params.github_url hugo.Data.cli.package.version }}
+  {{ $scriptSrc := printf "%s/blob/v%s/scripts/release/install.sh" site.Params.github_url hugo.Data.cli.package.version }}
 
   {{/* Where the reader is: one square per chapter (each section's .chapter label), filled as it passes. Built by the script below. */}}
   <nav class="rail" aria-label="Sections" data-rail hidden></nav>
@@ -99,7 +99,7 @@
     </section>
 
     {{/* ---------- problem: the cost in the reader's words, before the category is named ---------- */}}
-    {{/* A problem, so the section is red (.problem redefines the accents). Two costs a visitor already pays, then the proof: one recorded agent without Pixel on the scoping task the next chapter answers, every tool call it made before it answered. All of it is data/problem_trace.toml (scripts/problem-trace.py writes it from docs/bench/problem-trace/). No seconds and no dollars: the recording shows no reliable speed gain (docs/bench/problem-trace.md), and this section compares nothing. */}}
+    {{/* A problem, so the section is red (.problem redefines the accents). Two costs a visitor already pays, then the proof: one recorded agent without Pixel on the scoping task the next chapter answers, every tool call it made before it answered. All of it is data/problem_trace.toml (scripts/bench/problem-trace.py writes it from docs/bench/problem-trace/). No seconds and no dollars: the recording shows no reliable speed gain (docs/bench/problem-trace.md), and this section compares nothing. */}}
     {{ $t := hugo.Data.problem_trace }}
     {{/* `calls` holds every vanilla run's call count, sorted; the list is odd, so its middle is the median. */}}
     {{ $runs := sort $t.calls }}
@@ -140,7 +140,7 @@
     </section>
 
     {{/* ---------- scope: the same prompt as the Problem chapter, the other arm of its recording ---------- */}}
-    {{/* data/scope.toml is the task packet the Pixel arm received before its first call (scripts/scope-board.py, from docs/bench/problem-trace/packet.txt): same task, same repository, same day as the trace above. The prompt-submit hook pixel setup writes delivers it, so nobody types a command, the agent included. */}}
+    {{/* data/scope.toml is the task packet the Pixel arm received before its first call (scripts/dev/scope-board.py, from docs/bench/problem-trace/packet.txt): same task, same repository, same day as the trace above. The prompt-submit hook pixel setup writes delivers it, so nobody types a command, the agent included. */}}
     <section class="section section--center section--follows wrap" id="scope" aria-labelledby="scope-title">
       <p class="scope__handoff" aria-hidden="true">Same prompt, same repo</p>
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Scoping</span></p>
@@ -367,7 +367,7 @@
         <p class="invite__text"><strong>Don't trust our numbers. Get yours.</strong> After a few agent sessions, <code>pixel token-savings</code> reports what Pixel's answers spared on your code. Post it, and with your permission we may quote you here.</p>
         <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
       </aside>
-      {{/* The proofs an evaluator checks before running the script, last on the page now that the closing is gone. Signed releases: release.yml attests every archive and install.sh with SLSA build provenance, verified with gh attestation verify (SECURITY.md, "Verifying a release"). No telemetry beyond an optional release check: SECURITY.md. The changelog: a changelog.d fragment per user-facing change, cut at each release (CONTRIBUTING.md). */}}
+      {{/* The proofs an evaluator checks before running the script, last on the page now that the closing is gone. Signed releases: release.yml attests every archive and install.sh with SLSA build provenance, verified with gh attestation verify (SECURITY.md, "Verifying a release"). No telemetry beyond an optional release check: SECURITY.md. The changelog: a .github/changelog.d fragment per user-facing change, cut at each release (CONTRIBUTING.md). */}}
       <ul class="badges" data-reveal="stagger">
         <li>{{ partial "icon.html" (dict "name" "lock" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/.github/SECURITY.md#verifying-a-release" target="_blank" rel="noopener">Signed releases</a></li>
         <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/.github/SECURITY.md" target="_blank" rel="noopener">No telemetry beyond an optional release check</a></li>

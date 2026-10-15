@@ -13,7 +13,7 @@ on:
     # under docs/, the licence files, a Markdown file outside the list below
     # -- cannot change a test result, so it skips the two-and-a-half-minute
     # run; the Hugo site under website/ has its own workflow, pages.yml
-    # (which stays in: scripts/verify-action-pins.py reads every workflow).
+    # (which stays in: scripts/ci/verify-action-pins.py reads every workflow).
     # Later patterns win: the negations drop the docs first, then the
     # re-includes put back what the suite actually reads:
     #   - crates/**: the bundled agent prompts, checked by the install tests;
@@ -22,7 +22,7 @@ on:
     #     and CHANGELOG rename tables match RENAMED_COMMANDS row for row, and
     #     that the rule ids of the rust-guidelines skill head real guideline
     #     sections;
-    #   - changelog.d/**: the fragments scripts/test-prepare.py validates
+    #   - .github/changelog.d/**: the fragments scripts/test-prepare.py validates
     #     against the release script's contract, in the repository itself and
     #     not only in its fixtures;
     #   - .agents/skills/release/: prepare.sh, which scripts/test-prepare.py
@@ -50,7 +50,7 @@ on:
       - ".github/CONTRIBUTING.md"
       - "AGENTS.md"
       - "CHANGELOG.md"
-      - "changelog.d/**"
+      - ".github/changelog.d/**"
       - "docs/manual-setup.md"
       - "website/content/docs.md"
       - "website/content/benchmarks.md"
@@ -239,7 +239,7 @@ jobs:
           ^scripts/
           ^probes/
           ^\.githooks/
-          ^changelog\.d/
+          ^.github/changelog\.d/
           ^\.github/workflows/
           ^\.agents/skills/release/
           ^\.agents/skills/pixel-retro/
@@ -295,7 +295,7 @@ jobs:
         env:
           PIXEL_INSTALL_DIR: ${{ runner.temp }}/pixel
           PIXEL_NO_UPDATE_CHECK: "1"
-        run: sh scripts/install.sh
+        run: sh scripts/release/install.sh
 
       - name: Later steps see this target
         env:
@@ -340,12 +340,12 @@ jobs:
       # or the signing identity. Contract in scripts/test-verify-action-pins.py below.
       - name: Action pins (every uses on a full commit SHA)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/verify-action-pins.py
+        run: python3 scripts/ci/verify-action-pins.py
 
       # Every tracked source file carries its SPDX copyright and license
       # lines (OpenSSF gold); a tenth of a second, so it runs on every diff.
       - name: SPDX headers (copyright and license in every source file)
-        run: python3 scripts/check-spdx.py
+        run: python3 scripts/ci/check-spdx.py
 
       - name: Install Rust toolchain
         if: ${{ needs.changes.outputs.cargo == 'true' }}
@@ -523,29 +523,29 @@ jobs:
       - name: Brief-gate bench and excavation counter (self-tests, prompt set)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: |
-          python3 scripts/bench-brief-gate.py --self-test
-          python3 scripts/bench-brief-gate.py --check-set
-          python3 scripts/bench-graph-edges.py --self-test
-          python3 scripts/bench-brief-excerpt.py --self-test
-          python3 scripts/bench-brief-spans.py --self-test
-          python3 scripts/excavation-count.py --self-test
-          python3 scripts/ab-brief-live.py --self-test
-          python3 scripts/brief-check.py --self-test
-          python3 scripts/probe-test.py --self-test
-          python3 scripts/probe-test.py --check-all
-          python3 scripts/probe-translate.py --self-test
-          python3 scripts/probe-loop.py --self-test
-          python3 scripts/probe-chain.py --self-test
-          python3 scripts/extract-probes.py --self-test
-          python3 scripts/brief-bench.py --self-test
-          python3 scripts/brief-bench.py check
-          python3 scripts/brief-zero-calls.py --self-test
-          python3 scripts/tool-census/question_source.py
-          python3 scripts/tool-census/score_brief.py --self-test
-          python3 scripts/tool-census/run.py --self-test
-          python3 scripts/tool-census/oracle.py --self-test
-          python3 scripts/tool-census/test_classify.py
-          python3 scripts/tool-census/test_extract.py
+          python3 scripts/bench/bench-brief-gate.py --self-test
+          python3 scripts/bench/bench-brief-gate.py --check-set
+          python3 scripts/bench/bench-graph-edges.py --self-test
+          python3 scripts/bench/bench-brief-excerpt.py --self-test
+          python3 scripts/bench/bench-brief-spans.py --self-test
+          python3 scripts/bench/excavation-count.py --self-test
+          python3 scripts/bench/ab-brief-live.py --self-test
+          python3 scripts/bench/brief-check.py --self-test
+          python3 scripts/bench/probe-test.py --self-test
+          python3 scripts/bench/probe-test.py --check-all
+          python3 scripts/bench/probe-translate.py --self-test
+          python3 scripts/bench/probe-loop.py --self-test
+          python3 scripts/bench/probe-chain.py --self-test
+          python3 scripts/bench/extract-probes.py --self-test
+          python3 scripts/bench/brief-bench.py --self-test
+          python3 scripts/bench/brief-bench.py check
+          python3 scripts/bench/brief-zero-calls.py --self-test
+          python3 scripts/bench/tool-census/question_source.py
+          python3 scripts/bench/tool-census/score_brief.py --self-test
+          python3 scripts/bench/tool-census/run.py --self-test
+          python3 scripts/bench/tool-census/oracle.py --self-test
+          python3 scripts/bench/tool-census/test_classify.py
+          python3 scripts/bench/tool-census/test_extract.py
 
       # The workflow's own step, run with a stub script: only a pull request
       # number reaches the shoot script.
@@ -762,7 +762,7 @@ jobs:
       # Scorecard's Vulnerabilities check reads osv-scanner.toml, not
       # deny.toml: the two must accept the same advisories.
       - name: Advisory ignores agree (deny.toml, osv-scanner.toml)
-        run: python3 scripts/check-advisory-ignores.py
+        run: python3 scripts/ci/check-advisory-ignores.py
 
   # The green verdict the changes job's skip guard reads (#590): every lane
   # above ran green on this exact tree, so the tree is recorded in the cache

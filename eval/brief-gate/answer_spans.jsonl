@@ -30,4 +30,4 @@
 {"id": "bg-032", "answer_spans": [{"path": "crates/pixel-recall/src/sources/mod.rs", "symbol": "sources adapters", "start_line": 4, "end_line": 13}], "confidence": "medium"}
 {"id": "bg-149", "answer_spans": [{"path": "crates/pixel-git/src/nofollow.rs", "symbol": "nofollow module doc", "start_line": 4, "end_line": 14}], "confidence": "medium"}
 {"id": "bg-085", "answer_spans": [{"path": "crates/pixel-index/src/cache.rs", "symbol": "shared base-shard cache doc", "start_line": 4, "end_line": 12}], "confidence": "medium"}
-{"id": "bg-161", "answer_spans": [{"path": "scripts/mutants-nightly-range.py", "symbol": "select_range", "start_line": 31, "end_line": 74}], "confidence": "medium"}
+{"id": "bg-161", "answer_spans": [{"path": "scripts/ci/mutants-nightly-range.py", "symbol": "select_range", "start_line": 31, "end_line": 74}], "confidence": "medium"}

@@ -186,14 +186,14 @@ Tracked entry points and data:
 R=.pixel/experiments/plan-routing-NEW
 python3 -m venv "$R/venv"
 "$R/venv/bin/python" -m pip install -r scripts/fixtures/plan-routing-requirements.lock
-/usr/bin/time -l "$R/venv/bin/python" scripts/bench-plan-routing.py fit \
+/usr/bin/time -l "$R/venv/bin/python" scripts/bench/bench-plan-routing.py fit \
   --train scripts/fixtures/plan-routing-train.tsv --output "$R/fit"
 pixel daemon status  # use the socket path for this checkout in the next command
-/usr/bin/time -l "$R/venv/bin/python" scripts/bench-plan-routing.py evaluate \
+/usr/bin/time -l "$R/venv/bin/python" scripts/bench/bench-plan-routing.py evaluate \
   --model "$R/fit" --test scripts/fixtures/plan-routing-test.jsonl \
   --output "$R/eval" --socket /path/reported/by/daemon-status.sock
 python3 scripts/test-bench-plan-routing.py
-scripts/gates.sh
+scripts/ci/gates.sh
 ```
 
 Run directories must be new. Requires an already running indexed Pixel daemon;
@@ -240,7 +240,7 @@ runs should bind those documents before prediction; this pilot was not rerun.
 
 Executed: eight prototype contract tests; Python compilation; 100/100 real-daemon
 baseline parity; independent direct recomputation of exact/FP/FN counts;
-`scripts/gates.sh` **67 tests (36+12+9+10), exit 0**. Cargo fmt/test/clippy were
+`scripts/ci/gates.sh` **67 tests (36+12+9+10), exit 0**. Cargo fmt/test/clippy were
 explicitly skipped by that runner for docs/bench-only changes. Cargo.lock did
 not change: deny not run. No local mutants, Rust build, install/doctor, CI, push,
 PR, publication or global configuration change.

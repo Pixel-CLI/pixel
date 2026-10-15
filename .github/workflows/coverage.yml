@@ -56,7 +56,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           test "$GITHUB_REF" = refs/heads/main
-          python3 scripts/coverage-nightly.py --repository "$GITHUB_REPOSITORY" \
+          python3 scripts/ci/coverage-nightly.py --repository "$GITHUB_REPOSITORY" \
             --head "$GITHUB_SHA" --github-output "$GITHUB_OUTPUT"
 
   coverage:
@@ -223,7 +223,7 @@ jobs:
           cargo +"$NIGHTLY" llvm-cov report --branch --json --summary-only \
             --output-path target/coverage-branch.json
           # Per-line branch records (BRDA) for picking test targets:
-          # scripts/coverage-uncovered-branches.py reads this file.
+          # scripts/ci/coverage-uncovered-branches.py reads this file.
           cargo +"$NIGHTLY" llvm-cov report --branch --lcov \
             --output-path target/coverage-branch.lcov
           python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"

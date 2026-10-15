@@ -5533,7 +5533,7 @@ fn run_command(
             // `$$` is a shell idiom and is NOT expanded by Rust, so a literal
             // name would collide between concurrent upgrades. Use the real pid,
             // and keep the temp file in `dest`'s directory so the rename stays
-            // atomic (same filesystem). Mirrors scripts/install.sh's `.pixel.tmp.$$`.
+            // atomic (same filesystem). Mirrors scripts/release/install.sh's `.pixel.tmp.$$`.
             let tmp = dest.with_file_name(format!(
                 ".{}.tmp.{}",
                 dest.file_name().and_then(|n| n.to_str()).unwrap_or("pixel"),

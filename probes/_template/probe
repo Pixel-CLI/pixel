@@ -11,7 +11,7 @@
 Rules: read-only, no network, deterministic (sort what you list), generic (derive every word, path and symbol
 from the prompt and the repository when you run; never write them into this file), and print nothing when you have
 nothing to add. `.env*` only when git tracks it, with secret-looking values masked. Run it by hand with
-`python3 -I scripts/probe-test.py <name>`."""
+`python3 -I scripts/bench/probe-test.py <name>`."""
 import json
 import re
 import subprocess

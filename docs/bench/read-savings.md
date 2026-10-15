@@ -6,7 +6,7 @@ baseline reads the whole file; the Pixel arm runs `pixel list-signatures
 Both sides estimate tokens from those bytes divided by four, rounded down, as the "Reading code" table on
 `/benchmarks/` and shunt's benchmark do. No second model, no agent run.
 
-- **Command:** `scripts/bench-read-savings.sh` (downloads each file at its
+- **Command:** `scripts/bench/bench-read-savings.sh` (downloads each file at its
   pinned commit into a throwaway repository under `$TMPDIR`).
 - **Binary:** pixel 0.5.0, September 2026.
 - **Files:** ten large, well-known files of popular projects, listed for

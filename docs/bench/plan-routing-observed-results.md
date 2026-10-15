@@ -93,7 +93,7 @@ The earlier candidate artifacts and conclusions remain unchanged.
 
 ## Executed deliverable: private opt-in capture
 
-`scripts/record-plan-request.py` wraps one native `pixel plan` invocation. It
+`scripts/bench/record-plan-request.py` wraps one native `pixel plan` invocation. It
 installs no hook and runs only when explicitly invoked. It records:
 
 - literal prompt/argv, an explicit-query flag, input hash and caller-supplied
@@ -145,7 +145,7 @@ Run this only when there is an actual planning request to execute, with a fresh
 receipt filename:
 
 ```sh
-python3 scripts/record-plan-request.py \
+python3 scripts/bench/record-plan-request.py \
   --pixel .pixel/experiments/plan-routing-current-source-v1/pixel-current \
   --repo "$PWD" --output .pixel/plan-requests/NEW-ID.json \
   --prompt '<actual coding request>' --json
@@ -161,14 +161,14 @@ Executed **14 extractor/recorder tests**, Python compilation and the three nativ
 source-CLI mechanism checks. Tests cover literal-vs-quoted calls, explicit-query
 separation, cwd-aware action joins, output/exit preservation, snapshot changes,
 invalid metadata, incomplete postflight, timeouts, receipt write failure,
-overwrite refusal and symlink refusal. `scripts/gates.sh` passed **67 tests**
+overwrite refusal and symlink refusal. `scripts/ci/gates.sh` passed **67 tests**
 (36+12+9+10), explicitly skipping Cargo gates for docs/bench-only changes. No Rust
 edit, build, install/doctor, mutants, learned-router replay/training, push or PR.
 
 New source files:
 
-- `scripts/bench-plan-observed-corpus.py`
-- `scripts/record-plan-request.py`
+- `scripts/bench/bench-plan-observed-corpus.py`
+- `scripts/bench/record-plan-request.py`
 - `scripts/test-plan-request-capture.py`
 
 Private derived inputs, source references, exclusions, both audit passes, final

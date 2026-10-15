@@ -2,7 +2,7 @@
 
 160 call and reference edges of this repository at `85bede7d`, each judged
 `correct` or `wrong` against the source, for
-[`scripts/bench-graph-edges.py`](../../scripts/bench-graph-edges.py): which of
+[`scripts/bench/bench-graph-edges.py`](../../scripts/bench/bench-graph-edges.py): which of
 them the graph holds with each Rust source (`PIXEL_GRAPH_SOURCE_RUST=v1`,
 this graph's own resolver, or pixel-mvp's index, the default). Results and
 how to reproduce them: [`docs/bench/graph-edges.md`](../../docs/bench/graph-edges.md).

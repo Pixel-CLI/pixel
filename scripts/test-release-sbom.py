@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/release-sbom.py, the step release-build.yml runs to
+"""Contract of scripts/release/release-sbom.py, the step release-build.yml runs to
 write the SBOM published beside each release archive, checked without a tag.
 
 What must hold for the SBOM to describe the archive (OSPS-QA-02.02):

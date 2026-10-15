@@ -1,6 +1,6 @@
 # Brief vs oracle coverage (issue #906)
 
-How much of the context a vanilla agent actually looked at does a Pixel brief reproduce? `scripts/tool-census/score_brief.py`
+How much of the context a vanilla agent actually looked at does a Pixel brief reproduce? `scripts/bench/tool-census/score_brief.py`
 scores any `pixel` binary offline against the 20 census sessions of issue #905 (13 answer, 7 edit). No model runs: the
 oracle is read off the census `calls`, the brief is parsed from `pixel brief`.
 
@@ -27,9 +27,9 @@ oracle is read off the census `calls`, the brief is parsed from `pixel brief`.
 Reproduce:
 
 ```bash
-python3 -I scripts/tool-census/score_brief.py --self-test
-python3 -I scripts/tool-census/score_brief.py --bin <pixel> --sessions all --label <name>   # score/runs/<name>/report.{json,md}
-python3 -I scripts/tool-census/score_brief.py compare a/report.json b/report.json --labels a,b
+python3 -I scripts/bench/tool-census/score_brief.py --self-test
+python3 -I scripts/bench/tool-census/score_brief.py --bin <pixel> --sessions all --label <name>   # score/runs/<name>/report.{json,md}
+python3 -I scripts/bench/tool-census/score_brief.py compare a/report.json b/report.json --labels a,b
 ```
 
 ## Result: today's briefs reproduce almost none of the oracle

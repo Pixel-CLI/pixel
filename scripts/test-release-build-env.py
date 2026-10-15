@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of the reproducible release build (scripts/release-build-env.sh).
+"""Contract of the reproducible release build (scripts/release/release-build-env.sh).
 
 A release binary is reproducible only if every input that varies between two
 builds of one commit is pinned: the build date crates/pixel/build.rs embeds
@@ -249,7 +249,7 @@ class Wiring(unittest.TestCase):
         ):
             with self.subTest(workflow=workflow):
                 parts = steps(workflow)
-                env_at = index_of(parts, "scripts/release-build-env.sh")
+                env_at = index_of(parts, "scripts/release/release-build-env.sh")
                 self.assertLess(env_at, index_of(parts, build))
                 if any("Swatinem/rust-cache" in p for p in parts):
                     # rust-cache hashes RUSTFLAGS into its key when it restores.
@@ -257,7 +257,7 @@ class Wiring(unittest.TestCase):
 
     def test_macos_release_build_gets_the_environment_too(self):
         parts = steps("release-build.yml")
-        env_step = parts[index_of(parts, "scripts/release-build-env.sh")]
+        env_step = parts[index_of(parts, "scripts/release/release-build-env.sh")]
         self.assertNotIn("runner.os", env_step)
 
     def test_same_cross_version_everywhere(self):

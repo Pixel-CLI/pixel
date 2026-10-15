@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/homebrew-formula.py, the step release.yml runs to write
+"""Contract of scripts/release/homebrew-formula.py, the step release.yml runs to write
 the Homebrew formula and the Linux bottles, checked without a tag.
 
 What must hold for a release to install through the tap:

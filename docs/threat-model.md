@@ -40,7 +40,7 @@ model providers, and the website under `website/`.
 | Agent configurations | what `pixel setup` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. The guided `pixel setup` also writes a managed `pixel:setup` block into the instruction files of the agents the user picked (`~/.claude/CLAUDE.md`, `AGENTS.md`, …, shown in full and confirmed first, text around the block untouched, a symlinked dotfile written through) and `pixel-setup.md` rule files when asked. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
 | User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project) | credential theft, billing abuse |
 | Benchmark credentials | OAuth storage or an explicitly selected Claude gateway settings file read by `eval/claude_skill_pair.py` | credentials must reach only the selected model connection and stay out of benchmark receipts |
-| Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
+| Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/release/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
 | CI | `.github/workflows/*.yml`, the `PROJECTS_TOKEN` secret, the self-hosted runner named by the `PIXEL_RUNNER_LABELS` repository variable | a foothold in CI is a step towards the release chain |
 
 ## 2. Actors and trust boundaries
@@ -252,7 +252,7 @@ blocks and hook entries, refusing files that do not parse, and leaving a
 `<file>.pixel-bak.<nanos>-<seq>` copy of each file it changes
 (`pixel_setup::config::backup_if_changing`). Hook commands embed the
 absolute binary path, quoted by `routing::quoted_executable`. The binary
-reaches users through `scripts/install.sh` (archive checked against the
+reaches users through `scripts/release/install.sh` (archive checked against the
 release's `.sha256`), Homebrew, mise, or the `setup-pixel` action (exact
 version, sha256 check).
 
@@ -709,7 +709,7 @@ hold.
 
 ### T20. The update path installs a tampered binary (T, E, B7)
 
-- **Scenario**: the update prompt, `scripts/install.sh` or `pixel
+- **Scenario**: the update prompt, `scripts/release/install.sh` or `pixel
   self-update` installs something other than a genuine release.
 - **Mitigation**: `install.sh` and the `setup-pixel` action check the archive
   against the release's `.sha256`; every archive and `install.sh` carry a
@@ -729,7 +729,7 @@ hold.
 - **Mitigation**: releases build on GitHub-hosted runners in the reusable
   `release-build.yml`, which holds no secret and is the attestation's signer
   (SLSA Build Level 3); `release.yml` publishes and holds the tap token;
-  every remote `uses:` is pinned to a commit (`scripts/verify-action-pins.py`);
+  every remote `uses:` is pinned to a commit (`scripts/ci/verify-action-pins.py`);
   `cargo deny` and `osv-scanner.toml` gate advisories, licences and sources
   (`deny.toml`: crates.io only); Dependabot, OpenSSF Scorecard and CodeQL run
   on `main`; `pixel check-release` gates the tag.
@@ -863,7 +863,7 @@ Across all of them:
   merge, nightly at 05:41 UTC and manually on a selected branch; those
   events scan all four languages. Rust findings require triage before the
   next release; `cargo clippy` with warnings denied remains in PR CI.
-- **Dependencies**: `cargo deny check` and `scripts/check-advisory-ignores.py`
+- **Dependencies**: `cargo deny check` and `scripts/ci/check-advisory-ignores.py`
   in CI; Dependabot weekly for Cargo and GitHub Actions.
 
 Paths with no dedicated test today are named in the table; they are the

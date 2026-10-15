@@ -74,7 +74,7 @@ gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --owner LivioGama
 
 Release binaries are built reproducibly: the same tag, rebuilt with the same
 Rust toolchain and the same `cross` version, gives a byte-identical `pixel`.
-`scripts/release-build-env.sh` sets what would otherwise vary between two
+`scripts/release/release-build-env.sh` sets what would otherwise vary between two
 builds: `SOURCE_DATE_EPOCH`, the commit's time, for the build date
 `pixel --version` prints, and `RUSTFLAGS` remapping the checkout and
 `CARGO_HOME` out of the binary's panic messages and debug information.
@@ -88,7 +88,7 @@ paths, and fails unless the two match. To rebuild a Linux release yourself
 ```bash
 git clone https://github.com/Pixel-CLI/pixel && cd pixel && git switch --detach vX.Y.Z
 cargo install cross --locked --version 0.2.5   # the version release-build.yml pins
-env_lines=$(scripts/release-build-env.sh) && eval "$env_lines"
+env_lines=$(scripts/release/release-build-env.sh) && eval "$env_lines"
 cross +1.NN.N build --release --locked --no-default-features --features model2vec \
   --target x86_64-unknown-linux-musl -p pixel-cli
 sha256sum target/x86_64-unknown-linux-musl/release/pixel

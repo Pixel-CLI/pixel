@@ -290,7 +290,7 @@ stale migration/search contract assertions and four timing-sensitive failures.
 The assertions were corrected; all four timing cases passed serially with their
 original thresholds and no retries. On frozen commit
 `9fd435bf08f3146efa4d366c02be4d0811fe8037`,
-`NEXTEST_TEST_THREADS=2 CARGO_BUILD_JOBS=2 NEXTEST_RETRIES=0 rtk proxy bash scripts/gates.sh`
+`NEXTEST_TEST_THREADS=2 CARGO_BUILD_JOBS=2 NEXTEST_RETRIES=0 rtk proxy bash scripts/ci/gates.sh`
 exited 0: 3,863 tests passed, six skipped, and formatting, Clippy, doctests and
 the script contracts passed. The same commit's review gate exited 0 with no
 BLOCKER or CONCERN; its lower-severity findings were capped at 200, so it is
@@ -522,7 +522,7 @@ the fixture hook configuration has SHA-256
 ## Earlier implementation validation
 
 Frozen implementation commit: `e50538a17df65c6338cd84b825da6a7b6ed7b44e`.
-`scripts/gates.sh` exited 0: 3,904 workspace tests passed, six skipped, with
+`scripts/ci/gates.sh` exited 0: 3,904 workspace tests passed, six skipped, with
 formatting, Clippy, documentation tests and harness contracts passing.
 `scripts/mutants-remote-gate.sh` exited 0 using the passing cache; no new mutants
 were tested. Production code is unchanged from `328e835a`, whose remote retry
@@ -667,7 +667,7 @@ Provenance:
 
 Frozen source commit: `9042b4d1e70f1e5808c6627317e3b96a5f325814`.
 `CARGO_BUILD_JOBS=2 NEXTEST_TEST_THREADS=2 NEXTEST_RETRIES=0 rtk proxy bash
-scripts/gates.sh` exited 0: 3,904 tests passed, six skipped, plus formatting,
+scripts/ci/gates.sh` exited 0: 3,904 tests passed, six skipped, plus formatting,
 Clippy and documentation tests. The arena suite separately passed 79 tests.
 The evidence-report-only commit following this validation does not alter those
 tested inputs.

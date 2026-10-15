@@ -26,11 +26,11 @@ checklist below defines readiness to merge, with required gates run in CI.
 - [ ] `cargo fmt --all -- --check` exits 0.
 - [ ] `cargo test --workspace` exits 0.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
-- [ ] `cargo deny check --config .config/deny.toml` exits 0 (skip when neither `Cargo.lock` nor `.config/deny.toml` changed); a new advisory exception in `.config/deny.toml` carries its reason and is repeated in `osv-scanner.toml` (`python3 scripts/check-advisory-ignores.py`).
+- [ ] `cargo deny check --config .config/deny.toml` exits 0 (skip when neither `Cargo.lock` nor `.config/deny.toml` changed); a new advisory exception in `.config/deny.toml` carries its reason and is repeated in `osv-scanner.toml` (`python3 scripts/ci/check-advisory-ignores.py`).
 - [ ] New behaviour has a test that fails if the behaviour is removed.
-- [ ] Every new source file (`.rs`, `.py`, `.sh`, `.ts`, `.js`, `.mjs`, `Cargo.toml`, a workflow, a hook under `.githooks/`) opens with `SPDX-FileCopyrightText: The Pixel contributors` and `SPDX-License-Identifier: MIT` in its line comment, after any shebang; `python3 scripts/check-spdx.py --fix` adds them, and CI runs the check on every diff. The script lists the exclusions and their reasons.
+- [ ] Every new source file (`.rs`, `.py`, `.sh`, `.ts`, `.js`, `.mjs`, `Cargo.toml`, a workflow, a hook under `.githooks/`) opens with `SPDX-FileCopyrightText: The Pixel contributors` and `SPDX-License-Identifier: MIT` in its line comment, after any shebang; `python3 scripts/ci/check-spdx.py --fix` adds them, and CI runs the check on every diff. The script lists the exclusions and their reasons.
 - [ ] Normal CI gates pass on the PR head. Mutations are post-merge nightly feedback, not a pull-request gate (see "Mutation testing").
-- [ ] A `changelog.d/<slug>.<section>.md` fragment carries the entry, opening on its scope (`**graph:** …`), under 500 bytes (skip for pure refactors, CI/deps chores, and changes to the website alone, `website/` and its data, which ship nothing in the tool). Write it once, in the same push as the change: the pull request's link is left out, and the release cut appends it from the merge commit's `(#<n>)`. `prepare.sh --check`, which CI runs on every pull request, refuses a missing scope or an entry over 900.
+- [ ] A `.github/changelog.d/<slug>.<section>.md` fragment carries the entry, opening on its scope (`**graph:** …`), under 500 bytes (skip for pure refactors, CI/deps chores, and changes to the website alone, `website/` and its data, which ship nothing in the tool). Write it once, in the same push as the change: the pull request's link is left out, and the release cut appends it from the merge commit's `(#<n>)`. `prepare.sh --check`, which CI runs on every pull request, refuses a missing scope or an entry over 900.
 - [ ] The commit message follows the Conventional Commits format below.
 - [ ] The branch was created from an up-to-date `main` and the pull request targets `main` (a maintainer's maintenance-release branch instead starts from an up-to-date `origin/release/x.y` and its pull request targets `release/x.y`, so no unreleasable `main` commit rides along; see "Branches").
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
@@ -125,16 +125,16 @@ embedding stacks excepted), crates.io as the only source. A finding is fixed
 by changing the dependency, or documented in `.config/deny.toml` next to the
 exception with its reason; the CI job fails on anything else. `cargo deny
 check` needs the network for the advisory database and is not part of
-`scripts/gates.sh`. An advisory accepted in `.config/deny.toml` is also listed, with
+`scripts/ci/gates.sh`. An advisory accepted in `.config/deny.toml` is also listed, with
 its reason, in `osv-scanner.toml`: OpenSSF Scorecard scans `Cargo.lock` with
 osv-scanner, which never reads `.config/deny.toml`, and the same CI job runs
-`scripts/check-advisory-ignores.py` to fail when the two lists differ.
+`scripts/ci/check-advisory-ignores.py` to fail when the two lists differ.
 The CI job only runs when `Cargo.lock` or `.config/deny.toml` changes, so the release
 workflow runs `cargo deny check --config .config/deny.toml` again on the tag, before anything is built:
 an advisory published since the last dependency change blocks the release
 until it is fixed or accepted as above.
 
-`scripts/gates.sh` runs the same commands (nextest when installed, `cargo
+`scripts/ci/gates.sh` runs the same commands (nextest when installed, `cargo
 test` otherwise) with two additions for a laptop: it exits 0 without
 compiling when neither the diff against fetched `origin/main` (falling back
 to local `main`) nor the working tree touches a Rust-affecting path (`*.rs`, `Cargo.*`, `build.rs`, `.cargo/`,
@@ -162,7 +162,7 @@ Optional but recommended when the change touches the CLI surface, hooks, or
 the install flow:
 
 ```bash
-scripts/pixel-smoke-test.sh     # exercises the installed pixel (command -v pixel) end to end
+scripts/dev/pixel-smoke-test.sh     # exercises the installed pixel (command -v pixel) end to end
 ```
 
 The `Cross-build` workflow (`.github/workflows/cross-build.yml`) builds the
@@ -248,8 +248,8 @@ git history block, a ranked call trace, a configuration registry, a documentatio
 
 ```bash
 cp -R probes/_template probes/my-probe        # then edit pixel-plugin.toml and probe
-python3 -I scripts/probe-test.py my-probe     # contract, budget, determinism x2, read-only, no question worse
-python3 -I scripts/probe-test.py my-probe --live   # opt-in: the agent with and without it (1 run, --live-reps 3 to be sure)
+python3 -I scripts/bench/probe-test.py my-probe     # contract, budget, determinism x2, read-only, no question worse
+python3 -I scripts/bench/probe-test.py my-probe --live   # opt-in: the agent with and without it (1 run, --live-reps 3 to be sure)
 ```
 
 - **Contract.** `pixel-plugin.toml` (the plugin host's manifest) with `capabilities = ["brief-probe"]` and a
@@ -262,10 +262,10 @@ python3 -I scripts/probe-test.py my-probe --live   # opt-in: the agent with and 
   from the prompt and the repository when it runs: `probe-test.py --guard "<prompt>"` refuses code that spells out
   those of one prompt), `.env*` only when git tracks it with secret-looking values masked. A probe that overruns
   its budget, fails or prints nonsense is skipped, never fatal.
-- **Evidence.** `scripts/probe-translate.py <id>` shows what a session without a brief fetched and whether the brief
-  or a probe covers it; `scripts/probe-loop.py --prompt "<question>"` runs the whole loop on a plain prompt. The
+- **Evidence.** `scripts/bench/probe-translate.py <id>` shows what a session without a brief fetched and whether the brief
+  or a probe covers it; `scripts/bench/probe-loop.py --prompt "<question>"` runs the whole loop on a plain prompt. The
   questions are the public bench, `eval/brief-bench/` (56 questions on 7 pinned public repositories, with oracle
-  lines and plain-Codex baselines; `scripts/brief-bench.py check`): it is the default source of `probe-test.py`,
+  lines and plain-Codex baselines; `scripts/bench/brief-bench.py check`): it is the default source of `probe-test.py`,
   `probe-translate.py`, `brief-check.py` and `brief-zero-calls.py` (`--questions <file>` for another one), so a
   contributor needs no private data. A maintainer's local census is an optional second source, `--census-db
   <census.db>`; its prompts are never committed. The PR states the `PROBE ... | KEEP` line `probe-test` prints and
@@ -319,7 +319,7 @@ to write: the missed mutant is the bug report.
 
 ### Nightly checkpoint and optional full sweep
 
-`scripts/mutants-nightly-range.py` selects the latest checkpoint artifact
+`scripts/ci/mutants-nightly-range.py` selects the latest checkpoint artifact
 from a completed `mutants.yml` run on `main`. The first campaign starts at
 the parent of the commit that introduced that script, so it includes the
 rollout and every later commit. An API error or an unrelated checkpoint
@@ -370,7 +370,7 @@ pixel build-index --history .   # rebuild facts/history index
 pixel setup             # redeploy the agent prompt and hooks, Codex config
 pixel doctor . --fix --fail-on yellow   # must exit 0; report any non-green check in the PR
                                         # (a worktree Codex never runs in: --skip repo.codex-hook-review, see AGENTS.md)
-scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
+scripts/dev/pixel-smoke-test.sh   # the installed binary end to end (read-only)
 ```
 
 `dev-release` is `release` without thin LTO and with 16 codegen units: an
@@ -396,7 +396,7 @@ path and the doctor verdict for that chosen installation check.
 ## Reclaiming disk
 
 A workspace build is tens of gigabytes, and it is per worktree: four
-worktrees on one laptop carry four of them, plus four indexes. `scripts/clean.sh`
+worktrees on one laptop carry four of them, plus four indexes. `scripts/dev/clean.sh`
 removes what this checkout can rebuild, across every worktree `git worktree
 list` reports; the `justfile` is a front end for it, so `just` alone lists the
 recipes.
@@ -406,7 +406,7 @@ just disk          # what every scope below would remove, and the total. Removes
 just clean         # build output: target/ of every worktree, plus the ignored scratch in the tree
 just clean-index   # .pixel/ of every worktree (each daemon is stopped first)
 just clean-cache   # the base-shard cache shared by every worktree (~/.cache/pixel/shards)
-just clean-bench   # /tmp scratch from scripts/pixel-bench.sh
+just clean-bench   # /tmp scratch from scripts/bench/pixel-bench.sh
 just clean-all     # all of the above
 ```
 
@@ -417,7 +417,7 @@ by what getting the bytes back costs. `clean` costs one `cargo build`;
 `clean-index` costs `pixel build-index --history .`, minutes on a repository of
 a few hundred commits; `clean-cache` costs every worktree its next index build,
 because the cache is what makes a second worktree at the same commit cheap.
-`just` is not a prerequisite for anything: `scripts/clean.sh --help` documents
+`just` is not a prerequisite for anything: `scripts/dev/clean.sh --help` documents
 the same scopes and runs without it.
 
 Nothing under `~/.local/share/pixel/recall` (the recall corpus) or
@@ -464,7 +464,7 @@ Read [ARCHITECTURE.md](../ARCHITECTURE.md) for the full map. The short version:
 4. Wire the clap subcommand in `crates/pixel/src/main.rs`.
 5. Add a CLI integration test for the JSON contract.
 6. Update `ARCHITECTURE.md`, the agent prompt asset, and add a
-   `changelog.d/<slug>.<section>.md` fragment.
+   `.github/changelog.d/<slug>.<section>.md` fragment.
 
 ## Working on this repo with an AI agent
 
@@ -520,7 +520,7 @@ tools. Publish a reviewable candidate without waiting for local gates.
 | Before merge | Required CI tests, lint and selected feature/MSRV lanes; review | Current-head checks pass and findings are addressed |
 | Nightly main | Mutations on unjudged commits; coverage on an unmeasured SHA | Reports retained, failures investigated |
 
-`scripts/gates.sh` remains available for a deliberate local run; `--force`
+`scripts/ci/gates.sh` remains available for a deliberate local run; `--force`
 includes Cargo regardless of its path filter. It never runs mutations.
 
 For a long local run, use the harness's background-task facility and keep
@@ -621,7 +621,7 @@ which GitHub pre-fills, section by section (agents follow
    user's state; one-way for an `EXTRACTOR_VERSION` or `PROTOCOL_VERSION`
    bump, a file format under `.pixel/`, what `pixel setup` writes, a
    release tag) and the **blast radius** (who a bad merge breaks).
-4. **Docs touched**: `changelog.d/`, `ARCHITECTURE.md`, agent prompt, README.
+4. **Docs touched**: `.github/changelog.d/`, `ARCHITECTURE.md`, agent prompt, README.
 
 Keep PRs to one concern. A change over roughly 400 lines of diff or mixing
 concerns should be split into a stack of PRs.
@@ -680,7 +680,7 @@ paths are reviewed, the path-specific instructions that restate the rules
 above for the reviewer, the guideline files it applies (this file,
 `.agents/rules/`, the rust-guidelines skill) and the pre-merge checks, all
 warnings: Conventional Commits title, description, verification evidence in
-the body (the gate commands and what was not run), and a `changelog.d/`
+the body (the gate commands and what was not run), and a `.github/changelog.d/`
 fragment for a `feat`/`fix` touching `crates/`. The file is read from the
 branch under review, so a change to it is exercised by the pull request that
 carries it.
@@ -754,8 +754,8 @@ merging on the CI checks alone.
 ## Changelog
 
 `CHANGELOG.md` follows Keep a Changelog. Entries do not live in it until a
-release cuts them there: you write one file per entry under `changelog.d/`,
-e.g. `changelog.d/184-rank-gate-tolerance.fixed.md`.
+release cuts them there: you write one file per entry under `.github/changelog.d/`,
+e.g. `.github/changelog.d/184-rank-gate-tolerance.fixed.md`.
 
 The name is `<slug>.<section>.md`, the section naming the heading the entry is
 filed under — `added`, `changed`, `deprecated`, `removed`, `fixed` or
@@ -807,13 +807,13 @@ the cut.
 ### The release's highlights
 
 The narrative belongs to the release, not to each of its entries. An optional
-`changelog.d/_highlights.md` carries it: a lead paragraph saying what the
+`.github/changelog.d/_highlights.md` carries it: a lead paragraph saying what the
 release is about, then a `### Highlights` list of two or three bullets for the
 changes a reader should not miss. `prepare.sh` folds it in above the sections,
 so the GitHub release body — which `release.yml` cuts from the version heading
 to the next `## ` — opens on it.
 
-It is the one underscore-named file `changelog.d/` takes, and it is not an
+It is the one underscore-named file `.github/changelog.d/` takes, and it is not an
 entry: no section in its name, no scope prefix, no 500-byte aim. `###` and
 below are its to use; a `#` or `##` heading would end the section the release
 body is cut from, so `prepare.sh` refuses one, along with a file over 2000
@@ -839,7 +839,7 @@ The full procedure, with the checks after publication and the recovery from
 a failed run, is the `release` skill (`.agents/skills/release/SKILL.md`).
 Steps 1 to 3 are `.agents/skills/release/prepare.sh x.y.z`.
 
-1. Fold the `changelog.d/` fragments into a new `## [x.y.z] - YYYY-MM-DD`
+1. Fold the `.github/changelog.d/` fragments into a new `## [x.y.z] - YYYY-MM-DD`
    under a kept, empty `## [Unreleased]`, and delete them.
 2. Bump `version` in every workspace member (they move in lockstep since
    0.2.4), then `cargo update --workspace` so `Cargo.lock` follows.
@@ -851,7 +851,7 @@ Steps 1 to 3 are `.agents/skills/release/prepare.sh x.y.z`.
    `.github/workflows/release-build.yml`, which builds
    `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and
    `aarch64-apple-darwin`, generates the Homebrew formula with real hashes
-   and its two Linux bottles (`scripts/homebrew-formula.py`) and signs their
+   and its two Linux bottles (`scripts/release/homebrew-formula.py`) and signs their
    provenance; `release.yml` then uploads the tarballs with their `.sha256`
    files. `fail-fast: true`
    means a partial build failure publishes nothing.

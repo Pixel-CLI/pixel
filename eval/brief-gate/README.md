@@ -9,9 +9,9 @@ numbers and the way to reproduce them are in
 [`docs/bench/brief-gate.md`](../../docs/bench/brief-gate.md).
 
 ```bash
-python3 scripts/bench-brief-gate.py --check-set                       # schema, balance, privacy lint
-python3 scripts/bench-brief-gate.py --check-set --repo <fixture>      # + every expected file exists there
-python3 scripts/bench-brief-gate.py --pixel <pixel> --repo <fixture> --split dev
+python3 scripts/bench/bench-brief-gate.py --check-set                       # schema, balance, privacy lint
+python3 scripts/bench/bench-brief-gate.py --check-set --repo <fixture>      # + every expected file exists there
+python3 scripts/bench/bench-brief-gate.py --pixel <pixel> --repo <fixture> --split dev
 ```
 
 ## Files
@@ -19,7 +19,7 @@ python3 scripts/bench-brief-gate.py --pixel <pixel> --repo <fixture> --split dev
 | File | What |
 | --- | --- |
 | `prompts.jsonl` | the set, one JSON object per line |
-| `../../scripts/bench-brief-gate.py` | the runner, the metrics and `--check-set` / `--self-test` |
+| `../../scripts/bench/bench-brief-gate.py` | the runner, the metrics and `--check-set` / `--self-test` |
 
 ## Schema
 
@@ -130,5 +130,5 @@ after must use the same file.
 The same idea for four repositories at their pinned commits (`sha`): the 20 prompts of the tool census plus 30 written
 for each of excalidraw, requests and ripgrep (150 rows with the 40 off-topic ones). Off-topic rows have `repo`
 `any` and `sha` null: they are scored against every repository. `split` is dealt alternately by the SHA-256 of the text
-inside each (repo, on-topic) stratum. Built by `scripts/research-gate/multirepo_set.py`; used by
-`scripts/research-gate/gate_multirepo.py`. It has no `expected_files`: it measures the gate, not file retrieval.
+inside each (repo, on-topic) stratum. Built by `scripts/bench/research-gate/multirepo_set.py`; used by
+`scripts/bench/research-gate/gate_multirepo.py`. It has no `expected_files`: it measures the gate, not file retrieval.

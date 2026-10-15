@@ -146,7 +146,7 @@ reviews:
         Every exception (advisory ignore, licence, duplicate-major, source)
         carries its reason next to it. Flag an exception added without one,
         or an advisory silenced instead of fixed by a dependency change.
-    - path: "changelog.d/**"
+    - path: ".github/changelog.d/**"
       instructions: |
         One file per entry, named `<slug>.<section>.md` where the section is
         one of `added`, `changed`, `deprecated`, `removed`, `fixed`,
@@ -164,9 +164,9 @@ reviews:
     - path: "CHANGELOG.md"
       instructions: |
         Only a `release: prepare x.y.z` commit edits this file, by folding
-        `changelog.d/` fragments under a new dated `## [x.y.z]` heading and
+        `.github/changelog.d/` fragments under a new dated `## [x.y.z]` heading and
         keeping an empty `## [Unreleased]`. Flag a hand-written bullet in any
-        other pull request: it belongs in `changelog.d/`.
+        other pull request: it belongs in `.github/changelog.d/`.
     - path: ".github/workflows/**"
       instructions: |
         Third-party actions are pinned to a full commit SHA with the version
@@ -197,7 +197,7 @@ reviews:
         tree it measures must snapshot and restore what it touches and
         refuse to start on a pre-modified target: a lost edit in a bench
         checkout was a real finding on an earlier pull request.
-        Exemption: `scripts/bench-decide/**` is a bake-off of local ML
+        Exemption: `scripts/bench/bench-decide/**` is a bake-off of local ML
         models, whose adapters in `models.py` cannot run without torch,
         transformers and the model authors' packages. There, third-party
         imports are allowed only inside the `load()`/`decide()` of the adapter
@@ -205,8 +205,8 @@ reviews:
         `freeze_sets.py` and the `keyword-router`/`remote-cli` adapters still
         run on the standard library; flag a module-level third-party import.
         It does not use `bench_common.py`, which resolves the GitNexus CLI
-        for `scripts/bench-vs/` and has nothing this harness needs.
-        Exemption: `scripts/research-gate/**` fits and calibrates the brief
+        for `scripts/bench/bench-vs/` and has nothing this harness needs.
+        Exemption: `scripts/bench/research-gate/**` fits and calibrates the brief
         gate's logistic model offline (issue #883); nothing in `pixel` or CI
         runs it. Its fitting scripts (`gate_compact.py`, `gate_export.py`,
         `gate_forward.py`, `gate_pick_compact.py`) import numpy and
@@ -283,7 +283,7 @@ reviews:
         instructions: |
           Pass when the pull request description contains a section that
           names the gate commands run (any of `cargo fmt`, `cargo test`,
-          `cargo nextest`, `cargo clippy`, `cargo deny`, `scripts/gates.sh`,
+          `cargo nextest`, `cargo clippy`, `cargo deny`, `scripts/ci/gates.sh`,
           or a validator for non-Rust files) with their result, and states
           what was not run. Pass also when the diff touches no file under
           `crates/`, `Cargo.toml`, `Cargo.lock`, `deny.toml` or `.cargo/`
@@ -296,7 +296,7 @@ reviews:
         instructions: |
           Pass when the title type is `docs`, `chore`, `refactor`, `test`,
           `perf` or `release`, or when the diff adds or modifies a file
-          matching `changelog.d/*.<section>.md` whose section is one of
+          matching `.github/changelog.d/*.<section>.md` whose section is one of
           added, changed, deprecated, removed, fixed, security and whose
           content opens on `**<scope>:** `, carries no leading `-`, and fits
           500 bytes.

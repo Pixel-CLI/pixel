@@ -111,7 +111,7 @@ pixel doctor .     # optional health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-The one-liner runs [`install.sh`](scripts/install.sh): one POSIX `sh` file, no `sudo`, which verifies the release's SHA-256 and writes one file, `~/.local/bin/pixel`.
+The one-liner runs [`install.sh`](scripts/release/install.sh): one POSIX `sh` file, no `sudo`, which verifies the release's SHA-256 and writes one file, `~/.local/bin/pixel`.
 
 ## For AI agents
 

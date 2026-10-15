@@ -59,7 +59,7 @@ $S abort [lookup]                         # interrupt, close the panes
 ## A set in a row: `run-set`
 
 ```bash
-$S run-set census --pixel-bin /path/to/pixel --brief-extra "python3 -I scripts/probe-chain.py"
+$S run-set census --pixel-bin /path/to/pixel --brief-extra "python3 -I scripts/bench/probe-chain.py"
 $S run-set <catalog|census|bench> [--only id,id] [--parts 3] [--timeout S] [--sha C] [--baseline FILE]
 $S abort                       # stops both panes AND the loop
 ```
@@ -74,7 +74,7 @@ copy, the same prompt sent to both, a wait until both settle or `--timeout` pass
 each Codex rollout (parsed events, not the screen). The pixel arm registers `--parts` (default 3) prompt-submit
 hooks the way `pixel setup` does. `--brief-extra CMD` puts `hook-wrap.py` between the hooks and the pinned binary:
 it joins the brief of all parts, runs `CMD` (environment `CLONE`, `PROMPT`, `BRIEF_FILE`; a leading `@@REPLACE@@`
-replaces the brief), and splits the result over the parts again; `scripts/probe-chain.py` is the chain of gated
+replaces the brief), and splits the result over the parts again; `scripts/bench/probe-chain.py` is the chain of gated
 `probes/` until the brief runs probes itself. The end prints and saves (`$SCRATCH/sets/<source>-<utc>/table.md`)
 `case | no-pixel calls | pixel calls | brief bytes | pixel 0?` with totals, flags "0 but NO BRIEF delivered", and
 marks any case above its previous pixel baseline (`--baseline`; for `census` the last recorded live run).

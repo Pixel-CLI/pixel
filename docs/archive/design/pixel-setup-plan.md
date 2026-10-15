@@ -358,12 +358,12 @@ repository state is touched by `pixel setup`.
       `crates/pixel-setup/assets/pixel-agent-prompt.md` is deliberately
       unchanged: it is the retrieval protocol, and the setup block is
       user-facing steering, not a command the agent runs.
-- [x] `changelog.d/pixel-setup-wizard.added.md`.
+- [x] `.github/changelog.d/pixel-setup-wizard.added.md`.
 - [x] `cargo fmt --all -- --check`, `cargo test -p pixel-setup`,
       `cargo test -p pixel-cli --test cli`, `cargo clippy -p pixel-setup -p
       pixel-cli --all-targets`, `cargo check --workspace --all-targets`,
       `cargo test -p pixel-git --test boundary`,
-      `python3 scripts/check-spdx.py`.
+      `python3 scripts/ci/check-spdx.py`.
 - [ ] Optional: `pixel-dev build-index --history . && pixel-dev install --repo . &&
       pixel-dev doctor . --fix --fail-on yellow --skip 'install.*'` if the change
       moves what the home install writes.

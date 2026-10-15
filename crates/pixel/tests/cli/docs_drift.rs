@@ -756,7 +756,7 @@ fn every_rule_id_in_the_skill_should_head_a_guideline_when_upstream_is_refreshed
     let unknown: Vec<&String> = named.iter().filter(|id| !known.contains(*id)).collect();
     assert!(
         unknown.is_empty(),
-        "SKILL.md names rule ids that are not headings of guidelines.txt (renamed or removed upstream? run scripts/refresh-guidelines.sh and update SKILL.md): {unknown:?}"
+        "SKILL.md names rule ids that are not headings of guidelines.txt (renamed or removed upstream? run scripts/dev/refresh-guidelines.sh and update SKILL.md): {unknown:?}"
     );
 }
 

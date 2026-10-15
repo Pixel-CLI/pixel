@@ -94,7 +94,7 @@ codegen-units = 16
 # its documented manifest location). It forwards RUSTFLAGS and the CARGO_*
 # variables into its container by itself, not SOURCE_DATE_EPOCH:
 # crates/pixel/build.rs reads it for the build date `pixel --version`
-# prints, which scripts/release-build-env.sh pins to the commit's time so a
+# prints, which scripts/release/release-build-env.sh pins to the commit's time so a
 # release build is reproducible.
 [workspace.metadata.cross.build.env]
 passthrough = ["SOURCE_DATE_EPOCH"]

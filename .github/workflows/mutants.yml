@@ -40,7 +40,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           test "$GITHUB_REF" = refs/heads/main
-          python3 scripts/mutants-nightly-range.py plan \
+          python3 scripts/ci/mutants-nightly-range.py plan \
             --repository "$GITHUB_REPOSITORY" --head "$GITHUB_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
@@ -126,7 +126,7 @@ jobs:
         env:
           SRC: ${{ steps.diff.outputs.src }}
           # The pool every shard draws its runner from, one `runs-on` value
-          # per shard round-robin (scripts/mutants-gate.py). Absent or empty
+          # per shard round-robin (scripts/ci/mutants-gate.py). Absent or empty
           # falls back to GitHub's image; a malformed array fails the plan.
           RUNNERS_FILE: ${{ runner.temp }}/shard-runners.json
           # Through the environment, not template expansion: `${{ vars.* }}`
@@ -135,7 +135,7 @@ jobs:
           RUNNER_POOL: ${{ vars.PIXEL_MUTANTS_SHARD_RUNNERS }}
         run: |
           printf '%s' "$RUNNER_POOL" > "$RUNNERS_FILE"
-          python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt \
+          python3 scripts/ci/mutants-gate.py --diff pr.diff --list mutants-list.txt \
             --config mutants-config.toml --runners "$RUNNERS_FILE" \
             --github-output "$GITHUB_OUTPUT"
 
@@ -396,7 +396,7 @@ jobs:
       - name: Report what the gate actually tested
         id: report
         run: >
-          python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt
+          python3 scripts/ci/mutants-gate.py --diff pr.diff --list mutants-list.txt
           --outcomes-root shards --summary "$GITHUB_STEP_SUMMARY"
 
       # A failed report may still be a complete campaign (MISSED/TIMEOUT).
@@ -408,7 +408,7 @@ jobs:
         env:
           TIP: ${{ needs.plan.outputs.ref }}
         run: |
-          python3 scripts/mutants-nightly-range.py checkpoint \
+          python3 scripts/ci/mutants-nightly-range.py checkpoint \
             --list mutants-list.txt --outcomes-root shards --sha "$TIP" \
             --output checkpoint.json
 

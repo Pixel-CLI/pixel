@@ -5,7 +5,7 @@ name: Reproducible build
 
 # Builds the x86_64-unknown-linux-musl release binary twice from one commit,
 # in two checkouts at different paths, with release-build.yml's exact command
-# and environment (scripts/release-build-env.sh), and fails unless the two
+# and environment (scripts/release/release-build-env.sh), and fails unless the two
 # binaries are byte-identical: the evidence behind SECURITY.md, "Reproducing
 # a release build" (OpenSSF build_repeatable). Neither build restores a
 # cache, so each compiles every crate itself. One lane is enough to catch an
@@ -32,7 +32,7 @@ on:
       - "crates/*/Cargo.toml"
       - "crates/pixel/build.rs"
       - "rust-toolchain*"
-      - "scripts/release-build-env.sh"
+      - "scripts/release/release-build-env.sh"
   push:
     branches: [main]
     paths:
@@ -43,7 +43,7 @@ on:
       - "Cargo.toml"
       - "crates/**"
       - "rust-toolchain*"
-      - "scripts/release-build-env.sh"
+      - "scripts/release/release-build-env.sh"
   schedule:
     - cron: "37 4 * * 3"
   workflow_dispatch:
@@ -94,7 +94,7 @@ jobs:
       # build without the environment if the script failed.
       - name: Build in the first checkout
         run: |
-          env_lines=$(scripts/release-build-env.sh)
+          env_lines=$(scripts/release/release-build-env.sh)
           eval "$env_lines"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=$RUSTFLAGS"
           cross build --release --locked --no-default-features --features model2vec --target "$TARGET" -p pixel-cli
@@ -103,7 +103,7 @@ jobs:
       - name: Build in the second checkout
         working-directory: ${{ runner.temp }}/pixel-second
         run: |
-          env_lines=$(scripts/release-build-env.sh)
+          env_lines=$(scripts/release/release-build-env.sh)
           eval "$env_lines"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=$RUSTFLAGS"
           cross build --release --locked --no-default-features --features model2vec --target "$TARGET" -p pixel-cli
