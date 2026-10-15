@@ -64,7 +64,7 @@ One page per agent: what `pixel setup` writes for it and where, the `pixel docto
 - [Copilot CLI](https://pixel-cli.dev/for/copilot-cli/): nothing written by `pixel setup`; it only removes the hooks an earlier release wrote
 - [OpenCode](https://pixel-cli.dev/for/opencode/): native tools; `pixel setup` only removes what earlier releases wrote
 - [Devin](https://pixel-cli.dev/for/devin/): `pixel setup` (a per-prompt evidence brief through Devin's hook; retired lifecycle hooks removed)
-- [Antigravity](https://pixel-cli.dev/for/antigravity/): native tools; `pixel setup` only removes the plugin and hooks earlier releases wrote
+- [Antigravity](https://pixel-cli.dev/for/antigravity/): native tools; `pixel setup` installs a `PreInvocation` brief and a conversation-scoped plugin metrics relay deferred from `PostToolUse` to `PostInvocation`
 
 ## Answers
 

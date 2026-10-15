@@ -100,7 +100,7 @@ pub struct InstallSelection {
     /// The agents selected.
     pub agents: Vec<AgentTarget>,
     /// Register the task-event hooks of Claude Code, Devin, Gemini CLI,
-    /// Antigravity and OpenCode.
+    /// Antigravity and OpenCode, including the Claude and Antigravity metrics relays.
     pub task_hooks: bool,
     /// Register Codex's task hooks.
     pub codex_hooks: bool,
@@ -237,9 +237,9 @@ pub fn install_selected(
             dry_run,
         )?);
     }
-    // Keep task accounting and configured task gates available to every
-    // Claude session. Automatic retrieval guidance, post-edit advice and
-    // metrics are excluded from the native-default profile.
+    // Keep task accounting, configured task gates and metrics available to
+    // every Claude session. Retrieval guidance and post-edit advice stay out
+    // of the native-default profile.
     if wants.task_hooks(AgentTarget::ClaudeCode) {
         steps.push(crate::routing::install_at_scoped(
             &home,
@@ -293,10 +293,9 @@ pub fn install_selected(
             &home, &exe, dry_run,
         )?);
     }
-    // Every other host keeps its native retrieval: install writes no prompt,
-    // rewrite, approval or pre-invocation hook for it, and removes the ones
-    // an earlier release wrote. Each step runs only where that host's
-    // configuration exists, so a machine without it is left untouched.
+    // Every other host keeps its native retrieval. Each step runs only where
+    // that host's configuration exists, so a machine without it is left
+    // untouched.
     let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
     if opencode_dir.is_dir() {
         if wants.sweep(AgentTarget::OpenCode) {
@@ -342,11 +341,13 @@ pub fn install_selected(
                 &home, &exe, dry_run,
             )?);
         }
-        // The Antigravity brief hook: PreInvocation in the global
-        // hooks.json, written after the removal sweep so a stale copy the
-        // sweep just deleted is not re-added before removal runs.
+        // Antigravity hooks and its plugin are written after the removal
+        // sweep, so stale copies the sweep just deleted are not re-added.
         if wants.task_hooks(AgentTarget::Antigravity) {
             steps.push(crate::antigravity::install_antigravity_brief(
+                &home, &exe, dry_run,
+            )?);
+            steps.push(crate::antigravity::install_antigravity_plugin(
                 &home, &exe, dry_run,
             )?);
         }

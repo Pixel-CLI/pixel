@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 //! `pixel run-hook metrics` — the PostToolUse relay that replays a pixel
-//! invocation's finalized 🟩 metrics line to hosts whose tool results drop
-//! stderr (Codex) or keep it user-invisible (Claude's Bash result). The hook
+//! invocation's finalized 🟩 metrics line through hosts' visible hook message
+//! channels when shell tool results keep stderr out of the transcript. The hook
 //! reads the tool-call payload, matches the shell command's pixel invocation
 //! to the newest finalized action record for the effective cwd, and re-emits
 //! its metrics line in the provider's hook-response contract. Every miss —
@@ -17,6 +17,13 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+
+/// Antigravity's two hook events used by the deferred metrics relay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum MetricsEvent {
+    PostToolUse,
+    PostInvocation,
+}
 
 /// The hook payload's host. Named `Provider` to keep the restored code
 /// byte-identical to the version the registered command lines carry.
@@ -171,7 +178,14 @@ fn provider_payload(provider: Provider, mut payload: Value) -> Value {
         && let Some(call) = payload.get("toolCall")
     {
         let tool = call.get("name").cloned().unwrap_or(Value::Null);
-        let input = call.get("args").cloned().unwrap_or(Value::Null);
+        let mut input = call.get("args").cloned().unwrap_or(Value::Null);
+        // Antigravity names the shell command `CommandLine`; normalize it at
+        // the provider boundary before the shared metrics lookup.
+        if input.get("command").is_none()
+            && let Some(command) = input.get("CommandLine").cloned()
+        {
+            input["command"] = command;
+        }
         let cwd = input
             .get("Cwd")
             .or_else(|| payload.get("workspacePaths")?.as_array()?.first())
@@ -236,18 +250,10 @@ const METRICS_SHELL_TOOLS: &[&str] = &[
     "functions.shell",
 ];
 
-/// `pixel run-hook metrics` — PostToolUse relay whose dedupe drops a 🟩
-/// block already in the tool result. Codex's exec layer merges the
-/// invocation's stderr into the tool result it records and shows, so the
-/// relay is the fallback for the rare host whose tool result drops it,
-/// not the primary path: the 🟩 line reaches a Codex user once via the
-/// tool result and the relay no-ops on its dedupe. The hook reads the
-/// payload, matches the invocation to its finalized action record, and
-/// replays that record's line as `additionalContext`. Any miss is a
-/// silent exit: the relay is advisory and must never turn a tool call
-/// into a failure.
+/// `pixel run-hook metrics` — relay finalized metrics lines through provider
+/// hook contracts without turning a tool call into a failure.
 #[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; every decision lives in `metrics_hook_line`
-pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
+pub fn run_metrics_hook(provider: Option<Provider>, event: MetricsEvent) -> ! {
     // An imported Claude entry running beside Devin's own relay would emit
     // the Claude contract (`systemMessage`) into a host that never asked for
     // it and double the native `--provider devin` relay's output.
@@ -260,17 +266,148 @@ pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
     let Ok(payload) = serde_json::from_str::<Value>(&input) else {
         std::process::exit(0);
     };
-    // Antigravity's PostToolUse carries a camelCase `toolCall` payload; the
-    // same provider-boundary normalization the guard path applies lets the
-    // relay read it (a miss is the documented silent exit below).
-    let payload = match provider {
-        Some(p) => provider_payload(p, payload),
-        None => payload,
-    };
-    if let Some(response) = metrics_hook_response(provider, &payload) {
+    if let Some(response) = metrics_hook_event_response(provider, event, &payload) {
         print!("{response}");
     }
     std::process::exit(0);
+}
+
+fn metrics_hook_event_response(
+    provider: Option<Provider>,
+    event: MetricsEvent,
+    payload: &Value,
+) -> Option<Value> {
+    if provider == Some(Provider::Antigravity) {
+        return antigravity_metrics_hook_response(event, payload);
+    }
+    if event != MetricsEvent::PostToolUse {
+        return None;
+    }
+    let payload =
+        provider.map_or_else(|| payload.clone(), |p| provider_payload(p, payload.clone()));
+    metrics_hook_response(provider, &payload)
+}
+
+fn antigravity_metrics_hook_response(event: MetricsEvent, payload: &Value) -> Option<Value> {
+    match event {
+        MetricsEvent::PostToolUse => {
+            let payload = provider_payload(Provider::Antigravity, payload.clone());
+            if let Some(line) = metrics_record_line(&payload) {
+                let _ = store_antigravity_pending_metric(&payload, &line);
+            }
+            Some(serde_json::json!({}))
+        }
+        MetricsEvent::PostInvocation => {
+            let lines = take_antigravity_pending_metrics(payload)?;
+            (!lines.is_empty()).then(|| {
+                serde_json::json!({
+                    "injectSteps": lines.into_iter().map(|line| {
+                        serde_json::json!({"ephemeralMessage": line})
+                    }).collect::<Vec<_>>()
+                })
+            })
+        }
+    }
+}
+
+const ANTIGRAVITY_PENDING_METRICS_DIR: &str = ".pixel-pending-metrics";
+
+fn antigravity_pending_metrics_dir(payload: &Value) -> Option<(PathBuf, &str)> {
+    let conversation_id = payload.get("conversationId")?.as_str()?;
+    if conversation_id.is_empty() {
+        return None;
+    }
+    let artifact_path = payload.get("artifactDirectoryPath")?.as_str()?;
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let gemini_home = home.canonicalize().ok()?.join(".gemini");
+    let artifact_path = artifact_path.strip_prefix("~/").map_or_else(
+        || PathBuf::from(artifact_path),
+        |relative| home.join(relative),
+    );
+    if !artifact_path.is_absolute() {
+        return None;
+    }
+    let artifact_path = artifact_path.canonicalize().ok()?;
+    if !artifact_path.starts_with(&gemini_home) {
+        return None;
+    }
+    Some((
+        artifact_path.join(ANTIGRAVITY_PENDING_METRICS_DIR),
+        conversation_id,
+    ))
+}
+
+fn store_antigravity_pending_metric(payload: &Value, line: &str) -> std::io::Result<()> {
+    let Some(step_idx) = payload.get("stepIdx").and_then(Value::as_u64) else {
+        return Ok(());
+    };
+    let Some((directory, conversation_id)) = antigravity_pending_metrics_dir(payload) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&directory)?;
+    let pending = serde_json::json!({
+        "conversationId": conversation_id,
+        "stepIdx": step_idx,
+        "line": line
+    });
+    std::fs::write(
+        directory.join(format!("{step_idx}.json")),
+        serde_json::to_vec(&pending)?,
+    )
+}
+
+fn take_antigravity_pending_metrics(payload: &Value) -> Option<Vec<String>> {
+    let conversation_id = payload.get("conversationId")?.as_str()?;
+    let initial_num_steps = payload.get("initialNumSteps")?.as_u64()?;
+    let (directory, _) = antigravity_pending_metrics_dir(payload)?;
+    let entries = std::fs::read_dir(&directory).ok()?;
+    let mut files = entries
+        .filter_map(std::result::Result::ok)
+        .collect::<Vec<_>>();
+    files.sort_by_key(std::fs::DirEntry::file_name);
+    let mut pending = Vec::new();
+    for entry in files {
+        let path = entry.path();
+        let Some(step_idx) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|name| name.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let record = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        let Some(record) = record else {
+            let _ = std::fs::remove_file(path);
+            continue;
+        };
+        if record.get("conversationId").and_then(Value::as_str) != Some(conversation_id) {
+            let _ = std::fs::remove_file(path);
+            continue;
+        }
+        if step_idx < initial_num_steps {
+            let _ = std::fs::remove_file(path);
+            continue;
+        }
+        if record.get("stepIdx").and_then(Value::as_u64) != Some(step_idx) {
+            let _ = std::fs::remove_file(path);
+            continue;
+        }
+        if let Some(line) = record.get("line").and_then(Value::as_str) {
+            pending.push((step_idx, line.to_owned(), path));
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    pending.sort_by_key(|(step_idx, _, _)| *step_idx);
+    let lines = pending
+        .into_iter()
+        .filter_map(|(_, line, path)| std::fs::remove_file(path).ok().map(|()| line))
+        .collect::<Vec<_>>();
+    let _ = std::fs::remove_dir(&directory);
+    Some(lines)
 }
 
 /// Whether the host already put the invocation's 🟩 box in the tool result.
@@ -290,10 +427,13 @@ fn result_carries_metrics_box(payload: &Value) -> bool {
 
 /// The provider-shaped envelope for a replayed metrics line: Cursor's
 /// postToolUse contract is flat snake_case `additional_context` and
-/// Copilot's is flat camelCase `additionalContext`; every other host takes
-/// the Claude-style advisory shape.
+/// Copilot's is flat camelCase `additionalContext`; Codex uses its documented
+/// `systemMessage` relay.
 fn metrics_relay_response(provider: Option<Provider>, line: &str) -> Value {
     match provider {
+        // Codex's shell result can carry stderr without surfacing the footer
+        // in the transcript, so PostToolUse uses the documented visible field.
+        Some(Provider::Codex) => serde_json::json!({"systemMessage": line}),
         Some(Provider::Cursor) => serde_json::json!({"additional_context": line}),
         Some(Provider::Copilot) => serde_json::json!({"additionalContext": line}),
         _ => post_tool_use_advisory(line),
@@ -303,15 +443,13 @@ fn metrics_relay_response(provider: Option<Provider>, line: &str) -> Value {
 /// The hook's answer. A box missing from the result is replayed as
 /// `additionalContext` for every provider. A box already in the result is a
 /// duplicate for the model, so it is dropped, except for Claude Code: its
-/// Bash result carries stderr, which the user never sees, so the finalized
-/// box goes out as `systemMessage` only (user-visible, not model context).
-/// Devin and Codex document no `systemMessage` for this event and keep the
-/// silent dedupe.
+/// Bash result carries hidden stderr, while Codex's documented `systemMessage`
+/// is the user-visible relay when its shell result hides the footer.
 fn metrics_hook_response(provider: Option<Provider>, payload: &Value) -> Option<Value> {
     if !result_carries_metrics_box(payload) {
         return metrics_hook_line(payload).map(|line| metrics_relay_response(provider, &line));
     }
-    (provider == Some(Provider::Claude))
+    matches!(provider, Some(Provider::Claude | Provider::Codex))
         .then(|| metrics_record_line(payload))
         .flatten()
         .map(|line| serde_json::json!({"systemMessage": line}))
@@ -1041,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn metrics_hook_response_dedupes_except_for_claude_users() {
+    fn metrics_hook_response_relays_visible_metrics_for_claude_and_codex_users() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let fixture = MetricsFixture::new("response");
         let plain = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
@@ -1050,33 +1188,186 @@ mod tests {
         shown["tool_response"] = serde_json::json!({"stdout": "", "stderr": line});
         // Box missing: the model context replay, for every provider.
         let advisory = post_tool_use_advisory(&line);
-        for provider in [
-            None,
-            Some(Provider::Claude),
-            Some(Provider::Devin),
-            Some(Provider::Codex),
-        ] {
+        for provider in [None, Some(Provider::Claude), Some(Provider::Devin)] {
             assert_eq!(
                 metrics_hook_response(provider, &plain),
                 Some(advisory.clone())
             );
         }
-        // Box shown: only Claude answers, with the system message alone.
+        assert_eq!(
+            metrics_hook_response(Some(Provider::Codex), &plain),
+            Some(serde_json::json!({"systemMessage": line}))
+        );
+        // A box in tool_result isn't sufficient for a user-visible result in
+        // Claude or Codex; both use their documented systemMessage field.
         assert_eq!(
             metrics_hook_response(Some(Provider::Claude), &shown),
             Some(serde_json::json!({"systemMessage": line}))
         );
-        for provider in [
-            None,
-            Some(Provider::Devin),
-            Some(Provider::Cursor),
-            Some(Provider::Cursor),
-        ] {
+        assert_eq!(
+            metrics_hook_response(Some(Provider::Codex), &shown),
+            Some(serde_json::json!({"systemMessage": line}))
+        );
+        for provider in [None, Some(Provider::Devin), Some(Provider::Cursor)] {
             assert_eq!(metrics_hook_response(provider, &shown), None);
         }
         // Shown, but no record matches: nothing to finalize.
         shown["tool_input"] = serde_json::json!({"command": "pixel impact other.rs"});
         assert_eq!(metrics_hook_response(Some(Provider::Claude), &shown), None);
+        assert_eq!(metrics_hook_response(Some(Provider::Codex), &shown), None);
+    }
+
+    #[test]
+    fn antigravity_post_tool_use_should_store_line_and_answer_empty_object() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("antigravity");
+        let artifact_dir = fixture
+            .root
+            .parent()
+            .unwrap()
+            .join("home/.gemini/antigravity/conversation-a");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        let payload = provider_payload(
+            Provider::Antigravity,
+            serde_json::json!({
+                "toolCall": {
+                    "name": "run_command",
+                    "args": {
+                        "CommandLine": "pixel impact src/login.rs",
+                        "Cwd": fixture.root.display().to_string()
+                    }
+                },
+                "conversationId": "conversation-a",
+                "artifactDirectoryPath": artifact_dir,
+                "stepIdx": 4
+            }),
+        );
+        assert_eq!(
+            antigravity_metrics_hook_response(MetricsEvent::PostToolUse, &payload),
+            Some(serde_json::json!({}))
+        );
+        let line = metrics_record_line(&payload).expect("the fixture has one matching record");
+        assert!(line.starts_with("🟩 pixel impact ❀"), "{line}");
+        assert_eq!(line.lines().count(), 1, "{line}");
+        let pending_file = artifact_dir
+            .join(ANTIGRAVITY_PENDING_METRICS_DIR)
+            .join("4.json");
+        assert!(pending_file.is_file(), "PostToolUse persisted the metric");
+        let post_invocation = serde_json::json!({
+            "conversationId": "conversation-a",
+            "artifactDirectoryPath": artifact_dir,
+            "initialNumSteps": 2
+        });
+        assert_eq!(
+            antigravity_metrics_hook_response(MetricsEvent::PostInvocation, &post_invocation),
+            Some(serde_json::json!({
+                "injectSteps": [{"ephemeralMessage": line}]
+            }))
+        );
+        assert!(!pending_file.exists(), "the delivered metric is consumed");
+    }
+
+    #[test]
+    fn antigravity_pending_metrics_should_stay_conversation_scoped_and_clear_stale_steps() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("antigravity-correlation");
+        fixture.record("impact", "impact src/other.rs");
+        let home = fixture.root.parent().unwrap().join("home");
+        let artifact = |conversation: &str| {
+            let path = home.join(".gemini/antigravity").join(conversation);
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        };
+        let tool_payload = |conversation: &str, artifact_dir: &Path, command: &str, step_idx| {
+            provider_payload(
+                Provider::Antigravity,
+                serde_json::json!({
+                    "toolCall": {"name": "run_command", "args": {
+                        "CommandLine": command,
+                        "Cwd": fixture.root.display().to_string()
+                    }},
+                    "conversationId": conversation,
+                    "artifactDirectoryPath": artifact_dir,
+                    "stepIdx": step_idx
+                }),
+            )
+        };
+        let artifact_a = artifact("conversation-a");
+        let artifact_b = artifact("conversation-b");
+        let payload_a = tool_payload(
+            "conversation-a",
+            &artifact_a,
+            "pixel impact src/login.rs",
+            4,
+        );
+        let payload_b = tool_payload(
+            "conversation-b",
+            &artifact_b,
+            "pixel impact src/other.rs",
+            4,
+        );
+        assert_eq!(
+            antigravity_metrics_hook_response(MetricsEvent::PostToolUse, &payload_a),
+            Some(serde_json::json!({}))
+        );
+        assert_eq!(
+            antigravity_metrics_hook_response(MetricsEvent::PostToolUse, &payload_b),
+            Some(serde_json::json!({}))
+        );
+        let line_a = metrics_record_line(&payload_a).unwrap();
+        let line_b = metrics_record_line(&payload_b).unwrap();
+        assert_ne!(line_a, line_b);
+
+        let invocation_a = serde_json::json!({
+            "conversationId": "conversation-a",
+            "artifactDirectoryPath": artifact_a,
+            "initialNumSteps": 1
+        });
+        assert_eq!(
+            antigravity_metrics_hook_response(MetricsEvent::PostInvocation, &invocation_a),
+            Some(serde_json::json!({
+                "injectSteps": [{"ephemeralMessage": line_a}]
+            }))
+        );
+        let pending_b = artifact_b
+            .join(ANTIGRAVITY_PENDING_METRICS_DIR)
+            .join("4.json");
+        assert!(pending_b.is_file(), "consuming A leaves B pending");
+
+        let invocation_b = serde_json::json!({
+            "conversationId": "conversation-b",
+            "artifactDirectoryPath": artifact_b,
+            "initialNumSteps": 1
+        });
+        assert_eq!(
+            antigravity_metrics_hook_response(MetricsEvent::PostInvocation, &invocation_b),
+            Some(serde_json::json!({
+                "injectSteps": [{"ephemeralMessage": line_b}]
+            }))
+        );
+        assert!(!pending_b.exists(), "consuming B clears its state");
+
+        let stale_payload = tool_payload(
+            "conversation-a",
+            &artifact_a,
+            "pixel impact src/login.rs",
+            5,
+        );
+        store_antigravity_pending_metric(&stale_payload, &line_a).unwrap();
+        let stale_invocation = serde_json::json!({
+            "conversationId": "conversation-a",
+            "artifactDirectoryPath": artifact_a,
+            "initialNumSteps": 6
+        });
+        assert_eq!(
+            antigravity_metrics_hook_response(MetricsEvent::PostInvocation, &stale_invocation),
+            None,
+            "earlier-step metrics are not replayed into a later invocation"
+        );
+        assert!(
+            !artifact_a.join(ANTIGRAVITY_PENDING_METRICS_DIR).exists(),
+            "stale conversation state is cleaned"
+        );
     }
 
     #[test]
@@ -1086,17 +1377,15 @@ mod tests {
             metrics_relay_response(Some(Provider::Cursor), "line"),
             serde_json::json!({"additional_context": "line"})
         );
-        // Every non-Cursor provider — including the None fallback — keeps
-        // the Claude-style advisory envelope; a flipped comparison here
-        // would hand Cursor a shape it cannot read and vice versa.
-        for provider in [
-            None,
-            Some(Provider::Claude),
-            Some(Provider::Codex),
-            Some(Provider::Devin),
-        ] {
+        // Cursor uses its flat field; Codex uses systemMessage; remaining
+        // providers keep the existing advisory.
+        for provider in [None, Some(Provider::Claude), Some(Provider::Devin)] {
             assert_eq!(metrics_relay_response(provider, "line"), advisory);
         }
+        assert_eq!(
+            metrics_relay_response(Some(Provider::Codex), "line"),
+            serde_json::json!({"systemMessage": "line"})
+        );
     }
 
     #[test]

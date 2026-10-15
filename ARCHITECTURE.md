@@ -119,7 +119,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel check-release` | Check that a release tag is consistent with the tree before anything is built or published: crates/pixel/Cargo.toml carries the version, Cargo.lock is fresh for every workspace member, CHANGELOG.md has the `## [x.y.z]` heading and an empty Unreleased section. |
 | `pixel self-update` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
 | `pixel doctor` | Health check: install state, daemon, index/graph/facts freshness |
-| `pixel run-hook` | Hook entry point `task-event`, invoked by the Claude and Codex task lifecycle hooks; the retired verbs exit 0 silently |
+| `pixel run-hook` | Hook entry points `task-event` and `metrics`, invoked by Claude Code, Codex and Antigravity registrations; retired verbs exit 0 silently |
 | `pixel config` | Show effective settings and their sources; `setup` offers guided terminal configuration (also offered on interactive global install); `classify on\|off` controls the global classify kill switch (disabled by default); `classify-engine` stores the engine preference (`local\|remote\|jev\|clef-ollama\|clef-cloudflare\|auto`), `remote-preset <preset> [--model --base]` the provider it runs, `remote-key <preset>` its key; `edit [--repo]` opens commented YAML in `$VISUAL`/`$EDITOR`. Global `~/.pixel/config.yaml`, repository `.pixel/config.yaml`; legacy JSON remains supported. |
 | `pixel task-state` | Alias `task`: begin, contract, prepare, verify, review, finish, status, events, route, replay, evaluate, cancel and recover a durable task; show retains the Claude packet interface |
 | `pixel plan` | Deterministic todo list generation from code analysis; emits blocking verification gates (auth session, env keys, provider keys, real DB state) detected in the plan's file set; persists findings in `.pixel/plan.json` so `--status`/`--done N`/`--undone N`/`--prune` track execution state across re-plans without the daemon |
@@ -606,10 +606,11 @@ guard: every agent keeps its native search. It removes the
 `~/.local/share/pixel/agent-prompt.md` and `subagent-prompt.md` copies earlier
 releases deployed, then handles each agent through its own extension point:
 
-- **Claude Code**: task lifecycle hooks in `~/.claude/settings.json`. Retired
-  retrieval prompt, post-edit and metrics registrations are removed; task
-  contracts and foreign hooks are preserved. The optional plugin ships no
-  skill and registers no hooks; the per-prompt brief comes from the task hook.
+- **Claude Code**: task lifecycle hooks and a `PostToolUse` metrics relay in
+  `~/.claude/settings.json`. Retired retrieval prompts and post-edit advice
+  are removed; task contracts and foreign hooks are preserved. The optional
+  plugin ships no skill and registers no hooks; the per-prompt brief comes
+  from the task hook.
 - **Codex**: task lifecycle hooks in `$CODEX_HOME/hooks.json` (default
   `~/.codex/hooks.json`). Retired permanent `developer_instructions` blocks,
   retrieval prompt and metrics registrations are removed. The optional
@@ -632,18 +633,21 @@ releases deployed, then handles each agent through its own extension point:
   them into context, as a second Pixel-owned package
   (`~/.local/share/pixel/pi-classify/`, declared in the same `packages` list).
   Uninstall removes both packages and their entries.
-- **Gemini CLI, OpenCode, Devin, Antigravity**: the prompt brief and nothing
-  else, each only where its configuration already exists. Gemini: a
+- **Gemini CLI, OpenCode, Devin, Antigravity**: integrations are installed
+  only where each host's configuration already exists. Gemini: a
   `BeforeAgent` hook in `~/.gemini/settings.json`. OpenCode:
   `plugins/pixel-brief.js` in `~/.config/opencode` (`$XDG_CONFIG_HOME`
   honoured), whose `chat.message` hook runs `pixel brief`. Devin: the task
   events in its hooks file, `prompt-submit` among them. Antigravity: a
   `pixel-brief` entry in `~/.gemini/config/hooks.json` running on
-  `PreInvocation`. Install also removes what earlier releases wrote when it
-  is still there: the OpenCode `AGENTS.md` block and `plugins/pixel.js`
-  guard, Devin's retired guard hooks in `~/.config/devin/config.json`, the
-  Antigravity plugin, its config entry and the global `pixel-guard` (a
-  user-defined hook under that name is kept).
+  `PreInvocation`, plus the IDE and CLI Pixel plugins whose `pixel-guard`
+  `PostToolUse` hook stores a metric in that conversation's
+  `artifactDirectoryPath/.pixel-pending-metrics/<stepIdx>.json` and returns
+  `{}`. Its `PostInvocation` hook consumes only that conversation's pending
+  line as an `injectSteps[].ephemeralMessage` and clears the file. Install removes the OpenCode
+  `AGENTS.md` block and `plugins/pixel.js` guard, Devin's retired guard hooks
+  in `~/.config/devin/config.json`, and any retired Antigravity global metrics
+  hook; unrelated user hooks and settings are preserved.
 - **zcode, Cursor, Copilot CLI**: nothing is written. Install removes the
   zcode guard in `~/.zcode/cli/config.json`, `~/.cursor/hooks.json` and
   `~/.copilot/hooks/pixel.json` when an earlier release wrote them. `doctor`
@@ -715,13 +719,18 @@ does not parse as strict JSON is skipped, not rewritten.
 `install.opencode-agents-md` is red while the block or the managed plugin
 remains, and passes when OpenCode is absent.
 
-`pixel run-hook` (alias `hook`) has one live entry point, `task-event`, and it
-is the only hook `pixel setup` registers (Claude Code and Codex):
+`pixel run-hook` (alias `hook`) exposes task lifecycle and metrics entry
+points. `task-event` is registered for Claude Code and Codex; the metrics
+relay is registered for Claude Code, Codex and Antigravity:
 
 | Hook event | Command | Effect |
 | --- | --- | --- |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`, `SubagentStart`, `SubagentStop`, plus `PostToolUseFailure` (Claude) or `Interrupt` (Codex) | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks. Once enforced, a task retains its gates if runtime settings change. On `prompt-submit` it also returns the `[PIXEL:BRIEF]` evidence brief as `additionalContext` (see below). On `SessionStart` and a briefed `UserPromptSubmit` it may start the repository's daemon in the background (see "Keeping a daemon behind the brief"). Every hook of the table also leaves its line in `.pixel/brief-feedback.jsonl` after it has answered the host (`prompt-submit` parts, `post-tool-use`, `tool-failure`, `stop`): the read feedback of the brief, best effort and silent, so it adds no registration and cannot fail a host. |
 | `UserPromptSubmit` (Claude Code and Codex, `brief_parts` entries; default 3) | `pixel run-hook task-event --provider <host> --event prompt-submit --part K/N` | The brief split over `N` hooks (see "A brief larger than one hook"). Part 1 is the entry above with the ledger and the brief; parts 2 to `N` only print their slice. |
+| `PostToolUse` (Claude Code, matching `Bash`) | `pixel run-hook metrics --provider claude` | Relays the finalized Pixel metrics line to Claude's `systemMessage` after a shell call. |
+| `PostToolUse` (Codex) | `pixel run-hook metrics --provider codex` | Relays the finalized Pixel metrics line through Codex's documented `systemMessage`, including when the tool result already contains the box. |
+| `PostToolUse` (Antigravity, `pixel-guard` in the IDE and CLI Pixel plugins) | `pixel run-hook metrics --provider antigravity` | Matches a finalized metric to the tool call, stores it in that conversation's artifact directory keyed by `stepIdx`, and returns `{}` as required by Antigravity. |
+| `PostInvocation` (Antigravity, `pixel-guard` in the IDE and CLI Pixel plugins) | `pixel run-hook metrics --provider antigravity --event post-invocation` | Consumes matching pending metrics for the same `conversationId` and `artifactDirectoryPath`, injects each as one `ephemeralMessage`, and clears the stored record. |
 
 The verbs earlier releases registered (`guard`, `composed-guard`,
 `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`,
@@ -1198,10 +1207,11 @@ than fabricate counts.
 
 The active prompt instructs an agent to copy the exact line from the same tool-call
 result once, skipping an invocation already relayed by the host. A global latest
-record is unsafe under concurrency and must never be used. The installer provides
-no native automatic chat transport; mock-wrapper tests prove prompt delivery and
-stream/exit preservation, not actual model adherence or live-host duplicate
-suppression. Chat relay remains a host-supported, separately verifiable boundary.
+record is unsafe under concurrency and must never be used. Claude Code, Codex and
+Antigravity use host-supported metrics hooks where available; mock-wrapper tests
+prove command output and stream/exit preservation, not actual model adherence or
+live-host duplicate suppression. Chat relay remains a separately verifiable
+boundary.
 
 
 ### Brief probes

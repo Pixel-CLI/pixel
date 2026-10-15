@@ -1199,13 +1199,14 @@ enum HookCmd {
         #[arg(long, value_name = "K/N")]
         part: Option<brief_parts::BriefPart>,
     },
-    /// PostToolUse relay for hosts whose tool results drop stderr: re-emits
-    /// the finalized invocation's 🟩 metrics line as the provider's
-    /// additional-context envelope. Honors `pixel config metrics`.
+    /// Relay finalized 🟩 metrics lines through a provider's hook contract.
     Metrics {
         /// Provider whose hook-response contract to emit under.
         #[arg(long, value_enum)]
         provider: Option<hook_metrics::Provider>,
+        /// Hook event (Antigravity defers PostToolUse lines until PostInvocation).
+        #[arg(long, value_enum, default_value = "post-tool-use")]
+        event: hook_metrics::MetricsEvent,
     },
     #[command(flatten)]
     Retired(RetiredHookCmd),
@@ -5699,11 +5700,8 @@ fn run_command(
                 event,
                 part,
             } => task_hook::run(provider, event, part),
-            HookCmd::Metrics { provider } => {
-                // PostToolUse relay for hosts whose tool results drop stderr
-                // (Codex): re-emits the finalized invocation's 🟩 line as
-                // additionalContext. Never returns.
-                hook_metrics::run_metrics_hook(provider);
+            HookCmd::Metrics { provider, event } => {
+                hook_metrics::run_metrics_hook(provider, event);
             }
             // Retired verbs: drain the payload the host wrote, answer nothing.
             HookCmd::Retired(_) => {
