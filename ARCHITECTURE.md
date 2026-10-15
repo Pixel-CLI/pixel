@@ -429,17 +429,29 @@ envelope talks to the daemon socket directly.
   edge. An edge of this resolver goes only where pixel-mvp proves another
   target, so its right edges stay, and so do its wrong ones where
   pixel-mvp abstains. The merge records its undo in `ruby_hybrid_edges`
-  and `ruby_hybrid_unresolved`: `write_rows` restores this resolver's rows
-  first, runs its passes as without the switch, then merges again. The
-  graph records `graph_source_ruby` (`ruby=hybrid <commit> <extractor>`,
-  or `ruby=v1, pixel-mvp unavailable` outside a git work tree's top
-  level; absent when off, and a full build drops the side tables), and a
-  graph whose Ruby source differs from the switch's is rebuilt whole.
-  Cost on antiwork/gumroad (`b996417e`, `dev-release`): a one-file edit
-  then a graph command 0.79 s → 7.5 s (pixel-mvp's refresh and its
-  970 000 sites read on every update), a cold build 5.1 s → 13.1 s,
-  `.pixel/` 174 MB → 494 MB (302 MB since pixel-mvp's store schema 8,
-  whose index of gumroad is 131 MB); that is why it is off by default.
+  and `ruby_hybrid_unresolved`, each row with its site's file:
+  `write_rows` restores this resolver's rows first, runs its passes as
+  without the switch, then merges again, file by file
+  (`ruby_switch::merge_again`). The merge is decided per file, so only the
+  files whose merge may have moved are planned again: the update's own,
+  those whose rows the passes moved (a multiset hash of each Ruby file's
+  rows before and after them, `ruby_switch::prints`), those pixel-mvp's
+  refresh rewrote or redirected a site of, and those resolving a site
+  into a file whose definitions moved (`Store::files_reaching`); every
+  other file gets back the rows it had. The graph records the pixel-mvp
+  generation it was merged against (`ruby_hybrid_generation`); an index
+  at another generation (a refresh whose graph update did not commit)
+  makes the update merge every file. The graph records
+  `graph_source_ruby` (`ruby=hybrid <commit> <extractor> undo.2`, or
+  `ruby=v1, pixel-mvp unavailable` outside a git work tree's top level;
+  absent when off, and a full build drops the side tables), and a graph
+  whose Ruby source differs from the switch's is rebuilt whole. Cost on
+  antiwork/gumroad (`b996417e`, `dev-release`, pixel-mvp `192b576`): a
+  one-file edit then a graph command 0.71 s → 4.4 s (a line appended;
+  2.4 s → 6.1 s for a method inserted mid-file), nearly all of it
+  pixel-mvp's refresh of its index (its writer's full open check and
+  every Ruby site decided again, 2.9 s); a cold build 5.6 s → 12 s;
+  `.pixel/` 174 MB → 302 MB; that is why it is off by default.
 - Ruby constant receivers are resolved in `pixel-graph/src/resolve/ruby.rs`
   against class/module scopes, preserving the difference between nested
   declarations and `class A::B`. Unique class and constructor targets are

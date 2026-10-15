@@ -9,8 +9,9 @@
 use std::fs;
 use std::path::Path;
 
+use mvp_model::Graph;
 use pixel_graph::build::build_graph_from;
-use pixel_graph::mvp_adapter::{RustSource, Unresolved, refresh, rust_rows};
+use pixel_graph::mvp_adapter::{RustSource, Unresolved, refresh, refresh_changes, rust_rows};
 use pixel_graph::{EdgeKind, GraphStore, Tier};
 
 pub(crate) fn git(dir: &Path, args: &[&str]) {
@@ -329,6 +330,40 @@ fn a_refresh_after_an_edit_reads_the_new_file() {
             .any(|e| e.src_id == first && e.dst_id == helper && e.site_line == 15),
         "{:?}",
         rows.calls
+    );
+}
+
+/// The hybrid's update merges again only the files a refresh changed, and
+/// trusts the rows it kept only when the refresh started from the
+/// generation the graph was merged against: so a refresh must name that
+/// generation as the index published it, and name the files whose rows
+/// it wrote again.
+#[test]
+fn a_refresh_names_the_generation_it_started_from_and_the_files_it_wrote_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fixture(&root);
+    let state = root.join(".pixel");
+    let (first, changes) = refresh_changes(&root, &state).unwrap();
+    assert_eq!(changes.before, None, "no generation before the first");
+    let published = first.provenance().unwrap().generation;
+    drop(first);
+    let (again, changes) = refresh_changes(&root, &state).unwrap();
+    assert_eq!(changes.before.as_deref(), Some(published.as_str()));
+    assert!(changes.rewritten.is_empty() && changes.redirected.is_empty());
+    assert_eq!(again.provenance().unwrap().generation, published);
+    drop(again);
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    fs::write(
+        root.join("src/lib.rs"),
+        format!("{lib}\npub fn added() {{}}\n"),
+    )
+    .unwrap();
+    let (_, changes) = refresh_changes(&root, &state).unwrap();
+    assert_eq!(changes.before.as_deref(), Some(published.as_str()));
+    assert_eq!(
+        changes.rewritten.iter().collect::<Vec<_>>(),
+        vec!["src/lib.rs"]
     );
 }
 

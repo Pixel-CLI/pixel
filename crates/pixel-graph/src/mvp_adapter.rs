@@ -34,7 +34,7 @@
 //! Ruby is merged, not replaced: [`ruby`] keeps this graph's edge wherever
 //! pixel-mvp abstains (ADR-0037 there).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -257,6 +257,25 @@ pub struct Dropped {
 /// one that is a link or that git tracks is refused, as the other stores
 /// refuse it, before anything under it is read.
 pub fn refresh(repo: &Path, state: &Path) -> Result<mvp_store::Store, BoxErr> {
+    refresh_changes(repo, state).map(|(store, _)| store)
+}
+
+/// What one refresh of pixel-mvp's index changed, for a reader that
+/// follows it file by file (`ruby_switch::merge_again`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Changes {
+    /// The generation the refresh started from (`Provenance::generation`
+    /// of the index before it); `None` before the first one.
+    pub before: Option<String>,
+    /// The paths whose rows the refresh dropped or wrote again: what each
+    /// defines may have moved.
+    pub rewritten: BTreeSet<String>,
+    /// The paths holding a kept site whose target the refresh moved.
+    pub redirected: BTreeSet<String>,
+}
+
+/// [`refresh`], with what the refresh changed.
+pub fn refresh_changes(repo: &Path, state: &Path) -> Result<(mvp_store::Store, Changes), BoxErr> {
     pixel_git::sidecar::check(repo)?;
     let root = mvp_index::root(repo)?;
     if root.canonicalize()? != repo.canonicalize()? {
@@ -270,8 +289,13 @@ pub fn refresh(repo: &Path, state: &Path) -> Result<mvp_store::Store, BoxErr> {
     std::fs::create_dir_all(state)?;
     let mut writer = mvp_store::Writer::open(state, Some(WAIT))?;
     let tree = mvp_index::scan(&root)?;
-    writer.retried(|writer| -> Result<(), BoxErr> {
+    let changes = writer.retried(|writer| -> Result<Changes, BoxErr> {
         let indexed = writer.indexed()?;
+        // The id the published generation carries: its files, extractor
+        // and stale list (`link::generation_id`).
+        let before = indexed.extractor.as_deref().map(|extractor| {
+            mvp_index::link::generation_id(&indexed.files, extractor, &indexed.stale)
+        });
         let plan = mvp_index::plan(
             &tree,
             &indexed.files,
@@ -281,10 +305,36 @@ pub fn refresh(repo: &Path, state: &Path) -> Result<mvp_store::Store, BoxErr> {
         let extracted = mvp_index::extract(&tree.root, &plan.extract, None);
         let delta = mvp_index::link(&tree, &plan, extracted, |drop| writer.kept(drop))?;
         writer.publish(&delta)?;
-        Ok(())
+        let mut rewritten: BTreeSet<String> = delta.drop.iter().cloned().collect();
+        rewritten.extend(delta.add.iter().map(|rows| rows.file.path.clone()));
+        let redirected = delta
+            .redirect
+            .iter()
+            .map(|(edge, _)| uid_file(&edge.src))
+            .collect();
+        Ok(Changes {
+            before,
+            rewritten,
+            redirected,
+        })
     })?;
     drop(writer);
-    Ok(mvp_store::Store::open(state)?)
+    Ok((mvp_store::Store::open(state)?, changes))
+}
+
+/// [`refresh_crate`], with what the refresh changed.
+pub fn refresh_crate_changes(
+    root: &Path,
+    state: &Path,
+) -> Result<(mvp_store::Store, Changes), BoxErr> {
+    if !crate_root(root) {
+        return Err(format!(
+            "{} has no Cargo.toml: pixel-mvp resolves Rust paths from a crate root",
+            root.display()
+        )
+        .into());
+    }
+    refresh_changes(root, state)
 }
 
 /// One symbol, as the pairing reads it from either graph.

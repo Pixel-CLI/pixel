@@ -1411,16 +1411,24 @@ fn stored_definitions(
 ///
 /// When the graph's Ruby rows are the hybrid merge (`ruby_switch::is_hybrid`),
 /// they are restored to this resolver's own first, and merged again last
-/// with the same refresh of pixel-mvp's index.
+/// with the same refresh of pixel-mvp's index: the files whose merge may
+/// have moved are planned again, every other gets back the rows it had
+/// (`ruby_switch::merge_again`).
 fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Result<(), BoxErr> {
     let walled = mvp_adapter::rust_is_walled(store)?;
     // A merged graph goes back to this resolver's own Ruby rows first, so
     // every pass below decides as it would without the merge; the merge is
     // planned again at the end, on what they wrote.
     let hybrid = ruby_switch::is_hybrid(store)?;
-    if hybrid {
-        ruby_switch::restore(store)?;
-    }
+    let (undo, prints) = if hybrid {
+        let undo = ruby_switch::restore(store)?;
+        // What this resolver's rows hold before the passes below: the
+        // merge is planned again for the files whose rows they move, not
+        // for every file (`ruby_switch::merge_again`).
+        (undo, ruby_switch::prints(store)?)
+    } else {
+        (ruby_switch::Undo::default(), ruby_switch::Prints::new())
+    };
     // What the batch changed, before and after, for the re-resolution below.
     let mut affected = Affected::default();
     let mut before: Vec<Definition> = Vec::new();
@@ -1615,19 +1623,25 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     reconsider_resolved_calls(store, &mut affected)?;
     // Retry what the batch can have changed against the new candidate set.
     resolve_affected(store, &affected)?;
+    let moved = if hybrid {
+        ruby_switch::moved(store, &prints)?
+    } else {
+        std::collections::BTreeSet::new()
+    };
     if walled || hybrid {
         // One refresh of pixel-mvp's index serves both.
         let state = pixel_git::sidecar::dir(root);
-        let index = if walled {
-            mvp_adapter::refresh_crate(root, &state)?
+        let (index, changes) = if walled {
+            mvp_adapter::refresh_crate_changes(root, &state)?
         } else {
-            mvp_adapter::refresh(root, &state)?
+            mvp_adapter::refresh_changes(root, &state)?
         };
         if walled {
             mvp_adapter::apply(store, &mvp_adapter::rust_rows(store, &index)?)?;
         }
         if hybrid {
-            ruby_switch::merge_into(store, &index)?;
+            let batch: Vec<&str> = files.iter().map(|&(rel, _)| rel).collect();
+            ruby_switch::merge_again(store, &index, &changes, &undo, &moved, &batch)?;
         }
     }
 

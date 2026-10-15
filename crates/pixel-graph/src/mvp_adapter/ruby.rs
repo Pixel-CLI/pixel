@@ -37,7 +37,7 @@
 //! method name's. Anything else stays unpaired, which keeps this graph's
 //! rows.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use mvp_model::{Graph, Lang};
 
@@ -122,9 +122,15 @@ pub struct Edges {
 pub struct RubyPlan {
     /// Ids of `edges` rows to delete.
     pub remove_edges: Vec<i64>,
+    /// The file of each site of `remove_edges`, in its order: what an
+    /// update reads to give a file back its rows (`ruby_switch::Undo`),
+    /// whether or not the row's symbols still stand.
+    pub remove_edge_files: Vec<i64>,
     /// Ids of `unresolved_calls` rows to delete.
     pub remove_unresolved: Vec<i64>,
     pub add_edges: Vec<EdgeRow>,
+    /// The file of each site of `add_edges`, in its order.
+    pub add_edge_files: Vec<i64>,
     pub add_unresolved: Vec<Unresolved>,
     /// Sites, by how pixel-mvp decided them.
     pub sites: Sites,
@@ -176,14 +182,14 @@ fn tier_of(kind: EdgeKind) -> Tier {
 }
 
 /// A site: its kind (`calls`, `references`), file, line and name.
-type Key = (&'static str, i64, u32, String);
+type Key<'s> = (&'static str, i64, u32, &'s str);
 
 /// Sites left unpaired by key, grouped for pairing in line order: kind,
 /// file, name and enclosing symbol.
-type Bucket = (&'static str, i64, String, i64);
+type Bucket<'s> = (&'static str, i64, &'s str, i64);
 
-fn key_of(kind: EdgeKind, file_id: i64, line: u32, name: &str) -> Key {
-    (kind.as_str(), file_id, line, name.to_string())
+fn key_of(kind: EdgeKind, file_id: i64, line: u32, name: &str) -> Key<'_> {
+    (kind.as_str(), file_id, line, name)
 }
 
 /// pixel-mvp's sites of one key.
@@ -243,22 +249,28 @@ pub fn merge(
     let mut paired: HashMap<Key, Key> = ours
         .keys()
         .filter(|k| theirs.contains_key(*k))
-        .map(|k| (k.clone(), k.clone()))
+        .map(|k| (*k, *k))
         .collect();
     let mut ours_left: HashMap<Bucket, Vec<u32>> = HashMap::new();
     for (k, rows) in &ours {
         if let (false, Some(enc)) = (paired.contains_key(k), enclosing_of(rows)) {
-            ours_left
-                .entry((k.0, k.1, k.3.clone(), enc))
-                .or_default()
-                .push(k.2);
+            ours_left.entry((k.0, k.1, k.3, enc)).or_default().push(k.2);
         }
     }
+    // Only a site whose kind, file and name one of this graph's unpaired
+    // sites shares can pair: the enclosing symbol is looked up for those.
+    let open: HashSet<(&str, i64, &str)> = ours_left
+        .keys()
+        .map(|(kind, file, name, _)| (*kind, *file, *name))
+        .collect();
     let mut theirs_left: HashMap<Bucket, Vec<u32>> = HashMap::new();
     for k in theirs.keys().filter(|k| !ours.contains_key(*k)) {
+        if !open.contains(&(k.0, k.1, k.3)) {
+            continue;
+        }
         if let Some(enc) = enclosing(k.1, k.2) {
             theirs_left
-                .entry((k.0, k.1, k.3.clone(), enc))
+                .entry((k.0, k.1, k.3, enc))
                 .or_default()
                 .push(k.2);
         }
@@ -272,12 +284,12 @@ pub fn merge(
         if lines.len() == their_lines.len() && lines.iter().zip(&their_lines).all(|(a, b)| a <= b) {
             let (kind, file, name, _) = bucket;
             for (a, b) in lines.into_iter().zip(their_lines) {
-                paired.insert((kind, file, a, name.clone()), (kind, file, b, name.clone()));
+                paired.insert((kind, file, a, name), (kind, file, b, name));
             }
         }
     }
 
-    let mut used: std::collections::HashSet<&Key> = std::collections::HashSet::new();
+    let mut used: HashSet<&Key> = HashSet::new();
     let mut keys: Vec<&Key> = ours.keys().collect();
     keys.sort();
     for key in keys {
@@ -327,6 +339,7 @@ pub fn merge(
                 if src.is_some() && !edges.iter().any(|(_, e)| e.dst_id == *dst) {
                     counts_of(&mut plan, first.kind, first.receiver.as_deref()).mvp_at_mixed += 1;
                     plan.add_edges.push(edge_to(*dst));
+                    plan.add_edge_files.push(first.file_id);
                 }
             }
             continue;
@@ -357,14 +370,17 @@ pub fn merge(
                 if edge.tier != tier_of(row.kind) {
                     counts.raised_to_exact += 1;
                     plan.remove_edges.push(row.id);
+                    plan.remove_edge_files.push(row.file_id);
                     plan.add_edges.push(EdgeRow {
                         tier: tier_of(row.kind),
                         ..(*edge).clone()
                     });
+                    plan.add_edge_files.push(row.file_id);
                 }
             } else {
                 counts.v1_replaced += 1;
                 plan.remove_edges.push(row.id);
+                plan.remove_edge_files.push(row.file_id);
             }
         }
         wanted.sort_unstable();
@@ -375,6 +391,7 @@ pub fn merge(
             }
             counts_of(&mut plan, first.kind, first.receiver.as_deref()).mvp_at_unresolved += 1;
             plan.add_edges.push(edge_to(dst));
+            plan.add_edge_files.push(first.file_id);
         }
         let open: Vec<i64> = rows
             .iter()
@@ -403,12 +420,18 @@ pub fn merge(
         let targets = group.targets();
         plan.no_target += targets.iter().filter(|t| t.is_none()).count();
         let site = group.sites[0];
+        let src = if targets.iter().any(Option::is_some) {
+            enclosing(key.1, key.2)
+        } else {
+            None
+        };
         for dst in targets.iter().flatten() {
-            let Some(src) = enclosing(key.1, key.2) else {
+            let Some(src) = src else {
                 plan.no_caller += 1;
                 continue;
             };
             counts_of(&mut plan, site.kind, site.receiver.as_deref()).mvp_only_site += 1;
+            plan.add_edge_files.push(key.1);
             plan.add_edges.push(EdgeRow {
                 src_id: src,
                 dst_id: *dst,
@@ -434,68 +457,119 @@ pub fn merge(
     plan
 }
 
+/// Which Ruby files a plan covers.
+#[derive(Debug, Clone, Copy)]
+pub enum Scope<'a> {
+    /// Every Ruby file of the graph: a full build's merge.
+    All,
+    /// These Ruby files, by id: an update's, which merges again only the
+    /// files whose rows on either side may have moved
+    /// (`ruby_switch::merge_again`). The merge is decided file by file, so
+    /// a file's plan is the same whichever others are planned with it.
+    Files(&'a HashSet<i64>),
+}
+
+impl Scope<'_> {
+    /// The file ids this scope reads, among `ruby`: `None` for all.
+    fn ids(&self) -> Option<Vec<i64>> {
+        match self {
+            Scope::All => None,
+            Scope::Files(ids) => {
+                let mut ids: Vec<i64> = ids.iter().copied().collect();
+                ids.sort_unstable();
+                Some(ids)
+            }
+        }
+    }
+}
+
+const V1_EDGES: &str =
+    "SELECT e.id, s.file_id, e.src_id, e.dst_id, e.kind, e.tier, e.site_line, e.receiver,
+        coalesce(e.callee, d.name)
+   FROM edges e JOIN symbols s ON s.id = e.src_id JOIN files f ON f.id = s.file_id
+   JOIN symbols d ON d.id = e.dst_id
+  WHERE f.lang = 'ruby' AND e.kind IN ('calls', 'references')";
+
+const V1_OPEN: &str =
+    "SELECT u.id, u.file_id, u.name, u.enclosing_symbol_id, u.site_line, u.receiver, u.kind
+   FROM unresolved_calls u JOIN files f ON f.id = u.file_id WHERE f.lang = 'ruby'";
+
+fn v1_edge(r: &rusqlite::Row<'_>) -> rusqlite::Result<V1Row> {
+    let kind = EdgeKind::parse(&r.get::<_, String>(4)?);
+    let receiver: Option<String> = r.get(7)?;
+    let callee: String = r.get(8)?;
+    let edge = EdgeRow {
+        src_id: r.get(2)?,
+        dst_id: r.get(3)?,
+        kind,
+        tier: Tier::parse(&r.get::<_, String>(5)?),
+        site_line: r.get(6)?,
+        receiver: receiver.clone(),
+        callee: Some(callee.clone()),
+    };
+    Ok(V1Row {
+        id: r.get(0)?,
+        file_id: r.get(1)?,
+        kind,
+        line: edge.site_line,
+        name: site_name(kind, receiver.as_deref(), &callee),
+        enclosing: Some(edge.src_id),
+        receiver,
+        callee,
+        edge: Some(edge),
+    })
+}
+
+fn v1_open(r: &rusqlite::Row<'_>) -> rusqlite::Result<V1Row> {
+    let kind = EdgeKind::parse(&r.get::<_, String>(6)?);
+    let receiver: Option<String> = r.get(5)?;
+    let callee: String = r.get(2)?;
+    Ok(V1Row {
+        id: r.get(0)?,
+        file_id: r.get(1)?,
+        kind,
+        line: r.get(4)?,
+        name: site_name(kind, receiver.as_deref(), &callee),
+        enclosing: r.get(3)?,
+        receiver,
+        callee,
+        edge: None,
+    })
+}
+
 /// This graph's rows at its Ruby sites: every `calls` and `references`
 /// edge from a symbol of a Ruby file, every `unresolved_calls` row of one.
 pub fn v1_rows(store: &GraphStore) -> Result<Vec<V1Row>, BoxErr> {
+    v1_rows_in(store, Scope::All)
+}
+
+/// [`v1_rows`] of the files of `scope`.
+pub fn v1_rows_in(store: &GraphStore, scope: Scope<'_>) -> Result<Vec<V1Row>, BoxErr> {
     let conn = store.conn();
     let mut out = Vec::new();
-    let mut stmt = conn.prepare(
-        "SELECT e.id, s.file_id, e.src_id, e.dst_id, e.kind, e.tier, e.site_line, e.receiver,
-                coalesce(e.callee, d.name)
-           FROM edges e JOIN symbols s ON s.id = e.src_id JOIN files f ON f.id = s.file_id
-           JOIN symbols d ON d.id = e.dst_id
-          WHERE f.lang = 'ruby' AND e.kind IN ('calls', 'references')",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        let kind = EdgeKind::parse(&r.get::<_, String>(4)?);
-        let receiver: Option<String> = r.get(7)?;
-        let callee: String = r.get(8)?;
-        let edge = EdgeRow {
-            src_id: r.get(2)?,
-            dst_id: r.get(3)?,
-            kind,
-            tier: Tier::parse(&r.get::<_, String>(5)?),
-            site_line: r.get(6)?,
-            receiver: receiver.clone(),
-            callee: Some(callee.clone()),
-        };
-        Ok(V1Row {
-            id: r.get(0)?,
-            file_id: r.get(1)?,
-            kind,
-            line: edge.site_line,
-            name: site_name(kind, receiver.as_deref(), &callee),
-            enclosing: Some(edge.src_id),
-            receiver,
-            callee,
-            edge: Some(edge),
-        })
-    })?;
-    for row in rows {
-        out.push(row?);
-    }
-    let mut stmt = conn.prepare(
-        "SELECT u.id, u.file_id, u.name, u.enclosing_symbol_id, u.site_line, u.receiver, u.kind
-           FROM unresolved_calls u JOIN files f ON f.id = u.file_id WHERE f.lang = 'ruby'",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        let kind = EdgeKind::parse(&r.get::<_, String>(6)?);
-        let receiver: Option<String> = r.get(5)?;
-        let callee: String = r.get(2)?;
-        Ok(V1Row {
-            id: r.get(0)?,
-            file_id: r.get(1)?,
-            kind,
-            line: r.get(4)?,
-            name: site_name(kind, receiver.as_deref(), &callee),
-            enclosing: r.get(3)?,
-            receiver,
-            callee,
-            edge: None,
-        })
-    })?;
-    for row in rows {
-        out.push(row?);
+    match scope.ids() {
+        None => {
+            let mut stmt = conn.prepare(V1_EDGES)?;
+            for row in stmt.query_map([], v1_edge)? {
+                out.push(row?);
+            }
+            let mut stmt = conn.prepare(V1_OPEN)?;
+            for row in stmt.query_map([], v1_open)? {
+                out.push(row?);
+            }
+        }
+        Some(ids) => {
+            let mut edges = conn.prepare(&format!("{V1_EDGES} AND s.file_id = ?1"))?;
+            let mut open = conn.prepare(&format!("{V1_OPEN} AND u.file_id = ?1"))?;
+            for id in ids {
+                for row in edges.query_map([id], v1_edge)? {
+                    out.push(row?);
+                }
+                for row in open.query_map([id], v1_open)? {
+                    out.push(row?);
+                }
+            }
+        }
     }
     Ok(out)
 }
@@ -529,34 +603,98 @@ fn spelled(kind: mvp_model::EdgeKind, target: &str) -> (Option<String>, String) 
 /// What pixel-mvp's index (`mvp`) holds at the Ruby sites of `store`, in
 /// `store`'s ids. Reads both, writes neither.
 pub fn mvp_sites(store: &GraphStore, mvp: &mvp_store::Store) -> Result<Vec<MvpSite>, BoxErr> {
+    mvp_sites_in(store, mvp, Scope::All)
+}
+
+/// This graph's Ruby symbols of the files `paths` names (all, for
+/// `None`), as the pairing reads them.
+fn v1_symbols(
+    store: &GraphStore,
+    paths: Option<&BTreeSet<String>>,
+) -> Result<Vec<Sym<i64>>, BoxErr> {
+    const SQL: &str = "SELECT s.id, f.path, s.qualified, s.kind, s.start_line FROM symbols s
+       JOIN files f ON f.id = s.file_id WHERE f.lang = 'ruby'";
+    let sym = |r: &rusqlite::Row<'_>| {
+        Ok(Sym {
+            key: r.get::<_, i64>(0)?,
+            path: r.get(1)?,
+            name: r.get(2)?,
+            kind: common_kind(&r.get::<_, String>(3)?).to_string(),
+            line: r.get(4)?,
+        })
+    };
+    let mut out = Vec::new();
+    match paths {
+        None => {
+            let mut stmt = store.conn().prepare(SQL)?;
+            for row in stmt.query_map([], sym)? {
+                out.push(row?);
+            }
+        }
+        Some(paths) => {
+            let mut stmt = store.conn().prepare(&format!("{SQL} AND f.path = ?1"))?;
+            for path in paths {
+                for row in stmt.query_map([path], sym)? {
+                    out.push(row?);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// [`mvp_sites`] of the files of `scope`. The symbols are paired file by
+/// file (`pair`), so pairing the files of the scope and those its sites
+/// resolve into gives each the pairs a pairing of every file gives it.
+pub fn mvp_sites_in(
+    store: &GraphStore,
+    mvp: &mvp_store::Store,
+    scope: Scope<'_>,
+) -> Result<Vec<MvpSite>, BoxErr> {
     let files: HashMap<String, i64> = store
         .files()?
         .into_iter()
         .filter(|f| f.lang == "ruby")
         .map(|f| (f.path, f.id))
         .collect();
-    let ours: Vec<Sym<i64>> = {
-        let mut stmt = store.conn().prepare(
-            "SELECT s.id, f.path, s.qualified, s.kind, s.start_line FROM symbols s
-               JOIN files f ON f.id = s.file_id WHERE f.lang = 'ruby'",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Sym {
-                key: r.get::<_, i64>(0)?,
-                path: r.get(1)?,
-                name: r.get(2)?,
-                kind: common_kind(&r.get::<_, String>(3)?).to_string(),
-                line: r.get(4)?,
-            })
-        })?;
-        rows.collect::<Result<_, _>>()?
-    };
-    let mut theirs: Vec<Sym<String>> = Vec::new();
-    for file in mvp.files()?.into_iter().filter(|f| f.lang == Lang::Ruby) {
-        if !files.contains_key(&file.path) {
-            continue;
+    let (edges, paths) = match scope.ids() {
+        None => (mvp.all_edges()?, None),
+        Some(ids) => {
+            let wanted: HashSet<i64> = ids.into_iter().collect();
+            let mut scoped: Vec<&String> = files
+                .iter()
+                .filter(|(_, id)| wanted.contains(id))
+                .map(|(path, _)| path)
+                .collect();
+            scoped.sort();
+            let mut edges = Vec::new();
+            for path in scoped {
+                edges.extend(mvp.edges_of(path)?);
+            }
+            let mut paths: BTreeSet<String> = BTreeSet::new();
+            for edge in &edges {
+                paths.insert(uid_file(&edge.src));
+                if let Some(dst) = edge.dst.as_deref() {
+                    paths.insert(uid_file(dst));
+                }
+            }
+            paths.retain(|path| files.contains_key(path));
+            (edges, Some(paths))
         }
-        for symbol in mvp.symbols(&file.path)? {
+    };
+    let ours = v1_symbols(store, paths.as_ref())?;
+    let mut theirs: Vec<Sym<String>> = Vec::new();
+    // The files pixel-mvp reads as Ruby, as the pairing of every file
+    // takes them.
+    let mvp_files: Vec<String> = mvp
+        .files()?
+        .into_iter()
+        .filter(|f| f.lang == Lang::Ruby && files.contains_key(&f.path))
+        .filter(|f| paths.as_ref().is_none_or(|paths| paths.contains(&f.path)))
+        .map(|f| f.path)
+        .collect();
+    for path in mvp_files {
+        for symbol in mvp.symbols(&path)? {
             theirs.push(Sym {
                 kind: common_kind(symbol.kind.as_str()).to_string(),
                 key: symbol.uid,
@@ -568,7 +706,7 @@ pub fn mvp_sites(store: &GraphStore, mvp: &mvp_store::Store) -> Result<Vec<MvpSi
     }
     let paired = pair(&ours, &theirs);
     let mut out = Vec::new();
-    for edge in mvp.all_edges()? {
+    for edge in edges {
         let kind = match edge.kind {
             mvp_model::EdgeKind::Call => EdgeKind::Calls,
             mvp_model::EdgeKind::Reference
@@ -601,16 +739,38 @@ pub fn mvp_sites(store: &GraphStore, mvp: &mvp_store::Store) -> Result<Vec<MvpSi
 /// The smallest symbol of `store` enclosing each line of each Ruby file,
 /// as [`merge`] asks for it.
 pub fn spans(store: &GraphStore) -> Result<impl Fn(i64, u32) -> Option<i64>, BoxErr> {
+    spans_in(store, Scope::All)
+}
+
+/// [`spans`] of the files of `scope`.
+pub fn spans_in(
+    store: &GraphStore,
+    scope: Scope<'_>,
+) -> Result<impl Fn(i64, u32) -> Option<i64> + use<>, BoxErr> {
+    const SQL: &str = "SELECT s.file_id, s.start_line, s.end_line, s.id FROM symbols s
+       JOIN files f ON f.id = s.file_id WHERE f.lang = 'ruby'";
     let mut by_file: HashMap<i64, Vec<(u32, u32, i64)>> = HashMap::new();
-    let mut stmt = store.conn().prepare(
-        "SELECT s.file_id, s.start_line, s.end_line, s.id FROM symbols s
-           JOIN files f ON f.id = s.file_id WHERE f.lang = 'ruby'",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    })?;
-    for row in rows {
-        let (file, start, end, id) = row?;
+    let span = |r: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, u32, u32, i64)> {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    };
+    let mut rows = Vec::new();
+    match scope.ids() {
+        None => {
+            let mut stmt = store.conn().prepare(SQL)?;
+            for row in stmt.query_map([], span)? {
+                rows.push(row?);
+            }
+        }
+        Some(ids) => {
+            let mut stmt = store.conn().prepare(&format!("{SQL} AND s.file_id = ?1"))?;
+            for id in ids {
+                for row in stmt.query_map([id], span)? {
+                    rows.push(row?);
+                }
+            }
+        }
+    }
+    for (file, start, end, id) in rows {
         by_file.entry(file).or_default().push((start, end, id));
     }
     Ok(move |file: i64, line: u32| {
@@ -626,9 +786,19 @@ pub fn spans(store: &GraphStore) -> Result<impl Fn(i64, u32) -> Option<i64>, Box
 /// The merge of `store`'s Ruby rows with pixel-mvp's index (`mvp`). Reads
 /// both, writes neither.
 pub fn ruby_plan(store: &GraphStore, mvp: &mvp_store::Store) -> Result<RubyPlan, BoxErr> {
-    let v1 = v1_rows(store)?;
-    let sites = mvp_sites(store, mvp)?;
-    Ok(merge(&v1, &sites, spans(store)?))
+    ruby_plan_in(store, mvp, Scope::All)
+}
+
+/// [`ruby_plan`] of the files of `scope`: the rows a plan of every file
+/// gives them, and nothing for the others.
+pub fn ruby_plan_in(
+    store: &GraphStore,
+    mvp: &mvp_store::Store,
+    scope: Scope<'_>,
+) -> Result<RubyPlan, BoxErr> {
+    let v1 = v1_rows_in(store, scope)?;
+    let sites = mvp_sites_in(store, mvp, scope)?;
+    Ok(merge(&v1, &sites, spans_in(store, scope)?))
 }
 
 #[cfg(test)]

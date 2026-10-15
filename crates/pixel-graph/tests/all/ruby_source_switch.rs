@@ -8,12 +8,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use mvp_model::Graph;
 use pixel_graph::GraphStore;
 use pixel_graph::build::{build_graph_sources, update_file};
-use pixel_graph::mvp_adapter::RustSource;
 use pixel_graph::mvp_adapter::ruby_switch::{
-    RUBY_MVP_UNAVAILABLE, RUBY_SOURCE_KEY, RubySource, hybrid_source,
+    RUBY_GENERATION_KEY, RUBY_MVP_UNAVAILABLE, RUBY_SOURCE_KEY, RubySource, hybrid_source,
 };
+use pixel_graph::mvp_adapter::{RustSource, refresh};
 
 /// The fixture, built with `ruby` as the Ruby source.
 fn built(ruby: RubySource) -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -193,40 +194,185 @@ fn the_switch_reads_hybrid_as_on_and_anything_else_as_off() {
     assert_eq!(RubySource::parse(Some("Hybrid")), RubySource::V1);
 }
 
-#[test]
-fn an_update_elsewhere_that_makes_pixel_mvp_abstain_gives_the_site_back_to_this_resolver() {
-    // `params_for` is inherited from another file: this resolver links it
-    // `probable`, pixel-mvp proves it, and the merge raises it to `exact`.
+fn write(root: &Path, rel: &str, body: &str) {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, body).unwrap();
+}
+
+/// Two controllers, committed and built with the switch on: `params_for`
+/// is inherited from another file, this resolver links it `probable`,
+/// pixel-mvp proves it, and the merge raises it to `exact`.
+fn controllers() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
-    let write = |rel: &str, body: &str| {
-        let path = root.join(rel);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, body).unwrap();
-    };
     write(
+        &root,
         "app/controllers/base_controller.rb",
         "class BaseController\n  def params_for\n    1\n  end\nend\n",
     );
     write(
+        &root,
         "app/controllers/decks_controller.rb",
         "class DecksController < BaseController\n  def index\n    params_for\n  end\nend\n",
     );
-    write(".gitignore", ".pixel/\n");
+    write(&root, ".gitignore", ".pixel/\n");
     crate::mvp_adapter::git(&root, &["init", "-q"]);
     crate::mvp_adapter::git(&root, &["add", "-A"]);
     crate::mvp_adapter::git(&root, &["commit", "-qm", "fixture"]);
     let db = root.join(".pixel/graph.db");
     fs::create_dir_all(db.parent().unwrap()).unwrap();
     build_graph_sources(&root, &db, RustSource::Mvp, RubySource::Hybrid).unwrap();
-    let call = |db: &Path| -> Vec<String> {
-        edges(db)
-            .into_iter()
-            .filter(|e| e.contains(" calls "))
-            .collect()
-    };
+    (dir, root, db)
+}
+
+fn calls(db: &Path) -> Vec<String> {
+    edges(db)
+        .into_iter()
+        .filter(|e| e.contains(" calls "))
+        .collect()
+}
+
+/// What a full build of the tree as it stands writes, beside `db`.
+fn reference(root: &Path) -> PathBuf {
+    let reference = root.join(".pixel/reference.db");
+    let _ = fs::remove_file(&reference);
+    build_graph_sources(root, &reference, RustSource::Mvp, RubySource::Hybrid).unwrap();
+    reference
+}
+
+#[test]
+fn an_update_that_redefines_a_target_moves_the_edges_of_the_files_calling_it() {
+    // BaseController gains a method above `params_for`: its symbols are
+    // numbered anew, and DecksController's proven edge must follow, though
+    // nothing in decks_controller.rb changed.
+    let (_dir, root, db) = controllers();
+    write(
+        &root,
+        "app/controllers/base_controller.rb",
+        "class BaseController\n  def first\n  end\n\n  def params_for\n    1\n  end\nend\n",
+    );
+    update_file(&root, &db, "app/controllers/base_controller.rb").unwrap();
     assert_eq!(
-        call(&db),
+        calls(&db),
+        vec!["DecksController#index -> BaseController#params_for @3 calls exact - params_for"]
+    );
+    assert_eq!(decisions(&db), decisions(&reference(&root)));
+}
+
+#[test]
+fn an_update_that_moves_this_resolvers_rows_in_another_file_merges_that_file_again() {
+    // This resolver guessed Book#title for Card#label's `title`, which
+    // pixel-mvp disproves: the merge took the guess out and left the site
+    // unresolved. Book's `title` becomes `name`, so this resolver's own
+    // rows at Card's site move (its guess is demoted), while pixel-mvp's
+    // answer there does not: only the rows this resolver moved say Card's
+    // merge must be planned again.
+    let (_dir, root, db) = built(RubySource::Hybrid);
+    let book = fs::read_to_string(root.join("app/models/book.rb")).unwrap();
+    fs::write(
+        root.join("app/models/book.rb"),
+        book.replace("def title", "def name"),
+    )
+    .unwrap();
+    update_file(&root, &db, "app/models/book.rb").unwrap();
+    assert_eq!(decisions(&db), decisions(&reference(&root)));
+}
+
+#[test]
+fn an_update_that_renumbers_a_target_moves_an_edge_only_pixel_mvp_proves() {
+    // `x.bar` names two methods; this resolver leaves the site
+    // unresolved, pixel-mvp proves Foo#bar from `x = Foo.new`. Foo gains
+    // a method above `bar`: this graph numbers Foo's symbols anew while
+    // nothing it reads at Svc's site moves, so only pixel-mvp's answer
+    // says Svc's merge must be planned again.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    write(
+        &root,
+        "app/models/foo.rb",
+        "class Foo\n  def bar\n    1\n  end\nend\n",
+    );
+    write(
+        &root,
+        "app/models/baz.rb",
+        "class Baz\n  def bar\n    2\n  end\nend\n",
+    );
+    write(
+        &root,
+        "app/services/svc.rb",
+        "class Svc\n  def run\n    x = Foo.new\n    x.bar\n  end\nend\n",
+    );
+    write(&root, ".gitignore", ".pixel/\n");
+    crate::mvp_adapter::git(&root, &["init", "-q"]);
+    crate::mvp_adapter::git(&root, &["add", "-A"]);
+    crate::mvp_adapter::git(&root, &["commit", "-qm", "fixture"]);
+    let db = root.join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph_sources(&root, &db, RustSource::Mvp, RubySource::Hybrid).unwrap();
+    assert_eq!(calls(&db), vec!["Svc#run -> Foo#bar @4 calls exact x bar"]);
+    write(
+        &root,
+        "app/models/foo.rb",
+        "class Foo\n  def first\n  end\n\n  def bar\n    1\n  end\nend\n",
+    );
+    update_file(&root, &db, "app/models/foo.rb").unwrap();
+    assert_eq!(calls(&db), vec!["Svc#run -> Foo#bar @4 calls exact x bar"]);
+    assert_eq!(decisions(&db), decisions(&reference(&root)));
+}
+
+#[test]
+fn an_index_refreshed_without_the_graph_makes_the_next_update_merge_every_file() {
+    // A run refreshed pixel-mvp's index, then its graph update did not
+    // commit: the index holds a generation the graph was not merged
+    // against, and what changed between the two is in no delta the next
+    // refresh reports. That update must merge every file again, or
+    // DecksController would keep a proof pixel-mvp no longer makes.
+    let (_dir, root, db) = controllers();
+    write(
+        &root,
+        "config/initializers/patch.rb",
+        "code = ENV[\"X\"]\nBaseController.class_eval(code)\n",
+    );
+    refresh(&root, &root.join(".pixel")).unwrap();
+    update_file(&root, &db, "config/initializers/patch.rb").unwrap();
+    assert_eq!(
+        calls(&db),
+        vec!["DecksController#index -> BaseController#params_for @3 calls probable - params_for"]
+    );
+    assert_eq!(decisions(&db), decisions(&reference(&root)));
+}
+
+#[test]
+fn a_merged_graph_names_the_generation_of_pixel_mvp_it_was_merged_against() {
+    let (_dir, root, db) = controllers();
+    let generation = || {
+        refresh(&root, &root.join(".pixel"))
+            .unwrap()
+            .provenance()
+            .unwrap()
+            .generation
+    };
+    let recorded = |db: &Path| {
+        GraphStore::open(db)
+            .unwrap()
+            .meta_get(RUBY_GENERATION_KEY)
+            .unwrap()
+    };
+    assert_eq!(recorded(&db), Some(generation()));
+    write(&root, "app/models/tag.rb", "class Tag\nend\n");
+    update_file(&root, &db, "app/models/tag.rb").unwrap();
+    assert_eq!(recorded(&db), Some(generation()));
+    // A graph built with the switch off holds none.
+    build_graph_sources(&root, &db, RustSource::Mvp, RubySource::V1).unwrap();
+    assert_eq!(recorded(&db), None);
+}
+
+#[test]
+fn an_update_elsewhere_that_makes_pixel_mvp_abstain_gives_the_site_back_to_this_resolver() {
+    let (_dir, root, db) = controllers();
+    assert_eq!(
+        calls(&db),
         vec!["DecksController#index -> BaseController#params_for @3 calls exact - params_for"]
     );
     // A third file evaluates code it cannot read into BaseController:
@@ -234,15 +380,14 @@ fn an_update_elsewhere_that_makes_pixel_mvp_abstain_gives_the_site_back_to_this_
     // reads at that site changed. The update must hand the site back to
     // this resolver's own `probable` edge, not keep the proof it lost.
     write(
+        &root,
         "config/initializers/patch.rb",
         "code = ENV[\"X\"]\nBaseController.class_eval(code)\n",
     );
     update_file(&root, &db, "config/initializers/patch.rb").unwrap();
     assert_eq!(
-        call(&db),
+        calls(&db),
         vec!["DecksController#index -> BaseController#params_for @3 calls probable - params_for"]
     );
-    let reference = root.join(".pixel/reference.db");
-    build_graph_sources(&root, &reference, RustSource::Mvp, RubySource::Hybrid).unwrap();
-    assert_eq!(decisions(&db), decisions(&reference));
+    assert_eq!(decisions(&db), decisions(&reference(&root)));
 }
