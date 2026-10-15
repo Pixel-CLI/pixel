@@ -2927,12 +2927,30 @@ fn try_start_as(
             probes: probes_setup,
         },
     );
-    kick_index(result.as_ref().err(), prompt, &for_index, lazy_index);
+    let auto_start = crate::config_cmd::feature_enabled(
+        Some(&for_index),
+        crate::config_cmd::DAEMON_AUTO_START_FEATURE,
+        crate::config_cmd::DAEMON_AUTO_START_ENV,
+    );
+    kick_index(
+        result.as_ref().err(),
+        prompt,
+        &for_index,
+        auto_start,
+        lazy_index,
+    );
     result
 }
 
-fn kick_index(declined: Option<&Declined>, prompt: &str, root: &Path, launch: impl FnOnce(&Path)) {
-    if matches!(declined, Some(Declined::Unindexed))
+fn kick_index(
+    declined: Option<&Declined>,
+    prompt: &str,
+    root: &Path,
+    auto_start: bool,
+    launch: impl FnOnce(&Path),
+) {
+    if auto_start
+        && matches!(declined, Some(Declined::Unindexed))
         && !crate::prompt_continuation::is_trivial_continuation(prompt)
         && brief_signal(prompt).is_some()
     {
@@ -6822,9 +6840,23 @@ mod tests {
             Some(&Declined::Unindexed),
             "where is retrieval_route called",
             root,
+            true,
             |launched_root| launched.push(launched_root.to_path_buf()),
         );
         assert_eq!(launched, vec![root.to_path_buf()]);
+    }
+
+    #[test]
+    fn kick_index_should_not_launch_when_daemon_auto_start_is_off() {
+        let mut launches = 0;
+        kick_index(
+            Some(&Declined::Unindexed),
+            "where is retrieval_route called",
+            Path::new("/repo"),
+            false,
+            |_| launches += 1,
+        );
+        assert_eq!(launches, 0);
     }
 
     #[test]
@@ -6841,7 +6873,7 @@ mod tests {
             (None, "where is retrieval_route called"),
         ] {
             let mut launches = 0;
-            kick_index(declined, prompt, root, |_| launches += 1);
+            kick_index(declined, prompt, root, true, |_| launches += 1);
             assert_eq!(launches, 0, "{declined:?} {prompt:?}");
         }
     }
