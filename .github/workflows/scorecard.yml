@@ -25,14 +25,14 @@ permissions: read-all
 jobs:
   analysis:
     name: Scorecard analysis
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       # Upload the SARIF file to code scanning.
       security-events: write
       # Sign the published result (OIDC token for Sigstore).
       id-token: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: useblacksmith/checkout@v1 # v7
         with:
           persist-credentials: false
 

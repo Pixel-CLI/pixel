@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
+        os: [blacksmith-8vcpu-ubuntu-2404, blacksmith-8vcpu-ubuntu-2404-arm, blacksmith-12vcpu-macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
