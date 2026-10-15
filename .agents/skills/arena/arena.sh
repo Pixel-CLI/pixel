@@ -238,6 +238,9 @@ agent_launch() {
   # delivers the plain brief), and the user's agents run with Homebrew tools anyway. Same for both arms.
   local safe_path="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin:$HOME/.local/bin"
   [ "$arm" = no-pixel ] && brief='PIXEL_BRIEF=0'
+  # A loaded machine (parallel lanes, a dozen agent sessions) exhausts the brief's 3 s window and the brief comes
+  # back EMPTY; the measurement gives the pixel arm up to 8 s (the hook itself is killed at 10 s).
+  [ "$arm" = pixel ] && brief="PIXEL_BRIEF_WINDOW_MS=${ARENA_BRIEF_WINDOW_MS:-8000}"
   if [ "$AGENT" = devin ]; then
     printf "cd '%s' && env %s PATH='%s':%s '%s' --config '%s/config.json' --permission-mode dangerous --respect-workspace-trust false" \
       "$ws" "$brief" "$shim" "$safe_path" "$DEVIN_BIN" "$home"
@@ -707,7 +710,7 @@ set_cases() {
       # them in a row, /clear between cases. Never this repository.
       local rg="$CENSUS_ROOT/cache/ripgrep"
       [ -d "$rg/.git" ] || die "no ripgrep clone at $rg"
-      awk -F'\t' -v src="$rg" -v sha="$(git -C "$rg" rev-parse HEAD)" '{ printf "%s\tripgrep\t%s\t%s\t%s\n", $1, src, sha, $2 }' "$SELF_DIR/single.tsv" ;;
+      awk -F'\t' -v src="$rg" -v sha="$(git -C "$rg" rev-parse HEAD)" '{ printf "%s\tripgrep\t%s\t%s\t%s\n", $1, src, sha, $2 }' "${ARENA_SINGLE_FILE:-$SELF_DIR/single.tsv}" ;;
     census)
       [ -f "$CENSUS_ROOT/census.db" ] || die "no census database at $CENSUS_ROOT/census.db"
       sqlite3 -json "file:$CENSUS_ROOT/census.db?mode=ro" \

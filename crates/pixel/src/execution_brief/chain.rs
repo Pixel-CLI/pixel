@@ -2844,8 +2844,10 @@ impl Pending {
 }
 
 /// Start the brief for `prompt` of a hook session in `root`, or decline: a
-/// switched-off brief, a repository without an index and a prompt that asks
-/// nothing about code start no thread and run no lookup.
+/// switched-off brief and a prompt that asks nothing about code start no
+/// thread and run no lookup. A code prompt in a repository without an index
+/// still declines this brief, but lazily kicks a detached `prepare-repo` so
+/// the next prompt is indexed.
 ///
 /// `parts` is how many hooks deliver the brief (`brief_parts`, or 1 for a host
 /// with one hook): the region pack may fill that many. `session` is what the
@@ -2886,6 +2888,7 @@ fn try_start_as(
     let root = root.to_path_buf();
     let for_start = root.clone();
     let for_context = root.clone();
+    let for_index = root.clone();
     let dedupe = sent::enabled();
     let session_id = session.as_ref().and_then(|session| session.id.clone());
     // What this session was sent by earlier prompts, and where this prompt's
@@ -2915,7 +2918,7 @@ fn try_start_as(
             floor: if command { Duration::ZERO } else { PROBE_FLOOR },
             max_bytes: (command && pack.parts <= 1).then_some(COMMAND_MAX_BYTES),
         });
-    try_start_with(
+    let result = try_start_with(
         prompt,
         gate,
         window,
@@ -2931,7 +2934,28 @@ fn try_start_as(
             sent: sent_to,
             probes: probes_setup,
         },
-    )
+    );
+    // A code prompt in a repository with no index builds one detached, so the
+    // brief this prompt cannot have answers the next one. `is_trivial_continuation`
+    // and `brief_signal` are the same checks `try_start_with` skipped by
+    // declining first, and the build lock serializes overlapping kicks.
+    if matches!(result, Err(Declined::Unindexed))
+        && !crate::prompt_continuation::is_trivial_continuation(prompt)
+        && brief_signal(prompt).is_some()
+    {
+        lazy_index(&for_index);
+    }
+    result
+}
+
+/// Launch the detached `pixel prepare-repo` that indexes `root` in the
+/// background; the hook that spawned it is long gone when it finishes.
+fn lazy_index(root: &Path) {
+    let args = [
+        std::ffi::OsString::from("prepare-repo"),
+        root.as_os_str().to_os_string(),
+    ];
+    let _ = crate::spawn_detached(&args);
 }
 
 /// [`start_in`] with its gate, window, evidence source and intent judge given and

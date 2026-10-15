@@ -3,9 +3,12 @@ name: pixel
 description: >
   Deterministic code retrieval: indexed search, concept resolve, impact
   analysis, caller/callee tracing, task scoping, plan generation, and git
-  history archaeology via the `pixel` CLI. Use when the repo has a `.pixel`
-  directory, when the user mentions pixel, or before editing a symbol when
-  blast radius matters. Requires the `pixel` binary on PATH.
+  history archaeology via the `pixel` CLI. Use whenever the task needs
+  code retrieval — searching code by concept, finding callers, assessing
+  blast radius before an edit, scoping a task — or when the user mentions
+  pixel. The `.pixel` index is created lazily on demand; if the repo is
+  not indexed yet, run `pixel prepare-repo` first. Requires the `pixel`
+  binary on PATH.
 license: MIT
 ---
 
@@ -15,8 +18,9 @@ A `[PIXEL:BRIEF]` block may precede the task: a bounded set of indexed facts
 with `path:line` citations, not an action recommendation, an exhaustive map,
 or a read/edit boundary. Answer from it; open a cited region only if it
 contradicts you, and continue exploring any files or sources the task needs.
-0 hits or 0 callers: verify with `rg` first. If Pixel or its index is
-unavailable, continue normally.
+0 hits or 0 callers: verify with `rg` first. No `.pixel` directory in this
+repo: run `pixel prepare-repo` once to build the index and graph, then retry.
+If Pixel or its index is unavailable, continue normally.
 
 ## Retrieval commands
 

@@ -13,7 +13,9 @@ use std::process::Command;
 
 use crate::install::{CheckStatus, InstallStep, Result};
 
-const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
+/// The always-on rule earlier releases wrote into each plugin dir. Pixel
+/// ships its guidance as the `pixel` skill only, so install removes it.
+const RETIRED_RULE: &str = "rules/AGENTS.md";
 
 pub(crate) fn antigravity_config_dir(home: &Path) -> PathBuf {
     home.join(".gemini/config")
@@ -549,18 +551,17 @@ fn install_antigravity_plugin_with_agy(
         "version": env!("CARGO_PKG_VERSION"),
         "managedBy": "pixel"
     });
-    let skill = format!(
-        "---\nname: pixel\ndescription: >-\n  Deterministic code retrieval: indexed search, concept resolve, impact\n  analysis, caller/callee tracing, task targets, plan generation, and git\n  history archaeology via the `pixel` CLI.\n---\n\n{AGENT_PROMPT_ASSET}"
-    );
     let hooks = antigravity_metrics_plugin_hooks(exe);
     let manifest_text = serde_json::to_string_pretty(&manifest)? + "\n";
     let hooks_text = serde_json::to_string_pretty(&hooks)? + "\n";
     for path in [&ide_dir, &cli_dir] {
-        fs::create_dir_all(path.join("rules"))?;
         fs::create_dir_all(path.join("skills/pixel"))?;
         fs::write(path.join("plugin.json"), &manifest_text)?;
-        fs::write(path.join("rules/AGENTS.md"), AGENT_PROMPT_ASSET)?;
-        fs::write(path.join("skills/pixel/SKILL.md"), &skill)?;
+        remove_retired_rule(path)?;
+        fs::write(
+            path.join("skills/pixel/SKILL.md"),
+            crate::skill::PIXEL_SKILL,
+        )?;
         fs::write(path.join("hooks.json"), &hooks_text)?;
     }
     let registered = run_agy_plugin_with(agy, home, "install", Some(&cli_dir))?;
@@ -585,6 +586,19 @@ fn install_antigravity_plugin_with_agy(
             cli_dir.display()
         )),
     })
+}
+
+/// Delete the retired always-on rule from a pixel-owned plugin dir, and its
+/// `rules/` dir once empty: the guidance reaches the model as a skill only.
+fn remove_retired_rule(plugin: &Path) -> Result<()> {
+    match fs::remove_file(plugin.join(RETIRED_RULE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // A non-empty `rules/` holds files pixel did not write: keep it.
+    let _ = fs::remove_dir(plugin.join("rules"));
+    Ok(())
 }
 
 fn antigravity_metrics_plugin_hooks(exe: &Path) -> Value {
@@ -658,23 +672,23 @@ pub fn check_antigravity_install(
                 "CLI plugin.json"
             });
         }
-        for (relative, label) in [
-            ("rules/AGENTS.md", "rules/AGENTS.md"),
-            ("skills/pixel/SKILL.md", "skills/pixel/SKILL.md"),
-        ] {
-            if !dir.join(relative).is_file() {
-                missing.push(if surface == "IDE" {
-                    if label == "rules/AGENTS.md" {
-                        "IDE rules/AGENTS.md"
-                    } else {
-                        "IDE skills/pixel/SKILL.md"
-                    }
-                } else if label == "rules/AGENTS.md" {
-                    "CLI rules/AGENTS.md"
-                } else {
-                    "CLI skills/pixel/SKILL.md"
-                });
-            }
+        if fs::read_to_string(dir.join("skills/pixel/SKILL.md"))
+            .ok()
+            .as_deref()
+            != Some(crate::skill::PIXEL_SKILL)
+        {
+            missing.push(if surface == "IDE" {
+                "IDE skills/pixel/SKILL.md"
+            } else {
+                "CLI skills/pixel/SKILL.md"
+            });
+        }
+        if dir.join(RETIRED_RULE).exists() {
+            missing.push(if surface == "IDE" {
+                "IDE rules/AGENTS.md removed (retired always-on prompt)"
+            } else {
+                "CLI rules/AGENTS.md removed (retired always-on prompt)"
+            });
         }
         let installed_hooks = fs::read_to_string(dir.join("hooks.json"))
             .ok()
@@ -1137,6 +1151,16 @@ mod tests {
         .unwrap();
         let exe = Path::new("/opt/pixel tools/pixel");
         let agy = fake_agy(&tmp.path().join("agy"), r#"{"imports":[{"name":"pixel"}]}"#);
+        // An earlier release's always-on rule, in a pixel-owned plugin dir.
+        for dir in [plugin_dir(home), cli_plugin_dir(home)] {
+            fs::create_dir_all(dir.join("rules")).unwrap();
+            fs::write(
+                dir.join("plugin.json"),
+                r#"{"name":"pixel","managedBy":"pixel"}"#,
+            )
+            .unwrap();
+            fs::write(dir.join(RETIRED_RULE), "old prompt").unwrap();
+        }
 
         let step = install_antigravity_plugin_with_agy(home, exe, false, agy.as_os_str()).unwrap();
 
@@ -1156,8 +1180,12 @@ mod tests {
         for dir in [plugin_dir(home), cli_plugin_dir(home)] {
             assert!(is_pixel_plugin(&dir));
             assert_eq!(read_json_object(&dir.join("hooks.json")).unwrap(), expected);
-            assert!(dir.join("rules/AGENTS.md").is_file());
-            assert!(dir.join("skills/pixel/SKILL.md").is_file());
+            assert!(!dir.join(RETIRED_RULE).exists());
+            assert!(!dir.join("rules").exists());
+            assert_eq!(
+                fs::read_to_string(dir.join("skills/pixel/SKILL.md")).unwrap(),
+                crate::skill::PIXEL_SKILL
+            );
         }
         assert_eq!(
             read_json_object(&config_path(home)).unwrap(),

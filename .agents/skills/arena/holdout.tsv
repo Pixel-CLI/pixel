@@ -1,0 +1,13 @@
+lookup	Which flag selects the regex engine, and what values does it accept?
+lookup-2	How is the number of worker threads decided when --threads is not given?
+impact	Where is search_reader defined in the core crate, which code calls it, and which tests exercise it?
+flow	Trace how a match goes from the searcher to bytes written on standard output in a normal line-oriented search.
+diagnosis	Why can a file be searched when it is named explicitly on the command line even though a .gitignore would exclude it, and what tests prove that?
+configuration	Which flags choose the output format of results (for example JSON versus plain text), and where is each one handled?
+configuration-2	Which environment variables does ripgrep read, and where is each one read?
+tests	Which tests cover the --stats output, and what does each assert?
+history	What did the commit titled 'ci: fix binary discovery' change, and which files changed with it?
+overview	What is the globset crate for, and which crates depend on it?
+overview-2	What does the grep-regex crate contain, and which other crates does it depend on?
+review	Review the commit titled 'ignore: skip loading unreachable ignore files': what does it change, and what could break because of it?
+error-origin	Where does the error about an unrecognized file type come from, and what triggers it?

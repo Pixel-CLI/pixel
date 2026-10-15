@@ -1,0 +1,13 @@
+lookup	Which flag controls whether hidden files are searched, and which function applies it to the directory walker?
+lookup-2	What does the --max-filesize flag accept, and how is its value parsed?
+impact	Where is walk_builder defined, which code calls it, and which tests exercise that path?
+flow	Trace how a pattern given with -e becomes a compiled matcher.
+diagnosis	Why is a file treated as binary when it contains a NUL byte, yet still searched when --text is given, and which tests prove that?
+configuration	Which flags control how many lines of context are printed around a match, and where are they applied?
+configuration-2	Which flags affect the order of results, and where is sorting implemented?
+tests	Which tests cover the --count flag, and what does each assert?
+history	What did the commit titled 'index: remove incorrect README' change, and which files were touched?
+overview	What is the ignore crate for, and which crates depend on it?
+overview-2	What does the grep-printer crate contain, and which other crates does it depend on?
+review	Review the commit titled 'ci: attest build provenance for release archives': what does it change, and what could break because of it?
+error-origin	Where does the error about an invalid glob pattern come from, and what triggers it?
