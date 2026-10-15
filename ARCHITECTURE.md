@@ -438,7 +438,8 @@ envelope talks to the daemon socket directly.
   Cost on antiwork/gumroad (`b996417e`, `dev-release`): a one-file edit
   then a graph command 0.79 s → 7.5 s (pixel-mvp's refresh and its
   970 000 sites read on every update), a cold build 5.1 s → 13.1 s,
-  `.pixel/` 174 MB → 494 MB; that is why it is off by default.
+  `.pixel/` 174 MB → 494 MB (302 MB since pixel-mvp's store schema 8,
+  whose index of gumroad is 131 MB); that is why it is off by default.
 - Ruby constant receivers are resolved in `pixel-graph/src/resolve/ruby.rs`
   against class/module scopes, preserving the difference between nested
   declarations and `class A::B`. Unique class and constructor targets are
