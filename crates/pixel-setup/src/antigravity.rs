@@ -661,7 +661,7 @@ fn check_antigravity_install_with_agy(
             detail,
         ));
     }
-    let plugin_dirs = [&p_dir, &cli_dir];
+    let plugin_dirs = [p_dir.as_path(), cli_dir.as_path()];
     let has_managed_plugin = plugin_dirs.iter().any(|dir| is_pixel_plugin(dir));
     let foreign = foreign_plugins(plugin_dirs);
     let mut retired = Vec::new();

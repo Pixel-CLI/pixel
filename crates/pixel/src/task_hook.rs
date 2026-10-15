@@ -2811,6 +2811,11 @@ mod tests {
         )
         .unwrap();
         pixel_index::index::build(&root, &pixel_index::TrigramExtractor).unwrap();
+        let graph = root
+            .join(pixel_index::index::SHARD_DIR)
+            .join(pixel_daemon::api::GRAPH_DB_FILE);
+        std::fs::create_dir_all(graph.parent().unwrap()).unwrap();
+        pixel_graph::build::build_graph(&root, &graph).unwrap();
         let transcript = root.join("transcript.jsonl");
         std::fs::write(
             &transcript,
