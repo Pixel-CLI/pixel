@@ -347,7 +347,7 @@ class SelfTest(unittest.TestCase):
         """Every script of the zero-call loop runs on a clean checkout: no home directory, no scratch of one account."""
         names = ("brief-check", "brief-zero-calls", "brief-bench", "probe-test", "probe-translate", "probe-loop",
                  "probe-chain", "probe-equivalence", "extract-probes")
-        paths = [REPO / "scripts" / f"{n}.py" for n in names] + [p for p in sorted(HERE.glob("*.py"))
+        paths = [REPO / "scripts" / "bench" / f"{n}.py" for n in names] + [p for p in sorted(HERE.glob("*.py"))
                                                                   if p.name != Path(__file__).name]
         needles = ("/Users/" + "livio", "claude" + "-501")
         bad = [f"{p.name}: {n}" for p in paths for n in needles if n in p.read_text(encoding="utf-8")]
