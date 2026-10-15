@@ -367,40 +367,6 @@ fn a_refresh_names_the_generation_it_started_from_and_the_files_it_wrote_again()
     );
 }
 
-/// The hybrid's update merges again only the files a refresh changed, and
-/// trusts the rows it kept only when the refresh started from the
-/// generation the graph was merged against: so a refresh must name that
-/// generation as the index published it, and name the files whose rows
-/// it wrote again.
-#[test]
-fn a_refresh_names_the_generation_it_started_from_and_the_files_it_wrote_again() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
-    fixture(&root);
-    let state = root.join(".pixel");
-    let (first, changes) = refresh_changes(&root, &state).unwrap();
-    assert_eq!(changes.before, None, "no generation before the first");
-    let published = first.provenance().unwrap().generation;
-    drop(first);
-    let (again, changes) = refresh_changes(&root, &state).unwrap();
-    assert_eq!(changes.before.as_deref(), Some(published.as_str()));
-    assert!(changes.rewritten.is_empty() && changes.redirected.is_empty());
-    assert_eq!(again.provenance().unwrap().generation, published);
-    drop(again);
-    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
-    fs::write(
-        root.join("src/lib.rs"),
-        format!("{lib}\npub fn added() {{}}\n"),
-    )
-    .unwrap();
-    let (_, changes) = refresh_changes(&root, &state).unwrap();
-    assert_eq!(changes.before.as_deref(), Some(published.as_str()));
-    assert_eq!(
-        changes.rewritten.iter().collect::<Vec<_>>(),
-        vec!["src/lib.rs"]
-    );
-}
-
 #[test]
 fn outside_a_git_work_tree_there_is_no_index() {
     let dir = tempfile::tempdir().unwrap();
@@ -411,11 +377,11 @@ fn outside_a_git_work_tree_there_is_no_index() {
     assert!(!dir.path().join(".pixel/.pixel-mvp").exists());
 }
 
-// pixel-mvp's writer may keep a copy of git's index in its own state
+// pixel-mvp's writer keeps a copy of git's index in its own state
 // directory (`git_index`, ADR-0039 there), named `git-index.<key>`. This
 // repository's state is `.pixel/` alone, and its `## On-disk state` lists
-// what `.pixel/.pixel-mvp/` holds: the adapter places no such copy, makes
-// no `.pixel-mvp/` at the work tree's top level, and leaves git's own
+// what `.pixel/.pixel-mvp/` holds: the adapter places that one copy there,
+// makes no `.pixel-mvp/` at the work tree's top level, and leaves git's own
 // index as it found it.
 #[cfg(unix)]
 #[test]
