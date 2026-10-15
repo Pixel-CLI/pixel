@@ -204,7 +204,8 @@ jobs:
           ^\.config/
           ^deny\.toml$
           ^rust-toolchain
-          ^(README|ARCHITECTURE|CONTRIBUTING|AGENTS|CHANGELOG)\.md$
+          ^(README|ARCHITECTURE|AGENTS|CHANGELOG)\.md$
+          ^\.github/CONTRIBUTING\.md$
           ^docs/manual-setup\.md$
           ^website/
           ^\.agents/(rules|skills/(rust-guidelines|release))/

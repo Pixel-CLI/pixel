@@ -1,0 +1,16 @@
+target/
+.git/
+mutants.out/
+mutants.out.old/
+eval/results/
+eval/arena-results/
+run-artifacts/
+node_modules/
+.codex/
+.claude/
+.pixel/
+.env
+.env.*
+**/.env
+**/.env.*
+**/*.pixel-bak.*

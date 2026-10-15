@@ -222,7 +222,7 @@ reviews:
         anything that depends on the caller's working directory. A `bash`
         shebang is acceptable only for the bench and demo scripts that
         already use it.
-    - path: "{README.md,ARCHITECTURE.md,CONTRIBUTING.md,SECURITY.md,docs/**/*.md}"
+    - path: "{README.md,ARCHITECTURE.md,.github/CONTRIBUTING.md,.github/SECURITY.md,docs/**/*.md}"
       instructions: |
         Documentation must match the code: verify every command, flag, file
         path and exit code named against the tree, and flag anything the
@@ -353,7 +353,7 @@ knowledge_base:
     # CodeRabbit does not read, so map them to the files they govern here;
     # a plain string entry would scope them to .agents/ itself.
     filePatterns:
-      - files: "CONTRIBUTING.md"
+      - files: ".github/CONTRIBUTING.md"
         applyTo: "**"
       - files: ".agents/rules/mutation-gate.md,.agents/rules/test-hygiene.md,.agents/rules/rust-style.md"
         applyTo: "crates/**/*.rs"

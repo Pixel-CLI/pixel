@@ -57,7 +57,7 @@ check = '''<code>pixel impact &lt;symbol&gt;</code> each caller marked exact or 
 question = "Does anything leave my machine?"
 audience = "team"
 answer = [
-  '''Nothing you did not ask for: no telemetry, and the index stays in <code>.pixel/</code>. The network carries the embedding model's first download, your Git remotes, the two opt-in commands that call a service you configure (<code>pixel classify</code>, <code>pixel web-search</code>), and a daily release check in an interactive terminal (<code>PIXEL_NO_UPDATE_CHECK=1</code> turns it off). <a class="link" href="{github}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security model</a>''',
+  '''Nothing you did not ask for: no telemetry, and the index stays in <code>.pixel/</code>. The network carries the embedding model's first download, your Git remotes, the two opt-in commands that call a service you configure (<code>pixel classify</code>, <code>pixel web-search</code>), and a daily release check in an interactive terminal (<code>PIXEL_NO_UPDATE_CHECK=1</code> turns it off). <a class="link" href="{github}/blob/main/.github/SECURITY.md" target="_blank" rel="noopener">Security model</a>''',
 ]
 check = '''<code>pixel config</code> every setting and the file it comes from'''
 

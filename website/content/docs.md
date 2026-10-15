@@ -42,7 +42,7 @@ The same script. The second line is for the `install.sh` already published on th
 
 New installs use the script; re-running the same `curl … | sh` line updates an existing one. A binary managed by Homebrew or mise keeps being upgraded by its manager.
 
-To build from source, see [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/CONTRIBUTING.md).
+To build from source, see [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/.github/CONTRIBUTING.md).
 
 Then let your agents use it, and check the result:
 
@@ -53,7 +53,7 @@ pixel doctor .        # optional: health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-The index, the code graph and the optional history data live in `.pixel/` at the repository root and stay on your machine, and there is no telemetry beyond an optional release check. The network is used only for Git remote operations, the optional `pixel classify` (a core command) and `pixel web-search` (a command of the `pixel-utilities` plugin), the embedding model downloaded from Hugging Face on first use, and a release check throttled to at most once per day when a person is at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) ([security model](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md)).
+The index, the code graph and the optional history data live in `.pixel/` at the repository root and stay on your machine, and there is no telemetry beyond an optional release check. The network is used only for Git remote operations, the optional `pixel classify` (a core command) and `pixel web-search` (a command of the `pixel-utilities` plugin), the embedding model downloaded from Hugging Face on first use, and a release check throttled to at most once per day when a person is at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) ([security model](https://github.com/Pixel-CLI/pixel/blob/main/.github/SECURITY.md)).
 
 ## What pixel setup wires
 
