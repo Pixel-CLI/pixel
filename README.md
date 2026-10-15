@@ -58,7 +58,7 @@ The agent starts with the evidence already in context. It keeps all its tools �
 ```bash
 pixel brief "Where is request validation implemented?" .   # see what your agent gets
 pixel doctor .                                              # check install and index health
-PIXEL_BRIEF=0                                               # turn briefs off
+export PIXEL_BRIEF=0                                        # turn briefs off
 ```
 
 ## 🛠️ Retrieval on demand: the Pixel skill
