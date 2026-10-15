@@ -25,4 +25,3 @@ libc = "0.2"
 tempfile = "3"
 
 [dev-dependencies]
-proptest = { workspace = true }
