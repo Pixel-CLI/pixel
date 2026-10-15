@@ -18,7 +18,7 @@ const sessXs = [1440, 1200, 960, 720, 480, 240];
 const setup = {
 	nodes: [
 		{x: setupXs[0], y: setupY, label: 'Repo', sub: 'any language', icon: 'repo' as const},
-		{x: setupXs[1], y: setupY, label: 'First Prompt', sub: 'indexes the repo', icon: 'init' as const, local: true},
+		{x: setupXs[1], y: setupY, label: 'First Code Prompt', sub: 'indexes the repo', icon: 'init' as const, local: true},
 		{x: setupXs[2], y: setupY, label: '.pixel/', sub: 'shards · call graph', icon: 'graph' as const},
 		{x: setupXs[3], y: setupY, label: 'In Repo', sub: 'git-anchored', icon: 'git' as const},
 	],
@@ -50,8 +50,8 @@ export const measuredSavingsSpec: ComparisonSpec = {
 		setup,
 		session: {
 			nodes: [
-				{x: sessXs[0], y: sessY, label: 'pixel skill', sub: 'use pixel first', icon: 'hook', accent: GREEN},
-				{x: sessXs[1], y: sessY, label: 'Task', sub: 'new session', icon: 'task'},
+				{x: sessXs[0], y: sessY, label: 'Task', sub: 'new session', icon: 'task'},
+				{x: sessXs[1], y: sessY, label: 'pixel skill', sub: 'use pixel first', icon: 'hook', accent: GREEN},
 				{x: sessXs[2], y: sessY, label: 'Agent', sub: 'asks pixel', icon: 'agent'},
 				{x: sessXs[3], y: sessY, label: 'find-code · impact', sub: 'bounded reads', icon: 'read', accent: GREEN, local: true},
 				{x: sessXs[4], y: sessY, label: 'Precise Context', sub: 'no guessing', icon: 'context'},
@@ -87,8 +87,8 @@ export const impactSpec: ComparisonSpec = {
 		setup,
 		session: {
 			nodes: [
-				{x: sessXs[0], y: sessY, label: 'pixel skill', sub: 'impact before edit', icon: 'hook', accent: GREEN},
-				{x: sessXs[1], y: sessY, label: 'Task', sub: 'rename the fn', icon: 'task'},
+				{x: sessXs[0], y: sessY, label: 'Task', sub: 'rename the fn', icon: 'task'},
+				{x: sessXs[1], y: sessY, label: 'pixel skill', sub: 'impact before edit', icon: 'hook', accent: GREEN},
 				{x: sessXs[2], y: sessY, label: 'pixel impact', sub: 'callers upstream', icon: 'graph', accent: GREEN, local: true},
 				{x: sessXs[3], y: sessY, label: 'Blast Radius', sub: 'every site listed', icon: 'context'},
 				{x: sessXs[4], y: sessY, label: 'Edit', sub: 'informed', icon: 'edit'},
@@ -124,8 +124,8 @@ export const scopeSpec: ComparisonSpec = {
 		setup,
 		session: {
 			nodes: [
-				{x: sessXs[0], y: sessY, label: 'pixel skill', sub: 'scope first', icon: 'hook', accent: GREEN},
-				{x: sessXs[1], y: sessY, label: 'Task', sub: 'fix the bug', icon: 'task'},
+				{x: sessXs[0], y: sessY, label: 'Task', sub: 'fix the bug', icon: 'task'},
+				{x: sessXs[1], y: sessY, label: 'pixel skill', sub: 'scope first', icon: 'hook', accent: GREEN},
 				{x: sessXs[2], y: sessY, label: 'scope-task', sub: 'p0 · p1 · p2', icon: 'target', accent: GREEN, local: true},
 				{x: sessXs[3], y: sessY, label: 'File List', sub: 'closed, ranked', icon: 'read'},
 				{x: sessXs[4], y: sessY, label: 'Work P0', sub: 'then p1', icon: 'context'},
@@ -161,8 +161,8 @@ export const rewriteSpec: ComparisonSpec = {
 		setup,
 		session: {
 			nodes: [
-				{x: sessXs[0], y: sessY, label: 'pixel skill', sub: 'search the index', icon: 'hook', accent: GREEN},
-				{x: sessXs[1], y: sessY, label: 'Task', sub: 'find the call', icon: 'task'},
+				{x: sessXs[0], y: sessY, label: 'Task', sub: 'find the call', icon: 'task'},
+				{x: sessXs[1], y: sessY, label: 'pixel skill', sub: 'search the index', icon: 'hook', accent: GREEN},
 				{x: sessXs[2], y: sessY, label: 'Agent', sub: 'asks pixel', icon: 'agent'},
 				{x: sessXs[3], y: sessY, label: 'search-content', sub: 'indexed, capped', icon: 'target', accent: GREEN, local: true},
 				{x: sessXs[4], y: sessY, label: 'Capped Hits', sub: 'path:line', icon: 'context'},
@@ -199,10 +199,10 @@ export const briefSpec: ComparisonSpec = {
 			nodes: [
 				{x: setupXs[0], y: setupY, label: 'pixel setup', sub: 'once', icon: 'init', local: true},
 				{x: setupXs[1], y: setupY, label: 'Agent Hooks', sub: '7 hosts wired', icon: 'hook'},
-				{x: setupXs[2], y: setupY, label: 'First Prompt', sub: 'indexes the repo', icon: 'repo', local: true},
+				{x: setupXs[2], y: setupY, label: 'First Code Prompt', sub: 'indexes the repo', icon: 'repo', local: true},
 				{x: setupXs[3], y: setupY, label: '.pixel/', sub: 'index · graph', icon: 'graph'},
 			],
-			badge: 'INDEXED ON FIRST PROMPT',
+			badge: 'INDEXED ON FIRST CODE PROMPT',
 		},
 		session: {
 			nodes: [
