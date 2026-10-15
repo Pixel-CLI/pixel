@@ -64,7 +64,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: Homebrew/actions/setup-homebrew@e99025eb970cfa124b8284a35463d87426917478 # main
+      - uses: Homebrew/actions/setup-homebrew@eb02c69dbabdb66ff183c614f4ce7ab3c077592c # main
         with:
           stable: true
 

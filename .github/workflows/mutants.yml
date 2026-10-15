@@ -79,7 +79,7 @@ jobs:
       # every shard must generate the same list. Two cargo-mutants releases
       # can disagree on which mutants a diff produces.
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-mutants@27.1.0
 
@@ -140,7 +140,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - name: Upload the diff and the listing
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mutants-plan
           path: |
@@ -239,12 +239,12 @@ jobs:
           fi
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-mutants@27.1.0
 
       - name: Download the diff and the listing
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: mutants-plan
 
@@ -340,7 +340,7 @@ jobs:
       # Artifact names cannot hold the `/` of `k/n`, hence the job index.
       - name: Upload mutants.out
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mutants-out-${{ strategy.job-index }}
           path: mutants.out
@@ -371,7 +371,7 @@ jobs:
           persist-credentials: false
 
       - name: Download the diff and the listing
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: mutants-plan
 
@@ -381,7 +381,7 @@ jobs:
       # without a verdict, and the next step counts them as such.
       - name: Download every shard's mutants.out
         if: needs.plan.outputs.mutants != '0'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: mutants-out-*
           path: shards
@@ -414,7 +414,7 @@ jobs:
 
       - name: Record the completed campaign
         if: always() && steps.checkpoint.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mutants-nightly-checkpoint
           path: checkpoint.json
