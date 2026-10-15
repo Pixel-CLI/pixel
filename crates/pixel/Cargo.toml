@@ -61,3 +61,6 @@ xxhash-rust = { workspace = true }
 # (tests/cli/docs_drift.rs).
 toml_edit = "0.25.15"
 tempfile = "3"
+# The hook guarantees are checked over generated payloads
+# (tests/cli/hook_guarantees_cli.rs, task_hook::tests).
+proptest = { workspace = true }

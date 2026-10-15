@@ -21,6 +21,7 @@ mod evaluate_cli;
 mod execution_brief;
 mod french_brief_cli;
 mod graph_shadow_cli;
+mod hook_guarantees_cli;
 #[cfg(unix)]
 mod hook_stdin_cap_cli;
 mod impact_read_cli;

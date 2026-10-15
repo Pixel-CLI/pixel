@@ -2124,6 +2124,7 @@ dependencies = [
  "pixel-release",
  "pixel-setup",
  "pixel-task",
+ "proptest",
  "regex",
  "rusqlite",
  "serde",

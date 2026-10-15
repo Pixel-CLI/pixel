@@ -175,9 +175,14 @@ fn run_one(
     if let Some(home) = std::env::var_os("HOME") {
         command.env("HOME", home);
     }
+    in_own_group(&mut command);
     let Ok(mut child) = command.spawn() else {
         return (None, run("failed", 0));
     };
+    // The probe leads a group of its own, whose id is its pid: everything it
+    // starts (a `sleep` its shell left behind, a helper it daemonised, a
+    // `git` still running) is killed with it.
+    let group = child.id();
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let body = request.to_owned();
@@ -197,37 +202,78 @@ fn run_one(
         }
         let _ = sender.send(bytes);
     });
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < limit => std::thread::sleep(Duration::from_millis(4)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            Err(_) => break None,
-        }
-    };
-    let Some(status) = status else {
+    // The answer is complete when every process holding the probe's stdout
+    // has closed it, or never when the budget runs out first. Either way the
+    // whole group is killed then, before its leader is reaped, so that the
+    // id still names the group and no process of the probe outlives its run.
+    let read = receiver.recv_timeout(limit.saturating_duration_since(Instant::now()));
+    kill_group(group);
+    let _ = child.kill();
+    let status = reap(child, limit.max(Instant::now()) + REAP_GRACE);
+    let Ok(raw) = read else {
         return (None, run("timeout", 0));
     };
-    let Ok(raw) = receiver.recv_timeout(
-        limit
-            .saturating_duration_since(Instant::now())
-            .max(Duration::from_millis(20)),
-    ) else {
-        return (None, run("timeout", 0));
-    };
-    let text = String::from_utf8_lossy(&raw).into_owned();
-    if !status.success() {
+    if !status.is_some_and(|status| status.success()) {
         return (None, run("failed", 0));
     }
+    let text = String::from_utf8_lossy(&raw).into_owned();
     if text.trim().is_empty() {
         return (None, run("empty", 0));
     }
     let bytes = text.len();
     (Some(text), run("ok", bytes))
+}
+
+/// How long past its limit a probe's leader, once killed, is waited on for
+/// its status: a kill ends a process at once unless it sleeps in the kernel
+/// (a hung network or FUSE read), and that one is reaped later off the
+/// brief's path.
+const REAP_GRACE: Duration = Duration::from_millis(50);
+
+/// Starts the command in a new process group, its own pid the group's id.
+fn in_own_group(command: &mut Command) {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(command, 0);
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+/// Sends SIGKILL to the process group `group`. A group already gone is not an
+/// error, and Pixel's own group, or init's, is never one.
+fn kill_group(group: u32) {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(group) else {
+            return;
+        };
+        // SAFETY: `getpgrp` takes no argument and cannot fail.
+        if pid <= 1 || pid == unsafe { libc::getpgrp() } {
+            return;
+        }
+        // SAFETY: a negative pid signals the process group `pid`; the call
+        // touches no memory of ours, and an absent group only sets ESRCH.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    let _ = group;
+}
+
+/// The exit status of `child`, waited for no later than `until`: a leader a
+/// kill has not ended by then gives none, and a thread of its own reaps it
+/// whenever it ends, so the brief never waits past its window.
+fn reap(mut child: std::process::Child, until: Instant) -> Option<std::process::ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(1)),
+            Ok(None) => break,
+            Err(_) => return None,
+        }
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    None
 }
 
 /// A probe's output: its blocks, and the directives.
@@ -512,6 +558,102 @@ mod tests {
             merged.unwrap(),
             "[PIXEL:BRIEF]\n### z.rs:1-1 — z\n1| z\n### a.rs:1-1 — a\n1| a\n"
         );
+    }
+
+    /// Whether the process `pid` is gone, or a zombie its new parent has not
+    /// reaped yet: either way, nothing of it runs.
+    fn gone(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim().starts_with('Z'))
+    }
+
+    /// A probe is a script, and what it starts is the probe too: a sleeper
+    /// it forks dies with it whether the probe answered, hung, or exited and
+    /// left the sleeper holding its stdout, and none of them holds the brief
+    /// past the probe's budget.
+    #[test]
+    fn a_probe_and_every_process_it_started_are_killed_and_never_hold_the_brief() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let pids = tmp.path().join("pids");
+        std::fs::create_dir_all(&pids).unwrap();
+        // `<redirect>` the sleeper's stdout, record its pid, wait until it has.
+        let fork = |name: &str, redirect: &str| {
+            let file = pids.join(name);
+            let file = file.display();
+            format!(
+                "sh -c 'echo $$ > {file}; exec sleep 30' {redirect} &\nwhile [ ! -s {file} ]; do sleep 0.01; done\n"
+            )
+        };
+        // Answers, its sleeper's stdout elsewhere: complete when it exits.
+        fixture_probe(
+            &home,
+            "a-answers",
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\n{}printf '### a.rs:1-1 — a\\n1| a\\n'\n",
+                fork("a", ">/dev/null 2>&1")
+            ),
+            "",
+        );
+        // Hangs, its sleeper holding its stdout: killed at the budget.
+        fixture_probe(
+            &home,
+            "b-hangs",
+            &format!("#!/bin/sh\ncat >/dev/null\n{}sleep 30\n", fork("b", "")),
+            "",
+        );
+        // Exits at once, its sleeper holding its stdout: nothing is complete
+        // before the budget.
+        fixture_probe(
+            &home,
+            "c-exits",
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\n{}printf '### c — c\\n'\n",
+                fork("c", "")
+            ),
+            "",
+        );
+        let (h, root) = (host(&home), tmp.path().join("repo"));
+        std::fs::create_dir_all(&root).unwrap();
+        let started = Instant::now();
+        let (merged, runs) = apply(&stage(&h, &root, None, 2_000), "[PIXEL:BRIEF]\n");
+        let took = started.elapsed();
+        // Each budget is 400 ms (`fixture_probe`); the sleepers sleep 30 s.
+        assert!(
+            took < Duration::from_millis(1_000),
+            "the brief waited {took:?}"
+        );
+        let outcome = |name: &str| runs.iter().find(|r| r.name == name).map(|r| r.outcome);
+        assert_eq!(outcome("a-answers"), Some("ok"));
+        assert_eq!(outcome("b-hangs"), Some("timeout"));
+        assert_eq!(outcome("c-exits"), Some("timeout"));
+        assert_eq!(
+            merged.as_deref(),
+            Some("[PIXEL:BRIEF]\n### a.rs:1-1 — a\n1| a\n")
+        );
+        for name in ["a", "b", "c"] {
+            let pid: i32 = std::fs::read_to_string(pids.join(name))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let until = Instant::now() + Duration::from_secs(5);
+            while !gone(pid) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let alive = !gone(pid);
+            if alive {
+                // SAFETY: the pid is the sleeper this test started.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            assert!(!alive, "probe {name}'s sleeper outlived its run");
+        }
     }
 
     #[test]

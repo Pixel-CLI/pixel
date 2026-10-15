@@ -1,0 +1,1 @@
+**docs:** the README's recorded Codex comparison crops each pane to its left half and shows the pair across the full column width, so the terminal glyphs render about twice as large while both panes stay side by side.
