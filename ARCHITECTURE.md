@@ -1204,7 +1204,10 @@ has rendered the brief, `execution_brief::probes::apply` starts every probe whos
 `when` fits the question in parallel, each with `{prompt, repo_root, brief, kind, session_files}` as JSON on
 stdin, in an emptied environment (`PATH`, `HOME`, `LANG`, `PIXEL_BIN`), inside `min(budget_ms, what is left of the
 window)` (the chain leaves them at least 1.2 s even when it used the window up, and none outlives 5 s after the
-prompt). A probe that overruns is killed; one that fails, prints nothing or is not due is skipped: fail open.
+prompt). Each probe leads a process group of its own, and the whole group is killed when its run ends: at its limit,
+or once every process holding its stdout has closed it, so nothing it started (a `sleep` its shell left behind, a
+helper it daemonised) outlives the run or holds the brief. A probe that overruns is killed; one that fails, prints
+nothing or is not due is skipped: fail open.
 An unjudged prompt can use matching probes. A relevance-closed gate permits only probes declaring
 `when_gate_closed = true`, which also requires an explicit nonempty `when_prompt` matcher; an intent denial,
 explicit silence, disabled briefs, and unindexed repositories remain off. Recovery can supply an otherwise empty

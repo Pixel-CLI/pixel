@@ -398,7 +398,9 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   `when_gate_closed = true` requires an explicit prompt matcher and permits evidence recovery after a relevance
   rejection; it never bypasses an intent denial, the brief opt-out, repository trust or plugin disable settings.
   Probes run within their manifest budget and the shared deadline in an emptied environment with only
-  `PATH`, `HOME`, `LANG`, `GIT_CONFIG_NOSYSTEM` and `PIXEL_BIN`. The Cargo-member overview reads only tracked
+  `PATH`, `HOME`, `LANG`, `GIT_CONFIG_NOSYSTEM` and `PIXEL_BIN`, each in a process group of its own that is
+  killed whole when its run ends, so no process a probe starts outlives it (a process that leaves the group
+  with `setsid` or `setpgid` is not followed). The Cargo-member overview reads only tracked
   regular files through descriptor-relative, no-follow opens, with path-count, file-size and output caps.
 - **Moved commands (#878).** `pixel_plugin::MOVED_COMMANDS` maps each command
   that lives in a `Pixel-CLI` plugin repository (`pixel-git`, `pixel-flow`,

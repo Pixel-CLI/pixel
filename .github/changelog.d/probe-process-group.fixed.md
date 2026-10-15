@@ -1,0 +1,1 @@
+**brief:** a brief probe now runs in a process group of its own, killed whole when its run ends (at its budget, or once its answer is read), so a `sleep`, helper or `git` a probe starts no longer outlives the prompt-submit brief; before, only the probe itself was killed.
