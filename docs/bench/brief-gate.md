@@ -384,19 +384,24 @@ and its model are unchanged; only the words it reads moved.
 
 | | |
 | --- | --- |
-| binaries | `main` at `74b53a19` and #975 at `b0bd8c78`, each `CARGO_PROFILE_DEV_DEBUG=0 cargo build --profile dev-release -p pixel-cli` from a clean tree; #975's binary run with `PIXEL_BRIEF_FRENCH=0` and `=1` (this PR only flips the default) |
-| repository, set | the fixture above (clean clone at `85bede7d`, `pixel prepare-repo --no-daemon`), `prompts.jsonl` SHA-256 `bc6ac042…6276ad`, split `all`: 154 English and 64 French rows (37 on topic, 27 off, 22 with `expected_files`) |
-| runner | `PIXEL_BRIEF_PACK=0 python3 scripts/bench/bench-brief-gate.py --pixel <bin> --repo <fixture> --split all --daemon off --repeat 3 --warmup 3`, and `--daemon on --warm-meaning`; 0 unstable rows; back to back on 2026-10-15, load 6 to 9 on 15 CPUs |
+| binaries | `main` at `74b53a19` (before #976 and #977) and this change at `503026f9` (#977 merged, the default flipped), each `CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --profile dev-release -p pixel-cli`; the second run with `PIXEL_BRIEF_FRENCH=0` (off) and with the variable unset (on, the new default) |
+| repository, set | the fixture above (clean clone at `85bede7d`, `pixel prepare-repo --no-daemon`, `fixture_match: true` in every result), `prompts.jsonl` SHA-256 `4bd58566…6c041e`, split `all`: 154 English and 64 French rows (37 on topic, 27 off, 22 with `expected_files`) |
+| runner | `PIXEL_BRIEF_PACK=0 python3 scripts/bench/bench-brief-gate.py --pixel <bin> --repo <fixture> --split all --daemon off --repeat 3 --warmup 3`, and `--daemon on --warm-meaning`; 0 unstable rows, 0 errors, no Ollaya server (`ollaya_warm: false`); back to back on 2026-10-15 (20:16 to 20:24 UTC), 1-minute load 5 to 6 (daemon off) and 6 to 14 (daemon on) on 15 CPUs |
 
 | | `main` | off | on |
 | --- | ---: | ---: | ---: |
 | French on-topic briefed (of 37) | 10 | 10 | 21 |
 | French off-topic silent (of 27) | 27 | 27 | 26 |
 | French hit@8, daemon off (of 22) | 0 | 0 | 3 |
-| French hit@8, daemon on (of 22) | 0 | | 8 |
-| English briefs that differ from `main` (`stdout_sha`, of 154), daemon off / on | | 0 / | 0 / 0 |
-| latency p50 / p95, all 218 prompts, daemon off (ms) | 167 / 219 | 158 / 201 | 167 / 224 |
-| latency p50 / p95, all 218 prompts, daemon on (ms) | 83 / 135 | | 90 / 144 |
+| French hit@8, daemon on (of 22) | 0 | 0 | 8 |
+| English briefs that differ from `main` (`stdout_sha`, of 154), daemon off / on | reference | 0 / 0 | 0 / 0 |
+| latency p50 / p95, all 218 prompts, daemon off (ms) | 150 / 198 | 150 / 196 | 153 / 207 |
+| latency p50 / p95, all 218 prompts, daemon on (ms) | 82 / 131 | 84 / 139 | 90 / 141 |
+
+An earlier run of the same comparison (#977's `b0bd8c78` with the switch at
+`0` and `1`, load 6 to 9) gave every count it recorded the same; it had not
+run the `off` switch with the daemon, the cells this run adds. Only the
+latencies moved, within a shared machine's spread.
 
 What it says:
 
@@ -412,9 +417,10 @@ What it says:
    `main` prints, daemon on and off: the language is decided on the typed text
    and an English prompt is never rewritten.
 4. **The cost is the mapped prompt's evidence, not the mapping.** p95 moves by
-   5 to 9 ms, inside the run-to-run spread of a shared machine (the `off` run
-   of the same binary is 18 ms under `main`), and far inside the 750 ms window;
-   more French prompts now ask for the relevance block and get a brief.
+   9 ms (daemon off) and 10 ms (daemon on) against `main`, while the `off` run
+   of the same binary lands 2 ms under and 8 ms over it: inside the run-to-run
+   spread of a shared machine, and far inside the 750 ms window. More French
+   prompts now ask for the relevance block and get a brief.
 5. **The question word.** The gate's `question` feature reads an English
    opener among the first three words; writing a French one there as English
    (`pourquoi` → `why`) is the brief's own addition to pixel-mvp's rule.
