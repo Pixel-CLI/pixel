@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+"""Evidence for a named Cargo member: crate docs/API, dependency purposes and bounded examples."""
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+try:
+    import tomllib
+except ImportError:
+    sys.exit(0)
+
+MAX_TOTAL = 24_000
+MAX_DOC_LINES = 60
+MAX_DOC_CHARS = 240
+EXAMPLE_LINES = 65
+MAX_TRACKED_PATHS = 4_000
+MAX_FILE_BYTES = 300_000
+
+
+def tracked(root):
+    result = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, timeout=5)
+    paths = sorted(path for path in result.stdout.decode(errors="replace").split("\0") if path)
+    return paths if len(paths) <= MAX_TRACKED_PATHS else None
+
+
+def safe_read(root, relative, files):
+    """Read one tracked regular file under root without following symlinks or exceeding the byte cap."""
+    if relative not in files:
+        return None
+    parts = Path(relative).parts
+    if not parts or Path(relative).is_absolute() or any(part in ("", ".", "..") for part in parts):
+        return None
+    root_path = Path(root).resolve()
+    directory_fd = None
+    file_fd = None
+    try:
+        directory_fd = os.open(root_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        for part in parts[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow,
+                              dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(parts[-1], os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0),
+                          dir_fd=directory_fd)
+        info = os.fstat(file_fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
+            return None
+        content = os.read(file_fd, MAX_FILE_BYTES + 1)
+        if len(content) > MAX_FILE_BYTES:
+            return None
+        return content.decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def manifest(root, path, files):
+    text = safe_read(root, path, files)
+    if text is None:
+        return {}
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return {}
+
+
+def one_line(value, limit=160):
+    return " ".join(str(value or "").split())[:limit]
+
+
+def leading_docs(text, max_lines=MAX_DOC_LINES):
+    out, block = [], False
+    for line in text.splitlines()[:max_lines]:
+        if len(line) > MAX_DOC_CHARS:
+            line = line[:MAX_DOC_CHARS] + "…"
+        stripped = line.strip()
+        if not out and not stripped:
+            continue
+        if not out and stripped.startswith("/*!"):
+            block, stripped = True, stripped[3:]
+        elif block:
+            if "*/" in stripped:
+                block, stripped = False, stripped.split("*/", 1)[0]
+            else:
+                stripped = stripped.lstrip("* ")
+        elif stripped.startswith("//!"):
+            stripped = stripped[3:].strip()
+        elif not stripped:
+            continue
+        else:
+            break
+        if stripped:
+            out.append(stripped)
+        if not block and stripped and not line.strip().startswith(("//!", "/*", "*")):
+            break
+    return out
+
+
+def numbered(text, limit=100):
+    lines = text.splitlines()
+    out = [f"{number}| {line[:180]}" for number, line in enumerate(lines[:limit], 1)]
+    if len(lines) > limit:
+        out.append(f"... {len(lines) - limit} lines omitted")
+    return out
+
+
+def crate_source(root, directory, doc, files):
+    configured = (doc.get("lib") or {}).get("path")
+    path = f"{directory}/{configured}" if configured else f"{directory}/src/lib.rs"
+    text = safe_read(root, path, files)
+    return (path, text) if text is not None else (None, None)
+
+
+def main():
+    req = json.load(sys.stdin)
+    root, prompt = req["repo_root"], req["prompt"]
+    try:
+        files = tracked(root)
+        if files is None:
+            return
+        entries = [(path, manifest(root, path, files)) for path in files
+                   if path == "Cargo.toml" or path.endswith("/Cargo.toml")]
+    except (OSError, subprocess.SubprocessError):
+        return
+    packages = {doc.get("package", {}).get("name"): (path, doc)
+                for path, doc in entries if doc.get("package", {}).get("name")}
+    found = []
+    for path, doc in entries:
+        package = doc.get("package")
+        if not package or path == "Cargo.toml":
+            continue
+        directory = path.rsplit("/", 1)[0]
+        names = {str(package["name"]), directory.rsplit("/", 1)[-1]}
+        if any(re.search(rf"(?<![\w-]){re.escape(name.casefold())}(?![\w-])", prompt.casefold())
+               for name in names):
+            found.append((path, package, doc, directory))
+    if len(found) != 1:
+        return
+    manifest_path, package, doc, directory = found[0]
+    guidance = [path for path in files if path.rsplit("/", 1)[-1] == "AGENTS.md"]
+    out = ["### Repository instructions"]
+    if guidance:
+        for path in guidance[:8]:
+            text = safe_read(root, path, files)
+            if text is not None:
+                out.append(f"{path}:")
+                out.extend(line[:MAX_DOC_CHARS] for line in text.splitlines()[:12])
+    else:
+        out.append("No tracked AGENTS.md instruction files are present.")
+    source, main_source = crate_source(root, directory, doc, files)
+    if source is None or main_source is None:
+        return
+    out.extend([f"### {source} — crate purpose and public surface",
+                one_line(package.get("description")) or "crate-level documentation:"])
+    out.extend(leading_docs(main_source))
+    out.append(f"### {manifest_path} — line-numbered package manifest")
+    manifest_text = safe_read(root, manifest_path, files)
+    if manifest_text is not None:
+        out.extend(numbered(manifest_text, 100))
+    out.append(f"### {source} — line-numbered crate facade")
+    out.extend(numbered(main_source, 100))
+    member_files = sorted(path[len(directory) + 1:] for path in files
+                          if path.startswith(f"{directory}/"))
+    out.append(f"### Tracked files in {directory} ({len(member_files)} total)")
+    out.extend(member_files[:100])
+    if len(member_files) > 100:
+        out.append(f"... {len(member_files) - 100} paths omitted")
+    for table, label in ((doc.get("dependencies") or {}, "dependencies"),
+                         (doc.get("dev-dependencies") or {}, "development dependencies")):
+        if table:
+            out.append(f"{label}:")
+        for name in sorted(table):
+            local = packages.get(name)
+            local_doc = (local[1].get("package") or {}) if local else {}
+            optional = isinstance(table[name], dict) and table[name].get("optional") is True
+            out.append(f"- {name}{' (optional)' if optional else ''}"
+                       + (f" — {one_line(local_doc.get('description'))}" if local_doc.get("description") else ""))
+            if local:
+                dep_path = local[0].rsplit("/", 1)[0]
+                dep_source, dep_text = crate_source(root, dep_path, local[1], files)
+                docs = leading_docs(dep_text, max_lines=12) if dep_text is not None else []
+                if docs:
+                    out.append(f"  {dep_source} — leading module documentation")
+                    out.extend(f"  {line}" for line in docs)
+    examples = [path for path in files if path.startswith(f"{directory}/examples/") and path.endswith(".rs")]
+    for example in examples[:3]:
+        example_text = safe_read(root, example, files)
+        if example_text is None:
+            continue
+        lines = example_text.splitlines()
+        out.append(f"### {example} — example source")
+        out.extend(f"{number}| {line[:180]}" for number, line in enumerate(lines[:EXAMPLE_LINES], 1))
+        if len(lines) > EXAMPLE_LINES:
+            out.append(f"... {len(lines) - EXAMPLE_LINES} lines omitted")
+    bounded, used = [], 0
+    for line in out:
+        cost = len(line) + 1
+        if used + cost > MAX_TOTAL:
+            bounded.append("... evidence truncated at the configured character budget")
+            break
+        bounded.append(line)
+        used += cost
+    print("\n".join(bounded))
+
+
+if __name__ == "__main__":
+    main()

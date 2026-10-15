@@ -336,6 +336,12 @@ install <source>` and `pixel uninstall <name>` add and remove them and
 - **Environment.** A plugin receives `PIXEL_API`, `PIXEL_REPO_ROOT`,
   `PIXEL_GRAPH_DB` and `PIXEL_BIN`; it inherits the rest of the caller's environment unchanged; Pixel adds no
   secret to it.
+- **Brief-probe recovery.** Only the curated probes in `pixel-setup::bundled_probes` are installed automatically.
+  `when_gate_closed = true` requires an explicit prompt matcher and permits evidence recovery after a relevance
+  rejection; it never bypasses an intent denial, the brief opt-out, repository trust or plugin disable settings.
+  Probes run within their manifest budget and the shared deadline in an emptied environment with only
+  `PATH`, `HOME`, `LANG`, `GIT_CONFIG_NOSYSTEM` and `PIXEL_BIN`. The Cargo-member overview reads only tracked
+  regular files through descriptor-relative, no-follow opens, with path-count, file-size and output caps.
 - **Moved commands (#878).** `pixel_plugin::MOVED_COMMANDS` maps each command
   that lives in a `Pixel-CLI` plugin repository (`pixel-git`, `pixel-flow`,
   `pixel-recall`, `pixel-telemetry`, `pixel-utilities`) to it. A name the core

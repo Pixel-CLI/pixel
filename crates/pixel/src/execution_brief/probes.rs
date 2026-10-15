@@ -54,6 +54,8 @@ pub(crate) struct Stage<'a> {
     pub(crate) root: &'a Path,
     pub(crate) prompt: &'a str,
     pub(crate) kind: Option<&'a str>,
+    /// A relevance rejection requires each probe's explicit recovery opt-in.
+    pub(crate) gate_closed: bool,
     /// The deadline of the brief's window: no probe outlives it.
     pub(crate) deadline: Instant,
     /// Characters the merged brief may hold.
@@ -78,6 +80,7 @@ pub(crate) fn apply(stage: &Stage, brief: &str) -> (Option<String>, Vec<ProbeRun
         .probes
         .iter()
         .filter(|probe| probe.spec.applies(stage.kind, stage.prompt))
+        .filter(|probe| !stage.gate_closed || probe.spec.when_gate_closed)
         .collect();
     if due.is_empty() {
         return (None, Vec::new());
@@ -440,6 +443,7 @@ mod tests {
             root,
             prompt: "where is it",
             kind,
+            gate_closed: false,
             deadline: Instant::now() + Duration::from_millis(ms),
             cap: 3 * 9_800,
             max_bytes: None,
@@ -573,5 +577,54 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(root.to_str().unwrap()), "{text}");
+    }
+
+    #[test]
+    fn a_closed_gate_should_run_only_matching_opted_in_probes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let body = "#!/bin/sh\ncat >/dev/null\nprintf '### recovery.rs:1-1 — evidence\\n1| const VALUE: u8 = 7;\\n'\n";
+        fixture_probe(&home, "ordinary", body, "");
+        fixture_probe(
+            &home,
+            "recovery",
+            body,
+            "when_gate_closed = true\nwhen_prompt = \"where\"\n",
+        );
+        fixture_probe(
+            &home,
+            "unrelated",
+            body,
+            "when_gate_closed = true\nwhen_prompt = \"unrelated\"\n",
+        );
+        fixture_probe(
+            &home,
+            "wrong-kind",
+            body,
+            "when_gate_closed = true\nwhen_prompt = \"where\"\nskip_kinds = [\"flow\"]\n",
+        );
+        let h = host(&home);
+        let mut s = stage(&h, tmp.path(), Some("flow"), 1_000);
+        s.gate_closed = true;
+        let (merged, runs) = apply(&s, "");
+        assert_eq!(
+            runs.iter()
+                .map(|run| (run.name.as_str(), run.outcome))
+                .collect::<Vec<_>>(),
+            [("recovery", "ok")]
+        );
+        assert_eq!(
+            merged.as_deref(),
+            Some("[PIXEL:BRIEF]\n### recovery.rs:1-1 — evidence\n1| const VALUE: u8 = 7;\n")
+        );
+        s.gate_closed = false;
+        assert_eq!(
+            apply(&s, "")
+                .1
+                .iter()
+                .map(|run| run.name.as_str())
+                .collect::<Vec<_>>(),
+            ["ordinary", "recovery"]
+        );
     }
 }

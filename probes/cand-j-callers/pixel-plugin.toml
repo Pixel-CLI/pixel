@@ -1,0 +1,14 @@
+name = "cand-j-callers"
+version = "0.1.0"
+api = 1
+description = "For a 'where is X defined, who calls it, which tests cover it' question: the callers (and their callers), the tests that call it, its test helpers and the tests that set what it reads, instead of its callees and unrelated tests"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "LivioGama"
+when_prompt = "(?i)\\b(callers?|who calls|(functions?|methods?) (that )?(calls?|invokes?|uses?)|called (by|from)|call sites?|calls it)\\b"
+skip_kinds = ["overview", "review", "history"]
+when_gate_closed = true
+budget_ms = 2500
+mode = "lead"

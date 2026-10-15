@@ -1,0 +1,1 @@
+**brief:** Normal setup now bundles the validated caller, flow, diagnosis, setting, history, and Cargo-overview probes. Matching probes can explicitly recover evidence after a relevance rejection; intent denials and opt-outs stay silent. Fuller function bodies, dependency docs, and repository context reduce follow-up tool calls.

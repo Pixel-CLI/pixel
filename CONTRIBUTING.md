@@ -270,10 +270,11 @@ python3 -I scripts/probe-test.py my-probe --live   # opt-in: the agent with and 
   contributor needs no private data. A maintainer's local census is an optional second source, `--census-db
   <census.db>`; its prompts are never committed. The PR states the `PROBE ... | KEEP` line `probe-test` prints and
   `report.md`.
-- Shipping: a probe merged under `probes/` is embedded in the binary and installed by `pixel setup` into
+- Shipping: register a validated probe in `crates/pixel-setup/src/bundled_probes.rs` and its explicit shipping
+  allowlist test. Registered probes are embedded in the binary and installed by `pixel setup` into
   `~/.pixel/plugins/<name>/`; the prompt-submit brief runs it (see ARCHITECTURE.md, "Agent integration").
   `pixel plugin disable <name>` switches one off, `enable` back on. CI runs `probe-test.py --check-all` on every
-  directory of `probes/`.
+  directory of `probes/`; experimental directories are not automatically installed.
 
 ## Mutation testing
 

@@ -1209,19 +1209,26 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 `probes/<name>/` holds scripts that add blocks to the prompt-submit brief (contract: `CONTRIBUTING.md`, "Write a
 probe"). A probe is a plugin of the host (`pixel-plugin`): a `pixel-plugin.toml` with `capabilities =
 ["brief-probe"]` and a `[brief-probe]` table (`owner`, `when_kinds` / `skip_kinds` / `when_prompt`, `budget_ms` at
-most 2500, `mode` lead or append) beside an executable named by `run`. `pixel_plugin::probes` lists the probes that
+most 2500, `mode` lead or append, and `when_gate_closed`) beside an executable named by `run`. `pixel_plugin::probes` lists the probes that
 may run: the user tier (`~/.pixel/plugins/<name>/`, first-party and the user's own) as installed, the repo tier
 (`<repo>/.pixel/plugins/<name>/`) only at the digest `pixel plugin trust` recorded, minus the ones
 `pixel plugin disable` switched off (`disabled` in `~/.pixel/plugins.toml`; `enable` undoes it).
 
-`pixel setup` writes the seven first-party probes (embedded from `probes/` by `pixel-setup::bundled_probes`, each
+`pixel setup` writes thirteen curated first-party probes (embedded from the explicit allowlist in
+`pixel-setup::bundled_probes`, each
 directory marked so setup updates only its own copies and `--remove` deletes only them) next to the Claude or Codex
 brief hook; `PIXEL_BRIEF_PROBES=0` runs none. In `execution_brief::chain::Pending::finish_with_record`, once `fit`
-has rendered the brief and only when the gate is open, `execution_brief::probes::apply` starts every probe whose
+has rendered the brief, `execution_brief::probes::apply` starts every probe whose
 `when` fits the question in parallel, each with `{prompt, repo_root, brief, kind, session_files}` as JSON on
 stdin, in an emptied environment (`PATH`, `HOME`, `LANG`, `PIXEL_BIN`), inside `min(budget_ms, what is left of the
 window)` (the chain leaves them at least 1.2 s even when it used the window up, and none outlives 5 s after the
 prompt). A probe that overruns is killed; one that fails, prints nothing or is not due is skipped: fail open.
+An unjudged prompt can use matching probes. A relevance-closed gate permits only probes declaring
+`when_gate_closed = true`, which also requires an explicit nonempty `when_prompt` matcher; an intent denial,
+explicit silence, disabled briefs, and unindexed repositories remain off. Recovery can supply an otherwise empty
+brief without changing its logged relevance verdict. The shipped set includes caller/test evidence, complete
+flow bodies, stop-condition evidence, setting application sites, commit patches, and Cargo-member overviews.
+Experimental directories are not automatically shipped; the installer tests assert the exact allowlist.
 `probes::merge` folds what they print into the brief: `drop: <regex>` removes the brief's blocks whose header
 matches, `first: <regex>` moves them to the front, lead blocks go before the brief's and append blocks after, one
 block per header, the whole within the hook parts the host takes (3 x 9,800 characters) with append blocks shed

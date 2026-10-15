@@ -9,6 +9,7 @@ mod ask_contract;
 mod audit_cli;
 mod audit_prompt;
 mod brief_feedback_cli;
+mod bundled_brief_cli;
 mod classify_cli;
 mod classify_eval_cli;
 mod config_cli;

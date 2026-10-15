@@ -112,7 +112,10 @@ def main():
         used += cost
         out += chunk
     # The brief's other blocks are lexical neighbours of the question's words, not the commit: drop them.
-    print("drop: ^(?!history|commit )")
+    discarded = [header for header in re.findall(r"^### (.+)$", brief, re.M)
+                 if not header.startswith(("history", "commit "))]
+    if discarded:
+        print("drop: ^(?:" + "|".join(re.escape(header) for header in discarded) + ")$")
     print("\n".join(out))
 
 

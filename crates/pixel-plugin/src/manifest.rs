@@ -67,6 +67,8 @@ pub struct ProbeSpec {
     pub skip_kinds: Vec<String>,
     /// Run when the prompt matches this regex (searched, not anchored).
     pub when_prompt: Option<String>,
+    /// Whether a matching prompt may run when the brief gate is closed.
+    pub when_gate_closed: bool,
     pub budget_ms: u64,
     pub mode: ProbeMode,
 }
@@ -220,6 +222,7 @@ fn parse_probe(doc: &DocumentMut) -> Result<ProbeSpec, String> {
             "when_kinds",
             "skip_kinds",
             "when_prompt",
+            "when_gate_closed",
             "budget_ms",
             "mode",
         ]
@@ -258,6 +261,17 @@ fn parse_probe(doc: &DocumentMut) -> Result<ProbeSpec, String> {
             Some(pattern.to_owned())
         }
     };
+    let when_gate_closed = match table.get("when_gate_closed") {
+        None => false,
+        Some(item) => item
+            .as_bool()
+            .ok_or_else(|| "[brief-probe] `when_gate_closed` must be a boolean".to_owned())?,
+    };
+    if when_gate_closed && when_prompt.as_deref().is_none_or(str::is_empty) {
+        return Err(
+            "[brief-probe] `when_gate_closed` requires a nonempty `when_prompt`".to_owned(),
+        );
+    }
     let budget_ms = table
         .get("budget_ms")
         .and_then(Item::as_integer)
@@ -282,6 +296,7 @@ fn parse_probe(doc: &DocumentMut) -> Result<ProbeSpec, String> {
         when_kinds: list("when_kinds")?,
         skip_kinds: list("skip_kinds")?,
         when_prompt,
+        when_gate_closed,
         budget_ms,
         mode,
     })
@@ -444,6 +459,7 @@ mode = "lead"
         let m = parse(PROBE).unwrap();
         assert!(m.is_probe() && !m.has_command());
         let spec = m.probe.unwrap();
+        assert!(!spec.when_gate_closed, "the omitted option defaults off");
         assert_eq!(
             (spec.owner.as_str(), spec.budget_ms, spec.mode),
             ("pixel", 800, ProbeMode::Lead)
@@ -472,6 +488,40 @@ mode = "lead"
     }
 
     #[test]
+    fn a_closed_gate_probe_parses_only_with_a_nonempty_prompt_pattern() {
+        let enabled = PROBE.replace(
+            "when_prompt = \"(?i)\\\\bwhen\\\\b\"",
+            "when_prompt = \"(?i)\\\\bwhen\\\\b\"\nwhen_gate_closed = true",
+        );
+        let spec = parse(&enabled).unwrap().probe.unwrap();
+        assert!(spec.when_gate_closed);
+
+        let without_prompt = PROBE
+            .replace("when_prompt = \"(?i)\\\\bwhen\\\\b\"\n", "")
+            .replace(
+                "budget_ms = 800",
+                "when_gate_closed = true\nbudget_ms = 800",
+            );
+        let error = parse(&without_prompt).unwrap_err();
+        assert!(
+            error.contains("requires a nonempty `when_prompt`"),
+            "{error}"
+        );
+
+        let empty_prompt = PROBE
+            .replace("when_prompt = \"(?i)\\\\bwhen\\\\b\"", "when_prompt = \"\"")
+            .replace(
+                "budget_ms = 800",
+                "when_gate_closed = true\nbudget_ms = 800",
+            );
+        let error = parse(&empty_prompt).unwrap_err();
+        assert!(
+            error.contains("requires a nonempty `when_prompt`"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_broken_probe_table_is_refused_with_its_reason() {
         for (from, to, expect) in [
             ("budget_ms = 800", "budget_ms = 5000", "budget_ms"),
@@ -480,6 +530,11 @@ mode = "lead"
             ("budget_ms = 800\n", "", "budget_ms"),
             ("owner = \"pixel\"\n", "", "owner"),
             ("mode = \"lead\"", "mode = \"middle\"", "mode"),
+            (
+                "budget_ms = 800",
+                "budget_ms = 800\nwhen_gate_closed = \"true\"",
+                "when_gate_closed` must be a boolean",
+            ),
             (
                 "when_kinds = [\"history\"]",
                 "when_kinds = \"history\"",

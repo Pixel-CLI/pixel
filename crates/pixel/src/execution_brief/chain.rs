@@ -941,7 +941,8 @@ pub(crate) struct Brief {
     /// Where the evidence came from: `daemon` or `local`.
     route: Option<&'static str>,
     admission: Admission,
-    /// The gate refused the prompt and the refusal binds: nothing renders.
+    /// The core gate refused the prompt: `fit` renders nothing. A relevance
+    /// rejection may still be answered by an explicitly opted-in probe.
     silenced: bool,
     /// The relevance decision, when the probe answered.
     relevance: Option<relevance::Verdict>,
@@ -2722,10 +2723,8 @@ impl Pending {
         self.finish_with_record().text
     }
 
-    /// The probes' turn: when the gate let this prompt through, every
-    /// probe that fits its question runs inside what is left of the window and
-    /// the blocks they print are merged into `text` (or into an empty brief,
-    /// for a prompt the gate opened that the chain had nothing to say to).
+    /// Run matching probes within the remaining window. A relevance rejection
+    /// admits only explicitly opted-in probes; an intent denial stays silent.
     fn probe_stage(
         &self,
         brief: &Brief,
@@ -2734,7 +2733,8 @@ impl Pending {
         let Some(setup) = &self.probes else {
             return (text, Vec::new());
         };
-        if brief.admission.label() != "open" || brief.silenced {
+        let gate_closed = matches!(brief.admission, Admission::Closed(_));
+        if matches!(brief.admission, Admission::Denied(_)) || (brief.silenced && !gate_closed) {
             return (text, Vec::new());
         }
         let kind = brief.kind.map(QuestionKind::as_str);
@@ -2743,6 +2743,7 @@ impl Pending {
             root: &setup.root,
             prompt: &self.task,
             kind,
+            gate_closed,
             deadline: probe_deadline(self.started, self.deadline, Instant::now(), setup.floor),
             cap: setup.cap,
             max_bytes: setup.max_bytes,
@@ -2769,6 +2770,7 @@ impl Pending {
             None => (None, AnswerStats::default()),
         };
         let (text, probe_runs) = self.probe_stage(&brief, text);
+        let recovered = matches!(brief.admission, Admission::Closed(_)) && text.is_some();
         let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         // The daemon start has had the whole brief to launch; a hook about to
         // exit sees it through, for at most the hook bound.
@@ -2781,7 +2783,8 @@ impl Pending {
             ts_ms: pixel_task::now_ms(),
             signal: Some(self.signal.as_str()),
             gate: brief.admission.label(),
-            enforced: gate_enforced(self.signal, brief.silenced, ENFORCE_GATE_ON_WEAK),
+            enforced: gate_enforced(self.signal, brief.silenced, ENFORCE_GATE_ON_WEAK)
+                && !recovered,
             reason: brief.admission.reason().map(str::to_string),
             tier: brief.tier().map(Tier::as_str),
             model: gate_model_source(),
@@ -9463,5 +9466,84 @@ mod tests {
         .finish_with_record();
         assert!(finished.text.is_some());
         assert!(sent::load(&root, "s", pixel_task::now_ms()).is_empty());
+    }
+
+    #[test]
+    fn finishing_should_allow_probe_recovery_but_preserve_denials_and_explicit_silence() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let plugin = root.join(".pixel/plugins/recovery");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plugin.join("pixel-plugin.toml"),
+            "name = \"recovery\"\nversion = \"0.1.0\"\napi = 1\ndescription = \"recovery evidence\"\nrun = \"probe\"\ncapabilities = [\"brief-probe\"]\n[brief-probe]\nowner = \"test\"\nbudget_ms = 400\nwhen_prompt = \"crate\"\nwhen_gate_closed = true\n",
+        ).unwrap();
+        let program = plugin.join("probe");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ncat >/dev/null\nprintf '### source.rs:1-1 — evidence\\n1| pub struct Library;\\n'\n",
+        ).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for (admission, silenced, expected) in [
+            (Admission::Closed("no graph vocabulary".into()), true, true),
+            (Admission::Unjudged, false, true),
+            (Admission::Kind(QuestionKind::Overview), false, true),
+            (Admission::Denied("not a coding task".into()), true, false),
+            (Admission::Denied("not a coding task".into()), false, false),
+            (Admission::Open, true, false),
+        ] {
+            let label = admission.label();
+            let (send, done) = mpsc::channel();
+            send.send(()).unwrap();
+            let started = Instant::now();
+            let pending = Pending {
+                state: Arc::new(Mutex::new(Brief {
+                    admission,
+                    silenced,
+                    ..Brief::default()
+                })),
+                done,
+                deadline: started + SECOND,
+                started,
+                log: None,
+                kicked: None,
+                task: "what does this crate expose".into(),
+                signal: Signal::Prose,
+                sent: None,
+                probes: Some(ProbeSetup {
+                    host: pixel_plugin::Host {
+                        home: root.clone(),
+                        repo_root: None,
+                        path: std::ffi::OsString::new(),
+                        github_base: None,
+                    },
+                    root: root.clone(),
+                    cap: 1_000,
+                    floor: Duration::ZERO,
+                    max_bytes: None,
+                }),
+            };
+            let finished = pending.finish_with_record();
+            if expected {
+                assert_eq!(
+                    finished.text.as_deref(),
+                    Some("[PIXEL:BRIEF]\n### source.rs:1-1 — evidence\n1| pub struct Library;\n"),
+                    "{label}"
+                );
+                assert_eq!(finished.record.probes.len(), 1, "{label}");
+                assert_eq!(finished.record.probes[0].outcome, "ok", "{label}");
+                if label == "closed" {
+                    assert!(
+                        !finished.record.enforced,
+                        "recovery bypassed the relevance verdict"
+                    );
+                }
+            } else {
+                assert_eq!(finished.text, None, "{label}");
+                assert_eq!(finished.record.probes, [], "{label}");
+            }
+        }
     }
 }

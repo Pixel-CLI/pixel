@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+"""cand-j-callers: 'where is X defined, who calls it, which tests cover it' needs the callers, not the callees.
+X is the identifier-shaped word of the question that the symbol graph resolves to a function. The probe shows the
+callers (their body when short, else the window around the call) and the call sites of those callers, the tests
+among the callers, the test helpers named after X (`X_raw`), and the tests that set what X reads: the ALLCAPS
+environment names in its body and doc comment, looked up in the test files. Unrelated test blocks of the brief
+are dropped. Needs `pixel` (PIXEL_BIN, else PATH) and its daemon. Read-only, deterministic, no network."""
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+TESTPATH = re.compile(r'(^|/)(tests?|__tests__|spec|testdata)/|[._-](test|spec)s?\.\w+$|(^|/)test_\w+\.\w+$|_tests?\.\w+$')
+SRC = re.compile(r'\.(rs|py|js|jsx|ts|tsx|go|java|kt|c|h|cc|cpp|hpp|rb|php|swift|cs|scala|sh|lua)$')
+DECL = re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+|unsafe\s+|const\s+|extern\s+"[^"]*"\s+|static\s+|export\s+|default\s+)*(?:fn|def|function|func)\s+([A-Za-z_]\w*)|^\s*(?:[A-Za-z_]\w*!)\(\s*([A-Za-z_]\w*)\s*,\s*(?:\||move\s*\||\{|fn\b)|^\s*(?:test|it|describe)\(\s*[\'"`]([^\'"`]+)')
+IDENT = re.compile(r'`([A-Za-z_]\w*)(?:\(\))?`|\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b|\b([a-z]+[A-Z][A-Za-z0-9]*)\b|\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+)\b')
+ENV = re.compile(r'\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b')
+BODY_CAP, SITE_CONTEXT, MAX_CALLERS, MAX_SITES, MAX_TESTS, MAX_FILES = 40, 8, 6, 3, 3, 4000
+MAX_FILE_BYTES = 300_000
+
+
+def pixel(root, *args):
+    exe = os.environ.get('PIXEL_BIN') or 'pixel'
+    try:
+        return subprocess.run([exe, *args, '--metrics', 'off'], cwd=root, capture_output=True, text=True, timeout=8).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
+def jpixel(root, *args):
+    try:
+        return json.loads(pixel(root, *args, '--json') or '{}')
+    except ValueError:
+        return {}
+
+
+def read(root, path):
+    directory_fd = None
+    file_fd = None
+    try:
+        relative = Path(path)
+        nofollow = getattr(os, 'O_NOFOLLOW', None)
+        if nofollow is None or relative.is_absolute() or not relative.parts or any(
+            part in ('', '.', '..') for part in relative.parts
+        ):
+            return []
+        directory_fd = os.open(Path(root).resolve(), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        for part in relative.parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | nofollow,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(
+            relative.parts[-1],
+            os.O_RDONLY | nofollow | getattr(os, 'O_NONBLOCK', 0),
+            dir_fd=directory_fd,
+        )
+        info = os.fstat(file_fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
+            return []
+        chunks, total = [], 0
+        while total <= MAX_FILE_BYTES:
+            chunk = os.read(file_fd, MAX_FILE_BYTES + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > MAX_FILE_BYTES:
+            return []
+        return b''.join(chunks).decode(errors='replace').splitlines()
+    except (OSError, RuntimeError):
+        return []
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def edges(root, uid, role):
+    out, offset = [], 0
+    while offset <= 100:
+        data = jpixel(root, 'who-calls', '--role', role, '--offset', str(offset), uid, '.')
+        got = data.get('edges', [])
+        out += got
+        if len(got) < data.get('edge_limit', 20):
+            break
+        offset += len(got)
+    return out
+
+
+def resolve(root, prompt, brief):
+    """The function the question names: the first identifier-shaped word that the graph resolves to a function."""
+    seen = []
+    for m in IDENT.finditer(prompt):
+        word = next(g for g in m.groups() if g)
+        if word not in seen:
+            seen.append(word)
+    shown = set(re.findall(r'^### (\S+?):\d+-\d+', brief, re.M))
+    for word in seen:
+        rows = [s for s in jpixel(root, 'find-symbol', word, '.').get('symbols', []) if s.get('kind') in ('function', 'method') and s.get('name') == word]
+        if rows:
+            rows.sort(key=lambda s: (s['path'] not in shown, s['path'], s['start_line']))
+            return rows[0]
+    return None
+
+
+def unit_around(lines, n, cap):
+    """The declaration around line ``n`` (1-based): ``(first, last)`` or ``None`` when none is within reach."""
+    start = None
+    for i in range(n - 1, max(-1, n - 80), -1):
+        if DECL.match(lines[i]):
+            start = i
+            break
+    if start is None:
+        return None
+    s = start
+    while s > 0 and re.match(r'\s*(//|#\[|#\s|/\*|\*|@)', lines[s - 1]):
+        s -= 1
+    depth, seen, end = 0, False, None
+    for j in range(start, min(len(lines), start + 300)):
+        for ch in re.sub(r'"(\\.|[^"\\])*"|\'(\\.|[^\'\\])\'|//.*$', '', lines[j]):
+            if ch == '{':
+                depth, seen = depth + 1, True
+            elif ch == '}':
+                depth -= 1
+        if seen and depth <= 0:
+            end = j
+            break
+    if end is None or end < n - 1:
+        return None
+    return s + 1, min(end + 1, s + cap)
+
+
+def main():
+    req = json.load(sys.stdin)
+    root, prompt, brief = req['repo_root'], req['prompt'], req.get('brief', '')
+    sym = resolve(root, prompt, brief)
+    if not sym:
+        return
+    out, emitted = [], []
+
+    def emit(path, a, b, label):
+        lines = read(root, path)
+        a, b = max(1, a), min(len(lines), b)
+        if any(p == path and x <= a and b <= y for p, x, y in emitted) or a > b:
+            return
+        emitted.append((path, a, b))
+        out.append(f'### {path}:{a}-{b} — {label}')
+        out.extend(f'{n}| {lines[n - 1][:200]}' for n in range(a, b + 1))
+
+    # The definition's own words: ALLCAPS names in its body and the doc comment above it.
+    dlines = read(root, sym['path'])
+    top = sym['start_line']
+    if top < 1 or sym['end_line'] > len(dlines):
+        return
+    while top > 1 and re.match(r'\s*(//|#|/\*|\*|@)', dlines[top - 2]):
+        top -= 1
+    envs = sorted(set(ENV.findall('\n'.join(dlines[top - 1:sym['end_line']]))))
+    callers = sorted(edges(root, sym['uid'], 'callers'), key=lambda e: (e['symbol']['path'], e['symbol']['start_line']))
+    for edge in callers[:MAX_CALLERS]:
+        c = edge['symbol']
+        site = edge.get('site_line') or c['start_line']
+        label = 'a test that calls' if TESTPATH.search(c['path']) else 'calls'
+        if c['end_line'] - c['start_line'] + 1 <= BODY_CAP:
+            emit(c['path'], c['start_line'], c['end_line'], f"{c['name']} {label} {sym['name']}")
+        else:
+            emit(c['path'], site - SITE_CONTEXT, site + SITE_CONTEXT, f"{c['name']} {label} {sym['name']}")
+        for up in sorted(edges(root, c['uid'], 'callers'), key=lambda e: (e['symbol']['path'], e['symbol']['start_line']))[:MAX_SITES]:
+            u = up['symbol']
+            usite = up.get('site_line') or u['start_line']
+            ulines = read(root, u['path'])
+            if u['start_line'] >= usite - 1:
+                emit(u['path'], u['start_line'], usite + 1, f"{u['name']} calls {c['name']}")
+            else:
+                emit(u['path'], u['start_line'], u['start_line'] + 1, f"{u['name']} (declaration)")
+                emit(u['path'], usite - 1, usite + 1, f"{u['name']} calls {c['name']}")
+    # Test helpers named after the symbol: `name_raw`, `name_for_test`.
+    helper = re.compile(r'\bfn\s+(' + re.escape(sym['name']) + r'_\w+|\w+_' + re.escape(sym['name']) + r')\b|\bdef\s+(' + re.escape(sym['name']) + r'_\w+)')
+    files = sorted(f for f in subprocess.run(['git', 'ls-files', '-z'], cwd=root, capture_output=True, text=True).stdout.split('\0') if f and SRC.search(f))[:MAX_FILES]
+    texts = {f: read(root, f) for f in files}
+    for f in files:
+        for i, line in enumerate(texts[f]):
+            if helper.search(line):
+                span = unit_around(texts[f], i + 1, 22)
+                if span:
+                    emit(f, span[0], span[1], f"{helper.search(line).group(1) or helper.search(line).group(2)} (helper named after {sym['name']})")
+                break
+    # A test that lives beside a callee (its module's own unit tests).
+    callee_files = sorted({e['symbol']['path'] for e in edges(root, sym['uid'], 'callees')} - {sym['path']})
+    for f in callee_files[:MAX_FILES]:
+        if TESTPATH.search(f):
+            continue
+        lines = texts.get(f) or read(root, f)
+        for i, line in enumerate(lines):
+            if re.match(r'\s*(#\[test\]|def test_|(it|test)\()', line):
+                span = unit_around(lines, i + 2 if line.lstrip().startswith('#[') else i + 1, 22)
+                if span:
+                    emit(f, span[0], span[1], f'a unit test beside {Path(f).name}, which {sym["name"]} calls into')
+                break
+    # Tests that set what the symbol reads.
+    found = 0
+    for token in envs:
+        for f in files:
+            if not TESTPATH.search(f) or found >= MAX_TESTS:
+                continue
+            for i, line in enumerate(texts[f]):
+                if token in line:
+                    span = unit_around(texts[f], i + 1, 30)
+                    if span:
+                        emit(f, span[0], span[1], f'a test that sets {token}')
+                        found += 1
+                    break
+    if not out:
+        return
+    # Test blocks of the brief that never meet the symbol are noise for this question.
+    drops = []
+    for m in re.finditer(r'^### (\S+?:\d+-\d+) — (.*\(test\).*|.*\(a test of .*)$', brief, re.M):
+        start = m.end()
+        nxt = brief.find('\n### ', start)
+        body = brief[start: nxt if nxt != -1 else len(brief)]
+        if sym['name'] not in body and not any(t in body for t in envs):
+            drops.append(re.escape(m.group(1)))
+    for m in re.finditer(r'^### (tests matching [^\n]*)$', brief, re.M):
+        nxt = brief.find('\n### ', m.end())
+        if sym['name'] not in brief[m.end(): nxt if nxt != -1 else len(brief)]:
+            drops.append(re.escape(m.group(1)))
+    # The callees' bodies answer another question: keep the trace that lists them, drop their bodies.
+    for m in re.finditer(r'^### (\S+?:\d+-\d+) — (\w+) definition \((?:method|function|variant|struct)\)$', brief, re.M):
+        if m.group(2) != sym['name']:
+            drops.append(re.escape(m.group(1)))
+    if drops:
+        print('drop: ^(?:' + '|'.join(drops) + ')')
+    print('\n'.join(out))
+
+
+main()

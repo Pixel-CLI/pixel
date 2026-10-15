@@ -22,8 +22,35 @@ const MARKER: &str = ".pixel-bundled";
 /// Where the user plugins live, under the home directory.
 const PLUGINS_REL: &str = ".pixel/plugins";
 
-/// `(name, pixel-plugin.toml, probe)` of each first-party probe.
+/// `(name, pixel-plugin.toml, probe)` of each validated first-party probe.
+/// This is a curated shipping list; experimental directories under `probes/`
+/// are not installed until they have been validated for release.
 const BUNDLED: &[(&str, &str, &str)] = &[
+    (
+        "cand-j-callers",
+        include_str!("../../../probes/cand-j-callers/pixel-plugin.toml"),
+        include_str!("../../../probes/cand-j-callers/probe"),
+    ),
+    (
+        "cand-j-chain",
+        include_str!("../../../probes/cand-j-chain/pixel-plugin.toml"),
+        include_str!("../../../probes/cand-j-chain/probe"),
+    ),
+    (
+        "cand-j-stop-cause",
+        include_str!("../../../probes/cand-j-stop-cause/pixel-plugin.toml"),
+        include_str!("../../../probes/cand-j-stop-cause/probe"),
+    ),
+    (
+        "cand-k-code-sites",
+        include_str!("../../../probes/cand-k-code-sites/pixel-plugin.toml"),
+        include_str!("../../../probes/cand-k-code-sites/probe"),
+    ),
+    (
+        "cand-k-commit-patch",
+        include_str!("../../../probes/cand-k-commit-patch/pixel-plugin.toml"),
+        include_str!("../../../probes/cand-k-commit-patch/probe"),
+    ),
     (
         "config-registry",
         include_str!("../../../probes/config-registry/pixel-plugin.toml"),
@@ -53,6 +80,11 @@ const BUNDLED: &[(&str, &str, &str)] = &[
         "name-files",
         include_str!("../../../probes/name-files/pixel-plugin.toml"),
         include_str!("../../../probes/name-files/probe"),
+    ),
+    (
+        "overview-answer-evidence",
+        include_str!("../../../probes/overview-answer-evidence/pixel-plugin.toml"),
+        include_str!("../../../probes/overview-answer-evidence/probe"),
     ),
     (
         "rank-blocks",
@@ -168,6 +200,25 @@ pub(crate) fn remove(home: &Path, dry_run: bool) -> Result<InstallStep> {
 mod tests {
     use super::*;
 
+    // Candidate probes are shipped only after validation. In particular,
+    // cand-k-member-manifest, prune-noise and workspace-overview remain
+    // experimental even though their directories are present in the repo.
+    const SHIPPED_PROBE_NAMES: &[&str] = &[
+        "cand-j-callers",
+        "cand-j-chain",
+        "cand-j-stop-cause",
+        "cand-k-code-sites",
+        "cand-k-commit-patch",
+        "config-registry",
+        "doc-sections",
+        "error-origin",
+        "flow-rank",
+        "history-fallback",
+        "name-files",
+        "overview-answer-evidence",
+        "rank-blocks",
+    ];
+
     #[test]
     fn every_bundled_probe_has_a_valid_probe_manifest_and_an_executable_program() {
         let home = tempfile::tempdir().unwrap();
@@ -181,20 +232,12 @@ mod tests {
         let set = pixel_plugin::probes(&host).unwrap();
         assert!(set.skipped.is_empty(), "{:?}", set.skipped);
         let found: Vec<&str> = set.probes.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(found, names());
+        assert_eq!(names(), SHIPPED_PROBE_NAMES);
+        assert_eq!(found, SHIPPED_PROBE_NAMES);
         assert!(
             set.probes
                 .iter()
                 .all(|p| p.spec.budget_ms <= pixel_plugin::MAX_PROBE_BUDGET_MS)
-        );
-        assert_eq!(
-            BUNDLED.len(),
-            fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../probes"))
-                .unwrap()
-                .filter_map(std::result::Result::ok)
-                .filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('_'))
-                .count(),
-            "every directory of probes/ is bundled"
         );
     }
 
@@ -203,18 +246,18 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let first = install(home.path(), false).unwrap();
         assert!(
-            first.summary.contains("7 first-party brief probes"),
+            first.summary.contains("13 first-party brief probes"),
             "{}",
             first.summary
         );
         assert!(
-            first.summary.contains("7 written, 0 current"),
+            first.summary.contains("13 written, 0 current"),
             "{}",
             first.summary
         );
         let again = install(home.path(), false).unwrap();
         assert!(
-            again.summary.contains("0 written, 7 current"),
+            again.summary.contains("0 written, 13 current"),
             "{}",
             again.summary
         );
@@ -258,14 +301,14 @@ mod tests {
             install(home.path(), true)
                 .unwrap()
                 .summary
-                .contains("7 written, 0 current")
+                .contains("13 written, 0 current")
         );
         install(home.path(), false).unwrap();
         assert!(
             install(home.path(), true)
                 .unwrap()
                 .summary
-                .contains("0 written, 7 current")
+                .contains("0 written, 13 current")
         );
         let probe = home.path().join(PLUGINS_REL).join("rank-blocks/probe");
         fs::write(&probe, "old version").unwrap();
@@ -273,7 +316,7 @@ mod tests {
             install(home.path(), true)
                 .unwrap()
                 .summary
-                .contains("1 written, 6 current")
+                .contains("1 written, 12 current")
         );
         assert_eq!(
             fs::read_to_string(&probe).unwrap(),
@@ -320,7 +363,7 @@ mod tests {
         )
         .unwrap();
         let step = remove(home.path(), false).unwrap();
-        assert!(step.summary.contains("6 first-party"), "{}", step.summary);
+        assert!(step.summary.contains("12 first-party"), "{}", step.summary);
         assert!(own.is_dir());
         assert!(
             home.path().join(PLUGINS_REL).join("doc-sections").is_dir(),
