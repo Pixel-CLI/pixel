@@ -6,7 +6,7 @@
    "eval/brief-gate/prompts-multirepo.jsonl",
    "eval/brief-gate/prompts.jsonl (English rows)"
   ],
-  "features_dump": "scripts/bench/research-gate/results/multirepo-features.json (the gate's own features, as `pixel brief --json` logs them)",
+  "features_dump": "scripts/research-gate/results/multirepo-features.json (the gate's own features, as `pixel brief --json` logs them)",
   "split": "dev",
   "rows": {
    "dev_on_topic": 88,
@@ -17,9 +17,9 @@
   "estimator": "L2 logistic regression, C=0.3, balanced classes by weight, features standardised on the fit rows, lbfgs",
   "validation": "StratifiedGroupKFold 5-fold repeated 20 times, grouped by prompt text",
   "commands": [
-   "python3 scripts/bench/research-gate/multirepo_set.py <manifest.json> eval/brief-gate/prompts-multirepo.jsonl",
+   "python3 scripts/research-gate/multirepo_set.py <manifest.json> eval/brief-gate/prompts-multirepo.jsonl",
    "pixel brief --json <prompt> <repo at its pinned sha>   # per (prompt, repo); see results/multirepo-fit.txt",
-   "python3 scripts/bench/research-gate/gate_multirepo.py scripts/bench/research-gate/results/multirepo-features.json scripts/bench/research-gate/results/gate-model.json --template scripts/bench/research-gate/results/gate-model-pixel-only.json"
+   "python3 scripts/research-gate/gate_multirepo.py scripts/research-gate/results/multirepo-features.json scripts/research-gate/results/gate-model.json --template scripts/research-gate/results/gate-model-pixel-only.json"
   ]
  },
  "score": "intercept_raw + sum(raw_coefficient[i] * feature[i]); a log-odds under a balanced prior, not a calibrated probability",
