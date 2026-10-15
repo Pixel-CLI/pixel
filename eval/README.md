@@ -232,6 +232,12 @@ Replace this estimate with the measured `cost_usd` and token sums of
 
 ## Earlier results
 
+These runs used the variant prompts as they stood then. On 2026-10-15 `final` and `slim`
+lost the commands that left the binary for plugins (`recall`, `review-changes`,
+`plan-rollback`, `sync-branch`) and `final` its duplicate metrics paragraph, so a
+re-run is not on identical text: check out the prompts from before that commit to
+reproduce a row.
+
 ### Measured on this branch (claude / deepseek-v4-flash, 20-turn budget, Sept 2026)
 
 | arm | hooks | s1 score | s2 score | s3 score | mean of shown |
