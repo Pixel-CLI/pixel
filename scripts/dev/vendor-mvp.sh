@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-# Copy pixel-mvp's index crates into this workspace at one commit.
+# Copy pixel-mvp's index crates, or its French lexicon, into this workspace
+# at one commit.
 #
-#   scripts/dev/vendor-mvp.sh <pixel-mvp checkout> <commit> <crate>...
-#   scripts/dev/vendor-mvp.sh ../pixel-mvp eae8201 model store index
+#   scripts/dev/vendor-mvp.sh <pixel-mvp checkout> <commit> <part>...
+#   scripts/dev/vendor-mvp.sh ../pixel-mvp eae8201 model store index lexicon
 #
-# Each <crate> is a short name: `model`, `store` or `index`. pixel-mvp's
+# Each <part> is a crate's short name, `model`, `store` or `index`, or
+# `lexicon`. For a crate, pixel-mvp's
 # crates/pixel-<crate>/ at <commit> replaces crates/mvp-<crate>/ here, except
 # Cargo.toml and VENDORED.md, which belong to this workspace. The copy is
 # mechanical, and every sync repeats it the same way:
@@ -20,13 +22,20 @@
 #   - `cargo fmt` formats the copy: the shorter names reorder some imports;
 #   - VENDORED.md is rewritten with the commit.
 #
+# `lexicon` is data, not a crate: pixel-mvp's
+# crates/pixel-adapter/lexicon/fr-en.tsv at <commit> replaces
+# crates/mvp-lexicon/fr-en.tsv here byte for byte (ADR-0032 there: French
+# words and the English words code names them with), and
+# crates/mvp-lexicon/VENDORED.md is rewritten with the commit. Nothing in it
+# is renamed or formatted.
+#
 # ADR-0035 of the pixel-mvp research repository decided the copy: pixel-mvp
 # stays the source of these crates, a fix lands there first, and each sync
 # names its commit.
 set -eu
 
 if [ "$#" -lt 3 ]; then
-    sed -n '5,8p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '5,9p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
 fi
 src=$1
@@ -39,11 +48,42 @@ root=$(git rev-parse --show-toplevel)
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 
+# The lexicon: one data file, copied as it is.
+vendor_lexicon() {
+    from=crates/pixel-adapter/lexicon/fr-en.tsv
+    to=$root/crates/mvp-lexicon
+    git -C "$src" archive --format=tar "$full" "$from" | tar -x -C "$scratch"
+    mkdir -p "$to"
+    cp "$scratch/$from" "$to/fr-en.tsv"
+    cat >"$to/VENDORED.md" <<EOF
+# mvp-lexicon (vendored)
+
+\`fr-en.tsv\` is a copy of \`crates/pixel-adapter/lexicon/fr-en.tsv\` of
+pixel-mvp at commit \`$full\` (\`$short\`), made by
+\`scripts/dev/vendor-mvp.sh\`, byte for byte. It is data, not a crate: one
+French form per line, a tab, and the English words code names its notion
+with, or \`-\` for a word that carries no meaning in a request. ADR-0032 of
+the pixel-mvp research repository decided the lexicon; ADR-0036 moves it
+into Pixel's prompt-submit brief.
+
+- **Do not edit \`fr-en.tsv\` here.** pixel-mvp rebuilds it with
+  \`crates/pixel-adapter/lexicon/generate.py\` and measures a change on its
+  French development set before it ships: a change lands there first, then
+  comes here through the next sync, which names its commit.
+- **Sync:** \`scripts/dev/vendor-mvp.sh <pixel-mvp checkout> <commit> lexicon\`,
+  then the gates, in a pull request that names the commit.
+EOF
+}
+
 for crate in "$@"; do
     case $crate in
         model | store | index) ;;
+        lexicon)
+            vendor_lexicon
+            continue
+            ;;
         *)
-            echo "vendor-mvp: unknown crate '$crate' (model, store or index)" >&2
+            echo "vendor-mvp: unknown part '$crate' (model, store, index or lexicon)" >&2
             exit 2
             ;;
     esac
@@ -102,6 +142,6 @@ done
 # until its manifest is written, and rustfmt follows the module tree from
 # the crate root either way.
 for crate in "$@"; do
-    rustfmt --edition 2024 "$root/crates/mvp-$crate/src/lib.rs"
+    [ "$crate" = lexicon ] || rustfmt --edition 2024 "$root/crates/mvp-$crate/src/lib.rs"
 done
 echo "vendored $* at $short"

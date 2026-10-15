@@ -62,7 +62,7 @@ corpus and `~/.local/state/pixel` are never touched by any of them.
 
 | Script | Run | What |
 | --- | --- | --- |
-| `vendor-mvp.sh` | `scripts/dev/vendor-mvp.sh <pixel-mvp checkout> <commit> model store index` | copies pixel-mvp's `crates/pixel-<name>/` at `<commit>` (read with `git archive`, never the working tree) over `crates/mvp-<name>/`, keeping the workspace's `Cargo.toml`; renames the crates, adds the SPDX headers, runs `cargo fmt` and rewrites each `VENDORED.md` with the commit. A sync is a pull request that names the commit |
+| `vendor-mvp.sh` | `scripts/dev/vendor-mvp.sh <pixel-mvp checkout> <commit> model store index lexicon` | copies pixel-mvp's `crates/pixel-<name>/` at `<commit>` (read with `git archive`, never the working tree) over `crates/mvp-<name>/`, keeping the workspace's `Cargo.toml`; renames the crates, adds the SPDX headers, runs `cargo fmt` and rewrites each `VENDORED.md` with the commit. `lexicon` copies the French lexicon (`crates/pixel-adapter/lexicon/fr-en.tsv`) byte for byte into `crates/mvp-lexicon/`. A sync is a pull request that names the commit |
 
 ## Optional local smoke and audits
 
