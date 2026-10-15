@@ -486,6 +486,7 @@ mode = "lead"
         assert!(always.probe.unwrap().applies(None, "x"));
     }
 
+    #[test]
     fn a_closed_gate_probe_parses_only_with_a_nonempty_prompt_pattern() {
         let enabled = PROBE.replace(
             "when_prompt = \"(?i)\\\\bwhen\\\\b\"",

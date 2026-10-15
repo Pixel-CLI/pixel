@@ -578,6 +578,7 @@ mod tests {
         assert!(text.contains(root.to_str().unwrap()), "{text}");
     }
 
+    #[test]
     fn a_closed_gate_should_run_only_matching_opted_in_probes() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");

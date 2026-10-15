@@ -299,12 +299,14 @@ fn parse_within(parser: &mut Parser, content: &[u8], budget: Duration) -> Option
     )
 }
 
+#[cfg(test)]
 thread_local! {
     pub(crate) static TEST_PARSE_BUDGET: std::cell::Cell<Option<Duration>> =
         const { std::cell::Cell::new(None) };
 }
 
 fn parse_budget() -> Duration {
+    #[cfg(test)]
     if let Some(budget) = TEST_PARSE_BUDGET.with(std::cell::Cell::get) {
         return budget;
     }

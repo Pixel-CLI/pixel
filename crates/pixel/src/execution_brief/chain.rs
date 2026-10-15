@@ -9514,6 +9514,7 @@ mod tests {
         assert!(sent::load(&root, "s", pixel_task::now_ms()).is_empty());
     }
 
+    #[test]
     fn finishing_should_allow_probe_recovery_but_preserve_denials_and_explicit_silence() {
         use std::os::unix::fs::PermissionsExt;
 
