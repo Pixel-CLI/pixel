@@ -1,0 +1,13 @@
+lookup	Which flag sets the DFA size limit, and what does the code do with the value it parses?
+lookup-2	What values does the --color flag accept, and how is each one mapped to a ColorChoice?
+impact	Where is parse_low defined, which function calls it, and which tests cover that path?
+flow	Trace how the command line becomes a HiArgs value, from main through argument parsing.
+diagnosis	Why does ripgrep stop printing matches from a file it decides is binary, and what tests prove that behavior?
+configuration	How does ripgrep find and read the file named by RIPGREP_CONFIG_PATH, and how are its arguments combined with the command line?
+configuration-2	Which flags control whether ripgrep follows symlinks, and where are they applied?
+tests	Which tests cover gitignore matching in the ignore crate, and what does each assert?
+history	What did the commit titled 'ignore,globset: increase pool capacity' change, and which files changed with it?
+overview	What does ripgrep do, and which crates make up the workspace?
+overview-2	What does the grep crate contain, and which other crates does it depend on?
+review	Review the most recent commit: what does it change, and what could break because of it?
+error-origin	Where does the message about a binary file matching come from, and what triggers it?

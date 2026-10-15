@@ -14,6 +14,14 @@ SCRATCH=${ARENA_SCRATCH:-/private/tmp/claude-501/arena}
 CODEX_BIN=${ARENA_CODEX_BIN:-/Users/livio/.local/bin/codex}
 USER_CODEX_HOME=${ARENA_USER_CODEX_HOME:-$HOME/.codex}
 PREFIX=arena
+# Agent under test: codex (default) or claude. `--agent` on run and run-set sets it.
+AGENT=codex
+CLAUDE_BIN=${ARENA_CLAUDE_BIN:-$HOME/.local/bin/claude}
+CLAUDE_PROJECTS=${ARENA_CLAUDE_PROJECTS:-$HOME/.claude/projects}
+DEVIN_BIN=${ARENA_DEVIN_BIN:-$HOME/.local/bin/devin}
+DEVIN_TRANSCRIPTS=${ARENA_DEVIN_TRANSCRIPTS:-$HOME/.local/share/devin/cli/transcripts}
+CODEX_PROFILE=${ARENA_CODEX_PROFILE:-}
+USER_DEVIN_CONFIG=${ARENA_USER_DEVIN_CONFIG:-$HOME/.config/devin/config.json}
 
 usage() {
   cat <<'EOF'
@@ -21,15 +29,17 @@ Usage: arena.sh <command> [args]
 
   list                              the 8-case catalog: number, name, prompt
   run <n|name> [options]            run one case in two Codex panes
+      --agent codex|claude          agent under test (default: codex)
       --pixel-bin PATH              Pixel binary for the pixel arm (default: pixel on PATH)
       --sha COMMIT                  commit both arms are cloned at (default: origin/main)
       --timeout SECONDS             idle wait per arm (default: 600)
-      --here                        split the two panes in the current tab
+      --here                        (default inside Herdr) split the two panes right in the current tab
+      --tab                         open a new arena tab instead
                                     instead of opening a new arena tab
       --focus                       focus the arena tab when it opens
   run-set <source> [options]        run a whole set of questions in a row in the two panes
-      source: catalog | census | bench   (census prompts are read from census.db at run time)
-      --pixel-bin PATH   --brief-extra CMD   --parts N   --only id,id   --timeout SECONDS   --sha COMMIT
+      source: catalog | single | census | bench   (census prompts are read from census.db at run time)
+      --fresh (a new pair per case)   --codex-profile NAME   --cross   --history   --agent codex|claude|devin   --pixel-bin PATH   --brief-extra CMD   --parts N   --only id,id   --timeout SECONDS   --sha COMMIT
       --here                        panes live in the current tab: the finished case's
                                     pair closes when the next case starts, the last
                                     pair stays open
@@ -49,7 +59,7 @@ hd() { HERDR_ENV=1 herdr "$@"; }
 # TSV: number, name, prompt. SKILL.md holds the one copy of the catalog.
 catalog() {
   awk '
-    /^[0-9]+\. `[a-z]+` / {
+    /^[0-9]+\. `[a-z0-9-]+` / {
       n = $1; sub(/\.$/, "", n)
       name = $2; gsub(/`/, "", name)
       want = 1; next
@@ -152,12 +162,96 @@ make_codex_home() {
     ' "$f" 2>/dev/null
     printf 'check_for_update_on_startup = false\n\n'
     printf '[features]\nhooks = true\nplugin_hooks = false\nskills = false\n\n'
+    # Without this the orchestrator's MCP tool catalog rides on every request (~140K tokens: a bare
+    # "say hi" overflowed gpt-oss's 131K window); the user's own config.toml turns it off.
+    printf '[orchestrator.mcp]\nenabled = false\n\n'
     printf '[projects."%s"]\ntrust_level = "trusted"\n' "$ws"
   } >"$home/config.toml"
+  if [ -n "$CODEX_PROFILE" ]; then
+    # `codex -p NAME` layers $CODEX_HOME/NAME.config.toml over the base config. The profile may turn hooks
+    # off; the pixel arm needs them (the no-pixel arm has no hooks.json, so enabling them there is inert).
+    [ -f "$USER_CODEX_HOME/$CODEX_PROFILE.config.toml" ] || die "no Codex profile $USER_CODEX_HOME/$CODEX_PROFILE.config.toml"
+    sed -E 's/^(hooks[[:space:]]*=[[:space:]]*)false/\1true/' "$USER_CODEX_HOME/$CODEX_PROFILE.config.toml" >"$home/$CODEX_PROFILE.config.toml"
+    chmod 600 "$home/$CODEX_PROFILE.config.toml"
+  fi
   if [ -n "$hookbin" ]; then
     jq -n --arg cmd "'$hookbin' run-hook task-event --provider codex --event prompt-submit" \
       '{hooks:{UserPromptSubmit:[{hooks:[{type:"command",command:$cmd,timeout:10}]}]}}' >"$home/hooks.json"
   fi
+}
+
+# ---------------------------------------------------------------- claude
+
+# The login is the user's own (OAuth in the keychain); a separate
+# CLAUDE_CONFIG_DIR would lose it, so isolation is by flags: `--setting-sources
+# project` drops the user's hooks, `--settings` adds only this arm's hooks,
+# `--strict-mcp-config` drops MCP servers.
+
+# $1 home dir, $2 hook binary or "" for none, $3 parts. Writes $1/settings.json.
+make_claude_home() {
+  mkdir -p "$1"
+  if [ -z "$2" ]; then echo '{"hooks":{}}' >"$1/settings.json"; return; fi
+  jq -n --arg bin "$2" --argjson n "$3" '
+    {hooks: {UserPromptSubmit: [range(1; $n + 1) as $k
+      | {hooks: [{type: "command",
+                  command: ("'"'"'" + $bin + "'"'"' run-hook task-event --provider claude --event prompt-submit"
+                            + (if $n > 1 then " --part \($k)/\($n)" else "" end) + " || true"),
+                  timeout: 10}]}]}}' >"$1/settings.json"
+}
+
+# Devin takes the whole user config by path (`--config`), so an arm's config is the user's own with its
+# hooks replaced by this arm's and no MCP servers. $1 home dir, $2 hook binary or "", $3 parts.
+make_devin_home() {
+  mkdir -p "$1"
+  local hooks='{}'
+  if [ -n "$2" ]; then
+    hooks=$(jq -n --arg bin "$2" --argjson n "$3" '
+      {UserPromptSubmit: [range(1; $n + 1) as $k
+        | {hooks: [{type: "command",
+                    command: ("'"'"'" + $bin + "'"'"' run-hook task-event --provider devin --event prompt-submit"
+                              + (if $n > 1 then " --part \($k)/\($n)" else "" end) + " || true"),
+                    timeout: 10}]}]}')
+  fi
+  jq --argjson h "$hooks" '.hooks = $h | .mcp = {} | .respect_workspace_trust = false' "$USER_DEVIN_CONFIG" >"$1/config.json"
+  chmod 600 "$1/config.json"
+}
+
+# Claude's startup dialogs (folder trust, bypass-permissions consent) block the
+# prompt; the arena wrote the workspace and the flags, so it accepts them.
+claude_dialogs() {
+  local pane=$1 screen
+  screen=$(hd agent read "$pane" --source visible 2>/dev/null || true)
+  case "$screen" in
+    # The trust dialog opens on "No, exit": move to "Yes, I trust this folder" first.
+    *"No, exit"*"trust this folder"*) hd agent send-keys "$pane" down >/dev/null; hd agent send-keys "$pane" enter >/dev/null; sleep 1 ;;
+    *"Bypass Permissions"*|*"Yes, I accept"*) hd agent send-keys "$pane" 2 >/dev/null; hd agent send-keys "$pane" enter >/dev/null; sleep 1 ;;
+  esac
+}
+
+# The command a pane runs. $1 arm (pixel|no-pixel), $2 workspace, $3 home, $4 shim dir.
+agent_launch() {
+  local arm=$1 ws=$2 home=$3 shim=$4 brief=''
+  local safe_path="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin"
+  [ "$arm" = no-pixel ] && brief='PIXEL_BRIEF=0'
+  if [ "$AGENT" = devin ]; then
+    printf "cd '%s' && env %s PATH='%s':%s '%s' --config '%s/config.json' --permission-mode dangerous --respect-workspace-trust false" \
+      "$ws" "$brief" "$shim" "$safe_path" "$DEVIN_BIN" "$home"
+  elif [ "$AGENT" = claude ]; then
+    printf "cd '%s' && env %s PATH='%s':%s '%s' --settings '%s/settings.json' --setting-sources project --strict-mcp-config --permission-mode bypassPermissions" \
+      "$ws" "$brief" "$shim" "$safe_path" "$CLAUDE_BIN" "$home"
+  elif [ "$arm" = pixel ]; then
+    printf "cd '%s' && env CODEX_HOME='%s' PATH='%s':%s '%s' --dangerously-bypass-hook-trust%s" "$ws" "$home" "$shim" "$safe_path" "$CODEX_BIN" "${CODEX_PROFILE:+ -p $CODEX_PROFILE}"
+  else
+    printf "cd '%s' && env CODEX_HOME='%s' %s PATH='%s':%s '%s'%s" "$ws" "$home" "$brief" "$shim" "$safe_path" "$CODEX_BIN" "${CODEX_PROFILE:+ -p $CODEX_PROFILE}"
+  fi
+}
+
+check_agent() { case "$AGENT" in codex|claude|devin) ;; *) die "unknown agent: $AGENT (codex, claude or devin)" ;; esac; }
+
+agent_bin_ok() {
+  if [ "$AGENT" = claude ]; then [ -x "$CLAUDE_BIN" ] || die "no Claude binary at $CLAUDE_BIN (ARENA_CLAUDE_BIN)"
+  elif [ "$AGENT" = devin ]; then [ -x "$DEVIN_BIN" ] || die "no Devin binary at $DEVIN_BIN (ARENA_DEVIN_BIN)"
+  else [ -x "$CODEX_BIN" ] || die "no Codex binary at $CODEX_BIN"; fi
 }
 
 # ---------------------------------------------------------------- herdr
@@ -237,6 +331,7 @@ wait_ready() {
   local pane=$1 i=0 st
   while [ "$i" -lt 90 ]; do
     st=$(agent_state "$pane")
+    [ "$AGENT" != claude ] || claude_dialogs "$pane"
     case "$st" in idle|done) return 0 ;; esac
     sleep 1; i=$((i + 1))
   done
@@ -250,6 +345,7 @@ wait_ready() {
 # prompt-submit actually runs the hooks, not necessarily at session start.
 review_hooks_if_asked() {
   local pane=$1 screen
+  [ "$AGENT" = codex ] || return 0
   screen=$(hd agent read "$pane" --source visible 2>/dev/null || true)
   case "$screen" in
     *"Hooks need review"*)
@@ -270,20 +366,24 @@ review_hooks_if_asked() {
 
 cmd_run() {
   local sel=${1:-}; [ -n "$sel" ] || die 'run needs a case number or name'; shift
-  local bin='' sha='' timeout=600 focus=--no-focus here=0
+  local bin='' sha='' timeout=600 focus=--no-focus here=${ARENA_HERE:-$([ -n "${HERDR_PANE_ID:-}" ] && echo 1 || echo 0)}
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --agent) AGENT=${2:?--agent needs codex or claude}; shift 2 ;;
+      --codex-profile) CODEX_PROFILE=${2:?--codex-profile needs a name}; shift 2 ;;
       --pixel-bin) bin=${2:?--pixel-bin needs a path}; shift 2 ;;
       --sha) sha=${2:?--sha needs a commit}; shift 2 ;;
       --timeout) timeout=${2:?--timeout needs seconds}; shift 2 ;;
       --here) here=1; shift ;;
+      --tab) here=0; shift ;;
       --focus) focus=--focus; shift ;;
       *) die "unknown option: $1" ;;
     esac
   done
+  check_agent
   [ -n "$bin" ] || bin=$(command -v pixel) || die 'no pixel binary: pass --pixel-bin'
   [ -x "$bin" ] || die "not executable: $bin"
-  [ -x "$CODEX_BIN" ] || die "no Codex binary at $CODEX_BIN"
+  agent_bin_ok
 
   local row n name prompt
   row=$(catalog | awk -F'\t' -v s="$sel" '$1 == s || $2 == s { print; exit }')
@@ -304,17 +404,26 @@ cmd_run() {
   ph="$run_dir/pixel/codex-home"
   nh="$run_dir/no-pixel/codex-home"
   mkdir -p "$run_dir/pixel" "$run_dir/no-pixel"
-  make_codex_home "$ph" "$PIXEL_WS" "$PIXEL_COPY"
-  make_codex_home "$nh" "$NOPIXEL_WS" ""
+  if [ "$AGENT" = claude ]; then
+    make_claude_home "$ph" "$PIXEL_COPY" 1
+    make_claude_home "$nh" "" 1
+  elif [ "$AGENT" = devin ]; then
+    make_devin_home "$ph" "$PIXEL_COPY" 1
+    make_devin_home "$nh" "" 1
+  else
+    make_codex_home "$ph" "$PIXEL_WS" "$PIXEL_COPY"
+    make_codex_home "$nh" "$NOPIXEL_WS" ""
+  fi
 
   # Hook preflight, no model: the pixel hook yields the brief, the no-pixel
   # arm has no hook file and PIXEL_BRIEF=0 yields nothing.
   local pre_on pre_off
-  pre_on=$(hook_payload "$PIXEL_WS" "$prompt" | "$PIXEL_COPY" run-hook task-event --provider codex --event prompt-submit 2>/dev/null || true)
-  pre_off=$(hook_payload "$PIXEL_WS" "$prompt" | PIXEL_BRIEF=0 "$PIXEL_COPY" run-hook task-event --provider codex --event prompt-submit 2>/dev/null || true)
+  pre_on=$(hook_payload "$PIXEL_WS" "$prompt" | "$PIXEL_COPY" run-hook task-event --provider "$AGENT" --event prompt-submit 2>/dev/null || true)
+  pre_off=$(hook_payload "$PIXEL_WS" "$prompt" | PIXEL_BRIEF=0 "$PIXEL_COPY" run-hook task-event --provider "$AGENT" --event prompt-submit 2>/dev/null || true)
   case "$pre_on" in *'[PIXEL:BRIEF]'*) ;; *) die 'preflight: the pixel hook produced no [PIXEL:BRIEF]' ;; esac
   case "$pre_off" in *'[PIXEL:BRIEF]'*) die 'preflight: PIXEL_BRIEF=0 still produced a brief' ;; esac
   [ ! -e "$nh/hooks.json" ] || die 'preflight: no-pixel home has a hooks.json'
+  [ "$AGENT" != claude ] || ! grep -q run-hook "$nh/settings.json" || die 'preflight: no-pixel settings carry a hook'
 
   local tab_id p_pane n_pane
   make_panes "$name" "$PIXEL_WS" "$NOPIXEL_WS" "$here" "$focus"
@@ -324,12 +433,12 @@ cmd_run() {
   jq -n --arg id "$runid" --arg tab "$tab_id" --arg pp "$p_pane" --arg np "$n_pane" --arg ph "$ph" --arg nh "$nh" \
     --arg n "$n" --arg name "$name" --arg prompt "$prompt" --arg sha "$SHA_FULL" --arg bh "$BIN_HASH" \
     '{run:$id,tab:$tab,pixel_pane:$pp,no_pixel_pane:$np,pixel_home:$ph,no_pixel_home:$nh,case:($n|tonumber),name:$name,prompt:$prompt,commit:$sha,pixel_binary_sha256:$bh}' >"$run_dir/run.json"
+  run_json_extend "$run_dir" "$PIXEL_WS" "$NOPIXEL_WS"
   say "panes: $PREFIX:$name:pixel=$p_pane  $PREFIX:$name:no-pixel=$n_pane  (tab $tab_id)"
 
   sleep 2
-  local safe_path="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin"
-  hd pane run "$p_pane" "cd '$PIXEL_WS' && env CODEX_HOME='$ph' PATH='$KEY_DIR/pixel/shim':$safe_path '$CODEX_BIN' --dangerously-bypass-hook-trust" >/dev/null
-  hd pane run "$n_pane" "cd '$NOPIXEL_WS' && env CODEX_HOME='$nh' PIXEL_BRIEF=0 PATH='$KEY_DIR/no-pixel/shim':$safe_path '$CODEX_BIN'" >/dev/null
+  hd pane run "$p_pane" "$(agent_launch pixel "$PIXEL_WS" "$ph" "$KEY_DIR/pixel/shim")" >/dev/null
+  hd pane run "$n_pane" "$(agent_launch no-pixel "$NOPIXEL_WS" "$nh" "$KEY_DIR/no-pixel/shim")" >/dev/null
   wait_ready "$p_pane" || die "pixel arm never became ready (pane $p_pane)"
   wait_ready "$n_pane" || die "no-pixel arm never became ready (pane $n_pane)"
   review_hooks_if_asked "$p_pane"
@@ -359,9 +468,77 @@ cmd_run() {
 
 newest_rollout() { find "$1/sessions" -name 'rollout-*.jsonl' -type f 2>/dev/null | sort | tail -n 1; }
 
-# One arm's facts from its Codex rollout, as JSON.
+# Add the agent and both workspaces to run.json (the Claude transcript is found by workspace).
+run_json_extend() { # $1 run dir, $2 pixel ws, $3 no-pixel ws
+  jq --arg a "$AGENT" --arg pw "$2" --arg nw "$3" '. + {agent:$a, pixel_ws:$pw, no_pixel_ws:$nw}' "$1/run.json" >"$1/run.json.tmp" \
+    && mv -f "$1/run.json.tmp" "$1/run.json"
+}
+
+# The newest Claude transcript of a workspace (its directory is the path with
+# every character outside [A-Za-z0-9-] turned into "-").
+newest_transcript() {
+  local ws dir
+  ws=$(cd "$1" 2>/dev/null && pwd -P) || return 0
+  dir="$CLAUDE_PROJECTS/$(printf '%s' "$ws" | sed 's/[^A-Za-z0-9-]/-/g')"
+  ls -t "$dir"/*.jsonl 2>/dev/null | head -n 1
+}
+
+# One arm's facts from its Claude Code transcript, same shape as arm_json.
+claude_arm_json() { # $1 workspace, $2 prompt exit
+  local file; file=$(newest_transcript "$1")
+  if [ -z "$file" ]; then
+    jq -n --arg rc "$2" '{prompt_exit:($rc|tonumber),rollout:null,brief:null,tool_calls:[],final_answer:null,tokens:null,codex_seconds:null}'
+    return
+  fi
+  jq -s --arg rollout "$file" --arg rc "$2" '
+    def ts: sub("\\.[0-9]+Z$"; "Z") | fromdate;
+    def blocks: if (.message.content | type) == "array" then .message.content else [] end;
+    [.[] | select(.type == "assistant")] as $as
+    | ([.[] | select(.type == "attachment" and .attachment.type == "hook_additional_context" and .attachment.hookEvent == "UserPromptSubmit")
+        | .attachment.content | if type == "array" then join("\n") else tostring end | select(length > 0)]) as $ctx
+    | { prompt_exit: ($rc | tonumber), rollout: $rollout,
+        brief: (if ($ctx | map(contains("[PIXEL:BRIEF]")) | any) then ($ctx | join("\n")) else null end),
+        tool_calls: [ $as[] | blocks[] | select(.type == "tool_use")
+          | { kind: "tool_use", name: .name,
+              call: (.input.command // .input.file_path // .input.pattern // .input.query // (.input | tostring)) } ],
+        final_answer: ([$as[] | blocks[] | select(.type == "text") | .text] | last // null),
+        tokens: ([$as | group_by(.message.id)[] | last.message.usage // empty]
+                 | if length == 0 then null else {total_tokens: (map((.input_tokens // 0) + (.output_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0)) | add)} end),
+        codex_seconds: (if ($as | length) > 0 then (($as | last | .timestamp | ts) - ([.[] | select(.type == "user" and .timestamp) | .timestamp] | first | ts)) else null end) }' "$file"
+}
+
+# The newest Devin transcript that names the workspace (they are named by session, not by directory).
+newest_devin_transcript() {
+  find "$DEVIN_TRANSCRIPTS" -name '*.json' -mmin -240 -type f 2>/dev/null | xargs grep -l -F -- "$1" 2>/dev/null | xargs ls -t 2>/dev/null | head -n 1
+}
+
+# One arm's facts from its Devin transcript, same shape as arm_json.
+devin_arm_json() { # $1 workspace, $2 prompt exit
+  local file; file=$(newest_devin_transcript "$(cd "$1" 2>/dev/null && pwd -P)")
+  if [ -z "$file" ]; then
+    jq -n --arg rc "$2" '{prompt_exit:($rc|tonumber),rollout:null,brief:null,tool_calls:[],final_answer:null,tokens:null,codex_seconds:null}'
+    return
+  fi
+  jq --arg rollout "$file" --arg rc "$2" '
+    def ts: sub("\\.[0-9]+(\\+00:00|Z)$"; "Z") | fromdate;
+    [.steps[] | select(.source == "agent")] as $as
+    | ([.steps[] | select(.source == "user") | .timestamp] | first) as $a
+    | (.steps | last | .timestamp) as $b
+    | ([.steps[] | select(.source != "agent" and ((.message | tostring) | contains("[PIXEL:BRIEF]")) and ((.extra.telemetry.source // "") != "rules")) | .message | tostring]) as $ctx
+    | { prompt_exit: ($rc | tonumber), rollout: $rollout,
+        brief: (if ($ctx | length) > 0 then ($ctx | join("\n")) else null end),
+        tool_calls: [ $as[] | (.tool_calls // [])[] | { kind: "tool_call", name: .function_name,
+              call: (.arguments.command // .arguments.file_path // .arguments.pattern // .arguments.query // (.arguments | tostring)) } ],
+        final_answer: ([$as[] | select((.tool_calls // []) | length == 0) | (.message | tostring)] | last // null),
+        tokens: (if .final_metrics then {total_tokens: ((.final_metrics.total_prompt_tokens // 0) + (.final_metrics.total_completion_tokens // 0))} else null end),
+        codex_seconds: (if $a and $b then (($b | ts) - ($a | ts)) else null end) }' "$file"
+}
+
+# One arm's facts from its agent log, as JSON.
 arm_json() {
-  local home=$1 rc=$2 rollout
+  local home=$1 rc=$2 rollout ws=${3:-}
+  if [ "$AGENT" = claude ]; then claude_arm_json "$ws" "$rc"; return; fi
+  if [ "$AGENT" = devin ]; then devin_arm_json "$ws" "$rc"; return; fi
   rollout=$(newest_rollout "$home")
   if [ -z "$rollout" ]; then
     jq -n --arg rc "$rc" '{prompt_exit:($rc|tonumber),rollout:null,brief:null,tool_calls:[],final_answer:null,tokens:null,codex_seconds:null}'
@@ -393,7 +570,9 @@ arm_json() {
 collect_receipt() {
   local run_dir=$1 rc_p=$2 rc_n=$3 wall=$4 pj nj ph nh
   ph=$(jq -r .pixel_home "$run_dir/run.json"); nh=$(jq -r .no_pixel_home "$run_dir/run.json")
-  pj=$(arm_json "$ph" "$rc_p"); nj=$(arm_json "$nh" "$rc_n")
+  AGENT=$(jq -r '.agent // "codex"' "$run_dir/run.json")
+  pj=$(arm_json "$ph" "$rc_p" "$(jq -r '.pixel_ws // empty' "$run_dir/run.json")")
+  nj=$(arm_json "$nh" "$rc_n" "$(jq -r '.no_pixel_ws // empty' "$run_dir/run.json")")
   jq --arg wall "$wall" --argjson pixel "$pj" --argjson nopixel "$nj" '
     { run: .run, case: .case, name: .name, prompt: .prompt, commit: .commit,
       pixel_binary_sha256: .pixel_binary_sha256, wall_seconds: ($wall | tonumber),
@@ -424,7 +603,7 @@ summarize() {
     "                     pixel | no-pixel",
     "tool calls        \(.arms.pixel | calls) | \(.arms["no-pixel"] | calls)",
     "tokens            \(.arms.pixel | tok) | \(.arms["no-pixel"] | tok)",
-    "codex seconds     \(.arms.pixel.codex_seconds // "n/a") | \(.arms["no-pixel"].codex_seconds // "n/a")",
+    "agent seconds     \(.arms.pixel.codex_seconds // "n/a") | \(.arms["no-pixel"].codex_seconds // "n/a")",
     "tool calls in order:",
     (.arms | to_entries[] | .key as $k | .value.tool_calls | to_entries[] | "  [\($k)] \(.key + 1). \(.value.call | .[0:150])"),
     "answers:",
@@ -484,6 +663,8 @@ cmd_abort() {
     pkill -f -- "${d%/}/" 2>/dev/null || true
     rm -f "$d"pixel/codex-home/auth.json "$d"no-pixel/codex-home/auth.json
   done
+  pkill -f "$SCRATCH/setws/" 2>/dev/null || true
+  rm -rf "$SCRATCH"/setws/*.lock
   say 'abort complete'
 }
 
@@ -504,7 +685,19 @@ set_cases() {
       root=$(cd "$SELF_DIR" && cd "$root" && pwd)
       [ -n "$sha_arg" ] || { git -C "$root" fetch -q origin main || true; sha_arg=origin/main; }
       full=$(git -C "$root" rev-parse --verify "$sha_arg^{commit}") || die "unknown commit: $sha_arg"
-      catalog | awk -F'\t' -v sha="$full" -v src="$root" '{ printf "%s\tpixel\t%s\t%s\t%s\n", $2, src, sha, $3 }' ;;
+      # A clean clone of the repository (no target/, no uncommitted edits) is the source the arms copy.
+      local csrc="$SCRATCH/src/pixel"
+      if [ ! -d "$csrc/.git" ]; then mkdir -p "$SCRATCH/src"; git clone -q --no-checkout "$root" "$csrc" >&2; fi
+      git -C "$csrc" fetch -q "$root" "+refs/heads/*:refs/remotes/local/*" >&2 || true
+      git -C "$csrc" cat-file -e "$full^{commit}" 2>/dev/null || git -C "$csrc" fetch -q "$root" "$full" >&2
+      git -C "$csrc" checkout -q --detach "$full" >&2
+      catalog | awk -F'\t' -v sha="$full" -v src="$csrc" '{ printf "%s\tpixel\t%s\t%s\t%s\n", $2, src, sha, $3 }' ;;
+    single)
+      # 13 questions about one other repository (ripgrep, from the census cache): one pair of agents answers
+      # them in a row, /clear between cases. Never this repository.
+      local rg="$CENSUS_ROOT/cache/ripgrep"
+      [ -d "$rg/.git" ] || die "no ripgrep clone at $rg"
+      awk -F'\t' -v src="$rg" -v sha="$(git -C "$rg" rev-parse HEAD)" '{ printf "%s\tripgrep\t%s\t%s\t%s\n", $1, src, sha, $2 }' "$SELF_DIR/single.tsv" ;;
     census)
       [ -f "$CENSUS_ROOT/census.db" ] || die "no census database at $CENSUS_ROOT/census.db"
       sqlite3 -json "file:$CENSUS_ROOT/census.db?mode=ro" \
@@ -513,7 +706,7 @@ set_cases() {
     bench)
       jq -r --arg root "$BENCH_SRC" '[.id, (.repo | split("/") | last), ($root + "/" + (.repo | gsub("/"; "_"))), .sha, .prompt] | @tsv' \
         "$SELF_DIR/../../../eval/brief-bench/questions.jsonl" ;;
-    *) die "unknown source: $source (catalog, census or bench)" ;;
+    *) die "unknown source: $source (catalog, single, census or bench)" ;;
   esac
 }
 
@@ -529,23 +722,44 @@ cow_clone() { # $1 source dir, $2 dest, $3 sha
 set_base() { # $1 repo, $2 source dir, $3 sha, $4 binary, $5 binary hash
   local key="$1-${3:0:12}-${5:0:12}"
   SET_BASE="$SCRATCH/setws/$key"
+  # One indexer per key: a background prewarm and the case loop never both rebuild it.
+  local lock="$SCRATCH/setws/$key.lock"
+  mkdir -p "$SCRATCH/setws"
+  if [ ! -f "$SET_BASE/indexed" ] && ! mkdir "$lock" 2>/dev/null; then
+    until [ -f "$SET_BASE/indexed" ] || [ ! -d "$lock" ]; do sleep 2; done
+  fi
   if [ ! -f "$SET_BASE/indexed" ]; then
     say "indexing $1 at ${3:0:12} (once per repository, commit and binary)"
     rm -rf "$SET_BASE"
-    cow_clone "$2" "$SET_BASE/pixel/ws" "$3"
-    cow_clone "$2" "$SET_BASE/no-pixel/ws" "$3"
+    # Seed from the newest indexed base of the same repository and commit (another binary): the
+    # history index then only updates, seconds instead of minutes.
+    local seed; seed=$(ls -dt "$SCRATCH/setws/$1-${3:0:12}"-*/ 2>/dev/null | while read -r d; do [ -f "${d}indexed" ] && { echo "${d%/}"; break; }; done || true)
+    if [ -n "$seed" ]; then
+      say "seeding $1 from ${seed##*/}"
+      mkdir -p "$SET_BASE"; cp -c -R "$seed/pixel" "$SET_BASE/pixel"; cp -c -R "$seed/no-pixel" "$SET_BASE/no-pixel"
+    else
+      cow_clone "$2" "$SET_BASE/pixel/ws" "$3"
+      cow_clone "$2" "$SET_BASE/no-pixel/ws" "$3"
+    fi
     ( cd "$SET_BASE/pixel/ws" && "$4" prepare-repo . >"$SET_BASE/prepare.log" 2>&1 ) || die "prepare-repo failed; see $SET_BASE/prepare.log"
     # The history index is optional (a blobless clone can take longer than the watchdog allows) but a build that
     # fails by itself is not: only the watchdog's own kill is tolerated, and it is logged.
+    # The history index fetches every commit's diff (a blobless clone: from the network), minutes per
+    # repository; it is opt-in (`--history`), and a brief without it simply has no history evidence.
+    if [ "${ARENA_HISTORY:-0}" = 1 ]; then
     ( cd "$SET_BASE/pixel/ws"
       "$4" build-index --history . >>"$SET_BASE/prepare.log" 2>&1 & hp=$!
       ( sleep 420; if kill -0 "$hp" 2>/dev/null; then echo 'build-index watchdog fired after 420 seconds' >>"$SET_BASE/prepare.log"; kill "$hp" 2>/dev/null || true; fi ) & wp=$!
       if wait "$hp"; then rc=0; else rc=$?; fi
       kill "$wp" 2>/dev/null || true; wait "$wp" 2>/dev/null || true
       if [ "$rc" -ne 0 ] && ! grep -q 'watchdog fired' "$SET_BASE/prepare.log"; then exit "$rc"; fi ) || die "build-index failed; see $SET_BASE/prepare.log"
+    else
+      ( cd "$SET_BASE/pixel/ws" && "$4" build-index . >>"$SET_BASE/prepare.log" 2>&1 ) || die "build-index failed; see $SET_BASE/prepare.log"
+    fi
     ( cd "$SET_BASE/pixel/ws" && "$4" search-meaning 'how does this code work' . >>"$SET_BASE/prepare.log" 2>&1 ) || die "search-meaning failed; see $SET_BASE/prepare.log"
     touch "$SET_BASE/indexed"
   fi
+  rmdir "$lock" 2>/dev/null || true
 }
 
 # A daemon that has just started answers the first briefs empty: ask until the
@@ -596,6 +810,7 @@ close_all_arena_panes() { # every arena pane left by any earlier run — --here 
 
 set_abort() {
   say 'abort: interrupting the set'
+  [ -z "${SET_PREWARM:-}" ] || { pkill -P "$SET_PREWARM" 2>/dev/null || true; kill "$SET_PREWARM" 2>/dev/null || true; }
   [ -z "${SET_PIDS:-}" ] || kill $SET_PIDS 2>/dev/null || true
   [ -z "${SET_CASE:-}" ] || cmd_abort "$SET_CASE" >/dev/null 2>&1 || true
   rm -f "$SET_PID_FILE"
@@ -624,12 +839,36 @@ set_table() { # $1 set dir
   say "table: $1/table.md"
 }
 
+# Index every distinct repository+commit of the set up front, two at a time, so a case
+# never waits for its repository's first index while the other arm's pane sits idle.
+prewarm_bases() { # $1 cases TSV, $2 only, $3 binary, $4 binary hash
+  local id repo srcdir csha prompt running=0 seen=',' first=1
+  while IFS=$'\t' read -r id repo srcdir csha prompt; do
+    [ -n "$id" ] || continue
+    if [ -n "$2" ] && ! printf ',%s,' "$2" | grep -q ",$id,"; then continue; fi
+    case "$seen" in *",$repo-$csha,"*) continue ;; esac
+    seen="$seen$repo-$csha,"
+    if [ "$first" = 1 ]; then first=0; continue; fi
+    [ -d "$srcdir/.git" ] || continue
+    ( set_base "$repo" "$srcdir" "$csha" "$3" "$4" ) >/dev/null 2>&1 &
+    running=$((running + 1))
+    if [ "$running" -ge 2 ]; then wait -n 2>/dev/null || wait; running=$((running - 1)); fi
+  done <<<"$1"
+  wait
+}
+set_unlock_stale() { rm -rf "$SCRATCH"/setws/*.lock; }
+
 cmd_run_set() {
   local source=${1:-}; [ -n "$source" ] || die 'run-set needs a source: catalog, census or bench'; shift
-  local bin='' sha='' timeout=600 extra='' parts=3 only='' baseline_file='' here=0
+  local bin='' sha='' timeout=600 extra='' parts=3 only='' baseline_file='' cross=0 here=${ARENA_HERE:-$([ -n "${HERDR_PANE_ID:-}" ] && echo 1 || echo 0)}
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --pixel-bin) bin=${2:?--pixel-bin needs a path}; shift 2 ;;
+      --agent) AGENT=${2:?--agent needs codex or claude}; shift 2 ;;
+      --history) ARENA_HISTORY=1; shift ;;
+      --codex-profile) CODEX_PROFILE=${2:?--codex-profile needs a name}; shift 2 ;;
+      --cross) cross=1; shift ;;
+      --fresh) ARENA_REUSE=0; shift ;;
       --brief-extra) extra=${2:?--brief-extra needs a command}; shift 2 ;;
       --parts) parts=${2:?--parts needs a number}; shift 2 ;;
       --only) only=${2:?--only needs ids}; shift 2 ;;
@@ -637,12 +876,13 @@ cmd_run_set() {
       --sha) sha=${2:?--sha needs a commit}; shift 2 ;;
       --baseline) baseline_file=${2:?--baseline needs a results file}; shift 2 ;;
       --here) here=1; shift ;;
+      --tab) here=0; shift ;;
       *) die "unknown option: $1" ;;
     esac
   done
   [ -n "$bin" ] || bin=$(command -v pixel) || die 'no pixel binary: pass --pixel-bin'
   [ -x "$bin" ] || die "not executable: $bin"
-  [ -x "$CODEX_BIN" ] || die "no Codex binary at $CODEX_BIN"
+  check_agent; agent_bin_ok
   [ "$source" != census ] || command -v sqlite3 >/dev/null || die 'sqlite3 is required for the census source'
   [ -n "$baseline_file" ] || { [ "$source" != census ] || baseline_file=${ARENA_BASELINE:-$SCRATCH/baseline-final-live.jsonl}; }
   local bin_hash; bin_hash=$(sha256_of "$bin")
@@ -651,30 +891,46 @@ cmd_run_set() {
   : >"$SET_OUT/results.jsonl"
   echo $$ >"$SET_PID_FILE"
   trap set_abort INT TERM
-  SET_CASE=''; SET_PIDS=''
+  SET_CASE=''; SET_PIDS=''; SET_PREWARM=''
   local cases; cases=$(set_cases "$source" "$sha")
   [ -n "$cases" ] || die "the source $source has no cases"
-  local id repo srcdir csha prompt n=0 total prev_case=''
+  local id repo srcdir csha prompt n=0 total live_repo='' live_case='' runid run_dir pws nws ph nh hookbin tab_id p_pane n_pane reuse=${ARENA_REUSE:-1}
   total=$(printf '%s\n' "$cases" | awk -F'\t' -v o="$only" 'BEGIN{split(o,a,","); for(i in a) w[a[i]]=1} o=="" || ($1 in w) {c++} END{print c+0}')
   say "set $source: $total case(s), pixel binary ${bin_hash:0:12}${extra:+, brief extra: $extra}; output $SET_OUT"
+  # The first case indexes inline (its panes open as soon as it is ready); the other
+  # repositories index in the background while earlier cases run.
+  set_unlock_stale
+  prewarm_bases "$cases" "$only" "$bin" "$bin_hash" &
+  SET_PREWARM=$!
   # --here: the caller tab is shared — close every leftover arena pair from
   # earlier runs or a killed set before the first case opens its own.
   [ "$here" = 1 ] && close_all_arena_panes
   while IFS=$'\t' read -r id repo srcdir csha prompt <&3; do
     [ -n "$id" ] || continue
     if [ -n "$only" ] && ! printf ',%s,' "$only" | grep -q ",$id,"; then continue; fi
-    n=$((n + 1)); SET_CASE=$id
+    n=$((n + 1)); SET_CASE=$id; tm_start=$(date +%s)
+    # Consecutive cases of one repository keep their panes and agents: /clear between questions, a respawn
+    # only when the repository changes (--fresh: a new pair per case).
+    local reused=0
+    if [ "$reuse" = 1 ] && [ "$repo" = "$live_repo" ]; then reused=1; fi
     # --here keeps the finished case's panes until the next one opens its pair;
     # a pair for this same case left by an earlier run is always stale.
-    if [ "$here" = 1 ]; then
-      [ -z "$prev_case" ] || close_case_tab "$prev_case"
+    if [ "$reused" = 0 ] && [ "$here" = 1 ]; then
+      [ -z "$live_case" ] || close_case_tab "$live_case"
       close_case_tab "$id"
     fi
-    prev_case=$id
     say "[$n/$total] $id"
     [ -d "$srcdir/.git" ] || die "no source clone for $id: $srcdir (bench: scripts/brief-bench.py prepare)"
+    if [ "$reused" = 0 ]; then
+    # The panes open first, so the split is visible while the repository indexes and clones.
+    make_panes "$id" "$SCRATCH" "$SCRATCH" "$here" --no-focus
+    p_pane=$P_PANE; n_pane=$N_PANE; tab_id=$TAB_ID
+    [ -n "$p_pane" ] && [ -n "$n_pane" ] || die 'could not create the two panes'
+    titles "$p_pane" "$n_pane" "$id"
+    hd pane run "$p_pane" "echo 'arena: $id pixel arm: indexing $repo ...'" >/dev/null
+    hd pane run "$n_pane" "echo 'arena: $id no-pixel arm: waiting for the clone ...'" >/dev/null
     set_base "$repo" "$srcdir" "$csha" "$bin" "$bin_hash"
-    local runid run_dir pws nws ph nh hookbin
+    tm_base=$(date +%s)
     runid="$id-$(date -u +%Y%m%dT%H%M%SZ)"; run_dir="$SCRATCH/runs/$runid"
     pws="$run_dir/pixel/ws"; nws="$run_dir/no-pixel/ws"; ph="$run_dir/pixel/codex-home"; nh="$run_dir/no-pixel/codex-home"
     mkdir -p "$run_dir/pixel" "$run_dir/no-pixel"
@@ -683,6 +939,7 @@ cmd_run_set() {
     cp -c -R "$SET_BASE/pixel/ws" "$pws"; cp -c -R "$SET_BASE/no-pixel/ws" "$nws"
     (cd "$pws" && "$bin" prepare-repo . >/dev/null 2>&1) || true
     settle_daemon "$bin" "$pws"
+    tm_clone=$(date +%s)
     # The hook binary: the pinned one, or the wrapper that hydrates the brief with $extra.
     hookbin=$bin
     if [ -n "$extra" ]; then
@@ -691,25 +948,28 @@ cmd_run_set() {
       jq -n --arg real "$bin" --arg cmd "$extra" '{real:$real, extra:[$cmd]}' >"$run_dir/pixel/hookwrap/hook-wrap.json"
       hookbin="$run_dir/pixel/hookwrap/pixel"
     fi
-    make_codex_home "$ph" "$pws" ""; write_part_hooks "$ph" "$hookbin" "$parts"
-    make_codex_home "$nh" "$nws" ""
+    if [ "$AGENT" = claude ]; then
+      make_claude_home "$ph" "$hookbin" "$parts"; make_claude_home "$nh" "" 1
+    elif [ "$AGENT" = devin ]; then
+      make_devin_home "$ph" "$hookbin" "$parts"; make_devin_home "$nh" "" 1
+    else
+      make_codex_home "$ph" "$pws" ""; write_part_hooks "$ph" "$hookbin" "$parts"
+      make_codex_home "$nh" "$nws" ""
+    fi
     mkdir -p "$run_dir/pixel/shim" "$run_dir/no-pixel/shim"
     printf '#!/bin/sh\nexec %s "$@"\n' "'$bin'" >"$run_dir/pixel/shim/pixel"
     printf '#!/bin/sh\necho "pixel: command not found" >&2\nexit 127\n' >"$run_dir/no-pixel/shim/pixel"
     chmod +x "$run_dir/pixel/shim/pixel" "$run_dir/no-pixel/shim/pixel"
-    local tab_id p_pane n_pane
-    make_panes "$id" "$pws" "$nws" "$here" --no-focus
-    p_pane=$P_PANE; n_pane=$N_PANE; tab_id=$TAB_ID
-    [ -n "$p_pane" ] && [ -n "$n_pane" ] || die 'could not create the two panes'
-    titles "$p_pane" "$n_pane" "$id"
+    hd pane run "$p_pane" "cd '$pws'" >/dev/null; hd pane run "$n_pane" "cd '$nws'" >/dev/null
     # run.json keeps a digest of the prompt, never the prompt (census prompts are private).
     jq -n --arg id "$runid" --arg tab "$tab_id" --arg pp "$p_pane" --arg np "$n_pane" --arg ph "$ph" --arg nh "$nh" \
       --arg name "$id" --arg digest "$(printf '%s' "$prompt" | shasum -a 256 | cut -c1-16)" --arg sha "$csha" --arg bh "$bin_hash" \
       '{run:$id,tab:$tab,pixel_pane:$pp,no_pixel_pane:$np,pixel_home:$ph,no_pixel_home:$nh,case:0,name:$name,prompt:("sha256:"+$digest),commit:$sha,pixel_binary_sha256:$bh}' >"$run_dir/run.json"
+    run_json_extend "$run_dir" "$pws" "$nws"
+    tm_panes=$(date +%s)
     sleep 2
-    local safe_path="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin"
-    hd pane run "$p_pane" "cd '$pws' && env CODEX_HOME='$ph' PATH='$run_dir/pixel/shim':$safe_path '$CODEX_BIN' --dangerously-bypass-hook-trust" >/dev/null
-    hd pane run "$n_pane" "cd '$nws' && env CODEX_HOME='$nh' PIXEL_BRIEF=0 PATH='$run_dir/no-pixel/shim':$safe_path '$CODEX_BIN'" >/dev/null
+    hd pane run "$p_pane" "$(agent_launch pixel "$pws" "$ph" "$run_dir/pixel/shim")" >/dev/null
+    hd pane run "$n_pane" "$(agent_launch no-pixel "$nws" "$nh" "$run_dir/no-pixel/shim")" >/dev/null
     wait_ready "$p_pane" || die "pixel arm never became ready (pane $p_pane)"
     wait_ready "$n_pane" || die "no-pixel arm never became ready (pane $n_pane)"
     review_hooks_if_asked "$p_pane"
@@ -717,10 +977,35 @@ cmd_run_set() {
     hd agent rename "$p_pane" "$PREFIX-$id-pixel" >/dev/null 2>&1 || true
     hd agent rename "$n_pane" "$PREFIX-$id-no-pixel" >/dev/null 2>&1 || true
     titles "$p_pane" "$n_pane" "$id"
+    live_repo=$repo; live_case=$id
+    else
+      say "$id: reusing the panes (/clear)"
+      tm_base=$(date +%s); tm_clone=$tm_base
+      hd agent prompt "$p_pane" "/clear" >/dev/null 2>&1 || true
+      hd agent prompt "$n_pane" "/clear" >/dev/null 2>&1 || true
+      sleep 2
+      wait_ready "$p_pane" || die "pixel arm not ready after /clear (pane $p_pane)"
+      wait_ready "$n_pane" || die "no-pixel arm not ready after /clear (pane $n_pane)"
+      titles "$p_pane" "$n_pane" "$id"; live_case=$id
+    fi
     local t0 t1 rc_p=0 rc_n=0
-    t0=$(date +%s)
-    hd agent prompt "$p_pane" "$prompt" --wait --timeout $((timeout * 1000)) >"$run_dir/pixel/prompt.json" 2>&1 & local pid_p=$!
-    hd agent prompt "$n_pane" "$prompt" --wait --timeout $((timeout * 1000)) >"$run_dir/no-pixel/prompt.json" 2>&1 & local pid_n=$!
+    t0=$(date +%s); tm_ready=$t0
+    # Alternate which arm submits first (1s apart): the shared prompt cache can favour the second
+    # request, so the order is recorded and balanced across cases.
+    local first=pixel pid_p pid_n nprompt=$prompt
+    # --cross: the no-pixel arm gets the next prompt of the same repository, so the two requests share
+    # no question text and the prompt cache cannot carry one arm's request to the other.
+    if [ "$cross" = 1 ]; then
+      nprompt=$(printf '%s\n' "$cases" | awk -F'\t' -v r="$repo" -v i="$id" '$2==r{id[++k]=$1; p[k]=$5; if($1==i) at=k} END{print p[at%k+1]}')
+    fi
+    [ $((n % 2)) = 0 ] && first=no-pixel
+    if [ "$first" = pixel ]; then
+      hd agent prompt "$p_pane" "$prompt" --wait --timeout $((timeout * 1000)) >"$run_dir/pixel/prompt.json" 2>&1 & pid_p=$!; sleep 1
+      hd agent prompt "$n_pane" "$nprompt" --wait --timeout $((timeout * 1000)) >"$run_dir/no-pixel/prompt.json" 2>&1 & pid_n=$!
+    else
+      hd agent prompt "$n_pane" "$nprompt" --wait --timeout $((timeout * 1000)) >"$run_dir/no-pixel/prompt.json" 2>&1 & pid_n=$!; sleep 1
+      hd agent prompt "$p_pane" "$prompt" --wait --timeout $((timeout * 1000)) >"$run_dir/pixel/prompt.json" 2>&1 & pid_p=$!
+    fi
     # The review panel opens when the prompt actually runs the hooks: patrol.
     ( for _ in $(seq 60); do review_hooks_if_asked "$p_pane"; sleep 3; done ) & local pid_t=$!
     SET_PIDS="$pid_p $pid_n $pid_t"
@@ -732,15 +1017,22 @@ cmd_run_set() {
     titles "$p_pane" "$n_pane" "$id"
     collect_receipt "$run_dir" "$rc_p" "$rc_n" "$((t1 - t0))"
     local bytes pc nc base=null
-    bytes=$(brief_bytes_of "$pws")
+    if [ "$reused" = 1 ]; then bytes=$(jq '(.arms.pixel.brief // "") | utf8bytelength' "$run_dir/receipt.json")
+    else bytes=$(brief_bytes_of "$pws"); fi
+    cp "$run_dir/receipt.json" "$SET_OUT/$id.receipt.json" 2>/dev/null || true
     pc=$(jq '.arms.pixel.tool_calls | length' "$run_dir/receipt.json")
     nc=$(jq '.arms["no-pixel"].tool_calls | length' "$run_dir/receipt.json")
     if [ -n "$baseline_file" ] && [ -f "$baseline_file" ]; then
       base=$(jq -s --arg id "$id" '[.[] | select(.id == $id) | .pixel_calls] | first // null' "$baseline_file")
     fi
-    jq -nc --arg id "$id" --argjson pc "$pc" --argjson nc "$nc" --argjson b "$bytes" --argjson base "$base" --arg run "$runid" \
-      '{id:$id, pixel_calls:$pc, no_pixel_calls:$nc, brief_bytes:$b, baseline:$base, run:$run}' >>"$SET_OUT/results.jsonl"
-    say "$id: no-pixel $nc calls, pixel $pc calls, brief $bytes bytes"
+    # Where the seconds went: index (set_base), clones+daemon settle, panes+agent start, the prompt itself.
+    local timings
+    timings=$(jq -nc --argjson a "$((tm_base - tm_start))" --argjson b "$((tm_clone - tm_base))" --argjson c "$((tm_ready - tm_clone))" --argjson d "$((t1 - t0))" \
+      '{index_s:$a, clone_settle_s:$b, spawn_s:$c, prompt_s:$d}')
+    local arm_s; arm_s=$(jq -c '{pixel_s:.arms.pixel.codex_seconds, no_pixel_s:.arms["no-pixel"].codex_seconds}' "$run_dir/receipt.json")
+    jq -nc --arg id "$id" --argjson pc "$pc" --argjson nc "$nc" --argjson b "$bytes" --argjson base "$base" --arg run "$runid" --argjson tm "$timings" --arg first "$first" --argjson arm "$arm_s" \
+      '{id:$id, pixel_calls:$pc, no_pixel_calls:$nc, brief_bytes:$b, baseline:$base, run:$run, timings:$tm, first:$first, arm_seconds:$arm}' >>"$SET_OUT/results.jsonl"
+    say "$id: no-pixel $nc calls, pixel $pc calls, brief $bytes bytes; seconds $timings"
     if [ -s "$run_dir/brief.md" ]; then
       say "----- $id pixel brief (injected into the with-pixel arm) -----"
       cat "$run_dir/brief.md"
@@ -749,9 +1041,10 @@ cmd_run_set() {
       say "$id: NO brief delivered ($run_dir/brief.md empty)"
     fi
     # --here leaves the pair open; the next case or the next relaunch closes it.
-    [ "$here" = 1 ] || close_case_tab "$id"
+    [ "$here" = 1 ] || [ "$reuse" = 1 ] || close_case_tab "$id"
     SET_CASE=''
   done 3<<<"$cases"
+  [ "$here" = 1 ] || [ -z "$live_case" ] || close_case_tab "$live_case"
   rm -f "$SET_PID_FILE"
   trap - INT TERM
   set_table "$SET_OUT"
