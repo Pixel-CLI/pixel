@@ -26,10 +26,9 @@ on:
       - ".cargo/**"
       - ".github/workflows/cross-build.yml"
       - "Cargo.*"
-      - "Cross.toml"
       - "scripts/release-build-env.sh"
       - "crates/**"
-      - "deny.toml"
+      - ".config/deny.toml"
       - "rust-toolchain*"
 
 # A new push to a pull request cancels the run still in flight for its
