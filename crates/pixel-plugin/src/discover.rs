@@ -998,4 +998,27 @@ mod tests {
         let rows = list(&f.host).unwrap();
         assert!(rows.iter().all(|r| r.problem.is_none()), "{rows:?}");
     }
+
+    // A repository commits its own `.pixel/plugins/`, so a manifest that is
+    // a link (or a FIFO, or a directory) is one plugin's problem: `pixel
+    // <name>` refuses that plugin by name, `list` shows it under its row and
+    // still shows the others, as it does for any other invalid manifest.
+    #[test]
+    fn a_manifest_that_is_a_link_is_refused_by_name_and_listed_beside_the_others() {
+        let f = fixture();
+        let repo = f.host.repo_plugins().unwrap();
+        plugin_dir(&repo, "fine", "");
+        let linked = plugin_dir(&repo, "linked", "");
+        let elsewhere = f.tmp.path().join("elsewhere.toml");
+        fs::rename(linked.join("pixel-plugin.toml"), &elsewhere).unwrap();
+        symlink(&elsewhere, linked.join("pixel-plugin.toml")).unwrap();
+        let err = resolve(&f.host, "linked").unwrap_err().to_string();
+        assert!(err.contains("is a symbolic link"), "{err}");
+        let rows = list(&f.host).unwrap();
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["fine", "linked"]);
+        let problem = rows[1].problem.as_deref().unwrap();
+        assert!(problem.contains("is a symbolic link"), "{problem}");
+        assert_eq!(rows[0].problem, None);
+    }
 }

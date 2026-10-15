@@ -388,6 +388,15 @@ pub fn load(dir: &Path, expected_name: Option<&str>) -> Result<Option<Manifest>,
     let file = match crate::file::open_regular(&path, None) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // A link, a FIFO, a device or a directory at the manifest's name is
+        // that plugin's invalid manifest, like an oversized one: `list` shows
+        // it under its row instead of failing for every plugin beside it.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+            return Err(Error::Manifest {
+                path,
+                message: e.to_string(),
+            });
+        }
         Err(e) => return Err(Error::io(format!("read {}", path.display()), e)),
     };
     let mut bytes = Vec::new();
