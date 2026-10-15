@@ -787,6 +787,10 @@ a.agents__item { text-decoration: none; }
 .badges li::before { content: ""; width: 10px; height: 10px; border-radius: 1px; background: var(--green); }
 #faq .faq { margin-inline: auto; }
 /* Step 1 full width (the one-liner shows whole), then steps 2 to 4 in one row; 3 and 4 are optional and drawn quieter. */
+/* The install flow's one-line framing of "your repo", above step 1. */
+.get__where { margin: 0 auto 20px; max-width: 46em; text-align: center; color: var(--ink-soft); font-size: 0.95rem; text-wrap: balance; }
+.get__where strong { color: var(--ink); }
+.get__where code { background: var(--ground-2); padding: 1px 6px; border-radius: 3px; }
 .get, .steps__item { text-align: left; background: color-mix(in srgb, var(--panel) 55%, transparent); border-top: 2px solid var(--green); border-radius: 0 0 8px 8px; }
 .get { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding: clamp(18px, 2.4vw, 28px); }
 .get__head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }

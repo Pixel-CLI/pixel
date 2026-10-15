@@ -41,7 +41,7 @@
       <h1 class="hero__title hero__title--long"><span>Agents grep your code blind.</span> <span class="glow">Pixel hands them the map.</span></h1>
       <p class="hero__lede"><strong>A local index of signatures and callers. Your code questions reach the agent with a source-cited brief from it.</strong> One install, a handful of commands: you keep prompting as usual.</p>
       {{/* No install command here: the hero convinces, the Install chapter asks for the paste, with the script one click away. */}}
-      <div class="hero__cta"><a class="button" href="#install">Try Pixel on your repo</a><a class="link hero__how" href="#how">See how it works</a></div>
+      <div class="hero__cta"><a class="button" href="#install">Install Pixel on your repo</a><a class="link hero__how" href="#how">See how it works</a></div>
       {{/* Every agent `pixel setup` writes for (wiring "install" in data/agents.toml), named: several are not household names. Marks from assets/logos/ (the ids inside a mark get a prefix, since the Compatibility grid inlines the same SVG). */}}
       <div class="hero__works">
         <p class="hero__works-label">Works with</p>
@@ -298,13 +298,15 @@
     </section>
 
     {{/* ---------- install ---------- */}}
-    {{/* The two commands of the title are steps 1 and 2; 3 and 4 are marked optional. Step 1 is full width so the one-liner shows whole, with its three ways in as tabs: the script piped to sh, the same script read first, or the prompt for an agent, which then runs steps 2 and 3 itself. The script selects the archive (Linux x86_64, Linux arm64, Apple Silicon). Every command has its own Copy, never a chained "copy all", so each action is read before it runs. Platforms: the targets release.yml builds. No version number: the figure in step 4 restates "Measure it on your own code" in content/benchmarks.md (Requests at 611c616), which carries the version; change it there first, then here. */}}
+    {{/* The hero and nav CTAs land here: this chapter is the install flow. The two commands of the title are steps 1 and 2; 3 and 4 are marked optional. Step 1 is full width so the one-liner shows whole, with its three ways in as tabs: the script piped to sh, the same script read first, or the prompt for an agent, which then runs steps 2 and 3 itself. The script selects the archive (Linux x86_64, Linux arm64, Apple Silicon). Every command has its own Copy, never a chained "copy all", so each action is read before it runs. Platforms: the targets release.yml builds. No version number: the figure in step 4 restates "Measure it on your own code" in content/benchmarks.md (Requests at 611c616), which carries the version; change it there first, then here. */}}
     <section class="section wrap section--center" id="install" aria-labelledby="install-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Install</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="install-title"><span class="glow">Two commands.</span> That's the whole setup.</h2>
-        <p>Run them inside your repository.</p>
+        <h2 id="install-title"><span class="glow">Install it on your repo.</span> Two commands.</h2>
+        <p>Open a terminal in the repository you want to map.</p>
       </header>
+      {{/* What "your repo" means here, and the one state Pixel writes into it (restates content/benchmarks.md, "Measure it on your own code"). */}}
+      <p class="get__where" data-reveal><strong>One repository at a time.</strong> Pixel indexes the repository you run it in, keeps its files in <code>.pixel/</code> and adds that folder to <code>.gitignore</code>.</p>
       <div class="get" data-term data-reveal>
         <div class="get__head">
           <span class="get__n" aria-hidden="true">1</span>
