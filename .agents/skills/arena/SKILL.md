@@ -28,8 +28,8 @@ $S abort [lookup]                         # interrupt, close the panes
    (`prepare-repo .`, `build-index --history .`) and its daemon warmed;
    `no-pixel/ws` has no `.pixel/` at all. A run reuses both. The binary is
    copied next to them, so rebuilding the original does not change a run.
-2. **A new tab `arena:<case>`** in the focused Herdr workspace (or
-   `$HERDR_WORKSPACE_ID`) with two panes titled `arena:<case>:pixel` and
+2. **Two panes split right in the current tab** when run from a Herdr pane (`--here`, the default there), or **a
+   new tab `arena:<case>`** in the focused Herdr workspace (or `$HERDR_WORKSPACE_ID`) with `--tab` or outside Herdr; the panes titled `arena:<case>:pixel` and
    `arena:<case>:no-pixel`. The user's own panes are never touched; focus
    stays where it was unless `--focus` is given.
 3. **Codex in each pane**, one `CODEX_HOME` per arm per run
@@ -68,7 +68,7 @@ $S abort [lookup]                         # interrupt, close the panes
 - **Run once, do not restart.** A kill leaves indexers running; `abort` now stops them and clears the locks. Edit the
   script only when no set is running (bash reads a running script incrementally).
 - **Consecutive cases of one repository keep their panes**: `/clear` between questions, a respawn only when the
-  repository changes (`--fresh` opens a new pair per case). The `single` set is one repository (ripgrep), so one spawn.
+  repository or its pinned commit changes (`--fresh` opens a new pair per case; it cannot be combined with `--keep-context`). The `single` set is one repository (ripgrep), so one spawn.
 - Indexing the other repositories happens in the background while earlier cases run, one indexer per repository.
 
 ## Claude Code instead of Codex: `--agent claude`
@@ -94,7 +94,7 @@ answers the 13 questions in a row, so the transcript holds every brief and every
 `$SCRATCH/sets/<source>-<utc>/session/` has `pixel.turns.json` and `no-pixel.turns.json` (per turn: prompt, briefs
 the hooks added, tool calls, last answer; `session-digest.py` makes them), `report.md` (both arms turn by turn,
 briefs included) and the raw `*.session.jsonl` (omitted for `census`, whose prompts are private: there the prompt is
-replaced by its hash). The per-case table counts each case's own turn. This is the input for improving the probes and
+replaced by its hash; the arena writes no copy of the prompt, but Claude Code's own transcript of each session stays under `~/.claude/projects/` as for any session, and the arena never deletes it). The per-case table counts each case's own turn. This is the input for improving the probes and
 the brief until the questions need no tool calls: read `report.md`, pick a turn whose pixel arm still called tools,
 and take it to the `probe` skill. Claude Code only.
 
@@ -107,10 +107,9 @@ $S abort                       # stops both panes AND the loop
 ```
 
 One command runs every question of a source in a row, in the two panes `arena:<case>:pixel` and
-`arena:<case>:no-pixel` of a tab that is opened and closed per case: `catalog` is the prompts above, `single` is the 13 questions of `single.tsv` (one per census category) about ripgrep, never this repository, `bench`
+`arena:<case>:no-pixel` that are opened per case and closed when the next case needs a new pair (in `--here` the previous pair stays open until then; with `--tab` each pair is closed at that moment, and a reused pair lives across the cases of one repository at one commit): `catalog` is the prompts above, `single` is the 13 questions of `single.tsv` (one per census category) about ripgrep, never this repository, `bench`
 is `eval/brief-bench/questions.jsonl`, `census` reads the 13 private answer-only prompts from
-`/private/tmp/claude-501/census/census.db` at run time (they reach the panes and nothing else: no log, no
-`run.json`, no table). Per case, sequentially: a copy-on-write clone of the repository at its pinned commit (the
+`/private/tmp/claude-501/census/census.db` at run time (the arena itself writes them to no log, `run.json` or table; they reach the panes and the agent's own session transcript, which belongs to the agent). Per case, sequentially: a copy-on-write clone of the repository at its pinned commit (the
 repository, commit and binary are indexed once, with history), a fresh `CODEX_HOME` per arm with the same login
 copy, the same prompt sent to both, a wait until both settle or `--timeout` passes, and the tool calls counted from
 each Codex rollout (parsed events, not the screen). The pixel arm registers `--parts` (default 3) prompt-submit

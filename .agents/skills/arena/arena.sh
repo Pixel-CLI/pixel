@@ -52,7 +52,7 @@ Usage: arena.sh <command> [args]
 EOF
 }
 
-die() { printf 'arena: %s\n' "$*" >&2; exit 1; }
+die() { printf 'arena: %s\n' "$*" >&2; [ -z "${SET_LOCK_HELD:-}" ] || rmdir "$SET_LOCK_HELD" 2>/dev/null || true; exit 1; }
 say() { printf 'arena: %s\n' "$*" >&2; }
 hd() { HERDR_ENV=1 herdr "$@"; }
 
@@ -248,7 +248,7 @@ agent_launch() {
     printf "cd '%s' && env %s PATH='%s':%s '%s' --settings '%s/settings.json' --setting-sources project --strict-mcp-config --permission-mode bypassPermissions" \
       "$ws" "$brief" "$shim" "$safe_path" "$CLAUDE_BIN" "$home"
   elif [ "$arm" = pixel ]; then
-    printf "cd '%s' && env CODEX_HOME='%s' PATH='%s':%s '%s' --dangerously-bypass-hook-trust%s" "$ws" "$home" "$shim" "$safe_path" "$CODEX_BIN" "${CODEX_PROFILE:+ -p $CODEX_PROFILE}"
+    printf "cd '%s' && env CODEX_HOME='%s' %s PATH='%s':%s '%s' --dangerously-bypass-hook-trust%s" "$ws" "$home" "$brief" "$shim" "$safe_path" "$CODEX_BIN" "${CODEX_PROFILE:+ -p $CODEX_PROFILE}"
   else
     printf "cd '%s' && env CODEX_HOME='%s' %s PATH='%s':%s '%s'%s" "$ws" "$home" "$brief" "$shim" "$safe_path" "$CODEX_BIN" "${CODEX_PROFILE:+ -p $CODEX_PROFILE}"
   fi
@@ -738,10 +738,9 @@ set_base() { # $1 repo, $2 source dir, $3 sha, $4 binary, $5 binary hash
   # One indexer per key: a background prewarm and the case loop never both rebuild it.
   local lock="$SCRATCH/setws/$key.lock"
   mkdir -p "$SCRATCH/setws"
-  if [ ! -f "$SET_BASE/indexed" ] && ! mkdir "$lock" 2>/dev/null; then
-    until [ -f "$SET_BASE/indexed" ] || [ ! -d "$lock" ]; do sleep 2; done
-  fi
+  while [ ! -f "$SET_BASE/indexed" ] && ! mkdir "$lock" 2>/dev/null; do sleep 2; done
   if [ ! -f "$SET_BASE/indexed" ]; then
+    SET_LOCK_HELD=$lock
     say "indexing $1 at ${3:0:12} (once per repository, commit and binary)"
     rm -rf "$SET_BASE"
     # Seed from the newest indexed base of the same repository and commit (another binary): the
@@ -773,6 +772,7 @@ set_base() { # $1 repo, $2 source dir, $3 sha, $4 binary, $5 binary hash
     touch "$SET_BASE/indexed"
   fi
   rmdir "$lock" 2>/dev/null || true
+  SET_LOCK_HELD=''
 }
 
 # A daemon that has just started answers the first briefs empty: ask until the
@@ -898,6 +898,7 @@ cmd_run_set() {
   [ -x "$bin" ] || die "not executable: $bin"
   check_agent; agent_bin_ok
   [ "${ARENA_CLEAR:-1}" = 1 ] || [ "$AGENT" = claude ] || die '--keep-context reads Claude Code transcripts: use --agent claude'
+  [ "${ARENA_CLEAR:-1}" = 1 ] || [ "${ARENA_REUSE:-1}" = 1 ] || die '--keep-context needs the panes of a repository kept: drop --fresh'
   [ "$source" != census ] || command -v sqlite3 >/dev/null || die 'sqlite3 is required for the census source'
   [ -n "$baseline_file" ] || { [ "$source" != census ] || baseline_file=${ARENA_BASELINE:-$SCRATCH/baseline-final-live.jsonl}; }
   local bin_hash; bin_hash=$(sha256_of "$bin")
@@ -909,7 +910,7 @@ cmd_run_set() {
   SET_CASE=''; SET_PIDS=''; SET_PREWARM=''
   local cases; cases=$(set_cases "$source" "$sha")
   [ -n "$cases" ] || die "the source $source has no cases"
-  local id repo srcdir csha prompt n=0 total live_repo='' live_case='' runid run_dir pws nws ph nh hookbin tab_id p_pane n_pane reuse=${ARENA_REUSE:-1}
+  local id repo srcdir csha prompt n=0 turn=0 pair_dir total live_repo='' live_case='' runid run_dir pws nws ph nh hookbin tab_id p_pane n_pane reuse=${ARENA_REUSE:-1}
   total=$(printf '%s\n' "$cases" | awk -F'\t' -v o="$only" 'BEGIN{split(o,a,","); for(i in a) w[a[i]]=1} o=="" || ($1 in w) {c++} END{print c+0}')
   say "set $source: $total case(s), pixel binary ${bin_hash:0:12}${extra:+, brief extra: $extra}; output $SET_OUT"
   # The first case indexes inline (its panes open as soon as it is ready); the other
@@ -927,12 +928,12 @@ cmd_run_set() {
     # Consecutive cases of one repository keep their panes and agents: /clear between questions, a respawn
     # only when the repository changes (--fresh: a new pair per case).
     local reused=0
-    if [ "$reuse" = 1 ] && [ "$repo" = "$live_repo" ]; then reused=1; fi
+    if [ "$reuse" = 1 ] && [ "$repo-$csha" = "$live_repo" ]; then reused=1; fi
     # --here keeps the finished case's panes until the next one opens its pair;
     # a pair for this same case left by an earlier run is always stale.
-    if [ "$reused" = 0 ] && [ "$here" = 1 ]; then
+    if [ "$reused" = 0 ]; then
       [ -z "$live_case" ] || close_case_tab "$live_case"
-      close_case_tab "$id"
+      [ "$here" != 1 ] || close_case_tab "$id"
     fi
     say "[$n/$total] $id"
     [ -d "$srcdir/.git" ] || die "no source clone for $id: $srcdir (bench: scripts/bench/brief-bench.py prepare)"
@@ -946,7 +947,7 @@ cmd_run_set() {
     hd pane run "$n_pane" "echo 'arena: $id no-pixel arm: waiting for the clone ...'" >/dev/null
     set_base "$repo" "$srcdir" "$csha" "$bin" "$bin_hash"
     tm_base=$(date +%s)
-    runid="$id-$(date -u +%Y%m%dT%H%M%SZ)"; run_dir="$SCRATCH/runs/$runid"
+    runid="$id-$(date -u +%Y%m%dT%H%M%SZ)"; run_dir="$SCRATCH/runs/$runid"; pair_dir=$run_dir; turn=1
     pws="$run_dir/pixel/ws"; nws="$run_dir/no-pixel/ws"; ph="$run_dir/pixel/codex-home"; nh="$run_dir/no-pixel/codex-home"
     mkdir -p "$run_dir/pixel" "$run_dir/no-pixel"
     # Fresh copy-on-write clones per case: the indexed one for the pixel arm, a bare one for the other.
@@ -992,9 +993,13 @@ cmd_run_set() {
     hd agent rename "$p_pane" "$PREFIX-$id-pixel" >/dev/null 2>&1 || true
     hd agent rename "$n_pane" "$PREFIX-$id-no-pixel" >/dev/null 2>&1 || true
     titles "$p_pane" "$n_pane" "$id"
-    live_repo=$repo; live_case=$id
+    live_repo="$repo-$csha"; live_case=$id
     else
       say "$id: reusing the panes (/clear)"
+      runid="$id-$(date -u +%Y%m%dT%H%M%SZ)"; run_dir="$SCRATCH/runs/$runid"; turn=$((turn + 1))
+      mkdir -p "$run_dir/pixel" "$run_dir/no-pixel"
+      jq --arg id "$runid" --arg name "$id" --arg digest "$(printf '%s' "$prompt" | shasum -a 256 | cut -c1-16)" \
+        '.run = $id | .name = $name | .prompt = ("sha256:" + $digest)' "$pair_dir/run.json" >"$run_dir/run.json"
       tm_base=$(date +%s); tm_clone=$tm_base
       if [ "${ARENA_CLEAR:-1}" = 1 ]; then
         hd agent prompt "$p_pane" "/clear" >/dev/null 2>&1 || true
@@ -1042,8 +1047,8 @@ cmd_run_set() {
     if [ "${ARENA_CLEAR:-1}" = 0 ]; then
       # One session answers every question: the receipt is cumulative, so count this case's turn.
       local tp tn
-      tp=$(python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$pws")" --turn "$n" --hide-prompt)
-      tn=$(python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$nws")" --turn "$n" --hide-prompt)
+      tp=$(python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$pws")" --turn "$turn" --hide-prompt)
+      tn=$(python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$nws")" --turn "$turn" --hide-prompt)
       pc=$(jq '(.tool_calls // []) | length' <<<"$tp"); nc=$(jq '(.tool_calls // []) | length' <<<"$tn")
       bytes=$(jq '[(.briefs // [])[] | utf8bytelength] | add // 0' <<<"$tp")
     fi
@@ -1070,6 +1075,7 @@ cmd_run_set() {
     SET_CASE=''
   done 3<<<"$cases"
   [ "$here" = 1 ] || [ -z "$live_case" ] || close_case_tab "$live_case"
+  local rr=''
   if [ "${ARENA_CLEAR:-1}" = 0 ] && [ -n "$pws" ]; then
     # The whole conversation of each arm: every brief, every tool call, every answer, turn by turn.
     local sd="$SET_OUT/session" hide=''
@@ -1082,13 +1088,14 @@ cmd_run_set() {
     python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$nws")" $hide >"$sd/no-pixel.turns.json"
     python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$pws")" $hide --md "$(newest_transcript "$nws")" >"$sd/report.md"
     # A copy in the checkout (gitignored `.arena-reports/`) for the self-improvement loop.
-    local rr; rr=$(cd "$SELF_DIR/../../.." && pwd)/.arena-reports/${SET_OUT##*/}
-    mkdir -p "$rr" && cp "$sd"/* "$rr"/ && cp "$SET_OUT/table.md" "$rr"/ 2>/dev/null || true
+    rr=$(cd "$SELF_DIR/../../.." && pwd)/.arena-reports/${SET_OUT##*/}
+    mkdir -p "$rr" && cp "$sd"/* "$rr"/ || true
     say "session: $rr/report.md (every brief and tool call, turn by turn)"
   fi
   rm -f "$SET_PID_FILE"
   trap - INT TERM
   set_table "$SET_OUT"
+  [ -z "$rr" ] || cp "$SET_OUT/table.md" "$rr"/ 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------- main

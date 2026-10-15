@@ -81,10 +81,12 @@ def markdown(pixel, nopixel):
         n = nopixel[i] if i < len(nopixel) else None
         head = (p or n)["prompt"]
         lines += [f"## Turn {i + 1}", "", f"> {head}", ""]
+        if p and n and p["prompt"] != n["prompt"]:
+            lines += [f"**The two arms answered different prompts in this turn.** Without Pixel: {n['prompt']}", ""]
         for label, t in (("with Pixel", p), ("without Pixel", n)):
             if t is None:
                 continue
-            lines += [f"### {label}: {len(t['tool_calls'])} tool call(s), brief {sum(len(b) for b in t['briefs'])} bytes", ""]
+            lines += [f"### {label}: {len(t['tool_calls'])} tool call(s), brief {sum(len(b.encode()) for b in t['briefs'])} bytes", ""]
             for b in t["briefs"]:
                 lines += ["<details><summary>brief</summary>", "", "```", b, "```", "</details>", ""]
             for c in t["tool_calls"]:
