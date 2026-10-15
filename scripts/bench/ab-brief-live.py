@@ -57,7 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
-REPO = SCRIPTS.parent
+REPO = SCRIPTS.parents[1]
 
 
 def load_sibling(name):

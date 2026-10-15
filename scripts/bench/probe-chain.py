@@ -27,7 +27,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WORKTREE = HERE.parent
+WORKTREE = HERE.parents[1]
 
 
 def load_probe_test():

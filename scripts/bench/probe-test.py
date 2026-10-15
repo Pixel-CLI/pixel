@@ -45,7 +45,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WORKTREE = HERE.parent
+WORKTREE = HERE.parents[1]
 MAX_BUDGET_MS = 2500
 MODES = ("append", "lead")
 KINDS = ("overview", "review", "flow", "history", "config", "lookup", "tests", "impact", "diagnosis",

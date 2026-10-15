@@ -38,7 +38,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WORKTREE = HERE.parent
+WORKTREE = HERE.parents[1]
 BENCH = WORKTREE / "eval" / "brief-bench"
 CACHE = Path(os.environ.get("PIXEL_BENCH_CACHE") or Path.home() / ".cache" / "pixel-brief-bench")
 MIN_QUESTIONS = 50

@@ -47,7 +47,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WORKTREE = HERE.parent
+WORKTREE = HERE.parents[1]
 CENSUS_DIRS = tuple(Path(p) for p in (os.environ.get("PIXEL_CENSUS_DIR"), HERE / "tool-census") if p)
 NON_CALL_ITEMS = frozenset({"agent_message", "reasoning", "error", "todo_list", "user_message", "plan"})
 LINE_THRESHOLD = 0.8     # share of a call's lines the brief must quote for the call to be covered

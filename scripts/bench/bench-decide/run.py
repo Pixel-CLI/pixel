@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-FIXTURES = HERE.parent / "fixtures"
+FIXTURES = HERE.parents[1] / "fixtures"
 sys.path.insert(0, str(HERE))
 import models as M  # noqa: E402
 

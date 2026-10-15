@@ -39,7 +39,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WORKTREE = HERE.parent
+WORKTREE = HERE.parents[1]
 BURIED_AFTER = 80      # a block whose header is further down than this many lines of the brief reads as buried
 COVERED = 0.8
 
