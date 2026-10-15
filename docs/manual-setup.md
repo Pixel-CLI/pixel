@@ -12,8 +12,9 @@ wire (Cursor, Copilot, ...)? You don't need `pixel setup`.
 3. **Install Pi's explicit `/pixel-impact` package when Pi is present** and
    remove Pixel's automatic Pi prompt.
 4. **Remove what earlier releases wrote for every other agent**: deployed
-   prompts, guard hooks and plugins. It wires none of them, and every agent
-   keeps its native tools.
+   prompts, guard hooks and plugins (among them the `rules/AGENTS.md` once written
+   into Antigravity's Pixel plugin dirs). Guidance reaches every harness as the
+   `pixel` skill only, and every agent keeps its native tools.
 
 ## 1. Install the binary
 

@@ -27,7 +27,7 @@ type Result<T> = std::result::Result<T, InstallError>;
 /// The skill content: one front matter and prompt shared by every harness
 /// that reads a skill, so they all read one source.
 pub const PIXEL_SKILL: &str = concat!(
-    "---\nname: pixel\ndescription: >\n  Deterministic code-graph retrieval via the `pixel` CLI: callers and callees,\n  blast radius before an edit, safe rename, file outlines, concept search and\n  task scoping. Use when asked who calls or uses a symbol, what breaks if it\n  changes, to rename or refactor safely, where something is handled in\n  unfamiliar code, or before editing a symbol; also when the user mentions\n  pixel or the repo has a `.pixel` directory. Needs the `pixel` binary and a\n  git repo.\nlicense: MIT\n---\n\n",
+    "---\nname: pixel\ndescription: >\n  Finds where a symbol is defined, who calls it, and what breaks if it changes,\n  via the `pixel` CLI code graph. Use before renaming, changing a signature or\n  deleting a function or type; when asked who calls or uses X, where X is\n  defined, or where some behaviour lives without a known name; instead of\n  grepping for `name(` or `fn name`. Also outlines big files, packs one\n  symbol's source and scopes tasks. Needs `pixel` on PATH and a git repo\n  (`pixel prepare-repo` builds the index once).\nlicense: MIT\n---\n\n",
     include_str!("../assets/pixel-agent-prompt.md"),
 );
 

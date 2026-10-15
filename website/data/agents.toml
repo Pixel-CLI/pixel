@@ -39,12 +39,18 @@ shared = [
   "~/.config/opencode/skills/pixel/SKILL.md",
   "~/.gemini/skills/pixel/SKILL.md",
   # The first-party brief probes the prompt-submit brief runs (`pixel setup --remove` deletes them).
+  "~/.pixel/plugins/cand-j-callers/",
+  "~/.pixel/plugins/cand-j-chain/",
+  "~/.pixel/plugins/cand-j-stop-cause/",
+  "~/.pixel/plugins/cand-k-code-sites/",
+  "~/.pixel/plugins/cand-k-commit-patch/",
   "~/.pixel/plugins/config-registry/",
   "~/.pixel/plugins/doc-sections/",
   "~/.pixel/plugins/error-origin/",
   "~/.pixel/plugins/flow-rank/",
   "~/.pixel/plugins/history-fallback/",
   "~/.pixel/plugins/name-files/",
+  "~/.pixel/plugins/overview-answer-evidence/",
   "~/.pixel/plugins/rank-blocks/",
 ]
 
@@ -130,7 +136,7 @@ name = "Antigravity"
 logo = "antigravity"
 wiring = "install"
 lede = "Antigravity keeps its native tools; `pixel setup` installs a prompt brief and a deferred, conversation-scoped metrics relay in its IDE and CLI plugins."
-global = ["~/.gemini/config/config.json", "~/.gemini/config/plugins/pixel/plugin.json", "~/.gemini/config/plugins/pixel/hooks.json", "~/.gemini/config/plugins/pixel/rules/AGENTS.md", "~/.gemini/config/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/antigravity-cli/plugins/pixel/plugin.json", "~/.gemini/antigravity-cli/plugins/pixel/hooks.json", "~/.gemini/antigravity-cli/plugins/pixel/rules/AGENTS.md", "~/.gemini/antigravity-cli/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/config/import_manifest.json"]
+global = ["~/.gemini/config/config.json", "~/.gemini/config/plugins/pixel/plugin.json", "~/.gemini/config/plugins/pixel/hooks.json", "~/.gemini/config/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/antigravity-cli/plugins/pixel/plugin.json", "~/.gemini/antigravity-cli/plugins/pixel/hooks.json", "~/.gemini/antigravity-cli/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/config/import_manifest.json"]
 wires = "a `PreInvocation` evidence brief and a plugin metrics relay that queues by conversation artifact directory, then injects the matching one-line metric at `PostInvocation`; native tools stay unchanged"
 note = "Pixel returns `{}` from Antigravity `PostToolUse` and defers display until `PostInvocation`, whose documented `injectSteps` contract accepts the one-line ephemeral message. A user-defined `pixel-guard` in `~/.gemini/config/hooks.json` stays."
 checks = ["install.antigravity"]

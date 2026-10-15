@@ -10,3 +10,5 @@ owner = "pixel"
 budget_ms = 800
 # "lead": it replaces the whole brief (drop everything, then its own pruned blocks in the brief's order).
 mode = "lead"
+# Runs after the other probes were merged, on the merged brief.
+stage = "post"

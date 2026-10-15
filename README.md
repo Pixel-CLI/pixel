@@ -1,52 +1,61 @@
 <h1 align="center">🟩 Pixel</h1>
 
 <p align="center">
-  <strong>Agents grep your code blind. Pixel hands them the map.</strong>
-</p>
-
-<p align="center">
-  A tool that replaces everything that can be deterministic in repository work: search, symbols, callers, task scope, history, review and Git from one local CLI, so your AI coding agent spends its tokens on the hard part.
-</p>
-
-<p align="center">
-  <b>−94.5% median read volume for outline questions</b> on 8 large files · one install, a handful of commands · no account, no API key, no telemetry beyond an optional release check.
+  <strong>Repository evidence, delivered with your prompt.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/Pixel-CLI/pixel/releases/latest"><img src="https://img.shields.io/github/v/release/Pixel-CLI/pixel?color=2ea043&label=release" alt="Latest release" /></a>
   <a href="https://github.com/Pixel-CLI/pixel/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Pixel-CLI/pixel/ci.yml?branch=main&label=CI" alt="CI" /></a>
-  <a href="https://www.bestpractices.dev/projects/15211"><img src="https://www.bestpractices.dev/projects/15211/badge" alt="OpenSSF Best Practices badge" /></a>
-  <a href="https://www.bestpractices.dev/projects/15211"><img src="https://www.bestpractices.dev/projects/15211/baseline" alt="OpenSSF Best Practices baseline badge" /></a>
-  <a href="SECURITY.md#verifying-a-release"><img src="https://img.shields.io/badge/provenance-SLSA%20Build%20L3-2ea043" alt="Release archives, SBOMs and install.sh carry SLSA Build L3 provenance attestations" /></a>
-  <a href="https://github.com/Pixel-CLI/pixel/releases/latest"><img src="https://img.shields.io/badge/platforms-macOS%20arm64%20%7C%20Linux%20x86__64%20%C2%B7%20arm64-blue" alt="Prebuilt for macOS arm64 and Linux x86_64 and arm64" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license" /></a>
 </p>
 
-<p align="center">
-  <a href="https://pixel-cli.dev/"><b>Website</b></a> ·
-  <a href="https://pixel-cli.dev/docs/"><b>Docs</b></a> ·
-  <a href="https://pixel-cli.dev/benchmarks/"><b>Benchmarks</b></a>
-</p>
+Pixel gives your coding agent a short, source-cited brief before it starts work. Ask your question normally; Pixel retrieves relevant evidence from a local index and adds it to the agent’s context.
+
+## Save your tokens for the hard part
 
 <p align="center">
-  <img src="docs/examples/pixel-scope-comparison.webp" width="800" alt="The same task without Pixel and with it: the agent wanders the repository, or starts from a ranked list of files" />
+  <img src="docs/examples/pixel-prompt-submit-comparison.webp" width="800" alt="Recorded side-by-side Codex run: the same repository question reports 36 seconds with Pixel and 1 minute 58 seconds without, after additional searches and file reads." />
 </p>
 
-The animation illustrates a workflow; it is not a timed agent comparison.
-[Agent trials and their limits](https://pixel-cli.dev/benchmarks/#on-whole-agent-tasks) include a newer Opus trial with hooks that found no speed gain on one task.
+A uniformly sped-up recording of one Codex run on Requests. CLI-reported time: 36 seconds with Pixel, 1 minute 58 seconds without. Both panes keep their complete recorded output. This is one example, not a token benchmark. [Animation source and limits](docs/motion/prompt-submit/README.md).
 
-- **A local index of signatures and callers that your agent queries before it greps**: 94.5% less read volume (median) for outline questions using `pixel list-signatures` than whole-file reads on 8 large open-source files. [How we measure](https://pixel-cli.dev/benchmarks/#well-known-files)
-- **Native tools stay available**: Claude and Codex get a bounded evidence brief with each code prompt; Pi offers an explicit `/pixel-impact` command. Other agent integrations retain their existing policies.
-- **No account. No API key. No telemetry beyond an optional release check.** Your code stays on your machine.
-- **13 languages, MIT**, macOS (Apple Silicon) and Linux, signed releases.
+Code discovery costs more than the search itself: the model plans a search, calls a tool, reads the result and repeats. Pixel moves repository lookup into the prompt-submit path to cut that discovery loop.
 
-## Why
+When you press **Enter**, your agent’s `UserPromptSubmit` hook—or the equivalent event in its CLI—runs Pixel against the local index. Pixel builds a compact `[PIXEL:BRIEF]` with relevant definitions, callers, code, tests or history, then adds it alongside your submitted prompt, before the agent’s first response.
 
-- **79.7 to 97.2% less read volume** (median 94.5%): whole files versus signatures on eight pinned large files with Pixel 0.5.0; tokens estimated as UTF-8 bytes ÷ 4, not session cost. Files: Hugging Face Transformers, FastAPI, Next.js, LangChain, Django, CPython, VS Code and Tokio; no second model reading on the agent's behalf. [The files](https://pixel-cli.dev/benchmarks/#well-known-files)
-- **Measured against GitNexus** on the same 29 blast-radius cases and machine: callers found at a tie (0.86 against 0.84), a 153 ms median answer against 432 ms, and ~4,160 tokens of context per turn against ~19,700. GitNexus wins on Cypher queries, taint analysis and Ruby callers. Pixel is MIT; GitNexus is PolyForm Noncommercial. [The cases](docs/bench/vs-gitnexus.md)
-- **Evidence with boundaries.** Every answer says whether it is complete, capped or stale; a static call graph never claims it saw every caller.
-- **Local and mostly deterministic.** The index lives in `.pixel/` at the repository root and stays on your machine; no telemetry beyond an optional release check. Index queries are deterministic; the optional `pixel classify` (the one model-backed command) is not. Only Git remotes, `pixel classify` and `pixel web-search`, a one-time embedding model download, and a release check throttled to at most once per day when a person is at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) use the network.
-- **Safer Git.** `pixel impact` before an edit, `pixel commit-and-push` designed to be crash-safe after it, never a raw `--force`.
+The agent starts with cited source evidence already in context. The aim is fewer discovery turns and less repeated context across the whole task. Your agent keeps its usual tools to check the evidence or explore further.
+
+Current main supports prompt briefs in **Claude Code, Codex, pi, Devin, OpenCode, Gemini CLI and Antigravity**, through each host’s hooks or extensions.
+
+## Install
+
+```bash
+curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
+pixel setup
+```
+
+Choose your agents in setup. Then, from each repository you want to work in:
+
+```bash
+pixel prepare-repo .
+```
+
+Restart your agent session and approve hooks if prompted. Ask your next code question as usual.
+
+The installer downloads the latest release; integrations described here follow `main`. Check the [release notes](https://github.com/Pixel-CLI/pixel/releases/latest), or [build from main](CONTRIBUTING.md#build) for unreleased changes. [Read the installer](scripts/install.sh).
+
+## Preview a brief
+
+```bash
+pixel brief "Where is request validation implemented?" .
+```
+
+Briefs need an indexed repository. Unrelated prompts or unavailable evidence can produce no brief; your agent can continue with normal search. Set `PIXEL_BRIEF=0` to disable briefs.
+
+Use `pixel doctor .` to check installation and repository health.
+
+Local indexing and lookup need no Pixel account or API key. Optional model-backed features are configured separately.
 
 ## `pixel classify`: your local Jev
 
@@ -101,95 +110,10 @@ coding prompts:
 These are benchmark accuracy scores, not per-decision probabilities.
 [Full model results and method](docs/bench/decide-bakeoff.md).
 
-## Install
-
-```bash
-curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
-pixel setup      # once: guided at a terminal (pick agents and features, review, confirm);
-                 # wires Claude Code, Codex, Pi, OpenCode and Antigravity
-pixel doctor .     # optional health check
-pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
-```
-
-The one-liner runs [`install.sh`](scripts/install.sh): one POSIX `sh` file, no `sudo`, which verifies the release's SHA-256 and writes one file, `~/.local/bin/pixel`.
-
-## For AI agents
-
-Setting Pixel up for someone? Paste this into their Claude Code, Codex, Pi or any coding agent with a shell:
-
-```text
-Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the
-"For AI agents" section of its README, then tell me what changed and
-whether `pixel doctor .` is green.
-```
-
-If you are that agent: run the Install one-liner, tell the user it writes to their home configuration, then run `pixel setup` (idempotent) and `pixel doctor . --json` — report every check that is not green, do not claim success otherwise. Restart the session to load updated integrations. Codex and Claude keep native retrieval and receive a bounded evidence brief on each code prompt (`PIXEL_BRIEF=0` turns it off). Pi exposes `/pixel-impact <symbol>`. [Manual setup](docs/manual-setup.md) explains each surface.
-
-## Now build this harness
-
-Codex and Claude keep ordinary search native; the per-prompt brief resolves a named symbol and its callers from an existing graph without rebuilding it. Run `pixel impact <symbol> --no-refresh` yourself when a known symbol's callers or blast radius matter; Pi provides `/pixel-impact <symbol>`. Task lifecycle controls remain independent.
-
-**Ask about the code** — "find callers of X", "explain this flow":
-
-```mermaid
-flowchart TD
-    U["USER · callers or impact of a known symbol"] --> L["Agent · pixel impact or Pi command"]
-    L --> P["pixel impact SYMBOL --no-refresh"]
-    P --> E{"Useful existing graph?"}
-    E -->|yes| A["Inspect cited source and verify caller coverage"]
-    E -->|missing, stale, slow or unhelpful| N["Continue with native search"]
-    N --> A
-    A --> F["Answer with evidence and coverage limits"]
-```
-
-**Implement a feature** — "implement feature":
-
-```mermaid
-flowchart TD
-    U["🧑 USER · “implement feature”"] --> P0["Understand the task and inspect existing changes"]
-    P0 --> K{"Need impact facts for a known symbol?"}
-    K -->|explicit choice| P1["pixel impact SYMBOL --no-refresh"]
-    K -->|no| N["Native search and source inspection"]
-    P1 --> E{"Useful, fresh facts?"}
-    E -->|yes| V["Verify cited source and coverage limits"]
-    E -->|missing, stale or unhelpful| N
-    V --> P2["Edit with your tools, typecheck and test"]
-    N --> P2
-    P2 -->|broke it| RB["pixel plan-rollback “problem”"] --> P2
-    P2 -->|green| P3[“Review changes and repository state”]
-    P3 --> G0[“pixel review-gate”]
-    G0 -->|findings| FX[“fix them”] --> G0
-    G0 -->|clean| P4[“4 · COMMIT, when asked<br/>pixel commit --files a.ts --files b.ts -m “msg” --request-id “id”<br/>pixel commit-and-push --files f -m “msg” origin branch --request-id “id””]
-    G0 -->|clean, not asked| X[“stop — never commit unprompted”]
-    P4 --> P5["5 · CLEANUP and BRANCHES<br/>pixel scope-task --clear<br/>pixel new-branch “name” --request-id “id”<br/>pixel fetch origin<br/>pixel sync-branch<br/>pixel fast-forward --expected-head head --target-oid oid --request-id “id”"]
-    P5 --> F["stderr · 🟩 round-trips · tokens saved"]
-    classDef llm fill:#ffe3e3,stroke:#d64545,color:#8a1f1f
-    classDef det fill:#e6f4ea,stroke:#2ea043,color:#14522a
-    classDef stop fill:#fff3cd,stroke:#b8860b,color:#6b4e00
-    class P2,FX llm
-    class P0,P1,P3,P4,P5,RB,G0,N,V det
-    class X stop
-```
-
-Every git command in the diagram (`commit`, `commit-and-push`, `new-branch`, `fetch`, `sync-branch`, `fast-forward`, `plan-rollback` and the rest) is the `pixel-git` plugin; `flow` and `ultraflow`, `recall`, `token-savings` and the other telemetry commands, and `web-search` ship the same way, one repository each under `Pixel-CLI`: `pixel install github:Pixel-CLI/pixel-git` (then `pixel plugin enable git`, which allows its network commands), `pixel-flow`, `pixel-recall`, `pixel-telemetry`, `pixel-utilities`. Without the plugin, `pixel <command>` prints the install command and exits 2; `pixel doctor` flags an instruction file that names a command no installed plugin provides. `pixel uninstall <plugin>` removes one; `check-release` stays in the binary.
-
-- Red is the LLM — reasoning, meaning, edits
-- Orange is `pixel classify` — a model system one like Jev
-- Green is Pixel-CLI — deterministic
-- Yellow is `stop` — never commit unprompted
-
 ## More
 
-- [Documentation](https://pixel-cli.dev/docs/): install, updating, plugins, every command
-- [Benchmarks](https://pixel-cli.dev/benchmarks/): every number with its method, losses included
-- [ARCHITECTURE.md](ARCHITECTURE.md): crates and the full command surface
-- [CONTRIBUTING.md](CONTRIBUTING.md): build from source, gates, pull requests
-- [GOVERNANCE.md](GOVERNANCE.md): maintainers, roles and who holds the project's sensitive resources
-- [Report a bug](https://github.com/Pixel-CLI/pixel/issues/new?template=bug_report.yml): the issue form asks for the version, the platform and the steps to reproduce; vulnerabilities go through [SECURITY.md](SECURITY.md) instead
+[Documentation](https://pixel-cli.dev/docs/) · [Manual setup](docs/manual-setup.md) · [Benchmarks](https://pixel-cli.dev/benchmarks/) · [GitHub Actions](docs/github-actions.md)
 
-MIT licensed. See [`NOTICE`](NOTICE) for attribution.
+[Architecture](ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Report a bug](https://github.com/Pixel-CLI/pixel/issues/new?template=bug_report.yml)
 
-### GitHub Actions
-
-Prepare Pixel for CI agents with the reusable [setup action](docs/github-actions.md):
-verified release installation and daemon-free indexing on Linux and macOS ARM64.
+MIT licensed. macOS (Apple Silicon) and Linux. See [NOTICE](NOTICE) for attribution.

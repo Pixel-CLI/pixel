@@ -55,14 +55,26 @@ def chain(pt, probes_dir, root, prompt, brief, kind, pixel_bin, only=None, close
     probes = [p for p in probes if not p.problems and (not only or p.name in only) and p.applies(kind, prompt) and (p.closed_gate or not closed)]
     request = {"prompt": prompt, "repo_root": str(root), "brief": brief or "[PIXEL:BRIEF]\n", "kind": kind,
                "session_files": []}
-    outputs = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(probes))) as pool:
-        futures = {pool.submit(pt.run_probe, p, request, pixel_bin, home): p for p in probes}
-        for future, probe in futures.items():
-            stdout, _ms, error = future.result()
-            if not error and stdout.strip():
-                outputs.append((probe.name, probe.mode, stdout))
-    return pt.merge(brief or "[PIXEL:BRIEF]\n", outputs) if outputs else None
+    def run(group, req):
+        outs = []
+        if not group:
+            return outs
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(group)) as pool:
+            futures = {pool.submit(pt.run_probe, p, req, pixel_bin, home): p for p in group}
+            for future, probe in futures.items():
+                stdout, _ms, error = future.result()
+                if not error and stdout.strip():
+                    outs.append((probe.name, probe.mode, stdout))
+        return outs
+
+    base = brief or "[PIXEL:BRIEF]\n"
+    first = run([p for p in probes if not p.post], request)
+    merged = pt.merge(base, first) if first else None
+    # `stage = "post"` probes (pruning) see the brief the other probes produced, and their drops act on all of it.
+    late = run([p for p in probes if p.post], {**request, "brief": merged or base})
+    if late:
+        merged = pt.merge(merged or base, late)
+    return merged
 
 
 def main(argv=None):

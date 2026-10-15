@@ -85,6 +85,8 @@ class Probe:
         self.pattern = str(table.get("when_prompt") or "")
         # Runs even when the brief's gate closed (it found nothing worth saying); needs its own when_prompt.
         self.closed_gate = bool(table.get("when_gate_closed"))
+        # stage = "post": runs after the other probes were merged, on the merged brief (a pruning probe).
+        self.post = str(table.get("stage") or "") == "post"
         self.budget_ms = table.get("budget_ms", 0)
         self.mode = table.get("mode", "append")
         self.run = str(doc.get("run", "probe"))
@@ -113,6 +115,8 @@ class Probe:
             for kind in kinds:
                 if kind not in KINDS:
                     problems.append(f"{key}: unknown kind `{kind}`")
+        if str(table.get("stage") or "") not in ("", "post"):
+            problems.append('stage must be "post" or absent')
         if self.closed_gate and not self.pattern:
             problems.append("when_gate_closed needs a when_prompt (a closed gate runs only probes that name their questions)")
         if self.pattern:
@@ -123,7 +127,7 @@ class Probe:
         program = self.dir / self.run
         if not program.is_file() or not os.access(program, os.X_OK):
             problems.append(f"`{self.run}` is not an executable file")
-        for extra in sorted(set(table) - {"owner", "when_kinds", "skip_kinds", "when_prompt", "when_gate_closed", "budget_ms", "mode"}):
+        for extra in sorted(set(table) - {"owner", "when_kinds", "skip_kinds", "when_prompt", "when_gate_closed", "stage", "budget_ms", "mode"}):
             problems.append(f"[brief-probe] unknown key `{extra}`")
 
     def applies(self, kind, prompt):
