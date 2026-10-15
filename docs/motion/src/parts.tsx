@@ -352,8 +352,6 @@ export const Panel = ({x, y, w, h, title, color, mark}: {x: number; y: number; w
 	);
 };
 
-/// `maxRight` keeps a long badge inside its panel: the badge slides left
-/// until its right edge sits there, and a short one stays centred on `x`.
 export const Badge = ({x: cx, y, text, color, maxRight = Infinity}: {x: number; y: number; text: string; color: string; maxRight?: number}) => {
 	const tw = text.length * 9.6;
 	const w = tw + 56;

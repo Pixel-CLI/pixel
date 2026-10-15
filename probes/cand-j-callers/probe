@@ -158,7 +158,6 @@ def main():
         out.append(f'### {path}:{a}-{b} — {label}')
         out.extend(f'{n}| {lines[n - 1][:200]}' for n in range(a, b + 1))
 
-    # The definition's own words: ALLCAPS names in its body and the doc comment above it.
     dlines = read(root, sym['path'])
     top = sym['start_line']
     if top < 1 or sym['end_line'] > len(dlines):
@@ -184,7 +183,6 @@ def main():
             else:
                 emit(u['path'], u['start_line'], u['start_line'] + 1, f"{u['name']} (declaration)")
                 emit(u['path'], usite - 1, usite + 1, f"{u['name']} calls {c['name']}")
-    # Test helpers named after the symbol: `name_raw`, `name_for_test`.
     helper = re.compile(r'\bfn\s+(' + re.escape(sym['name']) + r'_\w+|\w+_' + re.escape(sym['name']) + r')\b|\bdef\s+(' + re.escape(sym['name']) + r'_\w+)')
     files = sorted(f for f in subprocess.run(['git', 'ls-files', '-z'], cwd=root, capture_output=True, text=True).stdout.split('\0') if f and SRC.search(f))[:MAX_FILES]
     texts = {f: read(root, f) for f in files}
@@ -195,7 +193,6 @@ def main():
                 if span:
                     emit(f, span[0], span[1], f"{helper.search(line).group(1) or helper.search(line).group(2)} (helper named after {sym['name']})")
                 break
-    # A test that lives beside a callee (its module's own unit tests).
     callee_files = sorted({e['symbol']['path'] for e in edges(root, sym['uid'], 'callees')} - {sym['path']})
     for f in callee_files[:MAX_FILES]:
         if TESTPATH.search(f):
@@ -207,7 +204,6 @@ def main():
                 if span:
                     emit(f, span[0], span[1], f'a unit test beside {Path(f).name}, which {sym["name"]} calls into')
                 break
-    # Tests that set what the symbol reads.
     found = 0
     for token in envs:
         for f in files:
@@ -222,7 +218,6 @@ def main():
                     break
     if not out:
         return
-    # Test blocks of the brief that never meet the symbol are noise for this question.
     drops = []
     for m in re.finditer(r'^### (\S+?:\d+-\d+) — (.*\(test\).*|.*\(a test of .*)$', brief, re.M):
         start = m.end()
@@ -234,7 +229,6 @@ def main():
         nxt = brief.find('\n### ', m.end())
         if sym['name'] not in brief[m.end(): nxt if nxt != -1 else len(brief)]:
             drops.append(re.escape(m.group(1)))
-    # The callees' bodies answer another question: keep the trace that lists them, drop their bodies.
     for m in re.finditer(r'^### (\S+?:\d+-\d+) — (\w+) definition \((?:method|function|variant|struct)\)$', brief, re.M):
         if m.group(2) != sym['name']:
             drops.append(re.escape(m.group(1)))

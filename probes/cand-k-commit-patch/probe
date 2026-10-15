@@ -56,13 +56,11 @@ def message(root, sha):
             fenced = not fenced
             continue
         if fenced:
-            # Command output inside the message: keep only the lines that carry a measured result.
             if kept < FENCED_KEEP and NUMBERS.search(line) and "Summary" not in line and "Range" not in line:
                 kept += 1
                 out.append("  " + line.strip())
             continue
         out.append(line)
-    # blank lines between paragraphs are kept once
     clean = []
     for line in out:
         if line.strip() or (clean and clean[-1].strip()):
@@ -111,7 +109,6 @@ def main():
             cost = sum(len(l) + 1 for l in chunk)
         used += cost
         out += chunk
-    # The brief's other blocks are lexical neighbours of the question's words, not the commit: drop them.
     discarded = [header for header in re.findall(r"^### (.+)$", brief, re.M)
                  if not header.startswith(("history", "commit "))]
     if discarded:

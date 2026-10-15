@@ -24,8 +24,6 @@ def main():
     if re.search(r"^### history", brief, re.M):
         return
     words = [w for w in dict.fromkeys(re.findall(r"[a-z]{5,}", prompt.lower()))]
-    # Rank the words by how few commit messages hold them (one `git log` read): a word no message holds only
-    # empties `--all-match`, a word every message holds says nothing, so the subject's own words lead.
     messages = git(root, "log", "-i", "-n", "20000", "--format=%B%x00").lower().split("\0")
     counts = {w: sum(w in m for m in messages) for w in words[:24]}
     words = sorted((w for w in words if counts.get(w)), key=lambda w: (counts[w], w))

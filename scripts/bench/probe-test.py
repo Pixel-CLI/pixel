@@ -83,9 +83,7 @@ class Probe:
         self.kinds = list(table.get("when_kinds") or [])
         self.skip = list(table.get("skip_kinds") or [])
         self.pattern = str(table.get("when_prompt") or "")
-        # Runs even when the brief's gate closed (it found nothing worth saying); needs its own when_prompt.
         self.closed_gate = bool(table.get("when_gate_closed"))
-        # stage = "post": runs after the other probes were merged, on the merged brief (a pruning probe).
         self.post = str(table.get("stage") or "") == "post"
         self.budget_ms = table.get("budget_ms", 0)
         self.mode = table.get("mode", "append")
@@ -362,9 +360,6 @@ doing down during each from further have having here into just keep keeps more m
 should some such than that their them then there these they this those through under until very want what when
 where which while will with would your how why who its are and the for not you can any all but was has our""".split())
 
-# Vocabulary of the contract, not of one question: the words and manifest files every repository of an ecosystem
-# shares, and the nouns of the questions a family of probes answers (a history probe says "commit", a workspace
-# probe reads "Cargo.toml"). A probe may spell them; it may not spell a name, path or symbol of one prompt.
 ECOSYSTEM = set("""readme cargo cargo.toml crate crates workspace workspaces package package.json packages commit commits
 pyproject pyproject.toml go.mod go.work pnpm-workspace.yaml monorepo""".split())
 

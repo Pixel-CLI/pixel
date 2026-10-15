@@ -70,7 +70,6 @@ def chain(pt, probes_dir, root, prompt, brief, kind, pixel_bin, only=None, close
     base = brief or "[PIXEL:BRIEF]\n"
     first = run([p for p in probes if not p.post], request)
     merged = pt.merge(base, first) if first else None
-    # `stage = "post"` probes (pruning) see the brief the other probes produced, and their drops act on all of it.
     late = run([p for p in probes if p.post], {**request, "brief": merged or base})
     if late:
         merged = pt.merge(merged or base, late)
@@ -90,7 +89,6 @@ def main(argv=None):
     root, prompt = os.environ["CLONE"], os.environ["PROMPT"]
     brief = Path(os.environ["BRIEF_FILE"]).read_text()
     kind, gate = last_decision(root)
-    # A closed gate runs only the probes that opt in (`when_gate_closed`, with a when_prompt of their own).
     merged = chain(load_probe_test(), args.probes, root, prompt, brief, kind, args.bin,
                    set(args.only.split(",")) if args.only else None, closed=gate == "closed")
     if merged:

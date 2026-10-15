@@ -299,18 +299,12 @@ fn parse_within(parser: &mut Parser, content: &[u8], budget: Duration) -> Option
     )
 }
 
-#[cfg(test)]
 thread_local! {
-    /// A budget that replaces [`PARSE_BUDGET`] on the current thread: tests
-    /// drive a cancelled parse through the production paths with it, since
-    /// no known input stalls the parser since tree-sitter 0.27.1 fixed #800.
     pub(crate) static TEST_PARSE_BUDGET: std::cell::Cell<Option<Duration>> =
         const { std::cell::Cell::new(None) };
 }
 
-/// [`PARSE_BUDGET`], or the current thread's [`TEST_PARSE_BUDGET`] in tests.
 fn parse_budget() -> Duration {
-    #[cfg(test)]
     if let Some(budget) = TEST_PARSE_BUDGET.with(std::cell::Cell::get) {
         return budget;
     }

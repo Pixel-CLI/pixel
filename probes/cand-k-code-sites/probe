@@ -68,7 +68,6 @@ class Files:
     def lines(self, path):
         if path not in self.cache:
             text = safe_lines(self.root, path)
-            # A `#[cfg(test)]` / `#[test]` item is a test: its lines are not the code path.
             mask = set()
             for n, line in enumerate(text):
                 if re.match(r"\s*#\[(cfg\(test\)|test)\]", line):
@@ -239,7 +238,6 @@ def env_mode(files, prompt, root):
                 sites.append((path, int(line) - 1))
         if not sites:
             continue
-        # The read: the first code site per file, at most two files.
         for path, i in sorted(dict.fromkeys(sites))[:2]:
             lines = files.lines(path)
             decls, ends = decls_of(lines), {}
@@ -338,7 +336,6 @@ def sites_mode(files, prompt, root):
     stems = stems_of(prompt, files)
     if not stems:
         return None
-    # One search for every stem; the lines are sorted into stems afterwards.
     found = [h.split(":", 2) for h in rg(root, "-i", "-F", *[a for stem in stems for a in ("-e", stem)])]
     found = [(h[0], int(h[1]) - 1, h[2]) for h in found if len(h) == 3 and files.code(h[0])]
     for stem in stems:
@@ -346,8 +343,6 @@ def sites_mode(files, prompt, root):
         hits = [h for h in hits if not is_comment(h[2]) and h[1] < len(files.lines(h[0])) and not files.is_test(h[0], h[1])
                 and (stem in parts_of(h[2]) or stem + "s" in parts_of(h[2]) or stem + "ed" in parts_of(h[2]))]
         nfiles = len({h[0] for h in hits})
-        # A behaviour is named by something the code declares (a type, a function, a variable, a field); a word
-        # that only ever sits in prose, string literals or call arguments is vocabulary of the question.
         declared = re.compile(rf"(?i)\b(?:fn|struct|enum|trait|class|def|const|static|let|var|type|func|function)\s+(?:mut\s+)?\w*{re.escape(stem)}|"
                               rf"^\s*(?:pub(?:\([^)]*\))?\s+)?\w*{re.escape(stem)}\w*\s*:\s*[A-Za-z&]")
         if not any(declared.search(h[2]) for h in hits):
@@ -356,8 +351,6 @@ def sites_mode(files, prompt, root):
             keep[stem] = hits
     if not keep:
         return None
-    # Follow the value one hop: `.follow_links(self.follow)` passes the stem's own token on to a method; that method
-    # name is an application site of the same behaviour (the setter's own uses read the stored value).
     for stem, hits in sorted(keep.items()):
         hop = set()
         for path, i, text in hits:
@@ -429,12 +422,10 @@ def main():
         blocks = [b for n, (_, b) in enumerate(blocks) if n in keep_ids]
         shown_paths = sorted({b[0][4:].split(":")[0] for b in blocks})
         print("drop: " + DOCY.pattern)
-        # A whole-file block of a file whose function is shown above says the same again, longer.
         for path in shown_paths:
             print("drop: ^" + re.escape(path) + r":\d+-\d+ — (file named|whole file)")
     if sites and not env:
         stems = sorted({w for b in blocks for w in re.findall(r"names (\S+)", b[0])[0].replace("%", "").split("/")})
-        # Registry rows and documentation matched on the question's generic words, not on its behaviour stems.
         print("drop: ^config registry|^(?!.*(?:" + "|".join(re.escape(x) for x in stems) + "))")
         print("drop: " + DOCY.pattern)
     for b in blocks:

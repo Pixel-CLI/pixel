@@ -941,8 +941,6 @@ pub(crate) struct Brief {
     /// Where the evidence came from: `daemon` or `local`.
     route: Option<&'static str>,
     admission: Admission,
-    /// The core gate refused the prompt: `fit` renders nothing. A relevance
-    /// rejection may still be answered by an explicitly opted-in probe.
     silenced: bool,
     /// The relevance decision, when the probe answered.
     relevance: Option<relevance::Verdict>,
@@ -2723,8 +2721,6 @@ impl Pending {
         self.finish_with_record().text
     }
 
-    /// Run matching probes within the remaining window. A relevance rejection
-    /// admits only explicitly opted-in probes; an intent denial stays silent.
     fn probe_stage(
         &self,
         brief: &Brief,
@@ -2844,10 +2840,6 @@ impl Pending {
 }
 
 /// Start the brief for `prompt` of a hook session in `root`, or decline: a
-/// switched-off brief and a prompt that asks nothing about code start no
-/// thread and run no lookup. A code prompt in a repository without an index
-/// still declines this brief, but lazily kicks a detached `prepare-repo` so
-/// the next prompt is indexed.
 ///
 /// `parts` is how many hooks deliver the brief (`brief_parts`, or 1 for a host
 /// with one hook): the region pack may fill that many. `session` is what the
@@ -2935,10 +2927,6 @@ fn try_start_as(
             probes: probes_setup,
         },
     );
-    // A code prompt in a repository with no index builds one detached, so the
-    // brief this prompt cannot have answers the next one. `is_trivial_continuation`
-    // and `brief_signal` are the same checks `try_start_with` skipped by
-    // declining first, and the build lock serializes overlapping kicks.
     if matches!(result, Err(Declined::Unindexed))
         && !crate::prompt_continuation::is_trivial_continuation(prompt)
         && brief_signal(prompt).is_some()
@@ -2948,8 +2936,6 @@ fn try_start_as(
     result
 }
 
-/// Launch the detached `pixel prepare-repo` that indexes `root` in the
-/// background; the hook that spawned it is long gone when it finishes.
 fn lazy_index(root: &Path) {
     let args = [
         std::ffi::OsString::from("prepare-repo"),
@@ -9492,7 +9478,6 @@ mod tests {
         assert!(sent::load(&root, "s", pixel_task::now_ms()).is_empty());
     }
 
-    #[test]
     fn finishing_should_allow_probe_recovery_but_preserve_denials_and_explicit_silence() {
         use std::os::unix::fs::PermissionsExt;
 

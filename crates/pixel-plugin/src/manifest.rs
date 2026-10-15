@@ -67,7 +67,6 @@ pub struct ProbeSpec {
     pub skip_kinds: Vec<String>,
     /// Run when the prompt matches this regex (searched, not anchored).
     pub when_prompt: Option<String>,
-    /// Whether a matching prompt may run when the brief gate is closed.
     pub when_gate_closed: bool,
     pub budget_ms: u64,
     pub mode: ProbeMode,
@@ -487,7 +486,6 @@ mode = "lead"
         assert!(always.probe.unwrap().applies(None, "x"));
     }
 
-    #[test]
     fn a_closed_gate_probe_parses_only_with_a_nonempty_prompt_pattern() {
         let enabled = PROBE.replace(
             "when_prompt = \"(?i)\\\\bwhen\\\\b\"",

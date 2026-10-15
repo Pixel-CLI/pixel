@@ -8,7 +8,6 @@ capabilities = ["brief-probe"]
 [brief-probe]
 owner = "pixel"
 when_kinds = ["history"]
-# The kind is null for a weak brief: also run on the words of a question about a commit.
 when_prompt = "(?i)\\b(commits?|changelog|git history|introduced|blame|released?|tagged?)\\b"
 when_gate_closed = true
 budget_ms = 1500

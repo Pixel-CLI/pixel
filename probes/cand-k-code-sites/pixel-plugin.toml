@@ -7,8 +7,6 @@ capabilities = ["brief-probe"]
 
 [brief-probe]
 owner = "pixel"
-# Two shapes, both decided again inside the script: an ALL_CAPS_WITH_UNDERSCORE name in the prompt, or a
-# "which flags/options/settings ... where are they applied/used/handled" question.
 when_prompt = "(?i:\\bwhere\\b.*\\b(appl\\w+|used|handled|enforced|checked|read)\\b)|\\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\\b"
 when_gate_closed = true
 budget_ms = 2500

@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! The installed first-party package overview probe reaches the native brief hook.
-
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -127,7 +125,6 @@ fn prompt_submit(home: &Path, root: &Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("prompt hook JSON")
 }
 
-#[test]
 fn setup_should_install_the_package_overview_probe_into_native_hook_context() {
     let root = fixture("native-overview");
     let home = Scratch::for_test("bundled-brief-home", "codex");

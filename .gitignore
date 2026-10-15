@@ -49,5 +49,4 @@ eval/brief-bench/adhoc/
 scripts/bench/tool-census/manifest.json
 census.db*
 
-# arena session reports (briefs, tool calls, transcripts)
 /.arena-reports/

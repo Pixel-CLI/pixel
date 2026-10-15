@@ -173,8 +173,6 @@ export const rewriteSpec: ComparisonSpec = {
 	},
 };
 
-// The prompt-submit brief: no prepare step, the first prompt indexes the
-// repository, and every later prompt reaches the agent with its evidence.
 export const briefSpec: ComparisonSpec = {
 	width: 1600,
 	height: 1000,

@@ -22,9 +22,6 @@ const MARKER: &str = ".pixel-bundled";
 /// Where the user plugins live, under the home directory.
 const PLUGINS_REL: &str = ".pixel/plugins";
 
-/// `(name, pixel-plugin.toml, probe)` of each validated first-party probe.
-/// This is a curated shipping list; experimental directories under `probes/`
-/// are not installed until they have been validated for release.
 const BUNDLED: &[(&str, &str, &str)] = &[
     (
         "cand-j-callers",
@@ -200,9 +197,6 @@ pub(crate) fn remove(home: &Path, dry_run: bool) -> Result<InstallStep> {
 mod tests {
     use super::*;
 
-    // Candidate probes are shipped only after validation. In particular,
-    // cand-k-member-manifest, prune-noise and workspace-overview remain
-    // experimental even though their directories are present in the repo.
     const SHIPPED_PROBE_NAMES: &[&str] = &[
         "cand-j-callers",
         "cand-j-chain",

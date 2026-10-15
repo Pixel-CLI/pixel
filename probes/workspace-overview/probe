@@ -89,7 +89,6 @@ def dep_name(spec):
     return re.split(r"[\s<>=!~;\[(@]", spec.strip(), maxsplit=1)[0]
 
 
-# --------------------------------------------------------------------------- manifests -> {kind, name, desc, ...}
 
 def cargo_member(root, rel, ws_package):
     doc = toml(root, f"{rel}/Cargo.toml" if rel else "Cargo.toml")
@@ -183,7 +182,6 @@ def discover(root, files):
     return "", []
 
 
-# --------------------------------------------------------------------------- README, member blocks
 
 def readme_lead(root, files):
     names = [f for f in files if "/" not in f and re.match(r"(?i)readme(\.(md|markdown|rst|txt))?$", f)]

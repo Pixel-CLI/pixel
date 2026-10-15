@@ -21,11 +21,8 @@ from pathlib import Path
 
 TYPE_KINDS = {'struct', 'class', 'enum', 'trait', 'interface', 'type', 'type_alias'}
 FUNC_KINDS = {'function', 'method'}
-# Question-frame words (matched as prefixes): they say how the question is asked, not what it is about.
 FRAME = ('trac', 'comm', 'line', 'becom', 'valu', 'from', 'thro', 'main', 'what', 'whic', 'wher', 'does', 'argu',
          'happ', 'code', 'file', 'data', 'into', 'goes', 'flow', 'work', 'step')
-# The agent still re-read partial constructors and parser bodies. Keep the
-# chain's answering bodies inside the three-part hook budget instead.
 BODY_CAP, FAR_CAP, HOP_CAP, HEAD_CAP, MAX_RANKED, BYTES = 180, 100, 100, 230, 4, 26_000
 MAX_FILE_BYTES = 300_000
 SIG_RETURNS = re.compile(r'->|:\s*[A-Z]\w*\s*[{=]|\bnew\b|__init__|constructor')
@@ -135,7 +132,6 @@ def main():
     entry = sorted(funcs[entry_word], key=lambda s: (s['path'] not in shown, -(s['end_line'] - s['start_line']), s['path']))[0]
     tword = next(iter(types))
     target = sorted(types[tword], key=lambda s: (s['path'] not in shown, s['path']))[0]
-    # The constructors of the target: functions of its file whose signature returns it.
     tlines = read(root, target['path'])
     ctor_names = []
     for i, line in enumerate(tlines):
@@ -200,7 +196,6 @@ def main():
             if (site or s['start_line']) - 2 > s['start_line']:
                 emit(s['path'], s['start_line'], s['start_line'], f"{s['name']} (declaration)")
             emit(s['path'], max(s['start_line'], (site or s['start_line']) - 2), (site or s['start_line']) + 4, f"{s['name']} calls {best[i + 1]['name']}")
-    # Other callees of the entry that take the target in their signature (the consumer of the result).
     esym = syms[0]
     for e in callees(root, entry['uid']):
         c = e['symbol']
@@ -208,7 +203,6 @@ def main():
             continue
         if re.search(r'\b' + re.escape(target['name']) + r'\b', c.get('sig', '')):
             emit(c['path'], c['start_line'], c['start_line'] + 9, f"{c['name']} receives the {target['name']}")
-    # The callees of every hop that carry the question's words, two levels deep.
     def ranked(uid):
         res = []
         for e in callees(root, uid):
@@ -231,8 +225,6 @@ def main():
         return emit(c['path'], c['start_line'], min(c['end_line'], c['start_line'] + cap - 1), why)
 
     def siblings(c):
-        # Methods of the same type as `c` whose names carry the question's words: `obj.method(..)` is a method
-        # call the graph may not resolve to an edge.
         owner = c.get('qualified', '').rsplit('::', 1)[0] if '::' in c.get('qualified', '') else None
         if not owner:
             return []
@@ -254,14 +246,12 @@ def main():
                     if body(d, f"{d['name']} (called by {c['name']}, named by the question)"):
                         for q in siblings(d):
                             body(q, f"{q['name']} (beside {d['name']}, named by the question)")
-                # What the question-named callee reads from elsewhere: its larger callees in other files.
                 far = [e['symbol'] for e in callees(root, c['uid']) if e['symbol']['path'] != c['path'] and e['symbol']['kind'] in FUNC_KINDS
                        and e['symbol']['end_line'] - e['symbol']['start_line'] >= 8 and 'test' not in e['symbol']['path'].lower()]
                 for d in sorted({x['uid']: x for x in far}.values(), key=lambda s: (s['path'], s['start_line']))[:2]:
                     body(d, f"{d['name']} (called by {c['name']})", FAR_CAP)
     if len(out) <= 2:
         return
-    # Replace the brief's own blocks: its headers, one by one (a bare `drop: .` would also remove other probes' blocks).
     own = [h for h in re.findall(r'^### (.+)$', brief, re.M) if h not in {l[4:] for l in out if l.startswith('### ')}]
     if own:
         print('drop: ^(?:' + '|'.join(re.escape(h) for h in own) + ')$')

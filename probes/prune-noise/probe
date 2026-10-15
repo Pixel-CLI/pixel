@@ -307,7 +307,6 @@ def prune(brief, prompt, kind):
     complete_ok = bool(COMPLETE_PROMPT.search(prompt))
     has_test_body = any(b.cat == "test" for b in blocks)
     keep_sites = set()
-    # 1. whole-block rules
     for block in blocks:
         if block.cat == "doc":
             seen_words = {w for x in block.lines for w in subwords(x)} & words
@@ -338,12 +337,10 @@ def prune(brief, prompt, kind):
             tied = any(b.cat == "registry" for b in blocks[:i])
             if tied and not any(block.path == p and block.lo <= n <= block.hi for p, n in keep_sites):
                 drop(block, "registry", stats)
-    # 2. structure rules
     blocks = [b for b in blocks if not b.dropped]
     blocks = merge_overlaps(blocks, stats)
     blocks = [b for b in blocks if not b.dropped]
     blocks = subtract_regions(blocks, stats)
-    # 3. caps: a block over HARD_CAP is always windowed; the others only when the total is over its budget
     for block in blocks:
         if block.ranged:
             before = block.size()
@@ -370,7 +367,6 @@ def prune(brief, prompt, kind):
         return sum(line_weight(t, words, syms) for t in b.body.values()) if b.ranged else 0
 
     while total() > cap and len(blocks) > 1:
-        # the cheapest byte to give up: shrinking an oversize block to its best window, or dropping a whole block
         options = []
         for i, b in enumerate(blocks):
             tier = TIER.get(b.cat, 1.0)

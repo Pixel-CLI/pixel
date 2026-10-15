@@ -21,7 +21,6 @@ from pathlib import Path
 SRC = re.compile(r'\.(rs|py|js|jsx|ts|tsx|go|java|kt|c|h|cc|cpp|hpp|rb|php|swift|cs|scala|sh|lua)$')
 TESTPATH = re.compile(r'(^|/)(tests?|__tests__|spec|testdata)/|[._-](test|spec)s?\.\w+$|(^|/)test_\w+\.\w+$|_tests?\.\w+$')
 STOP = set('what where which that this with from does how the and for are was were why when who whom whose into onto than then them they their there these those have has had been being will would should could can may might must about after before between through during over under again further once here some such only same also just very more most other each both any all not our your its his her him she you out off use used using make made get got let trace explain tell show describe find list name names code function functions method methods file files line lines value values data'.split())
-# Question-frame words (matched as prefixes): they say how the question is asked, not what it is about.
 FRAME = ('test', 'prov', 'proo', 'cove', 'defi', 'call', 'beha', 'work', 'happ', 'deci', 'expl', 'show', 'mean')
 SYN = [set(g.split()) for g in ('stop quit halt abort terminate bail cancel', 'skip suppress ignore hide filter refuse reject discard omit exclude',
                                 'fail error crash panic', 'print display output emit')]
@@ -191,7 +190,6 @@ def windows(lines, groups, size=SIZE, doc=False):
     required = sorted(range(len(groups)), key=lambda i: -groups[i][0])[:REQUIRED]
     low = [l.lower() for l in lines]
     ng = len(groups)
-    # prefix sums per group, of prose lines and of code-like lines
     pre = [[0] * (n + 1) for _ in range(ng)]
     for i, l in enumerate(low):
         for g, (_, members) in enumerate(groups):
@@ -290,7 +288,6 @@ def main():
             for ua, ub, _ in units(f, lines):
                 marked |= set(range(ua, ub + 1))
             scored[f] = [r for r in scored[f] if len(marked & set(range(r[2], r[3] + 1))) / (r[3] - r[2] + 1) < 0.5]
-    # The brief's own blocks: the definitions it names stay, the rest is replaced by the best windows below.
     drops, shown = [], {}
     for m in HEADER.finditer(brief):
         path, a, b, label = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
@@ -311,7 +308,6 @@ def main():
 
     wants_tests = bool(re.search(r'(?i)\b(tests?|specs?|prov\w*|proof|cover\w*)\b', prompt))
     def boosted(s, f, a, b):
-        # A window the brief's own retrieval also pointed at counts for more.
         return s * (BRIEF_BOOST if len(in_brief.get(f, set()) & set(range(a, b + 1))) / (b - a + 1) > 0.5 else 1.0)
 
     rows = sorted(((boosted(s, f, a, b), g, f, a, b) for f, rs in scored.items() for s, g, a, b in rs if not TESTPATH.search(f)),
@@ -331,7 +327,6 @@ def main():
         chosen.append((f, a, b))
         per_file[f] = per_file.get(f, 0) + 1
         used += size
-    # A small function named after the stop condition (`should_x_quit`) acts in its caller: show the call site.
     names_re = '|'.join(sorted(re.escape(m) for m in names if len(m) >= 4))
     extra = []
     for f, a, b in list(chosen):
@@ -357,7 +352,6 @@ def main():
         if item not in chosen:
             chosen.append(item)
     if wants_tests:
-        # Tests are judged as whole functions; the neighbours that share a name prefix come with the best one.
         tests = []
         for f, lines in texts.items():
             boost = 1.15 if any(m in Path(f).stem.lower() for m in names) else 1.0

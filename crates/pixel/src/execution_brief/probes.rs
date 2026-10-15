@@ -54,7 +54,6 @@ pub(crate) struct Stage<'a> {
     pub(crate) root: &'a Path,
     pub(crate) prompt: &'a str,
     pub(crate) kind: Option<&'a str>,
-    /// A relevance rejection requires each probe's explicit recovery opt-in.
     pub(crate) gate_closed: bool,
     /// The deadline of the brief's window: no probe outlives it.
     pub(crate) deadline: Instant,
@@ -579,7 +578,6 @@ mod tests {
         assert!(text.contains(root.to_str().unwrap()), "{text}");
     }
 
-    #[test]
     fn a_closed_gate_should_run_only_matching_opted_in_probes() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
