@@ -3,6 +3,7 @@
 
 //! Managing plugins: install (`add`), uninstall (`remove`), enable, trust.
 
+use std::io::Read;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -353,8 +354,10 @@ fn search(dir: &Path, depth: usize, found: &mut Vec<(PathBuf, Manifest)>) {
     }
 }
 
-/// Copy `from` to `to`, symlinks kept as symlinks (their target is judged
-/// when `run` is resolved), `.git` left behind.
+/// Copy `from` to `to`, symlinks kept as symlinks and never followed (their
+/// target is judged when `run` is resolved), `.git` left behind. A FIFO, a
+/// socket or a device is refused: copying one would wait on it forever or
+/// read a device into the plugin.
 fn copy_tree(from: &Path, to: &Path) -> Result<(), Error> {
     std::fs::create_dir_all(to).map_err(|e| Error::io(format!("create {}", to.display()), e))?;
     let entries =
@@ -374,12 +377,38 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), Error> {
             symlink(&target, &dst).map_err(|e| Error::io(format!("link {}", dst.display()), e))?;
         } else if kind.is_dir() {
             copy_tree(&src, &dst)?;
-        } else {
-            std::fs::copy(&src, &dst)
+        } else if kind.is_file() {
+            let seen = entry
+                .metadata()
+                .map_err(|e| Error::io(format!("stat {}", src.display()), e))?;
+            copy_file(&src, &seen, &dst)
                 .map_err(|e| Error::io(format!("copy {}", src.display()), e))?;
+        } else {
+            return Err(Error::Source(format!(
+                "{} is not a file, a directory or a link; a plugin cannot hold it",
+                src.display()
+            )));
         }
     }
     Ok(())
+}
+
+/// Copy the regular file `seen` describes at `from` to the new file `to`,
+/// with its permissions: opened without following a link or blocking, the
+/// same inode the directory listed, and at most the size listed, so a file
+/// swapped or growing while it is copied is refused, not copied.
+fn copy_file(from: &Path, seen: &std::fs::Metadata, to: &Path) -> std::io::Result<()> {
+    let source = crate::file::open_regular(from, Some(seen))?;
+    let permissions = source.metadata()?.permissions();
+    let mut target = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    let copied = std::io::copy(&mut source.take(seen.len() + 1), &mut target)?;
+    if copied > seen.len() {
+        return Err(std::io::Error::other("it grew while it was copied"));
+    }
+    target.set_permissions(permissions)
 }
 
 /// Delete `~/.pixel/plugins/<name>/` and forget its source and opt-in.
@@ -483,6 +512,8 @@ mod tests {
     use crate::testutil::{Fixture, fixture, manifest_text, plugin_dir};
     use sha2::{Digest, Sha256};
     use std::fs;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
 
     fn source_dir(f: &Fixture, name: &str, extra: &str) -> PathBuf {
         plugin_dir(&f.tmp.path().join("src"), name, extra)
@@ -560,6 +591,84 @@ mod tests {
         assert_eq!(
             resolve(&f.host, "tool").unwrap().unwrap().place,
             Place::User
+        );
+    }
+
+    // `std::fs::copy` opens a FIFO for reading and waits for a writer that
+    // never comes: `pixel install ./dir` hung. Refused, it names the entry
+    // and installs nothing.
+    #[test]
+    fn add_refuses_a_fifo_in_the_source_instead_of_waiting_on_it() {
+        let f = fixture();
+        let src = source_dir(&f, "tool", "");
+        let status = std::process::Command::new("mkfifo")
+            .arg(src.join("pipe"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let (host, source) = (f.host.clone(), src.to_str().unwrap().to_owned());
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(add(&host, &source, None).map(|added| added.name));
+        });
+        let err = receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("add waited on the FIFO")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("pipe is not a file, a directory or a link"),
+            "{err}"
+        );
+        assert_eq!(
+            fs::read_dir(f.host.user_plugins()).unwrap().count(),
+            0,
+            "neither the plugin nor its staging directory is left"
+        );
+    }
+
+    // A link in a plugin is part of what the plugin is (its text is in the
+    // trust digest); following it would copy a file from anywhere on the
+    // machine into ~/.pixel/plugins.
+    #[test]
+    fn add_copies_a_link_as_a_link_and_never_what_it_points_at() {
+        let f = fixture();
+        let src = source_dir(&f, "tool", "");
+        let outside = f.tmp.path().join("outside.txt");
+        fs::write(&outside, "not the plugin's").unwrap();
+        std::os::unix::fs::symlink(&outside, src.join("data")).unwrap();
+        let added = add(&f.host, src.to_str().unwrap(), None).unwrap();
+        let copied = added.dir.join("data");
+        assert!(fs::symlink_metadata(&copied).unwrap().is_symlink());
+        assert_eq!(fs::read_link(&copied).unwrap(), outside);
+    }
+
+    #[test]
+    fn a_file_copies_with_its_mode_and_never_past_the_size_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        fs::write(&from, "ab").unwrap();
+        fs::set_permissions(&from, fs::Permissions::from_mode(0o750)).unwrap();
+        let seen = fs::symlink_metadata(&from).unwrap();
+        copy_file(&from, &seen, &dir.path().join("same")).unwrap();
+        assert_eq!(fs::read(dir.path().join("same")).unwrap(), b"ab");
+        let mode = fs::metadata(dir.path().join("same"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o750);
+
+        // Appended after it was listed: the same inode, more bytes.
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&from)
+            .unwrap()
+            .write_all(b"cd")
+            .unwrap();
+        let err = copy_file(&from, &seen, &dir.path().join("grown")).unwrap_err();
+        assert!(
+            err.to_string().contains("grew while it was copied"),
+            "{err}"
         );
     }
 

@@ -3,7 +3,7 @@
 
 //! The digest a trust record binds to: every file of a plugin directory.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
@@ -47,7 +47,9 @@ pub fn dir_digest(dir: &Path) -> io::Result<String> {
             hasher.update(b"f");
             hasher.update([u8::from(meta.permissions().mode() & EXEC_BITS != 0)]);
             hasher.update(meta.len().to_le_bytes());
-            let mut file = File::open(&full)?;
+            // Listed as a regular file: opened as that very file, never
+            // through a link or a FIFO put at its name since.
+            let mut file = crate::file::open_regular(&full, Some(&meta))?;
             let mut buffer = vec![0u8; 64 * 1024];
             loop {
                 let n = file.read(&mut buffer)?;

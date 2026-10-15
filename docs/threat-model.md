@@ -318,7 +318,10 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   recorded `name` and a SHA-256 over every file of the directory (paths,
   contents, executable bits, symlink target text) in `~/.pixel/trusted.toml`
   (`pixel_plugin::dir_digest`, `TrustStore`). Any change to the directory
-  fails the comparison and the plugin is refused again. An untrusted repo
+  fails the comparison and the plugin is refused again. The digest reads
+  each file it listed as a regular file through `file::open_regular`
+  (`O_NOFOLLOW | O_NONBLOCK`, same inode), so a link or a FIFO swapped in
+  after the listing is an error, not a read through or a wait. An untrusted repo
   plugin does not fall through to a user plugin or PATH of the same name.
 - **Manifests are read as plain files.** Listing plugins and the
   prompt-submit brief read every repo plugin's `pixel-plugin.toml`, which the
@@ -337,7 +340,10 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   with `https://`, `ssh://`, `file://` or `git@` (`ext::` and `fd::`
   transports run commands), is cloned shallowly through `GitRunner` (timeout,
   redacted stderr) into a temporary directory, and only the plugin directory
-  is copied (`.git` left behind). The clone runs with
+  is copied (`.git` left behind): links as links, never followed; each file
+  opened as the regular file the listing saw and copied up to the size it
+  saw; a FIFO, socket or device refused, so a local source cannot hang the
+  copy or pull a file from elsewhere into `~/.pixel/plugins/`. The clone runs with
   `GIT_ALLOW_PROTOCOL=https:ssh:file`, so git itself refuses any other
   transport wherever the URL comes from (an `insteadOf` rewrite, a redirect),
   and `GIT_TERMINAL_PROMPT=0`, so a source that asks for credentials fails
@@ -859,6 +865,7 @@ the later threats hold.
 | Typed prompts in the brief log | `decision_log::{logged_typed, mask_keys, append}` | `logged_typed_should_mask_a_credential_and_cut_at_the_bound`, `logged_typed_should_keep_only_the_last_paragraph_of_a_pasted_log`, `mask_keys_should_hide_a_prefixed_key_and_a_long_run_and_keep_prose`, `append_should_be_owner_only_and_not_create_a_missing_directory`, `append_should_refuse_a_link_at_the_log_and_leave_its_target_alone`, `append_should_refuse_a_linked_directory_and_write_nothing_through_it` (`decision_log.rs`), `the_decision_log_should_stay_off_when_pixel_brief_log_says_so` (`prompt_brief_cli.rs`) |
 | Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask`, `a_plugin_source_url_is_logged_without_its_credentials` (`main.rs`) |
 | Repo plugin trust | `pixel_plugin::resolve`, `dir_digest`, `contained_program` | `a_repo_plugin_is_refused_until_trusted_and_again_after_an_edit`, `every_kind_of_change_moves_the_digest`, `a_run_that_escapes_through_a_symlink_is_refused` (`pixel-plugin`); `plugin_cli.rs` |
+| Plugin copies | `pixel_plugin::add` (`copy_tree`, `copy_file`) | `add_refuses_a_fifo_in_the_source_instead_of_waiting_on_it`, `add_copies_a_link_as_a_link_and_never_what_it_points_at`, `a_file_copies_with_its_mode_and_never_past_the_size_listed` (`install.rs`) |
 | Plugin manifest reads | `pixel_plugin::manifest::load`, `file::open_regular` | `a_manifest_reached_through_a_link_is_refused_and_not_read`, `a_manifest_is_read_up_to_the_bound_and_refused_past_it` (`manifest.rs`), `a_repo_probe_whose_manifest_is_a_link_is_skipped_and_the_others_still_run` (`probe.rs`), `a_fifo_is_refused_without_waiting_for_a_writer` (`file.rs`) |
 | Plugin clone transports | `pixel_plugin::add` (`clone_repo`, `looks_like_git_url`) | `url_schemes_are_a_whitelist`, `a_clone_is_held_to_authenticated_or_local_transports_by_git_itself` (`install.rs`) |
 | Keys over clear text | `sends_in_clear_text` | `a_key_never_leaves_the_machine_over_cleartext_http`, `only_plain_http_to_another_host_counts_as_clear_text` |
