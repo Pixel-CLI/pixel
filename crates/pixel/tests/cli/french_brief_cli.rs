@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! `PIXEL_BRIEF_FRENCH=1`: a French prompt is searched and gated on the
+//! The brief's French mapping, on by default (`PIXEL_BRIEF_FRENCH=0` turns
+//! it off): a French prompt is searched and gated on the
 //! English words code uses (`execution_brief/french.rs`). The code of a
 //! repository is named in English, so a French prompt about it shares almost
 //! no word with it: without the mapping its brief finds nothing to start
@@ -150,4 +151,25 @@ fn a_french_prompt_about_something_else_should_still_get_no_brief() {
         let output = brief(&root, prompt, "1");
         assert_eq!(stdout(&output), "", "{prompt}");
     }
+}
+
+// On by default: a host that sets nothing gets the mapping.
+#[test]
+fn the_mapping_should_be_on_when_nothing_turns_it_off() {
+    let root = fixture("default");
+    let prompt = "pourquoi les abonnements expirés ne sont pas remboursés ?";
+    let output = pixel_command()
+        .current_dir(&*root)
+        .env("PIXEL_BRIEF", "1")
+        .env("PIXEL_BRIEF_PACK", "0")
+        .env("PIXEL_BRIEF_PROBES", "0")
+        .env("PIXEL_METRICS", "0")
+        .env_remove("PIXEL_BRIEF_FRENCH")
+        .args(["brief", "--metrics", "off", prompt])
+        .arg(&*root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    assert!(text.contains(FILE), "{text}");
 }

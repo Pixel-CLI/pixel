@@ -374,6 +374,54 @@ What it says:
    dev split, the set the gate was fitted on: the gate is unchanged by this
    work (asserted above), the files are what moved.
 
+## French prompts through the lexicon
+
+pixel-mvp's ADR-0032, moved into the brief under ADR-0036 of the pixel-mvp
+research repository (#975, on by default in #978): a prompt that pixel-mvp's
+rule reads as French is searched, judged and gated on the English words of its
+vendored lexicon (`execution_brief/french.rs`, `crates/mvp-lexicon/`). The gate
+and its model are unchanged; only the words it reads moved.
+
+| | |
+| --- | --- |
+| binaries | `main` at `74b53a19` and #975 at `b0bd8c78`, each `CARGO_PROFILE_DEV_DEBUG=0 cargo build --profile dev-release -p pixel-cli` from a clean tree; #975's binary run with `PIXEL_BRIEF_FRENCH=0` and `=1` (this PR only flips the default) |
+| repository, set | the fixture above (clean clone at `85bede7d`, `pixel prepare-repo --no-daemon`), `prompts.jsonl` SHA-256 `bc6ac042…6276ad`, split `all`: 154 English and 64 French rows (37 on topic, 27 off, 22 with `expected_files`) |
+| runner | `PIXEL_BRIEF_PACK=0 python3 scripts/bench/bench-brief-gate.py --pixel <bin> --repo <fixture> --split all --daemon off --repeat 3 --warmup 3`, and `--daemon on --warm-meaning`; 0 unstable rows; back to back on 2026-10-15, load 6 to 9 on 15 CPUs |
+
+| | `main` | off | on |
+| --- | ---: | ---: | ---: |
+| French on-topic briefed (of 37) | 10 | 10 | 21 |
+| French off-topic silent (of 27) | 27 | 27 | 26 |
+| French hit@8, daemon off (of 22) | 0 | 0 | 3 |
+| French hit@8, daemon on (of 22) | 0 | | 8 |
+| English briefs that differ from `main` (`stdout_sha`, of 154), daemon off / on | | 0 / | 0 / 0 |
+| latency p50 / p95, all 218 prompts, daemon off (ms) | 167 / 219 | 158 / 201 | 167 / 224 |
+| latency p50 / p95, all 218 prompts, daemon on (ms) | 83 / 135 | | 90 / 144 |
+
+What it says:
+
+1. **French prompts reach the gate's English level of evidence.** Recall on
+   French on-topic prompts goes from 27 % to 57 %; with the daemon, 8 of the 22
+   French prompts with expected files name one in the first eight paths,
+   against none. Two of those 22 (`bg-190`, `bg-214`) name files that do not
+   exist at `85bede7d` (`--check-set --repo` lists them), so 20 are reachable.
+2. **One French off-topic prompt now fires**: `bg-023`, `c'est quoi la
+   différence entre let et const` (generic-code), at 96 % silent against
+   100 %.
+3. **English is untouched.** Every English brief is byte for byte the one
+   `main` prints, daemon on and off: the language is decided on the typed text
+   and an English prompt is never rewritten.
+4. **The cost is the mapped prompt's evidence, not the mapping.** p95 moves by
+   5 to 9 ms, inside the run-to-run spread of a shared machine (the `off` run
+   of the same binary is 18 ms under `main`), and far inside the 750 ms window;
+   more French prompts now ask for the relevance block and get a brief.
+5. **The question word.** The gate's `question` feature reads an English
+   opener among the first three words; writing a French one there as English
+   (`pourquoi` → `why`) is the brief's own addition to pixel-mvp's rule.
+   Prototyped before the Rust on the same set with `main`'s binary (French
+   rows rewritten by a script, daemon off): 13 of 37 briefed without it, 21
+   with it, off-topic 27 and 26 silent.
+
 ## Excavation: the agent-side metric
 
 *Excavation* is the native exploration an agent does to find the code a prompt

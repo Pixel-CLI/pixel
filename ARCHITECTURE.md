@@ -779,7 +779,7 @@ long untagged paste:
   relevance probe and the meaning search run at once on the deadline, and
   only the gate decides whether the repository is the subject.
 
-With `PIXEL_BRIEF_FRENCH=1` (off by default), a prompt that pixel-mvp's
+Unless `PIXEL_BRIEF_FRENCH=0`, a prompt that pixel-mvp's
 rule reads as French (`mvp_model::language`: two French function words or
 more, outnumbering its English ones) is searched, judged and gated on the
 English words code uses (`execution_brief/french.rs`, ADR-0032 of pixel-mvp,

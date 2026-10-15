@@ -36,8 +36,9 @@ use std::sync::OnceLock;
 
 use mvp_model::{Language, Lexicon, fold, language, prompt_terms, sub_words};
 
-/// The switch: `1` (or `true`, `on`) maps a French prompt's words before the
-/// brief runs; anything else, or nothing, leaves the prompt as typed.
+/// The switch: on unless set to `0`, `false` or `off`, which leaves a French
+/// prompt as typed. Measured on `eval/brief-gate/` before it went on
+/// (`docs/bench/brief-gate.md`, "French prompts through the lexicon").
 pub(crate) const FRENCH_ENV: &str = "PIXEL_BRIEF_FRENCH";
 
 /// pixel-mvp's lexicon, vendored (`crates/mvp-lexicon/VENDORED.md`).
@@ -64,7 +65,7 @@ const QUESTION_WINDOW: usize = 3;
 
 /// Whether [`FRENCH_ENV`]'s value turns the mapping on.
 pub(crate) fn enabled(value: Option<&str>) -> bool {
-    matches!(value, Some("1" | "true" | "on"))
+    !matches!(value, Some("0" | "false" | "off"))
 }
 
 /// The lexicon as pixel-mvp reads it: which words carry nothing.
@@ -184,19 +185,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_switch_should_be_off_unless_it_is_turned_on() {
+    fn the_switch_should_be_on_unless_it_is_turned_off() {
+        // `yes` was off while the switch was opt-in: with the default on, only
+        // the three opt-outs leave a French prompt as typed.
         for value in [
             None,
             Some(""),
-            Some("0"),
-            Some("false"),
-            Some("off"),
+            Some("1"),
+            Some("true"),
+            Some("on"),
             Some("yes"),
         ] {
-            assert!(!enabled(value), "{value:?}");
+            assert!(enabled(value), "{value:?}");
         }
-        for value in ["1", "true", "on"] {
-            assert!(enabled(Some(value)), "{value}");
+        for value in ["0", "false", "off"] {
+            assert!(!enabled(Some(value)), "{value}");
         }
     }
 
