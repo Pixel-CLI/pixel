@@ -44,7 +44,7 @@ jobs:
             os: ubuntu-26.04
             features: --no-default-features --features model2vec
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: blacksmith-12vcpu-macos-15
             features: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

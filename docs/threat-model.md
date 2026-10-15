@@ -127,7 +127,8 @@ stdout and stderr null, in its own process group. The hook neither waits for
 the build nor checks that it succeeded, so a later prompt may still find no
 index (the build failed or is running) and decline again. The root is the repository the payload's agent-controlled `cwd`
 resolves to, the same one the brief reads; a continuation, a prompt with no
-code signal and any other decline start nothing, and the index build lock
+code signal, any other decline and `daemon_auto_start` off
+(`PIXEL_DAEMON_AUTO_START=0`) start nothing, and the index build lock
 serializes overlapping starts. The build is the ordinary indexing of 3.4 and
 3.5, writing only under that repository's `.pixel/`.
 
