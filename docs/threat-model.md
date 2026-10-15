@@ -7,7 +7,7 @@ and what is left. It was written from the source on `main` after v0.6.1
 (2026-10); every mitigation below names the function, constant, path or
 workflow that implements it, as the code spells it, so a reader can check it.
 
-[SECURITY.md](../SECURITY.md) is the short policy: supported versions, how to
+[SECURITY.md](../.github/SECURITY.md) is the short policy: supported versions, how to
 report a vulnerability, how to verify a release. [ARCHITECTURE.md](../ARCHITECTURE.md)
 is the map of crates, on-disk state and the daemon wire contract this document
 builds on. [assurance-case.md](assurance-case.md) builds on this document in
@@ -54,7 +54,7 @@ model providers, and the website under `website/`.
 | Other local users | untrusted | file and socket permissions only |
 | Network services | untrusted for integrity, trusted with what is sent to them | Hugging Face, the classify endpoints (including `api.typesafe.ai`, `api.cloudflare.com` for Clef-flash on Workers AI, and a user-configured Ollama host for Clef-flash through Ollama), a configured Infisical host (default `app.infisical.com`, sent the bearer token), the web-search endpoints, `github.com` release checks, `ollaya.dev` |
 | Contributors | untrusted until review | pull requests, which CI builds and tests |
-| Maintainers | trusted ([GOVERNANCE.md](../GOVERNANCE.md)) | merges, tags, repository secrets and settings |
+| Maintainers | trusted ([GOVERNANCE.md](../.github/GOVERNANCE.md)) | merges, tags, repository secrets and settings |
 
 The boundaries a change can cross, referred to below as B1 to B7:
 

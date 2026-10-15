@@ -14,7 +14,7 @@ a local CLI written in Rust are countered.
 The top-level claim: **used as documented, Pixel does not give a repository,
 an agent, another local user or a network peer more than the user already
 gave them.** It breaks down into the security requirements of
-[SECURITY.md](../SECURITY.md), "Security model":
+[SECURITY.md](../.github/SECURITY.md), "Security model":
 
 | # | Requirement | Threats it answers |
 | --- | --- | --- |

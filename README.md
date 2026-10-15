@@ -17,7 +17,7 @@
   <a href="https://github.com/Pixel-CLI/pixel/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Pixel-CLI/pixel/ci.yml?branch=main&label=CI" alt="CI" /></a>
   <a href="https://www.bestpractices.dev/projects/15211"><img src="https://www.bestpractices.dev/projects/15211/badge" alt="OpenSSF Best Practices badge" /></a>
   <a href="https://www.bestpractices.dev/projects/15211"><img src="https://www.bestpractices.dev/projects/15211/baseline" alt="OpenSSF Best Practices baseline badge" /></a>
-  <a href="SECURITY.md#verifying-a-release"><img src="https://img.shields.io/badge/provenance-SLSA%20Build%20L3-2ea043" alt="Release archives, SBOMs and install.sh carry SLSA Build L3 provenance attestations" /></a>
+  <a href=".github/SECURITY.md#verifying-a-release"><img src="https://img.shields.io/badge/provenance-SLSA%20Build%20L3-2ea043" alt="Release archives, SBOMs and install.sh carry SLSA Build L3 provenance attestations" /></a>
   <a href="https://github.com/Pixel-CLI/pixel/releases/latest"><img src="https://img.shields.io/badge/platforms-macOS%20arm64%20%7C%20Linux%20x86__64%20%C2%B7%20arm64-blue" alt="Prebuilt for macOS arm64 and Linux x86_64 and arm64" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license" /></a>
 </p>
@@ -183,9 +183,9 @@ Every git command in the diagram (`commit`, `commit-and-push`, `new-branch`, `fe
 - [Documentation](https://pixel-cli.dev/docs/): install, updating, plugins, every command
 - [Benchmarks](https://pixel-cli.dev/benchmarks/): every number with its method, losses included
 - [ARCHITECTURE.md](ARCHITECTURE.md): crates and the full command surface
-- [CONTRIBUTING.md](CONTRIBUTING.md): build from source, gates, pull requests
-- [GOVERNANCE.md](GOVERNANCE.md): maintainers, roles and who holds the project's sensitive resources
-- [Report a bug](https://github.com/Pixel-CLI/pixel/issues/new?template=bug_report.yml): the issue form asks for the version, the platform and the steps to reproduce; vulnerabilities go through [SECURITY.md](SECURITY.md) instead
+- [CONTRIBUTING.md](.github/CONTRIBUTING.md): build from source, gates, pull requests
+- [GOVERNANCE.md](.github/GOVERNANCE.md): maintainers, roles and who holds the project's sensitive resources
+- [Report a bug](https://github.com/Pixel-CLI/pixel/issues/new?template=bug_report.yml): the issue form asks for the version, the platform and the steps to reproduce; vulnerabilities go through [SECURITY.md](.github/SECURITY.md) instead
 
 MIT licensed. See [`NOTICE`](NOTICE) for attribution.
 

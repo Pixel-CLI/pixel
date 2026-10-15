@@ -1,6 +1,6 @@
 # Project Rules
 
-**Before the first edit of any kind, read [CONTRIBUTING.md](CONTRIBUTING.md).** It defines the build, gates, PR format and definition of done; the loop below is the per-turn addendum.
+**Before the first edit of any kind, read [CONTRIBUTING.md](.github/CONTRIBUTING.md).** It defines the build, gates, PR format and definition of done; the loop below is the per-turn addendum.
 
 ## Mutation Testing Loop
 

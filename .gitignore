@@ -2,6 +2,8 @@
 **/*.rs.bk
 .DS_Store
 .pixel/
+.pixel-graph-head
+.pi-ultimate/
 .devin/
 
 # tool-local agent config dirs

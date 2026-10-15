@@ -105,7 +105,7 @@ fn referenced_commands(text: &str) -> BTreeSet<String> {
 const DOCS: &[&str] = &[
     "README.md",
     "ARCHITECTURE.md",
-    "CONTRIBUTING.md",
+    ".github/CONTRIBUTING.md",
     "docs/manual-setup.md",
     "website/content/docs.md",
     "website/content/benchmarks.md",

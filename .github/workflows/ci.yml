@@ -47,7 +47,7 @@ on:
       # docs_drift.rs:
       - "README.md"
       - "ARCHITECTURE.md"
-      - "CONTRIBUTING.md"
+      - ".github/CONTRIBUTING.md"
       - "AGENTS.md"
       - "CHANGELOG.md"
       - "changelog.d/**"
