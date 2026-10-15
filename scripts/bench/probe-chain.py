@@ -89,6 +89,8 @@ def main(argv=None):
     root, prompt = os.environ["CLONE"], os.environ["PROMPT"]
     brief = Path(os.environ["BRIEF_FILE"]).read_text()
     kind, gate = last_decision(root)
+    if gate in ("denied", "declined"):
+        return 0
     merged = chain(load_probe_test(), args.probes, root, prompt, brief, kind, args.bin,
                    set(args.only.split(",")) if args.only else None, closed=gate == "closed")
     if merged:

@@ -41,6 +41,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import types
 import unittest
 from pathlib import Path
 
@@ -211,25 +212,20 @@ def safe_search(pattern, text):
 
 def merge(brief, outputs, cap=PART_CHARS * PARTS):
     """The brief after its probes. ``outputs``: ``[(name, mode, stdout)]`` of the probes that ran, any order (they
-    are applied by name). A drop removes the brief's blocks and the blocks of every OTHER probe (never the
-    dropping probe's own); a first moves the brief's own blocks; a probe's block whose header the
+    are applied by name). A drop removes the brief's own blocks only (never a probe's block, as in the native
+    ``probes::merge``); a first moves the brief's own blocks; a probe's block whose header the
     brief already has is skipped; when the text is over ``cap`` characters the append blocks go first, then the
     brief's last blocks, then the lead blocks, whole, and the first block is never removed."""
     head, existing, footer = split_brief(brief)
     if not head:
         head = ["[PIXEL:BRIEF]"]
     lead, append, drops, firsts = [], [], [], []
-    owner = {}   # id(block) -> probe name, so a probe's drop never removes its own blocks
-    for name, mode, stdout in sorted(outputs, key=lambda o: o[0]):
+    for _name, mode, stdout in sorted(outputs, key=lambda o: o[0]):
         blocks, d, f, _ = parse_output(stdout)
-        drops += [(name, rx) for rx in d]
+        drops += d
         firsts += f
-        for b in blocks:
-            owner[id(b)] = name
         (lead if mode == "lead" else append).extend(blocks)
-    existing = [b for b in existing if not any(safe_search(rx, header_of(b)) for _, rx in drops)]
-    lead = [b for b in lead if not any(who != owner[id(b)] and safe_search(rx, header_of(b)) for who, rx in drops)]
-    append = [b for b in append if not any(who != owner[id(b)] and safe_search(rx, header_of(b)) for who, rx in drops)]
+    existing = [b for b in existing if not any(safe_search(rx, header_of(b)) for rx in drops)]
     for rx in reversed(firsts):
         moved = [b for b in existing if safe_search(rx, header_of(b))]
         existing = moved + [b for b in existing if b not in moved]
@@ -414,10 +410,10 @@ def evaluate(probe, qset, pixel_bin, ids, home):
     rows = []
     for qid in ids:
         q = qset.open(qid)
-        gate_open = (q["meta"].get("gate") or "open") == "open"
+        gate = q["meta"].get("gate") or "open"
         request = {"prompt": q["prompt"], "repo_root": q["clone"], "brief": q["text"] or "[PIXEL:BRIEF]\n",
                    "kind": q["kind"], "session_files": []}
-        applies = (gate_open or probe.closed_gate) and probe.applies(q["kind"], q["prompt"])
+        applies = gate_runs(gate, probe) and probe.applies(q["kind"], q["prompt"])
         row = {"id": qid, "repo": q["repo"], "kind": q["kind"], "applies": applies, "ran": False, "error": None,
                "probe_ms": 0, "deterministic": True, "read_only": True, "stray": 0}
         before = qset.score(q, q["text"])
@@ -580,7 +576,7 @@ def hook_shim(config_path, args):
             later = [f"{k}/{count}" if a == args[args.index("--part") + 1] else a for a in args]
             context += context_of(subprocess.run([real, *later], input=stdin, capture_output=True, text=True).stdout)
         kind, gate = last_decision(Path.cwd())
-        if (gate == "open" or probe.closed_gate) and probe.applies(kind, prompt):
+        if gate_runs(gate, probe) and probe.applies(kind, prompt):
             request = {"prompt": prompt, "repo_root": str(Path.cwd()), "brief": context or "[PIXEL:BRIEF]\n",
                        "kind": kind, "session_files": []}
             stdout, _, error = run_probe(probe, request, real, os.environ.get("HOME", "/"))
@@ -597,6 +593,12 @@ def hook_shim(config_path, args):
     done.write_text(json.dumps(state))
     sys.stdout.write(out)
     return 0
+
+
+def gate_runs(gate, probe):
+    """Whether the native ``probe_stage`` runs ``probe`` for a logged ``gate``: an open or unjudged brief runs every
+    matching probe, a closed gate only the ones with ``when_gate_closed``, a denied or declined prompt none."""
+    return gate in (None, "open", "unjudged") or (gate == "closed" and probe.closed_gate)
 
 
 def last_decision(root):
@@ -945,6 +947,17 @@ class SelfTest(unittest.TestCase):
         for case in cases:
             outputs = [(o["name"], o["mode"], o["stdout"]) for o in case["outputs"]]
             self.assertEqual(merge(case["brief"], outputs, case["cap"]), case["expected"], case["name"])
+
+    def test_a_drop_never_removes_another_probes_block_as_in_the_native_merge(self):
+        text = merge("[PIXEL:BRIEF]\n### keep — x\nk\n### gone — y\ng\n",
+                     [("a", "append", "### other — o\nbody\n"), ("b", "append", "drop: ^gone\ndrop: ^other\n")])
+        self.assertEqual(text, "[PIXEL:BRIEF]\n### keep — x\nk\n### other — o\nbody\n")
+
+    def test_a_denied_gate_runs_no_probe_and_a_closed_one_only_the_opted_in(self):
+        opted, plain = types.SimpleNamespace(closed_gate=True), types.SimpleNamespace(closed_gate=False)
+        self.assertTrue(all(gate_runs(g, plain) for g in (None, "open", "unjudged")))
+        self.assertTrue(gate_runs("closed", opted) and not gate_runs("closed", plain))
+        self.assertFalse(gate_runs("denied", opted) or gate_runs("declined", opted))
 
     def test_an_empty_brief_gets_the_tag_and_the_probe_blocks(self):
         text = merge("", [("p", "lead", "### a — b\nline\n")])

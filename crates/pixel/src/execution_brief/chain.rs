@@ -2927,13 +2927,17 @@ fn try_start_as(
             probes: probes_setup,
         },
     );
-    if matches!(result, Err(Declined::Unindexed))
+    kick_index(result.as_ref().err(), prompt, &for_index, lazy_index);
+    result
+}
+
+fn kick_index(declined: Option<&Declined>, prompt: &str, root: &Path, launch: impl FnOnce(&Path)) {
+    if matches!(declined, Some(Declined::Unindexed))
         && !crate::prompt_continuation::is_trivial_continuation(prompt)
         && brief_signal(prompt).is_some()
     {
-        lazy_index(&for_index);
+        launch(root);
     }
-    result
 }
 
 fn lazy_index(root: &Path) {
@@ -6807,6 +6811,38 @@ mod tests {
         ] {
             assert_eq!(admission.label(), label);
             assert_eq!(admission.reason(), reason);
+        }
+    }
+
+    #[test]
+    fn kick_index_should_launch_once_for_an_unindexed_code_prompt() {
+        let root = Path::new("/repo");
+        let mut launched = Vec::new();
+        kick_index(
+            Some(&Declined::Unindexed),
+            "where is retrieval_route called",
+            root,
+            |launched_root| launched.push(launched_root.to_path_buf()),
+        );
+        assert_eq!(launched, vec![root.to_path_buf()]);
+    }
+
+    #[test]
+    fn kick_index_should_not_launch_for_a_continuation_a_plain_prompt_or_another_decline() {
+        let root = Path::new("/repo");
+        for (declined, prompt) in [
+            (Some(&Declined::Unindexed), "thanks"),
+            (Some(&Declined::Unindexed), "hello there"),
+            (
+                Some(&Declined::NotAboutCode),
+                "where is retrieval_route called",
+            ),
+            (Some(&Declined::Disabled), "where is retrieval_route called"),
+            (None, "where is retrieval_route called"),
+        ] {
+            let mut launches = 0;
+            kick_index(declined, prompt, root, |_| launches += 1);
+            assert_eq!(launches, 0, "{declined:?} {prompt:?}");
         }
     }
 
