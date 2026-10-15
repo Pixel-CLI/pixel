@@ -14,7 +14,7 @@
 //! `next_actions` as flat fields, but the Rust side is one [`Outcome`] enum
 //! so an illegal tuple (an `established` answer without a witness, an
 //! `unknown` without a reason) cannot be built, and is refused on
-//! deserialization. The wire shape, from `docs/design/evaluate.md`:
+//! deserialization. The wire shape, from `docs/archive/design/evaluate.md`:
 //!
 //! ```json
 //! {
