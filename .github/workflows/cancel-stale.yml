@@ -36,7 +36,7 @@ jobs:
       # List runs and POST /actions/runs/{id}/cancel.
       actions: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: useblacksmith/checkout@v1 # v7
         with:
           ref: main
       - name: Cancel this PR's queued and in-progress runs

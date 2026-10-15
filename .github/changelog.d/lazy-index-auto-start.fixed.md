@@ -1,0 +1,1 @@
+**brief:** the detached `pixel prepare-repo` a code prompt starts in an unindexed repository now obeys `daemon_auto_start` like every other background start: with `PIXEL_DAEMON_AUTO_START=0` or the feature off, `pixel brief` and the prompt hooks start nothing.
