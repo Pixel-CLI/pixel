@@ -343,7 +343,10 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   is copied (`.git` left behind): links as links, never followed; each file
   opened as the regular file the listing saw and copied up to the size it
   saw; a FIFO, socket or device refused, so a local source cannot hang the
-  copy or pull a file from elsewhere into `~/.pixel/plugins/`. The clone runs with
+  copy, and a file swapped for a link after the listing is not read through.
+  Only the files are pinned: directories are walked by path (`copy_tree`,
+  `dir_digest`), so a process able to rewrite a local source while it is
+  copied can swap a subdirectory for a link (T25, #982). The clone runs with
   `GIT_ALLOW_PROTOCOL=https:ssh:file`, so git itself refuses any other
   transport wherever the URL comes from (an `insteadOf` rewrite, a redirect),
   and `GIT_TERMINAL_PROMPT=0`, so a source that asks for credentials fails
@@ -822,15 +825,22 @@ the later threats hold.
 - **Mitigation**: section 3.12. Repo plugins need a content-bound trust
   record; `run` must resolve inside the plugin directory; `network = true`
   needs an explicit opt-in; `add` accepts only fixed git URL schemes and
-  copies a plugin directory, not history or hooks.
+  copies a plugin directory, not history or hooks, each file opened without
+  following a link or blocking and copied up to the size listed (a FIFO,
+  socket or device refused), and `dir_digest` reads files the same way.
 - **Status**: Partial.
 - **Residual**: trust is bound to content, not to an author, and the user
   (or an agent acting for them) decides what to trust: `pixel plugin trust`
   is as strong as the review before it. The digest is checked immediately
   before the exec, not held open, so a process able to write the plugin
   directory in between can win that race (it could equally edit the
-  trusted file or the user's shell profile). A user plugin and a PATH plugin
-  are the user's own code and are not gated. A plugin runs with the user's
+  trusted file or the user's shell profile). The file opens pin leaf files
+  only: `copy_tree` and `dir_digest` walk directories by path, so a process
+  able to rewrite a local source during an install or a digest can swap a
+  subdirectory for a link and have the files behind it copied or hashed
+  (with the invoking user's reach; descriptor-relative traversal is #982).
+  A user plugin and a PATH plugin are the user's own code and are not
+  gated. A plugin runs with the user's
   privileges and network once allowed; `network` is a declaration gated by
   `enable`, not a sandbox, and the host cannot stop a plugin that declares
   `false` from using the network.
