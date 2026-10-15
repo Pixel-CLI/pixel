@@ -446,7 +446,7 @@ envelope talks to the daemon socket directly.
   `ruby=v1, pixel-mvp unavailable` outside a git work tree's top level;
   absent when off, and a full build drops the side tables), and a graph
   whose Ruby source differs from the switch's is rebuilt whole. Cost on
-  antiwork/gumroad (`b996417e`, `dev-release`, pixel-mvp `192b576`): a
+  antiwork/gumroad (`b996417e`, `dev-release`, pixel-mvp `e91e8da`): a
   one-file edit then a graph command 0.71 s → 4.4 s (a line appended;
   2.4 s → 6.1 s for a method inserted mid-file), nearly all of it
   pixel-mvp's refresh of its index (its writer's full open check and
