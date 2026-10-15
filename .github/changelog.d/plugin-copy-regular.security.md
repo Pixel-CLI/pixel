@@ -1,1 +1,0 @@
-**plugin:** `pixel install <directory>` copies each file as the regular file it listed, without following a link or blocking and never past the size it saw, and refuses a FIFO, socket or device instead of waiting on it forever; `pixel plugin trust` hashes files the same way.

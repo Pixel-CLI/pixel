@@ -1,1 +1,0 @@
-**cli:** `index-stats` (alias `stats`), the legacy dump of raw shard metadata, is deleted rather than moved to a plugin; scripts calling it now fail with an unknown-command error. `workspace`, `coverage`, `index-pack` and `index-unpack` remain core commands.

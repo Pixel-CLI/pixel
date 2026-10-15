@@ -1,1 +1,0 @@
-**classify:** OpenAI joins the install-time engine menu (Local / Remote / OpenAI / Jev), and `--remote-preset openai` classifies through OpenAI's Decisions API (gpt-6-luna), mapping labels to a choice question and its probabilities back into the distribution.

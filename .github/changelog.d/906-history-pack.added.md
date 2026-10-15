@@ -1,1 +1,0 @@
-**brief:** "when did X start ..., which commit" and "who added ..." get the commits of the history index that match the question: sha, date, subject, what the best two changed (`path:line +a -r`) and the matched paths. Read through the daemon's read-only `history` op; nothing is ingested, and a repo without `build-index --history` is briefed as before. Task #906.

@@ -1,1 +1,0 @@
-**graph:** `pixel graph-shadow [PATH] [--json]` compares this graph's Rust call, reference and import edges with those pixel-mvp's index (now vendored as the `mvp-*` crates) gives on the same symbols, both built in a scratch directory: what each links alone, by tier, receiver shape and language, and what pixel-mvp holds where this graph alone links.

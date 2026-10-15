@@ -1,1 +1,0 @@
-**setup:** Pixel guidance reaches Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi and Antigravity as the `pixel` skill only (Copilot CLI and the generic `AGENTS.md` target get none), and Antigravity no longer gets an always-on rules file.

@@ -1,1 +1,0 @@
-**cli:** `flow`, `plan-rollback`, `token-savings`, `squash-branch` and `fast-forward` left the binary and ship as plugins (`pixel install github:Pixel-CLI/pixel-flow`, `pixel-git`, `pixel-telemetry`). Without the plugin each prints that install command and exits 2.

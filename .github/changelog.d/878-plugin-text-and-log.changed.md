@@ -1,1 +1,0 @@
-**plugin:** the core runs a plugin as a child and logs the run to `.pixel/actions.jsonl` (arguments masked like any command). `classify --task-intent`, `audit`, `plan` and the brief name a plugin command only where that plugin runs; `pixel doctor` stops asking for a web-search provider without `pixel-utilities`.

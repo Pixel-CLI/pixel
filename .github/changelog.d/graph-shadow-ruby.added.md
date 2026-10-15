@@ -1,1 +1,0 @@
-**graph:** `pixel graph-shadow --lang ruby` reports what merging pixel-mvp's Ruby answer into this graph site by site would change, both built in a scratch directory: per kind (calls, routes, model associations, other references) the edges both hold, this graph's edges kept where pixel-mvp abstains, those its proof replaces, and pixel-mvp's targets added.

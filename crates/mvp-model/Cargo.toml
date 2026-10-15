@@ -7,7 +7,7 @@
 [package]
 name = "mvp-model"
 description = "Shared types of pixel-mvp's index and the Graph read trait; depends on nothing. Vendored, see VENDORED.md."
-version = "0.7.1"
+version = "0.8.0"
 edition.workspace = true
 license.workspace = true
 publish = false

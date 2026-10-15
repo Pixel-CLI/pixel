@@ -1,1 +1,0 @@
-**setup:** Restore Claude Code's PostToolUse metrics relay and Antigravity's deferred plugin relay; Antigravity returns `{}` after storing metrics per conversation, then injects and clears the matching line at PostInvocation. Codex uses its documented `systemMessage` response; `pixel doctor` checks relay registration.

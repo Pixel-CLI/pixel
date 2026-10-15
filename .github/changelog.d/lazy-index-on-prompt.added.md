@@ -1,1 +1,0 @@
-**brief:** a code prompt in a repository with no index now kicks a detached `pixel prepare-repo` from the prompt-submit path, so the next prompt is briefed instead of every prompt in an unindexed repo declining forever; the `pixel` skill's trigger no longer requires an existing `.pixel` directory and tells the agent to run `pixel prepare-repo` when one is missing.

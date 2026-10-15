@@ -1,1 +1,0 @@
-**setup:** a released `pixel` refuses the hidden development-only flags of `pixel setup` (`--selected-agents`, `--selected-features`, `--dummy-apply`) by name instead of accepting them; they stay live in debug builds, where the scripted runs and the golden comparison use them.

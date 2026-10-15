@@ -1,1 +1,0 @@
-**graph:** `PIXEL_GRAPH_SOURCE_RUBY=hybrid` merges pixel-mvp's Ruby answer into the graph site by site: where pixel-mvp proves a call's target, that edge (`exact`) replaces the resolver's; where it abstains, the resolver's edge stays in its tier. Ancestors and the routes the resolver does not read are added. Off by default, and with it off the graph is unchanged.

@@ -1,1 +1,0 @@
-**brief:** `PIXEL_BRIEF_FRENCH=1` reads a French prompt in the English words code uses before the brief searches and gates on it: pixel-mvp's French rule and lexicon (vendored), a code-shaped token kept as typed, an opening question word made English for the gate. Off by default; an English prompt is never rewritten.
