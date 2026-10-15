@@ -8,7 +8,17 @@
 <p align="center">
   <a href="https://github.com/Pixel-CLI/pixel/releases/latest"><img src="https://img.shields.io/github/v/release/Pixel-CLI/pixel?color=2ea043&label=release" alt="Latest release" /></a>
   <a href="https://github.com/Pixel-CLI/pixel/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Pixel-CLI/pixel/ci.yml?branch=main&label=CI" alt="CI" /></a>
+  <a href="https://www.bestpractices.dev/projects/15211"><img src="https://www.bestpractices.dev/projects/15211/badge" alt="OpenSSF Best Practices badge" /></a>
+  <a href="https://www.bestpractices.dev/projects/15211"><img src="https://www.bestpractices.dev/projects/15211/baseline" alt="OpenSSF Best Practices baseline badge" /></a>
+  <a href=".github/SECURITY.md#verifying-a-release"><img src="https://img.shields.io/badge/provenance-SLSA%20Build%20L3-2ea043" alt="Release archives, SBOMs and install.sh carry SLSA Build L3 provenance attestations" /></a>
+  <a href="https://github.com/Pixel-CLI/pixel/releases/latest"><img src="https://img.shields.io/badge/platforms-macOS%20arm64%20%7C%20Linux%20x86__64%20%C2%B7%20arm64-blue" alt="Prebuilt for macOS arm64 and Linux x86_64 and arm64" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license" /></a>
+</p>
+
+<p align="center">
+  <a href="https://pixel-cli.dev/"><b>Website</b></a> ·
+  <a href="https://pixel-cli.dev/docs/"><b>Docs</b></a> ·
+  <a href="https://pixel-cli.dev/benchmarks/"><b>Benchmarks</b></a>
 </p>
 
 <p align="center">
@@ -24,10 +34,9 @@
 ```bash
 curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 pixel setup              # pick your agents
-pixel prepare-repo .     # index this repo
 ```
 
-Restart your agent, approve hooks if asked, ask your next code question. That's it.
+Restart your agent, approve hooks if asked, ask your next code question. That's it: Pixel indexes the repository on its first use. Want it warm up front? `pixel prepare-repo .`
 
 <sub>[Read the installer](scripts/release/install.sh) · [release notes](https://github.com/Pixel-CLI/pixel/releases/latest) · [build from main](.github/CONTRIBUTING.md#build) for unreleased integrations.</sub>
 
@@ -38,12 +47,11 @@ You pay for every loop. In tokens. In wall time. In context it never uses.
 
 ## 🟩 The fix
 
-Pixel hooks your agent's prompt-submit event. Before the model sees your question, Pixel queries a **local code index** and attaches a compact `[PIXEL:BRIEF]`:
+Pixel hooks your agent's prompt-submit event. Before the model sees your question, Pixel queries a **local code index** and attaches a compact `[PIXEL:BRIEF]`: definitions, callers, code, tests and git history, cited `file:line`.
 
-```
-you ──Enter──▶ pixel (local index) ──▶ [PIXEL:BRIEF] + your prompt ──▶ agent
-               definitions · callers · code · tests · git history, cited file:line
-```
+<p align="center">
+  <img src="docs/examples/pixel-brief-comparison.webp" width="800" alt="Without Pixel the agent plans a search, greps, reads a whole file and greps again; with Pixel, pressing Enter runs a local index lookup and the agent starts from a cited brief" />
+</p>
 
 The agent starts with the evidence already in context. It keeps all its tools — it just doesn't have to go hunting.
 
@@ -52,6 +60,24 @@ pixel brief "Where is request validation implemented?" .   # see what your agent
 pixel doctor .                                              # check install and index health
 PIXEL_BRIEF=0                                               # turn briefs off
 ```
+
+## 🛠️ Retrieval on demand: the Pixel skill
+
+Need more than the brief? `pixel setup` drops a `pixel` skill into each agent's `skills/` folder. The agent asks the index directly — one call, then a targeted read:
+
+| Agent asks | Pixel answers with |
+|---|---|
+| where is X defined? | `pixel find-symbol 'X'` |
+| who calls X? | `pixel who-calls '<uid>'` |
+| what breaks if I change X? | `pixel impact '<uid>' --depth 1` |
+| outline of this 2,000-line file? | `pixel list-signatures <file>` — **median −94.5%** read volume |
+| just this one function | `pixel pack-context '<uid>' --budget 1500` |
+
+<p align="center">
+  <img src="docs/examples/pixel-scope-comparison.webp" width="800" alt="The same task without Pixel and with it: the agent wanders the repository, or starts from a ranked list of files" />
+</p>
+
+<sub>Both animations illustrate a workflow; they are not timed agent comparisons. [Agent trials and their limits](https://pixel-cli.dev/benchmarks/#on-whole-agent-tasks).</sub>
 
 ## 📊 Numbers
 

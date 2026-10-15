@@ -6,9 +6,10 @@ import {AgentDemo, DemoProps, demoFrames, FPS, Trace} from './AgentDemo';
 import {ComparisonScene, ComparisonSpec} from './ComparisonScene';
 import pixelRun from './demo/pixel.json';
 import vanillaRun from './demo/vanilla.json';
-import {impactSpec, measuredSavingsSpec, publishSpec, rollbackSpec, rewriteSpec, scopeSpec} from './PixelComparison';
+import {briefSpec, impactSpec, measuredSavingsSpec, publishSpec, rollbackSpec, rewriteSpec, scopeSpec} from './PixelComparison';
 
 const comps: [string, ComparisonSpec][] = [
+	['PixelBrief', briefSpec],
 	['PixelComparison', measuredSavingsSpec],
 	['PixelImpact', impactSpec],
 	['PixelScope', scopeSpec],

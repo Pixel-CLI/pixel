@@ -7,7 +7,7 @@
 #   <name>.webp  800x500 animated WebP at 15 fps for the README; set
 #                README_WEBP_SCALE=2 for 1600x1000 retina output
 #
-# Usage: scripts/render.sh [CompositionId ...]   (default: all seven)
+# Usage: scripts/render.sh [CompositionId ...]   (default: all eight)
 # Set README_WEBP_ONLY=1 to update only the README image; README_RENDER_CRF
 # (default 26) tunes the intermediate video used to extract its frames.
 # Needs ffmpeg and img2webp (brew install ffmpeg webp).
@@ -30,6 +30,7 @@ name_of() {
     PixelComparison) echo pixel-measured-comparison ;;
     PixelImpact) echo pixel-impact-comparison ;;
     PixelScope) echo pixel-scope-comparison ;;
+    PixelBrief) echo pixel-brief-comparison ;;
     PixelRollback) echo pixel-rollback-comparison ;;
     PixelPublish) echo pixel-publish-comparison ;;
     PixelRewrite) echo pixel-rewrite-comparison ;;
@@ -38,7 +39,7 @@ name_of() {
 }
 
 ids=("$@")
-[ ${#ids[@]} -gt 0 ] || ids=(AgentDemo PixelScope PixelComparison PixelImpact PixelRewrite PixelRollback PixelPublish)
+[ ${#ids[@]} -gt 0 ] || ids=(AgentDemo PixelScope PixelBrief PixelComparison PixelImpact PixelRewrite PixelRollback PixelPublish)
 
 for id in "${ids[@]}"; do
   name=$(name_of "$id")

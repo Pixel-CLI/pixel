@@ -1,0 +1,1 @@
+**docs:** the README leads with the prompt-submit brief: a two-command install (indexing happens on the first prompt), animated brief and retrieval diagrams, the `pixel` skill's question-to-command table, and numbers labelled with their source.

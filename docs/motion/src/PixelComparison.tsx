@@ -247,3 +247,50 @@ export const rewriteSpec: ComparisonSpec = {
 		loop: 'SAME COMMAND · DETERMINISTIC ANSWER',
 	},
 };
+
+// The prompt-submit brief: no prepare step, the first prompt indexes the
+// repository, and every later prompt reaches the agent with its evidence.
+export const briefSpec: ComparisonSpec = {
+	width: 1600,
+	height: 1000,
+	accentA: RED,
+	accentB: GREEN,
+	dotColor: GREEN,
+	panelA: {
+		title: 'WITHOUT PIXEL',
+		nodes: [
+			{x: topXs[0], y: topY, label: 'Prompt', sub: 'your question', icon: 'task'},
+			{x: topXs[1], y: topY, label: 'Agent', sub: 'plans a search', icon: 'agent'},
+			{x: topXs[2], y: topY, label: 'Grep', sub: 'rg · glob', icon: 'search'},
+			{x: topXs[3], y: topY, label: 'Read File', sub: '2,000 lines', icon: 'read'},
+			{x: topXs[4], y: topY, label: 'Grep Again', sub: 'wrong match', icon: 'deadend', warn: true},
+			{x: topXs[5], y: topY, label: 'Context Bloat', sub: 'unused code', icon: 'meter'},
+			{x: topXs[6], y: topY, label: 'Late Answer', sub: 'budget spent', icon: 'clock'},
+		],
+		loop: 'PLAN · SEARCH · READ · REPEAT — EVERY PROMPT',
+	},
+	panelB: {
+		title: 'WITH PIXEL',
+		leftText: ['EVIDENCE', 'BEFORE THE', 'FIRST TURN'],
+		setup: {
+			nodes: [
+				{x: setupXs[0], y: setupY, label: 'pixel setup', sub: 'once', icon: 'init', local: true},
+				{x: setupXs[1], y: setupY, label: 'Agent Hooks', sub: '7 hosts wired', icon: 'hook'},
+				{x: setupXs[2], y: setupY, label: 'First Prompt', sub: 'indexes the repo', icon: 'repo', local: true},
+				{x: setupXs[3], y: setupY, label: '.pixel/', sub: 'index · graph', icon: 'graph'},
+			],
+			badge: 'INDEXED ON FIRST PROMPT',
+		},
+		session: {
+			nodes: [
+				{x: sessXs[0], y: sessY, label: 'You', sub: 'ask as usual', icon: 'task'},
+				{x: sessXs[1], y: sessY, label: 'Enter', sub: 'prompt hook', icon: 'hook', accent: GREEN, local: true},
+				{x: sessXs[2], y: sessY, label: 'Local Index', sub: 'defs · callers · tests', icon: 'graph', accent: GREEN, local: true},
+				{x: sessXs[3], y: sessY, label: '[PIXEL:BRIEF]', sub: 'cited file:line', icon: 'context', accent: GREEN},
+				{x: sessXs[4], y: sessY, label: 'Agent', sub: 'evidence in context', icon: 'agent'},
+				{x: sessXs[5], y: sessY, label: 'Answer', sub: 'right files first', icon: 'ship', accent: GREEN},
+			],
+		},
+		loop: 'CITED EVIDENCE WITH YOUR PROMPT · YOUR AGENT KEEPS ITS TOOLS',
+	},
+};

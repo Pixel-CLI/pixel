@@ -148,7 +148,7 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 							frame={frame}
 						/>
 						{panelB.setup.badge && (
-							<Badge x={sessXs[0] - 20} y={656} text={panelB.setup.badge} color={C.inkSoft}/>
+							<Badge x={sessXs[0] - 20} y={656} text={panelB.setup.badge} color={C.inkSoft} maxRight={spec.width - 40 - 24}/>
 						)}
 						<g transform={`translate(0, ${setupY})`}>
 							{frame <= setupDur && (
