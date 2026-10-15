@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+"""cand-k-member-manifest: a question about the content and the requirements of one named workspace member.
+
+The member is found from the manifests when the probe runs: a tracked manifest (Cargo.toml, package.json,
+pyproject.toml, go.mod) whose directory name or package name equals the word before "crate/package/module/library"
+in the prompt. It prints that manifest (identity noise such as authors, urls and licence lines cut) with its line
+numbers, so features, optional and dev dependencies and deprecation comments are all visible, and the tracked files
+of the member's directory (examples, readme, tests included, which `ls` would show). Brief blocks outside the
+member's directory are dropped: the lexical neighbours of a crate question are other crates' files.
+
+Read-only (git ls-files, file reads), deterministic, nothing printed when no member is named."""
+import json
+import os
+import re
+import subprocess
+import sys
+
+MANIFESTS = ("Cargo.toml", "package.json", "pyproject.toml", "go.mod")
+NOISE = re.compile(r"^\s*(authors|documentation|homepage|repository|keywords|categories|license|license-file|readme|"
+                   r"exclude|include|publish|bugs|author|funding|edition(\.workspace)?|rust-version(\.workspace)?)\s*[=:]")
+NAMED = re.compile(r"(?i)\b(?:the\s+)?([A-Za-z][\w.-]*)\s+(?:crate|package|module|library|lib)\b")
+MAX_FILES = 24
+MAX_MANIFEST = 70
+
+
+def main():
+    req = json.load(sys.stdin)
+    root, prompt = req["repo_root"], req["prompt"]
+    tracked = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, text=True, timeout=10).stdout
+    files = sorted(f for f in tracked.split("\0") if f)
+    manifests = [f for f in files if os.path.basename(f) in MANIFESTS and "/" in f]
+    names = [n.lower() for n in NAMED.findall(prompt) if n.lower() not in ("this", "that", "each", "which", "other", "the", "a")]
+    for name in names:
+        hit = None
+        for m in manifests:
+            d = os.path.dirname(m)
+            if os.path.basename(d).lower() == name:
+                hit = m
+                break
+        if not hit:
+            continue
+        member = os.path.dirname(hit)
+        try:
+            with open(os.path.join(root, hit), encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            return
+        shown = [(n + 1, l) for n, l in enumerate(lines) if not NOISE.match(l)]
+        shown = [(n, l) for n, l in shown if l.strip() or True][:MAX_MANIFEST]
+        print(f"drop: ^(?!{re.escape(member)}[/ ])")
+        print(f"### {hit}:1-{len(lines)} — manifest of {name} (identity lines cut)")
+        print("\n".join(f"{n}| {l[:140]}" for n, l in shown))
+        inside = [f[len(member) + 1:] for f in files if f.startswith(member + "/")]
+        listed = inside[:MAX_FILES] + ([f"+{len(inside) - MAX_FILES} more"] if len(inside) > MAX_FILES else [])
+        print(f"### {member}/ — {len(inside)} tracked files")
+        print(", ".join(listed))
+        return
+
+
+main()

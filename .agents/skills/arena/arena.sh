@@ -13,7 +13,9 @@ SKILL_MD="$SELF_DIR/SKILL.md"
 SCRATCH=${ARENA_SCRATCH:-/private/tmp/claude-501/arena}
 CODEX_BIN=${ARENA_CODEX_BIN:-/Users/livio/.local/bin/codex}
 USER_CODEX_HOME=${ARENA_USER_CODEX_HOME:-$HOME/.codex}
-PREFIX=arena
+# Parallel instances: give each its own ARENA_PREFIX (pane/tab labels) and ARENA_PID_FILE so that one instance's
+# 'close every arena pane' or abort never touches another's. The index cache under ARENA_SCRATCH is shared.
+PREFIX=${ARENA_PREFIX:-arena}
 # Agent under test: codex (default) or claude. `--agent` on run and run-set sets it.
 AGENT=codex
 CLAUDE_BIN=${ARENA_CLAUDE_BIN:-$HOME/.local/bin/claude}
@@ -681,7 +683,7 @@ cmd_abort() {
 
 CENSUS_ROOT=${ARENA_CENSUS_ROOT:-/private/tmp/claude-501/census}
 BENCH_SRC=${ARENA_BENCH_SRC:-$HOME/.cache/pixel-brief-bench/src}
-SET_PID_FILE="$SCRATCH/set.pid"
+SET_PID_FILE=${ARENA_PID_FILE:-$SCRATCH/set.pid}
 
 # TSV rows: id, repo, source directory, sha, prompt. Census prompts are read
 # here and go to the panes and nowhere else (no log, no echo).

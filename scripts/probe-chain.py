@@ -80,7 +80,7 @@ def main(argv=None):
     kind, gate = last_decision(root)
     # A closed gate runs only the probes that opt in (`when_gate_closed`, with a when_prompt of their own).
     merged = chain(load_probe_test(), args.probes, root, prompt, brief, kind, args.bin,
-                   set(args.only.split(",")) if args.only else None, closed=gate not in (None, "open"))
+                   set(args.only.split(",")) if args.only else None, closed=gate == "closed")
     if merged:
         sys.stdout.write("@@REPLACE@@\n" + merged)
     return 0

@@ -209,19 +209,25 @@ def safe_search(pattern, text):
 
 def merge(brief, outputs, cap=PART_CHARS * PARTS):
     """The brief after its probes. ``outputs``: ``[(name, mode, stdout)]`` of the probes that ran, any order (they
-    are applied by name). Drops and firsts act on the brief's own blocks only; a probe's block whose header the
+    are applied by name). A drop removes the brief's blocks and the blocks of every OTHER probe (never the
+    dropping probe's own); a first moves the brief's own blocks; a probe's block whose header the
     brief already has is skipped; when the text is over ``cap`` characters the append blocks go first, then the
     brief's last blocks, then the lead blocks, whole, and the first block is never removed."""
     head, existing, footer = split_brief(brief)
     if not head:
         head = ["[PIXEL:BRIEF]"]
     lead, append, drops, firsts = [], [], [], []
+    owner = {}   # id(block) -> probe name, so a probe's drop never removes its own blocks
     for name, mode, stdout in sorted(outputs, key=lambda o: o[0]):
         blocks, d, f, _ = parse_output(stdout)
-        drops += d
+        drops += [(name, rx) for rx in d]
         firsts += f
+        for b in blocks:
+            owner[id(b)] = name
         (lead if mode == "lead" else append).extend(blocks)
-    existing = [b for b in existing if not any(safe_search(rx, header_of(b)) for rx in drops)]
+    existing = [b for b in existing if not any(safe_search(rx, header_of(b)) for _, rx in drops)]
+    lead = [b for b in lead if not any(who != owner[id(b)] and safe_search(rx, header_of(b)) for who, rx in drops)]
+    append = [b for b in append if not any(who != owner[id(b)] and safe_search(rx, header_of(b)) for who, rx in drops)]
     for rx in reversed(firsts):
         moved = [b for b in existing if safe_search(rx, header_of(b))]
         existing = moved + [b for b in existing if b not in moved]

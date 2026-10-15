@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+"""cand-k-commit-patch: a question that quotes a commit title and asks what the commit did and which files it touched.
+
+The commit is found like history-fallback does (the quoted title through `git log --grep`, else the prompt's
+rarest words). What is printed differs: the message's leading paragraphs (fenced output is cut), the complete
+`--stat` file list (so every file of the commit is named, with its counts), then the hunks file by file with source
+files first and manifests next, lockfiles and generated files only summarised, inside a byte budget. The block
+carries the header history-fallback uses, so in `lead` mode it replaces that block (a later block with a header
+already held is skipped by the merge).
+
+Read-only git, deterministic, nothing printed when no commit matches or the brief already holds a history block."""
+import json
+import re
+import subprocess
+import sys
+
+MESSAGE_LINES = 34
+NUMBERS = re.compile(r"\d(\.\d+)?\s*(±|x\b|times|%|ms\b)")
+FENCED_KEEP = 6
+PATCH_BYTES = 3300
+LOCK_LINES = 6
+LINE_CHARS = 150
+LOCKS = re.compile(r"(^|/)(Cargo\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|go\.sum|poetry\.lock|"
+                   r"uv\.lock|Gemfile\.lock|composer\.lock|Pipfile\.lock)$|\.min\.(js|css)$|\.snap$")
+MANIFEST = re.compile(r"(^|/)(Cargo\.toml|package\.json|pyproject\.toml|go\.mod|build\.gradle|pom\.xml|Gemfile)$")
+
+
+def git(root, *args):
+    return subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=20).stdout
+
+
+def find_commit(root, prompt):
+    words = [w for w in dict.fromkeys(re.findall(r"[a-z]{5,}", prompt.lower()))]
+    messages = git(root, "log", "-i", "-n", "20000", "--format=%B%x00").lower().split("\0")
+    counts = {w: sum(w in m for m in messages) for w in words[:24]}
+    words = sorted((w for w in words if counts.get(w)), key=lambda w: (counts[w], w))
+    for phrase in [q.strip() for q in re.findall(r"[\"'`]([^\"'`]{8,120})[\"'`]", prompt)]:
+        out = git(root, "log", "-i", "--fixed-strings", "-n", "6", "--format=%h", f"--grep={phrase}").split()
+        if out:
+            return out[0], words
+    for k in (3, 2):   # a single rare word names no commit: stay silent rather than show a neighbour
+        out = git(root, "log", "-i", "--all-match", "-n", "6", "--format=%h", *[f"--grep={w}" for w in words[:k]]).split()
+        if out and words:
+            return out[0], words
+    return None, words
+
+
+def message(root, sha):
+    lines = git(root, "show", "-s", "--format=%h %ad %an%n%B", "--date=short", sha).strip().splitlines()
+    out, fenced, kept = lines[:1], False, 0
+    for line in lines[1:]:
+        if line.startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            # Command output inside the message: keep only the lines that carry a measured result.
+            if kept < FENCED_KEEP and NUMBERS.search(line) and "Summary" not in line and "Range" not in line:
+                kept += 1
+                out.append("  " + line.strip())
+            continue
+        out.append(line)
+    # blank lines between paragraphs are kept once
+    clean = []
+    for line in out:
+        if line.strip() or (clean and clean[-1].strip()):
+            clean.append(line)
+    return clean[:MESSAGE_LINES + 1]
+
+
+def sections(diff):
+    """``[(path, [lines])]`` of a unified diff, in the order git printed it."""
+    out, cur = [], None
+    for line in diff.splitlines():
+        m = re.match(r"diff --git a/(.*) b/(.*)$", line)
+        if m:
+            cur = (m.group(2), [])
+            out.append(cur)
+        elif cur is not None and not line.startswith(("index ", "--- ", "+++ ", "new file", "deleted file", "similarity")):
+            cur[1].append(line)
+    return out
+
+
+def main():
+    req = json.load(sys.stdin)
+    root, prompt, brief = req["repo_root"], req["prompt"], req.get("brief", "")
+    if re.search(r"^### (history|commit )", brief, re.M):
+        return
+    sha, words = find_commit(root, prompt)
+    if not sha:
+        return
+    stat = git(root, "show", "--format=", "--stat=100", "--no-ext-diff", sha).rstrip().splitlines()
+    diff = sections(git(root, "show", "--format=", "-U1", "--no-ext-diff", sha))
+    rank = lambda s: (2 if LOCKS.search(s[0]) else 1 if MANIFEST.search(s[0]) else 0, s[0])
+    out = [f"### commit {sha} — message, files and patch"]
+    out += [l[:LINE_CHARS] for l in message(root, sha)]
+    out += ["files in the commit:"] + [l[:LINE_CHARS] for l in stat]
+    used = sum(len(l) + 1 for l in out)
+    for path, body in sorted(diff, key=rank):
+        if LOCKS.search(path):
+            edits = [l for l in body if l[:1] in "+-"]
+            out.append(f"@@ {path} (lockfile, {len(edits)} edited lines; first ones)")
+            out += [l[:LINE_CHARS] for l in edits[:LOCK_LINES]]
+            continue
+        chunk = [f"@@ {path}"] + [l[:LINE_CHARS] for l in body]
+        cost = sum(len(l) + 1 for l in chunk)
+        if used + cost > PATCH_BYTES + 1500 and used > 0:
+            chunk = chunk[: max(2, (PATCH_BYTES + 1500 - used) // 60)] + ["... (hunks cut)"]
+            cost = sum(len(l) + 1 for l in chunk)
+        used += cost
+        out += chunk
+    # The brief's other blocks are lexical neighbours of the question's words, not the commit: drop them.
+    print("drop: ^(?!history|commit )")
+    print("\n".join(out))
+
+
+main()
