@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use tree_sitter::Parser;
 
 use super::{
-    FileExtraction, ImportBinding, MAX_DEPTH, PARSE_BUDGET, RawSymbol, extract_file,
-    generic_symbol_kind, lang_of, language_for, over_budget, parse_file, parse_within, too_deep,
+    FileExtraction, ImportBinding, MAX_DEPTH, PARSE_BUDGET, RawSymbol, TEST_PARSE_BUDGET,
+    extract_file, generic_symbol_kind, lang_of, language_for, over_budget, parse_file,
+    parse_within, too_deep,
 };
 use crate::store::SymbolKind;
 
@@ -1079,15 +1080,15 @@ fn elixir_remote_call_should_be_recorded_by_its_dotted_target() {
 
 // --- parse budget (#800) ----------------------------------------------------------
 
-/// 262 bytes of `.tsx` (the `Fuzz` job's `timeout-287dc264…` reproducer) on
-/// which TSX error recovery ran for minutes without a budget.
-fn parse_hang_reproducer() -> Vec<u8> {
-    [
-        &b"import fu\x00\x00\x00\xfbon Button({ onClick(}# Pconst Page = (=> save()} /><span>te=t</span></di<Button onClick={() => save()} /><span>te=0</s`an></dn onClick={() => save()} /><span>t"[..],
-        &[0xa9; 72][..],
-        &b"e=t</span></div>;\n"[..],
-    ]
-    .concat()
+/// An ordinary TSX file, big enough that tree-sitter checks its progress
+/// callback many times. The #800 reproducer stopped stalling once
+/// tree-sitter 0.27.1 fixed the hang, so the tests below cancel this file
+/// with a zero budget instead of waiting on a parser bug.
+fn large_tsx() -> Vec<u8> {
+    (0..4000)
+        .map(|i| format!("const a{i} = <span>hi {i}</span>;\n"))
+        .collect::<String>()
+        .into_bytes()
 }
 
 /// Run `work` on its own thread and give it `cap`: a regression that hangs
@@ -1130,13 +1131,10 @@ fn parse_within_should_return_the_tree_of_a_file_inside_its_budget() {
 #[test]
 fn parse_within_should_give_up_once_past_its_budget() {
     let started = Instant::now();
-    let tree = within(Duration::from_secs(15), || {
-        parse_within(
-            &mut tsx_parser(),
-            &parse_hang_reproducer(),
-            Duration::from_millis(100),
-        )
-        .is_some()
+    let content = large_tsx();
+    assert!(parse_within(&mut tsx_parser(), &content, PARSE_BUDGET).is_some());
+    let tree = within(Duration::from_secs(15), move || {
+        parse_within(&mut tsx_parser(), &content, Duration::ZERO).is_some()
     });
     assert!(!tree, "a cancelled parse yields no tree");
     assert!(
@@ -1146,12 +1144,16 @@ fn parse_within_should_give_up_once_past_its_budget() {
     );
 }
 
-/// The production paths, concept and symbol extraction alike, return on the
-/// reproducer: the file just contributes no rows.
+/// The production paths, concept and symbol extraction alike, return on a
+/// file whose parse runs past the budget: the file just contributes no rows,
+/// although the same file yields rows within the budget.
 #[test]
 fn extraction_should_return_on_a_file_that_stalls_the_parser() {
-    let (concepts, extraction) = within(Duration::from_secs(19), || {
-        let content = parse_hang_reproducer();
+    let content = large_tsx();
+    assert!(!crate::concept::extract_concepts("src/fuzz.tsx", &content).is_empty());
+    assert!(extract_file("src/fuzz.tsx", &content).is_some());
+    let (concepts, extraction) = within(Duration::from_secs(19), move || {
+        TEST_PARSE_BUDGET.with(|budget| budget.set(Some(Duration::ZERO)));
         (
             crate::concept::extract_concepts("src/fuzz.tsx", &content),
             extract_file("src/fuzz.tsx", &content).is_some(),
