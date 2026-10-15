@@ -932,8 +932,9 @@ fn claim_mismatch_should_match_files_and_whole_directories() {
 /// says so.
 #[test]
 fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
-    // Written only when Codex has a retired Pixel block to remove.
-    const CONDITIONAL: &[&str] = &[".codex/config.toml"];
+    // Codex writes only when removing a retired block; AGY maintains its
+    // import manifest only when its CLI is available for registration.
+    const CONDITIONAL: &[&str] = &[".codex/config.toml", ".gemini/config/import_manifest.json"];
 
     let home = crate::support::Scratch::for_test("docs-drift", "agents-global");
     for dir in [
