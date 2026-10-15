@@ -94,7 +94,7 @@ answers the 13 questions in a row, so the transcript holds every brief and every
 `$SCRATCH/sets/<source>-<utc>/session/` has `pixel.turns.json` and `no-pixel.turns.json` (per turn: prompt, briefs
 the hooks added, tool calls, last answer; `session-digest.py` makes them), `report.md` (both arms turn by turn,
 briefs included) and the raw `*.session.jsonl` (omitted for `census`, whose prompts are private: there the prompt is
-replaced by its hash; the arena writes no copy of the prompt, but Claude Code's own transcript of each session stays under `~/.claude/projects/` as for any session, and the arena never deletes it). The per-case table counts each case's own turn. This is the input for improving the probes and
+replaced by its hash; the arena writes no copy of the prompt, but Claude Code's own transcript of each session stays under `~/.claude/projects/` as for any session, and the arena never deletes it). A set over several repositories opens one pair per repository: the first pair keeps these names, each later pair adds `-2`, `-3`, ... to its turn and transcript files, and `report.md` holds every pair one after the other. The per-case table counts each case's own turn. This is the input for improving the probes and
 the brief until the questions need no tool calls: read `report.md`, pick a turn whose pixel arm still called tools,
 and take it to the `probe` skill. Claude Code only.
 

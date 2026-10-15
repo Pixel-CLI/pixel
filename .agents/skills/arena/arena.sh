@@ -828,6 +828,22 @@ prewarm_bases() {
 }
 set_unlock_stale() { rm -rf "$SCRATCH"/setws/*.lock; }
 
+session_pair_write() { # $1 source, $2 pair number, $3 first case of the pair, $4 pixel workspace, $5 no-pixel workspace
+  local sd="$SET_OUT/session" hide='' sfx='' pt nt
+  pt=$(newest_transcript "$4"); nt=$(newest_transcript "$5")
+  [ -n "$pt" ] && [ -n "$nt" ] || { say "session: no transcript for the pair that starts at $3, not written"; return 0; }
+  [ "$1" != census ] || hide=--hide-prompt
+  [ "$2" = 1 ] || sfx=-$2
+  mkdir -p "$sd"
+  if [ "$1" != census ]; then
+    cp "$pt" "$sd/pixel.session$sfx.jsonl"; cp "$nt" "$sd/no-pixel.session$sfx.jsonl"
+  fi
+  python3 -I "$SELF_DIR/session-digest.py" "$pt" $hide >"$sd/pixel.turns$sfx.json"
+  python3 -I "$SELF_DIR/session-digest.py" "$nt" $hide >"$sd/no-pixel.turns$sfx.json"
+  if [ "$2" = 1 ]; then : >"$sd/report.md"; else printf '\n---\n\nPair %s, from case %s\n\n' "$2" "$3" >>"$sd/report.md"; fi
+  python3 -I "$SELF_DIR/session-digest.py" "$pt" $hide --md "$nt" >>"$sd/report.md"
+}
+
 cmd_run_set() {
   local source=${1:-}; [ -n "$source" ] || die 'run-set needs a source: catalog, census or bench'; shift
   local bin='' sha='' timeout=600 extra='' parts=3 only='' baseline_file='' cross=0 here=${ARENA_HERE:-$([ -n "${HERDR_PANE_ID:-}" ] && echo 1 || echo 0)}
@@ -867,7 +883,7 @@ cmd_run_set() {
   SET_CASE=''; SET_PIDS=''; SET_PREWARM=''
   local cases; cases=$(set_cases "$source" "$sha")
   [ -n "$cases" ] || die "the source $source has no cases"
-  local id repo srcdir csha prompt n=0 turn=0 pair_dir total live_repo='' live_case='' runid run_dir pws nws ph nh hookbin tab_id p_pane n_pane reuse=${ARENA_REUSE:-1}
+  local id repo srcdir csha prompt n=0 turn=0 pair_k=0 pair_first='' pair_dir total live_repo='' live_case='' runid run_dir pws nws ph nh hookbin tab_id p_pane n_pane reuse=${ARENA_REUSE:-1}
   total=$(printf '%s\n' "$cases" | awk -F'\t' -v o="$only" 'BEGIN{split(o,a,","); for(i in a) w[a[i]]=1} o=="" || ($1 in w) {c++} END{print c+0}')
   say "set $source: $total case(s), pixel binary ${bin_hash:0:12}${extra:+, brief extra: $extra}; output $SET_OUT"
   set_unlock_stale
@@ -885,6 +901,7 @@ cmd_run_set() {
     # --here keeps the finished case's panes until the next one opens its pair;
     # a pair for this same case left by an earlier run is always stale.
     if [ "$reused" = 0 ]; then
+      [ "${ARENA_CLEAR:-1}" = 1 ] || [ -z "$live_repo" ] || session_pair_write "$source" "$pair_k" "$pair_first" "$pws" "$nws"
       [ -z "$live_case" ] || close_case_tab "$live_case"
       [ "$here" != 1 ] || close_case_tab "$id"
     fi
@@ -899,7 +916,7 @@ cmd_run_set() {
     hd pane run "$n_pane" "echo 'arena: $id no-pixel arm: waiting for the clone ...'" >/dev/null
     set_base "$repo" "$srcdir" "$csha" "$bin" "$bin_hash"
     tm_base=$(date +%s)
-    runid="$id-$(date -u +%Y%m%dT%H%M%SZ)"; run_dir="$SCRATCH/runs/$runid"; pair_dir=$run_dir; turn=1
+    runid="$id-$(date -u +%Y%m%dT%H%M%SZ)"; run_dir="$SCRATCH/runs/$runid"; pair_dir=$run_dir; turn=1; pair_k=$((pair_k + 1)); pair_first=$id
     pws="$run_dir/pixel/ws"; nws="$run_dir/no-pixel/ws"; ph="$run_dir/pixel/codex-home"; nh="$run_dir/no-pixel/codex-home"
     mkdir -p "$run_dir/pixel" "$run_dir/no-pixel"
     # Fresh copy-on-write clones per case: the indexed one for the pixel arm, a bare one for the other.
@@ -1023,17 +1040,9 @@ cmd_run_set() {
   [ "$here" = 1 ] || [ -z "$live_case" ] || close_case_tab "$live_case"
   local rr=''
   if [ "${ARENA_CLEAR:-1}" = 0 ] && [ -n "$pws" ]; then
-    local sd="$SET_OUT/session" hide=''
-    [ "$source" != census ] || hide=--hide-prompt
-    mkdir -p "$sd"
-    if [ "$source" != census ]; then
-      cp "$(newest_transcript "$pws")" "$sd/pixel.session.jsonl"; cp "$(newest_transcript "$nws")" "$sd/no-pixel.session.jsonl"
-    fi
-    python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$pws")" $hide >"$sd/pixel.turns.json"
-    python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$nws")" $hide >"$sd/no-pixel.turns.json"
-    python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$pws")" $hide --md "$(newest_transcript "$nws")" >"$sd/report.md"
+    session_pair_write "$source" "$pair_k" "$pair_first" "$pws" "$nws"
     rr=$(cd "$SELF_DIR/../../.." && pwd)/.arena-reports/${SET_OUT##*/}
-    mkdir -p "$rr" && cp "$sd"/* "$rr"/ || true
+    mkdir -p "$rr" && cp "$SET_OUT/session"/* "$rr"/ || true
     say "session: $rr/report.md (every brief and tool call, turn by turn)"
   fi
   rm -f "$SET_PID_FILE"

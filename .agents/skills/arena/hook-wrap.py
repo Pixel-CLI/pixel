@@ -74,9 +74,10 @@ state = {"mode": "pass"}
 
 def context_of(text):
     try:
-        return json.loads(text)["hookSpecificOutput"].get("additionalContext", "") if text.strip() else ""
+        value = json.loads(text)["hookSpecificOutput"].get("additionalContext", "") if text.strip() else ""
     except (ValueError, KeyError, TypeError):
         return ""
+    return value if isinstance(value, str) else ""
 
 
 try:
@@ -84,6 +85,8 @@ try:
     if not isinstance(body, dict) or not isinstance(body.get("hookSpecificOutput"), dict):
         body = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ""}}
     first = body["hookSpecificOutput"].get("additionalContext", "")
+    if not isinstance(first, str):
+        first = ""
     # The probes read the WHOLE brief, not part 1's slice: run the real parts 2..N (they find part 1's stored brief)
     # and join the slices, then split the result over the parts again.
     count = int(args[args.index("--part") + 1].split("/")[1]) if "--part" in args else 1
