@@ -822,7 +822,8 @@ fn global_install_removes_the_cursor_zcode_and_antigravity_integrations_an_earli
     assert_eq!(red.status, CheckStatus::Red, "{red:?}");
     assert!(
         red.reason.as_deref().is_some_and(|reason| {
-            reason.contains("Antigravity Pixel metrics plugin incomplete")
+            reason.contains("retired Pixel Antigravity integration")
+                && reason.contains("pixel-guard")
         }),
         "{red:?}"
     );
@@ -978,10 +979,10 @@ fn doctor_should_require_brief_and_flag_unsupported_global_metrics_hook() {
     let stale = doctor_hooks();
     assert_eq!(stale.status, CheckStatus::Red, "{stale:?}");
     assert!(
-        stale
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("unsupported global Antigravity metrics relay")),
+        stale.reason.as_deref().is_some_and(|reason| {
+            reason.contains("retired Pixel Antigravity integration")
+                && reason.contains("pixel-metrics")
+        }),
         "doctor identifies the unsupported global relay: {stale:?}"
     );
 
