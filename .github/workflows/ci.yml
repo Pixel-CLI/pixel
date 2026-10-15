@@ -202,7 +202,7 @@ jobs:
           ^Cargo\.(toml|lock)$
           ^\.cargo/
           ^\.config/
-          ^deny\.toml$
+          ^\.config/deny\.toml$
           ^rust-toolchain
           ^(README|ARCHITECTURE|AGENTS|CHANGELOG)\.md$
           ^\.github/CONTRIBUTING\.md$
@@ -246,7 +246,6 @@ jobs:
           ^eval/
           ^\.cargo/mutants\.toml$
           (^|/)Cargo\.toml$
-          ^Cross\.toml$
           ^crates/pixel-install/assets/pi-pixel\.ts$
           EOF
 
@@ -255,7 +254,7 @@ jobs:
           cat > deps.re <<'EOF'
           (^|/)Cargo\.toml$
           ^Cargo\.lock$
-          ^deny\.toml$
+          ^\.config/deny\.toml$
           ^osv-scanner\.toml$
           ^scripts/check-advisory-ignores\.py$
           EOF
@@ -555,7 +554,7 @@ jobs:
         run: python3 scripts/test-harness-grid-input.py
 
       # What reproducible-build.yml's proof depends on: the commit's time,
-      # both path remaps, Cross.toml forwarding SOURCE_DATE_EPOCH, the
+      # both path remaps, workspace.metadata.cross forwarding SOURCE_DATE_EPOCH, the
       # environment set before the cache and the build in the three
       # workflows, one pinned cross, the release command.
       - name: Reproducible release build contract (disposable repo)
@@ -757,8 +756,8 @@ jobs:
       # majors of one crate outside the two embedding stacks, crates.io as
       # the only source. Every exception is documented in the file. The
       # advisory database is fetched by cargo-deny itself.
-      - name: cargo deny check
-        run: cargo deny check
+      - name: cargo deny check --config .config/deny.toml
+        run: cargo deny check --config .config/deny.toml
 
       # Scorecard's Vulnerabilities check reads osv-scanner.toml, not
       # deny.toml: the two must accept the same advisories.

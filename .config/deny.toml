@@ -1,7 +1,7 @@
 # cargo-deny policy (https://embarkstudios.github.io/cargo-deny/). CI runs
 # `cargo deny check` on every push and pull request (the `deny` job in
 # .github/workflows/ci.yml); locally: `cargo install --locked cargo-deny`,
-# then `cargo deny check`. Every exception below states why it exists, so a
+# then `cargo deny --config .config/deny.toml check`. Every exception below states why it exists, so a
 # reader can tell a decision from an oversight; remove one when its reason
 # no longer holds (cargo-deny warns about an unused entry).
 

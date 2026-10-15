@@ -26,7 +26,7 @@ checklist below defines readiness to merge, with required gates run in CI.
 - [ ] `cargo fmt --all -- --check` exits 0.
 - [ ] `cargo test --workspace` exits 0.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
-- [ ] `cargo deny check` exits 0 (skip when neither `Cargo.lock` nor `deny.toml` changed); a new advisory exception in `deny.toml` carries its reason and is repeated in `osv-scanner.toml` (`python3 scripts/check-advisory-ignores.py`).
+- [ ] `cargo deny check --config .config/deny.toml` exits 0 (skip when neither `Cargo.lock` nor `.config/deny.toml` changed); a new advisory exception in `.config/deny.toml` carries its reason and is repeated in `osv-scanner.toml` (`python3 scripts/check-advisory-ignores.py`).
 - [ ] New behaviour has a test that fails if the behaviour is removed.
 - [ ] Every new source file (`.rs`, `.py`, `.sh`, `.ts`, `.js`, `.mjs`, `Cargo.toml`, a workflow, a hook under `.githooks/`) opens with `SPDX-FileCopyrightText: The Pixel contributors` and `SPDX-License-Identifier: MIT` in its line comment, after any shebang; `python3 scripts/check-spdx.py --fix` adds them, and CI runs the check on every diff. The script lists the exclusions and their reasons.
 - [ ] Normal CI gates pass on the PR head. Mutations are post-merge nightly feedback, not a pull-request gate (see "Mutation testing").
@@ -91,7 +91,7 @@ cargo fmt --all -- --check
 cargo nextest run --workspace --profile ci   # or: cargo test --workspace
 cargo test --workspace --doc                 # nextest does not run doctests
 cargo clippy --workspace --all-targets -- -D warnings
-cargo deny check                             # dependency policy, see below
+cargo deny check --config .config/deny.toml                             # dependency policy, see below
 ```
 
 CI runs the tests through [cargo-nextest](https://nexte.st) (`cargo install
@@ -117,20 +117,20 @@ workspace to zero on it in the same PR and add it to the table with its
 one-line reason; the comment at the end of the table lists the pedantic lints
 evaluated and left out, with their site counts.
 
-The dependency policy is `deny.toml`, checked by
+The dependency policy is `.config/deny.toml`, checked by
 [cargo-deny](https://embarkstudios.github.io/cargo-deny/) (`cargo install
 --locked cargo-deny`): RustSec advisories including unmaintained crates,
 an allow-list of permissive licences, no two majors of one crate (the two
 embedding stacks excepted), crates.io as the only source. A finding is fixed
-by changing the dependency, or documented in `deny.toml` next to the
+by changing the dependency, or documented in `.config/deny.toml` next to the
 exception with its reason; the CI job fails on anything else. `cargo deny
 check` needs the network for the advisory database and is not part of
-`scripts/gates.sh`. An advisory accepted in `deny.toml` is also listed, with
+`scripts/gates.sh`. An advisory accepted in `.config/deny.toml` is also listed, with
 its reason, in `osv-scanner.toml`: OpenSSF Scorecard scans `Cargo.lock` with
-osv-scanner, which never reads `deny.toml`, and the same CI job runs
+osv-scanner, which never reads `.config/deny.toml`, and the same CI job runs
 `scripts/check-advisory-ignores.py` to fail when the two lists differ.
-The CI job only runs when `Cargo.lock` or `deny.toml` changes, so the release
-workflow runs `cargo deny check` again on the tag, before anything is built:
+The CI job only runs when `Cargo.lock` or `.config/deny.toml` changes, so the release
+workflow runs `cargo deny check --config .config/deny.toml` again on the tag, before anything is built:
 an advisory published since the last dependency change blocks the release
 until it is fixed or accepted as above.
 
@@ -170,7 +170,7 @@ three release lanes (musl x86_64 and aarch64 through `cross`,
 `aarch64-apple-darwin` natively) on every push to `main`, saving the cache
 the tag's build restores, and on pull requests
 that touch a Rust-affecting path (`crates/`, `Cargo.*`, `.cargo/`,
-`deny.toml`, the workflow itself); a docs, prompt or script PR skips it, and
+`.config/deny.toml`, the workflow itself); a docs, prompt or script PR skips it, and
 so does a `release-x.y.z` prepare PR into `main`, whose merge commit's push
 run is the one the tag waits for. A pull request into `main` builds the
 `dev-release` profile (no thin LTO, 16 codegen units): it proves the same
@@ -189,11 +189,11 @@ cross build --release --no-default-features --features model2vec \
 The `Fuzz` workflow (`.github/workflows/fuzz.yml`) runs every cargo-fuzz
 target under `fuzz/` for 60 seconds on a pull request that touches `fuzz/`,
 `pixel-graph`, `pixel-index`, `pixel-git`, the root `Cargo.toml` or
-`deny.toml`, for 600 seconds weekly, and for 120 seconds on every release tag,
+`.config/deny.toml`, for 600 seconds weekly, and for 120 seconds on every release tag,
 before `release.yml` builds anything. A crash fails it and uploads the
 reproducer as the `fuzz-artifacts-*` artifact. `fuzz/` is its own
 workspace, so the gates above never build it; the workflow runs `cargo deny`
-on it with the root `deny.toml` (the `libfuzzer-sys` NCSA licence exception
+on it with the root `.config/deny.toml` (the `libfuzzer-sys` NCSA licence exception
 lives there);
 to fuzz locally (nightly and `cargo install cargo-fuzz`), or to replay a
 downloaded crash:

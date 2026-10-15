@@ -38,7 +38,7 @@ on:
       - "crates/pixel-index/**"
       - "crates/pixel-git/**"
       - "Cargo.toml"
-      - "deny.toml"
+      - ".config/deny.toml"
   schedule:
     - cron: "23 3 * * 0"
   workflow_dispatch:
@@ -103,7 +103,7 @@ jobs:
           fallback: cargo-install
 
       # The root `cargo deny check` sees the root workspace only; this one
-      # applies the same deny.toml (advisories, licences, sources,
+      # applies the same .config/deny.toml (advisories, licences, sources,
       # duplicates) to what the fuzz build compiles and runs.
       - name: Install cargo-deny
         uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
@@ -111,7 +111,7 @@ jobs:
           tool: cargo-deny
 
       - name: Fuzz dependency policy
-        run: cargo deny --manifest-path fuzz/Cargo.toml --config deny.toml check
+        run: cargo deny --manifest-path fuzz/Cargo.toml check --config .config/deny.toml
 
       - name: Restore the corpus
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
