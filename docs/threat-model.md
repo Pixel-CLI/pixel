@@ -120,6 +120,17 @@ no longer parse: `pixel run-hook` prints an error on stderr and exits 0, so a
 registration an old install left behind can neither block a host nor add text
 to its context.
 
+On a code prompt in a repository with no index, `prompt-submit` also starts
+one detached `pixel prepare-repo <root>` (`execution_brief::chain::lazy_index`
+through `spawn_detached`): the running binary with fixed arguments, stdin,
+stdout and stderr null, in its own process group. The hook neither waits for
+the build nor checks that it succeeded, so a later prompt may still find no
+index (the build failed or is running) and decline again. The root is the repository the payload's agent-controlled `cwd`
+resolves to, the same one the brief reads; a continuation, a prompt with no
+code signal and any other decline start nothing, and the index build lock
+serializes overlapping starts. The build is the ordinary indexing of 3.4 and
+3.5, writing only under that repository's `.pixel/`.
+
 The active `metrics` hook relays only a finalized Pixel invocation's metric,
 correlated to its tool call, rather than a global latest record. Claude Code
 and Codex receive a `systemMessage`. Antigravity returns `{}` at `PostToolUse`
@@ -178,6 +189,15 @@ The verified-history store (`.pixel/classify-history.jsonl`,
 than read; the write path creates `.pixel/` with `sidecar::private_dir`; and
 `save` replaces the file through `nofollow::write_replace`, so a pre-planted
 `.tmp` symlink cannot redirect the write.
+A brief split over several prompt-submit hooks is stored for the parts that
+print it under `.pixel/brief-parts/` (`brief_parts`): the file name is the
+first 16 hex digits of the SHA-256 of the host's session id (of the empty
+string when the host sends none) and the SHA-256 of the prompt, so no host
+text reaches a path; the store refuses a `.pixel` or
+`brief-parts` directory that is a symbolic link, writes with mode 0600
+through `nofollow::write_replace`, and every part-1 write deletes entries
+older than one hour. The other parts only read their slice, bounded by
+`PART_CHARS`.
 
 ### 3.6 Git operations (B1, B2)
 
