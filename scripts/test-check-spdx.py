@@ -16,7 +16,7 @@ import sys
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).with_name("check-spdx.py")
+SCRIPT = Path(__file__).parent / 'ci' / 'check-spdx.py'
 HEADER_RS = "// SPDX-FileCopyrightText: The Pixel contributors\n// SPDX-License-Identifier: MIT\n"
 
 

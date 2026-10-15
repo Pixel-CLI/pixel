@@ -98,7 +98,8 @@ mod tests {
 
     use super::*;
 
-    const JSON: &str = include_str!("../../../../scripts/bench/research-gate/results/gate-model.json");
+    const JSON: &str =
+        include_str!("../../../../scripts/bench/research-gate/results/gate-model.json");
 
     fn model() -> Value {
         serde_json::from_str(JSON).unwrap()

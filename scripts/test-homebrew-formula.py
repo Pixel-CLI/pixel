@@ -33,7 +33,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCRIPT = HERE / "homebrew-formula.py"
+SCRIPT = HERE / "release" / "homebrew-formula.py"
 TEMPLATE = HERE / "fixtures/homebrew/pixel.rb.template"
 TAG = "v9.8.7"
 TARGETS = ("aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl")

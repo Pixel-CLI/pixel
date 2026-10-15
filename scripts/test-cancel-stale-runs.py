@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "cancel-stale-runs.sh"
+SCRIPT = ROOT / "scripts" / "ci" / "cancel-stale-runs.sh"
 
 STUB_GH = r"""#!/usr/bin/env bash
 # Answers `gh api` the way cancel-stale-runs.sh reads it (its --jq output).

@@ -600,7 +600,7 @@ class FragmentContract(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix="pixel-prepare-check-")
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        (root / ".github/changelog.d").mkdir()
+        (root / ".github/changelog.d").mkdir(parents=True)
         for name, text in fragments.items():
             (root / ".github/changelog.d" / name).write_text(text)
         (root / "CHANGELOG.md").write_text(self.CHANGELOG if changelog is None else changelog)

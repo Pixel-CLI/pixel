@@ -112,7 +112,7 @@ for path in args:
         # An absolute shell: a restricted PATH (restricted_install) does not
         # carry one.
         return subprocess.run(
-            ["/bin/sh", str(Path(__file__).with_name("install.sh"))],
+            ["/bin/sh", str(Path(__file__).parent / 'release' / 'install.sh')],
             env=self.env, capture_output=True, text=True, timeout=15,
         )
 

@@ -34,7 +34,7 @@ import tempfile
 import time
 import unittest
 
-SWARM = Path(__file__).with_name("pr-swarm.sh")
+SWARM = Path(__file__).parent / 'dev' / 'pr-swarm.sh'
 MARKER = "pr-swarm-contract"
 
 # Every rmux subcommand that changes a pane or a layout. A reconcile over

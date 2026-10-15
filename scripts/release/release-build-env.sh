@@ -14,7 +14,7 @@
 #   (the release profile keeps symbols: strip = "none"). Under cross the
 #   container sees the checkout at its host path and CARGO_HOME at /cargo,
 #   which the second flag already names; cross forwards RUSTFLAGS by itself
-#   and Cross.toml forwards SOURCE_DATE_EPOCH.
+#   and [workspace.metadata.cross] forwards SOURCE_DATE_EPOCH.
 #
 # release-build.yml, cross-build.yml (whose cache the release build restores:
 # rust-cache hashes RUSTFLAGS into its key) and reproducible-build.yml all run

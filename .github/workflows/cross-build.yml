@@ -28,7 +28,7 @@ on:
       - "Cargo.*"
       - "scripts/release/release-build-env.sh"
       - "crates/**"
-      - ".config/deny.toml"
+      - "deny.toml"
       - "rust-toolchain*"
 
 # A new push to a pull request cancels the run still in flight for its

@@ -202,7 +202,7 @@ jobs:
           ^Cargo\.(toml|lock)$
           ^\.cargo/
           ^\.config/
-          ^\.config/deny\.toml$
+          ^deny\.toml$
           ^rust-toolchain
           ^(README|ARCHITECTURE|AGENTS|CHANGELOG)\.md$
           ^\.github/CONTRIBUTING\.md$
@@ -254,7 +254,7 @@ jobs:
           cat > deps.re <<'EOF'
           (^|/)Cargo\.toml$
           ^Cargo\.lock$
-          ^\.config/deny\.toml$
+          ^deny\.toml$
           ^osv-scanner\.toml$
           ^scripts/check-advisory-ignores\.py$
           EOF
@@ -756,8 +756,8 @@ jobs:
       # majors of one crate outside the two embedding stacks, crates.io as
       # the only source. Every exception is documented in the file. The
       # advisory database is fetched by cargo-deny itself.
-      - name: cargo deny check --config .config/deny.toml
-        run: cargo deny check --config .config/deny.toml
+      - name: cargo deny check
+        run: cargo deny check
 
       # Scorecard's Vulnerabilities check reads osv-scanner.toml, not
       # deny.toml: the two must accept the same advisories.

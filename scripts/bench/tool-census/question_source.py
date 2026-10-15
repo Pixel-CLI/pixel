@@ -40,7 +40,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parent.parent
+REPO = HERE.parents[2]
 BENCH_DIR = REPO / "eval" / "brief-bench"
 DEFAULT_QUESTIONS = BENCH_DIR / "questions.jsonl"
 CENSUS_DIRS = tuple(Path(p) for p in (os.environ.get("PIXEL_CENSUS_DIR"), HERE) if p)

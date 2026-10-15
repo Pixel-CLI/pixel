@@ -24,7 +24,7 @@ import subprocess
 import tempfile
 import unittest
 
-RECORDER = Path(__file__).with_name("harness-recorder.sh")
+RECORDER = Path(__file__).parent / 'dev' / 'harness-recorder.sh'
 MARKER = "harness-recorder-contract"
 
 # A minimal but valid asciicast v3 file: a JSON header plus one output event.

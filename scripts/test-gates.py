@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 import unittest
 
-GATES = Path(__file__).with_name("gates.sh")
+GATES = Path(__file__).parent / "ci" / "gates.sh"
 
 
 class GatesContract(unittest.TestCase):
@@ -24,7 +24,7 @@ class GatesContract(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.repo = self.root / "repo"
-        (self.repo / "scripts").mkdir(parents=True)
+        (self.repo / "scripts" / "ci").mkdir(parents=True)
         shutil.copy(GATES, self.repo / "scripts/ci/gates.sh")
         # gates.sh runs the repository's script contracts before the cargo
         # gates. Stub them here: this fixture asserts that gates.sh invokes

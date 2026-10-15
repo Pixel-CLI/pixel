@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).resolve().parent / "release-prepare-only.py"
+SCRIPT = Path(__file__).resolve().parent / "release" / "release-prepare-only.py"
 spec = importlib.util.spec_from_file_location("release_prepare_only", SCRIPT)
 rpo = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rpo)

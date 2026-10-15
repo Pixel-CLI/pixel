@@ -54,8 +54,8 @@ class HarnessGridPrInput(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        scripts = self.root / "scripts"
-        scripts.mkdir()
+        scripts = self.root / "scripts" / "dev"
+        scripts.mkdir(parents=True)
         self.calls = self.root / "calls.txt"
         stub = scripts / "harness-sandbox-shoot.sh"
         stub.write_text('#!/bin/sh\nprintf "%s|%s\\n" "$1" "$2" >> "$CALLS"\n')

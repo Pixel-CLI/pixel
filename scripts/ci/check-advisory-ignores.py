@@ -62,7 +62,7 @@ def main(argv):
         print("usage: check-advisory-ignores.py [DENY_TOML OSV_SCANNER_TOML]", file=sys.stderr)
         return 2
     deny_path, osv_path = (Path(argv[1]), Path(argv[2])) if len(argv) == 3 else (
-        ROOT / ".config/deny.toml", ROOT / "osv-scanner.toml")
+        ROOT / "deny.toml", ROOT / "osv-scanner.toml")
     deny, found = problems(tomllib.loads(deny_path.read_text()), tomllib.loads(osv_path.read_text()))
     for line in found:
         print(line, file=sys.stderr)

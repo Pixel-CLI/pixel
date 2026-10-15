@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCRIPT = HERE / "homebrew-core-formula.py"
+SCRIPT = HERE / "release" / "homebrew-core-formula.py"
 TEMPLATE = HERE / "fixtures/homebrew/pixel-core.rb.template"
 TAG_URL = "https://github.com/Pixel-CLI/pixel/archive/refs/tags/v9.8.7.tar.gz"
 

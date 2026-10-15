@@ -26,7 +26,7 @@ import subprocess
 import tempfile
 import unittest
 
-CLEAN = Path(__file__).with_name("clean.sh")
+CLEAN = Path(__file__).parent / 'dev' / 'clean.sh'
 
 # The fixture's ignore rules, deliberately not a copy of the repository's:
 # DEPENDENCIES.md is missing from it so that a name clean.sh collects is, in
@@ -58,7 +58,7 @@ class CleanContract(unittest.TestCase):
         # the script matches paths it built against paths git printed.
         self.root = Path(self.tmp.name).resolve()
         self.repo = self.root / "repo"
-        (self.repo / "scripts").mkdir(parents=True)
+        (self.repo / "scripts" / "dev").mkdir(parents=True)
         shutil.copy(CLEAN, self.repo / "scripts/dev/clean.sh")
         (self.repo / ".gitignore").write_text(IGNORES)
         (self.repo / "src").mkdir()

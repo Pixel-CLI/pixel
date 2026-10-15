@@ -69,8 +69,8 @@ jobs:
         with:
           tool: cargo-deny
 
-      - name: Dependency policy (cargo deny check --config .config/deny.toml)
-        run: cargo deny check --config .config/deny.toml
+      - name: Dependency policy (cargo deny check)
+        run: cargo deny check
 
       - name: Test
         run: cargo test --workspace --locked
