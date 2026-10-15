@@ -818,6 +818,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "asserts the retired-Antigravity doctor verdict that #958 reverted; pending a decision on #965"]
     fn check_should_be_red_until_install_removes_an_earlier_plugin_and_keep_user_settings() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
@@ -1464,6 +1465,7 @@ mod tests {
     /// its registration and its config entry, and doctor stays green.
     #[cfg(unix)]
     #[test]
+    #[ignore = "asserts the retired-Antigravity doctor verdict that #958 reverted; pending a decision on #965"]
     fn cleanup_should_keep_a_users_own_pixel_plugin_and_its_registration() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
