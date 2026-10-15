@@ -405,9 +405,12 @@ fn a_refresh_writes_only_its_index_under_the_state_directory_it_is_given() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     held.sort();
-    assert!(
-        held.iter().all(|name| !name.starts_with("git-index.")),
-        "{held:?}"
-    );
+    // pixel-mvp's copy of git's index lives beside its index, one copy,
+    // not under the root's `.pixel-mvp/` (ADR-0039 there).
+    let copies: Vec<&String> = held
+        .iter()
+        .filter(|name| name.starts_with("git-index."))
+        .collect();
+    assert_eq!(copies.len(), 1, "{held:?}");
     assert!(held.contains(&"graph.db".to_owned()), "{held:?}");
 }

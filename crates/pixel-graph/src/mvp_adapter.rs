@@ -288,7 +288,8 @@ pub fn refresh_changes(repo: &Path, state: &Path) -> Result<(mvp_store::Store, C
     }
     std::fs::create_dir_all(state)?;
     let mut writer = mvp_store::Writer::open(state, Some(WAIT))?;
-    let tree = mvp_index::scan(&root)?;
+    settle(&root, state);
+    let tree = mvp_index::scan_discovered_in(mvp_index::discover(&root)?, &|_| None, state)?;
     let changes = writer.retried(|writer| -> Result<Changes, BoxErr> {
         let indexed = writer.indexed()?;
         // The id the published generation carries: its files, extractor
@@ -320,6 +321,41 @@ pub fn refresh_changes(repo: &Path, state: &Path) -> Result<(mvp_store::Store, C
     })?;
     drop(writer);
     Ok((mvp_store::Store::open(state)?, changes))
+}
+
+/// Makes or refreshes again pixel-mvp's copy of git's index (ADR-0039 of the
+/// pixel-mvp research repository) for the version of git's index there is
+/// now, under `state` (`state/.pixel-mvp/git-index.*`, beside the index it
+/// gives `Writer::open`), so that the scan reads its stat cache instead of
+/// git's: on a copied or freshly cloned checkout, git's own is stale and
+/// every file is hashed again. Run with the writer's lock held, as
+/// pixel-mvp's own `refresh` does. git's index is never written; a copy
+/// that cannot be made costs only git's stale stat cache.
+fn settle(root: &Path, state: &Path) {
+    use mvp_index::git_index;
+    let Ok(repo) = mvp_index::discover(root) else {
+        return;
+    };
+    let Some(copy) = repo
+        .index()
+        .and_then(|source| git_index::Copy::of(state, source))
+    else {
+        return;
+    };
+    let Some(bytes) = copy.bytes() else {
+        return;
+    };
+    let Some(name) = copy.path().file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let _ = mvp_store::place_git_index(
+        state,
+        name,
+        &bytes,
+        |file| git_index::refresh(repo.root(), file),
+        || copy.holds(),
+        |other| other.starts_with(git_index::PREFIX),
+    );
 }
 
 /// [`refresh_crate`], with what the refresh changed.

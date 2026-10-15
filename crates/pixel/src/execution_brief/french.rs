@@ -18,9 +18,9 @@
 //! - **Words, not stems.** pixel-mvp ranks on its stemmed terms; this brief's
 //!   searches match whole words (`pixel_daemon::relevance` counts a word-bounded
 //!   content match, a symbol name, a path word), so the lexicon's English words
-//!   are written as they are. `mvp_model::Lexicon` hands out stems only (its
-//!   lookup is private at the vendored commit), so [`EnglishWords`] reads the
-//!   same file for the words.
+//!   are written as they are: `Lexicon::english_words`, the lookup
+//!   `prompt_terms` reads the terms of, so the brief's words and pixel-mvp's
+//!   terms come from one lookup and cannot drift apart on a form.
 //! - **Code as typed.** A code-shaped token (`names_code`) or a backticked one
 //!   is kept whole: it is a name in the repository, in any language.
 //! - **The question word.** The gate reads an English question word among the
@@ -31,7 +31,6 @@
 //! The prompt's language is decided on the typed text, so an English prompt
 //! is never rewritten: its brief stays byte for byte what it was.
 
-use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use mvp_model::{Language, Lexicon, fold, language, prompt_terms, sub_words};
@@ -72,59 +71,6 @@ pub(crate) fn enabled(value: Option<&str>) -> bool {
 fn mvp_lexicon() -> &'static Lexicon {
     static READ: OnceLock<Lexicon> = OnceLock::new();
     READ.get_or_init(|| Lexicon::parse(LEXICON))
-}
-
-/// The English words of each French form of the lexicon, as written there:
-/// what [`Lexicon`] holds, without its stemming. A word is looked up as typed
-/// in lower case first, so accents choose ("marché" against "marche"), then
-/// with its accents folded, where the words of every form that folds to it
-/// are merged in file order.
-#[derive(Debug, Default)]
-struct EnglishWords {
-    exact: BTreeMap<String, Vec<String>>,
-    folded: BTreeMap<String, Vec<String>>,
-}
-
-impl EnglishWords {
-    /// Reads `<french>\t<english words, or ->` lines; `#` starts a comment and
-    /// a line of another shape is skipped, as `Lexicon::parse` does.
-    fn parse(text: &str) -> Self {
-        let mut words = Self::default();
-        for line in text.lines().filter(|line| !line.starts_with('#')) {
-            let Some((french, english)) = line.split_once('\t') else {
-                continue;
-            };
-            let english = english.trim();
-            let targets: Vec<String> = if english == "-" {
-                Vec::new()
-            } else {
-                english.split_whitespace().map(str::to_owned).collect()
-            };
-            let french = french.trim().to_lowercase();
-            let merged = words.folded.entry(fold(&french)).or_default();
-            for target in &targets {
-                if !merged.contains(target) {
-                    merged.push(target.clone());
-                }
-            }
-            words.exact.insert(french, targets);
-        }
-        words
-    }
-
-    /// The English words of `word`, `None` when the lexicon does not hold it.
-    fn get(&self, word: &str) -> Option<&[String]> {
-        let word = word.to_lowercase();
-        self.exact
-            .get(&word)
-            .or_else(|| self.folded.get(&fold(&word)))
-            .map(Vec::as_slice)
-    }
-}
-
-fn english_words() -> &'static EnglishWords {
-    static READ: OnceLock<EnglishWords> = OnceLock::new();
-    READ.get_or_init(|| EnglishWords::parse(LEXICON))
 }
 
 /// The text the brief searches and gates on for the typed text `typed`:
@@ -174,7 +120,7 @@ fn push_word(word: &str, out: &mut Vec<String>) {
         }
         return;
     }
-    match english_words().get(word) {
+    match mvp_lexicon().english_words(word) {
         Some(english) => out.extend(english.iter().cloned()),
         None => out.push(fold(word)),
     }
@@ -312,60 +258,17 @@ mod tests {
         assert_eq!(english("merci beaucoup pour tout ça"), None);
     }
 
+    // The brief matches whole words, so it must write the lexicon's words
+    // as written ("marketplace", not its term), and let accents choose
+    // between two forms: "marché" is a market, "marche" a filler.
     #[test]
-    fn the_reader_should_let_accents_choose_and_merge_the_folded_forms() {
-        let words = EnglishWords::parse(
-            "# a comment\twith a tab\nmarche\t-\nmarché\tmarket marketplace\npasse\tpassword pass\npassé\t-\nPassé\tpast\nno tab here\n",
-        );
-        assert_eq!(words.get("# a comment"), None);
-        assert_eq!(words.get("no tab here"), None);
-        assert_eq!(words.get("marche"), Some(&[][..]));
+    fn the_lexicons_whole_words_should_be_written_and_accents_should_choose() {
         assert_eq!(
-            words.get("MARCHÉ"),
-            Some(&["market".to_string(), "marketplace".to_string()][..])
+            english("le marché du vendeur ne marche pas").as_deref(),
+            english("le marché du vendeur").as_deref()
         );
-        // Typed without its accent, a word the lexicon holds only with one
-        // gets the words of every form that folds to it, once each.
-        assert_eq!(
-            words.get("passe"),
-            Some(&["password".to_string(), "pass".to_string()][..])
-        );
-        assert_eq!(
-            words.folded.get("passe").map(Vec::as_slice),
-            Some(
-                &[
-                    "password".to_string(),
-                    "pass".to_string(),
-                    "past".to_string()
-                ][..]
-            )
-        );
-        assert_eq!(words.get("marchés"), None);
-    }
-
-    // The words are the lexicon's own: read for words here, the file gives
-    // the very terms pixel-mvp's reader maps each form to, so the two readers
-    // cannot drift apart on a form.
-    #[test]
-    fn every_form_should_carry_the_words_whose_terms_pixel_mvp_maps_it_to() {
-        let words = english_words();
-        let mvp = mvp_lexicon();
-        assert_eq!(words.exact.len(), mvp.len());
-        let mut compared = 0;
-        for french in words.exact.keys() {
-            let mvp_terms = prompt_terms(french, Language::French, mvp);
-            if sub_words(french).len() != 1 || mvp_terms.is_empty() {
-                continue;
-            }
-            let terms: Vec<String> = words
-                .get(french)
-                .unwrap()
-                .iter()
-                .flat_map(|word| mvp_model::terms(word))
-                .collect();
-            assert_eq!(terms, mvp_terms, "{french}");
-            compared += 1;
-        }
-        assert!(compared > 4_000, "{compared} forms compared");
+        let written = english("le marché du vendeur").unwrap();
+        assert!(written.split(' ').any(|w| w == "marketplace"), "{written}");
+        assert!(!written.contains("marche"), "{written}");
     }
 }

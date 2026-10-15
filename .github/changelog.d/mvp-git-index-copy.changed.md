@@ -1,0 +1,1 @@
+**graph:** pixel-mvp's refresh now keeps its copy of git's index in `.pixel/.pixel-mvp/` and scans through it, as pixel-mvp does on its own; git's index is never written. The French brief reads the lexicon's English words through pixel-mvp's own lookup instead of a second reader of the same file.
