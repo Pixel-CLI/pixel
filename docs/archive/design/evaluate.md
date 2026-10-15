@@ -459,7 +459,7 @@ narrowed to mapped symbols in its name and summary, never by hiding
 omissions.
 
 **Measured 2026-09-26, and the rule applies**
-([docs/bench/evaluate-abstention.md](../bench/evaluate-abstention.md)).
+([docs/bench/evaluate-abstention.md](../../bench/evaluate-abstention.md)).
 Under the whole-change promise, 96 % to 100 % of commits abstain on pixel,
 GitNexus and openclaw, and 68 % on a Rails monolith. Even if docs, tests,
 comments, imports, attributes and assets stopped downgrading, 56 % to 90 %
@@ -554,7 +554,7 @@ below already forbids a synchronous hook in that case.
   Measured on openclaw (43 839 graph files, 2026-09-26): `what-changed`,
   which the diff predicate builds on, took about 100 s per call end to end,
   12 to 20 s of it the incremental graph update
-  ([evaluate-abstention.md](../bench/evaluate-abstention.md#cost)).
+  ([evaluate-abstention.md](../../bench/evaluate-abstention.md#cost)).
 
 ## `call-path` migration
 

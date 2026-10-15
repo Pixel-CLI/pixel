@@ -165,7 +165,7 @@ $ pixel setup --dummy-apply --selected-agents=1 --selected-features=1
 pixel: --selected-agents, --selected-features, --dummy-apply are development-only
 flags, and this build does not have them: `pixel setup` runs the guided wizard in
 a terminal and the unattended installer everywhere else. The flags are live in a
-debug build; docs/design/pixel-setup-plan.md says how to test with them.
+debug build; docs/archive/design/pixel-setup-plan.md says how to test with them.
 ```
 
 Refusing rather than ignoring is the point: an ignored `--dummy-apply` would
@@ -293,7 +293,7 @@ repository state is touched by `pixel setup`.
 - [x] Interactive wizard, drawn like GitButler's: a titled rule for the run, a
       `Step N of 3` banner per question, one checkbox row per option with the
       focused row's help under the list, and a final Apply/Cancel list
-      (`docs/design/but-agent-setup-reference.md`, "The flow"). Two input
+      (`docs/archive/design/but-agent-setup-reference.md`, "The flow"). Two input
       modes over the same rows: on a terminal the arrows move, space toggles,
       `a`/`n` answer all or none, enter continues and esc cancels
       (`prompt_key::{decode_list_byte, ListState}`); where raw mode is
