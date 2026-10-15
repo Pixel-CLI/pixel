@@ -649,10 +649,9 @@ releases deployed, then handles each agent through its own extension point:
   line as an `injectSteps[].ephemeralMessage` and clears the file. Install removes the OpenCode
   `AGENTS.md` block and `plugins/pixel.js` guard, Devin's retired guard hooks
   in `~/.config/devin/config.json`, and any retired Antigravity global metrics
-  hook, and the retired `rules/AGENTS.md` (and its `rules/` dir once empty)
-  from both Antigravity plugin dirs; unrelated user hooks and settings are
-  preserved. `pixel doctor` (`install.antigravity`) flags a leftover
-  `rules/AGENTS.md` and a plugin skill that differs from `PIXEL_SKILL`.
+  hook; unrelated user hooks and settings are preserved. `pixel doctor`
+  (`install.antigravity`) flags a plugin skill that differs from
+  `PIXEL_SKILL`.
 - **zcode, Cursor, Copilot CLI**: nothing is written. Install removes the
   zcode guard in `~/.zcode/cli/config.json`, `~/.cursor/hooks.json` and
   `~/.copilot/hooks/pixel.json` when an earlier release wrote them. `doctor`
