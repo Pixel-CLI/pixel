@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/release-sbom.py, the step release-build.yml runs to
+"""Contract of scripts/release/release-sbom.py, the step release-build.yml runs to
 write the SBOM published beside each release archive, checked without a tag.
 
 What must hold for the SBOM to describe the archive (OSPS-QA-02.02):
@@ -24,7 +24,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent / "release-sbom.py"
+SCRIPT = Path(__file__).resolve().parent / "release" / "release-sbom.py"
 TAG = "v9.8.7"
 TARGET = "x86_64-unknown-linux-musl"
 ROOT_REF = "path+file:///work/crates/pixel#pixel-cli@9.8.7"

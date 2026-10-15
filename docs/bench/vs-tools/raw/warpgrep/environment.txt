@@ -29,6 +29,6 @@ succeeded in both runs.
 
 command:
   MORPH_API_KEY=... MORPH_SDK_DIR=<dir with @morphllm/morphsdk installed> \
-  WARPGREP_SCRIPT=scripts/bench-vs/warpgrep-search.mjs WARPGREP_REPS=2 \
-  python3 scripts/bench-vs/bench-retrieval.py <repo> docs/bench/vs-tools/cases/queries-<lang>.json "$(command -v semble)"
-  python3 scripts/bench-vs/summarize-retrieval.py docs/bench/vs-tools/raw/warpgrep/retrieval-*.json
+  WARPGREP_SCRIPT=scripts/bench/bench-vs/warpgrep-search.mjs WARPGREP_REPS=2 \
+  python3 scripts/bench/bench-vs/bench-retrieval.py <repo> docs/bench/vs-tools/cases/queries-<lang>.json "$(command -v semble)"
+  python3 scripts/bench/bench-vs/summarize-retrieval.py docs/bench/vs-tools/raw/warpgrep/retrieval-*.json

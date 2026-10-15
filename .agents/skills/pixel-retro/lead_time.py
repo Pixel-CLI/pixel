@@ -116,7 +116,7 @@ INTERPRETERS = {"sh", "bash", "zsh", "python", "python3", "timeout", "time", "ni
 def bash_key(command):
     """`cargo nextest run --workspace` → `cargo nextest run`; leading `cd … &&`,
     subshell parentheses and environment assignments dropped, pipes cut. An
-    interpreter or wrapper keeps what it runs: `sh scripts/gates.sh --force`
+    interpreter or wrapper keeps what it runs: `sh scripts/ci/gates.sh --force`
     → `sh gates.sh`, `bash -c 'cargo test -p x'` → `cargo test`."""
     words = []
     for segment in re.split(r"\s*(?:\|\||&&|;|\||\n)\s*", command):

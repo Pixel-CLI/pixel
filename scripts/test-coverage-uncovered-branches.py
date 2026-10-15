@@ -16,7 +16,7 @@ import sys
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).with_name("coverage-uncovered-branches.py")
+SCRIPT = Path(__file__).parent / "ci" / "coverage-uncovered-branches.py"
 
 LCOV = """\
 TN:

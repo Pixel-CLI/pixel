@@ -35,10 +35,10 @@ def check(base, head, tip, merge, maintenance):
     subprocess.run(["git", "merge-base", "--is-ancestor", base, head], check=True, env=GIT_ENV)
     if base == head:
         raise ValueError("prepare head must contain a release commit")
-    scope = Path(__file__).resolve().parents[3] / "scripts/release-prepare-only.py"
+    scope = Path(__file__).resolve().parents[3] / "scripts/release/release-prepare-only.py"
     if not maintenance:
         subprocess.run([sys.executable, str(scope), base, head], check=True, env=GIT_ENV)
-    fragments = git("ls-tree", "-r", "--name-only", head, "changelog.d").splitlines()
+    fragments = git("ls-tree", "-r", "--name-only", head, ".github/changelog.d").splitlines()
     if any(path.endswith(".md") for path in fragments):
         raise ValueError("candidate still contains unreleased changelog fragments")
     if merge is None:

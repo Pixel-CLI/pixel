@@ -394,7 +394,7 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
 /// The token row of a measured whole-file read: both sides, then the saving.
 ///
 /// Counts are UTF-8 bytes divided by four, rounded down, on both sides: the
-/// rule of `scripts/bench-read-savings.sh`, so the line and the published
+/// rule of `scripts/bench/bench-read-savings.sh`, so the line and the published
 /// table can be re-derived with `wc -c` and agree to the token.
 fn measured_read_section(file_bytes: u64, answer_bytes: u64) -> String {
     let full_tok = read_tokens(file_bytes);
@@ -407,7 +407,7 @@ fn measured_read_section(file_bytes: u64, answer_bytes: u64) -> String {
 }
 
 /// Tokens a measured read counts for `bytes` of UTF-8: divided by four,
-/// rounded down, the rule `scripts/bench-read-savings.sh` publishes.
+/// rounded down, the rule `scripts/bench/bench-read-savings.sh` publishes.
 pub fn read_tokens(bytes: u64) -> u64 {
     bytes / 4
 }

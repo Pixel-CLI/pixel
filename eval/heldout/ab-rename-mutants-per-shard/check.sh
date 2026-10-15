@@ -13,9 +13,9 @@ if git grep -n -w MUTANTS_PER_SHARD -- . ':!eval'; then
   echo "FAIL: MUTANTS_PER_SHARD is still spelled above"
   fail=1
 fi
-uses=$(grep -c -w MUTANTS_PER_JOB scripts/mutants-gate.py || true)
+uses=$(grep -c -w MUTANTS_PER_JOB scripts/ci/mutants-gate.py || true)
 if [ "${uses:-0}" -lt 3 ]; then
-  echo "FAIL: scripts/mutants-gate.py names MUTANTS_PER_JOB $uses time(s), expected the definition, the comment and the use"
+  echo "FAIL: scripts/ci/mutants-gate.py names MUTANTS_PER_JOB $uses time(s), expected the definition, the comment and the use"
   fail=1
 fi
 for file in .agents/rules/test-campaigns.md .github/workflows/mutants.yml; do
@@ -23,7 +23,7 @@ for file in .agents/rules/test-campaigns.md .github/workflows/mutants.yml; do
 done
 python3 - <<'PY' || fail=1
 import importlib.util
-spec = importlib.util.spec_from_file_location("gate", "scripts/mutants-gate.py")
+spec = importlib.util.spec_from_file_location("gate", "scripts/ci/mutants-gate.py")
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 assert gate.MUTANTS_PER_JOB == 10, gate.MUTANTS_PER_JOB

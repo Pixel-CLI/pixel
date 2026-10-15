@@ -194,7 +194,7 @@ fn runs_global_guard(entry: &Value, exe: &Path) -> bool {
 }
 
 /// Whether `entry` is the Antigravity prompt brief hook Pixel registered.
-fn is_pixel_brief(entry: &Value, exe: &Path) -> bool {
+pub(crate) fn is_pixel_brief(entry: &Value, exe: &Path) -> bool {
     global_entry_commands(entry).is_some_and(|commands| {
         commands.len() == 1
             && commands.iter().all(|(event, command)| {
@@ -521,8 +521,16 @@ fn install_antigravity_plugin_with_agy(
         });
     }
 
-    for path in [&ide_dir, &cli_dir] {
-        ensure_pixel_plugin_owned(path)?;
+    if let Some(foreign) = foreign_plugins([&ide_dir, &cli_dir]).first() {
+        return Ok(InstallStep {
+            id: "install.antigravity-plugin".into(),
+            status: CheckStatus::Yellow,
+            summary: format!(
+                "kept the user's own plugin at {}; Antigravity metrics relay not installed",
+                foreign.display()
+            ),
+            detail: Some(format!("kept_plugin_path={}", foreign.display())),
+        });
     }
     let config = config_path(home);
     let mut config_value = read_json_object(&config)?;
@@ -559,21 +567,32 @@ fn install_antigravity_plugin_with_agy(
         )?;
         fs::write(path.join("hooks.json"), &hooks_text)?;
     }
-    let registered = run_agy_plugin_with(agy, home, "install", Some(&cli_dir))?;
+    let registration = run_agy_plugin_with(agy, home, "install", Some(&cli_dir));
     config_value["plugins"]["pixel"]["enabled"] = json!(true);
     fs::write(&config, serde_json::to_string_pretty(&config_value)? + "\n")?;
+    let registration_error = registration.as_ref().err().map(ToString::to_string);
+    let registered = registration.unwrap_or(false);
+    let (status, registration_summary) = if let Some(error) = registration_error {
+        (
+            CheckStatus::Yellow,
+            format!("; CLI plugin registration failed: {error}"),
+        )
+    } else if registered {
+        (CheckStatus::Green, " and registered it with agy".into())
+    } else {
+        (
+            CheckStatus::Green,
+            " (agy not found; CLI registration deferred)".into(),
+        )
+    };
     Ok(InstallStep {
         id: "install.antigravity-plugin".into(),
-        status: CheckStatus::Green,
+        status,
         summary: format!(
             "deployed Antigravity metrics plugin to IDE {} and CLI {}{}",
             ide_dir.display(),
             cli_dir.display(),
-            if registered {
-                " and registered it with agy"
-            } else {
-                " (agy not found; CLI registration deferred)"
-            }
+            registration_summary
         ),
         detail: Some(format!(
             "ide_path={}; cli_path={}; agy_registered={registered}",
@@ -608,24 +627,19 @@ fn antigravity_metrics_plugin_hooks(exe: &Path) -> Value {
     })
 }
 
-fn ensure_pixel_plugin_owned(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    if is_pixel_plugin(path) {
-        return Ok(());
-    }
-    Err(crate::InstallError::InvalidSettings {
-        path: path.to_path_buf(),
-        reason: "refusing to overwrite a plugin directory not marked managedBy=\"pixel\"".into(),
-    })
-}
-
 /// `pixel doctor` check: verify both deferred-relay events and plugin setup.
 /// Green-skips when Antigravity is not configured.
 pub fn check_antigravity_install(
     home: &Path,
     exe: &Path,
+) -> std::result::Result<(String, Value), String> {
+    check_antigravity_install_with_agy(home, exe, OsStr::new("agy"))
+}
+
+fn check_antigravity_install_with_agy(
+    home: &Path,
+    exe: &Path,
+    agy: &OsStr,
 ) -> std::result::Result<(String, Value), String> {
     let p_dir = plugin_dir(home);
     let cli_dir = cli_plugin_dir(home);
@@ -643,37 +657,82 @@ pub fn check_antigravity_install(
             detail,
         ));
     }
+    let plugin_dirs = [p_dir.as_path(), cli_dir.as_path()];
+    let has_managed_plugin = plugin_dirs.iter().any(|dir| is_pixel_plugin(dir));
+    let foreign = foreign_plugins(plugin_dirs);
+    let mut retired = Vec::new();
+    if h_path.is_file() {
+        let hooks = read_json_object(&h_path).map_err(|error| error.to_string())?;
+        if hooks
+            .get("pixel-guard")
+            .is_some_and(|entry| is_retired_global_guard(entry, exe))
+        {
+            retired.push(format!("the pixel-guard in {}", h_path.display()));
+        }
+        if hooks
+            .get("pixel-metrics")
+            .is_some_and(|entry| is_pixel_metrics(entry, exe))
+        {
+            retired.push(format!("the pixel-metrics hook in {}", h_path.display()));
+        }
+    }
+    if !has_managed_plugin && foreign.is_empty() && cfg_path.is_file() {
+        let config = read_json_object(&cfg_path).map_err(|error| error.to_string())?;
+        if config
+            .get("plugins")
+            .and_then(|plugins| plugins.get("pixel"))
+            .is_some()
+        {
+            retired.push(format!("the pixel plugin entry in {}", cfg_path.display()));
+        }
+    }
+    if !retired.is_empty() {
+        return Err(format!(
+            "retired Pixel Antigravity integration remains: {} — run `pixel setup` to remove it",
+            retired.join(", ")
+        ));
+    }
+    if !has_managed_plugin {
+        return Ok((
+            "no Pixel plugin or hook; Antigravity keeps its native tools".into(),
+            detail,
+        ));
+    }
+
     let mut missing = Vec::new();
     let expected_hooks = antigravity_metrics_plugin_hooks(exe);
     for (surface, dir) in [("IDE", &p_dir), ("CLI", &cli_dir)] {
         let managed = is_pixel_plugin(dir);
         if !managed {
-            missing.push(if surface == "IDE" {
-                "IDE plugin.json"
-            } else {
-                "CLI plugin.json"
-            });
+            missing.push(format!("{surface} plugin is not managed by Pixel"));
+            continue;
         }
         if fs::read_to_string(dir.join("skills/pixel/SKILL.md"))
             .ok()
             .as_deref()
             != Some(crate::skill::PIXEL_SKILL)
         {
-            missing.push(if surface == "IDE" {
-                "IDE skills/pixel/SKILL.md"
-            } else {
-                "CLI skills/pixel/SKILL.md"
-            });
+            missing.push(
+                if surface == "IDE" {
+                    "IDE skills/pixel/SKILL.md"
+                } else {
+                    "CLI skills/pixel/SKILL.md"
+                }
+                .into(),
+            );
         }
         let installed_hooks = fs::read_to_string(dir.join("hooks.json"))
             .ok()
             .and_then(|text| serde_json::from_str::<Value>(&text).ok());
         if installed_hooks.as_ref() != Some(&expected_hooks) {
-            missing.push(if surface == "IDE" {
-                "IDE hooks.json (metrics relay)"
-            } else {
-                "CLI hooks.json (metrics relay)"
-            });
+            missing.push(
+                if surface == "IDE" {
+                    "IDE hooks.json (metrics relay)"
+                } else {
+                    "CLI hooks.json (metrics relay)"
+                }
+                .into(),
+            );
         }
     }
     let plugin_enabled = fs::read_to_string(&cfg_path)
@@ -682,12 +741,10 @@ pub fn check_antigravity_install(
         .and_then(|v| v.get("plugins")?.get("pixel")?.get("enabled")?.as_bool())
         == Some(true);
     if !plugin_enabled {
-        missing.push("config.json (pixel plugin enabled)");
+        missing.push("config.json (pixel plugin enabled)".into());
     }
-    if agy_pixel_registered_with(OsStr::new("agy"), home).map_err(|error| error.to_string())?
-        == Some(false)
-    {
-        missing.push("Antigravity CLI Pixel plugin registration");
+    if agy_pixel_registered_with(agy, home).map_err(|error| error.to_string())? == Some(false) {
+        missing.push("Antigravity CLI Pixel plugin registration".into());
     }
     if !missing.is_empty() {
         return Err(format!(
@@ -791,6 +848,88 @@ fn remove_antigravity_with_agy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_should_be_red_until_cleanup_removes_an_earlier_guard_and_keeps_user_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let exe = PathBuf::from("/usr/local/bin/pixel");
+        let (summary, _) = check_antigravity_install(home, &exe).unwrap();
+        assert!(summary.contains("skipping"), "{summary}");
+
+        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
+        fs::write(
+            config_path(home),
+            r#"{"plugins":{"other":{"enabled":true},"pixel":{"enabled":true}},"keep":"config"}"#,
+        )
+        .unwrap();
+        let mut hooks = json!({"other-hook": {"enabled": true}});
+        hooks["pixel-guard"] = retired_global_guard("/usr/local/bin/pixel");
+        fs::write(hooks_path(home), serde_json::to_vec(&hooks).unwrap()).unwrap();
+        for dir in [plugin_dir(home), cli_plugin_dir(home)] {
+            fs::create_dir_all(dir.join("rules")).unwrap();
+            fs::write(
+                dir.join("plugin.json"),
+                r#"{"name":"pixel","managedBy":"pixel"}"#,
+            )
+            .unwrap();
+        }
+        let error = check_antigravity_install(home, &exe).unwrap_err();
+        assert!(
+            error.contains("retired Pixel Antigravity integration"),
+            "{error}"
+        );
+        assert!(error.contains("pixel-guard"), "{error}");
+        assert!(
+            !error.contains("plugin entry"),
+            "an enabled managed plugin is not a retired registration: {error}"
+        );
+
+        // No `agy` on this test's PATH lookup: the fake binary name is absent.
+        remove_antigravity_with_agy(home, &exe, false, OsStr::new("pixel-test-no-agy")).unwrap();
+        assert!(!plugin_dir(home).exists());
+        assert!(!cli_plugin_dir(home).exists());
+        let hooks: Value = serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
+        assert_eq!(hooks, json!({"other-hook": {"enabled": true}}));
+        let config: Value = serde_json::from_slice(&fs::read(config_path(home)).unwrap()).unwrap();
+        assert_eq!(config["keep"], "config");
+        assert_eq!(config["plugins"], json!({"other": {"enabled": true}}));
+        let (summary, _) = check_antigravity_install(home, &exe).unwrap();
+        assert!(summary.contains("native tools"), "{summary}");
+
+        // A user-defined `pixel-guard` is theirs: kept, and not reported.
+        let mine = json!({"enabled": true, "PreToolUse": []});
+        fs::write(
+            hooks_path(home),
+            serde_json::to_vec(&json!({"pixel-guard": mine})).unwrap(),
+        )
+        .unwrap();
+        remove_antigravity_with_agy(home, &exe, false, OsStr::new("pixel-test-no-agy")).unwrap();
+        let hooks: Value = serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
+        assert_eq!(hooks["pixel-guard"], mine);
+        assert!(check_antigravity_install(home, &exe).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_should_report_incomplete_pixel_managed_plugin_without_legacy_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
+        let exe = Path::new("/usr/local/bin/pixel");
+        let absent_agy = tmp.path().join("missing-agy");
+        install_antigravity_plugin_with_agy(home, exe, false, absent_agy.as_os_str()).unwrap();
+        fs::remove_file(cli_plugin_dir(home).join("hooks.json")).unwrap();
+
+        let error =
+            check_antigravity_install_with_agy(home, exe, absent_agy.as_os_str()).unwrap_err();
+
+        assert!(
+            error.contains("Antigravity Pixel metrics plugin incomplete"),
+            "{error}"
+        );
+        assert!(error.contains("CLI hooks.json (metrics relay)"), "{error}");
+    }
 
     /// The global `pixel-guard` an install before the plugin wrote: guard on
     /// both pre-events, metrics after each tool.
@@ -1100,6 +1239,96 @@ mod tests {
         assert!(calls.contains("plugin install "));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_plugin_install_should_keep_foreign_plugin_and_return_yellow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
+        let original_config =
+            r#"{"plugins":{"pixel":{"enabled":false},"other":{"enabled":true}},"keep":1}"#;
+        fs::write(config_path(home), original_config).unwrap();
+        let foreign = plugin_dir(home);
+        fs::create_dir_all(&foreign).unwrap();
+        fs::write(foreign.join("plugin.json"), r#"{"name":"pixel"}"#).unwrap();
+        let agy = fake_agy(&tmp.path().join("agy"), r#"{"imports":[{"name":"pixel"}]}"#);
+
+        let step = install_antigravity_plugin_with_agy(
+            home,
+            Path::new("/opt/pixel/pixel"),
+            false,
+            agy.as_os_str(),
+        )
+        .unwrap();
+
+        assert_eq!(step.status, CheckStatus::Yellow);
+        assert!(
+            step.summary.contains(&foreign.display().to_string()),
+            "{}",
+            step.summary
+        );
+        assert_eq!(
+            fs::read_to_string(foreign.join("plugin.json")).unwrap(),
+            r#"{"name":"pixel"}"#
+        );
+        assert!(!cli_plugin_dir(home).exists());
+        assert_eq!(
+            fs::read_to_string(config_path(home)).unwrap(),
+            original_config
+        );
+        assert!(!agy.with_extension("log").exists(), "agy was called");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_plugin_install_should_finish_config_when_agy_registration_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
+        fs::write(
+            config_path(home),
+            r#"{"plugins":{"other":{"enabled":true}},"keep":1}"#,
+        )
+        .unwrap();
+        let agy = tmp.path().join("agy");
+        fs::write(
+            &agy,
+            "#!/bin/sh\nprintf 'registration denied' >&2\nexit 9\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&agy).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&agy, permissions).unwrap();
+
+        let step = install_antigravity_plugin_with_agy(
+            home,
+            Path::new("/opt/pixel/pixel"),
+            false,
+            agy.as_os_str(),
+        )
+        .unwrap();
+
+        assert_eq!(step.status, CheckStatus::Yellow);
+        assert!(
+            step.summary.contains("registration failed"),
+            "{}",
+            step.summary
+        );
+        assert!(
+            step.summary.contains("registration denied"),
+            "{}",
+            step.summary
+        );
+        assert!(plugin_dir(home).join("hooks.json").is_file());
+        assert!(cli_plugin_dir(home).join("hooks.json").is_file());
+        assert_eq!(
+            read_json_object(&config_path(home)).unwrap(),
+            json!({"plugins":{"other":{"enabled":true},"pixel":{"enabled":true}},"keep":1})
+        );
+    }
+
     #[test]
     fn global_guard_is_detected_on_either_pre_event() {
         let guard = json!({"type": "command",
@@ -1368,6 +1597,41 @@ mod tests {
     /// A user's own plugin named `pixel` is not a leftover: install keeps it,
     /// its registration and its config entry, and doctor stays green.
     #[cfg(unix)]
+    #[test]
+    fn cleanup_should_keep_a_users_own_pixel_plugin_and_its_registration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let exe = Path::new("/opt/pixel/pixel");
+        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
+        let config = r#"{"plugins":{"pixel":{"enabled":true}}}"#;
+        fs::write(config_path(home), config).unwrap();
+        let mine = plugin_dir(home);
+        fs::create_dir_all(&mine).unwrap();
+        fs::write(mine.join("plugin.json"), r#"{"name":"pixel"}"#).unwrap();
+        let agy = fake_agy(&tmp.path().join("agy"), r#"{"imports":[{"name":"pixel"}]}"#);
+
+        let step = remove_antigravity_with_agy(home, exe, false, agy.as_os_str()).unwrap();
+
+        assert_eq!(step.status, CheckStatus::Green);
+        assert_eq!(
+            step.summary,
+            format!(
+                "no Antigravity integration found to remove; kept the user's own plugin at {}",
+                mine.display()
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(mine.join("plugin.json")).unwrap(),
+            r#"{"name":"pixel"}"#
+        );
+        assert_eq!(fs::read_to_string(config_path(home)).unwrap(), config);
+        assert!(!agy.with_extension("log").exists(), "agy was called");
+        assert_eq!(
+            check_antigravity_install(home, exe).unwrap().0,
+            "no Pixel plugin or hook; Antigravity keeps its native tools"
+        );
+    }
+
     #[test]
     fn plugin_dir_and_helpers_return_the_expected_paths() {
         let home = Path::new("/home/user");

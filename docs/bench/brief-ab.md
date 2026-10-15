@@ -5,8 +5,8 @@ does the prompt-submit brief make a real Claude Code agent search the
 repository less before it answers, with answers that are as good or better?
 [`brief-gate.md`](brief-gate.md) measures the brief itself (gate, file recall,
 latency) with no agent; this document is the agent-side measurement, driven by
-[`scripts/ab-brief-live.py`](../../scripts/ab-brief-live.py) and counted with
-the rules of `scripts/excavation-count.py`.
+[`scripts/bench/ab-brief-live.py`](../../scripts/bench/ab-brief-live.py) and counted with
+the rules of `scripts/bench/excavation-count.py`.
 
 ## Arms
 
@@ -127,7 +127,7 @@ pattern-matched (the one text test is for `[PIXEL:BRIEF]` at the start of the
 
 | Metric | Definition |
 | --- | --- |
-| `native` | Grep, Glob, Read and Bash calls that search or read (`grep`, `rg`, `find`, `cat`, `ls`, `sed -n`, `git grep`, ...) before the first edit or the closing answer: `scripts/excavation-count.py`'s classifier and stop rule |
+| `native` | Grep, Glob, Read and Bash calls that search or read (`grep`, `rg`, `find`, `cat`, `ls`, `sed -n`, `git grep`, ...) before the first edit or the closing answer: `scripts/bench/excavation-count.py`'s classifier and stop rule |
 | `tools_total`, `pixel` | every tool call; the calls to the `pixel` CLI, apart (a drop in `native` bought with `pixel` calls is a move, not a saving) |
 | tokens | `input_total` = input + cache creation + cache read summed over the session's requests, and `output_tokens`, from the `result` event; `cost_usd` is the list price the CLI reports |
 | wall time | the driver's own clock, process start to exit |
@@ -165,11 +165,11 @@ results).
 
 ```bash
 W=/private/tmp/claude-501/883-ab                       # any scratch directory
-python3 scripts/ab-brief-live.py setup --work $W --side old --binary <baseline pixel> --expect-sha 85bede7d
-python3 scripts/ab-brief-live.py setup --work $W --side new --binary <candidate pixel> --expect-sha <commit>
-python3 scripts/ab-brief-live.py probe --work $W --run-id probe --arms off,old,new
-python3 scripts/ab-brief-live.py run   --work $W --run-id <id> --arms off,old,new --reps 2 --split test --concurrency 4
-python3 scripts/ab-brief-live.py report --work $W --run-id <id> --receipt docs/bench/brief-ab/<id>.json
+python3 scripts/bench/ab-brief-live.py setup --work $W --side old --binary <baseline pixel> --expect-sha 85bede7d
+python3 scripts/bench/ab-brief-live.py setup --work $W --side new --binary <candidate pixel> --expect-sha <commit>
+python3 scripts/bench/ab-brief-live.py probe --work $W --run-id probe --arms off,old,new
+python3 scripts/bench/ab-brief-live.py run   --work $W --run-id <id> --arms off,old,new --reps 2 --split test --concurrency 4
+python3 scripts/bench/ab-brief-live.py report --work $W --run-id <id> --receipt docs/bench/brief-ab/<id>.json
 ```
 
 The raw streams stay in `eval/arena-results/<id>/` (gitignored); `report` re-reads
@@ -231,7 +231,7 @@ Run identity.
 | `new` binary | `pixel 0.7.1`, commit `44bbaaac9f88609070df363fb8a4886ecbd1b66e` (PR #887), SHA-256 `ac2dc892f43c1f06919c5cefc75300d3b2f9b50270c2004b2e6448270b3c21ea`; hashes identical at the start and at the end of the run |
 | fixtures | `Pixel-CLI/pixel` at `85bede7d9a3c4e385e0a2045241a6466efbd8cbd`, tree `8b95943aa1bd077f1690c3f3d7aa07283e75b97c` in both; clean at the end; both daemons alive during the run (0 restarts); `new` brief settled after 6 warm-up calls; of its 28 fired briefs 24 print `coverage: 2/2 ops answered` and the 4 `low` ones print no coverage line |
 | prompts | the 16 + 4 `test` rows above (`bg-015 bg-026 bg-032 bg-037 bg-048 bg-086 bg-093 bg-110 bg-120 bg-128 bg-130 bg-161 bg-178 bg-203 bg-209 bg-215`; off-topic `bg-040 bg-145 bg-177 bg-205`), set SHA-256 `bc6ac042...6ad`, order seed 883 |
-| driver | `scripts/ab-brief-live.py` at commit `91c51e56` (SHA-256 `af5baadd8c1292e0882841f263f2bb7739779a9aaade444fd9a81bb6bd2ac095`); the report code was extended after the run (per-prompt table, groups, number formatting) and re-run on the same `runs.jsonl` |
+| driver | `scripts/bench/ab-brief-live.py` at commit `91c51e56` (SHA-256 `af5baadd8c1292e0882841f263f2bb7739779a9aaade444fd9a81bb6bd2ac095`); the report code was extended after the run (per-prompt table, groups, number formatting) and re-run on the same `runs.jsonl` |
 | machine | macOS arm64, 16 CPUs, shared with other agents; 1-minute load 2.8 to 5.6 at launch (mean 4.4); Ollaya not warm; list cost USD 24.43 (off 8.22, old 7.74, new 8.48); the five-hour usage window went from 0.55 to 0.82 |
 | commands | `ab-brief-live.py setup` x2, `probe`, `run --run-id ab-20261009 --arms off,old,new --reps 2 --split test --concurrency 4`, `report --run-id ab-20261009 --receipt docs/bench/brief-ab/ab-20261009.json` |
 

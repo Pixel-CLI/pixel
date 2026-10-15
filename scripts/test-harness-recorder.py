@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/harness-recorder.sh: what a recording run produces.
+"""Contract of scripts/dev/harness-recorder.sh: what a recording run produces.
 
 Every case runs the real script against stub binaries placed on PATH — a
 stubbed `claude`/`codex` that behave like the real harnesses emit (the two
@@ -24,7 +24,7 @@ import subprocess
 import tempfile
 import unittest
 
-RECORDER = Path(__file__).with_name("harness-recorder.sh")
+RECORDER = Path(__file__).parent / 'dev' / 'harness-recorder.sh'
 MARKER = "harness-recorder-contract"
 
 # A minimal but valid asciicast v3 file: a JSON header plus one output event.

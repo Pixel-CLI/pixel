@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/pr-swarm.sh: what one reconcile does, and what it must not.
+"""Contract of scripts/dev/pr-swarm.sh: what one reconcile does, and what it must not.
 
 Every case runs the real script with three stub binaries on PATH -- `rmux`
 (stateful: it answers find-panes from a JSON state file and records every call,
@@ -34,7 +34,7 @@ import tempfile
 import time
 import unittest
 
-SWARM = Path(__file__).with_name("pr-swarm.sh")
+SWARM = Path(__file__).parent / 'dev' / 'pr-swarm.sh'
 MARKER = "pr-swarm-contract"
 
 # Every rmux subcommand that changes a pane or a layout. A reconcile over

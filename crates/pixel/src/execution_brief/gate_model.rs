@@ -3,7 +3,7 @@
 
 //! The constants of the relevance gate's model.
 //!
-//! Copied by hand from `scripts/research-gate/results/gate-model.json` (the
+//! Copied by hand from `scripts/bench/research-gate/results/gate-model.json` (the
 //! SHA-256 is in [`SOURCE`]): "multi-repository compact gate, five features",
 //! an L2 logistic regression fitted on the English dev rows of the brief-gate
 //! set of Pixel (#885) and of the multi-repository set (#906), French rows
@@ -11,7 +11,7 @@
 //! as `gate-model-pixel-only.json`.
 //! Never read at run time: a change of model is a change of this file,
 //! reviewed as one. A test holds every constant here to the json, and
-//! `scripts/research-gate/gate_reference.py` is the executable definition the
+//! `scripts/bench/research-gate/gate_reference.py` is the executable definition the
 //! parity test in `evidence.rs` holds the Rust score to.
 
 /// The json these constants were copied from, and its SHA-256; the decision
@@ -98,7 +98,8 @@ mod tests {
 
     use super::*;
 
-    const JSON: &str = include_str!("../../../../scripts/research-gate/results/gate-model.json");
+    const JSON: &str =
+        include_str!("../../../../scripts/bench/research-gate/results/gate-model.json");
 
     fn model() -> Value {
         serde_json::from_str(JSON).unwrap()

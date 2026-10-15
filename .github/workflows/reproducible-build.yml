@@ -5,7 +5,7 @@ name: Reproducible build
 
 # Builds the x86_64-unknown-linux-musl release binary twice from one commit,
 # in two checkouts at different paths, with release-build.yml's exact command
-# and environment (scripts/release-build-env.sh), and fails unless the two
+# and environment (scripts/release/release-build-env.sh), and fails unless the two
 # binaries are byte-identical: the evidence behind SECURITY.md, "Reproducing
 # a release build" (OpenSSF build_repeatable). Neither build restores a
 # cache, so each compiles every crate itself. One lane is enough to catch an
@@ -29,11 +29,10 @@ on:
       - ".github/workflows/reproducible-build.yml"
       - "Cargo.lock"
       - "Cargo.toml"
-      - "Cross.toml"
       - "crates/*/Cargo.toml"
       - "crates/pixel/build.rs"
       - "rust-toolchain*"
-      - "scripts/release-build-env.sh"
+      - "scripts/release/release-build-env.sh"
   push:
     branches: [main]
     paths:
@@ -42,10 +41,9 @@ on:
       - ".github/workflows/reproducible-build.yml"
       - "Cargo.lock"
       - "Cargo.toml"
-      - "Cross.toml"
       - "crates/**"
       - "rust-toolchain*"
-      - "scripts/release-build-env.sh"
+      - "scripts/release/release-build-env.sh"
   schedule:
     - cron: "37 4 * * 3"
   workflow_dispatch:
@@ -88,7 +86,7 @@ jobs:
 
       # The version release-build.yml pins.
       - name: Install cross
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cross@0.2.5
 
@@ -96,7 +94,7 @@ jobs:
       # build without the environment if the script failed.
       - name: Build in the first checkout
         run: |
-          env_lines=$(scripts/release-build-env.sh)
+          env_lines=$(scripts/release/release-build-env.sh)
           eval "$env_lines"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=$RUSTFLAGS"
           cross build --release --locked --no-default-features --features model2vec --target "$TARGET" -p pixel-cli
@@ -105,7 +103,7 @@ jobs:
       - name: Build in the second checkout
         working-directory: ${{ runner.temp }}/pixel-second
         run: |
-          env_lines=$(scripts/release-build-env.sh)
+          env_lines=$(scripts/release/release-build-env.sh)
           eval "$env_lines"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=$RUSTFLAGS"
           cross build --release --locked --no-default-features --features model2vec --target "$TARGET" -p pixel-cli
@@ -139,7 +137,7 @@ jobs:
 
       - name: Upload both binaries
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: reproducible-build-differing
           path: ${{ runner.temp }}/differing/

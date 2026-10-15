@@ -5,7 +5,7 @@ name: Release-prepare scope
 
 # Decides whether this run is a release-prepare pull request into main,
 # whose jobs are skipped: a `release-` head branch AND a diff that
-# scripts/release-prepare-only.py accepts (version lines, CHANGELOG.md,
+# scripts/release/release-prepare-only.py accepts (version lines, CHANGELOG.md,
 # deleted fragments). The branch name alone would let any code change
 # skip the gates. Any other event, or a failed check, keeps every job.
 #
@@ -46,7 +46,7 @@ jobs:
         run: |
           verdict=false
           if [ "$EVENT" = pull_request ] && [ "$BASE_REF" = main ] && [[ "$HEAD_REF" == release-* ]] \
-            && python3 scripts/release-prepare-only.py "$BASE_SHA" "$HEAD_SHA"; then
+            && python3 scripts/release/release-prepare-only.py "$BASE_SHA" "$HEAD_SHA"; then
             verdict=true
           fi
           echo "release-prepare=$verdict" | tee -a "$GITHUB_OUTPUT"

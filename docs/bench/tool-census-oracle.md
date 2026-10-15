@@ -1,12 +1,12 @@
 # Tool census oracle: does perfect injected context reach zero tool calls?
 
-Issue #905, follow-up to the vanilla census (`scripts/tool-census/`). Question: when the
+Issue #905, follow-up to the vanilla census (`scripts/bench/tool-census/`). Question: when the
 prompt-submit hook injects exactly what the census agent itself found by exploring, does a
 coding agent answer with **zero** tool calls, and does a framing sentence matter?
 
-Driver: `scripts/tool-census/oracle.py` (`cap-probe`, `build`, `run`, `report`, `--self-test`).
+Driver: `scripts/bench/tool-census/oracle.py` (`cap-probe`, `build`, `run`, `report`, `--self-test`).
 It reuses `run.py` (claude launch, env whitelist, `pixel` shim, per-session `cp -c` clone, quota
-guard) and `classify.py` from the extractor lane (both in `scripts/tool-census/`). It works on the
+guard) and `classify.py` from the extractor lane (both in `scripts/bench/tool-census/`). It works on the
 private census only (its recorded raw streams, `census.db` and the local `manifest.json`).
 Raw streams, briefs, hook payloads and the run record live in
 `<root>/oracle/` (`raw/`, `briefs/`, `hooks/`, `settings/`, `runs/oracle-1.json`).
@@ -178,11 +178,11 @@ how a retrieval engine would *produce* such an oracle, only what a perfect one b
 ## Reproduce
 
 ```sh
-python3 scripts/tool-census/oracle.py cap-probe          # the limit, with a marker (haiku, about $0.01)
-python3 scripts/tool-census/oracle.py build              # briefs, hooks, settings under oracle/
-python3 scripts/tool-census/oracle.py run --run-id oracle-1 --concurrency 12   # 36 sessions
-python3 scripts/tool-census/oracle.py report --run-id oracle-1
-python3 -I scripts/tool-census/oracle.py --self-test
+python3 scripts/bench/tool-census/oracle.py cap-probe          # the limit, with a marker (haiku, about $0.01)
+python3 scripts/bench/tool-census/oracle.py build              # briefs, hooks, settings under oracle/
+python3 scripts/bench/tool-census/oracle.py run --run-id oracle-1 --concurrency 12   # 36 sessions
+python3 scripts/bench/tool-census/oracle.py report --run-id oracle-1
+python3 -I scripts/bench/tool-census/oracle.py --self-test
 ```
 
 Run `oracle-1`: 36 sessions (13 P, 13 D, 5 PF, 5 DF), 80.8 s wall at concurrency 12, $5.73,

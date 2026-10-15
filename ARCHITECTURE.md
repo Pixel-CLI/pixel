@@ -38,7 +38,7 @@ MCP server. `pixel setup` registers no MCP server with any agent.
 
 | Crate | Role | Depends on (pixel crates) |
 | --- | --- | --- |
-| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry point under `run-hook` (alias `hook`: `task-event`). | every library crate except `pixel-context` (reached through the daemon), `pixel-ultraflow`, `pixel-bench` and the vendored `mvp-model`, `mvp-store` and `mvp-index` |
+| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry point under `run-hook` (alias `hook`: `task-event`). | every library crate except `pixel-context` (reached through the daemon), `pixel-ultraflow`, `pixel-session` (reached through the daemon and the ranker), `pixel-bench` and the vendored `mvp-model`, `mvp-store` and `mvp-index` |
 | `pixel-proto` | The shared contract crate: `Envelope`, `PixelError` and `ErrorCode`, `Epistemics`, `SnapshotInfo`, `Budget`, `Warning`, the `Op` request enum, and `commands::RENAMED_COMMANDS`, the old-to-new CLI subcommand names the CLI accepts as hidden aliases until 1.0. No I/O, no business logic. Every other crate that speaks the wire format depends on it, and it depends on nothing internal. | none |
 | `pixel-daemon` | Transport-agnostic `Service` (`api.rs`) and the Unix-socket NDJSON daemon with filesystem watching (`daemon.rs`). Dispatches each `Op` to the right library, attaches snapshot and epistemics metadata, and is the one place a retrieval envelope is built. Also hosts the recall daemon service. | index, graph, context, rank, proto, ops, facts, session, recall, git |
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
@@ -56,7 +56,7 @@ MCP server. `pixel setup` registers no MCP server with any agent.
 | `pixel-setup` | Idempotent `pixel setup`, `pixel setup --remove`, `pixel doctor`. The guided run at a terminal is the `setup/` module (agent detection and targets, the four-feature catalog (Token super savior, command timing and savings, on-demand daemon, AI classification), the plan, the managed block and its upsert) in front of the same installer, which `install_selected` limits to the agents and hook groups the plan picked. Global install: Claude and Codex task lifecycle hooks, cleanup of their retired retrieval hooks and prompts and the `claude()` shell wrapper, removal of the Pi `APPEND_SYSTEM.md` retrieval block, the `pixel` skill (`skills/pixel/SKILL.md`) deployed into every configured harness's skills dir — a guided run writes only the selected agents' roots — and the explicit Pi `/pixel-impact` package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`) when Pi is present. No always-on prompt is deployed: guidance reaches every harness as the `pixel` skill only, and the deployed agent prompts are removed, among them the `rules/AGENTS.md` earlier releases wrote into Antigravity's Pixel plugin dirs. Where a host's configuration already exists, Gemini CLI, OpenCode, Devin and Antigravity get their brief and metrics hooks (see "Agent integration"); the retired zcode, Cursor and Copilot CLI artifacts are removed. An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo`: native-default migration for Claude and Codex, and removal of the retired Devin and Pi project guards and `AGENTS.md` retrieval blocks (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `banner` logo card (a short logo pulse, not an animation) and ends on the `banner` summary. The text it deploys depends on which plugins run (`pixel_plugin::Available`): the steering names `pixel who-wrote` only where the git plugin runs, and the web-search section is written only where `pixel-utilities` does (the plan's notes say which plugin to install otherwise). `pixel doctor` reads the managed blocks it deployed (`setup::deployed_files`, `setup::managed_text`) and reports `plugins.references` yellow, with the `pixel install github:Pixel-CLI/<repo>` command, for a plugin command they name that no plugin provides; `web-search.provider` is green and says so when `pixel-utilities` is not installed. | proto, daemon, index, facts, git, plugin |
 | `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`, and an optional `commands` list so one binary serves several `pixel <command>` words, run as `<run> <command> <args…>`; two plugins of a tier answering to one command are an error naming both, in `resolve`, `list` and `install`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (the library behind `pixel install`: a local directory, a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL, or `github:<owner>/<repo>[@<ref>]`, whose unshipped program is fetched as a release asset with `curl`), `remove` (`pixel uninstall`), `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. `Available` is the set of moved commands (`MOVED_COMMANDS`) that a plugin runs on this host, with the host's own reason for one that is installed but blocked (untrusted, not enabled): text that would name a plugin command asks it first. `read_only_invocation` says which moved commands and modes only read, for the task gate: `repo-state`, `review-changes` and the history reads always; `recall` and `list-errors` only when their first argument is a read mode (an option first makes it not a read, so an option value is never taken for the mode); `list-branches` unless `--fetch`. Home, repo root, PATH and the GitHub base URL are fields of `Host`, never read from the process. | git |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
-| `mvp-model` | Vendored from pixel-mvp at a pinned commit (`crates/mvp-model/VENDORED.md`, ADR-0035 there): the row types of pixel-mvp's index (files, symbols, edges with a target or none, provenance) and the `Graph` read trait. Pure: no I/O, enforced by its own `clippy.toml`. `src/` is a copy, synced by `scripts/vendor-mvp.sh`, never edited here. | none |
+| `mvp-model` | Vendored from pixel-mvp at a pinned commit (`crates/mvp-model/VENDORED.md`, ADR-0035 there): the row types of pixel-mvp's index (files, symbols, edges with a target or none, provenance) and the `Graph` read trait. Pure: no I/O, enforced by its own `clippy.toml`. `src/` is a copy, synced by `scripts/dev/vendor-mvp.sh`, never edited here. | none |
 | `mvp-store` | Vendored from pixel-mvp like `mvp-model`: pixel-mvp's graph store, one SQLite file (`graph.db`) in a `.pixel-mvp/` state directory under the root it is given, with one writer behind a lock, one generation published per transaction, and a damaged or foreign file refused and rebuilt. `pixel-graph`'s `mvp_adapter` refreshes and reads it. | mvp-model |
 | `mvp-index` | Vendored from pixel-mvp like `mvp-model`: pixel-mvp's indexer for Ruby and Rust. `tree` scans the work tree through git (tracked and untracked files, the commit and the dirty flag a generation names), `link::plan` diffs it against the stored generation, `extract` parses the planned files with tree-sitter into symbols and edges, and `link::link` decides every site of the generation again under each language's rules: an edge only where the rule proves its target, every other site kept unresolved. It writes nothing; its caller hands the rows to `mvp-store`. It spawns `git` itself (`tree.rs`), outside `pixel-git`'s `GitRunner`: no timeout and no output cap. `pixel-graph`'s `mvp_adapter` runs it. | mvp-model |
 
@@ -139,7 +139,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
 | `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes (and whether it carried the search receipt and answer excerpts, with the excerpt bytes, and for a region pack its bytes, hook parts, symbols, located blocks and whether the text search stood in for a stale graph) and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the typed text (never a pasted block, credential shapes masked, cut at 600 characters) and its SHA-256. The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
-| `brief-feedback.jsonl` | CLI `run-hook task-event` (`execution_brief/feedback.rs`) | What the agent read after the brief, per host session (the id is stored as 16 hex digits of its SHA-256). `prompt`: one line per prompt the brief saw, with the brief's bytes, gate and kind, the repository paths it injected (best first, at most 32) and the SHA-256 of the typed text that joins it to `brief-decisions.jsonl`. `part`: the bytes each prompt-submit hook part printed to the host, and whether the part gave up waiting for the brief (`late`), so a brief that never arrived is told from an empty one. `tool`: one line per `PostToolUse` or `PostToolUseFailure` with the tool name, whether it changed a file, and the repository files it named (the `file_path`, `path` or `notebook_path` of its input and the existing files among the words of its shell command; a file outside the repository, a link out of it or a credential-shaped path is never named). `stop`, and with it a `turn` line that closes the prompt: injected, read and edited paths, their overlap and the tool calls before the first answer. Paths and counts only, never prompt, command or output text. The last 1,500 lines, mode 0600, written through `decision_log::append_with` (never through a link, never creates `.pixel/`); `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `scripts/brief-feedback-summary.py` turns the `turn` lines into the zero-call rate and the injected-versus-read precision and recall. |
+| `brief-feedback.jsonl` | CLI `run-hook task-event` (`execution_brief/feedback.rs`) | What the agent read after the brief, per host session (the id is stored as 16 hex digits of its SHA-256). `prompt`: one line per prompt the brief saw, with the brief's bytes, gate and kind, the repository paths it injected (best first, at most 32) and the SHA-256 of the typed text that joins it to `brief-decisions.jsonl`. `part`: the bytes each prompt-submit hook part printed to the host, and whether the part gave up waiting for the brief (`late`), so a brief that never arrived is told from an empty one. `tool`: one line per `PostToolUse` or `PostToolUseFailure` with the tool name, whether it changed a file, and the repository files it named (the `file_path`, `path` or `notebook_path` of its input and the existing files among the words of its shell command; a file outside the repository, a link out of it or a credential-shaped path is never named). `stop`, and with it a `turn` line that closes the prompt: injected, read and edited paths, their overlap and the tool calls before the first answer. Paths and counts only, never prompt, command or output text. The last 1,500 lines, mode 0600, written through `decision_log::append_with` (never through a link, never creates `.pixel/`); `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `scripts/bench/brief-feedback-summary.py` turns the `turn` lines into the zero-call rate and the injected-versus-read precision and recall. |
 | `brief-sessions/<session>.json` | CLI `run-hook task-event` (`execution_brief/sent.rs`) | The line ranges the region packs already sent to one host session, so the next pack leaves them out and spends its room on source the session has not got. The name is the first 16 hex digits of the SHA-256 of the host's session id; the file holds keys only: per range the first 16 hex digits of the SHA-256 of the path, its first and last line and when it was sent. A key older than 24 hours is forgotten (every write also deletes session files nobody has written for a day), at most 1,000 are kept, and `SessionStart` with source `compact` or `clear` deletes the file (a `resume` keeps it: the context is the same). Written atomically with mode 0600 in a 0700 directory, never through a link (`.pixel` or `brief-sessions` as a symbolic link is refused), and never creates `.pixel/`. `PIXEL_BRIEF_DEDUPE=0\|false\|off` sends everything again. |
 | `brief-parts/<session>-<prompt>.txt` | CLI `run-hook task-event --part` (`brief_parts.rs`) | The whole prompt-submit brief of one prompt, stored by part 1 of a brief split over several hooks and read by parts 2 to N (see "Agent integration"). The name is the first 16 hex digits of the SHA-256 of the host's session id, a dash and the SHA-256 of the prompt, so no host text reaches a file name. Written atomically with mode 0600 (`pixel_git::nofollow::write_replace`), never through a link (`.pixel` or `brief-parts` as a symbolic link is refused); an empty file means the prompt got no brief, so the other parts do not wait. Part 1 deletes the entry before it computes the brief, leaves an empty `.done` file with the same stem once its own output is written, and every part-1 write deletes the entries older than one hour. |
 | `reconcile-conflict.json` | `pixel-ops` | Conflict marker `reconcile` writes and clears (no hook reads it). |
@@ -206,7 +206,7 @@ Machine-wide:
 - `~/.local/state/pixel/pr-swarm/`: the repo-local `pr-swarm` reconciler's
   state — `reconcile.log`, `lock/`, `resolve.tsv`, `last-run.jsonl` and
   `watch.pid` (the `watch` loop's claim, the authority on whether one runs) —
-  written by `scripts/pr-swarm.sh`, not by any `pixel` crate
+  written by `scripts/dev/pr-swarm.sh`, not by any `pixel` crate
   (`.agents/rules/pr-swarm.md`). The pane set itself is derived from rmux
   pane titles, not from these files.
 - Daemon socket and pid: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` on Linux
@@ -724,8 +724,9 @@ does not parse as strict JSON is skipped, not rewritten.
 remains, and passes when OpenCode is absent.
 
 `pixel run-hook` (alias `hook`) exposes task lifecycle and metrics entry
-points. `task-event` is registered for Claude Code and Codex; the metrics
-relay is registered for Claude Code, Codex and Antigravity:
+points. `task-event` is registered for Claude Code, Codex, Devin, Gemini CLI
+and Antigravity; the metrics relay is registered for Claude Code, Codex and
+Antigravity:
 
 | Hook event | Command | Effect |
 | --- | --- | --- |
@@ -840,7 +841,7 @@ brief-gate sets of Pixel (`eval/brief-gate/prompts.jsonl`) and of four repositor
 (`prompts-multirepo.jsonl`: pixel, excalidraw, requests, ripgrep; an earlier
 model fitted on Pixel alone closed 7 of 13 census answer prompts and 13 of the 19 census prompts the gate sees), thresholds
 calibrated out of fold at 5 and 10 % of the off-topic rows
-(`scripts/research-gate/results/gate-model.json`, whose SHA-256
+(`scripts/bench/research-gate/results/gate-model.json`, whose SHA-256
 `gate_model.rs` cites and a test checks, with `gate_reference.py` as the
 executable definition the parity test holds the Rust score to). It does not
 apply without a code graph or without a keyword to weigh: such a plain prompt
@@ -924,7 +925,7 @@ skipped unless asked. A code-shaped prompt that resolved `defined:` reads the
 definition's range, then its callers' declarations, then the best chunk of the
 top fused files. Its ZERO step (one unambiguous definition of at most 40 lines shown as the answer, `answer::STRONG_ZERO`) is off: 1 of 2 firings was right on dev. The typed text loses its links (`strip_urls`) before the signal is decided, so a pasted `utm_source` is not a code identifier. Ranges come from lines actually read at HEAD, never from a
 credential-shaped path.
-`scripts/bench-brief-excerpt.py` measures excerpt@1 and `scripts/bench-brief-spans.py` the
+`scripts/bench/bench-brief-excerpt.py` measures excerpt@1 and `scripts/bench/bench-brief-spans.py` the
 ZERO precision and the share of gold spans inside the `read:` ranges. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
 explicit cue (config, setting, env, flag, option, default), not `install` or
 `hook`. That
@@ -1155,7 +1156,7 @@ measured averages. `workflow-v2` measures the one case it can: `list-signatures`
 stands in for reading one whole file, so its baseline is that file's size (a
 `stat`, no source read) with no assumed command, and the live line states
 `full read N tok, pixel answer M tok (-X%)` from the file and the stdout answer
-(`answer_bytes`), both floored bytes / 4 as in `scripts/bench-read-savings.sh`.
+(`answer_bytes`), both floored bytes / 4 as in `scripts/bench/bench-read-savings.sh`.
 Records keep the version they were written with. Estimates consider only returned evidence/relationships and
 represented native steps. Partial results remain partial; meaningless comparisons
 are unavailable; zero and negative savings are retained. There is no external
@@ -1247,10 +1248,10 @@ Experimental directories are not automatically shipped; the installer tests asse
 matches, `first: <regex>` moves them to the front, lead blocks go before the brief's and append blocks after, one
 block per header, the whole within the hook parts the host takes (3 x 9,800 characters) with append blocks shed
 first and the closing directive kept last. The merge is pinned by the golden cases of
-`crates/pixel/tests/fixtures/probe-merge.json`, which `scripts/probe-test.py` (the specification and the harness)
+`crates/pixel/tests/fixtures/probe-merge.json`, which `scripts/bench/probe-test.py` (the specification and the harness)
 and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `probes` entry of the prompt's line in
-`.pixel/brief-decisions.jsonl`. `scripts/probe-equivalence.py` checks the native brief against the reference chain
-`scripts/probe-chain.py` on the census questions.
+`.pixel/brief-decisions.jsonl`. `scripts/bench/probe-equivalence.py` checks the native brief against the reference chain
+`scripts/bench/probe-chain.py` on the census questions.
 
 ## Testing and gates
 
@@ -1269,8 +1270,8 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   through `CARGO_BIN_EXE_pixel` against a temp fixture repo.
 - CI (`.github/workflows/ci.yml`) classifies the diff first, so a job whose
   paths did not change skips its steps, then runs in parallel:
-  - **Test + Format**: action-pin verification (`scripts/verify-action-pins.py`),
-    the SPDX header check (`scripts/check-spdx.py`, on every diff),
+  - **Test + Format**: action-pin verification (`scripts/ci/verify-action-pins.py`),
+    the SPDX header check (`scripts/ci/check-spdx.py`, on every diff),
     `cargo fmt --check`, `cargo nextest run --profile ci`
     (`.config/nextest.toml`: one process per test, retry once but fail on
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
@@ -1288,11 +1289,11 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
     `model2vec` only);
   - **MSRV**, **Ranking gates** (the NDCG@10 bench in test mode) and
     **Dependency policy** (`cargo deny`, then
-    `scripts/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
+    `scripts/ci/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
     reads, accepts the same advisories as `deny.toml`).
 - Other workflows: `mutants.yml` (01:17 UTC on `main`, only the cumulative
   diff since the latest completed campaign; no pull-request trigger).
-  `scripts/mutants-nightly-range.py` selects a checkpoint from trusted
+  `scripts/ci/mutants-nightly-range.py` selects a checkpoint from trusted
   completed main-run artifact metadata and refuses API/history failures.
   A checkpoint is uploaded after every listed mutant has a recognized
   outcome; survivors keep the run red, while missing outcomes and disk-full
@@ -1315,10 +1316,10 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   (on a tag: `verify`, then publication, the tap and the post-publish smoke
   test) and `release-build.yml`, the reusable workflow it calls to build the
   archives, write the formula and the Linux bottles with
-  `scripts/homebrew-formula.py` and the homebrew-core formula with
-  `scripts/homebrew-core-formula.py`, write each archive's CycloneDX SBOM
+  `scripts/release/homebrew-formula.py` and the homebrew-core formula with
+  `scripts/release/homebrew-core-formula.py`, write each archive's CycloneDX SBOM
   `pixel-<tag>-<target>.cdx.json` (cargo-cyclonedx, narrowed by
-  `scripts/release-sbom.py` to the crates `cargo tree -p pixel-cli` compiles
+  `scripts/release/release-sbom.py` to the crates `cargo tree -p pixel-cli` compiles
   for that target and feature set, from the build matrix's `features`), and
   sign their provenance, the SBOMs among the subjects (it is the
   attestation's signer, which makes the provenance SLSA Build Level 3; the
@@ -1353,7 +1354,7 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   root `Cargo.toml` or `deny.toml`, 600 s weekly and on demand, 120 s when
   `release.yml` calls it on a `v*` tag, crash reproducers uploaded) and `coverage.yml` (the Test job's nextest suite
   under `cargo llvm-cov`, doctests aside, at 02:47 UTC on main only.
-  `scripts/coverage-nightly.py` skips both expensive jobs when the latest
+  `scripts/ci/coverage-nightly.py` skips both expensive jobs when the latest
   successful scheduled run already measured this SHA; failed or cancelled
   measurements are retried. Read-only Actions access supplies run metadata.
   Reports contain line, region and function totals and one row per crate in the job
@@ -1363,7 +1364,7 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   --branch` and writes branch and line totals, one row per crate, to its
   summary; it uploads the raw JSON report as the `coverage-branch-summary`
   artifact and the per-line lcov report as `coverage-branch-lcov`, which
-  `scripts/coverage-uncovered-branches.py` turns into uncovered branches per
+  `scripts/ci/coverage-uncovered-branches.py` turns into uncovered branches per
   file and line).
 - `fuzz/` is a cargo-fuzz crate with its own `[workspace]`, outside the
   root workspace (no root `cargo` command builds it). `graph_extract` feeds
@@ -1400,7 +1401,7 @@ to equal that base and a prepare-only diff without remaining fragments.
 Before tagging it requires the squash merge on the target history, its sole
 parent equal to that base, and its tree identical to the validated prepare
 head. Later target commits do not change which merge gets tagged. Its real
-Git contract runs in both `scripts/gates.sh` and CI
+Git contract runs in both `scripts/ci/gates.sh` and CI
 (`scripts/test-release-candidate.py`). CI results and semantic changelog
 coverage remain separate release requirements. The explicit `--maintenance`
 mode permits backport code in the diff (full CI is required), retaining the
@@ -1417,7 +1418,7 @@ back to `unknown` rather than failing the build. The script re-runs when
 the common dir), the index, or `SOURCE_DATE_EPOCH` changes, so the flag
 follows commits without a `cargo clean`.
 
-Release builds are reproducible. `scripts/release-build-env.sh` sets
+Release builds are reproducible. `scripts/release/release-build-env.sh` sets
 `SOURCE_DATE_EPOCH` to the commit's time and `RUSTFLAGS` to
 `--remap-path-prefix` the checkout (`/pixel`) and `CARGO_HOME` (`/cargo`);
 `release-build.yml` and `cross-build.yml` run it before their cache step
@@ -1437,7 +1438,7 @@ gives an offline-only binary with no semantic search.
 One build-time switch sits beside the features: `PIXEL_UPDATE_CHECK=off`
 (read with `option_env!` in `update_notice.rs`) builds a binary that never
 checks for a release, prints the notice or offers to upgrade itself. The
-homebrew-core formula (`scripts/homebrew-core-formula.py`) builds with it and
+homebrew-core formula (`scripts/release/homebrew-core-formula.py`) builds with it and
 with `--no-default-features --features model2vec`, since homebrew-core builds
 from source, owns updates, and refuses the prebuilt ONNX Runtime `fastembed`
 downloads; every other build keeps the check.

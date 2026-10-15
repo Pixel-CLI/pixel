@@ -30,5 +30,5 @@ paid several times.
   clear goes straight to a test and the fix; this rule is for changes whose
   benefit is a bet.
 - **A prototype that works becomes a probe.** A brief heuristic proven by a script is shipped as
-  `probes/<name>/` (a generic script plus its manifest), judged by `scripts/probe-test.py` and written with the
+  `probes/<name>/` (a generic script plus its manifest), judged by `scripts/bench/probe-test.py` and written with the
   `probe` skill (`.agents/skills/probe/SKILL.md`); not as a Rust change to the brief.

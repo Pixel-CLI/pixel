@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/cancel-stale-runs.sh, the sweep cancel-stale.yml runs
+"""Contract of scripts/ci/cancel-stale-runs.sh, the sweep cancel-stale.yml runs
 when a pull request closes and every ten minutes.
 
 It exists to stop validation runs whose verdict no longer matters. What it
@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "cancel-stale-runs.sh"
+SCRIPT = ROOT / "scripts" / "ci" / "cancel-stale-runs.sh"
 
 STUB_GH = r"""#!/usr/bin/env bash
 # Answers `gh api` the way cancel-stale-runs.sh reads it (its --jq output).

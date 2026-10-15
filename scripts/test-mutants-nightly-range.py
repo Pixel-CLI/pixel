@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-SCRIPT = Path(__file__).with_name("mutants-nightly-range.py")
+SCRIPT = Path(__file__).parent / 'ci' / 'mutants-nightly-range.py'
 SPEC = importlib.util.spec_from_file_location("nightly_range", SCRIPT)
 nightly = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(nightly)
@@ -31,8 +31,8 @@ class RangeContract(unittest.TestCase):
         self.git("config", "user.email", "test@example.invalid")
         self.git("config", "user.name", "Test")
         self.before = self.commit("initial")
-        (self.root / "scripts").mkdir()
-        (self.root / "scripts/mutants-nightly-range.py").write_text("rollout")
+        (self.root / "scripts" / "ci").mkdir(parents=True)
+        (self.root / "scripts/ci/mutants-nightly-range.py").write_text("rollout")
         self.rollout = self.commit("rollout")
         self.head = self.commit("next")
 
@@ -159,7 +159,7 @@ class CheckpointContract(unittest.TestCase):
 
 class WorkflowContract(unittest.TestCase):
     def test_only_main_diff_is_scheduled_and_no_pr_starts_mutations(self):
-        root = SCRIPT.parent.parent
+        root = SCRIPT.parents[2]
         workflow = (root / nightly.WORKFLOW).read_text()
         triggers = workflow.split("on:\n", 1)[1].split("\nconcurrency:", 1)[0]
         self.assertIn('cron: "17 1 * * *"', triggers)

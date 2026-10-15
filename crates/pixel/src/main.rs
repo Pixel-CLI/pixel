@@ -2118,7 +2118,7 @@ fn render_data(data: &Value, raw_json: bool, cap: usize) -> Rendered {
 /// The `successor` field `call-path` adds to its output: the `evaluate path`
 /// command asking the same question of the same repository, ready to run,
 /// and what it adds. The rest of the output is untouched: `call-path` stays
-/// compatible for two minor versions (`docs/design/evaluate.md`,
+/// compatible for two minor versions (`docs/archive/design/evaluate.md`,
 /// "`call-path` migration").
 fn call_path_successor(from: &str, to: &str, repo: &Path) -> Value {
     json!({
@@ -5534,7 +5534,7 @@ fn run_command(
             // `$$` is a shell idiom and is NOT expanded by Rust, so a literal
             // name would collide between concurrent upgrades. Use the real pid,
             // and keep the temp file in `dest`'s directory so the rename stays
-            // atomic (same filesystem). Mirrors scripts/install.sh's `.pixel.tmp.$$`.
+            // atomic (same filesystem). Mirrors scripts/release/install.sh's `.pixel.tmp.$$`.
             let tmp = dest.with_file_name(format!(
                 ".{}.tmp.{}",
                 dest.file_name().and_then(|n| n.to_str()).unwrap_or("pixel"),

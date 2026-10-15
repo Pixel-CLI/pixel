@@ -7,7 +7,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 
-spec = importlib.util.spec_from_file_location('pilot', Path(__file__).with_name('bench-plan-routing.py'))
+spec = importlib.util.spec_from_file_location('pilot', Path(__file__).parent / 'bench' / 'bench-plan-routing.py')
 pilot = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pilot)
 

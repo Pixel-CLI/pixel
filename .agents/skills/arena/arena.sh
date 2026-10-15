@@ -935,7 +935,7 @@ cmd_run_set() {
       close_case_tab "$id"
     fi
     say "[$n/$total] $id"
-    [ -d "$srcdir/.git" ] || die "no source clone for $id: $srcdir (bench: scripts/brief-bench.py prepare)"
+    [ -d "$srcdir/.git" ] || die "no source clone for $id: $srcdir (bench: scripts/bench/brief-bench.py prepare)"
     if [ "$reused" = 0 ]; then
     # The panes open first, so the split is visible while the repository indexes and clones.
     make_panes "$id" "$SCRATCH" "$SCRATCH" "$here" --no-focus

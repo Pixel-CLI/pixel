@@ -16,7 +16,7 @@ file (the prompt-submit hooks, or none for the vanilla arm), your OAuth login an
 the Claude quota, so pass `--agent codex` for heavy loops. Both streams are normalised into the same call shape
 (Codex commands and Claude Read/Grep/Glob/Bash) before translation.
 
-## The flow (what `scripts/probe-loop.py` does, and what you decide)
+## The flow (what `scripts/bench/probe-loop.py` does, and what you decide)
 
 1. **Register** the question: the prompt on `--repo` (default: the current repository) pinned at HEAD, stored in
    the git-ignored `eval/brief-bench/adhoc/`.
@@ -39,7 +39,7 @@ the Claude quota, so pass `--agent codex` for heavy loops. Both streams are norm
    **Overfitting guard.** The probe must derive every word, path and symbol from the prompt and the repository at
    run time. Code that spells out words, paths or symbols of this one prompt is refused: `probe-test.py --guard
    "<prompt>" --guard-paths <oracle paths>` (and the loop runs it) fails it with the literals it found.
-6. **Validate.** `python3 -I scripts/probe-loop.py --prompt "<question>" --repo <path> --probe <name>
+6. **Validate.** `python3 -I scripts/bench/probe-loop.py --prompt "<question>" --repo <path> --probe <name>
    --hypothesis "<one line>"`: the guard, offline `probe-test` on the question and on every bench question (no
    regression), then live with and without the probe (`--live-reps 1` by default). KEEP when the calls drop,
    ideally to 0. If not, translate the new remaining calls and loop: at most ~3 iterations (`--max-iter`), each
@@ -61,7 +61,7 @@ never commit or quote its prompts). Examples in this skill that name a census id
   fixed excalidraw-3, ripgrep-3 and ripgrep-5 and regressed requests-3 (0 -> 4), requests-4 (0 -> 10), requests-5
   (0 -> 4) and excalidraw-4 (7 -> 13): the reordering and the extra blocks made Codex explore more. Gate each probe
   (`skip_kinds`, `when_*`), and before any combined claim run the whole set
-  (`arena.sh run-set census --brief-extra "python3 scripts/probe-chain.py"`) and keep every zero-call question at 0.
+  (`arena.sh run-set census --brief-extra "python3 scripts/bench/probe-chain.py"`) and keep every zero-call question at 0.
 - **A probe must see the whole brief.** The first wrapper fed probes only part 1's slice, and a replacing probe
   then dropped parts 2 and 3. The shims now join all parts before probing and split the result again.
 

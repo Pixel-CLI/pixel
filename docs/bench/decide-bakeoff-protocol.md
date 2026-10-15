@@ -126,7 +126,7 @@ interval the integration gate reads.
   so it can include memory held from earlier models, and it excludes child
   processes (the `pixel classify` child behind `pixel-static` and
   `remote-cli`). `run.py` records it as `runner_peak_rss_bytes`; the
-  committed manifests under `scripts/bench-decide/runs/` predate the rename
+  committed manifests under `scripts/bench/bench-decide/runs/` predate the rename
   and call it `peak_rss_bytes` (all macOS, so already in bytes).
 
 ## What this pilot does not claim

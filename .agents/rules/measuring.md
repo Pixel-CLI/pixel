@@ -14,7 +14,7 @@ seconds and would have caught the case beside it.
   conclusion drawn from it ("the gate passes now, nothing to do") was false.
 - **Report the number, never the colour.** "Mutants is green" is not a
   result; "107 tested, 79 caught, 28 unviable, 0 missed, verdict `tested`"
-  is. A gate can pass having tested nothing at all — `scripts/mutants-gate.py`
+  is. A gate can pass having tested nothing at all — `scripts/ci/mutants-gate.py`
   exists because that happened, and calls the two cases `not-applicable` and
   `vacuous`. The count is the only part of a green check that carries
   information.

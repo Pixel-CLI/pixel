@@ -1329,7 +1329,10 @@ fn antigravity_hook_drift(value: &serde_json::Value, exe: &Path) -> Vec<&'static
         }]
     });
     let mut missing = Vec::new();
-    if value.get("pixel-brief") != Some(&expected_brief) {
+    let brief = value.get("pixel-brief");
+    if brief.is_none_or(|brief| {
+        crate::antigravity::is_pixel_brief(brief, exe) && brief != &expected_brief
+    }) {
         missing.push("pixel-brief");
     }
     if contains_antigravity_metrics_relay(value, exe) {
@@ -4431,6 +4434,49 @@ Prose naming `pixel status` is not a table row.
             present
                 .summary
                 .contains("no web search provider configured")
+        );
+    }
+
+    #[test]
+    fn antigravity_doctor_should_preserve_a_user_defined_pixel_brief() {
+        let exe = PathBuf::from("/opt/pixel/pixel");
+        let hooks = serde_json::json!({
+            "pixel-brief": {
+                "enabled": true,
+                "PreInvocation": [{
+                    "type": "command",
+                    "command": "user-brief",
+                    "timeout": 10
+                }]
+            }
+        });
+
+        assert_eq!(
+            super::antigravity_hook_drift(&hooks, &exe),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn antigravity_doctor_should_still_reject_a_disabled_pixel_owned_brief() {
+        let exe = PathBuf::from("/opt/pixel/pixel");
+        let hooks = serde_json::json!({
+            "pixel-brief": {
+                "enabled": false,
+                "PreInvocation": [{
+                    "type": "command",
+                    "command": format!(
+                        "{} run-hook task-event --provider antigravity --event prompt-submit",
+                        crate::routing::quoted_executable(&exe)
+                    ),
+                    "timeout": 10
+                }]
+            }
+        });
+
+        assert_eq!(
+            super::antigravity_hook_drift(&hooks, &exe),
+            vec!["pixel-brief"]
         );
     }
 }

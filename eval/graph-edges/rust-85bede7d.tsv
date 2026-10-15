@@ -54,7 +54,7 @@ rs-v1only-52	call	crates/pixel/src/execution_brief/evidence.rs	Live::local_conte
 rs-v1only-53	call	crates/pixel-install/src/intro/mod.rs	draw_prompt	crates/pixel/src/classify_history.rs	HistoryStore::len	440	wrong	&str len on a const, not HistoryStore::len
 rs-v1only-54	call	crates/pixel-ultraflow/src/compose.rs	success_signal	crates/pixel-graph/src/imports.rs	contains	256	wrong	collection contains, not imports::contains free fn
 rs-v1only-55	call	crates/pixel-graph/src/plan.rs	auth_marker_hits	crates/pixel/src/classify_history.rs	HistoryStore::len	1186	wrong	slice len, not HistoryStore::len
-rs-v1only-56	call	crates/pixel/src/ai_cli_readify/approve.rs	claude	scripts/problem-trace.py	kind	301	wrong	io::Error::kind linked to a Python function
+rs-v1only-56	call	crates/pixel/src/ai_cli_readify/approve.rs	claude	scripts/bench/problem-trace.py	kind	301	wrong	io::Error::kind linked to a Python function
 rs-v1only-57	call	crates/pixel-ops/src/fingerprint.rs	parse_ordinary	crates/pixel-graph/src/imports.rs	contains	59	wrong	str::contains, not imports::contains free fn
 rs-v1only-58	call	crates/pixel-facts/src/ingest.rs	insert_phase_c_commit	crates/pixel-facts/src/store.rs	FactsStore::conn	1182	correct	store: &mut FactsStore; MVP has same edge at line 1183 (line-key artifact)
 rs-v1only-59	call	crates/pixel-daemon/src/daemon/contract_tests.rs	EchoCorpus::apply_change	crates/pixel-flow/examples/oauth-env.py	unwrap	37	wrong	Mutex lock().unwrap linked to a Python function

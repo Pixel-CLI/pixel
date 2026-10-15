@@ -90,7 +90,7 @@ Short answers to questions developers ask about coding agents, each only where P
 
 - [About](https://pixel-cli.dev/about/): who makes Pixel, how the project runs, and where to ask a question, report a bug or a vulnerability
 - [Changelog](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/CHANGELOG.md): what changed in each release
-- [Contributing](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/CONTRIBUTING.md): build from source, gates, pull requests
+- [Contributing](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/.github/CONTRIBUTING.md): build from source, gates, pull requests
 - [Decision benchmarks](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/bench/decide-bakeoff.md): the models behind `pixel classify`, scored on coding decisions
 
 ## Further guides

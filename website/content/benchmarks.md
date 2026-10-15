@@ -36,11 +36,11 @@ On Requests' `src/requests/models.py` (1,184 lines) the report's last row read `
 pixel token-savings
 ```
 
-**Our table, on your machine.** `scripts/bench-read-savings.sh` re-measures the well-known files below. It needs a clone of Pixel's repository for the script, plus `curl` and the network: it downloads each file at its pinned commit into a throwaway folder, never into your code, and takes a few seconds.
+**Our table, on your machine.** `scripts/bench/bench-read-savings.sh` re-measures the well-known files below. It needs a clone of Pixel's repository for the script, plus `curl` and the network: it downloads each file at its pinned commit into a throwaway folder, never into your code, and takes a few seconds.
 
 ```bash
 git clone --depth 1 https://github.com/Pixel-CLI/pixel.git && cd pixel
-scripts/bench-read-savings.sh
+scripts/bench/bench-read-savings.sh
 ```
 
 To turn the rate into a monthly figure for your team, the [savings estimate](../savings/) multiplies it by your own numbers.
@@ -66,7 +66,7 @@ The same measurement on large files of popular projects, each pinned to a commit
 
 {{% read-savings %}}
 
-React's work loop is left out of the range: it is written in Flow, and the JavaScript grammar lists 20 of its 125 top-level functions, so its 99.4% measures a parse failure, not a saving. The Signatures column is the check for that on every row: signature counts provide a coarse coverage check, not proof of complete parsing; the Python counts are compared with module- and class-level definitions (Transformers: 90 for 89 `def` and `class` lines). Re-run it with `scripts/bench-read-savings.sh`. [Method and raw output](https://github.com/Pixel-CLI/pixel/blob/main/docs/bench/read-savings.md)
+React's work loop is left out of the range: it is written in Flow, and the JavaScript grammar lists 20 of its 125 top-level functions, so its 99.4% measures a parse failure, not a saving. The Signatures column is the check for that on every row: signature counts provide a coarse coverage check, not proof of complete parsing; the Python counts are compared with module- and class-level definitions (Transformers: 90 for 89 `def` and `class` lines). Re-run it with `scripts/bench/bench-read-savings.sh`. [Method and raw output](https://github.com/Pixel-CLI/pixel/blob/main/docs/bench/read-savings.md)
 
 ## Cold start on a large repository
 

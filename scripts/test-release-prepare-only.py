@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/release-prepare-only.py: CI skips its gates on a
+"""Contract of scripts/release/release-prepare-only.py: CI skips its gates on a
 release-prepare pull request only when the diff is what prepare.sh writes.
 
 The script is the whole guard: the branch name is free to pick, so a code
@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).resolve().parent / "release-prepare-only.py"
+SCRIPT = Path(__file__).resolve().parent / "release" / "release-prepare-only.py"
 spec = importlib.util.spec_from_file_location("release_prepare_only", SCRIPT)
 rpo = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rpo)
@@ -43,7 +43,7 @@ class ReleasePrepareOnly(unittest.TestCase):
             "crates/pixel/Cargo.toml": '[package]\nname = "pixel"\nversion = "0.5.1"\n\n[dependencies]\nserde = "1"\n',
             "Cargo.lock": '[[package]]\nname = "pixel"\nversion = "0.5.1"\n\n[[package]]\nname = "serde"\nversion = "1.0.0"\nchecksum = "aaa"\n',
             "CHANGELOG.md": "## [Unreleased]\n",
-            "changelog.d/1-a.fixed.md": "fix\n",
+            ".github/changelog.d/1-a.fixed.md": "fix\n",
             "crates/pixel/src/lib.rs": "pub fn f() {}\n",
         })
         self.base = self.commit()
@@ -67,7 +67,7 @@ class ReleasePrepareOnly(unittest.TestCase):
             p = Path(self.repo, path)
             p.write_text(p.read_text().replace("0.5.1", "0.5.2"))
         self.write({"CHANGELOG.md": "## [Unreleased]\n\n## [0.5.2]\n- fix\n"})
-        Path(self.repo, "changelog.d/1-a.fixed.md").unlink()
+        Path(self.repo, ".github/changelog.d/1-a.fixed.md").unlink()
 
     def reasons(self):
         head = self.commit()
@@ -104,8 +104,8 @@ class ReleasePrepareOnly(unittest.TestCase):
 
     def test_an_added_fragment_is_refused(self):
         self.bump()
-        self.write({"changelog.d/2-b.added.md": "new\n"})
-        self.assertEqual(self.reasons(), ["changelog.d/2-b.added.md: a fragment may only be deleted (A)"])
+        self.write({".github/changelog.d/2-b.added.md": "new\n"})
+        self.assertEqual(self.reasons(), [".github/changelog.d/2-b.added.md: a fragment may only be deleted (A)"])
 
     def worktree_reasons(self):
         cwd = os.getcwd()

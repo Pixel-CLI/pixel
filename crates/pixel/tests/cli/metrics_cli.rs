@@ -1292,7 +1292,7 @@ fn live_blocks_state_every_absent_comparison_and_keep_json_stdout_clean() {
 
 /// The first result a new user sees: `pixel list-signatures` on a large file
 /// states the whole-file read and its own answer, both as UTF-8 bytes / 4
-/// floored (the rule of `scripts/bench-read-savings.sh`), so `wc -c` on the
+/// floored (the rule of `scripts/bench/bench-read-savings.sh`), so `wc -c` on the
 /// file and on stdout re-derives the line. Under `workflow-v1` the baseline
 /// was a 4 KiB guess plus 1 KiB for an assumed command, whatever the file's
 /// size: a 20 KB file read as "47% saved" when the answer was 94% smaller.

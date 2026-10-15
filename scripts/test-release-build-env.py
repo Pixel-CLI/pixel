@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of the reproducible release build (scripts/release-build-env.sh).
+"""Contract of the reproducible release build (scripts/release/release-build-env.sh).
 
 A release binary is reproducible only if every input that varies between two
 builds of one commit is pinned: the build date crates/pixel/build.rs embeds
@@ -14,7 +14,7 @@ could silently drop:
 
 - the script's output: the commit's time, both remaps, an existing RUSTFLAGS
   kept, a path RUSTFLAGS cannot carry refused before anything is written;
-- Cross.toml forwards SOURCE_DATE_EPOCH, which cross does not by itself;
+- [workspace.metadata.cross] forwards SOURCE_DATE_EPOCH, which cross does not by itself;
 - release-build.yml, cross-build.yml and reproducible-build.yml set the
   environment before the cache step and the build, pin the same cross, and
   reproducible-build.yml builds with release-build.yml's exact command.
@@ -29,7 +29,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "release-build-env.sh"
+SCRIPT = ROOT / "scripts" / "release" / "release-build-env.sh"
 WORKFLOWS = ROOT / ".github" / "workflows"
 EPOCH = 1700000000
 
@@ -200,7 +200,8 @@ class BuildSteps(unittest.TestCase):
         self.tmp.cleanup()
 
     def stub_env_script(self, body: str) -> None:
-        script = self.root / "scripts" / "release-build-env.sh"
+        script = self.root / "scripts" / "release" / "release-build-env.sh"
+        script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("#!/bin/sh\n" + body)
         script.chmod(0o755)
 
@@ -238,8 +239,8 @@ class BuildSteps(unittest.TestCase):
 
 class Wiring(unittest.TestCase):
     def test_cross_forwards_source_date_epoch(self):
-        text = (ROOT / "Cross.toml").read_text()
-        self.assertRegex(text, r'(?m)^\[build\.env\]\s*\npassthrough = \[[^\]]*"SOURCE_DATE_EPOCH"')
+        text = (ROOT / "Cargo.toml").read_text()
+        self.assertRegex(text, r'(?m)^\[workspace\.metadata\.cross\.build\.env\]\s*\npassthrough = \[[^\]]*"SOURCE_DATE_EPOCH"')
 
     def test_environment_is_set_before_cache_and_build(self):
         for workflow, build in (
@@ -249,7 +250,7 @@ class Wiring(unittest.TestCase):
         ):
             with self.subTest(workflow=workflow):
                 parts = steps(workflow)
-                env_at = index_of(parts, "scripts/release-build-env.sh")
+                env_at = index_of(parts, "scripts/release/release-build-env.sh")
                 self.assertLess(env_at, index_of(parts, build))
                 if any("Swatinem/rust-cache" in p for p in parts):
                     # rust-cache hashes RUSTFLAGS into its key when it restores.
@@ -257,7 +258,7 @@ class Wiring(unittest.TestCase):
 
     def test_macos_release_build_gets_the_environment_too(self):
         parts = steps("release-build.yml")
-        env_step = parts[index_of(parts, "scripts/release-build-env.sh")]
+        env_step = parts[index_of(parts, "scripts/release/release-build-env.sh")]
         self.assertNotIn("runner.os", env_step)
 
     def test_same_cross_version_everywhere(self):

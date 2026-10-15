@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! The issue #407 reproducer: `scripts/verify-ollaya-fresh-install.sh` must
+//! The issue #407 reproducer: `scripts/dev/verify-ollaya-fresh-install.sh` must
 //! exist, be executable, and encode the acceptance flow — clean Pixel
 //! environment → `pixel setup` → ollaya setup → model pull — so the same
 //! flow can re-run on any machine. A regression in the flow is a release
@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// The reproducer script, relative to the repository root.
-const SCRIPT: &str = "scripts/verify-ollaya-fresh-install.sh";
+const SCRIPT: &str = "scripts/dev/verify-ollaya-fresh-install.sh";
 
 fn script_path() -> std::path::PathBuf {
     // CARGO_MANIFEST_DIR is crates/pixel; the repo root is two levels up.

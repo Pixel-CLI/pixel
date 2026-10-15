@@ -71,7 +71,7 @@ first `cargo mutants` run come back clean:
 - **A survivor that shows the code is wrong is a bug report.** When the test
   written for a mutant proves the function never worked (a `git cat-file
   --batch-check <object>` that git rejects, so every blob measured 0 bytes),
-  fix the bug in its own PR with a `changelog.d/` fragment, below the PR that
+  fix the bug in its own PR with a `.github/changelog.d/` fragment, below the PR that
   found it. Do not bend the test to the broken behaviour.
 - **Fix from the nightly report.** Read its `MISSED`/`TIMEOUT` lines and
   write an ordinary contract test. Mutation verification happens in the

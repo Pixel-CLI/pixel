@@ -16,7 +16,7 @@
           "crates/pixel-setup/src/uninstall.rs",
           "README.md",
           "docs/manual-setup.md",
-          "scripts/pixel-bench.sh",
+          "scripts/bench/pixel-bench.sh",
           "crates/pixel-setup/src/install.rs",
           "AGENTS.md",
           "CLAUDE.md",
@@ -295,7 +295,7 @@
           "crates/pixel-setup/src/uninstall.rs",
           "README.md",
           "docs/manual-setup.md",
-          "scripts/pixel-bench.sh",
+          "scripts/bench/pixel-bench.sh",
           "crates/pixel-setup/src/install.rs"
         ],
         "coverage": {

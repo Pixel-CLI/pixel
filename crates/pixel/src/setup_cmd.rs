@@ -320,7 +320,7 @@ fn collect(
 // ── display ────────────────────────────────────────────────────────────────
 //
 // The wizard's screens follow GitButler's `but agent setup` (see
-// `docs/design/but-agent-setup-reference.md`): a titled rule for the run, a
+// `docs/archive/design/but-agent-setup-reference.md`): a titled rule for the run, a
 // banner per step with a right-aligned `Step N of M`, one checkbox row per
 // option, and the focused row's help in dim text under the list.
 
@@ -1408,7 +1408,7 @@ fn io(err: std::io::Error) -> String {
 // `$HOME`. Tests and `cargo run` build with debug assertions on, which is what
 // keeps the scripted cases in `tests/cli/setup_cli.rs` working.
 //
-// REMOVAL (before the release, tracked in docs/design/pixel-setup-plan.md and
+// REMOVAL (before the release, tracked in docs/archive/design/pixel-setup-plan.md and
 // on issue #890). Every site is a deletion; nothing new is written:
 //
 //   1. delete this whole section, to the matching END marker below, and the
@@ -1508,7 +1508,7 @@ mod dev {
             "{} {verb} {noun}, and this build does not have {pronoun}: \
              `pixel setup` runs the guided wizard in a terminal and the unattended \
              installer everywhere else. The flags are live in a debug build; \
-             docs/design/pixel-setup-plan.md says how to test with them.",
+             docs/archive/design/pixel-setup-plan.md says how to test with them.",
             named.join(", ")
         ))
     }
@@ -2436,7 +2436,7 @@ mod tests {
                 "several flags read as a plural: {refusal}"
             );
             assert!(
-                refusal.contains("docs/design/pixel-setup-plan.md"),
+                refusal.contains("docs/archive/design/pixel-setup-plan.md"),
                 "the refusal says where the flags are documented: {refusal}"
             );
         }

@@ -67,7 +67,7 @@ jobs:
       # cross-build.yml sets the same value for the entry restored below.
       # reproducible-build.yml builds the x86_64 lane twice with it.
       - name: Reproducible build environment
-        run: scripts/release-build-env.sh --github-env
+        run: scripts/release/release-build-env.sh --github-env
 
       # Restores what cross-build.yml saved on main for this target (shared
       # key release-<target>): the dependencies arrive compiled, and only the
@@ -85,7 +85,7 @@ jobs:
       # cross-build.yml and reproducible-build.yml pin the same version.
       - name: Install cross (Linux musl)
         if: runner.os == 'Linux'
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cross@0.2.5
 
@@ -118,7 +118,7 @@ jobs:
       # the crates it lists, failing when one the build compiles is absent.
       # Its name matches none of the pixel-*.tar.gz globs downstream.
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-cyclonedx@0.5.9
 
@@ -134,11 +134,11 @@ jobs:
           # shellcheck disable=SC2086
           cargo tree --locked -p pixel-cli --target "$TARGET" $FEATURES \
             -e normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/sbom-tree.txt"
-          python3 scripts/release-sbom.py crates/pixel/pixel_bin.cdx.json \
+          python3 scripts/release/release-sbom.py crates/pixel/pixel_bin.cdx.json \
             "$RUNNER_TEMP/sbom-tree.txt" "$TAG" "$TARGET" "pixel-${TAG}-${TARGET}.cdx.json"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: pixel-${{ matrix.target }}
           path: |
@@ -164,7 +164,7 @@ jobs:
           persist-credentials: false
 
       - name: Download the archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: pixel-*
           path: artifacts
@@ -176,7 +176,7 @@ jobs:
       # held by scripts/test-homebrew-formula.py, which CI runs on every pull
       # request that touches it, so this step changes without a tag.
       - name: Generate the Homebrew formula and the Linux bottles
-        run: python3 scripts/homebrew-formula.py "${GITHUB_REF#refs/tags/}" artifacts .
+        run: python3 scripts/release/homebrew-formula.py "${GITHUB_REF#refs/tags/}" artifacts .
 
       # pixel-core.rb: the formula a homebrew-core pull request carries,
       # built from the source archive GitHub serves for this tag (its sha256
@@ -187,7 +187,7 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           curl -fsSL --retry 3 -o source.tar.gz \
             "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
-          python3 scripts/homebrew-core-formula.py "$TAG" source.tar.gz pixel-core.rb
+          python3 scripts/release/homebrew-core-formula.py "$TAG" source.tar.gz pixel-core.rb
 
       # The SBOM glob below would sign an empty set without complaint: a
       # build job that uploaded its archive without its SBOM stops here.
@@ -219,7 +219,7 @@ jobs:
             artifacts/pixel-*.tar.gz
             artifacts/pixel-*.cdx.json
             pixel-*.bottle.tar.gz
-            scripts/install.sh
+            scripts/release/install.sh
 
       # Everything release.yml publishes, in one artifact: the attested
       # files themselves, not a rebuild or a second checkout of them.
@@ -237,7 +237,7 @@ jobs:
           mkdir release-assets
           cp artifacts/pixel-*.tar.gz artifacts/pixel-*.tar.gz.sha256 \
             artifacts/pixel-*.cdx.json \
-            pixel-*.bottle.tar.gz pixel.rb pixel-core.rb scripts/install.sh \
+            pixel-*.bottle.tar.gz pixel.rb pixel-core.rb scripts/release/install.sh \
             release-assets/
           if [ ! -s "$BUNDLE" ]; then
             echo "::error::actions/attest left no bundle at '$BUNDLE'; the release would ship without its provenance file"
@@ -247,7 +247,7 @@ jobs:
           ls -l release-assets
 
       - name: Upload the release assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-assets
           path: release-assets/

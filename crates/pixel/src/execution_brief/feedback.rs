@@ -18,7 +18,7 @@
 //!   prompt: injected paths, read paths, their overlap, and how many tool calls
 //!   came before the first answer.
 //!
-//! `scripts/brief-feedback-summary.py` turns the `turn` lines into the
+//! `scripts/bench/brief-feedback-summary.py` turns the `turn` lines into the
 //! zero-call rate and the injected-versus-read precision and recall.
 //!
 //! The file holds paths and counts, never prompt text, command text or tool

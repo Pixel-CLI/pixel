@@ -1047,16 +1047,42 @@ fn unavailable(event: TaskHookEvent, payload: Option<&Value>, enforced: bool) ->
 }
 
 fn payload_cwd(provider: TaskProvider, payload: &Value) -> std::path::PathBuf {
-    let antigravity_workspace = (provider == TaskProvider::Antigravity)
-        .then(|| payload["workspacePaths"].as_array()?.first()?.as_str())
-        .flatten()
-        .filter(|path| !path.is_empty());
-    antigravity_workspace
-        .or_else(|| string(payload, &["cwd"]))
-        .map_or_else(
-            || std::env::current_dir().unwrap_or_default(),
-            std::path::PathBuf::from,
-        )
+    if provider == TaskProvider::Antigravity {
+        let cwd = string(payload, &["cwd"]).filter(|path| !path.is_empty());
+        if let Some(root) = cwd.and_then(indexed_antigravity_root) {
+            return root;
+        }
+        if let Some(root) = payload["workspacePaths"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .find_map(indexed_antigravity_root)
+        {
+            return root;
+        }
+        if let Some(workspace) = payload["workspacePaths"]
+            .as_array()
+            .and_then(|paths| paths.first())
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+        {
+            return std::path::PathBuf::from(workspace);
+        }
+    }
+    string(payload, &["cwd"]).map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        std::path::PathBuf::from,
+    )
+}
+
+/// Antigravity can report several workspaces; prefer one Pixel can brief.
+fn indexed_antigravity_root(path: &str) -> Option<std::path::PathBuf> {
+    let root = crate::discover_root(Path::new(path)).ok()?;
+    crate::execution_brief::chain::Gate::read(&root)
+        .indexed
+        .then_some(root)
 }
 
 /// Whether the unanswered decision would have been enforced. Unreadable input
@@ -1622,6 +1648,7 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     /// A Claude-argued `task-event` inside a host that imports Claude's
     /// configuration must exit without acting: the marker names the real host.
@@ -2693,6 +2720,49 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_workspace_should_skip_an_unindexed_first_root() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let parent = std::env::temp_dir().join(format!(
+            "pixel-antigravity-workspaces-{}-{unique}",
+            std::process::id()
+        ));
+        let unindexed = parent.join("first");
+        let indexed = parent.join("second");
+        let explicit = parent.join("cwd");
+        for root in [&unindexed, &indexed, &explicit] {
+            std::fs::create_dir_all(root.join(".git")).unwrap();
+        }
+        for root in [&indexed, &explicit] {
+            let shard = root
+                .join(pixel_index::index::SHARD_DIR)
+                .join(pixel_index::index::SHARD_FILE);
+            std::fs::create_dir_all(shard.parent().unwrap()).unwrap();
+            std::fs::write(shard, b"fixture").unwrap();
+        }
+
+        let payload = json!({
+            "workspacePaths": [unindexed.clone(), indexed.clone()],
+        });
+        assert_eq!(
+            payload_cwd(TaskProvider::Antigravity, &payload),
+            indexed.canonicalize().unwrap()
+        );
+        let payload = json!({
+            "cwd": explicit.clone(),
+            "workspacePaths": [indexed.clone(), unindexed],
+        });
+        assert_eq!(
+            payload_cwd(TaskProvider::Antigravity, &payload),
+            explicit.canonicalize().unwrap()
+        );
+
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
     fn antigravity_native_user_input_should_inject_a_brief_from_its_workspace() {
         let unique = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -2702,9 +2772,50 @@ mod tests {
             "pixel-antigravity-native-{}-{unique}",
             std::process::id()
         ));
-        std::fs::create_dir_all(root.join(".git")).unwrap();
-        std::fs::write(root.join("src.ts"), "function fetchUser() {}\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/fetch.ts"), "function fetchUser() {}\n").unwrap();
+        let initialized = Command::new("git")
+            .current_dir(&root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["init", "-q"])
+            .status()
+            .expect("git is installed for the fixture");
+        assert!(initialized.success());
+        let staged = Command::new("git")
+            .current_dir(&root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["add", "."])
+            .status()
+            .expect("git is installed for the fixture");
+        assert!(staged.success());
+        let committed = Command::new("git")
+            .current_dir(&root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args([
+                "-c",
+                "user.name=Pixel Test",
+                "-c",
+                "user.email=pixel-test@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ])
+            .status()
+            .expect("git is installed for the fixture");
+        assert!(committed.success());
+        let root = root.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".pixel")).unwrap();
+        std::fs::write(
+            root.join(".pixel/config.yaml"),
+            "daemon_auto_start: false\n",
+        )
+        .unwrap();
         pixel_index::index::build(&root, &pixel_index::TrigramExtractor).unwrap();
+        let graph = root
+            .join(pixel_index::index::SHARD_DIR)
+            .join(pixel_daemon::api::GRAPH_DB_FILE);
+        std::fs::create_dir_all(graph.parent().unwrap()).unwrap();
+        pixel_graph::build::build_graph(&root, &graph).unwrap();
         let transcript = root.join("transcript.jsonl");
         std::fs::write(
             &transcript,
@@ -2734,21 +2845,21 @@ mod tests {
         assert_eq!(payload_cwd(TaskProvider::Antigravity, &payload), root);
         let gate = crate::execution_brief::chain::Gate::read(&root);
         assert!(gate.enabled && gate.indexed, "{gate:?}");
-        assert!(
-            start_brief(
-                TaskProvider::Antigravity,
-                TaskHookEvent::PromptSubmit,
-                &payload,
-                1
-            )
-            .is_some()
-        );
-
-        // Keep evidence deterministic here: starting the real brief against
-        // this fixture proves the native payload gates it on the workspace,
-        // while `pending_brief` supplies known brief text for the host
-        // envelope assertion below.
-        let decision = with_brief(json!({"decision":"observe"}), Some(pending_brief()));
+        let brief = start_brief(
+            TaskProvider::Antigravity,
+            TaskHookEvent::PromptSubmit,
+            &payload,
+            1,
+        )
+        .expect("the native prompt starts a brief from the indexed workspace");
+        let context = finish_brief(
+            TaskProvider::Antigravity,
+            TaskHookEvent::PromptSubmit,
+            &payload,
+            Some(brief),
+        )
+        .expect("the indexed fixture returns read-only evidence");
+        let decision = with_context(json!({"decision":"observe"}), Some(context));
         let output = envelope(
             TaskProvider::Antigravity,
             TaskHookEvent::PromptSubmit,
@@ -2760,6 +2871,7 @@ mod tests {
                 panic!("Antigravity receives its brief through injectSteps: {output}")
             });
         assert!(message.starts_with("[PIXEL:BRIEF]\n"), "{message}");
+        assert!(message.contains("src/fetch.ts:1"), "{message}");
 
         std::fs::remove_dir_all(root).unwrap();
     }

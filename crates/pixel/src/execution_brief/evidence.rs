@@ -2356,7 +2356,7 @@ mod tests {
     }
 
     /// Blocks recorded from a daemon on the brief-gate fixture, with the score
-    /// and tier `scripts/research-gate/gate_reference.py` gives them (see
+    /// and tier `scripts/bench/research-gate/gate_reference.py` gives them (see
     /// `gate_parity.json`'s `why` fields for what each one covers).
     const PARITY: &str = include_str!("gate_parity.json");
 

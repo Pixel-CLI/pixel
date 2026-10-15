@@ -116,6 +116,6 @@ workflow change can block every pull request.
 
 ## Docs touched
 
-`changelog.d/` (or why the change ships nothing), `ARCHITECTURE.md` with
+`.github/changelog.d/` (or why the change ships nothing), `ARCHITECTURE.md` with
 the section `.agents/rules/architecture-doc.md` maps the change to (or why
 it moves nothing the map describes), the agent prompt, the README.

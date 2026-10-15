@@ -279,7 +279,7 @@ pub(crate) fn is_test_path(path: &str) -> bool {
 }
 
 /// Whether `path` is prose or measurement a reader opens for documentation,
-/// not code: markdown and text, `docs/`, `changelog.d/`, `eval/`, a
+/// not code: markdown and text, `docs/`, `.github/changelog.d/`, `eval/`, a
 /// `CHANGELOG*` file.
 pub(crate) fn is_docs_path(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -287,7 +287,7 @@ pub(crate) fn is_docs_path(path: &str) -> bool {
     matches!(extension, "md" | "mdx" | "rst" | "txt" | "adoc")
         || name.to_ascii_uppercase().starts_with("CHANGELOG")
         || path.starts_with("docs/")
-        || path.starts_with("changelog.d/")
+        || path.starts_with(".github/changelog.d/")
         || path.starts_with("eval/")
 }
 
@@ -1383,7 +1383,7 @@ mod tests {
             "README.md",
             "docs/a.rs",
             "CHANGELOG.md",
-            "changelog.d/1.changed.md",
+            ".github/changelog.d/1.changed.md",
         ] {
             assert!(is_docs_path(docs), "{docs}");
         }
@@ -1469,7 +1469,7 @@ mod tests {
             "docs/a.rs",
             "README.md",
             "CHANGELOG",
-            "changelog.d/1.md",
+            ".github/changelog.d/1.md",
         ] {
             assert!(demoted(path, false, false), "{path}");
         }

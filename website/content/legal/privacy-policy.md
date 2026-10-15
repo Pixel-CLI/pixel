@@ -37,7 +37,7 @@ The [savings estimate](/savings/) calculates everything inside the page. The val
 
 ## The pixel binary
 
-This policy covers the website. The `pixel` command-line tool runs on your machine and sends no telemetry or usage data beyond an optional release check. The index it builds and its sidecar files stay on your machine. It connects to the network only for the actions [SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md) lists:
+This policy covers the website. The `pixel` command-line tool runs on your machine and sends no telemetry or usage data beyond an optional release check. The index it builds and its sidecar files stay on your machine. It connects to the network only for the actions [SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/.github/SECURITY.md) lists:
 
 - first-use model downloads from Hugging Face;
 - Git remote operations you ask for;

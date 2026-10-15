@@ -12,7 +12,7 @@ import unittest
 
 
 def module(filename, name):
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).parent / 'bench' / filename)
     result = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(result)
     return result

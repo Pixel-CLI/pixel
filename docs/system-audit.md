@@ -64,7 +64,7 @@ The contract text below is inventory evidence, not an endorsement of wording; no
 | `graph` | Force (re)build of the code graph db | A1 | A1 PASS: contains `symbols`; valid JSON |
 | `history` | Commit history with detail levels and byte caps | A1 | A1 PASS: contains `fixture`; valid JSON |
 | `history-search` | M3: history-wide fact + diff search | A1 | A1 PASS: contains `removed_manual_history`; valid JSON |
-| `hook guard`, `composed-guard`, `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`, `metrics` | Retired verbs, kept as silent no-ops so an old hook registration cannot fail a host | A1 | `scripts/system_audit.py` asserts exit 0 and empty stdout for each; the 2026-09-12 run predates the retirement |
+| `hook guard`, `composed-guard`, `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`, `metrics` | Retired verbs, kept as silent no-ops so an old hook registration cannot fail a host | A1 | `scripts/bench/system_audit.py` asserts exit 0 and empty stdout for each; the 2026-09-12 run predates the retirement |
 | `impact` | Blast radius of a symbol (callers upstream / callees downstream) | A1 | A1 PASS: valid JSON |
 | `index` | Build (or rebuild) the text index for a directory tree | A1 | A1 PASS: exit 0; fixture state checked |
 | `inspect` | Show repo state: HEAD, branch, dirty files, fingerprints | A1 | A1 PASS: contains `lib.rs`; valid JSON |
@@ -175,8 +175,8 @@ The contract text below is inventory evidence, not an endorsement of wording; no
 
 ## Boundary execution records
 
-- **A1:** `python3 scripts/system_audit.py --pixel target/debug/pixel --output /tmp/pixel-system-audit-final.json` → **102/102 PASS**, exit 0; 87 unique leaves. Frozen binary SHA256 `7977b61b795ffd1ea985ad68718b6ea734846b1eede952e177f4f99f8f0ac340`.
-- **A2:** `python3 scripts/system_audit_recall.py target/debug/pixel --output /tmp/pixel-recall-audit-final-current.json` → **28/28 PASS**, exit 0, same binary hash as A1. Populated malformed Claude JSONL, incremental append, temporary daemon lifecycles, configuration preservation and upgrade failure/success.
+- **A1:** `python3 scripts/bench/system_audit.py --pixel target/debug/pixel --output /tmp/pixel-system-audit-final.json` → **102/102 PASS**, exit 0; 87 unique leaves. Frozen binary SHA256 `7977b61b795ffd1ea985ad68718b6ea734846b1eede952e177f4f99f8f0ac340`.
+- **A2:** `python3 scripts/bench/system_audit_recall.py target/debug/pixel --output /tmp/pixel-recall-audit-final-current.json` → **28/28 PASS**, exit 0, same binary hash as A1. Populated malformed Claude JSONL, incremental append, temporary daemon lifecycles, configuration preservation and upgrade failure/success.
 - **A3:** `tests/ask-ranking/verify.py` and `tests/ask-ranking/observed.json` identify a frozen 195-file corpus and earlier immutable binary `d94b0e0d1571400886bea2a5a8f9c9001940034e316fe880799346d2072b67f3`; manual questions rank **3/2**. Explicit 3/5/8 limits compared, retain eight. This earlier-candidate evidence is not relabeled as a final installed-binary run.
 - **U1:** `cargo test -p pixel-cli --test upgrade_cli` → **2/2 PASS**: selected repo alone receives Shutdown; an unresponsive socket errors within the bound without false completion.
 - Exact argv, expected output assertions, exit codes, durations and binary identity are retained in `tests/system-audit/2026-09-12-cli-boundaries.json`. Temporary paths identify disposable fixtures only.

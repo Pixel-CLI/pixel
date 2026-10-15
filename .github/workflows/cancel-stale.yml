@@ -10,7 +10,7 @@ name: Cancel stale runs
 # answer is moot. `concurrency` in the heavy workflows already covers the
 # same-branch repush; this covers the merge/close that fires no new job to
 # supersede the old ones. Manual purge from a checkout:
-#   bash scripts/cancel-stale-runs.sh --all --older-than 60 --apply
+#   bash scripts/ci/cancel-stale-runs.sh --all --older-than 60 --apply
 on:
   pull_request:
     types: [closed]
@@ -41,12 +41,12 @@ jobs:
           ref: main
       - name: Cancel this PR's queued and in-progress runs
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        run: bash scripts/cancel-stale-runs.sh --branch "$PR_HEAD" --apply
+        run: bash scripts/ci/cancel-stale-runs.sh --branch "$PR_HEAD" --apply
         env:
           GH_TOKEN: ${{ github.token }}
           PR_HEAD: ${{ github.event.pull_request.head.ref }}
       - name: Cancel runs whose PR is already closed
         if: github.event_name == 'schedule'
-        run: bash scripts/cancel-stale-runs.sh --closed --apply
+        run: bash scripts/ci/cancel-stale-runs.sh --closed --apply
         env:
           GH_TOKEN: ${{ github.token }}

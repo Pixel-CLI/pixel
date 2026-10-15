@@ -5,7 +5,7 @@
 //! largest source files contain, whole against `pixel list-signatures`.
 //!
 //! The same measurement as `/benchmarks/` ("Well-known files") and
-//! `scripts/bench-read-savings.sh`, run on the user's own code: for each of
+//! `scripts/bench/bench-read-savings.sh`, run on the user's own code: for each of
 //! the largest indexed files, the file's bytes against the bytes of the
 //! outline `list-signatures` prints, both counted by
 //! [`pixel_actionlog::read_tokens`]. Per-language coverage closes the report,

@@ -67,8 +67,8 @@ A question about how you use Pixel is as welcome as a bug report.
 | --- | --- |
 | a question, an idea, or feedback on how you use Pixel | [GitHub Discussions](https://github.com/Pixel-CLI/pixel/discussions) |
 | a bug, with the command and its output | [GitHub Issues](https://github.com/Pixel-CLI/pixel/issues) |
-| a pull request | [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/CONTRIBUTING.md) lists what a pull request needs to be merged |
-| a security vulnerability, privately | [a private security advisory](https://github.com/Pixel-CLI/pixel/security/advisories/new) ([SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md)) |
+| a pull request | [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/.github/CONTRIBUTING.md) lists what a pull request needs to be merged |
+| a security vulnerability, privately | [a private security advisory](https://github.com/Pixel-CLI/pixel/security/advisories/new) ([SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/.github/SECURITY.md)) |
 | a request about your data | as the [Privacy Policy](/legal/privacy-policy/#who-is-responsible) says |
 
 There is no contact form, so the site keeps nothing you send. Every channel above is on GitHub, where you can read past threads before you post.
