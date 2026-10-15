@@ -6,7 +6,7 @@
 
 A commit "abstains" when a whole-change negative from `diff-reaches` would be
 downgraded to `unknown`: `uncovered_changes` or `unanchored` is non-empty
-(docs/design/evaluate.md, C3). `outside_symbol` residues are split by reading
+(docs/archive/design/evaluate.md, C3). `outside_symbol` residues are split by reading
 the lines themselves at the commit (new side) or its parent (old side).
 """
 import collections

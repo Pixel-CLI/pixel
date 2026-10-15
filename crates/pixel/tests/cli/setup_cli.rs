@@ -16,7 +16,7 @@
 //! `--print` contract, the unattended path, and the in-process goldens for
 //! everything else — the interactive prompts stay covered by the injected-I/O
 //! unit tests in `setup_cmd.rs`, which is the same split `but agent setup`
-//! settled on (`docs/design/but-agent-setup-reference.md`, "Testing strategy").
+//! settled on (`docs/archive/design/but-agent-setup-reference.md`, "Testing strategy").
 
 use crate::support::{Scratch, pixel_command};
 use std::fs;

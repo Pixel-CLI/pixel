@@ -1,7 +1,7 @@
 # Abstention of a whole-change negative (`evaluate diff-reaches`, d2-5)
 
 Measured 2026-09-26, before Delivery 2 of `pixel evaluate`
-([design note](../design/evaluate.md), decision C3). The question is how
+([design note](../archive/design/evaluate.md), decision C3). The question is how
 often `diff-reaches` would have to answer `unknown` rather than
 `absent_in_snapshot` because part of a change has no symbol in the graph. If
 the answer is "almost always", the whole-change promise leaves no real use
