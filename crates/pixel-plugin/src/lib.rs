@@ -23,6 +23,7 @@ mod available;
 mod discover;
 mod error;
 mod fetch;
+mod file;
 mod hash;
 mod install;
 mod invoke;

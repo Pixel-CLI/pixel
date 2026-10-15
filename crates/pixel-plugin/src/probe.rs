@@ -134,6 +134,30 @@ mod tests {
         assert!(set.probes[0].program.ends_with("probe"));
     }
 
+    // The brief reads every repo probe's manifest at each prompt: one the
+    // repository committed as a link is skipped with its reason, never read
+    // through, and the other probes still run.
+    #[test]
+    fn a_repo_probe_whose_manifest_is_a_link_is_skipped_and_the_others_still_run() {
+        let f = fixture();
+        probe_dir(&f.host.user_plugins(), "q");
+        let repo = f.host.repo_plugins().unwrap();
+        let linked = probe_dir(&repo, "p");
+        let elsewhere = f.tmp.path().join("elsewhere.toml");
+        fs::rename(linked.join("pixel-plugin.toml"), &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, linked.join("pixel-plugin.toml")).unwrap();
+        let set = probes(&f.host).unwrap();
+        let names: Vec<&str> = set.probes.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["q"]);
+        assert_eq!(set.skipped.len(), 1, "{:?}", set.skipped);
+        assert_eq!(set.skipped[0].0, "p");
+        assert!(
+            set.skipped[0].1.contains("is a symbolic link"),
+            "{:?}",
+            set.skipped
+        );
+    }
+
     #[test]
     fn a_disabled_probe_is_skipped_and_enabling_brings_it_back() {
         let f = fixture();

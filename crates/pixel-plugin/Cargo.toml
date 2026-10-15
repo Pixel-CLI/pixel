@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+libc = "0.2"
 mutants = { workspace = true }
 pixel-git = { path = "../pixel-git" }
 regex = "1.13"

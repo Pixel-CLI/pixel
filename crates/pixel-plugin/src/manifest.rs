@@ -3,6 +3,7 @@
 
 //! `pixel-plugin.toml`: what a plugin directory declares about itself.
 
+use std::io::Read;
 use std::path::{Component, Path};
 
 use toml_edit::{DocumentMut, Item};
@@ -17,6 +18,9 @@ pub const API_VERSION: i64 = 1;
 
 /// Longest plugin name; it becomes a directory name and a `pixel-<name>` binary.
 const MAX_NAME_LEN: usize = 64;
+/// Largest manifest read, 16 KiB, pixel-mvp's bound: the largest this
+/// repository ships (`probes/_template`) is 744 bytes.
+pub const MAX_MANIFEST_BYTES: u64 = 16_384;
 
 /// What a plugin can be asked to do. API 1 knows two capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,15 +376,35 @@ fn run_is_relative(run: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Read `<dir>/pixel-plugin.toml`. `Ok(None)` when the file is absent (the
-/// directory is not a plugin); a manifest that exists but is invalid, or
-/// names another plugin than its directory, is an error.
+/// Read `<dir>/pixel-plugin.toml`, at most [`MAX_MANIFEST_BYTES`] of it,
+/// opened without following a link or blocking (`file::open_regular`): the
+/// prompt-submit brief reads every repo plugin's manifest, so one committed
+/// as a link to `/dev/zero` or `/dev/tty` must be refused, not read.
+/// `Ok(None)` when the file is absent (the directory is not a plugin); a
+/// manifest that exists but is a link, oversized, invalid, or names another
+/// plugin than its directory, is an error.
 pub fn load(dir: &Path, expected_name: Option<&str>) -> Result<Option<Manifest>, Error> {
     let path = dir.join(MANIFEST_FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+    let file = match crate::file::open_regular(&path, None) {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(Error::io(format!("read {}", path.display()), e)),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::io(format!("read {}", path.display()), e))?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(Error::Manifest {
+            path,
+            message: format!("larger than {MAX_MANIFEST_BYTES} bytes"),
+        });
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Err(Error::Manifest {
+            path,
+            message: "not UTF-8".to_owned(),
+        });
     };
     let manifest = parse(&text).map_err(|message| Error::Manifest {
         path: path.clone(),
@@ -722,5 +746,48 @@ mode = "lead"
         std::fs::write(dir.path().join(MANIFEST_FILE), "api = 9").unwrap();
         let err = load(dir.path(), None).unwrap_err().to_string();
         assert!(err.contains(MANIFEST_FILE), "{err}");
+    }
+
+    // A repository chooses what its `.pixel/plugins/` holds, and every
+    // prompt reads its manifests: a manifest linked to a valid one outside
+    // the plugin would make the plugin declare what it does not hold, and
+    // one linked to `/dev/zero` would grow the brief's memory without end.
+    #[test]
+    fn a_manifest_reached_through_a_link_is_refused_and_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere.toml");
+        std::fs::write(&elsewhere, GOOD).unwrap();
+        let plugin = dir.path().join("flow");
+        std::fs::create_dir(&plugin).unwrap();
+        for target in [elsewhere.as_path(), Path::new("/dev/zero")] {
+            let link = plugin.join(MANIFEST_FILE);
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            let err = load(&plugin, Some("flow")).unwrap_err().to_string();
+            assert!(err.contains("is a symbolic link"), "{target:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_manifest_is_read_up_to_the_bound_and_refused_past_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MANIFEST_FILE);
+        let at_bound = |len: u64| {
+            let mut text = GOOD.to_owned();
+            text.push('#');
+            let pad = usize::try_from(len).unwrap() - text.len() - 1;
+            text.push_str(&"x".repeat(pad));
+            text.push('\n');
+            assert_eq!(text.len() as u64, len);
+            text
+        };
+        std::fs::write(&path, at_bound(MAX_MANIFEST_BYTES)).unwrap();
+        assert_eq!(load(dir.path(), None).unwrap().unwrap().name, "flow");
+        std::fs::write(&path, at_bound(MAX_MANIFEST_BYTES + 1)).unwrap();
+        let err = load(dir.path(), None).unwrap_err().to_string();
+        assert!(err.contains("larger than 16384 bytes"), "{err}");
+        std::fs::write(&path, b"name = \"\xff\"").unwrap();
+        let err = load(dir.path(), None).unwrap_err().to_string();
+        assert!(err.contains("not UTF-8"), "{err}");
     }
 }

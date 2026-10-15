@@ -1,0 +1,1 @@
+**plugin:** a plugin's `pixel-plugin.toml` is read without following a link or blocking, and at most 16 KiB of it: a repository that commits its manifest as a link to `/dev/zero`, `/dev/tty` or another file no longer hangs or exhausts `pixel plugin list`, `pixel <name>` or the prompt-submit brief; the plugin is reported and skipped.
