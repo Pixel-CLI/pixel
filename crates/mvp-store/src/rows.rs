@@ -271,9 +271,10 @@ pub(crate) fn unreadable(conn: &Connection) -> rusqlite::Result<Option<String>> 
                 .strip_prefix(&*uid_path(file))
                 .is_some_and(|r| r.starts_with('#'))
     };
-    let mut uids: HashSet<String> = HashSet::new();
-    let mut stmt =
-        conn.prepare("SELECT uid, file, kind, name, signature, line, end_line, leaf FROM symbols")?;
+    let mut ids: HashSet<i64> = HashSet::new();
+    let mut stmt = conn.prepare(
+        "SELECT uid, file, kind, name, signature, line, end_line, leaf, id FROM symbols",
+    )?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let (uid, file) = (text(row, 0)?, text(row, 1)?);
@@ -285,8 +286,8 @@ pub(crate) fn unreadable(conn: &Connection) -> rusqlite::Result<Option<String>> 
             && line(row, 5)?
             && line(row, 6)?
             && text(row, 7)? == name.map(mvp_model::leaf);
-        match uid {
-            Some(uid) if readable => uids.insert(uid.to_owned()),
+        match (uid, row.get_ref(8)?) {
+            (Some(_), ValueRef::Integer(id)) if readable => ids.insert(id),
             _ => return Ok(Some(format!("symbols row {}", shown(row.get_ref(0)?)))),
         };
     }
@@ -299,7 +300,8 @@ pub(crate) fn unreadable(conn: &Connection) -> rusqlite::Result<Option<String>> 
             ValueRef::Null => Some(false),
             _ => text(row, 1)?.map(|_| true),
         };
-        let readable = text(row, 0)?.is_some_and(|src| uids.contains(src))
+        // The id of a symbol of the index.
+        let readable = matches!(row.get_ref(0)?, ValueRef::Integer(src) if ids.contains(&src))
             && resolved.is_some()
             && text(row, 2)?.and_then(EdgeKind::parse).is_some()
             && line(row, 3)?

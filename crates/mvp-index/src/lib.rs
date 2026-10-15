@@ -32,5 +32,5 @@ pub use lang::extractor;
 pub use link::{Plan, link, plan};
 pub use tree::{
     Known, Repository, Tree, TreeError, TreeFile, changes, diff, discover, root, scan,
-    scan_discovered, scan_with,
+    scan_discovered, scan_discovered_in, scan_with,
 };

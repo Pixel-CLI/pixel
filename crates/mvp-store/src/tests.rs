@@ -168,11 +168,11 @@ fn damage_under_the_writer(root: &Path, sql: &str) {
     conn.execute_batch(sql).unwrap();
 }
 
-/// Makes `edges_src` and `edges_dst` trade b-trees, with the schema
-/// version bumped so that an open connection reads the new schema: every
-/// page stays sound, but the rows a publish deletes are missing from the
-/// index it deletes them through.
-fn swap_edge_indexes(root: &Path) {
+/// Makes `edges_dst` and the uid index of `symbols` trade b-trees (both
+/// keyed by a uid), with the schema version bumped so that an open
+/// connection reads the new schema: every page stays sound, but the rows a
+/// publish deletes are missing from the indexes it deletes them from.
+fn swap_uid_indexes(root: &Path) {
     let conn = rusqlite::Connection::open(db_path(root)).unwrap();
     let version: i64 = conn
         .query_row("PRAGMA schema_version", [], |r| r.get(0))
@@ -183,8 +183,9 @@ fn swap_edge_indexes(root: &Path) {
         &format!(
             "PRAGMA writable_schema = ON;
              UPDATE sqlite_master SET rootpage = (
-               SELECT sum(rootpage) FROM sqlite_master WHERE name IN ('edges_src', 'edges_dst')
-             ) - rootpage WHERE name IN ('edges_src', 'edges_dst');
+               SELECT sum(rootpage) FROM sqlite_master
+                WHERE name IN ('edges_dst', 'sqlite_autoindex_symbols_1')
+             ) - rootpage WHERE name IN ('edges_dst', 'sqlite_autoindex_symbols_1');
              PRAGMA schema_version = {};",
             version + 1
         ),
@@ -267,6 +268,100 @@ fn c10_unresolved_edges_are_counted_and_never_served() {
     assert_eq!(callees[0].dst.as_deref(), Some("b.rs#b#function"));
     assert_eq!(store.stats().unwrap().unresolved, 1);
     assert_eq!(store.all_edges().unwrap().len(), 2);
+}
+
+/// A reader that follows the index one file at a time (v1's Ruby merge
+/// re-reads only the files an update touched) must see, file by file,
+/// exactly the edges a reader of every edge sees, unresolved sites
+/// included; and must learn which files resolve a site into a file whose
+/// definitions changed, since their answer may change with them.
+#[test]
+fn a_file_s_edges_and_the_files_reaching_it_are_read_one_file_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    published(dir.path());
+    let a = symbol("a.rs", "a", 1);
+    let b = symbol("b.rs", "b", 1);
+    let c = symbol("c.rs", "c", 3);
+    let mut writer = Writer::open(dir.path(), None).unwrap();
+    writer
+        .publish(&delta(
+            "gen-2",
+            vec![file(
+                "c.rs",
+                vec![c.clone()],
+                vec![
+                    call(&c, Some(&b), "b"),
+                    call(&c, Some(&c), "c"),
+                    call(&c, None, "gone"),
+                ],
+            )],
+            &[],
+            &["a.rs", "b.rs", "c.rs"],
+        ))
+        .unwrap();
+    drop(writer);
+    let store = Store::open(dir.path()).unwrap();
+    let mut by_file: Vec<Edge> = ["a.rs", "b.rs", "c.rs"]
+        .iter()
+        .flat_map(|path| store.edges_of(path).unwrap())
+        .collect();
+    let mut all = store.all_edges().unwrap();
+    let key = |e: &Edge| (e.src.clone(), e.target.clone(), e.dst.clone());
+    by_file.sort_by_key(key);
+    all.sort_by_key(key);
+    assert_eq!(by_file, all);
+    let of_a = store.edges_of("a.rs").unwrap();
+    assert_eq!(
+        of_a,
+        vec![call(&a, Some(&b), "b"), call(&a, None, "missing")]
+    );
+    assert!(store.edges_of("b.rs").unwrap().is_empty());
+    assert!(store.edges_of("nowhere.rs").unwrap().is_empty());
+    // An unresolved site reaches no file; a resolved one reaches its
+    // target's, its own included.
+    assert_eq!(store.files_reaching("b.rs").unwrap(), ["a.rs", "c.rs"]);
+    assert_eq!(store.files_reaching("c.rs").unwrap(), ["c.rs"]);
+    assert!(store.files_reaching("a.rs").unwrap().is_empty());
+}
+
+/// An edge names its site's symbol by that symbol's id in the index: an
+/// edge leaving a symbol the index does not hold has nothing to name, and
+/// a generation holding one would read back an edge from nowhere. Such a
+/// delta is refused, and the published generation stays.
+#[test]
+fn an_edge_leaving_no_symbol_of_the_index_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    published(dir.path());
+    let c = symbol("c.rs", "c", 1);
+    let ghost = symbol("c.rs", "ghost", 2);
+    let mut writer = Writer::open(dir.path(), None).unwrap();
+    let refused = writer.publish(&delta(
+        "gen-2",
+        vec![file("c.rs", vec![c], vec![call(&ghost, None, "x")])],
+        &[],
+        &["a.rs", "b.rs", "c.rs"],
+    ));
+    assert!(
+        matches!(&refused, Err(StoreError::Refused(reason)) if reason.contains("c.rs#ghost#function")),
+        "{refused:?}"
+    );
+    drop(writer);
+    assert_eq!(generation(dir.path()), id("gen-1"));
+    // A site of a file may leave a symbol of another file the index holds.
+    let c = symbol("c.rs", "c", 1);
+    let a = symbol("a.rs", "a", 1);
+    let mut writer = Writer::open(dir.path(), None).unwrap();
+    writer
+        .publish(&delta(
+            "gen-3",
+            vec![file("c.rs", vec![c], vec![call(&a, None, "y")])],
+            &[],
+            &["a.rs", "b.rs", "c.rs"],
+        ))
+        .unwrap();
+    drop(writer);
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(store.edges_of("a.rs").unwrap().len(), 3);
 }
 
 #[test]
@@ -654,7 +749,7 @@ fn c19_damage_a_publish_meets_rebuilds_the_index_empty() {
         .unwrap();
     drop(writer);
     let mut writer = Writer::open(dir.path(), None).unwrap();
-    swap_edge_indexes(dir.path());
+    swap_uid_indexes(dir.path());
     writer.indexed().unwrap();
     let failed = writer.publish(&delta("gen-2", vec![], &["a.rs"], &["b.rs"]));
     assert!(
@@ -690,7 +785,7 @@ fn c19_damage_a_publish_meets_is_rebuilt_and_published_in_the_same_run() {
         .unwrap();
     drop(writer);
     let mut writer = Writer::open(dir.path(), None).unwrap();
-    swap_edge_indexes(dir.path());
+    swap_uid_indexes(dir.path());
     let mut read = Vec::new();
     let done = writer.retried(|writer| -> Result<(), StoreError> {
         let files = writer.indexed()?.files;
@@ -893,7 +988,6 @@ fn c19_an_index_that_disagrees_with_its_table_is_refused_then_rebuilt() {
             "b.rs#b#functioo",
         ),
         ("symbols_file", "b.rs", "c.rs"),
-        ("edges_src", "a.rs#a#function", "a.rs#a#functioo"),
         ("edges_dst", "b.rs#b#function", "b.rs#b#functioo"),
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -964,14 +1058,14 @@ fn c19_a_value_in_a_form_the_writer_never_writes_is_refused_then_rebuilt() {
 fn c19_a_file_checked_once_is_checked_again_once_written() {
     let dir = tempfile::tempdir().unwrap();
     published(dir.path());
-    let page = root_page(dir.path(), "edges_src");
+    let page = root_page(dir.path(), "edges_dst");
     // `root_page` wrote the file: a reader checks it whole and stamps it.
     settle(dir.path());
     assert_eq!(generation(dir.path()), id("gen-1"));
     assert!(checked::trusted(dir.path()), "stamped");
     let db = db_path(dir.path());
     let before = std::fs::metadata(&db).unwrap();
-    assert!(rekey(dir.path(), page, "a.rs#a#function", "a.rs#a#functioo") > 0);
+    assert!(rekey(dir.path(), page, "b.rs#b#function", "b.rs#b#functioo") > 0);
     let file = std::fs::File::options().write(true).open(&db).unwrap();
     file.set_modified(before.modified().unwrap()).unwrap();
     drop(file);
@@ -980,7 +1074,7 @@ fn c19_a_file_checked_once_is_checked_again_once_written() {
         (after.len(), after.modified().unwrap()),
         (before.len(), before.modified().unwrap())
     );
-    refused_then_rebuilt(dir.path(), "edges_src rekeyed under its old mtime");
+    refused_then_rebuilt(dir.path(), "edges_dst rekeyed under its old mtime");
 }
 
 // ADR-0022: a writer stamps the file only when it holds what a check passed
@@ -1020,10 +1114,10 @@ fn c19_a_write_in_the_tick_of_the_stamp_is_checked_again() {
     seam::freeze();
     let dir = tempfile::tempdir().unwrap();
     published(dir.path());
-    let page = root_page(dir.path(), "edges_src");
+    let page = root_page(dir.path(), "edges_dst");
     drop(Writer::open(dir.path(), None).unwrap());
-    assert!(rekey(dir.path(), page, "a.rs#a#function", "a.rs#a#functioo") > 0);
-    refused_then_rebuilt(dir.path(), "edges_src rekeyed in the tick of the stamp");
+    assert!(rekey(dir.path(), page, "b.rs#b#function", "b.rs#b#functioo") > 0);
+    refused_then_rebuilt(dir.path(), "edges_dst rekeyed in the tick of the stamp");
 }
 
 // Review of #52: damage another process does after the writer's open

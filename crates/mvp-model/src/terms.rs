@@ -179,9 +179,17 @@ impl Lexicon {
         lexicon
     }
 
-    /// The English words of a French word as typed, `None` when the
-    /// lexicon does not hold it.
-    fn get(&self, word: &str) -> Option<&[String]> {
+    /// The English words a French word maps to, whole, as the lexicon
+    /// writes them (`marketplace`, not its term): looked up in lower case
+    /// as written first, so accents choose ("marché" against "marche"),
+    /// then with its accents folded, where the words of every form that
+    /// folds to it are merged in file order. Empty for a word the lexicon
+    /// drops ("donne"), `None` for one it does not hold.
+    ///
+    /// [`prompt_terms`] reads the terms of these words; a caller that
+    /// matches whole words (v1's execution brief, ADR-0036) reads them
+    /// here, so both read one lookup and cannot drift apart on a form.
+    pub fn english_words(&self, word: &str) -> Option<&[String]> {
         let word = word.to_lowercase();
         self.exact
             .get(&word)
@@ -214,7 +222,7 @@ pub fn prompt_terms(text: &str, language: Language, lexicon: &Lexicon) -> Vec<St
         if FRENCH.binary_search(&fold(&word).as_str()).is_ok() {
             continue;
         }
-        match lexicon.get(&word) {
+        match lexicon.english_words(&word) {
             Some(english) => {
                 for target in english {
                     out.extend(terms(target));
@@ -337,6 +345,55 @@ mod tests {
         assert_eq!(french("passe"), ["password", "pass"]);
         assert_eq!(french("MARCHÉ"), ["market", "marketplac"]);
         assert_eq!(lexicon.len(), 4);
+    }
+
+    // A caller that matches whole words (v1's brief searches a word-bounded
+    // content match, a symbol name) needs the words as written: a term
+    // ("marketplac") is not a word the code holds.
+    #[test]
+    fn english_words_are_whole_and_their_terms_are_the_prompts() {
+        let lexicon = Lexicon::parse("marché\tmarket marketplace\ndonne\t-\n");
+        assert_eq!(
+            lexicon.english_words("MARCHÉ"),
+            Some(&["market".to_owned(), "marketplace".to_owned()][..])
+        );
+        let terms_of_words: Vec<String> = lexicon
+            .english_words("marché")
+            .unwrap()
+            .iter()
+            .flat_map(|word| terms(word))
+            .collect();
+        assert_eq!(
+            terms_of_words,
+            prompt_terms("marché", Language::French, &lexicon)
+        );
+        assert_eq!(lexicon.english_words("donne"), Some(&[][..]));
+        assert_eq!(lexicon.english_words("marchés"), None);
+    }
+
+    // Typed without accents, a word the lexicon holds only with them gets
+    // the words of every form that folds to it, once each, in file order:
+    // which form was meant cannot be told, so none is lost. Typed with its
+    // accents, it gets its own form's words only.
+    #[test]
+    fn a_folded_word_merges_the_words_of_every_form() {
+        let lexicon = Lexicon::parse("créé\tcreate\ncrée\tcreate creator\ncréée\tcreated\n");
+        assert_eq!(
+            lexicon.english_words("cree"),
+            Some(&["create".to_owned(), "creator".to_owned()][..])
+        );
+        assert_eq!(
+            lexicon.english_words("creé"),
+            Some(&["create".to_owned(), "creator".to_owned()][..])
+        );
+        assert_eq!(
+            lexicon.english_words("Créé"),
+            Some(&["create".to_owned()][..])
+        );
+        assert_eq!(
+            lexicon.english_words("creee"),
+            Some(&["created".to_owned()][..])
+        );
     }
 
     #[test]

@@ -183,6 +183,21 @@ pub fn scan_with(path: &Path, known: &Known<'_>) -> Result<Tree, TreeError> {
 /// The final HEAD and metadata checks still detect a checkout or save
 /// between discovery and the end of the scan (C-11).
 pub fn scan_discovered(repo: Repository, known: &Known<'_>) -> Result<Tree, TreeError> {
+    let base = repo.root.clone();
+    scan_discovered_in(repo, known, &base)
+}
+
+/// [`scan_discovered`], reading the copy of git's index (ADR-0039) from
+/// `base`'s [`STATE`] instead of the work tree root's: `base` is the
+/// directory a caller gives the store (`Writer::open`, `place_git_index`),
+/// when it keeps Pixel's state away from the root (v1 keeps it in
+/// `.pixel/.pixel-mvp/`, so its `base` is `<root>/.pixel`). The copy is
+/// still keyed by git's index file and read only while that holds.
+pub fn scan_discovered_in(
+    repo: Repository,
+    known: &Known<'_>,
+    base: &Path,
+) -> Result<Tree, TreeError> {
     let Repository {
         root,
         commit,
@@ -190,7 +205,7 @@ pub fn scan_discovered(repo: Repository, known: &Known<'_>) -> Result<Tree, Tree
     } = repo;
     let copy = index
         .as_deref()
-        .and_then(|source| crate::git_index::Copy::of(&root, source));
+        .and_then(|source| crate::git_index::Copy::of(base, source));
     let unsettled = copy.as_ref().is_some_and(|copy| !copy.made());
     // The copy stands for git's index only while that is the version it
     // was made of, the scan's end included; else git's own index is read.

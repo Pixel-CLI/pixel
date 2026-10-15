@@ -18,7 +18,10 @@ use crate::rows;
 /// 5: `files` keeps the stat each file was hashed under (ADR-0022 §2).
 /// 6: `words` holds each sub-word's exact document frequency.
 /// 7: `postings` and `documents`, the terms BM25 reads (ADR-0030).
-pub const SCHEMA_VERSION: i64 = 7;
+/// 8: `edges.src` is the `symbols.id` of the site's symbol, not its uid:
+///    the uid, written once per site and once more in `edges_src`, was
+///    300 of the 336 MB of `antiwork/gumroad`'s index.
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// The version of the full check of [`shape`], named in every stamp
 /// (`checked`): bumped whenever the check gets stricter, so that no build
@@ -32,6 +35,9 @@ pub const APPLICATION_ID: i64 = 0x5058_4d56;
 /// resolver needs to decide a site again without parsing its file:
 /// `files.facts`, `edges.target` and `edges.context`, and `symbols.leaf`,
 /// the last segment of the name ([`mvp_model::leaf`]), for the chain.
+/// An edge names its site's symbol by `symbols.id` (`src`), which every
+/// read turns back into the symbol's uid; its target by uid (`dst`), which
+/// may name a symbol of another file.
 const TABLES: &str = "
 CREATE TABLE files (
   path TEXT PRIMARY KEY,
@@ -45,7 +51,8 @@ CREATE TABLE files (
   stat_ino INTEGER
 ) WITHOUT ROWID;
 CREATE TABLE symbols (
-  uid TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY,
+  uid TEXT NOT NULL UNIQUE,
   file TEXT NOT NULL,
   kind TEXT NOT NULL,
   name TEXT NOT NULL,
@@ -58,7 +65,7 @@ CREATE INDEX symbols_file ON symbols(file);
 CREATE INDEX symbols_name ON symbols(name COLLATE NOCASE);
 CREATE INDEX symbols_leaf ON symbols(leaf COLLATE NOCASE);
 CREATE TABLE edges (
-  src TEXT NOT NULL,
+  src INTEGER NOT NULL,
   dst TEXT,
   kind TEXT NOT NULL,
   line INTEGER NOT NULL,

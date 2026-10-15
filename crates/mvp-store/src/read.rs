@@ -113,10 +113,32 @@ impl Store {
     /// Every edge of the generation, resolved or not; for checks that compare
     /// the store with the indexer's output.
     pub fn all_edges(&self) -> Result<Vec<Edge>, StoreError> {
+        self.edges(&format!("{EDGES} ORDER BY e.rowid"), [])
+    }
+
+    /// Every edge whose site is in `file`, resolved or not, in the order
+    /// `all_edges` gives them: what a reader that follows the index one
+    /// file at a time reads in place of every edge (v1's Ruby merge,
+    /// ADR-0037).
+    pub fn edges_of(&self, file: &str) -> Result<Vec<Edge>, StoreError> {
         self.edges(
-            "SELECT src, dst, kind, line, target, context FROM edges",
-            [],
+            &format!(
+                "{EDGES} WHERE e.src IN (SELECT id FROM symbols WHERE file = ?1) ORDER BY e.rowid"
+            ),
+            [file],
         )
+    }
+
+    /// The files holding a site resolved to a symbol of `file`, sorted,
+    /// `file` among them when it calls itself: those whose answer
+    /// changes when what `file` defines does.
+    pub fn files_reaching(&self, file: &str) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT s.file FROM edges e JOIN symbols s ON s.id = e.src
+              WHERE e.dst IN (SELECT uid FROM symbols WHERE file = ?1) ORDER BY s.file",
+        )?;
+        let rows = stmt.query_map([file], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     fn edges<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<Vec<Edge>, StoreError> {
@@ -175,8 +197,7 @@ impl Graph for Store {
 
     fn callers(&self, uid: &str) -> Result<Vec<Edge>, GraphError> {
         self.edges(
-            "SELECT src, dst, kind, line, target, context FROM edges
-             WHERE dst = ?1 AND resolved = 1 ORDER BY src, line",
+            &format!("{EDGES} WHERE e.dst = ?1 AND e.resolved = 1 ORDER BY s.uid, e.line"),
             [uid],
         )
         .map_err(graph_error)
@@ -244,13 +265,20 @@ impl Graph for Store {
 
     fn callees(&self, uid: &str) -> Result<Vec<Edge>, GraphError> {
         self.edges(
-            "SELECT src, dst, kind, line, target, context FROM edges
-             WHERE src = ?1 AND resolved = 1 ORDER BY line, dst",
+            &format!(
+                "{EDGES} WHERE e.src = (SELECT id FROM symbols WHERE uid = ?1) AND e.resolved = 1
+                 ORDER BY e.line, e.dst"
+            ),
             [uid],
         )
         .map_err(graph_error)
     }
 }
+
+/// An edge as [`edge_of`] reads it, with its site's symbol's uid for
+/// `edges.src`, which holds that symbol's id.
+const EDGES: &str = "SELECT s.uid, e.dst, e.kind, e.line, e.target, e.context
+     FROM edges e JOIN symbols s ON s.id = e.src";
 
 /// The symbols a token names, by name or by leaf: two searches, one per
 /// name index, rather than one `OR` the planner may answer by walking the

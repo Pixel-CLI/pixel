@@ -639,21 +639,22 @@ impl<'a> Index<'a> {
         // the front of that owner's own list, where what it prepends goes.
         let unsure =
             |step: &Step| matches!(step.node, Node::Known(o, s) if self.unsure(o, s, name));
-        let unknown = steps
-            .iter()
-            .enumerate()
-            .filter(|(_, step)| unsure(step))
-            .map(|(j, _)| front(steps, j))
-            .min();
         let Some(first) = steps.iter().position(defines) else {
-            return if unknown.is_some() {
+            return if steps.iter().any(unsure) {
                 Lookup::Abstain
             } else {
                 Lookup::NotFound
             };
         };
+        // An unsure step whose own list starts at or before the first
+        // definition: every step up to it, and a later one only when it
+        // sits in the same own list. A step past both cannot matter, so
+        // its facts are not read (most of a long chain).
         if steps[..first].iter().any(|step| step.node == Node::Unknown)
-            || unknown.is_some_and(|at| at <= first)
+            || steps
+                .iter()
+                .enumerate()
+                .any(|(j, step)| (j <= first || front(steps, j) <= first) && unsure(step))
         {
             return Lookup::Abstain;
         }

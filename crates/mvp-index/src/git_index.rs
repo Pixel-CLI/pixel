@@ -40,17 +40,19 @@ pub struct Copy {
     source: PathBuf,
     /// The source's path and stat, hashed: the copy's name.
     key: String,
-    /// Where the copy is: `.pixel-mvp/git-index.<key>` under the root.
+    /// Where the copy is: `.pixel-mvp/git-index.<key>` under the base.
     path: PathBuf,
 }
 
 impl Copy {
-    /// The copy of the version of `source` there is now, in the state of
-    /// the work tree at `root`; `None` when `source` is not a regular file
-    /// (no index yet, before the first `git add`).
-    pub fn of(root: &Path, source: &Path) -> Option<Copy> {
+    /// The copy of the version of `source` there is now, in `base`'s
+    /// [`STATE`]: the work tree's root, or the directory a caller keeps
+    /// Pixel's state under ([`crate::tree::scan_discovered_in`]); `None`
+    /// when `source` is not a regular file (no index yet, before the first
+    /// `git add`).
+    pub fn of(base: &Path, source: &Path) -> Option<Copy> {
         let key = key(source)?;
-        let path = root.join(STATE).join(format!("{PREFIX}{key}"));
+        let path = base.join(STATE).join(format!("{PREFIX}{key}"));
         Some(Copy {
             source: source.to_path_buf(),
             key,
@@ -151,7 +153,7 @@ fn key(_: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree::{discover, scan_discovered};
+    use crate::tree::{discover, scan_discovered, scan_discovered_in};
 
     /// Runs git in `dir`, as a test sets a repository up.
     fn run_git(dir: &Path, args: &[&str]) {
@@ -181,8 +183,13 @@ mod tests {
     /// The copy of the git index there is now, made and refreshed as the
     /// writer makes it.
     fn made(root: &Path) -> Copy {
+        made_in(root, discover(root).unwrap().root())
+    }
+
+    /// [`made`], in `base`'s state directory.
+    fn made_in(root: &Path, base: &Path) -> Copy {
         let repo = discover(root).unwrap();
-        let copy = Copy::of(repo.root(), repo.index().unwrap()).unwrap();
+        let copy = Copy::of(base, repo.index().unwrap()).unwrap();
         std::fs::write(copy.path(), copy.bytes().unwrap()).unwrap();
         assert!(refresh(repo.root(), copy.path()));
         assert!(copy.made() && copy.holds());
@@ -216,6 +223,45 @@ mod tests {
             crate::tree::scan_using(root, tree.commit.clone(), Some(copy.path()), &|_| None)
                 .unwrap();
         assert!(!stale.dirty);
+    }
+
+    // v1 keeps pixel-mvp's state in `.pixel/.pixel-mvp/` (ADR-0036): the
+    // copy its writer places there must be the one its scan reads, or every
+    // scan pays git's stale stat cache again (v1#993). Its key is still
+    // git's index file, so a change staged after it is read from git's own,
+    // and neither the copy nor the scans write `.git/index` (C-18).
+    #[cfg(unix)]
+    #[test]
+    fn c11_c18_a_copy_under_a_callers_state_directory_is_the_one_its_scan_reads() {
+        let dir = committed();
+        let root = dir.path();
+        let base = root.join(".pixel");
+        std::fs::create_dir_all(base.join(STATE)).unwrap();
+        // As the store makes it: the state is never listed by git.
+        std::fs::write(base.join(STATE).join(".gitignore"), "*\n").unwrap();
+        let git_index = root.join(".git/index");
+        let stat = |path: &Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            (std::fs::read(path).unwrap(), meta.modified().unwrap())
+        };
+        let before = stat(&git_index);
+        let copy = made_in(root, &base);
+        assert!(copy.path().starts_with(base.join(STATE)), "{copy:?}");
+        let tree = scan_discovered_in(discover(root).unwrap(), &|_| None, &base).unwrap();
+        assert_eq!(tree.index.as_deref(), Some(copy.path()), "the copy read");
+        assert!(!tree.dirty && !tree.unsettled);
+        // The root's own state holds no copy: read from there, git's own
+        // index is, and the writer is asked for a copy.
+        let tree = scan_discovered(discover(root).unwrap(), &|_| None).unwrap();
+        assert_eq!(tree.index, None);
+        assert!(!tree.dirty && tree.unsettled);
+        assert_eq!(stat(&git_index), before, "git's index untouched");
+        std::fs::write(root.join("a.rb"), "def b; end\n").unwrap();
+        run_git(root, &["add", "a.rb"]);
+        std::fs::write(root.join("a.rb"), "def a; end\n").unwrap();
+        let tree = scan_discovered_in(discover(root).unwrap(), &|_| None, &base).unwrap();
+        assert!(tree.dirty, "the staged change is seen");
+        assert_eq!(tree.index, None, "git's own index read");
     }
 
     // The copy is found by the path git names: the same from any directory

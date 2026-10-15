@@ -170,7 +170,7 @@ mod rspec;
 mod stubs;
 mod values;
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -396,10 +396,25 @@ struct Index<'a> {
     /// Spec file → the modules it mixes into objects the rules cannot
     /// name (`stubs::spread_by`), read once.
     spread_by: RefCell<HashMap<&'a str, Option<Rc<HashSet<&'a str>>>>>,
+    /// What [`Index::brought`] walks, once it first runs.
+    bringing: OnceCell<Bringing<'a>>,
     /// The indexes of the projects that load this one as a path gem: a
     /// call on `self` must find the same definition from their objects too
     /// (F1 across projects, R6).
     loaders: Vec<Index<'a>>,
+}
+
+/// What each module nests, declares and has written in its body, by
+/// module: the walk of [`Index::brought`], read once per index.
+struct Bringing<'a> {
+    /// A module → the modules nested in it, at any depth.
+    nested: HashMap<&'a str, Vec<&'a str>>,
+    /// A class or module → its ancestor declarations (`Index::mixins`),
+    /// a hook's under the hook's owner.
+    declared: HashMap<&'a str, Vec<usize>>,
+    /// The innermost scope of a mixin written in a body → those mixins
+    /// (`Facts::mixins_written`).
+    written: HashMap<String, Vec<usize>>,
 }
 
 impl<'a> Index<'a> {
@@ -438,6 +453,7 @@ impl<'a> Index<'a> {
             rspec: rspec::Rspec::read(world.files, visible),
             unowned: HashMap::new(),
             spread_by: RefCell::new(HashMap::new()),
+            bringing: OnceCell::new(),
             loaders: Vec::new(),
         };
         // A group's `def` is a method of an object the rules cannot name
@@ -646,33 +662,16 @@ impl<'a> Index<'a> {
     /// those nested in it (`ClassMethods`), read from the declarations and
     /// facts alone, so before any chain is walked.
     fn brought(&self, mixed: Vec<&'a str>) -> HashSet<&'a str> {
-        // What each module nests and declares, read once: a scan of every
-        // module and declaration per module brought would be quadratic.
-        let mut nested: HashMap<&str, Vec<&'a str>> = HashMap::new();
-        for &module in &self.modules {
-            let mut end = module.len();
-            while let Some(at) = module[..end].rfind("::") {
-                nested.entry(&module[..at]).or_default().push(module);
-                end = at;
-            }
-        }
-        let mut declared: HashMap<&str, Vec<&Mixin<'a>>> = HashMap::new();
-        for mixin in self.mixins.iter().filter(|mixin| !mixin.name.is_empty()) {
-            let declarer = self.symbols[mixin.src].name.as_str();
-            let by = match mixin.kind.on {
-                On::Hook => split_method(declarer).map_or("", |(owner, _, _)| owner),
-                _ => declarer,
-            };
-            declared.entry(by).or_default().push(mixin);
-        }
-        let mut written: HashMap<&str, Vec<(&str, &[String])>> = HashMap::new();
-        for (path, scope) in self.facts.mixins_written().0 {
-            if let Some(innermost) = scope.first() {
-                let paths = written.entry(innermost.as_str()).or_default();
-                paths.push((path.as_str(), scope.as_slice()));
-            }
-        }
         let mut spread = HashSet::new();
+        if mixed.is_empty() {
+            return spread;
+        }
+        let Bringing {
+            nested,
+            declared,
+            written,
+        } = self.bringing.get_or_init(|| self.bringing());
+        let written_all = self.facts.mixins_written().0;
         let mut next = mixed;
         let mut any = false;
         while let Some(module) = next.pop() {
@@ -686,16 +685,58 @@ impl<'a> Index<'a> {
                 next.extend(self.modules.iter().copied());
             }
             next.extend(nested.get(module).into_iter().flatten());
-            for mixin in declared.get(module).into_iter().flatten() {
+            for &at in declared.get(module).into_iter().flatten() {
+                let mixin = &self.mixins[at];
                 let named = self.may_name(&mixin.name, &mixin.cref);
                 next.extend(named.iter().filter_map(|name| self.known(name)));
             }
-            for (path, scope) in written.get(module).into_iter().flatten() {
+            for &at in written.get(module).into_iter().flatten() {
+                let (path, scope) = &written_all[at];
                 let named = self.may_name(path, scope);
                 next.extend(named.iter().filter_map(|name| self.known(name)));
             }
         }
         spread
+    }
+
+    /// What [`Index::brought`] walks, read once per index: a scan of every
+    /// module and declaration per module brought would be quadratic, and
+    /// one per call is paid by each example file of the test program
+    /// (`stubs::spread_by`). Read on the first call, which comes after
+    /// the modules, the ancestor declarations and the mixins written are
+    /// all read: none of them changes once the index is built.
+    fn bringing(&self) -> Bringing<'a> {
+        let mut nested: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
+        for &module in &self.modules {
+            let mut end = module.len();
+            while let Some(at) = module[..end].rfind("::") {
+                nested.entry(&module[..at]).or_default().push(module);
+                end = at;
+            }
+        }
+        let mut declared: HashMap<&'a str, Vec<usize>> = HashMap::new();
+        for (at, mixin) in self.mixins.iter().enumerate() {
+            if mixin.name.is_empty() {
+                continue;
+            }
+            let declarer = self.symbols[mixin.src].name.as_str();
+            let by = match mixin.kind.on {
+                On::Hook => split_method(declarer).map_or("", |(owner, _, _)| owner),
+                _ => declarer,
+            };
+            declared.entry(by).or_default().push(at);
+        }
+        let mut written: HashMap<String, Vec<usize>> = HashMap::new();
+        for (at, (_, scope)) in self.facts.mixins_written().0.iter().enumerate() {
+            if let Some(innermost) = scope.first() {
+                written.entry(innermost.clone()).or_default().push(at);
+            }
+        }
+        Bringing {
+            nested,
+            declared,
+            written,
+        }
     }
 
     /// The file each resolved `require` loads, per requiring file.

@@ -5,12 +5,14 @@
 //! the rows a run keeps, and publishes the next generation in one
 //! transaction.
 
+use std::collections::HashMap;
 use std::fs::{File, TryLockError};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use mvp_model::{Delta, FileRow, Kept};
-use rusqlite::{Connection, params};
+
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::checked::{self, Stamp};
 use crate::read::stats;
@@ -200,7 +202,7 @@ fn apply(conn: &mut Connection, delta: &Delta) -> Result<(), StoreError> {
     let tx = conn.transaction()?;
     {
         let mut drop_edges =
-            tx.prepare("DELETE FROM edges WHERE src IN (SELECT uid FROM symbols WHERE file = ?1)")?;
+            tx.prepare("DELETE FROM edges WHERE src IN (SELECT id FROM symbols WHERE file = ?1)")?;
         let mut drop_symbols = tx.prepare("DELETE FROM symbols WHERE file = ?1")?;
         let mut drop_file = tx.prepare("DELETE FROM files WHERE path = ?1")?;
         for path in &delta.drop {
@@ -219,6 +221,7 @@ fn apply(conn: &mut Connection, delta: &Delta) -> Result<(), StoreError> {
             "INSERT INTO edges (src, dst, kind, line, resolved, target, context)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
+        let mut symbol_id = tx.prepare("SELECT id FROM symbols WHERE uid = ?1")?;
         for rows in &delta.add {
             add_file.execute(params![
                 rows.file.path,
@@ -227,6 +230,7 @@ fn apply(conn: &mut Connection, delta: &Delta) -> Result<(), StoreError> {
                 delta.provenance.indexed_at,
                 rows.facts,
             ])?;
+            let mut ids: HashMap<&str, i64> = HashMap::with_capacity(rows.symbols.len());
             for symbol in &rows.symbols {
                 add_symbol.execute(params![
                     symbol.uid,
@@ -238,10 +242,25 @@ fn apply(conn: &mut Connection, delta: &Delta) -> Result<(), StoreError> {
                     symbol.line,
                     symbol.end_line,
                 ])?;
+                ids.insert(symbol.uid.as_str(), tx.last_insert_rowid());
             }
             for edge in &rows.edges {
+                // A site's symbol is its file's; one of another file the
+                // index holds is looked up, one it does not hold refused.
+                let src = match ids.get(edge.src.as_str()) {
+                    Some(&id) => id,
+                    None => symbol_id
+                        .query_row([&edge.src], |r| r.get(0))
+                        .optional()?
+                        .ok_or_else(|| {
+                            StoreError::Refused(format!(
+                                "an edge of {} leaves {}, which no symbol of the index is",
+                                rows.file.path, edge.src
+                            ))
+                        })?,
+                };
                 add_edge.execute(params![
-                    edge.src,
+                    src,
                     edge.dst,
                     edge.kind.as_str(),
                     edge.line,
@@ -253,8 +272,8 @@ fn apply(conn: &mut Connection, delta: &Delta) -> Result<(), StoreError> {
         }
         let mut redirect = tx.prepare(
             "UPDATE edges SET dst = ?1, resolved = ?2
-             WHERE src = ?3 AND kind = ?4 AND line = ?5 AND target = ?6 AND context = ?7
-               AND dst IS ?8",
+             WHERE src = (SELECT id FROM symbols WHERE uid = ?3) AND kind = ?4 AND line = ?5
+               AND target = ?6 AND context = ?7 AND dst IS ?8",
         )?;
         for (edge, dst) in &delta.redirect {
             redirect.execute(params![
@@ -486,22 +505,23 @@ fn read_kept(conn: &Connection, drop: &[String]) -> Result<Kept, StoreError> {
         }
     }
     let mut stmt =
-        conn.prepare("SELECT uid, file, kind, name, signature, line, end_line FROM symbols")?;
+        conn.prepare("SELECT uid, file, kind, name, signature, line, end_line, id FROM symbols")?;
     let mut rows = stmt.query([])?;
+    // A kept symbol's id → its index in `kept.symbols`.
+    let mut kept_ids: HashMap<i64, usize> = HashMap::new();
     while let Some(row) = rows.next()? {
         let file: String = row.get(1)?;
         if !dropped.contains(file.as_str()) {
+            kept_ids.insert(row.get(7)?, kept.symbols.len());
             kept.symbols.push(symbol_of(row, file)?);
         }
     }
-    let kept_uids: std::collections::HashSet<&str> =
-        kept.symbols.iter().map(|s| s.uid.as_str()).collect();
     let mut stmt = conn.prepare("SELECT src, dst, kind, line, target, context FROM edges")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        let src: String = row.get(0)?;
-        if kept_uids.contains(src.as_str()) {
-            kept.edges.push(edge_of(row, src)?);
+        let src: i64 = row.get(0)?;
+        if let Some(&at) = kept_ids.get(&src) {
+            kept.edges.push(edge_of(row, kept.symbols[at].uid.clone())?);
         }
     }
     Ok(kept)
