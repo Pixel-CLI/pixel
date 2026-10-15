@@ -14,11 +14,9 @@ renders.
 | `PixelImpact` | `impactSpec` | `pixel-impact-comparison` |
 | `PixelScope` | `scopeSpec` | `pixel-scope-comparison` |
 | `PixelBrief` | `briefSpec` | `pixel-brief-comparison` |
-| `PixelRollback` | `rollbackSpec` | `pixel-rollback-comparison` |
-| `PixelPublish` | `publishSpec` | `pixel-publish-comparison` |
 | `PixelRewrite` | `rewriteSpec` | `pixel-rewrite-comparison` |
 
-The seven `Pixel*` compositions render `ComparisonScene` (`src/ComparisonScene.tsx`)
+The five `Pixel*` compositions render `ComparisonScene` (`src/ComparisonScene.tsx`)
 with one spec from `src/PixelComparison.tsx`, at 1600×1000, 30 fps, 8 s.
 They illustrate workflows, not timed comparisons. The accounting diagram's
 "measured" label refers to local volumes; tokens and avoided-round-trip times
