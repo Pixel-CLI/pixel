@@ -39,7 +39,7 @@ Usage: arena.sh <command> [args]
       --focus                       focus the arena tab when it opens
   run-set <source> [options]        run a whole set of questions in a row in the two panes
       source: catalog | single | census | bench   (census prompts are read from census.db at run time)
-      --fresh (a new pair per case)   --codex-profile NAME   --cross   --history   --agent codex|claude|devin   --pixel-bin PATH   --brief-extra CMD   --parts N   --only id,id   --timeout SECONDS   --sha COMMIT
+      --keep-context (no /clear: one session per arm answers every question; writes session/ with all briefs and tool calls)   --fresh (a new pair per case)   --codex-profile NAME   --cross   --history   --agent codex|claude|devin   --pixel-bin PATH   --brief-extra CMD   --parts N   --only id,id   --timeout SECONDS   --sha COMMIT
       --here                        panes live in the current tab: the finished case's
                                     pair closes when the next case starts, the last
                                     pair stays open
@@ -220,7 +220,8 @@ make_devin_home() {
 # prompt; the arena wrote the workspace and the flags, so it accepts them.
 claude_dialogs() {
   local pane=$1 screen
-  screen=$(hd agent read "$pane" --source visible 2>/dev/null || true)
+  # Narrow panes wrap the dialog text ("Yes, I trust this / folder"): match on a single-spaced copy.
+  screen=$(hd agent read "$pane" --source visible 2>/dev/null | tr '\n' ' ' | tr -s ' ' || true)
   case "$screen" in
     # The trust dialog opens on "No, exit": move to "Yes, I trust this folder" first.
     *"No, exit"*"trust this folder"*) hd agent send-keys "$pane" down >/dev/null; hd agent send-keys "$pane" enter >/dev/null; sleep 1 ;;
@@ -663,7 +664,12 @@ cmd_abort() {
     pkill -f -- "${d%/}/" 2>/dev/null || true
     rm -f "$d"pixel/codex-home/auth.json "$d"no-pixel/codex-home/auth.json
   done
-  pkill -f "$SCRATCH/setws/" 2>/dev/null || true
+  # Indexers a killed set left behind: matched by working directory, never by command line (a shell
+  # whose command merely mentions the path would match too).
+  local ip
+  for ip in $(pgrep -f 'pixel (prepare-repo|build-index)' 2>/dev/null); do
+    case "$(lsof -a -p "$ip" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')" in "$SCRATCH"/setws/*) kill "$ip" 2>/dev/null || true ;; esac
+  done
   rm -rf "$SCRATCH"/setws/*.lock
   say 'abort complete'
 }
@@ -869,6 +875,7 @@ cmd_run_set() {
       --codex-profile) CODEX_PROFILE=${2:?--codex-profile needs a name}; shift 2 ;;
       --cross) cross=1; shift ;;
       --fresh) ARENA_REUSE=0; shift ;;
+      --keep-context) ARENA_CLEAR=0; shift ;;
       --brief-extra) extra=${2:?--brief-extra needs a command}; shift 2 ;;
       --parts) parts=${2:?--parts needs a number}; shift 2 ;;
       --only) only=${2:?--only needs ids}; shift 2 ;;
@@ -883,6 +890,7 @@ cmd_run_set() {
   [ -n "$bin" ] || bin=$(command -v pixel) || die 'no pixel binary: pass --pixel-bin'
   [ -x "$bin" ] || die "not executable: $bin"
   check_agent; agent_bin_ok
+  [ "${ARENA_CLEAR:-1}" = 1 ] || [ "$AGENT" = claude ] || die '--keep-context reads Claude Code transcripts: use --agent claude'
   [ "$source" != census ] || command -v sqlite3 >/dev/null || die 'sqlite3 is required for the census source'
   [ -n "$baseline_file" ] || { [ "$source" != census ] || baseline_file=${ARENA_BASELINE:-$SCRATCH/baseline-final-live.jsonl}; }
   local bin_hash; bin_hash=$(sha256_of "$bin")
@@ -981,9 +989,11 @@ cmd_run_set() {
     else
       say "$id: reusing the panes (/clear)"
       tm_base=$(date +%s); tm_clone=$tm_base
-      hd agent prompt "$p_pane" "/clear" >/dev/null 2>&1 || true
-      hd agent prompt "$n_pane" "/clear" >/dev/null 2>&1 || true
-      sleep 2
+      if [ "${ARENA_CLEAR:-1}" = 1 ]; then
+        hd agent prompt "$p_pane" "/clear" >/dev/null 2>&1 || true
+        hd agent prompt "$n_pane" "/clear" >/dev/null 2>&1 || true
+        sleep 2
+      fi
       wait_ready "$p_pane" || die "pixel arm not ready after /clear (pane $p_pane)"
       wait_ready "$n_pane" || die "no-pixel arm not ready after /clear (pane $n_pane)"
       titles "$p_pane" "$n_pane" "$id"; live_case=$id
@@ -1022,6 +1032,14 @@ cmd_run_set() {
     cp "$run_dir/receipt.json" "$SET_OUT/$id.receipt.json" 2>/dev/null || true
     pc=$(jq '.arms.pixel.tool_calls | length' "$run_dir/receipt.json")
     nc=$(jq '.arms["no-pixel"].tool_calls | length' "$run_dir/receipt.json")
+    if [ "${ARENA_CLEAR:-1}" = 0 ]; then
+      # One session answers every question: the receipt is cumulative, so count this case's turn.
+      local tp tn
+      tp=$(python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$pws")" --turn "$n" --hide-prompt)
+      tn=$(python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$nws")" --turn "$n" --hide-prompt)
+      pc=$(jq '(.tool_calls // []) | length' <<<"$tp"); nc=$(jq '(.tool_calls // []) | length' <<<"$tn")
+      bytes=$(jq '[(.briefs // [])[] | utf8bytelength] | add // 0' <<<"$tp")
+    fi
     if [ -n "$baseline_file" ] && [ -f "$baseline_file" ]; then
       base=$(jq -s --arg id "$id" '[.[] | select(.id == $id) | .pixel_calls] | first // null' "$baseline_file")
     fi
@@ -1045,6 +1063,22 @@ cmd_run_set() {
     SET_CASE=''
   done 3<<<"$cases"
   [ "$here" = 1 ] || [ -z "$live_case" ] || close_case_tab "$live_case"
+  if [ "${ARENA_CLEAR:-1}" = 0 ] && [ -n "$pws" ]; then
+    # The whole conversation of each arm: every brief, every tool call, every answer, turn by turn.
+    local sd="$SET_OUT/session" hide=''
+    [ "$source" != census ] || hide=--hide-prompt
+    mkdir -p "$sd"
+    if [ "$source" != census ]; then
+      cp "$(newest_transcript "$pws")" "$sd/pixel.session.jsonl"; cp "$(newest_transcript "$nws")" "$sd/no-pixel.session.jsonl"
+    fi
+    python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$pws")" $hide >"$sd/pixel.turns.json"
+    python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$nws")" $hide >"$sd/no-pixel.turns.json"
+    python3 -I "$SELF_DIR/session-digest.py" "$(newest_transcript "$pws")" $hide --md "$(newest_transcript "$nws")" >"$sd/report.md"
+    # A copy in the checkout (gitignored `.arena-reports/`) for the self-improvement loop.
+    local rr; rr=$(cd "$SELF_DIR/../../.." && pwd)/.arena-reports/${SET_OUT##*/}
+    mkdir -p "$rr" && cp "$sd"/* "$rr"/ && cp "$SET_OUT/table.md" "$rr"/ 2>/dev/null || true
+    say "session: $rr/report.md (every brief and tool call, turn by turn)"
+  fi
   rm -f "$SET_PID_FILE"
   trap - INT TERM
   set_table "$SET_OUT"

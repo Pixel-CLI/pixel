@@ -9,7 +9,7 @@ what ``arena.sh run-set --brief-extra`` hangs on the frozen binary's prompt-subm
 protocol of ``probe-test.py``'s hook shim: the environment carries ``CLONE`` (the repository), ``PROMPT`` and
 ``BRIEF_FILE`` (the brief the binary printed); the output is nothing (no change) or ``@@REPLACE@@`` followed by the
 merged brief. The kind and the gate are read from the last line of ``.pixel/brief-decisions.jsonl`` that the hook
-just wrote; a closed gate runs no probe. A probe that times out or fails is skipped.
+just wrote; a closed gate runs only the probes with `when_gate_closed`. A probe that times out or fails is skipped.
 
     probe-chain.py                      (environment as above)
     probe-chain.py --only a,b           only these probes
@@ -48,11 +48,11 @@ def last_decision(root):
         return None, None
 
 
-def chain(pt, probes_dir, root, prompt, brief, kind, pixel_bin, only=None):
+def chain(pt, probes_dir, root, prompt, brief, kind, pixel_bin, only=None, closed=False):
     """The merged brief, or ``None`` when no probe added anything."""
     home = tempfile.mkdtemp(prefix="chain-home-")
     probes = [pt.Probe(d) for d in sorted(Path(probes_dir).glob("*/")) if not d.name.startswith(("_", "."))]
-    probes = [p for p in probes if not p.problems and (not only or p.name in only) and p.applies(kind, prompt)]
+    probes = [p for p in probes if not p.problems and (not only or p.name in only) and p.applies(kind, prompt) and (p.closed_gate or not closed)]
     request = {"prompt": prompt, "repo_root": str(root), "brief": brief or "[PIXEL:BRIEF]\n", "kind": kind,
                "session_files": []}
     outputs = []
@@ -78,10 +78,9 @@ def main(argv=None):
     root, prompt = os.environ["CLONE"], os.environ["PROMPT"]
     brief = Path(os.environ["BRIEF_FILE"]).read_text()
     kind, gate = last_decision(root)
-    if gate not in (None, "open"):
-        return 0
+    # A closed gate runs only the probes that opt in (`when_gate_closed`, with a when_prompt of their own).
     merged = chain(load_probe_test(), args.probes, root, prompt, brief, kind, args.bin,
-                   set(args.only.split(",")) if args.only else None)
+                   set(args.only.split(",")) if args.only else None, closed=gate not in (None, "open"))
     if merged:
         sys.stdout.write("@@REPLACE@@\n" + merged)
     return 0

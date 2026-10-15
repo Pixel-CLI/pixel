@@ -87,6 +87,17 @@ Each `run-set` result carries `timings`: `index_s` (waiting on `set_base`), `clo
 and the daemon settle), `spawn_s` (panes until the agent is ready), `prompt_s`. The distinct repositories of the
 set index in the background, two at a time, while earlier cases run; the first case indexes inline with its panes already open.
 
+## One session for every question: `--keep-context`
+
+`run-set single --agent claude --keep-context` is the same set without `/clear`: one Claude session per arm
+answers the 13 questions in a row, so the transcript holds every brief and every tool call in order. At the end
+`$SCRATCH/sets/<source>-<utc>/session/` has `pixel.turns.json` and `no-pixel.turns.json` (per turn: prompt, briefs
+the hooks added, tool calls, last answer; `session-digest.py` makes them), `report.md` (both arms turn by turn,
+briefs included) and the raw `*.session.jsonl` (omitted for `census`, whose prompts are private: there the prompt is
+replaced by its hash). The per-case table counts each case's own turn. This is the input for improving the probes and
+the brief until the questions need no tool calls: read `report.md`, pick a turn whose pixel arm still called tools,
+and take it to the `probe` skill. Claude Code only.
+
 ## A set in a row: `run-set`
 
 ```bash

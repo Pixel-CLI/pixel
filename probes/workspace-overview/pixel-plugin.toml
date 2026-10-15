@@ -1,0 +1,16 @@
+name = "workspace-overview"
+version = "0.1.0"
+api = 1
+description = "Answers a workspace overview or a named-member question from the manifests"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "pixel"
+skip_kinds = ["history", "impact"]
+# A closed gate (an overview question names no code) still runs it; the script itself refuses a repository with
+# fewer than two workspace members and a prompt that neither names a member nor asks about the workspace.
+when_prompt = "(?i)\\b(crates?|workspace|monorepo|packages?|members?|modules?|depend\\w*|made up|make up|consists?)\\b"
+when_gate_closed = true
+budget_ms = 1500
+mode = "lead"

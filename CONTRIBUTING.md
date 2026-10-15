@@ -253,7 +253,7 @@ python3 -I scripts/probe-test.py my-probe --live   # opt-in: the agent with and 
 ```
 
 - **Contract.** `pixel-plugin.toml` (the plugin host's manifest) with `capabilities = ["brief-probe"]` and a
-  `[brief-probe]` table: `owner`, `when_kinds` / `skip_kinds` / `when_prompt` (when it runs), `budget_ms` (at most
+  `[brief-probe]` table: `owner`, `when_kinds` / `skip_kinds` / `when_prompt` (when it runs), `when_gate_closed` (also run when the brief's gate closed; needs a `when_prompt`), `budget_ms` (at most
   2500), `mode` (`lead` puts its blocks before the brief's, `append` after). The executable named by `run` reads
   `{prompt, repo_root, brief, kind, session_files}` as JSON on stdin and prints brief blocks (`### path:lo-hi —
   label`, then numbered lines `N| text`), and optionally `drop: <regex>` / `first: <regex>` lines that remove or

@@ -10,9 +10,8 @@ import re
 import subprocess
 import sys
 
-STOP = {"which", "start", "started", "change", "changed", "commit", "skipping", "when", "what", "that", "this",
-        "with", "from", "they", "have", "does", "about"}
 PATCH_LINES = 90
+MESSAGE_LINES = 10
 
 
 def git(root, *args):
@@ -24,26 +23,39 @@ def main():
     root, prompt, brief = req["repo_root"], req["prompt"], req.get("brief", "")
     if re.search(r"^### history", brief, re.M):
         return
-    words = [w for w in dict.fromkeys(re.findall(r"[a-z]{5,}", prompt.lower())) if w not in STOP]
-    if not words:
-        return
+    words = [w for w in dict.fromkeys(re.findall(r"[a-z]{5,}", prompt.lower()))]
+    # Rank the words by how few commit messages hold them (one `git log` read): a word no message holds only
+    # empties `--all-match`, a word every message holds says nothing, so the subject's own words lead.
+    messages = git(root, "log", "-i", "-n", "20000", "--format=%B%x00").lower().split("\0")
+    counts = {w: sum(w in m for m in messages) for w in words[:24]}
+    words = sorted((w for w in words if counts.get(w)), key=lambda w: (counts[w], w))
+    quoted = [q.strip() for q in re.findall(r"[\"'`]([^\"'`]{8,120})[\"'`]", prompt)]
     shown = []
-    for k in (3, 2, 1):
+    for phrase in quoted:
+        out = git(root, "log", "-i", "--fixed-strings", "-n", "6", "--format=%h %as %s", f"--grep={phrase}").strip()
+        if out:
+            shown = out.splitlines()
+            words = words or re.findall(r"[a-z]{5,}", phrase.lower())[:3]
+            break
+    if not words and not shown:
+        return
+    for k in () if shown else (3, 2, 1):
         args = ["log", "-i", "--all-match", "-n", "6", "--format=%h %as %s"] + [f"--grep={w}" for w in words[:k]]
         out = git(root, *args).strip()
         if out:
             shown = out.splitlines()
             break
     pick = []
-    if words:
+    if words and not shown:
         pick = git(root, "log", "-S" + words[0], "-n", "5", "--format=%h %as %s", "--", "*.rs", "*.py", "*.ts",
                    "*.js", "*.go").strip().splitlines()
     shas = [line.split()[0] for line in shown] or [line.split()[0] for line in pick]
     if not shas:
         return
     sha = shas[0]
-    body = git(root, "show", "--format=%h %ad %an%n%B", "--date=short", "--stat=100", "--patch", "-U2",
-               "--no-ext-diff", sha).splitlines()
+    message = git(root, "show", "-s", "--format=%h %ad %an%n%B", "--date=short", sha).strip().splitlines()
+    body = message[:MESSAGE_LINES] + git(root, "show", "--format=", "--stat=100", "--patch", "-U2",
+                                         "--no-ext-diff", sha).splitlines()
     tags = git(root, "tag", "--contains", sha, "--sort=creatordate").split("\n")
     print(f"### history — commits matching {', '.join(words[:3])}")
     print("\n".join(shown or pick))

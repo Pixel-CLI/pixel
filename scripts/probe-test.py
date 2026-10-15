@@ -83,6 +83,8 @@ class Probe:
         self.kinds = list(table.get("when_kinds") or [])
         self.skip = list(table.get("skip_kinds") or [])
         self.pattern = str(table.get("when_prompt") or "")
+        # Runs even when the brief's gate closed (it found nothing worth saying); needs its own when_prompt.
+        self.closed_gate = bool(table.get("when_gate_closed"))
         self.budget_ms = table.get("budget_ms", 0)
         self.mode = table.get("mode", "append")
         self.run = str(doc.get("run", "probe"))
@@ -111,6 +113,8 @@ class Probe:
             for kind in kinds:
                 if kind not in KINDS:
                     problems.append(f"{key}: unknown kind `{kind}`")
+        if self.closed_gate and not self.pattern:
+            problems.append("when_gate_closed needs a when_prompt (a closed gate runs only probes that name their questions)")
         if self.pattern:
             try:
                 re.compile(self.pattern)
@@ -119,7 +123,7 @@ class Probe:
         program = self.dir / self.run
         if not program.is_file() or not os.access(program, os.X_OK):
             problems.append(f"`{self.run}` is not an executable file")
-        for extra in sorted(set(table) - {"owner", "when_kinds", "skip_kinds", "when_prompt", "budget_ms", "mode"}):
+        for extra in sorted(set(table) - {"owner", "when_kinds", "skip_kinds", "when_prompt", "when_gate_closed", "budget_ms", "mode"}):
             problems.append(f"[brief-probe] unknown key `{extra}`")
 
     def applies(self, kind, prompt):
@@ -348,6 +352,12 @@ doing down during each from further have having here into just keep keeps more m
 should some such than that their them then there these they this those through under until very want what when
 where which while will with would your how why who its are and the for not you can any all but was has our""".split())
 
+# Vocabulary of the contract, not of one question: the words and manifest files every repository of an ecosystem
+# shares, and the nouns of the questions a family of probes answers (a history probe says "commit", a workspace
+# probe reads "Cargo.toml"). A probe may spell them; it may not spell a name, path or symbol of one prompt.
+ECOSYSTEM = set("""readme cargo cargo.toml crate crates workspace workspaces package package.json packages commit commits
+pyproject pyproject.toml go.mod go.work pnpm-workspace.yaml monorepo""".split())
+
 
 def literals_of_prompt(prompt, oracle_paths=()):
     """What a probe written for ONE question would hard-code: its content words (five letters or more) and the
@@ -362,7 +372,7 @@ def literals_of_prompt(prompt, oracle_paths=()):
         stem = base.rsplit(".", 1)[0]
         if len(stem) >= 4:
             lits.add(stem)
-    return {x for x in lits if x}
+    return {x for x in lits if x and x.lower() not in ECOSYSTEM}
 
 
 def overfit(probe_dir, prompt, oracle_paths=(), others=None):
@@ -402,7 +412,7 @@ def evaluate(probe, qset, pixel_bin, ids, home):
         gate_open = (q["meta"].get("gate") or "open") == "open"
         request = {"prompt": q["prompt"], "repo_root": q["clone"], "brief": q["text"] or "[PIXEL:BRIEF]\n",
                    "kind": q["kind"], "session_files": []}
-        applies = gate_open and probe.applies(q["kind"], q["prompt"])
+        applies = (gate_open or probe.closed_gate) and probe.applies(q["kind"], q["prompt"])
         row = {"id": qid, "repo": q["repo"], "kind": q["kind"], "applies": applies, "ran": False, "error": None,
                "probe_ms": 0, "deterministic": True, "read_only": True, "stray": 0}
         before = qset.score(q, q["text"])
@@ -565,7 +575,7 @@ def hook_shim(config_path, args):
             later = [f"{k}/{count}" if a == args[args.index("--part") + 1] else a for a in args]
             context += context_of(subprocess.run([real, *later], input=stdin, capture_output=True, text=True).stdout)
         kind, gate = last_decision(Path.cwd())
-        if gate == "open" and probe.applies(kind, prompt):
+        if (gate == "open" or probe.closed_gate) and probe.applies(kind, prompt):
             request = {"prompt": prompt, "repo_root": str(Path.cwd()), "brief": context or "[PIXEL:BRIEF]\n",
                        "kind": kind, "session_files": []}
             stdout, _, error = run_probe(probe, request, real, os.environ.get("HOME", "/"))
