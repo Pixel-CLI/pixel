@@ -26,6 +26,17 @@ const SKIPPED_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 /// Git URL schemes `add` accepts. `ext::` and `fd::` run commands, and a
 /// bare path is handled as a directory before this list is consulted.
 const URL_PREFIXES: [&str; 4] = ["https://", "ssh://", "file://", "git@"];
+/// The environment of a plugin clone. `GIT_ALLOW_PROTOCOL` holds git itself
+/// to the transports of [`URL_PREFIXES`] (`git@host:path` is ssh) wherever a
+/// URL reaches it, not only the one `add` checked: an `insteadOf` rewrite or
+/// an HTTP redirect cannot move the clone to `ext::`, `git://` or `http://`.
+/// `GIT_TERMINAL_PROMPT=0` makes a source that asks for credentials (GitHub
+/// answers a missing repository that way) fail at once instead of waiting
+/// on the terminal, unseen by an agent, until [`CLONE_TIMEOUT`].
+const CLONE_ENV: [(&str, &str); 2] = [
+    ("GIT_ALLOW_PROTOCOL", "https:ssh:file"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+];
 
 /// What `add` installed.
 #[derive(Debug, PartialEq, Eq)]
@@ -188,7 +199,8 @@ fn ensure_no_shared_command(plugins: &Path, manifest: &Manifest) -> Result<(), E
     Ok(())
 }
 
-/// Shallow-clone `url` (at `reference`, a branch or tag) into `<tmp>/clone`.
+/// Shallow-clone `url` (at `reference`, a branch or tag) into `<tmp>/clone`,
+/// over the transports [`CLONE_ENV`] allows and without a credential prompt.
 /// The directory is removed when the returned handle drops.
 fn clone_repo(url: &str, reference: Option<&str>, shown: &str) -> Result<tempfile::TempDir, Error> {
     let clone = tempfile::tempdir().map_err(|e| Error::io("create a clone directory", e))?;
@@ -204,11 +216,19 @@ fn clone_repo(url: &str, reference: Option<&str>, shown: &str) -> Result<tempfil
         args.extend(["--branch", reference]);
     }
     args.extend(["--", url, "clone"]);
-    runner.run(&args).map_err(|e| {
+    let failed = |e: pixel_git::GitError| {
         // Git echoes the URL it was given, userinfo included.
         let reason = e.to_string().replace(url, shown);
         Error::Source(format!("cannot clone {shown}: {reason}"))
-    })?;
+    };
+    let output = runner.run_output(&args, &CLONE_ENV).map_err(failed)?;
+    if !output.success() {
+        return Err(failed(pixel_git::GitError::NonZeroExit {
+            args: args.iter().map(ToString::to_string).collect(),
+            code: output.code,
+            stderr: output.stderr,
+        }));
+    }
     Ok(clone)
 }
 
@@ -686,6 +706,32 @@ mod tests {
         assert_eq!(
             Config::at(f.host.config_file()).source("cloned").unwrap(),
             Some(url)
+        );
+    }
+
+    // `looks_like_git_url` is the first gate; git's own allow-list is the
+    // one that holds when a URL reaches the clone some other way (a user's
+    // `insteadOf` rewrite, a redirect). Called directly, a `git://` or
+    // `http://` URL, which anyone on the path can tamper with, is refused by
+    // git before it connects: without the list git dials 127.0.0.1:1 and
+    // fails on the connection instead.
+    #[test]
+    fn a_clone_is_held_to_authenticated_or_local_transports_by_git_itself() {
+        for url in ["git://127.0.0.1:1/p.git", "http://127.0.0.1:1/p.git"] {
+            let err = clone_repo(url, None, url).unwrap_err().to_string();
+            let scheme = url.split_once(':').unwrap().0;
+            assert!(
+                err.contains(&format!("transport '{scheme}' not allowed")),
+                "{url}: {err}"
+            );
+        }
+        assert_eq!(
+            CLONE_ENV,
+            [
+                ("GIT_ALLOW_PROTOCOL", "https:ssh:file"),
+                ("GIT_TERMINAL_PROMPT", "0"),
+            ],
+            "every scheme add accepts, and no credential prompt"
         );
     }
 

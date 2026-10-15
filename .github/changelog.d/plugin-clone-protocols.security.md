@@ -1,0 +1,1 @@
+**plugin:** `pixel install` clones a git source with `GIT_ALLOW_PROTOCOL=https:ssh:file` and `GIT_TERMINAL_PROMPT=0`: git itself refuses `git://`, `http://` and `ext::` wherever the URL comes from (a redirect, an `insteadOf` rewrite), and a source that asks for credentials fails at once instead of waiting on a prompt an agent never sees.
