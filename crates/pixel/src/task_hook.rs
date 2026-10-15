@@ -13,10 +13,6 @@ use serde_json::{Value, json};
 
 use crate::brief_parts::{self, BriefPart, Limits};
 
-/// Hook payloads are bounded independently of the host's output limits (1 MiB).
-/// One spelling shared with every other hook entry point, so the cap a host
-/// is measured against cannot drift between them.
-pub(crate) const MAX_INPUT: u64 = crate::hook_input::MAX_HOOK_INPUT;
 // Return a decision before the managed native hooks' ten-second host deadline
 // and Pi's eight-second subprocess deadline; a stalled worker dies with run().
 const DECISION_TIMEOUT: Duration = Duration::from_secs(6);
@@ -26,6 +22,10 @@ const _: () = assert!(
 );
 // The probes' ceiling (5 s after the prompt) leaves a second of the decision to print the merged brief.
 const _: () = assert!(5_000 + 1_000 <= DECISION_TIMEOUT.as_millis() as u64);
+// A stdin its host leaves open is waited on before the decision starts: both
+// together stay inside Pi's eight-second deadline, the tighter of the two.
+const _: () =
+    assert!(crate::hook_input::STDIN_WAIT.as_millis() + DECISION_TIMEOUT.as_millis() < 8_000);
 const UNAVAILABLE: &str = "Pixel task state is unavailable. Reads and recovery remain available; edits and completion require a working task ledger.";
 
 /// Hosts with a verified task lifecycle adapter.
@@ -1583,7 +1583,7 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
     if provider == TaskProvider::Claude && imported_config_host().is_some() {
         std::process::exit(0);
     }
-    let raw = crate::hook_input::read_bounded(&mut std::io::stdin(), MAX_INPUT);
+    let raw = crate::hook_input::read_hook_payload();
     let mut output = if let Some(raw) = &raw {
         let later = part.filter(|part| part.index > 1 && event == TaskHookEvent::PromptSubmit);
         if let Some(part) = later {
@@ -3298,5 +3298,126 @@ mod tests {
         assert_eq!(with_context(plain.clone(), None), plain);
         let own = json!({"decision": "observe", "context": "own"});
         assert_eq!(with_context(own.clone(), Some("brief".into())), own);
+    }
+
+    /// Any JSON value a few levels deep, its strings sometimes the tool
+    /// names and shell commands the gate parses.
+    fn any_value() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::from),
+            any::<i64>().prop_map(Value::from),
+            any::<f64>().prop_map(|f| json!(f)),
+            any::<String>().prop_map(Value::from),
+            prop::sample::select(vec!["Edit", "Write", "Bash", "shell", "exec_command"])
+                .prop_map(Value::from),
+            "(sed|git|rg|sort|uniq|pixel|cat) [-a-z ='/|;&>$(){}]{0,40}".prop_map(Value::from),
+        ];
+        leaf.prop_recursive(3, 32, 6, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..6).prop_map(Value::from),
+                prop::collection::btree_map(any::<String>(), inner, 0..6)
+                    .prop_map(|map| Value::Object(map.into_iter().collect())),
+            ]
+        })
+    }
+
+    /// A payload shaped like a host's, every field of any shape.
+    fn any_payload() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        let fields = [
+            "tool_name",
+            "tool_input",
+            "session_id",
+            "turn_id",
+            "tool_use_id",
+            "cwd",
+            "prompt",
+            "success",
+            "stop_reason",
+            "cancelled",
+            "usage",
+        ];
+        (
+            prop::collection::vec(prop::option::of(any_value()), fields.len()),
+            any_value(),
+        )
+            .prop_map(move |(values, other)| {
+                let mut payload: serde_json::Map<String, Value> = fields
+                    .iter()
+                    .zip(values)
+                    .filter_map(|(key, value)| Some(((*key).to_owned(), value?)))
+                    .collect();
+                payload.insert("other".to_owned(), other);
+                Value::Object(payload)
+            })
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 512,
+            failure_persistence: None,
+            ..proptest::test_runner::Config::default()
+        })]
+
+        /// The gate's parsing of a host payload never panics, whatever the
+        /// payload (a panic there is a hook that answers nothing), and what
+        /// any decision becomes on the host's stdout is one JSON object on
+        /// one line (pixel-mvp's C-32).
+        #[test]
+        fn any_payload_should_normalize_and_any_decision_should_be_one_json_line(
+            payload in proptest::prelude::prop_oneof![any_payload(), any_value()],
+            // The ledger decides in objects (`task_bridge::handle_hook`,
+            // [`unavailable`]); Pi gets that object as it is.
+            decision in proptest::prelude::prop_oneof![
+                any_payload(),
+                proptest::sample::select(vec![
+                    json!({"decision": "deny", "reason": "r"}),
+                    json!({"decision": "continue", "reason": "r"}),
+                    json!({"decision": "observe", "context": "c"}),
+                    json!({"decision": "deny"}),
+                ]),
+            ],
+        ) {
+            let normalized = normalize(TaskHookEvent::PreToolUse, &payload);
+            proptest::prop_assert!(normalized.is_object(), "{}", normalized);
+            for provider in <TaskProvider as clap::ValueEnum>::value_variants() {
+                for event in <TaskHookEvent as clap::ValueEnum>::value_variants() {
+                    let normalized = normalize(*event, &payload);
+                    proptest::prop_assert!(normalized.is_object(), "{}", normalized);
+                    for answer in [
+                        envelope(*provider, *event, &decision),
+                        envelope(*provider, *event, &unavailable(*event, Some(&payload), true)),
+                    ] {
+                        let line = answer.to_string();
+                        proptest::prop_assert!(!line.contains('\n'), "{}", line);
+                        let parsed: Value = serde_json::from_str(&line).unwrap();
+                        proptest::prop_assert!(parsed.is_object(), "{}", line);
+                    }
+                }
+            }
+        }
+
+        /// Without enforcement, a ledger that cannot answer blocks nothing,
+        /// whatever the payload: every host but Pi gets an empty object, and
+        /// Pi an observation. Only an enforced session is gated.
+        #[test]
+        fn an_unenforced_session_should_never_be_blocked_by_an_unavailable_ledger(
+            payload in proptest::prelude::prop_oneof![any_payload(), any_value()],
+        ) {
+            for provider in <TaskProvider as clap::ValueEnum>::value_variants() {
+                for event in <TaskHookEvent as clap::ValueEnum>::value_variants() {
+                    let decision = unavailable(*event, Some(&payload), false);
+                    proptest::prop_assert_eq!(&decision["decision"], "observe");
+                    let answer = envelope(*provider, *event, &decision);
+                    if *provider == TaskProvider::Pi {
+                        proptest::prop_assert_eq!(&answer, &decision);
+                    } else {
+                        proptest::prop_assert_eq!(&answer, &json!({}));
+                    }
+                }
+            }
+        }
     }
 }

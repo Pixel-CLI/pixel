@@ -14,10 +14,10 @@ use std::process::{Output, Stdio};
 
 use crate::support::pixel_command;
 
-/// The shared hook cap, spelled here because this integration test links
-/// against the binary, not its private modules. `hook_input::tests` pins it
-/// equal to the task-event cap, and every payload below is sized from it so
-/// the boundary is exact rather than a nearby round number.
+/// The shared hook cap (`hook_input::MAX_HOOK_INPUT`), spelled here because
+/// this integration test links against the binary, not its private modules.
+/// Every payload below is sized from it so the boundary is exact rather than
+/// a nearby round number.
 const MAX_HOOK_INPUT: usize = 1_048_576;
 
 /// One byte past the shared cap, so the payload is refused by the cap and not
