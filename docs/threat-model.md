@@ -123,8 +123,9 @@ The active `metrics` hook relays only a finalized Pixel invocation's metric,
 correlated to its tool call, rather than a global latest record. Claude Code
 and Codex receive a `systemMessage`. Antigravity returns `{}` at `PostToolUse`
 and queues the line under its canonical artifact directory, accepted only
-beneath the user's `.gemini` directory. `PostInvocation` requires matching
-`conversationId` and `stepIdx`, discards stale steps, and removes consumed
+beneath the user's `.gemini` directory. `PostInvocation` requires a matching
+`conversationId`, verifies the record's `stepIdx` matches its file name, and
+accepts only steps at or after `initialNumSteps`. It removes consumed
 records before returning an `ephemeralMessage`. Host-provided paths and
 conversation identifiers remain untrusted input; this relay executes no
 tool command.

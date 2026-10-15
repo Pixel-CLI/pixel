@@ -720,8 +720,9 @@ does not parse as strict JSON is skipped, not rewritten.
 remains, and passes when OpenCode is absent.
 
 `pixel run-hook` (alias `hook`) exposes task lifecycle and metrics entry
-points. `task-event` is registered for Claude Code and Codex; the metrics
-relay is registered for Claude Code, Codex and Antigravity:
+points. `task-event` is registered for Claude Code, Codex, Devin, Gemini CLI
+and Antigravity; the metrics relay is registered for Claude Code, Codex and
+Antigravity:
 
 | Hook event | Command | Effect |
 | --- | --- | --- |

@@ -941,8 +941,8 @@ fn doctor_should_require_brief_and_flag_unsupported_global_metrics_hook() {
         missing
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("IDE plugin.json")),
-        "doctor names missing plugin assets: {missing:?}"
+            .is_some_and(|reason| reason.contains("pixel-brief")),
+        "doctor names the missing prompt brief: {missing:?}"
     );
 
     let options = InstallOptions {
