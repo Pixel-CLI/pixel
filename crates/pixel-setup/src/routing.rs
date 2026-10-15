@@ -863,8 +863,8 @@ pub(crate) enum HookScope {
     /// retrieval; kept for the migration fixtures that recreate it.
     #[cfg(test)]
     LifecycleOnly,
-    /// Task-event lifecycle only. Used for native-default global Claude and
-    /// installs; retrieval prompts and metrics stay out.
+    /// Task-event lifecycle only. Used for native-default global installs;
+    /// Claude also receives its PostToolUse metrics relay.
     TaskEventsOnly {
         /// `UserPromptSubmit` entries that carry the brief (see [`merge_task_hooks`]).
         prompt_parts: u8,
@@ -1028,6 +1028,14 @@ fn configure_scoped(
         return Ok((enabled, adopted));
     }
     if let HookScope::TaskEventsOnly { prompt_parts } = scope {
+        if provider == Provider::Claude {
+            hooks
+                .entry("PostToolUse")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .ok_or("PostToolUse is not an array")?
+                .push(metrics_relay_group(exe, provider));
+        }
         merge_task_hooks(hooks, provider, exe, prompt_parts)?;
         return Ok((enabled, adopted));
     }
@@ -1612,6 +1620,52 @@ pub(crate) fn has_pixel_guard(value: &Value, verb: &str, exe: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_claude_task_events_should_include_one_metrics_relay_and_preserve_foreign_hooks() {
+        let exe = Path::new("/tmp/pixel");
+        let foreign = json!({
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "keep-audit-hook"}]
+        });
+        let mut value = json!({"hooks":{"PostToolUse":[foreign.clone()]}});
+
+        for _ in 0..2 {
+            configure_scoped(
+                &mut value,
+                Provider::Claude,
+                exe,
+                &[],
+                HookScope::TaskEventsOnly { prompt_parts: 1 },
+                &[],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            value["hooks"]["PostToolUse"],
+            json!([
+                foreign,
+                {
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "'/tmp/pixel' run-hook metrics --provider claude",
+                        "timeout": config::HOOK_TIMEOUT
+                    }]
+                },
+                {
+                    "hooks": [{
+                        "type": "command",
+                        "command": "'/tmp/pixel' run-hook task-event --provider claude --event post-tool-use",
+                        "timeout": config::HOOK_TIMEOUT
+                    }]
+                }
+            ]),
+            "a repeat install replaces Pixel's relay without dropping foreign hooks"
+        );
+        assert!(task_hooks_registered(&value, Provider::Claude, exe));
+    }
 
     #[test]
     fn task_hooks_should_replace_only_owned_entries_and_cover_native_boundaries() {

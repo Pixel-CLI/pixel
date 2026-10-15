@@ -219,8 +219,8 @@ fn global_install_registers_only_task_hooks_for_claude_and_codex() {
     .unwrap();
     assert_no_retired_prompt(home);
 
-    // Claude receives task accounting only. Retrieval prompts, metrics,
-    // PostToolUse advice and PreToolUse rewriting stay out of global hooks.
+    // Claude receives task accounting and the dedicated PostToolUse metrics
+    // relay. Retrieval prompts, advice and PreToolUse rewriting stay out.
     let settings: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
             .unwrap();
@@ -229,6 +229,7 @@ fn global_install_registers_only_task_hooks_for_claude_and_codex() {
         serde_json::json!({}),
         "Claude global hooks contain no automatic retrieval callbacks: {settings}"
     );
+    assert_eq!(metrics_relays(&settings, "claude").len(), 1, "{settings}");
     assert_eq!(codex_developer_instructions(home), None);
     let codex: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap()).unwrap();
@@ -739,16 +740,16 @@ fn install_removes_the_copilot_hooks_an_earlier_release_wrote() {
     );
 }
 
-/// Cursor, ZCode and Antigravity keep their native tools: on a machine that
-/// uses them, `pixel setup` writes no hook, prompt or plugin, and removes
-/// the ones an earlier release wrote while every foreign entry, setting and
-/// line of user text stays. Antigravity's doctor check is red on the
-/// leftovers and green after.
+/// Cursor and ZCode keep their native tools. Antigravity receives only its
+/// selected brief and plugin metrics hook after retired plugin/guard artifacts
+/// are removed; foreign entries and settings stay. Doctor is red before repair
+/// and green after.
 #[test]
 #[cfg(unix)]
 fn global_install_removes_the_cursor_zcode_and_antigravity_integrations_an_earlier_release_wrote() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
+    let exe = fake_pixel_exe(home);
     let old = "'/opt/old/pixel'";
 
     let cursor = home.join(".cursor/hooks.json");
@@ -809,6 +810,7 @@ fn global_install_removes_the_cursor_zcode_and_antigravity_integrations_an_earli
     let antigravity_check = || {
         let report = doctor(&DoctorOptions {
             home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
             shell: Some(TEST_SHELL.into()),
             only: vec!["install.antigravity".into()],
             ..Default::default()
@@ -818,23 +820,17 @@ fn global_install_removes_the_cursor_zcode_and_antigravity_integrations_an_earli
     };
     let red = antigravity_check();
     assert_eq!(red.status, CheckStatus::Red, "{red:?}");
-    assert_eq!(
-        red.reason.as_deref(),
-        Some(
-            format!(
-                "retired Pixel Antigravity integration remains: {}, the pixel plugin entry in {}, the pixel-guard in {} — run `pixel setup` to remove it",
-                plugin.display(),
-                gemini.join("config.json").display(),
-                gemini.join("hooks.json").display()
-            )
-            .as_str()
-        )
+    assert!(
+        red.reason.as_deref().is_some_and(|reason| {
+            reason.contains("Antigravity Pixel metrics plugin incomplete")
+        }),
+        "{red:?}"
     );
 
     let report = install(&InstallOptions {
         repo: None,
         home: Some(home.to_path_buf()),
-        executable_path: Some(fake_pixel_exe(home)),
+        executable_path: Some(exe.clone()),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
@@ -851,10 +847,13 @@ fn global_install_removes_the_cursor_zcode_and_antigravity_integrations_an_earli
         serde_json::json!({"model": "glm", "hooks": {"events": {"PreToolUse": [zcode_foreign]}}})
     );
     assert_eq!(fs::read_to_string(&zcode_agents).unwrap(), "mine\n");
-    assert!(!plugin.exists(), "the managed plugin directory is removed");
+    assert!(
+        plugin.join("plugin.json").is_file(),
+        "the managed plugin is restored"
+    );
     assert_eq!(
         read_json(&gemini.join("config.json")),
-        serde_json::json!({"plugins": {"other": {"enabled": true}}, "keep": "config"})
+        serde_json::json!({"plugins": {"other": {"enabled": true}, "pixel": {"enabled": true}}, "keep": "config"})
     );
     let exe_path = fs::canonicalize(fake_pixel_exe(home))
         .unwrap()
@@ -871,10 +870,124 @@ fn global_install_removes_the_cursor_zcode_and_antigravity_integrations_an_earli
                     "command": format!("'{exe_path}' run-hook task-event --provider antigravity --event prompt-submit"),
                     "timeout": 10
                 }]
-            }
+            },
         })
     );
-    assert_eq!(antigravity_check().status, CheckStatus::Green);
+    let plugin_hooks = serde_json::json!({
+        "pixel-guard": {
+            "enabled": true,
+            "PostToolUse": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("'{exe_path}' run-hook metrics --provider antigravity"),
+                    "timeout": 10
+                }]
+            }],
+            "PostInvocation": [{
+                "type": "command",
+                "command": format!("'{exe_path}' run-hook metrics --provider antigravity --event post-invocation"),
+                "timeout": 10
+            }]
+        }
+    });
+    assert_eq!(read_json(&plugin.join("hooks.json")), plugin_hooks);
+    assert_eq!(
+        read_json(
+            &home
+                .join(".gemini/antigravity-cli/plugins/pixel")
+                .join("hooks.json")
+        ),
+        plugin_hooks
+    );
+    let green = antigravity_check();
+    assert_eq!(green.status, CheckStatus::Green, "{green:?}");
+}
+
+/// Antigravity doctor requires its prompt brief, verifies the plugin metrics
+/// relay, and flags the unsupported global PostToolUse relay.
+#[test]
+#[cfg(unix)]
+fn doctor_should_require_brief_and_flag_unsupported_global_metrics_hook() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let config = home.join(".gemini/config");
+    fs::create_dir_all(&config).unwrap();
+    let hooks_path = config.join("hooks.json");
+    let foreign = serde_json::json!({
+        "enabled": true,
+        "PostToolUse": [{"matcher":"run_command", "hooks":[{"type":"command", "command":"audit"}]}]
+    });
+    fs::write(
+        &hooks_path,
+        serde_json::to_string_pretty(&serde_json::json!({"user-audit": foreign.clone()})).unwrap(),
+    )
+    .unwrap();
+    let exe = fake_pixel_exe(home);
+    let doctor_hooks = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
+            shell: Some(TEST_SHELL.into()),
+            only: vec!["install.antigravity".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.antigravity").clone()
+    };
+    let missing = doctor_hooks();
+    assert_eq!(missing.status, CheckStatus::Red, "{missing:?}");
+    assert!(
+        missing
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("IDE plugin.json")),
+        "doctor names missing plugin assets: {missing:?}"
+    );
+
+    let options = InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(exe.clone()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    };
+    install(&options).unwrap();
+    let installed = read_json(&hooks_path);
+    assert_eq!(installed["user-audit"], foreign);
+    assert!(installed.get("pixel-metrics").is_none());
+    assert_eq!(doctor_hooks().status, CheckStatus::Green);
+    assert!(
+        doctor_hooks()
+            .summary
+            .contains("deferred metrics relay configured")
+    );
+
+    let mut malformed = read_json(&hooks_path);
+    malformed["pixel-metrics"] = serde_json::json!({
+        "enabled": true,
+        "PostToolUse": [{"matcher": "*", "hooks": [{
+            "type": "command",
+            "command": format!("'{}' run-hook metrics --provider antigravity", exe.display())
+        }]}]
+    });
+    fs::write(
+        &hooks_path,
+        serde_json::to_string_pretty(&malformed).unwrap(),
+    )
+    .unwrap();
+    let stale = doctor_hooks();
+    assert_eq!(stale.status, CheckStatus::Red, "{stale:?}");
+    assert!(
+        stale
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("unsupported global Antigravity metrics relay")),
+        "doctor identifies the unsupported global relay: {stale:?}"
+    );
+
+    install(&options).unwrap();
+    assert_eq!(doctor_hooks().status, CheckStatus::Green);
+    assert_eq!(read_json(&hooks_path)["user-audit"], foreign);
 }
 
 #[test]
@@ -6081,8 +6194,8 @@ fn metrics_relays(value: &serde_json::Value, provider: &str) -> Vec<(String, Str
     found
 }
 
-/// Repeated global installs register every synchronous task-event boundary
-/// once and preserve unrelated PostToolUse hooks without a metrics callback.
+/// Repeated global installs register each Claude task boundary and metrics
+/// relay once, preserving unrelated PostToolUse hooks.
 #[test]
 #[cfg(unix)]
 fn claude_install_should_register_one_task_event_suite_and_keep_foreign_groups() {
@@ -6113,8 +6226,8 @@ fn claude_install_should_register_one_task_event_suite_and_keep_foreign_groups()
     let groups = settings["hooks"]["PostToolUse"].as_array().unwrap();
     assert!(groups.contains(&foreign), "foreign group kept: {settings}");
     assert!(
-        metrics_relays(&settings, "claude").is_empty(),
-        "the native-default global hooks have no automatic metrics callback: {settings}"
+        metrics_relays(&settings, "claude").len() == 1,
+        "the native-default Claude hooks include one metrics callback: {settings}"
     );
 }
 
@@ -6170,6 +6283,113 @@ fn doctor_should_flag_a_claude_install_missing_a_task_event_hook() {
     install(&options).unwrap();
     let fixed = doctor_hooks();
     assert_eq!(fixed.status, CheckStatus::Green, "{fixed:?}");
+}
+
+/// Claude doctor requires one correctly shaped PostToolUse metrics relay;
+/// setup repairs a missing or malformed registration without disturbing its
+/// other hooks.
+#[test]
+#[cfg(unix)]
+fn doctor_should_flag_a_missing_or_malformed_claude_metrics_relay() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    let options = InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(exe.clone()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    };
+    install(&options).unwrap();
+    let path = home.join(".claude/settings.json");
+    let doctor_hooks = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
+            shell: Some(TEST_SHELL.into()),
+            only: vec!["install.claude-hooks".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.claude-hooks").clone()
+    };
+
+    let mut settings = read_json(&path);
+    settings["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|group| {
+            !group["hooks"].as_array().is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook["command"].as_str().is_some_and(|command| {
+                        command.contains("run-hook metrics --provider claude")
+                    })
+                })
+            })
+        });
+    fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+    let missing = doctor_hooks();
+    assert_eq!(missing.status, CheckStatus::Red, "{missing:?}");
+    assert!(
+        missing
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("PostToolUse metrics relay")),
+        "doctor names the missing relay: {missing:?}"
+    );
+
+    install(&options).unwrap();
+    let mut settings = read_json(&path);
+    let relay = settings["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|group| {
+            group["hooks"].as_array().is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook["command"].as_str().is_some_and(|command| {
+                        command.contains("run-hook metrics --provider claude")
+                    })
+                })
+            })
+        })
+        .unwrap();
+    relay["matcher"] = "Read".into();
+    fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+    let malformed = doctor_hooks();
+    assert_eq!(malformed.status, CheckStatus::Red, "{malformed:?}");
+
+    install(&options).unwrap();
+    let mut settings = read_json(&path);
+    let relays = metrics_relays(&settings, "claude");
+    assert_eq!(relays.len(), 1);
+    let group = settings["hooks"]["PostToolUse"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| {
+            group["hooks"].as_array().is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook["command"].as_str().is_some_and(|command| {
+                        command.contains("run-hook metrics --provider claude")
+                    })
+                })
+            })
+        })
+        .unwrap()
+        .clone();
+    settings["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .push(group);
+    fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+    let duplicate = doctor_hooks();
+    assert_eq!(duplicate.status, CheckStatus::Red, "{duplicate:?}");
+
+    install(&options).unwrap();
+    let fixed = doctor_hooks();
+    assert_eq!(fixed.status, CheckStatus::Green, "{fixed:?}");
+    assert_eq!(metrics_relays(&read_json(&path), "claude").len(), 1);
 }
 
 /// Devin keeps its native tools in a repository too: `setup --repo`

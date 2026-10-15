@@ -110,15 +110,24 @@ embed the repository by sending it, which it could do with `search`.
 
 `pixel run-hook task-event` reads one JSON payload from the agent host on
 stdin (ARCHITECTURE.md, hook table). The payload's `cwd`, `tool_input` and
-session fields are agent-controlled. `task-event` is the only hook `pixel
-setup` registers: it gates edits and completion for a task contract and, on
+session fields are agent-controlled. `task-event` gates edits and completion for a task contract and, on
 `prompt-submit`, returns the bounded `[PIXEL:BRIEF]` evidence block. It never
 executes `tool_input.command` and never rewrites or approves a command.
 
 The verbs earlier releases registered (`guard`, `composed-guard`,
-`session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`,
-`metrics`) still parse, exit 0 and print nothing, so a registration an old
+`session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`)
+still parse, exit 0 and print nothing, so a registration an old
 install left behind can neither block a host nor add text to its context.
+
+The active `metrics` hook relays only a finalized Pixel invocation's metric,
+correlated to its tool call, rather than a global latest record. Claude Code
+and Codex receive a `systemMessage`. Antigravity returns `{}` at `PostToolUse`
+and queues the line under its canonical artifact directory, accepted only
+beneath the user's `.gemini` directory. `PostInvocation` requires matching
+`conversationId` and `stepIdx`, discards stale steps, and removes consumed
+records before returning an `ephemeralMessage`. Host-provided paths and
+conversation identifiers remain untrusted input; this relay executes no
+tool command.
 
 ### 3.4 Repository content: walking, parsing, indexing (B1)
 

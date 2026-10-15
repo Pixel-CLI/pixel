@@ -440,10 +440,23 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     runner.check(
         "install.antigravity",
         move || -> std::result::Result<DoctorCheckDetail, String> {
-            let (summary, detail) = crate::antigravity::check_antigravity_install(
+            let (mut summary, detail) = crate::antigravity::check_antigravity_install(
                 &home_for_antigravity,
                 &exe_for_antigravity,
             )?;
+            let hooks_path = crate::antigravity::hooks_path(&home_for_antigravity);
+            if hooks_path.is_file() {
+                let hooks = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
+                let missing = antigravity_hook_drift(&hooks, &exe_for_antigravity);
+                if !missing.is_empty() {
+                    return Err(format!(
+                        "missing or malformed Pixel Antigravity hooks in {}: {} — run `pixel setup`",
+                        hooks_path.display(),
+                        missing.join(", ")
+                    ));
+                }
+                summary = "Antigravity Pixel prompt brief and deferred metrics relay configured; native tools preserved".into();
+            }
             Ok(DoctorCheckDetail {
                 summary,
                 detail: Some(detail),
@@ -451,10 +464,8 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     );
 
-    // The one hook `pixel setup` registers for Claude is `run-hook
-    // task-event` (the task lifecycle gates and the prompt brief). Verify the
-    // registration: matchers, commands and the executable this binary's
-    // install would write, not just a `pixel` substring.
+    // Verify the task-event suite and its separate metrics relay using the
+    // commands this binary's install would write, not a `pixel` substring.
     runner.record(
         "install.claude-hooks",
         || -> std::result::Result<(CheckStatus, DoctorCheckDetail, Remedy), String> {
@@ -478,9 +489,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     _ => "task lifecycle gates".to_owned(),
                 });
             }
+            if !claude_metrics_relay_registered(&value, &exe) {
+                missing.push("PostToolUse metrics relay".to_owned());
+            }
             if !missing.is_empty() {
                 return Err(format!(
-                    "missing pixel lifecycle hooks in {}: {} — run `pixel setup`",
+                    "missing pixel hooks in {}: {} — run `pixel setup`",
                     path.display(),
                     missing.join(", ")
                 ));
@@ -1250,7 +1264,94 @@ fn has_unexpected_pixel_hooks(
     exe: &Path,
 ) -> bool {
     let expected_task_prefix = format!("task-event --provider {} --event ", provider.name());
-    has_retired_pixel_hooks(value, exe, |verb| !verb.starts_with(&expected_task_prefix))
+    let mut checked = value.clone();
+    if provider == crate::routing::Provider::Claude
+        && let Some(groups) = checked
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|hooks| hooks.get_mut("PostToolUse"))
+            .and_then(serde_json::Value::as_array_mut)
+    {
+        groups.retain(|group| !is_claude_metrics_relay_group(group, exe));
+    }
+    has_retired_pixel_hooks(&checked, exe, |verb| {
+        !verb.starts_with(&expected_task_prefix)
+    })
+}
+
+/// Whether Claude has exactly the `PostToolUse` metrics relay setup writes.
+fn claude_metrics_relay_registered(value: &serde_json::Value, exe: &Path) -> bool {
+    value
+        .get("hooks")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|hooks| hooks.get("PostToolUse"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|groups| {
+            groups
+                .iter()
+                .filter(|group| is_claude_metrics_relay_group(group, exe))
+                .count()
+                == 1
+        })
+}
+
+fn is_claude_metrics_relay_group(group: &serde_json::Value, exe: &Path) -> bool {
+    let Some(hooks) = group.get("hooks").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if group.get("matcher").and_then(serde_json::Value::as_str)
+        != Some(crate::routing::Provider::Claude.shell())
+        || hooks.len() != 1
+    {
+        return false;
+    }
+    let hook = &hooks[0];
+    hook.get("type").and_then(serde_json::Value::as_str) == Some("command")
+        && hook.get("timeout").and_then(serde_json::Value::as_u64)
+            == Some(crate::config::HOOK_TIMEOUT)
+        && hook
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|command| crate::routing::pixel_hook_verb(command, exe))
+            == Some("metrics --provider claude")
+}
+
+fn antigravity_hook_drift(value: &serde_json::Value, exe: &Path) -> Vec<&'static str> {
+    let expected_brief = serde_json::json!({
+        "enabled": true,
+        "PreInvocation": [{
+            "type": "command",
+            "command": format!(
+                "{} run-hook task-event --provider antigravity --event prompt-submit",
+                crate::routing::quoted_executable(exe)
+            ),
+            "timeout": 10
+        }]
+    });
+    let mut missing = Vec::new();
+    if value.get("pixel-brief") != Some(&expected_brief) {
+        missing.push("pixel-brief");
+    }
+    if contains_antigravity_metrics_relay(value, exe) {
+        missing.push("unsupported global Antigravity metrics relay");
+    }
+    missing
+}
+
+fn contains_antigravity_metrics_relay(value: &serde_json::Value, exe: &Path) -> bool {
+    match value {
+        serde_json::Value::String(command) => {
+            crate::routing::pixel_run_hook_verb(command, exe)
+                == Some("metrics --provider antigravity")
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| contains_antigravity_metrics_relay(value, exe)),
+        serde_json::Value::Object(values) => values
+            .values()
+            .any(|value| contains_antigravity_metrics_relay(value, exe)),
+        _ => false,
+    }
 }
 
 /// Whether a repo-local settings file retains a Pixel callback that
@@ -4013,9 +4114,11 @@ Prose naming `pixel status` is not a table row.
         let task_hooks = serde_json::json!({
             "hooks": {
                 "PreToolUse": [{"hooks": [{"command": "/opt/pixel/pixel run-hook task-event --provider claude --event pre-tool-use"}]}],
-                "UserPromptSubmit": [{"hooks": [{"command": "/opt/pixel/pixel run-hook task-event --provider claude --event prompt-submit"}]}]
+                "UserPromptSubmit": [{"hooks": [{"command": "/opt/pixel/pixel run-hook task-event --provider claude --event prompt-submit"}]}],
+                "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": format!("{} run-hook metrics --provider claude", crate::routing::quoted_executable(exe)), "timeout": 10}]}]
             }
         });
+        assert!(super::claude_metrics_relay_registered(&task_hooks, exe));
         assert!(!super::has_unexpected_pixel_hooks(
             &task_hooks,
             crate::routing::Provider::Claude,
