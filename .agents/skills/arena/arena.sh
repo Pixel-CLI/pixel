@@ -232,7 +232,9 @@ claude_dialogs() {
 # The command a pane runs. $1 arm (pixel|no-pixel), $2 workspace, $3 home, $4 shim dir.
 agent_launch() {
   local arm=$1 ws=$2 home=$3 shim=$4 brief=''
-  local safe_path="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin"
+  # Homebrew first: the system python3 is 3.9, which crashes the probe chain (the wrapper then silently
+  # delivers the plain brief), and the user's agents run with Homebrew tools anyway. Same for both arms.
+  local safe_path="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin:$HOME/.local/bin"
   [ "$arm" = no-pixel ] && brief='PIXEL_BRIEF=0'
   if [ "$AGENT" = devin ]; then
     printf "cd '%s' && env %s PATH='%s':%s '%s' --config '%s/config.json' --permission-mode dangerous --respect-workspace-trust false" \

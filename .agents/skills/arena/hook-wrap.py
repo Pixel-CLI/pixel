@@ -80,7 +80,10 @@ def context_of(text):
 
 
 try:
-    body = json.loads(out) if out.strip() else {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ""}}
+    body = json.loads(out) if out.strip() else {}
+    # A closed gate prints `{}`: an empty brief for the probes to fill, not a failure to pass through.
+    if not isinstance(body.get("hookSpecificOutput"), dict):
+        body = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ""}}
     first = body["hookSpecificOutput"].get("additionalContext", "")
     # The probes read the WHOLE brief, not part 1's slice: run the real parts 2..N (they find part 1's stored brief)
     # and join the slices, then split the result over the parts again.
