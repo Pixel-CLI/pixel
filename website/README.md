@@ -63,7 +63,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   release check, no account, MIT, changelog). No Pixel version appears in the home's copy: the data files
   and the method pages each figure links carry it; the footer's version is
   read from `data/cli.toml`. Keep
-  `$agentPrompt` in step with the root README. The inspected script remains
+  `$agentPrompt` in step with the root README's Install section (it has no separate agent block). The inspected script remains
   linked to the released tag; never deploy while validating a branch.
 - The wall uses `data/read_savings.toml`; the evidence compares whole files
   with signatures, not billed tokens or task outcomes. The scope board
@@ -214,19 +214,20 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `agents-install` shortcode, from `data/agents.toml`.
 - `data/agents.toml`: the agents the site names, in the home's order, and
   what Pixel does for each: `wiring` (`install` or `none`), the
-  files `pixel setup` and `pixel setup --repo` write, the `pixel doctor` checks. The hero, the Compatibility
+  files `pixel setup` writes, the `pixel doctor` checks (`pixel setup --repo`
+  writes only `.pixel/config.yaml`, so no agent lists repository files). The
+  hero's Works with row (the `install` agents), the Compatibility
   grid, the `/docs/` wiring table and the `/for/` section all read it.
-  `crates/pixel/tests/cli/docs_drift.rs` runs a real `pixel setup` and
-  `pixel setup --repo` into empty directories and fails when the files
-  they write differ from the lists, when a check id is not one of
+  `crates/pixel/tests/cli/docs_drift.rs` runs a real `pixel setup`
+  into an empty directory and fails when the files
+  it writes differ from the lists, when a check id is not one of
   `pixel doctor`'s or an agent check of the doctor belongs to no agent, and
   when `static/llms.txt` misses an agent page: a pull request that changes
   what `pixel setup` writes updates this file in the same commit.
 - `content/for/`: one page per agent (`/for/<slug>/`), each a front matter
   naming its `agent` and the `{{% agent-setup %}}` shortcode
   (`layouts/shortcodes/agent-setup.html`), which writes the setup sections
-  from the data: install, what `pixel setup` writes, the per-repository
-  cleanup, the check, the removal.
+  from the data: install, what `pixel setup` writes, the check, the removal.
   `layouts/for/single.html` adds the breadcrumb (visible and as
   `BreadcrumbList` JSON-LD) and the other agents; `layouts/for/list.html`
   groups `/for/` by wiring, and the build fails on an agent with no page or
@@ -242,8 +243,9 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   (`layouts/shortcodes/read-savings.html`) and the `/savings/` estimate all read it: re-run the script
   and replace the rows, never one number by hand (the kept rows' count, range and median are computed once, in `layouts/partials/kept-rates.html`), then re-render the share
   card (`og/render.sh`), whose figures come from the wall's row.
-- `data/jobs.toml`, `data/savings.toml`: the six animations and the token
-  table, both from the README. A job's `text` holds one line on a wide
+- `data/jobs.toml`, `data/savings.toml`: the workflow animations of `/docs/`
+  (one per job whose command is in the core binary; the heading counts them)
+  and the token table, from the README's historical numbers. A job's `text` holds one line on a wide
   screen (about 70 characters): the tab panel reserves one line there and
   clips past it, so a longer text would lose its end rather than move the
   video.

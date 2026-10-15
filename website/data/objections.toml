@@ -31,9 +31,9 @@
 question = "Will my agent actually use it?"
 audience = "dev"
 answer = [
-  '''Not every time: agents fall back to <code>grep</code>. <code>pixel setup</code> puts Pixel's protocol into every session, and <code>pixel setup --repo</code> adds a guard that flags untargeted reads of large files; it advises, never blocks. In one Opus 5.5 medium trial on a low-research scoping task, hooks were slower (+11%), with more tokens read (+12%) and higher provider-reported API cost (+31%). This is not a general result. <a class="link" href="{bench}#on-whole-agent-tasks">Method and limits</a>''',
+  '''Not always: agents fall back to <code>grep</code>. <code>pixel setup</code> adds a prompt-submit hook, so a code question arrives with a source-cited brief, plus a skill for follow-ups; neither blocks a search or read. One Opus 5.5 trial of the earlier install hooks (not this brief): slower +11%, tokens read +12%, reported cost +31%, one task. <a class="link" href="{bench}#on-whole-agent-tasks">Method and limits</a>''',
 ]
-check = '''<code>pixel action-log</code> what Pixel ran in this repository, and how it went'''
+check = '''<code>pixel brief "&lt;your question&gt;" .</code> the evidence your agent receives with that prompt'''
 
 [[objection]]
 question = "Why not just grep?"
@@ -57,7 +57,7 @@ check = '''<code>pixel impact &lt;symbol&gt;</code> each caller marked exact or 
 question = "Does anything leave my machine?"
 audience = "team"
 answer = [
-  '''Nothing you did not ask for: no telemetry, and the index stays in <code>.pixel/</code>. The network carries the embedding model's first download, your Git remotes, the two opt-in commands that call a service you configure (<code>pixel classify</code>, <code>pixel web-search</code>), and a daily release check in an interactive terminal (<code>PIXEL_NO_UPDATE_CHECK=1</code> turns it off). <a class="link" href="{github}/blob/main/.github/SECURITY.md" target="_blank" rel="noopener">Security model</a>''',
+  '''Nothing you did not ask for: no telemetry, and the index stays in <code>.pixel/</code>. The network carries the embedding model's first download, Git remotes and plugins you install, the opt-in <code>pixel classify</code> and <code>pixel web-search</code> (a plugin), which can send your question to a provider, and a daily release check in a terminal (<code>PIXEL_NO_UPDATE_CHECK=1</code> turns it off). <a class="link" href="{github}/blob/main/.github/SECURITY.md" target="_blank" rel="noopener">Security model</a>''',
 ]
 check = '''<code>pixel config</code> every setting and the file it comes from'''
 
@@ -65,7 +65,7 @@ check = '''<code>pixel config</code> every setting and the file it comes from'''
 question = "How do I remove it?"
 audience = "team"
 answer = [
-  '''<code>pixel setup --remove</code> removes every block, hook and file <code>pixel setup</code> wrote, then the binary; <code>pixel setup --remove --repo</code> does the same for one repository. The index is the <code>.pixel/</code> folder: delete it.''',
+  '''<code>pixel setup --remove</code> removes every hook, skill and file <code>pixel setup</code> wrote, then the binary (a Homebrew or mise copy stays: use the manager). The index is the <code>.pixel/</code> folder: delete it.''',
 ]
 check = '''<code>pixel setup --remove --dry-run</code> the list, before anything is removed'''
 

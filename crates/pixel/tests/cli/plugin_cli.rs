@@ -328,30 +328,6 @@ fn install_reports_a_bad_source_and_keeps_the_credentials_of_a_url_out_of_the_lo
     assert!(!log.contains("ghp_topsecret"), "{log}");
 }
 
-/// The pre-rename spellings that stood for a command now shipped as a
-/// plugin and not built into the core, with the command they resolve to.
-const MOVED_ALIASES: [(&str, &str); 19] = [
-    ("branch", "new-branch"),
-    ("branches", "list-branches"),
-    ("excavate", "dig-history"),
-    ("history", "commit-history"),
-    ("history-search", "search-history"),
-    ("inspect", "repo-state"),
-    ("lifecycle", "file-history"),
-    ("log", "action-log"),
-    ("publish", "commit"),
-    ("reconcile", "sync-branch"),
-    ("replay-flow", "flow"),
-    ("rescue", "plan-rollback"),
-    ("review", "review-changes"),
-    ("rewrite", "squash-branch"),
-    ("savings", "token-savings"),
-    ("ship", "commit-and-push"),
-    ("sniper", "list-errors"),
-    ("sync", "fetch"),
-    ("update", "fast-forward"),
-];
-
 /// The moved commands the core no longer builds in: the only names the
 /// moved-command hint is for. Only `check-release` was kept in the binary.
 fn unbuilt_moved() -> Vec<(&'static str, &'static str)> {
@@ -372,17 +348,6 @@ fn moved_hint(name: &str) -> String {
 }
 
 #[test]
-fn the_alias_list_is_every_rename_that_points_at_an_unbuilt_moved_command() {
-    let unbuilt: Vec<&str> = unbuilt_moved().iter().map(|(name, _)| *name).collect();
-    let derived: Vec<(&str, &str)> = pixel_proto::commands::RENAMED_COMMANDS
-        .iter()
-        .copied()
-        .filter(|(_, new)| unbuilt.contains(new))
-        .collect();
-    assert_eq!(derived, MOVED_ALIASES);
-}
-
-#[test]
 fn the_unbuilt_moved_commands_are_the_ones_the_core_already_dropped() {
     let unbuilt: Vec<&str> = unbuilt_moved().iter().map(|(name, _)| *name).collect();
     for name in [
@@ -397,7 +362,7 @@ fn the_unbuilt_moved_commands_are_the_ones_the_core_already_dropped() {
 }
 
 #[test]
-fn an_unbuilt_moved_command_and_each_of_its_aliases_without_a_plugin_print_the_hint_and_exit_two() {
+fn an_unbuilt_moved_command_without_a_plugin_print_the_hint_and_exit_two() {
     let world = World::new("hints");
     for (name, repo) in unbuilt_moved() {
         let out = world.pixel(&[name, "anything", "--json"]);
@@ -408,16 +373,6 @@ fn an_unbuilt_moved_command_and_each_of_its_aliases_without_a_plugin_print_the_h
             "{name}"
         );
         assert_eq!(stdout(&out), "", "{name}");
-    }
-    for (alias, name) in MOVED_ALIASES {
-        let out = world.pixel(&[alias, "--help"]);
-        assert_eq!(out.status.code(), Some(2), "{alias}: {out:?}");
-        assert_eq!(
-            stderr(&out),
-            moved_hint(name),
-            "{alias} names the canonical plugin, not itself"
-        );
-        assert_eq!(stdout(&out), "", "{alias}");
     }
 }
 
@@ -493,7 +448,7 @@ fn path_plugin(world: &World, name: &str) {
 }
 
 #[test]
-fn an_unbuilt_moved_command_runs_the_plugin_by_name_and_by_alias_with_its_own_args_and_exit_code() {
+fn an_unbuilt_moved_command_runs_the_plugin_by_name_with_its_own_args_and_exit_code() {
     let world = World::new("moved-run");
     for (name, _) in unbuilt_moved() {
         path_plugin(&world, name);
@@ -511,37 +466,6 @@ fn an_unbuilt_moved_command_runs_the_plugin_by_name_and_by_alias_with_its_own_ar
             "{name}"
         );
     }
-    for (alias, name) in MOVED_ALIASES {
-        let out = world.pixel(&[alias, "list", "--json"]);
-        assert!(
-            ok(&out).starts_with("args=list --json\napi=1\n"),
-            "{alias}: {out:?}"
-        );
-        assert_eq!(
-            stderr(&out),
-            format!("note: '{alias}' is now '{name}'; the old name stays accepted until 1.0\n"),
-            "{alias}"
-        );
-        assert_eq!(
-            world.pixel(&[alias, "fail"]).status.code(),
-            Some(7),
-            "{alias}"
-        );
-        let help = world.pixel(&[alias, "--help"]);
-        assert_eq!(stderr(&help), "", "{alias} --help prints no rename note");
-    }
-}
-
-#[test]
-fn an_alias_resolves_to_the_plugin_of_the_canonical_name_only() {
-    let world = World::new("moved-canonical");
-    // `pixel-rescue` is not the plugin `rescue` stands for; `pixel-plan-rollback` is.
-    path_plugin(&world, "rescue");
-    let out = world.pixel(&["rescue", "x"]);
-    assert_eq!(out.status.code(), Some(2), "{out:?}");
-    assert_eq!(stderr(&out), moved_hint("plan-rollback"));
-    path_plugin(&world, "plan-rollback");
-    assert!(ok(&world.pixel(&["rescue", "x"])).starts_with("args=x\n"));
 }
 
 #[test]
@@ -550,11 +474,6 @@ fn an_installed_plugin_serves_the_moved_name() {
     let source = world.source("flow", "");
     ok(&world.pixel(&["install", source.to_str().unwrap()]));
     assert!(ok(&world.pixel(&["flow", "list"])).starts_with("args=list\napi=1\n"));
-    let by_alias = world.pixel(&["replay-flow", "list"]);
-    assert!(
-        ok(&by_alias).starts_with("args=list\napi=1\n"),
-        "{by_alias:?}"
-    );
     // Another unbuilt moved command is still only a hint.
     assert_eq!(
         stderr(&world.pixel(&["plan-rollback"])),
@@ -583,7 +502,7 @@ fn a_plugin_run_is_in_the_action_log_like_a_core_command_with_its_outcome_and_ma
         "{done:?}"
     );
     // A pre-rename spelling is logged under the command it stands for.
-    let failed = world.pixel(&["rescue", "fail"]);
+    let failed = world.pixel(&["plan-rollback", "fail"]);
     assert_eq!(failed.status.code(), Some(7), "{failed:?}");
 
     let log = action_log(&world);
@@ -594,7 +513,7 @@ fn a_plugin_run_is_in_the_action_log_like_a_core_command_with_its_outcome_and_ma
     assert_eq!(first["outcome"], "ok");
     assert!(first.get("error").is_none(), "{first}");
     assert_eq!(second["command"], "plan-rollback");
-    assert_eq!(second["args"], "rescue fail");
+    assert_eq!(second["args"], "plan-rollback fail");
     assert_eq!(second["outcome"], "error");
     assert_eq!(second["error"], "plan-rollback exited 7");
     for record in &log {
@@ -891,9 +810,6 @@ fn a_listed_command_runs_the_plugin_with_the_command_word_first() {
         ok(&second).starts_with("args=plan-rollback fail\n"),
         "{second:?}"
     );
-    // The pre-rename spelling of a listed command reaches it too.
-    let alias = world.pixel(&["update", "x"]);
-    assert!(ok(&alias).starts_with("args=fast-forward x\n"), "{alias:?}");
     // The plugin's own name is not a command, and an unlisted moved one hints.
     let by_name = world.pixel(&["git"]);
     assert_eq!(by_name.status.code(), Some(2), "{by_name:?}");

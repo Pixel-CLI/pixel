@@ -343,14 +343,13 @@ pub mod potion {
     }
 
     /// Refuse a load that may not download when `repo` was never set up
-    /// ([`crate::potion_set_up`]: its download finished, or a legacy marker
-    /// exists at all).
+    /// ([`crate::potion_cached`]: its download finished).
     pub(crate) fn require_set_up(
         cache_dir: &Path,
         repo: &str,
         download: bool,
     ) -> Result<(), String> {
-        if download || crate::potion_set_up(cache_dir, repo) {
+        if download || crate::potion_cached(cache_dir, repo) {
             Ok(())
         } else {
             Err("embedding model not present — run `pixel recall setup` first".to_string())
@@ -542,9 +541,8 @@ mod potion_gate_tests {
         assert_eq!(
             std::fs::read_to_string(crate::potion_marker(dir.path(), CODE_64M)).unwrap(),
             CODE_64M,
-            "the repository's own marker, not the shared legacy one"
+            "the repository's own marker"
         );
-        assert!(!dir.path().join(crate::LEGACY_POTION_MARKER).exists());
         assert!(!crate::potion_cached(dir.path(), CODE_16M));
 
         assert_eq!(finish_load(dir.path(), CODE_16M, false, 256), Ok(256));
@@ -552,15 +550,6 @@ mod potion_gate_tests {
 
         assert!(finish_load(dir.path(), CODE_16M, true, 0).is_err());
         assert!(!crate::potion_cached(dir.path(), CODE_16M));
-    }
-
-    /// Before per-repository markers, one `potion.ok` admitted every model;
-    /// an upgrade must not refuse a model that loaded the day before.
-    #[test]
-    fn a_legacy_marker_should_still_admit_any_model() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(crate::LEGACY_POTION_MARKER), CODE_16M).unwrap();
-        assert_eq!(require_set_up(dir.path(), CODE_64M, false), Ok(()));
     }
 }
 

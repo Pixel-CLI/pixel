@@ -59,8 +59,6 @@ const fn entry(id: &'static str, fix: Option<&'static str>) -> CheckSpec {
 
 /// Command that rewrites everything `pixel setup` deploys in the home.
 const FIX_INSTALL: Option<&str> = Some("pixel setup");
-/// Command that rewrites the repo-local enforcement files.
-const FIX_REPO_INSTALL: Option<&str> = Some("pixel setup --repo {root}");
 /// Command that builds the text index and the graph, and warms the daemon.
 const FIX_PREPARE: Option<&str> = Some("pixel prepare-repo {root}");
 
@@ -71,35 +69,16 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("binary.path", None),
     entry("binary.executable", None),
     entry("binary.shell-path", None),
-    entry("install.agent-prompt", FIX_INSTALL),
-    entry("install.pi-prompt", FIX_INSTALL),
     entry("install.pi-impact", FIX_INSTALL),
-    entry("install.codex-config", FIX_INSTALL),
     entry("install.codex-metrics-hook", FIX_INSTALL),
     // Only the user can review a hook (`/hooks` in Codex); the outcome says so.
     entry("install.codex-hook-review", None),
-    entry("install.opencode-agents-md", FIX_INSTALL),
     entry("install.antigravity", FIX_INSTALL),
     entry("install.claude-hooks", FIX_INSTALL),
-    entry("install.devin-hooks", FIX_INSTALL),
-    // The removal command names the orphaned file, so the outcome carries it.
-    entry("install.rtk-backup", None),
-    entry("install.legacy-wrappers", FIX_INSTALL),
     // The setup step is interactive and needs the user at a terminal, so
     // the check names it in the message but leaves `--fix` out of it.
     entry("web-search.provider", None),
-    // The repair installs a plugin from the network, so the outcome names the
-    // exact `pixel install` commands and `--fix` leaves them to the user.
-    entry("plugins.references", None),
     entry("repo.task-hook-observations", None),
-    entry("repo.codex-config", FIX_REPO_INSTALL),
-    entry("repo.codex-hooks", FIX_REPO_INSTALL),
-    entry("repo.codex-hook-review", None),
-    entry("repo.devin-hooks", FIX_REPO_INSTALL),
-    entry("repo.warp-mcp", FIX_REPO_INSTALL),
-    entry("repo.pixel-first", FIX_REPO_INSTALL),
-    entry("repo.claude-hooks", FIX_REPO_INSTALL),
-    entry("repo.pi-guard", FIX_REPO_INSTALL),
     entry("daemon.health", Some("pixel daemon start {root}")),
     entry(
         "daemon.epistemics",
@@ -216,14 +195,9 @@ pub struct DoctorOptions {
     /// Repo root to check index/graph/facts freshness for. If None, only
     /// install-state checks run.
     pub repo_root: Option<PathBuf>,
-    /// Shell whose wrapper block should be checked, as a `$SHELL`-style value.
-    /// Defaults to `$SHELL`. Must match what `pixel setup` was given, or the
-    /// check looks at the wrong profile.
+    /// Shell whose `PATH` the `binary.shell-path` check asks, as a
+    /// `$SHELL`-style value. Defaults to the account's login shell.
     pub shell: Option<String>,
-    /// The `claude` executable whose version decides which wrapper block is
-    /// expected (see `InstallOptions::claude_executable`). Defaults to the
-    /// first `claude` on PATH.
-    pub claude_executable: Option<PathBuf>,
     /// Check ids to run; empty runs every check. Ids come from [`CHECKS`].
     pub only: Vec<String>,
     /// Check ids to leave out.
@@ -265,7 +239,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         only: &options.only,
         skip: &options.skip,
         root: options.repo_root.as_deref(),
-        shell: options.shell.as_deref(),
         checks: Vec::new(),
         skipped: 0,
     };
@@ -318,52 +291,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         shell_path_check(shell_override.as_deref())
     });
 
-    runner.check(
-        "install.agent-prompt",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            // No host reads a deployed Pixel prompt any more; copies an
-            // earlier release wrote are retired by `pixel setup`.
-            let dir = home.join(".local/share/pixel");
-            let left: Vec<String> = ["agent-prompt.md", install::SUBAGENT_PROMPT_FILE]
-                .iter()
-                .map(|name| dir.join(name))
-                .filter(|path| path.is_file())
-                .map(|path| path.display().to_string())
-                .collect();
-            if !left.is_empty() {
-                return Err(format!(
-                    "retired Pixel prompt file(s) remain: {} — run `pixel setup` to remove them",
-                    left.join(", ")
-                ));
-            }
-            Ok(DoctorCheckDetail {
-                summary: "no Pixel prompt deployed; agents keep their own instructions".into(),
-                detail: Some(serde_json::json!({ "dir": dir.display().to_string() })),
-            })
-        },
-    );
-
-    runner.check(
-        "install.pi-prompt",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            let path = home.join(install::PI_PROMPT_REL);
-            if path.is_file() {
-                let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-                let cleaned =
-                    config::strip_managed_block(&install::strip_unmarked_pi_prompts(&content));
-                if content != cleaned {
-                    return Err(format!(
-                        "{} still contains Pixel's retired automatic prompt — run `pixel setup`",
-                        path.display()
-                    ));
-                }
-            }
-            Ok(DoctorCheckDetail {
-                summary: format!("no Pixel automatic prompt in {}", path.display()),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            })
-        },
-    );
     let pi_paths = crate::pi_global::PiPaths::resolve(&home, options.home.is_some());
     runner.record("install.pi-impact", || {
         let detail = Some(serde_json::json!({
@@ -398,16 +325,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
 
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
     runner.check(
-        "install.codex-config",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            let (summary, detail) = crate::codex_config::check_developer_instructions(&codex_home)?;
-            Ok(DoctorCheckDetail {
-                summary,
-                detail: Some(detail),
-            })
-        },
-    );
-    runner.check(
         "install.codex-metrics-hook",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let (summary, detail) = crate::codex_config::check_task_hooks(&codex_home, &exe)?;
@@ -421,19 +338,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         let hooks_path = codex_home.join(crate::codex_config::HOOKS_FILE);
         codex_hook_review(&codex_home, &hooks_path, &exe)
     });
-
-    runner.check(
-        "install.opencode-agents-md",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            let (summary, detail) = crate::opencode_config::check_opencode(
-                &crate::opencode_config::opencode_config_dir(&home, options.home.is_some()),
-            )?;
-            Ok(DoctorCheckDetail {
-                summary,
-                detail: Some(detail),
-            })
-        },
-    );
 
     let exe_for_antigravity = exe.clone();
     let home_for_antigravity = home.clone();
@@ -499,12 +403,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     missing.join(", ")
                 ));
             }
-            if has_unexpected_pixel_hooks(&value, crate::routing::Provider::Claude, &exe) {
-                return Err(format!(
-                    "retired Pixel retrieval or metrics hooks remain in {}; run `pixel setup`",
-                    path.display()
-                ));
-            }
             let stacked = crate::routing::stacked_pixel_hooks(&value, &exe);
             if !stacked.is_empty() {
                 return Err(format!(
@@ -529,84 +427,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     );
 
-    // Devin keeps its task hooks and its prompt brief; a Pixel hook of any
-    // other kind left in its global config by an earlier release is red until
-    // `pixel setup` removes it. With no `~/.config/devin/` the check is
-    // green-absent.
-    runner.check(
-        "install.devin-hooks",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            let path = home
-                .join(crate::config::DEVIN_CONFIG_DIR)
-                .join(crate::config::DEVIN_CONFIG_FILE);
-            if path.is_file() {
-                let value = install::read_settings(&path).map_err(|e| e.to_string())?;
-                if crate::routing::has_retired_pixel_hook(&value, &exe) {
-                    return Err(format!(
-                        "retired Pixel hooks remain in {} — run `pixel setup` to remove them",
-                        path.display()
-                    ));
-                }
-            }
-            Ok(DoctorCheckDetail {
-                summary: "no retired Pixel hook; the agent keeps its own tools".into(),
-                detail: Some(serde_json::json!({
-                    "paths": [path.display().to_string()],
-                })),
-            })
-        },
-    );
-
-    // A global RTK backup that no guard delegates to is never applied again;
-    // say so rather than leave a file that looks like a live registration.
-    runner.record("install.rtk-backup", || {
-        Ok(rtk_backup_check(crate::routing::orphan_rtk_backup(
-            &home, &exe,
-        )))
-    });
-
-    // Legacy `claude()` shell wrappers are harmful now: a surviving block
-    // double-injects the prompt on every wrapped launch. Any pixel-managed
-    // block in ANY candidate profile (the resolved shell's or a stray left
-    // by an install that ran under the wrong $SHELL) is red.
-    let shell_override = options.shell.clone();
-    runner.check(
-        "install.legacy-wrappers",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            let shell = install::resolve_shell(shell_override.as_deref());
-            let (_, resolved) = install::shell_profile_for(&shell, &home);
-            let mut profiles = vec![resolved.clone()];
-            profiles.extend(
-                install::stray_wrapper_profiles(&home, &resolved)
-                    .into_iter()
-                    .map(|(_, path)| path),
-            );
-            let mut blocks = Vec::new();
-            for profile in &profiles {
-                if fs::read_to_string(profile)
-                    .ok()
-                    .and_then(|content| install::extract_managed_block(&content))
-                    .is_some()
-                {
-                    blocks.push(profile.display().to_string());
-                }
-            }
-            if !blocks.is_empty() {
-                return Err(format!(
-                    "stale pixel shell wrapper in {} — run `pixel setup` to remove its unsolicited prompt injection",
-                    blocks.join(", ")
-                ));
-            }
-            Ok(DoctorCheckDetail {
-                summary: "no legacy shell wrappers".into(),
-                detail: Some(serde_json::json!({ "profiles_checked": profiles
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>() })),
-            })
-        },
-    );
-
     // Which web search provider the installed `pixel` resolves to, read
     // straight from the environment and the global config file — never
     // by spawning the binary, which would re-enter it from inside
@@ -620,248 +440,10 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         web_search_provider_check(&home)
     });
 
-    // The text `pixel setup` deployed names commands: each one that a plugin
-    // provides must run here, or the agent is taught a command that fails.
-    runner.record("plugins.references", || {
-        Ok(plugin_references_check(
-            &home,
-            options.repo_root.as_deref(),
-            &plugins,
-        ))
-    });
-
     if let Some(root) = &options.repo_root {
         runner.check("repo.task-hook-observations", || {
             task_hook_observations(root)
         });
-        // Repo-local enforcement (`pixel setup --repo <path>`). A check is
-        // red only when the file carries evidence of a Pixel install (a
-        // Pixel entry, marker or sidecar) and that install is broken. An
-        // absent file, or one the project keeps for itself with nothing of
-        // Pixel's in it, is informational green: a repo where repo-install
-        // never ran is a valid state, not a broken one.
-        runner.check_status("repo.codex-config", || {
-            let codex_dir = root.join(".codex");
-            if !crate::codex_config::carries_pixel_block(&codex_dir)? {
-                return Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: "no retired Pixel block in .codex/config.toml".into(),
-                        detail: None,
-                    },
-                ));
-            }
-            let (summary, detail) = crate::codex_config::check_developer_instructions(&codex_dir)?;
-            Ok((
-                CheckStatus::Green,
-                DoctorCheckDetail {
-                    summary,
-                    detail: Some(detail),
-                },
-            ))
-        });
-
-        runner.check_status("repo.codex-hooks", || {
-            let hooks_path = root.join(".codex").join(crate::codex_config::HOOKS_FILE);
-            let sidecar = root.join(".codex").join(crate::routing::CODEX_COMPOSED_BACKUP);
-            if sidecar.is_file() {
-                return Err(format!(
-                    "retired composed-guard backup {} remains — run `pixel setup --repo` to restore native Codex hooks",
-                    sidecar.display()
-                ));
-            }
-            if !hooks_path.is_file() {
-                return Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: "no .codex/hooks.json — no repo-local Pixel task hooks installed".into(),
-                        detail: None,
-                    },
-                ));
-            }
-            let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
-            if has_unexpected_repo_pixel_hooks(&value, &exe) {
-                return Err(format!(
-                    "{} still has a retired Pixel callback — run `pixel setup --repo` to restore native Codex hooks",
-                    hooks_path.display()
-                ));
-            }
-            let task_hooks = crate::routing::task_hooks_registered(
-                &value,
-                crate::routing::Provider::Codex,
-                &exe,
-            );
-            let pixel_task_hooks_present = crate::routing::has_pixel_hook(&value, &exe);
-            let trust = task_hooks.then(|| {
-                match crate::codex_config::project_trust(&codex_home, root) {
-                    Ok(crate::codex_config::ProjectTrust::Trusted) => {
-                        "Codex trusts this project; task hooks are configured".to_owned()
-                    }
-                    Ok(crate::codex_config::ProjectTrust::Untrusted) => {
-                        "Codex has not trusted this project; task hooks may not load".to_owned()
-                    }
-                    Ok(crate::codex_config::ProjectTrust::Unspecified) => {
-                        "Codex project trust is unspecified; task hooks may not load".to_owned()
-                    }
-                    Err(error) => format!(
-                        "Codex project trust is unknown ({error}); task hooks may not load"
-                    ),
-                }
-            });
-            Ok((
-                CheckStatus::Green,
-                DoctorCheckDetail {
-                    summary: if let Some(trust) = &trust {
-                        format!("native Codex hooks preserved in {}; {trust}", hooks_path.display())
-                    } else {
-                        format!(
-                            "native Codex hooks preserved; {} in {}",
-                            if pixel_task_hooks_present {
-                                "partial Pixel task hooks preserved as configured"
-                            } else {
-                                "no Pixel task hooks installed"
-                            },
-                            hooks_path.display(),
-                        )
-                    },
-                    detail: Some(serde_json::json!({
-                        "hooks": hooks_path.display().to_string(),
-                        "task_hooks": task_hooks,
-                        "pixel_task_hooks_present": pixel_task_hooks_present,
-                        "native_pre_tool_use": true,
-                        "trust": trust,
-                    })),
-                },
-            ))
-        });
-
-        runner.check_status("repo.codex-hook-review", || {
-            let hooks_path = root.join(".codex").join(crate::codex_config::HOOKS_FILE);
-            codex_hook_review(&codex_home, &hooks_path, &exe)
-        });
-
-        runner.check("repo.devin-hooks", || {
-            retired_pixel_hooks_check(
-                &[
-                    root.join(crate::routing::DEVIN_LOCAL_CONFIG),
-                    root.join(crate::routing::DEVIN_LEGACY_HOOKS),
-                ],
-                &exe,
-                &format!(
-                    "pixel setup --repo {}",
-                    crate::routing::quoted_executable(root)
-                ),
-            )
-        });
-
-        runner.check_status("repo.warp-mcp", || {
-            let path = root.join(crate::warp::CONFIG_FILE);
-            if !crate::warp::has_retired_entry(root).map_err(|e| e.to_string())? {
-                return Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: "no retired Pixel Warp MCP server configured".into(),
-                        detail: None,
-                    },
-                ));
-            }
-            if crate::repo_git::is_tracked(root, crate::warp::CONFIG_FILE) {
-                // Install never edits a tracked config, so its fix cannot help.
-                return Ok((
-                    CheckStatus::Yellow,
-                    DoctorCheckDetail {
-                        summary: format!(
-                            "{} (tracked by git) still starts Pixel's retired MCP server — remove its `pixel` entry",
-                            path.display()
-                        ),
-                        detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-                    },
-                ));
-            }
-            Err(format!(
-                "{} still starts Pixel's retired MCP server — run `pixel setup --repo {}`",
-                path.display(),
-                crate::routing::quoted_executable(root)
-            ))
-        });
-
-        runner.check_status("repo.pixel-first", || {
-            let path = root.join("AGENTS.md");
-            match crate::pixel_first::check_rules(root).map_err(|e| e.to_string())? {
-                None => Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: "no Pixel-first project rule configured".into(),
-                        detail: None,
-                    },
-                )),
-                Some(_) => Err(format!(
-                    "retired Pixel-first block remains in {} — run `pixel setup --repo {}` to remove it",
-                    path.display(),
-                    crate::routing::quoted_executable(root)
-                )),
-            }
-        });
-
-        runner.record("repo.claude-hooks", || {
-            // The shared settings.json is committed: a pixel guard there
-            // runs this machine's binary path on every teammate's clone.
-            let shared = root.join(crate::routing::CLAUDE_SHARED_SETTINGS);
-            if shared.is_file() {
-                let value = install::read_settings(&shared).map_err(|e| e.to_string())?;
-                if crate::routing::has_pixel_guard(&value, "run-hook guard", &exe) {
-                    return Err(format!(
-                        "retired Pixel guard in shared {} — run `pixel setup --repo` to restore native Claude retrieval",
-                        shared.display()
-                    ));
-                }
-            }
-            let path = root.join(crate::routing::CLAUDE_LOCAL_SETTINGS);
-            let value = if path.is_file() {
-                install::read_settings(&path).map_err(|e| e.to_string())?
-            } else {
-                serde_json::Value::Null
-            };
-            let rtk_backup = root.join(crate::routing::RTK_BACKUP);
-            if has_unexpected_repo_pixel_hooks(&value, &exe) {
-                return Err(format!(
-                    "retired Pixel callbacks remain in {}; run `pixel setup --repo` to restore native Claude retrieval",
-                    path.display()
-                ));
-            }
-            if rtk_backup.is_file() {
-                return Ok((
-                    CheckStatus::Yellow,
-                    DoctorCheckDetail {
-                        summary: format!(
-                            "stale Claude RTK backup {} remains; run `pixel setup --repo` to complete native cleanup",
-                            rtk_backup.display()
-                        ),
-                        detail: Some(serde_json::json!({
-                            "path": path.display().to_string(),
-                            "rtk_backup": rtk_backup.display().to_string(),
-                        })),
-                    },
-                    Remedy::Catalogue,
-                ));
-            }
-            Ok((
-                CheckStatus::Green,
-                DoctorCheckDetail {
-                    summary: format!("native Claude hooks preserved in {}", path.display()),
-                    detail: Some(serde_json::json!({
-                        "path": path.display().to_string(),
-                        "pixel_callbacks": false,
-                    })),
-                },
-                Remedy::Catalogue,
-            ))
-        });
-
-        runner.check_status("repo.pi-guard", || {
-            pi_guard_check(root, crate::pi_project::guard_state(root))
-        });
-
         runner.check(
             "daemon.health",
             || -> std::result::Result<DoctorCheckDetail, String> {
@@ -1117,61 +699,6 @@ fn codex_hook_review(
     ))
 }
 
-/// Green while none of `paths` holds a Pixel hook; red, naming `fix`, when
-/// one an earlier release registered is still there. An absent or foreign
-/// file is green: doctor judges what Pixel wrote.
-fn retired_pixel_hooks_check(
-    paths: &[PathBuf],
-    exe: &Path,
-    fix: &str,
-) -> std::result::Result<DoctorCheckDetail, String> {
-    let mut left = Vec::new();
-    for path in paths.iter().filter(|path| path.is_file()) {
-        let value = install::read_settings(path).map_err(|e| e.to_string())?;
-        if crate::routing::has_pixel_hook(&value, exe) {
-            left.push(path.display().to_string());
-        }
-    }
-    if !left.is_empty() {
-        return Err(format!(
-            "retired Pixel hooks remain in {} — run `{fix}` to remove them",
-            left.join(", ")
-        ));
-    }
-    Ok(DoctorCheckDetail {
-        summary: "no Pixel hook; the agent keeps its native tools".into(),
-        detail: Some(serde_json::json!({
-            "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-        })),
-    })
-}
-
-/// `repo.pi-guard`: red while a Pi guard extension Pixel wrote (at
-/// `.pi/extensions/` or, from releases up to 0.4.0, `.pi/agent/`) is still in
-/// the repository; a file there Pixel did not write is the user's.
-fn pi_guard_check(
-    root: &Path,
-    state: crate::pi_project::GuardState,
-) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
-    use crate::pi_project::GuardState;
-    let path = match state {
-        GuardState::Absent => {
-            return Ok((
-                CheckStatus::Green,
-                DoctorCheckDetail {
-                    summary: "no Pixel Pi project extension; Pi keeps its native tools".into(),
-                    detail: None,
-                },
-            ));
-        }
-        GuardState::Retired(path) | GuardState::Legacy(path) => path,
-    };
-    Err(format!(
-        "retired Pixel Pi project extension remains at {} — run `pixel setup --repo {}` to remove it",
-        path.display(),
-        crate::routing::quoted_executable(root)
-    ))
-}
 /// The final verdict of `install.claude-hooks` once every hook is present
 /// and registered once: yellow when they run `others` rather than `exe`, the
 /// managed binary. A side build ([`config::is_side_build`]) never judges it:
@@ -1223,59 +750,6 @@ fn brief_parts_drift(path: &Path, installed: u8, configured: u8) -> Option<Docto
             "installed_parts": installed,
             "configured_parts": configured,
         })),
-    })
-}
-
-/// `install.rtk-backup`: yellow when `orphan` names a global RTK backup no
-/// pixel guard delegates to, with the command that removes it.
-fn rtk_backup_check(orphan: Option<PathBuf>) -> (CheckStatus, DoctorCheckDetail, Remedy) {
-    match orphan {
-        None => (
-            CheckStatus::Green,
-            DoctorCheckDetail {
-                summary: "no orphaned RTK backup".into(),
-                detail: None,
-            },
-            Remedy::Catalogue,
-        ),
-        Some(path) => {
-            let remove = format!("rm {}", crate::routing::quoted_executable(&path));
-            (
-                CheckStatus::Yellow,
-                DoctorCheckDetail {
-                    summary: format!(
-                        "{} holds an RTK hook no pixel guard delegates to; pixel never applies it — remove it: {remove}",
-                        path.display(),
-                    ),
-                    detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-                },
-                Remedy::Command(remove),
-            )
-        }
-    }
-}
-
-/// Whether a global settings file retains Pixel callbacks outside its own
-/// provider's task lifecycle: the global install rewrites every Pixel hook
-/// there, so any other one is retired.
-fn has_unexpected_pixel_hooks(
-    value: &serde_json::Value,
-    provider: crate::routing::Provider,
-    exe: &Path,
-) -> bool {
-    let expected_task_prefix = format!("task-event --provider {} --event ", provider.name());
-    let mut checked = value.clone();
-    if provider == crate::routing::Provider::Claude
-        && let Some(groups) = checked
-            .get_mut("hooks")
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|hooks| hooks.get_mut("PostToolUse"))
-            .and_then(serde_json::Value::as_array_mut)
-    {
-        groups.retain(|group| !is_claude_metrics_relay_group(group, exe));
-    }
-    has_retired_pixel_hooks(&checked, exe, |verb| {
-        !verb.starts_with(&expected_task_prefix)
     })
 }
 
@@ -1335,65 +809,7 @@ fn antigravity_hook_drift(value: &serde_json::Value, exe: &Path) -> Vec<&'static
     }) {
         missing.push("pixel-brief");
     }
-    if contains_antigravity_metrics_relay(value, exe) {
-        missing.push("unsupported global Antigravity metrics relay");
-    }
     missing
-}
-
-fn contains_antigravity_metrics_relay(value: &serde_json::Value, exe: &Path) -> bool {
-    match value {
-        serde_json::Value::String(command) => {
-            crate::routing::pixel_run_hook_verb(command, exe)
-                == Some("metrics --provider antigravity")
-        }
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| contains_antigravity_metrics_relay(value, exe)),
-        serde_json::Value::Object(values) => values
-            .values()
-            .any(|value| contains_antigravity_metrics_relay(value, exe)),
-        _ => false,
-    }
-}
-
-/// Whether a repo-local settings file retains a Pixel callback that
-/// `pixel setup --repo` removes; it keeps task-event hooks of every
-/// provider, so those are not reported.
-fn has_unexpected_repo_pixel_hooks(value: &serde_json::Value, exe: &Path) -> bool {
-    has_retired_pixel_hooks(value, exe, crate::routing::native_cleanup_retires)
-}
-
-/// Whether any Pixel hook in `value` has a verb `retired` matches.
-fn has_retired_pixel_hooks(
-    value: &serde_json::Value,
-    exe: &Path,
-    retired: impl Fn(&str) -> bool,
-) -> bool {
-    value
-        .get("hooks")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|events| {
-            events.values().any(|groups| {
-                groups.as_array().is_some_and(|groups| {
-                    groups.iter().any(|group| {
-                        group
-                            .get("hooks")
-                            .and_then(serde_json::Value::as_array)
-                            .is_some_and(|inner| {
-                                inner.iter().any(|hook| {
-                                    hook.get("command")
-                                        .and_then(serde_json::Value::as_str)
-                                        .and_then(|command| {
-                                            crate::routing::pixel_hook_verb(command, exe)
-                                        })
-                                        .is_some_and(&retired)
-                                })
-                            })
-                    })
-                })
-            })
-        })
 }
 
 #[derive(Debug)]
@@ -1407,8 +823,6 @@ pub(crate) struct DoctorCheckDetail {
 enum Remedy {
     /// The check's command in [`CHECKS`].
     Catalogue,
-    /// A command only this outcome can name, such as a path to remove.
-    Command(String),
     /// No command: nothing to repair, or another check carries the fix.
     Manual,
 }
@@ -1609,135 +1023,6 @@ fn web_search_plugin_absent(plugins: &pixel_plugin::Available) -> (CheckStatus, 
     )
 }
 
-/// One file of deployed text and the plugin commands it names.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PluginReference {
-    path: PathBuf,
-    commands: Vec<&'static str>,
-}
-
-/// Whether `text` names the moved `command` by its current name or by a
-/// pre-rename spelling the CLI still accepts (`pixel inspect` is
-/// `repo-state`): both reach the same plugin.
-fn names_moved_command(text: &str, command: &str) -> bool {
-    names_command(text, command)
-        || pixel_proto::commands::RENAMED_COMMANDS
-            .iter()
-            .any(|(old, new)| *new == command && names_command(text, old))
-}
-
-/// Whether `text` names `pixel <command>` as a whole command word.
-fn names_command(text: &str, command: &str) -> bool {
-    let needle = format!("pixel {command}");
-    text.match_indices(&needle).any(|(at, _)| {
-        text[at + needle.len()..]
-            .chars()
-            .next()
-            .is_none_or(|next| !(next.is_ascii_alphanumeric() || next == '-' || next == '_'))
-    })
-}
-
-/// The moved commands the managed blocks of the files `pixel setup` deploys
-/// name, per file, in the global scope under `home` and in the repository.
-fn deployed_plugin_references(home: &Path, repo_root: Option<&Path>) -> Vec<PluginReference> {
-    let mut scopes = vec![(home, crate::setup::Scope::Global)];
-    if let Some(root) = repo_root.filter(|root| *root != home) {
-        scopes.push((root, crate::setup::Scope::Repository));
-    }
-    let mut references = Vec::new();
-    for (base, scope) in scopes {
-        for path in crate::setup::deployed_files(base, scope) {
-            let Ok(text) = fs::read_to_string(&path) else {
-                continue;
-            };
-            let block = crate::setup::managed_text(&text);
-            let commands: Vec<&'static str> = pixel_plugin::MOVED_COMMANDS
-                .iter()
-                .map(|(command, _)| *command)
-                .filter(|command| !pixel_plugin::stays_in_core(command))
-                .filter(|command| names_moved_command(&block, command))
-                .collect();
-            if !commands.is_empty() {
-                references.push(PluginReference { path, commands });
-            }
-        }
-    }
-    references
-}
-
-/// Yellow when deployed instructions name a plugin command that does not run
-/// here, with the `pixel install` commands for the plugins that are simply
-/// missing; a plugin that is installed but blocked says why instead.
-fn plugin_references_check(
-    home: &Path,
-    repo_root: Option<&Path>,
-    plugins: &pixel_plugin::Available,
-) -> (CheckStatus, DoctorCheckDetail, Remedy) {
-    let references = deployed_plugin_references(home, repo_root);
-    let mut dangling = Vec::new();
-    let mut missing_repos: Vec<&'static str> = Vec::new();
-    let mut blocked = Vec::new();
-    for reference in &references {
-        for command in &reference.commands {
-            if plugins.has(command) {
-                continue;
-            }
-            dangling.push(format!("pixel {command} in {}", reference.path.display()));
-            if let Some(why) = plugins.blocked(command) {
-                if !blocked.contains(&why) {
-                    blocked.push(why);
-                }
-            } else if let Some(repo) = pixel_plugin::repo_of(command)
-                && !missing_repos.contains(&repo)
-            {
-                missing_repos.push(repo);
-            }
-        }
-    }
-    if dangling.is_empty() {
-        return (
-            CheckStatus::Green,
-            DoctorCheckDetail {
-                summary: "deployed instructions name no plugin command that is missing".into(),
-                detail: Some(serde_json::json!({
-                    "files_checked": references.len(),
-                })),
-            },
-            Remedy::Catalogue,
-        );
-    }
-    let install = missing_repos
-        .iter()
-        .map(|repo| pixel_plugin::install_command(repo))
-        .collect::<Vec<_>>()
-        .join(" && ");
-    let mut summary = format!(
-        "deployed instructions name plugin commands that do not run here: {}",
-        dangling.join(", ")
-    );
-    if !install.is_empty() {
-        summary.push_str(&format!(" — install the plugin: {install}"));
-    }
-    for why in &blocked {
-        summary.push_str(&format!(" — {why}"));
-    }
-    (
-        CheckStatus::Yellow,
-        DoctorCheckDetail {
-            summary,
-            detail: Some(serde_json::json!({
-                "dangling": dangling,
-                "missing_plugins": missing_repos,
-            })),
-        },
-        if install.is_empty() {
-            Remedy::Manual
-        } else {
-            Remedy::Command(install)
-        },
-    )
-}
-
 /// Which web search provider `pixel web-search` resolves to for `home`.
 /// Green when one is configured; yellow, naming the setup command, when the
 /// public chain is the default. The provider is read straight from the
@@ -1817,8 +1102,8 @@ fn env_non_empty(name: &str) -> bool {
 }
 
 /// The global pixel config as a JSON value: `~/.pixel/config.yaml` parsed
-/// with the same YAML engine the CLI uses, falling back to the legacy
-/// `config.json`, or an empty document when neither file exists. The two
+/// with the same YAML engine the CLI uses, or an empty document when the file
+/// does not exist. The two
 /// scalar keys the check reads never need more than the mapping shape, but a
 /// malformed file is an error rather than a silent `none` — doctor must not
 /// hide a config it cannot read.
@@ -1829,26 +1114,15 @@ pub(crate) fn load_pixel_config(home: &Path) -> std::result::Result<Value, Strin
             std::fs::read_to_string(&yaml).map_err(|e| format!("read {}: {e}", yaml.display()))?;
         return parse_pixel_config(&text, &yaml);
     }
-    let legacy = home.join(".pixel/config.json");
-    if legacy.is_file() {
-        let text = std::fs::read_to_string(&legacy)
-            .map_err(|e| format!("read {}: {e}", legacy.display()))?;
-        return parse_pixel_config(&text, &legacy);
-    }
     Ok(serde_json::json!({}))
 }
 
 /// Parse one pixel config file: `null` (an empty file) reads as an empty
 /// document, anything other than a mapping is an error.
 fn parse_pixel_config(text: &str, path: &Path) -> std::result::Result<Value, String> {
-    let value: Value = if path.extension().is_some_and(|ext| ext == "json") {
-        serde_json::from_str(text).map_err(|_| ())
-    } else {
-        serde_saphyr::from_str(text).map_err(|_| ())
-    }
-    .map_err(|()| {
+    let value: Value = serde_saphyr::from_str(text).map_err(|_| {
         format!(
-            "invalid configuration {}; expected a YAML/JSON mapping",
+            "invalid configuration {}; expected a YAML mapping",
             path.display()
         )
     })?;
@@ -1869,8 +1143,6 @@ struct Runner<'a> {
     only: &'a [String],
     skip: &'a [String],
     root: Option<&'a Path>,
-    /// The `--shell` override, handed on to the `pixel setup` a fix runs.
-    shell: Option<&'a str>,
     checks: Vec<DoctorCheck>,
     skipped: usize,
 }
@@ -1923,8 +1195,8 @@ impl Runner<'_> {
                 summary: d.summary,
                 reason: None,
                 detail: d.detail,
-                repair: repair_for(spec, status, &remedy, self.root, self.shell),
-                fix: fix_for(spec, status, remedy, self.root, self.shell),
+                repair: repair_for(spec, status, &remedy, self.root),
+                fix: fix_for(spec, status, remedy, self.root),
             },
             Err(reason) => DoctorCheck {
                 id: id.into(),
@@ -1934,20 +1206,8 @@ impl Runner<'_> {
                 summary: "check failed".into(),
                 reason: Some(reason),
                 detail: None,
-                repair: repair_for(
-                    spec,
-                    CheckStatus::Red,
-                    &Remedy::Catalogue,
-                    self.root,
-                    self.shell,
-                ),
-                fix: fix_for(
-                    spec,
-                    CheckStatus::Red,
-                    Remedy::Catalogue,
-                    self.root,
-                    self.shell,
-                ),
+                repair: repair_for(spec, CheckStatus::Red, &Remedy::Catalogue, self.root),
+                fix: fix_for(spec, CheckStatus::Red, Remedy::Catalogue, self.root),
             },
         };
         self.checks.push(check);
@@ -2001,14 +1261,12 @@ fn validate_selection(only: &[String], skip: &[String]) -> Result<()> {
 
 /// The repair command a check reports: none on green, otherwise what the
 /// outcome names, with `{root}` in a catalogue command replaced by the quoted
-/// repository root (`.` when there is none) and `shell` handed to a
-/// home-wide `pixel setup`.
+/// repository root (`.` when there is none).
 fn fix_for(
     spec: &CheckSpec,
     status: CheckStatus,
     remedy: Remedy,
     root: Option<&Path>,
-    shell: Option<&str>,
 ) -> Option<String> {
     if status == CheckStatus::Green {
         return None;
@@ -2016,14 +1274,12 @@ fn fix_for(
     match remedy {
         Remedy::Catalogue => spec.fix.map(|template| {
             let root = root.map_or_else(|| ".".to_owned(), crate::routing::quoted_executable);
-            let shell = shell.map(shell_word);
-            catalogue_steps(template, &root, shell.as_deref())
+            catalogue_steps(template, &root)
                 .iter()
                 .map(|argv| format!("pixel {}", argv.join(" ")))
                 .collect::<Vec<_>>()
                 .join(" && ")
         }),
-        Remedy::Command(command) => Some(command),
         Remedy::Manual => None,
     }
 }
@@ -2036,25 +1292,21 @@ fn repair_for(
     status: CheckStatus,
     remedy: &Remedy,
     root: Option<&Path>,
-    shell: Option<&str>,
 ) -> Option<Vec<Vec<String>>> {
     if status == CheckStatus::Green || *remedy != Remedy::Catalogue {
         return None;
     }
     let root = root.map_or_else(|| ".".to_owned(), |r| r.to_string_lossy().into_owned());
-    spec.fix
-        .map(|template| catalogue_steps(template, &root, shell))
+    spec.fix.map(|template| catalogue_steps(template, &root))
 }
 
 /// The argv after `pixel` of each `&&`-joined command in `template`, with
-/// `{root}` replaced by `root`. The home-wide `pixel setup` also gets
-/// `--shell <shell>` when one was given, so the repair reads the profile the
-/// check read.
-fn catalogue_steps(template: &str, root: &str, shell: Option<&str>) -> Vec<Vec<String>> {
+/// `{root}` replaced by `root`.
+fn catalogue_steps(template: &str, root: &str) -> Vec<Vec<String>> {
     template
         .split(" && ")
         .map(|command| {
-            let mut argv: Vec<String> = command
+            command
                 .split_whitespace()
                 .skip(1)
                 .map(|word| {
@@ -2064,29 +1316,9 @@ fn catalogue_steps(template: &str, root: &str, shell: Option<&str>) -> Vec<Vec<S
                         word.to_owned()
                     }
                 })
-                .collect();
-            if let Some(shell) = shell
-                && argv == ["setup"]
-            {
-                argv.extend(["--shell".to_owned(), shell.to_owned()]);
-            }
-            argv
+                .collect()
         })
         .collect()
-}
-
-/// `shell` as one shell word: bare when it holds only path-safe characters,
-/// single-quoted otherwise.
-fn shell_word(shell: &str) -> String {
-    if !shell.is_empty()
-        && shell
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
-    {
-        shell.to_owned()
-    } else {
-        crate::routing::quoted_executable(Path::new(shell))
-    }
 }
 
 /// One command `pixel doctor --fix` runs, and the flagged checks it repairs.
@@ -2561,19 +1793,15 @@ mod tests {
 
     use super::env_non_empty;
     use super::{
-        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, PLACEHOLDER_DUMMY, Remedy,
-        Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs, capped, catalogue_steps,
-        claude_hooks_owner_check, extract_rule_commands, fix_for, judge_repair, load_pixel_config,
-        names_check, normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
-        render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair, selected,
-        shell_path_check, shell_word, spec, split_home_repairs, validate_selection,
-        web_search_provider_check_with, web_search_provider_from,
+        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, PLACEHOLDER_DUMMY, Repair,
+        RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs, capped, claude_hooks_owner_check,
+        extract_rule_commands, judge_repair, load_pixel_config, names_check,
+        normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
+        render_repairs, repair_plan, run_repair, selected, shell_path_check, spec,
+        split_home_repairs, validate_selection, web_search_provider_check_with,
+        web_search_provider_from,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
-    use super::{
-        PluginReference, deployed_plugin_references, names_command, names_moved_command,
-        plugin_references_check,
-    };
     use crate::InstallError;
 
     #[test]
@@ -2888,7 +2116,7 @@ mod tests {
             .map(|spec| spec.id)
             .filter(|id| id.starts_with("install."))
             .collect();
-        assert_eq!(home.len(), 12, "the install group as catalogued");
+        assert_eq!(home.len(), 5, "the install group as catalogued");
         let skip = ids(&["install.*"]);
         for spec in CHECKS {
             assert_eq!(
@@ -2935,58 +2163,6 @@ mod tests {
         );
     }
 
-    /// A fix is a command an agent may run as is: never on a healthy check,
-    /// and always pointed at the repository the report is about.
-    #[test]
-    fn fix_for_should_name_a_command_only_for_a_check_that_needs_one() {
-        let repo = CheckSpec {
-            id: "repo.pi-guard",
-            fix: Some("pixel setup --repo {root}"),
-        };
-        let root = Path::new("/tmp/it's here");
-        assert_eq!(
-            fix_for(
-                &repo,
-                CheckStatus::Green,
-                Remedy::Catalogue,
-                Some(root),
-                None
-            ),
-            None
-        );
-        assert_eq!(
-            fix_for(&repo, CheckStatus::Red, Remedy::Catalogue, Some(root), None).as_deref(),
-            Some("pixel setup --repo '/tmp/it'\\''s here'")
-        );
-        assert_eq!(
-            fix_for(&repo, CheckStatus::Yellow, Remedy::Catalogue, None, None).as_deref(),
-            Some("pixel setup --repo .")
-        );
-        assert_eq!(
-            fix_for(
-                &repo,
-                CheckStatus::Yellow,
-                Remedy::Command("rm x".into()),
-                Some(root),
-                None
-            )
-            .as_deref(),
-            Some("rm x")
-        );
-        assert_eq!(
-            fix_for(&repo, CheckStatus::Red, Remedy::Manual, Some(root), None),
-            None
-        );
-        let bare = CheckSpec {
-            id: "binary.path",
-            fix: None,
-        };
-        assert_eq!(
-            fix_for(&bare, CheckStatus::Red, Remedy::Catalogue, Some(root), None),
-            None
-        );
-    }
-
     /// `--fix` runs a catalogue command by dropping its leading word, so a
     /// template that did not start with `pixel` would run the wrong program.
     #[test]
@@ -2996,75 +2172,6 @@ mod tests {
                 assert!(command.starts_with("pixel "), "{}: {command}", check.id);
             }
         }
-    }
-
-    #[test]
-    fn catalogue_steps_should_split_chains_and_substitute_the_root() {
-        assert_eq!(
-            catalogue_steps(
-                "pixel daemon stop {root} && pixel daemon start {root}",
-                "/r",
-                None
-            ),
-            argv(&[&["daemon", "stop", "/r"], &["daemon", "start", "/r"]])
-        );
-    }
-
-    /// The home install reads the shell profile, so the repair must target
-    /// the shell the check was told about; the repo install and every other
-    /// command take no `--shell`.
-    #[test]
-    fn catalogue_steps_should_hand_the_shell_to_the_home_install_only() {
-        assert_eq!(
-            catalogue_steps("pixel setup", "/r", Some("fish")),
-            argv(&[&["setup", "--shell", "fish"]])
-        );
-        assert_eq!(
-            catalogue_steps("pixel setup", "/r", None),
-            argv(&[&["setup"]])
-        );
-        assert_eq!(
-            catalogue_steps("pixel setup --repo {root}", "/r", Some("fish")),
-            argv(&[&["setup", "--repo", "/r"]])
-        );
-    }
-
-    #[test]
-    fn fix_for_should_print_the_shell_the_repair_will_use() {
-        let install = spec("install.agent-prompt");
-        assert_eq!(
-            fix_for(
-                install,
-                CheckStatus::Red,
-                Remedy::Catalogue,
-                None,
-                Some("fish")
-            )
-            .as_deref(),
-            Some("pixel setup --shell fish")
-        );
-        assert_eq!(
-            fix_for(
-                install,
-                CheckStatus::Red,
-                Remedy::Catalogue,
-                None,
-                Some("my sh")
-            )
-            .as_deref(),
-            Some("pixel setup --shell 'my sh'")
-        );
-        assert_eq!(
-            fix_for(
-                spec("daemon.epistemics"),
-                CheckStatus::Yellow,
-                Remedy::Catalogue,
-                Some(Path::new("/r")),
-                Some("fish")
-            )
-            .as_deref(),
-            Some("pixel daemon stop '/r' && pixel daemon start '/r'")
-        );
     }
 
     /// The three outcomes of the shell probe, driven through a script the
@@ -3267,12 +2374,11 @@ mod tests {
         assert_eq!(provider(), "none");
     }
 
-    /// The global config reads as JSON either way: the YAML file (parsed
-    /// with the CLI's own engine) or the legacy `config.json`, and nothing
-    /// when neither exists; a file that is not a mapping is an error, not a
-    /// silent `none`.
+    /// The global config reads as the YAML file (parsed with the CLI's own
+    /// engine), and nothing when it does not exist; a file that is not a
+    /// mapping is an error, not a silent `none`.
     #[test]
-    fn web_search_config_reads_yaml_legacy_json_or_absent() {
+    fn web_search_config_reads_yaml_or_absent() {
         let dir = std::env::temp_dir().join(format!(
             "pixel-doctor-web-search-config-{}",
             std::process::id()
@@ -3292,18 +2398,8 @@ mod tests {
         assert_eq!(doc["web_search"]["searxng_url"], "https://sx.test");
         assert_eq!(doc["remote_keys"]["perplexity"], "pplx");
 
-        std::fs::remove_file(home.join(".pixel/config.yaml")).unwrap();
-        std::fs::write(
-            home.join(".pixel/config.json"),
-            r#"{"web_search":{"searxng_url":"https://sx.test"}}"#,
-        )
-        .unwrap();
-        let doc = load_pixel_config(&home).unwrap();
-        assert_eq!(doc["web_search"]["searxng_url"], "https://sx.test");
-
         // An empty YAML file is an empty document; anything that is not a
         // mapping is an error the check must not gloss over.
-        std::fs::remove_file(home.join(".pixel/config.json")).unwrap();
         std::fs::write(home.join(".pixel/config.yaml"), "").unwrap();
         assert_eq!(load_pixel_config(&home).unwrap(), serde_json::json!({}));
         std::fs::write(home.join(".pixel/config.yaml"), "web_search: [\n").unwrap();
@@ -3407,74 +2503,6 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(2),
             "the deadline must bound the wait, took {:?}",
             started.elapsed()
-        );
-    }
-
-    #[test]
-    fn shell_word_should_quote_only_what_a_shell_would_split() {
-        assert_eq!(shell_word("fish"), "fish");
-        assert_eq!(
-            shell_word("/opt/homebrew/bin/fish-3.7_x"),
-            "/opt/homebrew/bin/fish-3.7_x"
-        );
-        assert_eq!(shell_word("a b"), "'a b'");
-        assert_eq!(shell_word(""), "''");
-    }
-
-    /// `--fix` runs only the catalogue command of a flagged check, with the
-    /// root as one raw argument (no shell quoting: nothing parses it again).
-    #[test]
-    fn repair_for_should_carry_argv_only_for_a_flagged_catalogue_fix() {
-        let repo = spec("repo.pi-guard");
-        let root = Path::new("/tmp/it's here");
-        assert_eq!(
-            repair_for(
-                repo,
-                CheckStatus::Yellow,
-                &Remedy::Catalogue,
-                Some(root),
-                None
-            ),
-            Some(argv(&[&["setup", "--repo", "/tmp/it's here"]]))
-        );
-        assert_eq!(
-            repair_for(repo, CheckStatus::Red, &Remedy::Catalogue, None, None),
-            Some(argv(&[&["setup", "--repo", "."]]))
-        );
-        assert_eq!(
-            repair_for(
-                repo,
-                CheckStatus::Green,
-                &Remedy::Catalogue,
-                Some(root),
-                None
-            ),
-            None
-        );
-        assert_eq!(
-            repair_for(
-                repo,
-                CheckStatus::Red,
-                &Remedy::Command("rm x".into()),
-                Some(root),
-                None
-            ),
-            None,
-            "a command one outcome names stays the user's call"
-        );
-        assert_eq!(
-            repair_for(repo, CheckStatus::Red, &Remedy::Manual, Some(root), None),
-            None
-        );
-        assert_eq!(
-            repair_for(
-                spec("binary.path"),
-                CheckStatus::Red,
-                &Remedy::Catalogue,
-                Some(root),
-                None
-            ),
-            None
         );
     }
 
@@ -3697,22 +2725,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RepairStatus::NotConverged).unwrap(),
             "not_converged"
-        );
-    }
-
-    #[test]
-    fn rtk_backup_check_should_carry_the_removal_command_as_its_fix() {
-        let (status, _, remedy) = rtk_backup_check(None);
-        assert_eq!((status, remedy), (CheckStatus::Green, Remedy::Catalogue));
-        let (status, detail, remedy) = rtk_backup_check(Some(PathBuf::from("/h/.claude/rtk.json")));
-        assert_eq!(status, CheckStatus::Yellow);
-        assert_eq!(remedy, Remedy::Command("rm '/h/.claude/rtk.json'".into()));
-        assert!(
-            detail
-                .summary
-                .ends_with("remove it: rm '/h/.claude/rtk.json'"),
-            "{}",
-            detail.summary
         );
     }
 
@@ -4033,57 +3045,6 @@ Prose naming `pixel status` is not a table row.
     }
 
     #[test]
-    fn pi_impact_doctor_should_judge_the_package_install_wrote() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = crate::pi_global::PiPaths::resolve(home.path(), true);
-        let old_exe = Path::new("/opt/old-pixel/pixel");
-        let current_exe = Path::new("/opt/current-pixel/pixel");
-        std::fs::create_dir_all(&paths.agent_dir).unwrap();
-        let check = |exe: &Path| {
-            let report = super::doctor(&super::DoctorOptions {
-                home: Some(home.path().to_path_buf()),
-                executable_path: Some(exe.to_path_buf()),
-                only: vec!["install.pi-impact".into()],
-                ..Default::default()
-            })
-            .unwrap();
-            report.checks.into_iter().next().unwrap()
-        };
-
-        let missing = check(current_exe);
-        assert_eq!(missing.status, CheckStatus::Red, "{missing:?}");
-        assert_eq!(missing.fix.as_deref(), Some("pixel setup"));
-
-        crate::pi_global::install(&paths, old_exe, false, false).unwrap();
-        let stale = check(current_exe);
-        assert_eq!(stale.status, CheckStatus::Red, "{stale:?}");
-        assert!(
-            stale
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("different binary")),
-            "{stale:?}"
-        );
-
-        crate::pi_global::install(&paths, current_exe, false, false).unwrap();
-        let current = check(current_exe);
-        assert_eq!(current.status, CheckStatus::Green, "{current:?}");
-        assert_eq!(current.fix, None);
-
-        // A foreign file under the retired name is the user's: manual, kept.
-        let legacy = paths.agent_dir.join(crate::pi_global::LEGACY_EXTENSION);
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, "// user-owned extension\n").unwrap();
-        let foreign = check(current_exe);
-        assert_eq!(foreign.status, CheckStatus::Yellow, "{foreign:?}");
-        assert_eq!(foreign.fix, None, "doctor offers no repair it cannot make");
-        assert_eq!(
-            std::fs::read_to_string(&legacy).unwrap(),
-            "// user-owned extension\n"
-        );
-    }
-
-    #[test]
     fn pi_impact_doctor_should_not_offer_install_for_unparsable_settings_or_a_file_agent_dir() {
         let home = tempfile::tempdir().unwrap();
         let paths = crate::pi_global::PiPaths::resolve(home.path(), true);
@@ -4109,298 +3070,6 @@ Prose naming `pixel status` is not a table row.
         assert_eq!(occupied.status, CheckStatus::Yellow, "{occupied:?}");
         assert_eq!(occupied.fix, None);
         assert!(occupied.summary.contains("not a directory"), "{occupied:?}");
-    }
-
-    #[test]
-    fn global_claude_doctor_should_reject_provider_qualified_automatic_hooks_only() {
-        let exe = Path::new("/opt/pixel/pixel");
-        let task_hooks = serde_json::json!({
-            "hooks": {
-                "PreToolUse": [{"hooks": [{"command": "/opt/pixel/pixel run-hook task-event --provider claude --event pre-tool-use"}]}],
-                "UserPromptSubmit": [{"hooks": [{"command": "/opt/pixel/pixel run-hook task-event --provider claude --event prompt-submit"}]}],
-                "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": format!("{} run-hook metrics --provider claude", crate::routing::quoted_executable(exe)), "timeout": 10}]}]
-            }
-        });
-        assert!(super::claude_metrics_relay_registered(&task_hooks, exe));
-        assert!(!super::has_unexpected_pixel_hooks(
-            &task_hooks,
-            crate::routing::Provider::Claude,
-            exe
-        ));
-
-        for verb in [
-            "session-start --provider claude",
-            "prompt-submit --provider claude",
-            "post-compaction --provider claude",
-            "post-tool-use --provider claude",
-            "metrics --provider claude",
-        ] {
-            let value = serde_json::json!({
-                "hooks": {"SessionStart": [{"hooks": [{"command": format!("/opt/pixel/pixel run-hook {verb}")}]}]}
-            });
-            assert!(
-                super::has_unexpected_pixel_hooks(&value, crate::routing::Provider::Claude, exe),
-                "doctor must reject {verb}"
-            );
-        }
-        let wrong_provider = serde_json::json!({
-            "hooks": {"PreToolUse": [{"hooks": [{"command": "/opt/pixel/pixel run-hook task-event --provider codex --event pre-tool-use"}]}]}
-        });
-        assert!(super::has_unexpected_pixel_hooks(
-            &wrong_provider,
-            crate::routing::Provider::Claude,
-            exe
-        ));
-    }
-
-    #[test]
-    fn repo_codex_doctor_should_accept_partial_task_hooks_preserved_by_install() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let repo = temp.path().join("repo");
-        let exe = Path::new("/opt/pixel/pixel");
-        let hooks_path = repo.join(".codex/hooks.json");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
-        let partial = serde_json::json!({
-            "hooks": {
-                "SessionStart": [{"hooks": [{"type": "command", "command": "/opt/pixel/pixel run-hook task-event --provider codex --event session-start"}]}],
-                "PostToolUseFailure": [{"matcher": "*", "hooks": [{"type": "command", "command": "/opt/pixel/pixel run-hook task-event --provider codex --event tool-failure"}]}]
-            }
-        });
-        std::fs::write(&hooks_path, serde_json::to_vec_pretty(&partial).unwrap()).unwrap();
-
-        let install = crate::install::install(&crate::install::InstallOptions {
-            home: Some(home.clone()),
-            executable_path: Some(exe.to_path_buf()),
-            repo: Some(repo.clone()),
-            ..Default::default()
-        })
-        .unwrap();
-        assert!(install.ok, "{install:?}");
-        let after_install: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&hooks_path).unwrap()).unwrap();
-        assert_eq!(
-            after_install["hooks"]["SessionStart"], partial["hooks"]["SessionStart"],
-            "repo install deliberately preserves partial project task hooks"
-        );
-        assert_eq!(
-            after_install["hooks"]["PostToolUseFailure"], partial["hooks"]["PostToolUseFailure"],
-            "repo install preserves the unsupported extra Codex event too"
-        );
-
-        let options = super::DoctorOptions {
-            home: Some(home),
-            repo_root: Some(repo),
-            executable_path: Some(exe.to_path_buf()),
-            only: vec!["repo.codex-hooks".into()],
-            ..Default::default()
-        };
-        let report = super::doctor(&options).unwrap();
-        let check = &report.checks[0];
-        assert_eq!(check.status, CheckStatus::Green, "{check:?}");
-        assert_eq!(check.fix, None, "an accepted native state needs no repair");
-        assert!(check.summary.contains("partial Pixel task hooks preserved"));
-        assert_eq!(check.detail.as_ref().unwrap()["task_hooks"], false);
-        assert_eq!(
-            check.detail.as_ref().unwrap()["pixel_task_hooks_present"],
-            true
-        );
-    }
-
-    /// A home with `pixel setup`'s block in the global Claude file, naming
-    /// `text`, and the user's own line around it.
-    fn home_with_block(text: &str) -> tempfile::TempDir {
-        let home = tempfile::tempdir().unwrap();
-        let claude = home.path().join(".claude/CLAUDE.md");
-        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
-        std::fs::write(
-            &claude,
-            format!(
-                "My own rule: use `pixel commit` never.\n{}\n{text}\n{}\n",
-                crate::setup::BLOCK_START,
-                crate::setup::BLOCK_END
-            ),
-        )
-        .unwrap();
-        home
-    }
-
-    #[test]
-    fn names_command_should_match_whole_command_words_only() {
-        assert!(names_command("run `pixel who-wrote`.", "who-wrote"));
-        assert!(names_command("pixel who-wrote", "who-wrote"));
-        assert!(names_command("pixel who-wrote src/a.rs", "who-wrote"));
-        assert!(!names_command("pixel who-wrote-more", "who-wrote"));
-        assert!(!names_command("pixel who-wrote_x", "who-wrote"));
-        assert!(!names_command("pixel diffuse", "diff"));
-        assert!(!names_command("who-wrote alone", "who-wrote"));
-        assert!(names_command("pixel diff`", "diff"));
-    }
-
-    #[test]
-    fn plugin_references_should_see_a_renamed_spelling_as_its_current_command() {
-        let home = home_with_block("- `pixel inspect` then `pixel rescue \"x\"`.");
-        let refs = deployed_plugin_references(home.path(), None);
-        assert_eq!(
-            refs,
-            vec![PluginReference {
-                path: home.path().join(".claude/CLAUDE.md"),
-                commands: vec!["repo-state", "plan-rollback"],
-            }],
-            "the canonical command is reported, in the table's order"
-        );
-        assert!(names_moved_command("pixel inspect", "repo-state"));
-        assert!(!names_moved_command("pixel inspect", "diff"));
-    }
-
-    #[test]
-    fn plugin_references_should_read_the_managed_block_and_not_the_users_own_text() {
-        let home =
-            home_with_block("- `pixel impact` and `pixel who-wrote` and `pixel web-search`.");
-        let refs = deployed_plugin_references(home.path(), None);
-        assert_eq!(
-            refs,
-            vec![PluginReference {
-                path: home.path().join(".claude/CLAUDE.md"),
-                commands: vec!["who-wrote", "web-search"],
-            }],
-            "`pixel commit` sits outside the block and is the user's"
-        );
-        // check-release stays in the core: naming it needs no plugin.
-        let home = home_with_block("- `pixel check-release v1`.");
-        assert_eq!(deployed_plugin_references(home.path(), None), vec![]);
-    }
-
-    #[test]
-    fn plugin_references_should_go_yellow_with_the_install_commands_of_the_missing_plugins() {
-        let home = home_with_block("- `pixel who-wrote` and `pixel web-search`.");
-        let (status, detail, remedy) =
-            plugin_references_check(home.path(), None, &pixel_plugin::Available::none());
-        assert_eq!(status, CheckStatus::Yellow);
-        assert_eq!(
-            remedy,
-            Remedy::Command(
-                "pixel install github:Pixel-CLI/pixel-git && pixel install github:Pixel-CLI/pixel-utilities"
-                    .into()
-            )
-        );
-        let claude = home.path().join(".claude/CLAUDE.md").display().to_string();
-        assert_eq!(
-            detail.summary,
-            format!(
-                "deployed instructions name plugin commands that do not run here: pixel who-wrote in {claude}, pixel web-search in {claude} — install the plugin: pixel install github:Pixel-CLI/pixel-git && pixel install github:Pixel-CLI/pixel-utilities"
-            )
-        );
-        assert_eq!(
-            detail.detail.unwrap()["missing_plugins"],
-            serde_json::json!(["pixel-git", "pixel-utilities"])
-        );
-    }
-
-    #[test]
-    fn plugin_references_should_be_green_when_each_named_plugin_runs() {
-        let home = home_with_block("- `pixel who-wrote` and `pixel web-search`.");
-        let plugins = pixel_plugin::Available::of(&["who-wrote", "web-search"]);
-        let (status, detail, remedy) = plugin_references_check(home.path(), None, &plugins);
-        assert_eq!((status, remedy), (CheckStatus::Green, Remedy::Catalogue));
-        assert_eq!(detail.detail.unwrap()["files_checked"], 1);
-        // Only the plugin that is missing is named.
-        let plugins = pixel_plugin::Available::of(&["who-wrote"]);
-        let (status, detail, remedy) = plugin_references_check(home.path(), None, &plugins);
-        assert_eq!(status, CheckStatus::Yellow);
-        assert_eq!(
-            remedy,
-            Remedy::Command("pixel install github:Pixel-CLI/pixel-utilities".into())
-        );
-        assert!(
-            !detail.summary.contains("pixel who-wrote in"),
-            "{}",
-            detail.summary
-        );
-    }
-
-    #[test]
-    fn plugin_references_should_report_a_blocked_plugin_with_its_reason_and_no_install() {
-        let home = home_with_block("- `pixel who-wrote`.");
-        let plugins = pixel_plugin::Available::none().blocking(
-            "who-wrote",
-            "plugin `git` is not enabled: run `pixel plugin enable git`",
-        );
-        let (status, detail, remedy) = plugin_references_check(home.path(), None, &plugins);
-        assert_eq!((status, remedy), (CheckStatus::Yellow, Remedy::Manual));
-        assert!(
-            detail
-                .summary
-                .ends_with(" — plugin `git` is not enabled: run `pixel plugin enable git`"),
-            "{}",
-            detail.summary
-        );
-        assert!(
-            !detail.summary.contains("install the plugin"),
-            "{}",
-            detail.summary
-        );
-    }
-
-    #[test]
-    fn plugin_references_should_find_the_repository_files_too_and_not_twice_when_repo_is_home() {
-        let home = tempfile::tempdir().unwrap();
-        let repo = tempfile::tempdir().unwrap();
-        let claude = repo.path().join("CLAUDE.md");
-        std::fs::write(
-            &claude,
-            format!(
-                "{}\n- `pixel plan-rollback \"x\"`\n{}\n",
-                crate::setup::BLOCK_START,
-                crate::setup::BLOCK_END
-            ),
-        )
-        .unwrap();
-        let refs = deployed_plugin_references(home.path(), Some(repo.path()));
-        assert_eq!(
-            refs,
-            vec![PluginReference {
-                path: claude,
-                commands: vec!["plan-rollback"],
-            }]
-        );
-        // A repository that is the home directory: its global file is read once.
-        let global = home_with_block("- `pixel who-wrote`.");
-        assert_eq!(
-            deployed_plugin_references(global.path(), Some(global.path())).len(),
-            1
-        );
-    }
-
-    #[test]
-    fn the_doctor_should_run_the_references_check_and_carry_the_install_command_as_its_fix() {
-        let home = home_with_block("- `pixel who-wrote`.");
-        let run = |plugins: pixel_plugin::Available| {
-            super::doctor(&super::DoctorOptions {
-                home: Some(home.path().to_path_buf()),
-                executable_path: Some(PathBuf::from("/opt/pixel/pixel")),
-                only: vec!["plugins.references".into()],
-                plugins: Some(plugins),
-                ..Default::default()
-            })
-            .unwrap()
-            .checks
-            .remove(0)
-        };
-        let missing = run(pixel_plugin::Available::none());
-        assert_eq!(missing.status, CheckStatus::Yellow, "{missing:?}");
-        assert_eq!(
-            missing.fix.as_deref(),
-            Some("pixel install github:Pixel-CLI/pixel-git")
-        );
-        assert!(
-            missing.repair.is_none(),
-            "a network install is the user's call"
-        );
-        let present = run(pixel_plugin::Available::of(&["who-wrote"]));
-        assert_eq!(present.status, CheckStatus::Green, "{present:?}");
-        assert_eq!(present.fix, None);
     }
 
     #[test]

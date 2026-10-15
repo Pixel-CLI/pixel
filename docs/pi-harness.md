@@ -1,9 +1,10 @@
 # Pixel in the Pi harness
 
 Pi keeps its native tools. Pixel adds one explicit command, `/pixel-impact
-<symbol>`, and nothing that runs on its own: no model-callable Pixel tool, no
-startup retrieval, no per-prompt context, no system-prompt block and no
-policy check on Pi's tool calls.
+<symbol>`, a `before_agent_start` hook that adds the `[PIXEL:BRIEF]` evidence
+brief to each code prompt, and the `pixel` skill: no model-callable Pixel tool,
+no startup retrieval, no system-prompt block and no policy check on Pi's tool
+calls.
 
 ## Install
 
@@ -12,8 +13,10 @@ policy check on Pi's tool calls.
 
 | Path | Content |
 | --- | --- |
-| `~/.local/share/pixel/pi-package/package.json` | the package manifest, naming its one extension |
+| `~/.local/share/pixel/pi-package/package.json` | the package manifest, naming its extensions |
 | `~/.local/share/pixel/pi-package/extensions/pixel-impact.ts` | the command, bound to this machine's `pixel` binary |
+| `~/.local/share/pixel/pi-package/extensions/pixel-brief.ts` | the brief hook, bound to the same binary |
+| `skills/pixel/SKILL.md` in Pi's agent directory | the `pixel` skill every harness gets |
 | `settings.json` in Pi's agent directory | the package's absolute path, appended to `packages` |
 
 Every other key and package in `settings.json` stays. Pi loads the package on
@@ -21,11 +24,10 @@ its next start; `/pixel-impact` then appears in its command list.
 
 The install leaves Pi alone and reports yellow, rather than rewriting, when
 `settings.json` does not parse or holds a `packages` that is not a list, or
-when the agent path is not a directory. A copy of the command an earlier
-release wrote to `extensions/pixel-impact.ts` in the agent directory is
-removed, so Pi does not register the name twice; a file there that Pixel did
-not write is left and reported. The install also removes Pixel's retired block
-from `APPEND_SYSTEM.md`, keeping any text of yours.
+when the agent path is not a directory. It no longer removes what earlier
+releases wrote: a copy of the command in `extensions/pixel-impact.ts` of the
+agent directory (Pi would register the name twice) and Pixel's block in
+`APPEND_SYSTEM.md` are yours to delete.
 
 `pixel doctor` reports the package as `install.pi-impact`: red when it is
 missing from `packages` or bound to another binary, green when it is current or
@@ -42,8 +44,6 @@ never builds or refreshes the index. If the graph is missing, run
 
 ## Per repository
 
-`pixel setup --repo .` writes nothing for Pi. It removes the project
-extension `.pi/extensions/pixel-guard.ts` (and the older `.pi/agent/` copy)
-that earlier releases wrote, which carried task gates, a retrieval tool and a
-native-tool policy. A file under that name that Pixel did not write stays.
-`repo.pi-guard` in `pixel doctor .` is red while Pixel's copy is still there.
+`pixel setup --repo .` writes nothing for Pi. The project extension
+`.pi/extensions/pixel-guard.ts` that earlier releases wrote is no longer
+removed by `pixel setup`; delete it if it is still there.

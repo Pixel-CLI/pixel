@@ -183,34 +183,6 @@ impl AgentTarget {
         })
     }
 
-    /// The instruction file this target writes, relative to the scope's base
-    /// directory, or `None` when the agent has no file pixel is willing to
-    /// guess at. A guessed path is a file the harness never reads, which reads
-    /// on the review screen as pixel having done something.
-    pub fn instruction(self, scope: Scope) -> Option<&'static [&'static str]> {
-        match (self, scope) {
-            (Self::ClaudeCode, Scope::Global) => Some(&[".claude", "CLAUDE.md"]),
-            (Self::Codex, Scope::Global) => Some(&[".codex", "AGENTS.md"]),
-            (Self::OpenCode, Scope::Global) => Some(&[".config", "opencode", "AGENTS.md"]),
-            (Self::Gemini, Scope::Global) => Some(&[".gemini", "GEMINI.md"]),
-            (_, Scope::Repository) => Some(match self {
-                Self::ClaudeCode => &["CLAUDE.md"][..],
-                Self::Gemini => &["GEMINI.md"][..],
-                _ => &["AGENTS.md"][..],
-            }),
-            // Cursor's global rules need `.mdc` frontmatter to load at all, the
-            // generic target has no global file of its own, and Devin,
-            // Antigravity and pi are handled by their own installs (pi gets a
-            // skill and a package under ~/.pi/agent, not an instruction file).
-            // None of them has a global instruction file pixel writes without
-            // guessing.
-            (
-                Self::Cursor | Self::Devin | Self::Antigravity | Self::Pi | Self::AgentMd,
-                Scope::Global,
-            ) => None,
-        }
-    }
-
     /// Whether this agent looks like it is already in use under `base` for
     /// `scope`, so the picker can pre-check it. The wizard checks the running
     /// agent separately: a harness with no configuration directory on this
@@ -221,12 +193,6 @@ impl AgentTarget {
             Scope::Repository => self.repo_marker(),
         };
         marker.is_some_and(|components| join(base, components).exists())
-    }
-
-    /// The absolute path this target's instruction file has under `base`.
-    pub fn instruction_path(self, base: &Path, scope: Scope) -> Option<PathBuf> {
-        self.instruction(scope)
-            .map(|components| join(base, components))
     }
 }
 
@@ -302,48 +268,6 @@ mod tests {
                 target.name()
             );
         }
-    }
-
-    #[test]
-    fn every_target_names_a_repository_instruction_file() {
-        for target in AgentTarget::ALL {
-            assert!(
-                target.instruction(Scope::Repository).is_some(),
-                "{} writes no repository file",
-                target.name()
-            );
-        }
-    }
-
-    #[test]
-    fn the_global_targets_that_have_a_file_name_one() {
-        let named: Vec<&str> = AgentTarget::ALL
-            .iter()
-            .filter(|t| t.instruction(Scope::Global).is_some())
-            .map(|t| t.name())
-            .collect();
-        assert_eq!(
-            named,
-            vec!["Claude Code", "Codex", "Gemini CLI", "OpenCode"],
-            "a global instruction file is claimed only where the harness reads one"
-        );
-    }
-
-    #[test]
-    fn instruction_paths_resolve_under_the_scope_base() {
-        let dir = Path::new("/tmp/pixel-setup-agent-test");
-        assert_eq!(
-            AgentTarget::ClaudeCode.instruction_path(dir, Scope::Repository),
-            Some(dir.join("CLAUDE.md"))
-        );
-        assert_eq!(
-            AgentTarget::ClaudeCode.instruction_path(dir, Scope::Global),
-            Some(dir.join(".claude").join("CLAUDE.md"))
-        );
-        assert_eq!(
-            AgentTarget::Cursor.instruction_path(dir, Scope::Global),
-            None
-        );
     }
 
     #[test]

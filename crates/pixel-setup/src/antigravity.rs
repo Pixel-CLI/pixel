@@ -163,36 +163,6 @@ fn global_entry_commands(entry: &Value) -> Option<Vec<(&str, &str)>> {
     Some(commands)
 }
 
-/// Whether `entry` is the global `pixel-guard` pixel registered before its
-/// Antigravity plugin owned the guard: every handler is a pixel executable's
-/// Antigravity `guard` or `metrics` hook. A user's own hook under the same
-/// name is anything else, and is left alone.
-fn is_retired_global_guard(entry: &Value, exe: &Path) -> bool {
-    global_entry_commands(entry).is_some_and(|commands| {
-        !commands.is_empty()
-            && commands.iter().all(|(_, command)| {
-                matches!(
-                    crate::routing::pixel_run_hook_verb(command, exe),
-                    Some("guard --provider antigravity" | "metrics --provider antigravity")
-                )
-            })
-    })
-}
-
-/// Whether a global `hooks.json` entry would run Pixel's Antigravity guard
-/// beside the plugin's: enabled, with a guard handler under `PreToolUse` or
-/// `PreInvocation` (Antigravity runs the two events independently).
-fn runs_global_guard(entry: &Value, exe: &Path) -> bool {
-    entry.get("enabled") != Some(&Value::Bool(false))
-        && global_entry_commands(entry).is_some_and(|commands| {
-            commands.iter().any(|(event, command)| {
-                matches!(*event, "PreToolUse" | "PreInvocation")
-                    && crate::routing::pixel_run_hook_verb(command, exe)
-                        == Some("guard --provider antigravity")
-            })
-        })
-}
-
 /// Whether `entry` is the Antigravity prompt brief hook Pixel registered.
 pub(crate) fn is_pixel_brief(entry: &Value, exe: &Path) -> bool {
     global_entry_commands(entry).is_some_and(|commands| {
@@ -205,37 +175,19 @@ pub(crate) fn is_pixel_brief(entry: &Value, exe: &Path) -> bool {
     })
 }
 
-/// Whether `entry` is the legacy global Antigravity PostToolUse metrics hook.
-fn is_pixel_metrics(entry: &Value, exe: &Path) -> bool {
-    global_entry_commands(entry).is_some_and(|commands| {
-        commands.len() == 1
-            && commands.iter().all(|(event, command)| {
-                *event == "PostToolUse"
-                    && crate::routing::pixel_run_hook_verb(command, exe)
-                        == Some("metrics --provider antigravity")
-            })
-    })
-}
-
-/// Remove Pixel-owned Antigravity hooks and the retired global guard.
-///
-/// Only the entry pixel registered is removed ([`is_retired_global_guard`]);
-/// a `pixel-guard` a user wrote is kept, and reported yellow when it still
-/// runs Pixel's guard beside the plugin. The file is read and validated in a
-/// dry run too, so a dry run fails where the real run would.
-pub fn remove_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+/// Remove the prompt brief hook Pixel registered in the global `hooks.json`;
+/// a `pixel-brief` entry the user wrote is kept. The file is read and
+/// validated in a dry run too, so a dry run fails where the real run would.
+fn remove_brief_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let h_path = hooks_path(home);
-    let step = |status, summary: String| InstallStep {
+    let step = |summary: String| InstallStep {
         id: "install.antigravity-hooks".into(),
-        status,
+        status: CheckStatus::Green,
         summary,
         detail: Some(format!("path={}", h_path.display())),
     };
     if !h_path.is_file() {
-        return Ok(step(
-            CheckStatus::Green,
-            "no retired Antigravity global guard found".into(),
-        ));
+        return Ok(step("no Antigravity hooks file found".into()));
     }
     let mut root_val = read_json_object(&h_path)?;
     let root = root_val
@@ -244,109 +196,22 @@ pub fn remove_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Ins
             path: h_path.clone(),
             reason: "hooks.json root is not an object".into(),
         })?;
-    let had_brief = root
+    if !root
         .get("pixel-brief")
-        .is_some_and(|entry| is_pixel_brief(entry, exe));
-    let had_metrics = root
-        .get("pixel-metrics")
-        .is_some_and(|entry| is_pixel_metrics(entry, exe));
-    match root.get("pixel-guard") {
-        None => {
-            if !had_brief && !had_metrics {
-                return Ok(step(
-                    CheckStatus::Green,
-                    "no Pixel Antigravity hooks found to remove".into(),
-                ));
-            }
-            if dry_run {
-                return Ok(step(
-                    CheckStatus::Green,
-                    format!(
-                        "would remove the prompt brief hook and metrics hook from {}",
-                        h_path.display()
-                    ),
-                ));
-            }
-            if had_brief {
-                root.remove("pixel-brief");
-            }
-            if had_metrics {
-                root.remove("pixel-metrics");
-            }
-            fs::write(&h_path, serde_json::to_string_pretty(&root_val)? + "\n")?;
-            return Ok(step(
-                CheckStatus::Green,
-                "removed the prompt brief hook and metrics hook from global hooks.json".into(),
-            ));
-        }
-        Some(entry) if !is_retired_global_guard(entry, exe) => {
-            let (status, note) = if runs_global_guard(entry, exe) {
-                (
-                    CheckStatus::Yellow,
-                    "; it still runs Pixel's guard beside the plugin, remove it by hand",
-                )
-            } else {
-                (CheckStatus::Green, "")
-            };
-            if had_brief || had_metrics {
-                if dry_run {
-                    return Ok(step(
-                        status,
-                        format!(
-                            "would remove the prompt brief hook and metrics hook; kept the user-defined pixel-guard in {}: it is not the entry pixel registered{note}",
-                            h_path.display()
-                        ),
-                    ));
-                }
-                if had_brief {
-                    root.remove("pixel-brief");
-                }
-                if had_metrics {
-                    root.remove("pixel-metrics");
-                }
-                fs::write(&h_path, serde_json::to_string_pretty(&root_val)? + "\n")?;
-                return Ok(step(
-                    status,
-                    format!(
-                        "removed the prompt brief hook and metrics hook; kept the user-defined pixel-guard in {}: it is not the entry pixel registered{note}",
-                        h_path.display()
-                    ),
-                ));
-            }
-            return Ok(step(
-                status,
-                format!(
-                    "kept the user-defined pixel-guard in {}: it is not the entry pixel registered{note}",
-                    h_path.display()
-                ),
-            ));
-        }
-        Some(_) => {}
+        .is_some_and(|entry| is_pixel_brief(entry, exe))
+    {
+        return Ok(step("no Pixel Antigravity hooks found to remove".into()));
     }
     if dry_run {
-        return Ok(step(
-            CheckStatus::Green,
-            if had_brief || had_metrics {
-                format!(
-                    "would remove retired pixel-guard and Pixel prompt and metrics hooks from {}",
-                    h_path.display()
-                )
-            } else {
-                format!("would remove retired pixel-guard from {}", h_path.display())
-            },
-        ));
+        return Ok(step(format!(
+            "would remove the prompt brief hook from {}",
+            h_path.display()
+        )));
     }
-    root.remove("pixel-guard");
-    if had_brief {
-        root.remove("pixel-brief");
-    }
-    if had_metrics {
-        root.remove("pixel-metrics");
-    }
+    root.remove("pixel-brief");
     fs::write(&h_path, serde_json::to_string_pretty(&root_val)? + "\n")?;
     Ok(step(
-        CheckStatus::Green,
-        "removed retired pixel-guard from global hooks.json".into(),
+        "removed the prompt brief hook from global hooks.json".into(),
     ))
 }
 
@@ -659,39 +524,6 @@ fn check_antigravity_install_with_agy(
     }
     let plugin_dirs = [p_dir.as_path(), cli_dir.as_path()];
     let has_managed_plugin = plugin_dirs.iter().any(|dir| is_pixel_plugin(dir));
-    let foreign = foreign_plugins(plugin_dirs);
-    let mut retired = Vec::new();
-    if h_path.is_file() {
-        let hooks = read_json_object(&h_path).map_err(|error| error.to_string())?;
-        if hooks
-            .get("pixel-guard")
-            .is_some_and(|entry| is_retired_global_guard(entry, exe))
-        {
-            retired.push(format!("the pixel-guard in {}", h_path.display()));
-        }
-        if hooks
-            .get("pixel-metrics")
-            .is_some_and(|entry| is_pixel_metrics(entry, exe))
-        {
-            retired.push(format!("the pixel-metrics hook in {}", h_path.display()));
-        }
-    }
-    if !has_managed_plugin && foreign.is_empty() && cfg_path.is_file() {
-        let config = read_json_object(&cfg_path).map_err(|error| error.to_string())?;
-        if config
-            .get("plugins")
-            .and_then(|plugins| plugins.get("pixel"))
-            .is_some()
-        {
-            retired.push(format!("the pixel plugin entry in {}", cfg_path.display()));
-        }
-    }
-    if !retired.is_empty() {
-        return Err(format!(
-            "retired Pixel Antigravity integration remains: {} — run `pixel setup` to remove it",
-            retired.join(", ")
-        ));
-    }
     if !has_managed_plugin {
         return Ok((
             "no Pixel plugin or hook; Antigravity keeps its native tools".into(),
@@ -774,7 +606,7 @@ fn remove_antigravity_with_agy(
     let cfg_path = config_path(home);
 
     if dry_run {
-        let global = remove_global_hooks(home, exe, true)?;
+        let global = remove_brief_hook(home, exe, true)?;
         return Ok(InstallStep {
             id: "uninstall.antigravity".into(),
             status: global.status,
@@ -811,8 +643,8 @@ fn remove_antigravity_with_agy(
         }
     }
 
-    // Only the global guard Pixel wrote; a user-defined `pixel-guard` stays.
-    let global = remove_global_hooks(home, exe, false)?;
+    // Only the brief hook Pixel wrote; a user-defined `pixel-brief` stays.
+    let global = remove_brief_hook(home, exe, false)?;
     if global.summary.starts_with("removed") {
         removed_items.push("hooks.json entry");
     }
@@ -849,67 +681,6 @@ fn remove_antigravity_with_agy(
 mod tests {
     use super::*;
 
-    #[test]
-    fn check_should_be_red_until_cleanup_removes_an_earlier_guard_and_keeps_user_settings() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        let exe = PathBuf::from("/usr/local/bin/pixel");
-        let (summary, _) = check_antigravity_install(home, &exe).unwrap();
-        assert!(summary.contains("skipping"), "{summary}");
-
-        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
-        fs::write(
-            config_path(home),
-            r#"{"plugins":{"other":{"enabled":true},"pixel":{"enabled":true}},"keep":"config"}"#,
-        )
-        .unwrap();
-        let mut hooks = json!({"other-hook": {"enabled": true}});
-        hooks["pixel-guard"] = retired_global_guard("/usr/local/bin/pixel");
-        fs::write(hooks_path(home), serde_json::to_vec(&hooks).unwrap()).unwrap();
-        for dir in [plugin_dir(home), cli_plugin_dir(home)] {
-            fs::create_dir_all(dir.join("rules")).unwrap();
-            fs::write(
-                dir.join("plugin.json"),
-                r#"{"name":"pixel","managedBy":"pixel"}"#,
-            )
-            .unwrap();
-        }
-        let error = check_antigravity_install(home, &exe).unwrap_err();
-        assert!(
-            error.contains("retired Pixel Antigravity integration"),
-            "{error}"
-        );
-        assert!(error.contains("pixel-guard"), "{error}");
-        assert!(
-            !error.contains("plugin entry"),
-            "an enabled managed plugin is not a retired registration: {error}"
-        );
-
-        // No `agy` on this test's PATH lookup: the fake binary name is absent.
-        remove_antigravity_with_agy(home, &exe, false, OsStr::new("pixel-test-no-agy")).unwrap();
-        assert!(!plugin_dir(home).exists());
-        assert!(!cli_plugin_dir(home).exists());
-        let hooks: Value = serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
-        assert_eq!(hooks, json!({"other-hook": {"enabled": true}}));
-        let config: Value = serde_json::from_slice(&fs::read(config_path(home)).unwrap()).unwrap();
-        assert_eq!(config["keep"], "config");
-        assert_eq!(config["plugins"], json!({"other": {"enabled": true}}));
-        let (summary, _) = check_antigravity_install(home, &exe).unwrap();
-        assert!(summary.contains("native tools"), "{summary}");
-
-        // A user-defined `pixel-guard` is theirs: kept, and not reported.
-        let mine = json!({"enabled": true, "PreToolUse": []});
-        fs::write(
-            hooks_path(home),
-            serde_json::to_vec(&json!({"pixel-guard": mine})).unwrap(),
-        )
-        .unwrap();
-        remove_antigravity_with_agy(home, &exe, false, OsStr::new("pixel-test-no-agy")).unwrap();
-        let hooks: Value = serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
-        assert_eq!(hooks["pixel-guard"], mine);
-        assert!(check_antigravity_install(home, &exe).is_ok());
-    }
-
     #[cfg(unix)]
     #[test]
     fn check_should_report_incomplete_pixel_managed_plugin_without_legacy_hooks() {
@@ -929,133 +700,6 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("CLI hooks.json (metrics relay)"), "{error}");
-    }
-
-    /// The global `pixel-guard` an install before the plugin wrote: guard on
-    /// both pre-events, metrics after each tool.
-    fn retired_global_guard(exe: &str) -> Value {
-        let guard = format!("'{exe}' run-hook guard --provider antigravity");
-        let metrics = format!("'{exe}' run-hook metrics --provider antigravity");
-        json!({
-            "enabled": true,
-            "PreToolUse": [{"matcher": "run_command|grep_search|find_by_name|find_file_by_name|list_dir|file_search|view_file|read|read_file|notebook_read",
-                "hooks": [{"type": "command", "command": guard, "timeout": 10}]}],
-            "PreInvocation": [{"type": "command", "command": guard, "timeout": 10}],
-            "PostToolUse": [{"matcher": "*",
-                "hooks": [{"type": "command", "command": metrics, "timeout": 10}]}]
-        })
-    }
-
-    #[test]
-    fn remove_global_hooks_should_remove_only_the_guard_pixel_registered() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
-        let exe = PathBuf::from("/usr/local/bin/pixel");
-        // Written by a release at another path: still pixel's own entry.
-        let planted = json!({
-            "pixel-guard": retired_global_guard("/opt/homebrew/bin/pixel"),
-            "other-hook": {"enabled": true}
-        });
-        let text = serde_json::to_string_pretty(&planted).unwrap();
-        fs::write(hooks_path(home), &text).unwrap();
-
-        let dry = remove_global_hooks(home, &exe, true).unwrap();
-        assert_eq!(dry.status, CheckStatus::Green);
-        assert!(
-            dry.summary.starts_with("would remove retired pixel-guard"),
-            "{}",
-            dry.summary
-        );
-        assert_eq!(fs::read_to_string(hooks_path(home)).unwrap(), text);
-
-        let step = remove_global_hooks(home, &exe, false).unwrap();
-        assert_eq!(step.status, CheckStatus::Green);
-        assert_eq!(
-            step.summary,
-            "removed retired pixel-guard from global hooks.json"
-        );
-        let hooks: Value = serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
-        assert_eq!(hooks, json!({"other-hook": {"enabled": true}}));
-    }
-
-    #[test]
-    fn remove_global_hooks_should_keep_a_user_defined_pixel_guard() {
-        let exe = PathBuf::from("/usr/local/bin/pixel");
-        let mut with_user_hook = retired_global_guard("/usr/local/bin/pixel");
-        with_user_hook["PreInvocation"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"type": "command", "command": "user-audit", "timeout": 10}));
-        for (case, entry, status) in [
-            (
-                "a user's own command",
-                json!({"enabled": true, "PreInvocation":
-                    [{"type": "command", "command": "user-audit", "timeout": 10}]}),
-                CheckStatus::Green,
-            ),
-            (
-                "pixel's guard with a user hook added",
-                with_user_hook,
-                CheckStatus::Yellow,
-            ),
-            (
-                "another program's run-hook guard",
-                retired_global_guard("/usr/local/bin/notpixel"),
-                CheckStatus::Green,
-            ),
-            (
-                "a key pixel never wrote",
-                json!({"enabled": true, "Stop": []}),
-                CheckStatus::Green,
-            ),
-        ] {
-            let tmp = tempfile::tempdir().unwrap();
-            let home = tmp.path();
-            fs::create_dir_all(antigravity_config_dir(home)).unwrap();
-            let text = serde_json::to_string_pretty(&json!({"pixel-guard": entry})).unwrap();
-            fs::write(hooks_path(home), &text).unwrap();
-            for dry_run in [true, false] {
-                let step = remove_global_hooks(home, &exe, dry_run).unwrap();
-                assert_eq!(step.status, status, "{case}: {}", step.summary);
-                assert!(
-                    step.summary
-                        .starts_with("kept the user-defined pixel-guard"),
-                    "{case}: {}",
-                    step.summary
-                );
-                assert_eq!(
-                    fs::read_to_string(hooks_path(home)).unwrap(),
-                    text,
-                    "{case}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn install_should_preserve_a_user_defined_pixel_brief() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
-        let exe = PathBuf::from("/usr/local/bin/pixel");
-        let foreign = json!({"enabled": true, "PreInvocation": [{
-            "type": "command",
-            "command": "user-brief",
-            "timeout": 10
-        }]});
-        let text = serde_json::to_string_pretty(&json!({"pixel-brief": foreign})).unwrap();
-        fs::write(hooks_path(home), &text).unwrap();
-
-        let step = install_antigravity_brief(home, &exe, false).unwrap();
-
-        assert_eq!(step.status, CheckStatus::Yellow);
-        assert!(step.summary.contains("kept the user-defined pixel-brief"));
-        assert_eq!(fs::read_to_string(hooks_path(home)).unwrap(), text);
-
-        let cleanup = remove_global_hooks(home, &exe, false).unwrap();
-        assert_eq!(cleanup.status, CheckStatus::Green);
-        assert_eq!(fs::read_to_string(hooks_path(home)).unwrap(), text);
     }
 
     #[test]
@@ -1089,44 +733,6 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_should_remove_pixel_brief_but_keep_a_user_guard() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
-        let exe = PathBuf::from("/usr/local/bin/pixel");
-        let brief = json!({"enabled": true, "PreInvocation": [{
-            "type": "command",
-            "command": format!(
-                "{} run-hook task-event --provider antigravity --event prompt-submit",
-                crate::routing::quoted_executable(&exe)
-            ),
-            "timeout": 10
-        }]});
-        let foreign_guard = json!({"enabled": true, "PreInvocation": [{
-            "type": "command",
-            "command": "user-audit",
-            "timeout": 10
-        }]});
-        let text = serde_json::to_string_pretty(&json!({
-            "pixel-brief": brief,
-            "pixel-guard": foreign_guard
-        }))
-        .unwrap();
-        fs::write(hooks_path(home), &text).unwrap();
-
-        let dry = remove_global_hooks(home, &exe, true).unwrap();
-        assert_eq!(dry.status, CheckStatus::Green);
-        assert!(dry.summary.contains("would remove the prompt brief hook"));
-        assert_eq!(fs::read_to_string(hooks_path(home)).unwrap(), text);
-
-        let step = remove_global_hooks(home, &exe, false).unwrap();
-        assert_eq!(step.status, CheckStatus::Green);
-        assert!(step.summary.contains("removed the prompt brief hook"));
-        let hooks: Value = serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
-        assert_eq!(hooks, json!({"pixel-guard": foreign_guard}));
-    }
-
-    #[test]
     fn uninstall_dry_run_should_report_brief_cleanup_with_a_user_guard() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
@@ -1157,41 +763,6 @@ mod tests {
         assert_eq!(step.status, CheckStatus::Green);
         assert!(step.summary.contains("would remove the prompt brief hook"));
         assert_eq!(fs::read_to_string(hooks_path(home)).unwrap(), text);
-    }
-
-    #[test]
-    fn antigravity_cleanup_should_remove_legacy_pixel_metrics_and_brief_but_keep_user_hooks() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
-        let exe = Path::new("/usr/local/bin/pixel");
-        fs::write(hooks_path(home), "{}\n").unwrap();
-        install_antigravity_brief(home, exe, false).unwrap();
-        let mut hooks = read_json_object(&hooks_path(home)).unwrap();
-        hooks["pixel-metrics"] = json!({"enabled": true, "PostToolUse": [{
-            "matcher": "*", "hooks": [{
-                "type": "command",
-                "command": "'/usr/local/bin/pixel' run-hook metrics --provider antigravity"
-            }]
-        }]});
-        let user_hook = json!({"enabled": true, "PostToolUse": [{"matcher": "run_command", "hooks": [{
-            "type": "command", "command": "./audit.sh"
-        }]}]});
-        hooks["user-audit"] = user_hook.clone();
-        fs::write(hooks_path(home), serde_json::to_vec_pretty(&hooks).unwrap()).unwrap();
-
-        let dry = remove_global_hooks(home, exe, true).unwrap();
-        assert_eq!(dry.status, CheckStatus::Green);
-        let after_dry: Value =
-            serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
-        assert!(after_dry.get("pixel-brief").is_some());
-        assert!(after_dry.get("pixel-metrics").is_some());
-
-        let step = remove_global_hooks(home, exe, false).unwrap();
-
-        assert_eq!(step.status, CheckStatus::Green);
-        let hooks: Value = serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
-        assert_eq!(hooks, json!({"user-audit": user_hook}));
     }
 
     #[cfg(unix)]
@@ -1327,30 +898,6 @@ mod tests {
             read_json_object(&config_path(home)).unwrap(),
             json!({"plugins":{"other":{"enabled":true},"pixel":{"enabled":true}},"keep":1})
         );
-    }
-
-    #[test]
-    fn global_guard_is_detected_on_either_pre_event() {
-        let guard = json!({"type": "command",
-            "command": "'/usr/local/bin/pixel' run-hook guard --provider antigravity"});
-        let pre_invocation_only = json!({"enabled": true, "PreInvocation": [guard.clone()]});
-        let exe = Path::new("/usr/local/bin/pixel");
-        assert!(runs_global_guard(&pre_invocation_only, exe));
-        // Not first in its group, behind a user's own handler.
-        let pre_tool_second = json!({"PreToolUse": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": "user-audit"}, guard.clone()]}]});
-        assert!(runs_global_guard(&pre_tool_second, exe));
-        let disabled = json!({"enabled": false, "PreInvocation": [guard.clone()]});
-        assert!(!runs_global_guard(&disabled, exe));
-        let metrics_only = json!({"PostToolUse": [{"matcher": "*", "hooks": [
-            {"type": "command",
-             "command": "'/usr/local/bin/pixel' run-hook metrics --provider antigravity"}]}]});
-        assert!(!runs_global_guard(&metrics_only, exe));
-        let foreign_guard = json!({"enabled": true, "PreInvocation": [{
-            "type": "command",
-            "command": "/opt/notpixel run-hook guard --provider antigravity"
-        }]});
-        assert!(!runs_global_guard(&foreign_guard, exe));
     }
 
     #[test]

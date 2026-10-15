@@ -35,7 +35,7 @@ pixel recall index --stats          # incremental, a few seconds
 pixel recall status                 # last ingest must be minutes old, per agent
 pixel --version                     # the binary the suggestions are judged against
 pixel commit-history                # what main gained inside the window
-pixel --metrics off doctor . --only install.agent-prompt --only install.pi-prompt
+pixel --metrics off doctor . --only install.claude-hooks --only install.pi-impact
 ```
 
 The last line says which prompt the agents in the transcripts were
@@ -138,7 +138,6 @@ Drop the noise before counting (verified 2026-09):
 | human complaint | `pixel recall search 'pixel' --role user --human-only --since $W` (`--human-only` alone keeps assistant and tool turns, it only drops injected user text), read for "marche pas", "lent", "pourquoi", "bug", "encore", "wrong" |
 | harness or install drift | `pixel recall search '(doctor|install\.|daemon (lock|not running)|stale)' --role tool --since $W` |
 | prompts older than the binary | `pixel recall search 'deployed by .pixel setup. differs? from' --role tool --since $W` (#243): how many sessions ran on a stale prompt, and whether the agent or the user acted on it |
-| old command names | `pixel recall search "note: '[a-z-]+' is now '" --role tool --since $W`: an agent still calling pre-rename names, i.e. a prompt, skill or script that was never updated; outside the pixel repo only, where the string also sits in `rename_note`'s tests |
 
 Sessions that ran in the pixel repo itself are mostly about pixel's code:
 there, "capped" or "error" usually sits in a diff or a test, not in a
@@ -263,7 +262,7 @@ Session memory and a single log line both lie. For every candidate:
 | Agent misuse of a flag or command | the prompt pixel installs: `crates/pixel-install/assets/pixel-agent-prompt.md` (and `pixel-subagent-prompt.md`), or the clap help text |
 | Agent bypassed pixel because the answer was worse | the command's output (truth markers, caps, ranking) — not the prompt; a stronger "MUST" does not fix a weak answer |
 | Slow read op | profile first, suggest only with a measured number |
-| Install, doctor or daemon drift | first check whether a rerun of the install would clear it, without running it on the user's machine (Step 2 forbids replaying host-wide commands, and `--repo` writes into their repository): run it against a copy, `HOME=<scratch> CODEX_HOME=<scratch>/.codex XDG_CONFIG_HOME=<scratch>/.config pixel setup --shell <shell>` then `pixel doctor` with the same three variables (all on the command line: `CODEX_HOME` and `XDG_CONFIG_HOME` otherwise point the install back at the real files), or for a `repo.*` check `pixel setup --repo <fixture>` on a `git init` fixture seeded with the drifted file; failing that, read the install code path. If a rerun clears it, the install is fine and the friction is that nobody reran it: an upgrade path that skips it, a note nobody read. Propose a change to `pixel-install` only when the install itself leaves the check red, or a `pixel doctor` check when nothing reported the drift at all |
+| Install, doctor or daemon drift | first check whether a rerun of the install would clear it, without running it on the user's machine (Step 2 forbids replaying host-wide commands, and `--repo` writes into their repository): run it against a copy, `HOME=<scratch> CODEX_HOME=<scratch>/.codex XDG_CONFIG_HOME=<scratch>/.config pixel setup` then `pixel doctor` with the same three variables (all on the command line: `CODEX_HOME` and `XDG_CONFIG_HOME` otherwise point the install back at the real files), or for a `repo.*` check `pixel setup --repo <fixture>` on a `git init` fixture seeded with the drifted file; failing that, read the install code path. If a rerun clears it, the install is fine and the friction is that nobody reran it: an upgrade path that skips it, a note nobody read. Propose a change to `pixel-install` only when the install itself leaves the check red, or a `pixel doctor` check when nothing reported the drift at all |
 | Repo rule or skill gap | `.agents/rules/*.md` or `.agents/skills/*/SKILL.md` |
 | Not pixel's (user repo, git, another tool) | one line in the report, then drop it |
 

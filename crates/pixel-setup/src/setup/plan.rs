@@ -18,30 +18,8 @@ use std::path::{Path, PathBuf};
 use crate::Result;
 use crate::install::InstallSelection;
 
-use super::agent::{AgentTarget, Scope, join};
+use super::agent::{AgentTarget, Scope};
 use super::feature::{ConfigValue, Feature, HookGroup, Writes};
-
-/// The rule file `pixel setup` writes inside a harness's rules directory,
-/// relative to the scope base. Named for what it is: a setup block, not a rule
-/// the user edits.
-pub const RULES_FILE: &str = "pixel-setup.md";
-
-/// The rules directories, relative to the scope base, of the harnesses that
-/// load a plain Markdown rule file, and the only ones `RULES_FILE` may be
-/// written into.
-///
-/// Deliberately not every directory named `rules`. Cursor loads `.mdc` files
-/// with frontmatter, and Codex's `rules` directory holds execution-policy
-/// `.rules` files; a `pixel-setup.md` written there is a file the harness never
-/// reads, which on the review screen reads as pixel having done something. The
-/// three below take a Markdown file: Claude Code's per-tool rules, Gemini's
-/// rules directory, and Devin's `~/.devin/rules/`, which pixel already scrubs
-/// (`AGENT_RULES_DIRS` in `config.rs`).
-const RULES_DIRS: &[(AgentTarget, &str)] = &[
-    (AgentTarget::ClaudeCode, ".claude/rules"),
-    (AgentTarget::Gemini, ".gemini/rules"),
-    (AgentTarget::Devin, ".devin/rules"),
-];
 
 /// A key the selected features store in the global configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,18 +144,6 @@ impl SetupPlan {
             pi_extension: has(HookGroup::Pi) || self.agents.contains(&AgentTarget::Pi),
         }
     }
-}
-
-/// Every rule file a setup could write under `base`, whatever the selection:
-/// `pixel uninstall` needs the list without the answers that produced it.
-pub fn rule_files(base: &Path) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = RULES_DIRS
-        .iter()
-        .map(|(_, dir)| join(base, &[dir, RULES_FILE]))
-        .collect();
-    paths.sort();
-    paths.dedup();
-    paths
 }
 
 #[cfg(test)]

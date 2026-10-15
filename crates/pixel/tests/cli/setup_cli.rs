@@ -99,7 +99,7 @@ fn without_a_terminal_setup_is_the_unattended_installer_and_never_asks() {
     let yes = Scratch::for_test("setup", "no-tty-yes");
     let repo = Scratch::for_test("setup", "no-tty-repo");
 
-    let piped = run(&plain, &repo, &["setup", "--shell", "zsh"]);
+    let piped = run(&plain, &repo, &["setup"]);
     let report: serde_json::Value = serde_json::from_str(&stdout_of(&piped)).unwrap();
     assert_eq!(report["ok"], true, "{report}");
     assert!(
@@ -108,7 +108,7 @@ fn without_a_terminal_setup_is_the_unattended_installer_and_never_asks() {
     );
 
     // `--yes` asks for the same thing explicitly, and gets the same files.
-    stdout_of(&run(&yes, &repo, &["setup", "--shell", "zsh", "--yes"]));
+    stdout_of(&run(&yes, &repo, &["setup", "--yes"]));
     let settings = |home: &Path| fs::read_to_string(home.join(".claude/settings.json")).unwrap();
     let written = settings(&plain);
     assert!(
@@ -416,17 +416,11 @@ fn the_hooks_follow_the_agents_and_the_hook_features_that_were_picked() {
 
 // TEMPORARY (dev-flags): drives the wizard with the two selection flags.
 #[test]
-fn remove_takes_out_the_block_the_skill_and_the_hooks_a_guided_run_wrote() {
+fn remove_takes_out_the_skill_and_the_hooks_a_guided_run_wrote() {
     let home = Scratch::for_test("setup", "remove-home");
     let repo = Scratch::for_test("setup", "remove-repo");
     fs::create_dir_all(home.join(".claude")).unwrap();
-    // The state an older release left: the user's text, then the retired
-    // managed block.
-    fs::write(
-        home.join(".claude/CLAUDE.md"),
-        "# My rules\n\nKeep me.\n\n<!-- pixel:setup:start -->\nold guidance\n<!-- pixel:setup:end -->\n",
-    )
-    .unwrap();
+    fs::write(home.join(".claude/CLAUDE.md"), "# My rules\n\nKeep me.\n").unwrap();
 
     // Prompt: the task hooks and the skill deploy.
     let out = run(
@@ -454,8 +448,6 @@ fn remove_takes_out_the_block_the_skill_and_the_hooks_a_guided_run_wrote() {
         &[
             "setup",
             "--remove",
-            "--shell",
-            "zsh",
             "--binary-path",
             absent.to_str().unwrap(),
             "--json",
@@ -468,7 +460,10 @@ fn remove_takes_out_the_block_the_skill_and_the_hooks_a_guided_run_wrote() {
     );
 
     let claude_md = fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap();
-    assert_eq!(claude_md, "# My rules\n\nKeep me.\n", "only the block goes");
+    assert_eq!(
+        claude_md, "# My rules\n\nKeep me.\n",
+        "the user's file stays"
+    );
     assert!(
         !home.join(".claude/skills/pixel").exists(),
         "the managed skill copy is removed"

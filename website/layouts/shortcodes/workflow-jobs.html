@@ -1,4 +1,4 @@
-      <h3 class="vs__kicker" id="jobs">Six jobs your agent runs every day</h3>
+      <h3 class="vs__kicker" id="jobs">{{ index (slice "Zero" "One" "Two" "Three" "Four" "Five" "Six" "Seven" "Eight") (len hugo.Data.jobs.job) }} jobs your agent runs every day</h3>
       <p class="ledger__fine">Workflow illustrations, not timed agent trials. The accounting animation combines measured local output volumes with token and time estimates; it does not measure billed savings.</p>
       <div class="jobs" data-jobs>
         <div class="jobs__tabs" role="tablist" aria-label="Jobs">

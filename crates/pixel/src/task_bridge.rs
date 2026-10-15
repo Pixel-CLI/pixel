@@ -177,7 +177,7 @@ pub(crate) fn handle_hook(
                 &format!("origin-{}", task.task_id),
                 "contract_origin",
                 json!({
-                    "repository_config":crate::config_file::preferred_path(&root.join(".pixel")),
+                    "repository_config":crate::config_file::path_in(&root.join(".pixel")),
                     "basis":"repository executable requirements plus task acceptance contract"
                 }),
             )?;
@@ -367,7 +367,7 @@ fn gate_reason(task: &Task, reasons: &[String]) -> String {
         return String::new();
     }
     format!(
-        "Task {}: {}. Use pixel task status {} --json; draft checks with pixel task contract TASK --definition '<JSON>' (no file write needed). Contract, prepare, verify, review and recovery remain available.",
+        "Task {}: {}. Use pixel task-state status {} --json; draft checks with pixel task-state contract TASK --definition '<JSON>' (no file write needed). Contract, prepare, verify, review and recovery remain available.",
         task.task_id,
         reasons.join("; "),
         task.task_id
@@ -816,7 +816,7 @@ mod tests {
         assert!(!fallback_enforced(&root.0, "codex", Some("session-a")));
         assert!(!fallback_enforced(&root.0, "claude", Some("session-b")));
 
-        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        let config = crate::config_file::path_in(&root.0.join(".pixel"));
         std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
         assert!(fallback_enforced(&root.0, "codex", None));
         // The retrieval policy turns configured enforcement off in an answering
@@ -846,7 +846,7 @@ mod tests {
     #[test]
     fn an_enforced_hook_should_leave_the_marker_its_fallback_reads() {
         let root = Scratch::new();
-        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        let config = crate::config_file::path_in(&root.0.join(".pixel"));
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
         let prompt =
@@ -869,7 +869,7 @@ mod tests {
     #[test]
     fn an_existing_marker_should_not_be_rewritten_by_later_enforced_hooks() {
         let root = Scratch::new();
-        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        let config = crate::config_file::path_in(&root.0.join(".pixel"));
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
         // A directory in the marker's place exists for the fallback but cannot
@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn an_unwritable_marker_should_deny_what_an_enforced_ledger_gates() {
         let root = Scratch::new();
-        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        let config = crate::config_file::path_in(&root.0.join(".pixel"));
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
         // A read-only markers directory fails the durable write while the
@@ -995,7 +995,7 @@ mod tests {
     fn provider_hooks_should_enforce_edits_and_stop_with_separate_provider_sessions() {
         let root = Scratch::new();
         init_repo(&root.0);
-        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        let config = crate::config_file::path_in(&root.0.join(".pixel"));
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
         let store = Store::open(&root.0).unwrap();

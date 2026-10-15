@@ -56,7 +56,14 @@ fn read_only_should_accept_retrieval_and_refuse_state_changers() {
         &["build-index", "."],
         &["doctor"],
         &["self-update"],
-        &["run-hook", "guard"],
+        &[
+            "run-hook",
+            "task-event",
+            "--provider",
+            "claude",
+            "--event",
+            "stop",
+        ],
         &["rename", "a", "b"],
     ] {
         assert!(!read_only(args), "{args:?} must not relaunch");

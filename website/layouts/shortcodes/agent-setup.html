@@ -1,4 +1,4 @@
-{{- /* The setup sections of a /for/<slug>/ page, as Markdown, from the page's `agent` entry in data/agents.toml: install, what Pixel writes and where, the per-repository cleanup, the check, the removal. Called as {{% agent-setup %}} so the sections reach the table of contents. crates/pixel/tests/cli/docs_drift.rs holds the data's paths and checks to a real `pixel setup`. */ -}}
+{{- /* The setup sections of a /for/<slug>/ page, as Markdown, from the page's `agent` entry in data/agents.toml: install, what Pixel writes and where, the check, the removal. Called as {{% agent-setup %}} so the sections reach the table of contents. crates/pixel/tests/cli/docs_drift.rs holds the data's paths and checks to a real `pixel setup`. */ -}}
 {{- $slug := .Page.Params.agent -}}
 {{- $a := index (where hugo.Data.agents.agent "slug" $slug) 0 -}}
 {{- if not $a }}{{ errorf "%s: no agent %q in data/agents.toml" .Page.File.Path $slug }}{{ end -}}
@@ -27,34 +27,15 @@ Run it once, from anywhere{{ with $a.when }}; it writes {{ $a.name }}'s files {{
 
 {{ strings.TrimSuffix "." $a.wires | strings.FirstUpper }}.
 
-Every `pixel setup` also writes {{ range $i, $f := $shared }}{{ if $i }} and {{ end }}`{{ $f }}`{{ end }}. It deploys no prompt and adds no retrieval guard: {{ $a.name }} keeps its native search, and Pixel's commands stay available when you ask for them.
+Every `pixel setup` also writes {{ range $i, $f := $shared }}{{ if $i }} and {{ end }}`{{ $f }}`{{ end }}. No prompt, rules file or retrieval guard is written: {{ $a.name }} keeps its native search, and Pixel's commands stay available when you ask for them.
 {{ else }}
 ## What pixel setup writes
 
-Nothing for {{ $a.name }}: it keeps its native tools, and `pixel setup` only removes what an earlier release wrote for it.{{ if $a.checks }} `pixel doctor` reports its checks as passing once those leftovers are gone.{{ end }}
+Nothing for {{ $a.name }}: it keeps its native tools, and `pixel setup` leaves its configuration alone.
 {{ end }}
 {{- with $a.note }}
 {{ . }}
 {{ end }}
-{{- if or $a.repo $a.repo_note }}
-## Per repository
-
-```bash
-pixel setup --repo .
-```
-
-Updates this repository only, and skips every global step. It removes the retrieval guards and prompt blocks an earlier release wrote, keeps task lifecycle hooks, and never adds a guard that steers the agent toward Pixel.
-{{- with $a.repo }} For {{ $a.name }}:
-{{ range . }}
-- `{{ . }}`
-{{- end }}
-
-Every file that names this machine's `pixel` binary goes into the clone's `.git/info/exclude`, so a `git add -A` cannot publish it.
-{{- end }} [Every per-repository file]({{ $docs }}#per-repository-cleanup)
-{{ with $a.repo_note }}
-{{ . }}
-{{ end }}
-{{- end }}
 ## Check it
 
 ```bash
@@ -79,10 +60,6 @@ pixel setup --remove
 
 It removes everything `pixel setup` wrote, for every agent at once, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it.
 {{- end }}
-{{- with $a.repo }}
-
-`pixel setup --remove --repo .` removes only this repository's files.
-{{- end }}
 {{- if eq $a.wiring "none" }}
-Nothing to remove for {{ $a.name }}. `pixel setup --remove` also takes out what an earlier release wrote for it.
+Nothing to remove for {{ $a.name }}.
 {{- end }}

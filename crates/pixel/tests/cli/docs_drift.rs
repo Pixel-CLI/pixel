@@ -16,9 +16,7 @@
 //!   table, in `pixel --help` order (a new command cannot ship
 //!   undocumented);
 //! - ARCHITECTURE.md's `## Crates` table has one row per workspace member,
-//!   and its `Depends on` cell matches that member's `Cargo.toml`;
-//! - the docs page's per-project list and `pixel setup --help` name exactly
-//!   the files `pixel setup --repo` writes (`REPO_ARTIFACTS`).
+//!   and its `Depends on` cell matches that member's `Cargo.toml`.
 //!
 //! `pixel doctor` already dry-runs the *installed* prompt's command lines
 //! against the parser at run time; this test does it for the tree at build
@@ -305,8 +303,7 @@ fn production_part(source: &str) -> &str {
 
 /// Commands a runtime string tells the agent to run: `` `pixel <name>`` or
 /// `"pixel <name>` on a line of production code. Comments and the test
-/// modules ([`production_part`]) are skipped: tests name old spellings on
-/// purpose (alias and hook-compatibility fixtures).
+/// modules ([`production_part`]) are skipped.
 fn runtime_command_mentions(source: &str) -> BTreeSet<String> {
     let production = production_part(source);
     let code: String = production
@@ -314,15 +311,7 @@ fn runtime_command_mentions(source: &str) -> BTreeSet<String> {
         .filter(|l| !l.trim_start().starts_with("//"))
         .map(|l| format!("{l}\n"))
         .collect();
-    let mut out = referenced_commands(&code);
-    // A quoted `"pixel …` is a command only when it names one: "pixel is the
-    // engine" is prose, "pixel rescue --apply" is a pre-rename spelling.
-    out.extend(
-        referenced_commands(&code.replace("\"pixel ", "`pixel "))
-            .into_iter()
-            .filter(|name| pixel_proto::commands::renamed_to(name).is_some()),
-    );
-    out
+    referenced_commands(&code)
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -372,16 +361,14 @@ fn every_command_production_code_prints_is_a_current_subcommand() {
 fn runtime_command_mentions_skip_comments_and_tests() {
     let source = [
         "/// `pixel rescue` is the old name",
-        "fn f() -> String { format!(\"pixel plan-rollback --apply {oid} .\") }",
         "const HINT: &str = \"run `pixel build-index .` first\";",
-        "const OLD: &str = \"pixel rescue backup\";",
         "const PROSE: &str = \"pixel is the engine\";",
         "#[cfg(test)]",
         "mod tests { const OLD: &str = \"pixel hook guard\"; }",
     ]
     .join("\n");
     let got: Vec<String> = runtime_command_mentions(&source).into_iter().collect();
-    assert_eq!(got, ["build-index", "rescue"]);
+    assert_eq!(got, ["build-index"]);
 
     // A `#[cfg(test)]` on a lone item is not the start of the tests:
     // `pixel/src/main.rs` opens on a `#[cfg(test)] static` lock, and cutting
@@ -634,73 +621,6 @@ fn the_architecture_crate_table_matches_the_workspace_manifests() {
     }
 }
 
-/// The `(old, new)` rows of the first `| Old name | New name |` table in
-/// `text`, in document order.
-fn rename_table_rows(text: &str) -> Vec<(String, String)> {
-    let Some((_, after)) = text.split_once("| Old name | New name |") else {
-        return Vec::new();
-    };
-    after
-        .lines()
-        .skip(2) // the rest of the header line, then the `| --- |` separator
-        .map_while(|line| {
-            let cells: Vec<&str> = line
-                .trim()
-                .strip_prefix('|')?
-                .strip_suffix('|')?
-                .split('|')
-                .map(|cell| cell.trim().trim_matches('`'))
-                .collect();
-            match cells.as_slice() {
-                [old, new] => Some(((*old).to_string(), (*new).to_string())),
-                _ => None,
-            }
-        })
-        .collect()
-}
-
-#[test]
-fn renamed_command_tables_list_exactly_the_accepted_aliases() {
-    // The rename doc and the changelog tell users which old names still work;
-    // the CLI registers those aliases from `RENAMED_COMMANDS`. A table that
-    // drops a row or keeps a stale one sends a user to a name that fails.
-    let expected: Vec<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
-        .iter()
-        .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
-        .collect();
-    let root = repo_root();
-    for doc in ["docs/renamed-commands.md", "CHANGELOG.md"] {
-        let text = std::fs::read_to_string(root.join(doc)).unwrap();
-        assert_eq!(
-            rename_table_rows(&text),
-            expected,
-            "{doc}: the `| Old name | New name |` table must match RENAMED_COMMANDS row for row"
-        );
-    }
-}
-
-#[test]
-fn rename_table_rows_stop_at_the_end_of_the_table() {
-    let text = [
-        "intro",
-        "| Old name | New name |",
-        "| --- | --- |",
-        "| `ready` | `prepare-repo` |",
-        "| `hook` | `run-hook` |",
-        "",
-        "| `after` | `blank line` |",
-    ]
-    .join("\n");
-    assert_eq!(
-        rename_table_rows(&text),
-        vec![
-            ("ready".to_string(), "prepare-repo".to_string()),
-            ("hook".to_string(), "run-hook".to_string()),
-        ]
-    );
-    assert!(rename_table_rows("no table here").is_empty());
-}
-
 #[test]
 fn referenced_commands_reads_only_backticked_command_names() {
     let text = "Run `pixel search-content foo` then `pixel impact`.\n`pixel-cli` is the crate; the pixel binary; `pixel` alone; `pixel foo/bar`; `pixel --help` is a flag.";
@@ -773,66 +693,6 @@ fn guideline_rule_ids_should_read_only_heading_ids() {
     let text = "## Panic on bug (M-PANIC-ON-BUG) { #M-PANIC-ON-BUG }\nSee M-FROM-ERROR in prose.\n### Sub (M-NOT-A-RULE)\n";
     let got: Vec<String> = guideline_rule_ids(text).into_iter().collect();
     assert_eq!(got, ["M-PANIC-ON-BUG"]);
-}
-
-/// Every backticked `` `<repo>/<path>` `` in `text`, without the prefix.
-fn repo_paths(text: &str) -> BTreeSet<String> {
-    text.split('`')
-        .skip(1)
-        .step_by(2)
-        .filter_map(|token| token.strip_prefix("<repo>/"))
-        .map(str::to_string)
-        .collect()
-}
-
-/// Every backticked relative path (`` `.codex/hooks.json` ``) in `text`.
-fn dot_paths(text: &str) -> BTreeSet<String> {
-    text.split('`')
-        .skip(1)
-        .step_by(2)
-        .filter(|token| {
-            (*token == "AGENTS.md")
-                || (token.starts_with('.') && token.contains('/') && !token.contains(' '))
-        })
-        .map(str::to_string)
-        .collect()
-}
-
-fn repo_artifact_paths() -> BTreeSet<String> {
-    pixel_setup::install::REPO_ARTIFACTS
-        .iter()
-        .map(|artifact| artifact.path.to_string())
-        .collect()
-}
-
-/// The README once sent readers to `.devin/hooks.json` and `.pi/agent/`,
-/// files the agents never read, and left out the Claude file the install
-/// really writes: the list, now on the docs page, is checked against the code.
-#[test]
-fn docs_per_project_list_should_name_exactly_the_repo_install_files() {
-    let docs = std::fs::read_to_string(repo_root().join("website/content/docs.md")).unwrap();
-    assert_eq!(repo_paths(&docs), repo_artifact_paths());
-}
-
-#[test]
-fn install_repo_help_should_name_exactly_the_repo_install_files() {
-    let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
-        .args(["setup", "--help"])
-        .env("PIXEL_DAEMON_AUTO_START", "0")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{out:?}");
-    let help = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(dot_paths(&help), repo_artifact_paths(), "{help}");
-}
-
-#[test]
-fn repo_paths_should_read_only_backticked_repo_prefixed_tokens() {
-    let text = "`<repo>/.a/b` and <repo>/.c/d, `.e/f`, `<repo>/.g/h`, `AGENTS.md`";
-    let got: Vec<String> = repo_paths(text).into_iter().collect();
-    assert_eq!(got, [".a/b", ".g/h"]);
-    let got: Vec<String> = dot_paths(text).into_iter().collect();
-    assert_eq!(got, [".e/f", "AGENTS.md"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -925,19 +785,26 @@ fn claim_mismatch_should_match_files_and_whole_directories() {
 }
 
 /// The agent pages tell a reader which files `pixel setup` puts in their
-/// home. Run the real command into an empty one, with the config directories
-/// its Pi step and cleanup steps look for (OpenCode's, Devin's, Antigravity's,
-/// Pi's), and hold the data to exactly what landed: a file the install starts
-/// writing, stops writing or moves fails here until `website/data/agents.toml`
-/// says so.
+/// home. Run the real command into one that holds every configuration
+/// directory an agent's step looks for (a skills dir lands only in a harness
+/// root that exists), and hold the data to exactly what landed: a file the
+/// install starts writing, stops writing or moves fails here until
+/// `website/data/agents.toml` says so.
 #[test]
 fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
-    // Codex writes only when removing a retired block; AGY maintains its
-    // import manifest only when its CLI is available for registration.
-    const CONDITIONAL: &[&str] = &[".codex/config.toml", ".gemini/config/import_manifest.json"];
+    // AGY maintains its import manifest only when its CLI is available for
+    // registration.
+    const CONDITIONAL: &[&str] = &[".gemini/config/import_manifest.json"];
+    const SEEDED: &[(&str, &str)] = &[
+        (".gemini/settings.json", "{}\n"),
+        (".gemini/config/hooks.json", "{}\n"),
+    ];
 
     let home = crate::support::Scratch::for_test("docs-drift", "agents-global");
     for dir in [
+        ".codex",
+        ".cursor",
+        ".devin",
         ".config/opencode",
         ".config/devin",
         ".gemini/config",
@@ -945,14 +812,21 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
     ] {
         std::fs::create_dir_all(home.join(dir)).unwrap();
     }
+    for (file, seed) in SEEDED {
+        std::fs::write(home.join(file), seed).unwrap();
+    }
     let out = crate::support::pixel_command()
-        .args(["setup", "--shell", "zsh", "--json"])
+        .args(["setup", "--json"])
         .env("HOME", &*home)
         .env_remove("CODEX_HOME")
         .env_remove("XDG_CONFIG_HOME")
         .output()
         .unwrap();
     assert!(out.status.success(), "pixel setup: {out:?}");
+    for (file, seed) in SEEDED {
+        let now = std::fs::read_to_string(home.join(file)).unwrap();
+        assert_ne!(now, *seed, "`pixel setup` left {file} as it found it");
+    }
     let mut written = BTreeSet::new();
     files_under(&home, &home, &mut written);
 
@@ -979,34 +853,8 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
     );
 }
 
-/// The same contract for `pixel setup --repo`: the data's `repo` lists are
-/// exactly `REPO_ARTIFACTS`, and a real run into an empty repository writes
-/// every one of them but the conditional ones, and nothing outside them.
 #[test]
-fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
-    // These appear only when legacy hook backups exist, retired Pixel
-    // guidance is migrated out of an existing project file, or a retired
-    // Pixel callback is removed from an existing hook file: native cleanup
-    // never creates an empty one.
-    const CONDITIONAL: &[&str] = &[
-        ".claude/pixel-rtk-hooks.json",
-        ".claude/settings.local.json",
-        ".codex/config.toml",
-        ".codex/hooks.json",
-        ".codex/pixel-composed-guard-backup.json",
-        "AGENTS.md",
-    ];
-    let data = agents_data();
-    let mut claimed = agents_field(&data, "repo");
-    claimed.extend(string_list(data.get("repo_shared")));
-    let listed: BTreeSet<String> = claimed.iter().cloned().collect();
-    assert_eq!(
-        listed.len(),
-        claimed.len(),
-        "a repo path listed twice: {claimed:?}"
-    );
-    assert_eq!(listed, repo_artifact_paths());
-
+fn a_repo_install_should_write_only_the_repository_config() {
     let root = crate::support::Scratch::for_test("docs-drift", "agents-repo");
     let repo = root.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -1019,75 +867,16 @@ fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
     assert!(out.status.success(), "pixel setup --repo: {out:?}");
     let mut written = BTreeSet::new();
     files_under(&repo, &repo, &mut written);
-    // Every command run on a repository appends to its action log; that file
-    // is the CLI's, not an agent's.
-    written.retain(|file| !file.starts_with(".pixel/"));
-    let (unclaimed, unmatched) = claim_mismatch(&claimed, &written);
+    written.retain(|file| !file.starts_with(".pixel/") || file == ".pixel/config.yaml");
+    assert_eq!(
+        written,
+        BTreeSet::from([".pixel/config.yaml".to_string()]),
+        "`pixel setup --repo` writes more or less than the docs say"
+    );
     assert!(
-        unclaimed.is_empty(),
-        "`pixel setup --repo` wrote files agents.toml does not list: {unclaimed:?}"
+        !root.join("home").exists(),
+        "`pixel setup --repo` skips every global step"
     );
-    // The pages promise these files to anyone who runs the command, so an
-    // install that writes nothing must fail here too. Only the conditional
-    // ones may be missing from an empty repository.
-    let missing: Vec<&String> = unmatched
-        .iter()
-        .filter(|path| !CONDITIONAL.contains(&path.as_str()))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "`pixel setup --repo` did not write files agents.toml lists: {missing:?} (wrote {written:?})"
-    );
-}
-
-/// Repo inventory includes portable files that are rewritten only while
-/// removing a retired Pixel block; migration must preserve surrounding text.
-#[test]
-fn repo_install_should_preserve_and_rewrite_documented_migration_files() {
-    let root = crate::support::Scratch::for_test("docs-drift", "agents-repo-migration");
-    let repo = root.join("repo");
-    std::fs::create_dir_all(repo.join(".codex")).unwrap();
-    let codex_path = repo.join(".codex/config.toml");
-    let codex_instructions = format!(
-        "Keep this Codex instruction.\n{}\nRetired Pixel instructions.\n{}\nKeep this too.\n",
-        pixel_setup::config::MANAGED_BEGIN,
-        pixel_setup::config::MANAGED_END,
-    );
-    std::fs::write(
-        &codex_path,
-        format!(
-            "developer_instructions = '''\n{codex_instructions}'''\n\n[other]\nvalue = \"preserve\"\n"
-        ),
-    )
-    .unwrap();
-    let agents_path = repo.join("AGENTS.md");
-    std::fs::write(
-        &agents_path,
-        "Keep this project instruction.\n\n<!-- pixel:warp-retrieval:begin -->\nRetired Pixel-first instructions.\n<!-- pixel:warp-retrieval:end -->\n\nKeep this too.\n",
-    )
-    .unwrap();
-
-    let out = crate::support::pixel_command()
-        .args(["setup", "--json", "--repo"])
-        .arg(&repo)
-        .env("HOME", root.join("home"))
-        .env_remove("CODEX_HOME")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "pixel setup --repo: {out:?}");
-
-    let codex = std::fs::read_to_string(&codex_path).unwrap();
-    let codex: toml_edit::DocumentMut = codex.parse().unwrap();
-    let instructions = codex["developer_instructions"].as_str().unwrap();
-    assert!(instructions.contains("Keep this Codex instruction."));
-    assert!(instructions.contains("Keep this too."));
-    assert!(!instructions.contains(pixel_setup::config::MANAGED_BEGIN));
-    assert_eq!(codex["other"]["value"].as_str(), Some("preserve"));
-
-    let agents = std::fs::read_to_string(&agents_path).unwrap();
-    assert!(agents.contains("Keep this project instruction."));
-    assert!(agents.contains("Keep this too."));
-    assert!(!agents.contains("pixel:warp-retrieval:"));
 }
 
 /// `static/llms.txt` is a static file, so it cannot build its links from

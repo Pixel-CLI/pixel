@@ -117,15 +117,15 @@ One check needs a human and no `--fix` clears it: `repo.codex-hook-review`. Code
 
 ### Side build (`pixel-dev`)
 
-With a mise or Homebrew `pixel`, the home install (the Claude hooks in `~/.claude/settings.json`, the deployed prompts, the Codex and pi config) belongs to that managed binary and every other repository runs it. A global `pixel-dev setup` rewires all of it to a branch build until someone runs `pixel setup` again, so the side build stays in this repository:
+With a mise or Homebrew `pixel`, the home install (the Claude hooks in `~/.claude/settings.json`, the deployed skills, the Codex and pi config) belongs to that managed binary and every other repository runs it. A global `pixel-dev setup` rewires all of it to a branch build until someone runs `pixel setup` again, so the side build stays in this repository:
 
 1. `pixel self-update --dev --repo . --build "cargo build --profile dev-release -p pixel-cli"`.
 2. Track A: `pixel-dev build-index --history .`. Track B: `pixel-dev setup --repo .` (the repo-local files only).
-3. `pixel-dev doctor . --fix --fail-on yellow --skip 'install.*'`: the `install.*` checks judge the home install, which is the managed binary's. A side build's `--fix` never runs a home-install repair (it prints `left pixel setup … to the managed pixel`): a `rule.*` check still flagged after it means this build's CLI no longer accepts the deployed rules, a change to the home install.
+3. `pixel-dev doctor . --fix --fail-on yellow --skip 'install.*'`: the `install.*` checks judge the home install, which is the managed binary's. A side build's `--fix` never runs a home-install repair (it prints `left pixel setup … to the managed pixel`).
 
-Only when the unit changes what the home install writes (`crates/pixel-setup/`, the prompts in `crates/pixel-setup/assets/` or `rules/`, a hook) does the global install belong to the check: run `pixel-dev setup` and the full `pixel-dev doctor . --fix --fail-on yellow`, then hand the machine back with `pixel setup` and `pixel doctor . --fail-on yellow` through the managed binary, and report both. Using `pixel-dev` is expected here: do not narrate it.
+Only when the unit changes what the home install writes (`crates/pixel-setup/`, the skill text in `crates/pixel-setup/assets/`, a hook) does the global install belong to the check: run `pixel-dev setup` and the full `pixel-dev doctor . --fix --fail-on yellow`, then hand the machine back with `pixel setup` and `pixel doctor . --fail-on yellow` through the managed binary, and report both. Using `pixel-dev` is expected here: do not narrate it.
 
-Both commands target the account's login shell (from the user database, not `$SHELL`, which an agent's command tool overrides: Claude Code's runs under `/bin/zsh` on a fish machine): `install` removes the retired `claude()` wrapper from that shell's profile and `doctor` reports one that remains. If `doctor` still reports `install.legacy-wrappers` for the wrong profile, pass the shell a human launches `claude` from to both commands: `--shell fish`.
+`doctor` asks the account's login shell (from the user database, not `$SHELL`, which an agent's command tool overrides: Claude Code's runs under `/bin/zsh` on a fish machine) whether `pixel` is on its PATH (`binary.shell-path`). If it asks the wrong shell, pass the one a human launches `claude` from: `pixel doctor --shell fish`.
 
 ### Default: no local installation
 

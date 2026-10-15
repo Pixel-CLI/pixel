@@ -1,19 +1,25 @@
 # Manual Setup
 
 Prefer to control your own setup, or using an agent `pixel setup` does not
-wire (Cursor, Copilot, ...)? You don't need `pixel setup`.
+wire (Copilot CLI, ...)? You don't need `pixel setup`.
 
 `pixel setup` does these things, and you can do each of them by hand:
 
-1. **Keep Claude and Codex task lifecycle hooks**, preserving foreign hooks,
-   while removing Pixel's automatic retrieval prompts and metrics callbacks.
-2. **Remove retired Pixel instruction blocks** from Codex configuration and
-   project `AGENTS.md`, preserving unrelated text.
-3. **Install Pi's explicit `/pixel-impact` package when Pi is present** and
-   remove Pixel's automatic Pi prompt.
-4. **Remove what earlier releases wrote for every other agent**: deployed
-   prompts, guard hooks and plugins. Guidance reaches every harness as the
-   `pixel` skill only, and every agent keeps its native tools.
+1. **Install the `pixel` skill**, `skills/pixel/SKILL.md`, in `~/.claude` and in
+   each of `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini` (Gemini CLI and
+   Antigravity), `~/.pi/agent` and `~/.config/opencode` that exists. Pi's
+   package writes the same file itself, and Antigravity's plugins carry their
+   own copy. Copilot CLI and a generic `AGENTS.md` agent get no skill.
+2. **Register hooks, preserving foreign ones.** Claude Code, Codex and Devin
+   get the `task-event` hooks, whose prompt-submit entry adds the
+   `[PIXEL:BRIEF]`, and Claude Code, Codex and Antigravity a metrics relay.
+   Gemini CLI and OpenCode get a brief hook only.
+3. **Install Pi's package when Pi is present**: the explicit `/pixel-impact`
+   command and a hook that adds the brief.
+4. **Store the settings and the first-party brief probes** under `~/.pixel/`.
+
+No prompt, rules file or instruction block is written, and every agent keeps
+its native tools.
 
 ## 1. Install the binary
 
@@ -48,26 +54,24 @@ confirm:
 
 ```bash
 pixel setup              # this machine, and every agent it finds
-pixel setup --repo .     # one repository, its own agents and files
-pixel setup --print      # the block the default answers produce, changing nothing
+pixel setup --repo .     # one repository: only .pixel/config.yaml
+pixel setup --print      # the skill the default answers deploy, changing nothing
 pixel setup --yes        # no questions, whatever the terminal
 ```
 
-It writes a managed block (`<!-- pixel:setup:start -->` … `:end -->`) into each
-selected agent's instruction file, registers the task lifecycle hooks of the
-agents you picked, and stores the settings the features you pick need. Without
-a terminal (a pipe, CI) or with `--yes` or `--json` it does not ask: it
-deploys the hooks for every configured host and reports what changed.
-`pixel setup --remove` takes the block, the rule files and the hooks out again.
-The files it writes for each agent, for the default answers, are checked in
-under [`tests/setup/.agents/`](../tests/setup/README.md).
+It installs the `pixel` skill for the agents you picked, registers their
+hooks, and stores the settings the features you pick need. Without a terminal
+(a pipe, CI) or with `--yes` or `--json` it does not ask: it deploys for every
+configured host and reports what changed. `pixel setup --remove` takes the
+skill, the hooks, the Pi package and the brief probes out again. The skill text
+and the settings for the default answers are checked in under
+[`tests/setup/.agents/`](../tests/setup/README.md), and the files written for
+each agent are on the website's [per-agent pages](https://pixel-cli.dev/for/).
 
 `pixel setup` deploys no prompt. To give an agent Pixel's full protocol
 anyway, copy
 [`crates/pixel-setup/assets/pixel-agent-prompt.md`](../crates/pixel-setup/assets/pixel-agent-prompt.md)
-into that agent's own instruction file (see [Any other agent](#any-other-agent)),
-not under `~/.local/share/pixel/`: `pixel setup` deletes the
-`agent-prompt.md` and `subagent-prompt.md` earlier releases deployed there.
+into that agent's own instruction file (see [Any other agent](#any-other-agent)).
 
 ### Claude Code
 
@@ -76,11 +80,15 @@ To assess callers or the impact of a known symbol, run `pixel impact
 prompt that names a symbol and asks to change it or find its callers.
 Ordinary work keeps the usual tools.
 
-`pixel setup` removes its retired retrieval, post-edit advice, compaction
-and metrics registrations from Claude's user settings. Independent task-event
-hooks remain available for configured task contracts. Repository installation
-preserves foreign hooks and restores adopted RTK registrations, removing the
-Pixel retrieval wrapper. Native reads need no Pixel retrieval callback.
+`pixel setup` registers the `task-event` hooks in `~/.claude/settings.json`
+(session, tool, subagent and `Stop` events; the `UserPromptSubmit` entries carry
+the brief, `PIXEL_BRIEF=0` turns it off) and a `PostToolUse` metrics relay,
+and adds the skill under `~/.claude/skills/pixel/`. Foreign hooks are
+preserved. `pixel setup` no longer cleans up what earlier releases registered
+(the `guard`, `session-start`, `prompt-submit`, `post-compaction` and
+`post-tool-use` verbs of `run-hook`): delete those entries by hand. The binary
+still answers them with exit 0, so a leftover does not block a tool call. Native
+reads need no Pixel retrieval callback.
 
 Copying the full prompt into Claude's instructions by hand enables a
 different profile with additional context.
@@ -90,30 +98,31 @@ different profile with additional context.
 For a known symbol whose callers or change impact matter, run `pixel impact
 <symbol> --no-refresh`; the per-prompt brief covers the common case.
 
-Global installation removes Pixel's old retrieval `UserPromptSubmit` and
-metrics hooks and retains the independent task-event suite. The previous
-caller-facts prompt classifier has been retired. Project installation
-restores foreign hook registrations from its owned composed-guard backup and
-removes the retrieval wrapper. It adds no native-search rewrite or denial.
+Global installation writes the same `task-event` suite and metrics relay into
+`$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), and the skill under
+`~/.codex/skills/pixel/` when `~/.codex` exists. Codex runs a hook only after
+you review it with `/hooks`. It adds no native-search rewrite or denial.
 
-Do not copy the full agent prompt into `developer_instructions`.
-Installation removes older Pixel-managed blocks from global and project
-Codex configuration and project `AGENTS.md`, preserving foreign text.
-Existing sessions retain previously received context until a fresh session.
+Do not copy the full agent prompt into `developer_instructions`. `pixel setup`
+no longer removes a Pixel block an earlier release left in
+`developer_instructions` or in a project `AGENTS.md`: delete it by hand (the
+`<!-- pixel:managed:begin -->` and `<!-- pixel:setup:start -->` markers
+delimit it). Existing sessions retain previously received context until a
+fresh session.
 
 ### Pi
 
-Pi uses a package. The explicit
-`/pixel-impact <symbol>` command requests bounded graph evidence. It does
-not query Pixel at startup, classify every prompt, or replace native tools.
-By hand, add the package path to `packages` in Pi's `settings.json`.
-See [Pi integration](pi-harness.md) for the files.
+Pi uses a package, which is separate from the skill: the explicit
+`/pixel-impact <symbol>` command requests bounded graph evidence, and a
+`before_agent_start` hook adds the brief. Neither replaces native tools. By
+hand, add the package path to `packages` in Pi's `settings.json`. See [Pi
+integration](pi-harness.md) for the files. The package step also writes the
+skill to `~/.pi/agent/skills/pixel/SKILL.md`.
 
-`pixel setup` removes its managed and recognized historical automatic
-instructions from `~/.pi/agent/APPEND_SYSTEM.md`, preserving user text.
-`pixel setup --repo .` removes the retired project extension
-`.pi/extensions/pixel-guard.ts`. No Pixel-first block is added to project
-`AGENTS.md`.
+`pixel setup` no longer removes a Pixel block from
+`~/.pi/agent/APPEND_SYSTEM.md` or the project extension
+`.pi/extensions/pixel-guard.ts` that earlier releases wrote: delete them by
+hand. `pixel setup --repo .` writes nothing for Pi.
 
 ### Bounded graph queries
 
@@ -139,9 +148,8 @@ look beyond the returned list when task correctness requires it.
 
 ### Any other agent
 
-`pixel setup` wires only the agents above; the website's
-[per-agent pages](https://pixel-cli.dev/for/) list what it writes or removes
-for each. To give any tool the
+The website's [per-agent pages](https://pixel-cli.dev/for/) list what
+`pixel setup` writes for each agent it wires. To give any other tool the
 full protocol, put the text of the bundled
 `crates/pixel-setup/assets/pixel-agent-prompt.md` wherever that tool reads
 always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
@@ -149,19 +157,6 @@ always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
 `AGENTS.md`. Copy it verbatim rather than a summary, and re-copy it after an
 upgrade. `pixel setup` does not manage that copy, and `pixel doctor` does
 not check it.
-
-## Renamed commands
-
-If you wrote Pixel commands into your own instructions before the rename
-(a `CLAUDE.md`, a rules file, a CI script, a hand-wired hook such as
-`<pixel> hook session-start`), you do not have to rewrite them yet: each old
-name is a hidden alias of its new name until 1.0, and `pixel doctor` accepts
-rule text that still uses the old names. Update them when convenient, using
-the table in [renamed-commands.md](renamed-commands.md).
-
-An old name prints one `note:` line on stderr with the new name. It never
-touches stdout or `--json` output, and `--metrics off` or `PIXEL_METRICS=0`
-silence it together with the metrics line. Hook invocations stay silent.
 
 ## Context and evaluation
 
@@ -172,8 +167,9 @@ shipped and later removed.
 
 ## Uninstall
 
-Run `pixel setup --remove` (and `pixel setup --remove --repo .` for repository
-integration). It removes Pixel-owned registrations and managed text while
-preserving unrelated configuration. Remove separately installed plugins
-through the host's plugin manager. Do not delete a shared settings or
-`APPEND_SYSTEM.md` file merely because it once contained Pixel text.
+Run `pixel setup --remove`. It removes Pixel-owned registrations, the skill, the
+Pi package and the brief probes while preserving unrelated configuration.
+`pixel setup --repo` wrote only `<repo>/.pixel/config.yaml`; delete it by hand if
+you no longer want it. Remove separately installed plugins through the host's
+plugin manager. Do not delete a shared settings file merely because it once
+contained Pixel text.

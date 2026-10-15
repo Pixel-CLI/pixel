@@ -99,11 +99,10 @@ echo "home:     $HOME_DIR (contained)"
 echo
 
 # --- [1/5] pixel setup -------------------------------------------------------
-# The global install deploys the agent prompt, hooks and shell wrapper into
-# the fresh HOME. Non-interactive: the classify setup it would offer at the
+# The global install deploys the pixel skill and hooks into the fresh HOME. Non-interactive: the classify setup it would offer at the
 # end is driven separately in step 2, where its output can be checked.
 echo "--- [1/5] pixel setup ---"
-"$PIXEL_BIN" setup --shell sh >"$WORK/install.out" 2>"$WORK/install.err" \
+"$PIXEL_BIN" setup >"$WORK/install.out" 2>"$WORK/install.err" \
     || fail "pixel setup exited non-zero: $(tail -5 "$WORK/install.err")"
 pass "pixel setup"
 

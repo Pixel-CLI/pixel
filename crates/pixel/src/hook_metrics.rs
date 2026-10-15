@@ -34,12 +34,6 @@ pub enum Provider {
     Devin,
     /// Antigravity's `toolCall` payload is normalized to the shared shape.
     Antigravity,
-    /// Cursor's `postToolUse`: flat `tool_output` payload, snake_case
-    /// `additional_context` response.
-    Cursor,
-    /// Copilot CLI: camelCase `toolName`/`toolArgs`/`toolResult` payload,
-    /// top-level `additionalContext` response.
-    Copilot,
 }
 
 /// Whether this hook invocation is an imported Claude entry running in a
@@ -151,29 +145,6 @@ fn command_text(v: &Value) -> String {
 }
 /// Normalize Antigravity's documented toolCall payload at the provider boundary.
 fn provider_payload(provider: Provider, mut payload: Value) -> Value {
-    // Copilot CLI sends camelCase fields; normalize to the shared
-    // snake_case shape the rest of the guard reads.
-    if provider == Provider::Copilot {
-        if payload.get("tool_name").is_none()
-            && let Some(value) = payload.get("toolName").cloned()
-        {
-            payload["tool_name"] = value;
-        }
-        if payload.get("tool_input").is_none()
-            && let Some(value) = payload.get("toolArgs").cloned()
-        {
-            // The CLI hook docs describe `toolArgs` as a JSON string; the
-            // SDK sends the object itself. Accept both.
-            payload["tool_input"] = match value.as_str().and_then(|s| {
-                let parsed: Result<Value, _> = serde_json::from_str(s);
-                parsed.ok()
-            }) {
-                Some(parsed) => parsed,
-                None => value,
-            };
-        }
-        return payload;
-    }
     if provider == Provider::Antigravity
         && let Some(call) = payload.get("toolCall")
     {
@@ -204,13 +175,13 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())
         .map(PathBuf::from)
-        // Cursor sends `cwd: ""` on Shell calls and puts the repo in
-        // `workspace_roots` instead (observed on cursor-agent 2026.10.01);
         // Antigravity's PreInvocation payload names only `workspacePaths`.
         .or_else(|| {
-            ["workspace_roots", "workspacePaths"]
-                .into_iter()
-                .find_map(|key| payload.get(key)?.as_array()?.first()?.as_str())
+            payload
+                .get("workspacePaths")?
+                .as_array()?
+                .first()?
+                .as_str()
                 .map(PathBuf::from)
         })
         .or_else(|| std::env::current_dir().ok())?;
@@ -239,7 +210,6 @@ fn post_tool_use_advisory(note: &str) -> serde_json::Value {
 const METRICS_SHELL_TOOLS: &[&str] = &[
     "Bash",
     "bash",
-    // Cursor's composer-mode shell tool.
     "Shell",
     "shell",
     "local_shell",
@@ -412,30 +382,18 @@ fn take_antigravity_pending_metrics(payload: &Value) -> Option<Vec<String>> {
 
 /// Whether the host already put the invocation's 🟩 box in the tool result.
 fn result_carries_metrics_box(payload: &Value) -> bool {
-    // `tool_response` is the Claude/Codex/Devin field; Cursor's postToolUse
-    // sends the same idea as `tool_output` (a JSON-stringified result);
-    // Copilot nests it under `toolResult.textResultForLlm` — the serialized
-    // contains-check reaches the nested text field.
-    ["tool_response", "tool_output", "toolResult"]
-        .iter()
-        .any(|key| {
-            payload
-                .get(key)
-                .is_some_and(|r| r.to_string().contains("🟩 pixel"))
-        })
+    payload
+        .get("tool_response")
+        .is_some_and(|r| r.to_string().contains("🟩 pixel"))
 }
 
-/// The provider-shaped envelope for a replayed metrics line: Cursor's
-/// postToolUse contract is flat snake_case `additional_context` and
-/// Copilot's is flat camelCase `additionalContext`; Codex uses its documented
-/// `systemMessage` relay.
+/// The provider-shaped envelope for a replayed metrics line: Codex uses its
+/// documented `systemMessage` relay.
 fn metrics_relay_response(provider: Option<Provider>, line: &str) -> Value {
     match provider {
         // Codex's shell result can carry stderr without surfacing the footer
         // in the transcript, so PostToolUse uses the documented visible field.
         Some(Provider::Codex) => serde_json::json!({"systemMessage": line}),
-        Some(Provider::Cursor) => serde_json::json!({"additional_context": line}),
-        Some(Provider::Copilot) => serde_json::json!({"additionalContext": line}),
         _ => post_tool_use_advisory(line),
     }
 }
@@ -481,8 +439,8 @@ fn metrics_record_line(payload: &Value) -> Option<String> {
     let tool_input = payload.get("tool_input")?;
     let command = tool_command_text(tool_input)?;
     // Resolve the working directory the way enforcement does, so an empty
-    // `cwd` (Cursor sends `cwd: ""`) falls back to `workspace_roots` and the
-    // workspace's `.pixel` is still found for the metrics lookup.
+    // `cwd` falls back to the workspace paths and the workspace's `.pixel` is
+    // still found for the metrics lookup.
     let payload_cwd = provider_cwd(payload, tool_input).unwrap_or_default();
     // A leading `cd dir &&` selects where the invocation actually ran:
     // the record's cwd is that effective directory, not the tool cwd.
@@ -797,7 +755,7 @@ mod tests {
     // ---- `pixel run-hook metrics` ----------------------------------------
 
     // HOME is process-global and the metrics layer consults
-    // `~/.pixel/config.json`; serialize tests that repoint it through the
+    // `~/.pixel/config.yaml`; serialize tests that repoint it through the
     // crate-wide `ENV_LOCK`.
     struct MetricsFixture {
         root: PathBuf,
@@ -1092,33 +1050,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_metrics_relay_resolves_the_workspace_from_empty_cwd() {
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let fixture = MetricsFixture::new("cursor-empty-cwd");
-        // The documented Cursor shell payload: `cwd: ""` with the repository
-        // in `workspace_roots`, the hook process running outside the
-        // workspace. The record lookup must still find the workspace's
-        // action log, or the relay never fires for Cursor.
-        let payload = serde_json::json!({
-            "tool_name": "Shell",
-            "tool_input": { "command": "pixel impact src/login.rs" },
-            "cwd": "",
-            "workspace_roots": [fixture.root],
-        });
-        let line =
-            metrics_hook_line(&payload).expect("the workspace resolves through workspace_roots");
-        assert!(line.starts_with("🟩 pixel impact ❀"), "{line}");
-        // Without workspace_roots and with an empty cwd there is no
-        // workspace to look up from the fixture dir: nothing to relay.
-        let payload = serde_json::json!({
-            "tool_name": "Shell",
-            "tool_input": { "command": "pixel impact src/login.rs" },
-            "cwd": "",
-        });
-        assert_eq!(metrics_hook_line(&payload), None);
-    }
-
-    #[test]
     fn metrics_hook_line_suppresses_overlapping_identical_records() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let fixture = MetricsFixture::new("overlap");
@@ -1208,7 +1139,7 @@ mod tests {
             metrics_hook_response(Some(Provider::Codex), &shown),
             Some(serde_json::json!({"systemMessage": line}))
         );
-        for provider in [None, Some(Provider::Devin), Some(Provider::Cursor)] {
+        for provider in [None, Some(Provider::Devin)] {
             assert_eq!(metrics_hook_response(provider, &shown), None);
         }
         // Shown, but no record matches: nothing to finalize.
@@ -1371,61 +1302,6 @@ mod tests {
     }
 
     #[test]
-    fn metrics_relay_response_switches_on_the_cursor_contract() {
-        let advisory = post_tool_use_advisory("line");
-        assert_eq!(
-            metrics_relay_response(Some(Provider::Cursor), "line"),
-            serde_json::json!({"additional_context": "line"})
-        );
-        // Cursor uses its flat field; Codex uses systemMessage; remaining
-        // providers keep the existing advisory.
-        for provider in [None, Some(Provider::Claude), Some(Provider::Devin)] {
-            assert_eq!(metrics_relay_response(provider, "line"), advisory);
-        }
-        assert_eq!(
-            metrics_relay_response(Some(Provider::Codex), "line"),
-            serde_json::json!({"systemMessage": "line"})
-        );
-    }
-
-    #[test]
-    fn cursor_metrics_response_uses_the_flat_additional_context_field() {
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let fixture = MetricsFixture::new("cursor");
-        let mut payload = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
-        payload["tool_name"] = serde_json::json!("Shell");
-        let line = metrics_hook_line(&payload).expect("seeded record");
-        assert_eq!(
-            metrics_hook_response(Some(Provider::Cursor), &payload),
-            Some(serde_json::json!({"additional_context": line}))
-        );
-        // The box inside Cursor's `tool_output` dedupes like `tool_response`.
-        payload["tool_output"] = serde_json::json!(line);
-        assert_eq!(
-            metrics_hook_response(Some(Provider::Cursor), &payload),
-            None
-        );
-    }
-
-    /// Cursor sends `cwd: ""` on Shell calls and names the repo only in
-    /// `workspace_roots`; the metrics relay must still resolve the workspace
-    /// and find the matching record instead of silently returning no line.
-    #[test]
-    fn cursor_metrics_lookup_falls_back_to_workspace_roots_on_empty_cwd() {
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let fixture = MetricsFixture::new("cursor-roots");
-        let payload = serde_json::json!({
-            "tool_name": "Shell",
-            "tool_input": { "command": "pixel impact src/login.rs" },
-            "cwd": "",
-            "workspace_roots": [fixture.root.display().to_string()],
-        });
-        let line = metrics_hook_line(&payload)
-            .expect("an empty cwd still resolves the workspace via workspace_roots");
-        assert!(line.starts_with("🟩 pixel impact"), "{line}");
-    }
-
-    #[test]
     fn tool_command_text_accepts_string_and_argv_array_forms() {
         assert_eq!(
             tool_command_text(&serde_json::json!({"command": "pixel x"})),
@@ -1539,7 +1415,7 @@ mod tests {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let fixture = MetricsFixture::new("optout");
         std::fs::write(
-            fixture.root.join(".pixel/config.json"),
+            fixture.root.join(".pixel/config.yaml"),
             "{\"metrics\": \"off\"}\n",
         )
         .unwrap();

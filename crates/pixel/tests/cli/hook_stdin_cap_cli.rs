@@ -8,12 +8,6 @@
 //! payload takes its unavailable envelope, which denies `PreToolUse` on an
 //! enforced session.
 //!
-//! The other verbs (`guard`, `composed-guard`, `session-start`,
-//! `prompt-submit`, `post-compaction`, `post-tool-use`, `metrics`) are
-//! retired. A settings file written by an older release keeps naming them
-//! until the user runs `pixel setup` again, and a verb that stopped parsing
-//! would exit 2, which a host reads as a block on the tool call. They stay
-//! accepted, with the flags those releases wrote, and answer nothing.
 
 use std::io::Write;
 use std::process::{Output, Stdio};
@@ -84,57 +78,4 @@ fn task_event_should_take_the_same_envelope_for_an_oversized_and_a_malformed_pay
         oversized.stdout, malformed.stdout,
         "an over-cap payload must take the same unavailable envelope as a malformed one"
     );
-}
-
-/// Every retired verb, spelled the way each release that registered it wrote
-/// it into an agent's settings file.
-const RETIRED: &[&[&str]] = &[
-    &["guard"],
-    &["guard", "--provider", "claude"],
-    &["guard", "--provider", "claude", "--delegate-rtk"],
-    &["guard", "--provider", "devin"],
-    &["guard", "--provider", "zcode"],
-    &["guard", "--provider", "antigravity"],
-    &["guard", "--provider", "cursor"],
-    &[
-        "composed-guard",
-        "--provider",
-        "codex",
-        "--backup",
-        "/tmp/pixel-backup.json",
-    ],
-    &["session-start"],
-    &["session-start", ".", "--provider", "codex"],
-    &["session-start", "--provider", "devin"],
-    &["prompt-submit"],
-    &["prompt-submit", "--provider", "claude"],
-    &["prompt-submit", "--provider", "codex"],
-    &["post-compaction", "--provider", "claude"],
-    &["post-tool-use", "--provider", "claude"],
-    &["metrics", "--provider", "codex"],
-    &["metrics", "--provider", "cursor"],
-];
-
-/// A retired verb must keep exiting 0 with nothing on stdout: a nonzero exit
-/// from a `PreToolUse` hook blocks the host's tool call. The oversized payload
-/// proves the verb reads only up to the shared cap before answering, and the
-/// `hook` alias is the spelling older settings used for the whole group.
-#[test]
-fn retired_hook_verbs_should_accept_their_old_flags_and_answer_nothing() {
-    let small = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"grep -rn needle src"},"cwd":"/tmp","session_id":"s"}"#;
-    let oversized = oversized_payload();
-    for verb in RETIRED {
-        for group in ["run-hook", "hook"] {
-            let mut args = vec![group];
-            args.extend_from_slice(verb);
-            for payload in [small, "", oversized.as_str()] {
-                let output = feed(&args, payload);
-                assert!(output.status.success(), "{args:?} must exit 0: {output:?}");
-                assert!(
-                    output.stdout.is_empty(),
-                    "{args:?} must answer nothing: {output:?}"
-                );
-            }
-        }
-    }
 }

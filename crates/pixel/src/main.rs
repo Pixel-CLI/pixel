@@ -189,7 +189,6 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[derive(Subcommand)]
 enum Command {
     /// Build (or rebuild) the text index for a directory tree.
-    #[command(alias = "index")]
     BuildIndex {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -205,7 +204,6 @@ enum Command {
     /// Search the indexed tree with a regex pattern. Accepts any number of
     /// paths (repo roots, subdirectories, or files) — ripgrep-style; the repo
     /// root is discovered automatically for each.
-    #[command(alias = "search")]
     SearchContent {
         pattern: String,
         /// Paths to search: repo roots, subdirectories, or files (any mix).
@@ -268,7 +266,6 @@ enum Command {
     },
     /// Native-output literal file search for automatic routing; unsupported
     /// inputs execute the original rg/grep command without modification.
-    #[command(alias = "search-compat")]
     SearchLikeRg {
         #[arg(value_enum)]
         tool: search_compat::SearchTool,
@@ -276,7 +273,6 @@ enum Command {
         args: Vec<String>,
     },
     /// Compile and execute one bounded deterministic retrieval recipe.
-    #[command(alias = "query")]
     RunRecipe {
         intent: String,
         #[arg(long, default_value = ".")]
@@ -300,7 +296,6 @@ enum Command {
     /// question embeds only the code that changed. Tests, configuration and
     /// data files and docs rank below code unless the question names them
     /// ("test", "config", "readme"...); a JSON hit's `demoted` says which.
-    #[command(alias = "ask")]
     SearchMeaning {
         /// The natural-language question.
         question: String,
@@ -322,7 +317,6 @@ enum Command {
     /// territories with conservative conflict pairs, merge-order layers, and
     /// declared shared files (evidence for a parallel-edit harness, never an
     /// action recommendation).
-    #[command(alias = "targets")]
     ScopeTask {
         /// Task/feature description (omit with --clear).
         task: Option<String>,
@@ -411,7 +405,6 @@ enum Command {
         jsonl: bool,
     },
     /// Look up symbols by name in the code graph.
-    #[command(alias = "symbol")]
     FindSymbol {
         name: String,
         #[arg(default_value = ".")]
@@ -420,7 +413,6 @@ enum Command {
         json: bool,
     },
     /// All signatures in a file — the skeleton view at ~10% of Read cost.
-    #[command(alias = "skeleton")]
     ListSignatures {
         file: String,
         #[arg(default_value = ".")]
@@ -431,7 +423,6 @@ enum Command {
     /// Structural repo map: every indexed file with its symbols. `--markdown`
     /// emits the exportable document form — the human-editable projection of
     /// the graph.
-    #[command(alias = "map")]
     RepoMap {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -442,7 +433,6 @@ enum Command {
         json: bool,
     },
     /// Budget-fitted context for a symbol uid.
-    #[command(alias = "context")]
     PackContext {
         uid: String,
         #[arg(default_value = ".")]
@@ -473,7 +463,6 @@ enum Command {
         json: bool,
     },
     /// Direct callers or callees of a symbol.
-    #[command(alias = "uses")]
     WhoCalls {
         uid_or_name: String,
         #[arg(default_value = ".")]
@@ -519,7 +508,6 @@ enum Command {
     /// `evaluate path` asks the same question and tells an exhaustive
     /// absence from a search the depth cap cut; the output's `successor`
     /// field names that command for these two symbols.
-    #[command(alias = "trace")]
     CallPath {
         from: String,
         to: String,
@@ -573,7 +561,6 @@ enum Command {
         json: bool,
     },
     /// Discovered execution flows.
-    #[command(alias = "processes")]
     ListFlows {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -583,7 +570,6 @@ enum Command {
         json: bool,
     },
     /// Functional-area clusters.
-    #[command(alias = "clusters")]
     ListAreas {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -593,7 +579,6 @@ enum Command {
         json: bool,
     },
     /// Symbols/flows affected by working-tree changes.
-    #[command(alias = "changes")]
     WhatChanged {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -610,7 +595,6 @@ enum Command {
         json: bool,
     },
     /// Force (re)build of the code graph db.
-    #[command(alias = "graph")]
     RebuildGraph {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -697,7 +681,6 @@ enum Command {
         json: bool,
     },
     /// Make a repository ready for agent work: index, graph, and warm daemon.
-    #[command(alias = "ready")]
     PrepareRepo {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -770,7 +753,6 @@ enum Command {
     // M3/M4 — engines (resolve, history, lifecycle, excavate, reconcile)
     // -----------------------------------------------------------------
     /// Engine 1: resolve a phrase to code via the concept index.
-    #[command(alias = "resolve")]
     FindCode {
         phrase: String,
         #[arg(default_value = ".")]
@@ -781,24 +763,21 @@ enum Command {
         json: bool,
     },
     // -----------------------------------------------------------------
-    // M5/M6 — setup / doctor / migrate / hook
+    // M5/M6 — setup / doctor / hook
     // -----------------------------------------------------------------
     /// Set pixel up for your agents, on this machine or in one repository
     /// (`--repo`). `--remove` takes everything back out.
     ///
     /// In a terminal this is a guided setup: it detects the agent CLIs, asks
     /// which of them to write for and which features to switch on, lists every
-    /// instruction file, rule file, hook, setting and note it would write, with
-    /// the exact text of the managed block (`<!-- pixel:setup:start -->` …
-    /// `:end -->`), and writes nothing until you confirm. Cancelling writes
-    /// nothing.
+    /// skill file, hook, setting and note it would write, and writes nothing
+    /// until you confirm. Cancelling writes nothing.
     ///
     /// Without a terminal on stdin and stdout, in CI, or with `--yes`,
     /// `--json` or `--print`, it does not ask: it deploys the agent
-    /// integrations while preserving native retrieval (task lifecycle hooks,
-    /// the Pi impact extension when Pi is configured, retired registrations
-    /// removed) and reports what changed, exactly as `pixel install` did
-    /// before `pixel install <source>` became the plugin installer.
+    /// integrations while preserving native retrieval (the `pixel` skill, task
+    /// lifecycle hooks, the Pi package when Pi is configured) and reports what
+    /// changed.
     ///
     /// ## Examples
     ///
@@ -808,7 +787,7 @@ enum Command {
     /// pixel setup
     /// ```
     ///
-    /// Set up one repository (its own agents, its own instruction files):
+    /// Set up one repository (its `.pixel/config.yaml`):
     ///
     /// ```text
     /// pixel setup --repo .
@@ -820,7 +799,7 @@ enum Command {
     /// pixel setup --yes
     /// ```
     ///
-    /// Print the block the default answers produce, changing nothing:
+    /// Print the skill the default answers deploy, changing nothing:
     ///
     /// ```text
     /// pixel setup --print
@@ -834,44 +813,23 @@ enum Command {
     Setup {
         #[arg(long)]
         json: bool,
-        /// Shell whose profile is checked for the retired `claude()` wrapper
-        /// (default: account login shell, then $SHELL). Pass e.g. `fish`
-        /// to select the profile explicitly. With `--remove`, the shell
-        /// whose wrapper block is removed.
-        #[arg(long)]
-        shell: Option<String>,
         /// Set up this repository instead of the machine, skipping every
-        /// global step: project-local hooks and, in the guided setup, the
-        /// agents' instruction files under the repository root. Retired
-        /// Claude and Codex retrieval hooks are removed, adopted RTK/foreign
-        /// hooks are restored from matching backups, independent task
-        /// controls are preserved, tracked Codex hooks are left alone, the
-        /// retired Devin guard and Pi project extension are removed, and
-        /// retired Pixel retrieval blocks go from AGENTS.md and Codex config.
-        /// Adds no guard. Foreign instructions and native tools are preserved.
-        /// Files: `.claude/settings.local.json`, `.claude/pixel-rtk-hooks.json`,
-        /// `.codex/config.toml`, `.codex/hooks.json`,
-        /// `.codex/pixel-composed-guard-backup.json`, and `AGENTS.md`.
-        /// Machine-specific files naming this binary go into `info/exclude`.
-        /// With `--remove`, only the project-local artifacts that
-        /// `pixel setup --repo` wrote are removed and every global removal
-        /// step is skipped.
-        #[arg(long, value_name = "PATH")]
+        /// global step: it writes the repository's `.pixel/config.yaml`.
+        /// Pixel keeps no repo-local hooks, so nothing else is written under
+        /// the repository.
+        #[arg(long, value_name = "PATH", conflicts_with = "remove")]
         repo: Option<PathBuf>,
         /// Do not ask: deploy the integrations as an unattended run does,
         /// even in a terminal.
         #[arg(long, conflicts_with_all = ["remove", "print"])]
         yes: bool,
-        /// Print the block the default answers produce, without prompting or
+        /// Print the skill the default answers deploy, without prompting or
         /// writing anything.
         #[arg(long, conflicts_with = "remove")]
         print: bool,
-        /// Remove everything `pixel setup` wrote: managed blocks from
-        /// agent-config files, the `pixel:setup` block and the rule files from
-        /// every instruction file the guided setup owns, hook entries from all
-        /// settings files, hook scripts, the Pi impact package, the rule
-        /// source file, and the pixel binary itself. Idempotent: safe to
-        /// re-run.
+        /// Remove everything `pixel setup` wrote: the `pixel` skill, hook
+        /// entries from the settings files, the Pi package, the brief probes,
+        /// and the pixel binary itself. Idempotent: safe to re-run.
         #[arg(long)]
         remove: bool,
         /// With `--remove`: preview what would be removed without making any
@@ -882,11 +840,6 @@ enum Command {
         /// running binary, left in place when Homebrew or mise installed it).
         #[arg(long, requires = "remove")]
         binary_path: Option<PathBuf>,
-        /// With `--remove`: remove only that shell's wrapper block and keep
-        /// everything else installed: the fix for a block `pixel doctor`
-        /// reports in a profile the login shell never loads.
-        #[arg(long, requires = "remove")]
-        wrappers_only: bool,
         // TEMPORARY (dev-flags) start: three development-only args, removed
         // before the release. The removal recipe is in `setup_cmd.rs`; the
         // three args below and the `dev:` field at the construction site are
@@ -935,7 +888,6 @@ enum Command {
     /// Cargo.lock is fresh for every workspace member, CHANGELOG.md has the
     /// `## [x.y.z]` heading and an empty Unreleased section. Exit 1 on any
     /// failed check.
-    #[command(alias = "release-check")]
     CheckRelease {
         /// The version or tag: `1.2.3`, `v1.2.3` or `refs/tags/v1.2.3`.
         version: String,
@@ -949,7 +901,6 @@ enum Command {
     /// Rebuild the binary, stop the daemon, copy the new binary to the
     /// install path, and optionally restart the daemon. Solves the
     /// "Text file busy" error when the daemon holds the binary open.
-    #[command(alias = "upgrade")]
     SelfUpdate {
         /// Cargo build command to run (default: `cargo build --release -p pixel-cli`).
         /// The built binary is read from `target/<profile>/pixel`, with the
@@ -988,7 +939,8 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         json: bool,
-        /// Shell whose wrapper block should be checked (default: $SHELL).
+        /// Shell asked whether `pixel` is on its PATH (default: the account's
+        /// login shell, then $SHELL).
         #[arg(long)]
         shell: Option<String>,
         /// Run only this check id, or every check of a group as `<group>.*`
@@ -1013,18 +965,7 @@ enum Command {
         #[arg(long, conflicts_with = "list")]
         fix: bool,
     },
-    /// Removed: the legacy `.gitpixel/` migration. Hidden and kept only so a
-    /// script that still calls it exits 0 with a note instead of failing
-    /// with "unrecognized subcommand".
-    #[command(hide = true)]
-    Migrate {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
     /// Host hook entry points (task-event) registered by `pixel setup`.
-    #[command(alias = "hook")]
     RunHook {
         #[command(subcommand)]
         cmd: HookCmd,
@@ -1035,7 +976,6 @@ enum Command {
         cmd: Option<ConfigCmd>,
     },
     /// Completion contracts, verification, task trajectories and Claude packets.
-    #[command(alias = "task")]
     TaskState {
         #[command(subcommand)]
         cmd: TaskCmd,
@@ -1208,44 +1148,6 @@ enum HookCmd {
         #[arg(long, value_enum, default_value = "post-tool-use")]
         event: hook_metrics::MetricsEvent,
     },
-    #[command(flatten)]
-    Retired(RetiredHookCmd),
-}
-
-/// Hook verbs that older releases registered in agent settings. Each one is
-/// accepted and does nothing; the per-prompt brief and the task gates replaced
-/// them.
-#[derive(Subcommand)]
-enum RetiredHookCmd {
-    /// Retired: the guard.
-    #[command(hide = true)]
-    Guard(RetiredHook),
-    /// Retired: the sealed foreign-hook composition of the Codex guard.
-    #[command(hide = true)]
-    ComposedGuard(RetiredHook),
-    /// Retired: the capability block, replaced by the installed agent prompt.
-    #[command(hide = true)]
-    SessionStart(RetiredHook),
-    /// Retired: the prompt-time task context, replaced by the per-prompt brief.
-    #[command(hide = true)]
-    PromptSubmit(RetiredHook),
-    /// Retired: the targets re-injection after context compaction.
-    #[command(hide = true)]
-    PostCompaction(RetiredHook),
-    /// Retired: the blast-radius note after an edit.
-    #[command(hide = true)]
-    PostToolUse(RetiredHook),
-}
-
-/// The arguments of a retired hook verb: whatever an older release wrote into
-/// a settings file (`--provider`, `--backup`, `--delegate-rtk`, a path) is
-/// accepted and ignored. A verb that stopped parsing would exit 2, and a host
-/// treats a `PreToolUse` hook that exits 2 as a block on the tool call.
-#[derive(clap::Args)]
-#[command(disable_help_flag = true)]
-struct RetiredHook {
-    #[arg(num_args = 0.., allow_hyphen_values = true, trailing_var_arg = true)]
-    _ignored: Vec<std::ffi::OsString>,
 }
 
 #[derive(Subcommand)]
@@ -1267,24 +1169,6 @@ enum ConfigCmd {
         /// Write to the machine-wide configuration.
         #[arg(long)]
         global: bool,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// Retired retrieval policy: no hook reads it any more. `pixel config
-    /// policy` reports the effective setting and the layer that set it
-    /// (environment, repository, global, or the advisory default); `advisory`,
-    /// `enforce` or `off` persists it to `<root>/.pixel/config.yaml` — or
-    /// `~/.pixel/config.yaml` with `--global`.
-    Policy {
-        /// New value; omit to report the effective setting.
-        #[arg(value_enum)]
-        value: Option<config_cmd::PolicyMode>,
-        /// Write to the machine-wide configuration.
-        #[arg(long)]
-        global: bool,
-        /// Print the effective setting as JSON, for the Pi extension.
-        #[arg(long)]
-        json: bool,
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -1634,11 +1518,6 @@ fn send_to_daemon(root: &Path, req: &Request) -> DaemonRoute {
     served.map_or(DaemonRoute::Absent, |response| {
         DaemonRoute::Served(Box::new(response))
     })
-}
-
-/// Check if an env var is explicitly set to "0"/"false"/"off".
-fn env_flag_off(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|v| matches!(v.as_str(), "0" | "false" | "off"))
 }
 
 /// Prefer the daemon; fall back to an in-process Service. The given path may
@@ -3515,9 +3394,8 @@ fn is_cargo_target_path(path: &Path) -> bool {
 /// True when `exe` is a build a developer runs from a checkout rather than
 /// a release install: cargo build output ([`is_cargo_target_path`]) or the
 /// `pixel-dev` side build ([`pixel_setup::config::is_side_build`]). Such a
-/// build carries its branch's prompts under the release's version, so
-/// whatever a release install owns (the deployed prompts, the upgrade
-/// notice) is not its to judge.
+/// build carries its branch's code under the release's version, so
+/// whatever a release install owns (the upgrade notice) is not its to judge.
 pub(crate) fn is_developer_build(exe: &Path) -> bool {
     is_cargo_target_path(exe) || pixel_setup::config::is_side_build(exe)
 }
@@ -3892,26 +3770,6 @@ fn operation_path(matches: &clap::ArgMatches) -> Option<PathBuf> {
         .and_then(|mut paths| paths.next().cloned())
 }
 
-/// What `pixel migrate` prints now that the command does nothing.
-const MIGRATE_REMOVED_NOTE: &str = "note: 'migrate' was removed and does nothing; pixel no longer \
-     reads legacy .gitpixel/ state, so delete that directory by hand if it is still there";
-
-/// The pre-rename subcommand this invocation was spelled with, and its
-/// current name. Only the first word that is not an option names the
-/// command (`pixel prepare-repo ready` runs `prepare-repo` on a path called
-/// `ready`); `--metrics` is the one option taking a separate value before it.
-fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
-    let mut words = argv.iter().skip(1);
-    while let Some(word) = words.next() {
-        if word == "--metrics" {
-            words.next();
-        } else if !word.starts_with('-') {
-            return pixel_proto::commands::renamed_to(word).map(|new| (word.as_str(), new));
-        }
-    }
-    None
-}
-
 /// The arguments as the action log records them. An API key is a secret:
 /// the log is plain text under `.pixel/`, so every positional after
 /// `config remote-key <preset>` is masked.
@@ -3960,36 +3818,6 @@ fn logged_args(args: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// The one stderr line announcing that an old command name was used, or
-/// `None` when the name is current or the stream is protected (hooks,
-/// `search-like-rg`, the statusline), so the note never lands in a hook
-/// response or a byte-compatible rg output. The note is not a metrics line:
-/// `--metrics off`, `PIXEL_METRICS=0` and the persistent `metrics` opt-out
-/// silence reporting, not the rename teaching signal.
-fn rename_note(argv: &[String], unprotected: bool) -> Option<String> {
-    if !unprotected {
-        return None;
-    }
-    let (old, new) = renamed_invocation(argv)?;
-    Some(format!(
-        "note: '{old}' is now '{new}'; the old name stays accepted until {}\n",
-        pixel_proto::commands::ALIAS_REMOVAL_VERSION
-    ))
-}
-
-/// Whether this invocation checks the prompts `pixel setup` deployed:
-/// every command but the protected streams, the two that already deal
-/// with them (`setup` rewrites and removes them, `doctor` reports them),
-/// and any command of a developer build
-/// ([`is_developer_build`]: `pixel-dev`, or a binary run from `target/`).
-/// The deployed prompts are the managed `pixel`'s: a build from another
-/// commit differs from them by construction while printing the same
-/// version, and the fix the note names, `pixel setup`, would hand the
-/// whole machine's hooks and prompts to that build (#549).
-fn checks_deployed_prompts(command_label: &str, protected: bool, developer_build: bool) -> bool {
-    !protected && !developer_build && !matches!(command_label, "setup" | "doctor")
 }
 
 /// The command labels the update close may relaunch. The relaunch executes
@@ -4063,24 +3891,6 @@ fn bounded_result_note(basis: &str, cap_hits: &[Value], truncation_warned: bool)
     (!rest.is_empty()).then(|| format!("{tier}; caps: {}", rest.join("; ")))
 }
 
-/// One stderr line naming the prompts an earlier `pixel setup` deployed:
-/// this release deploys none, and nothing outside `pixel doctor` said so.
-fn stale_prompt_note(stale: &[&str]) -> Option<String> {
-    if stale.is_empty() {
-        return None;
-    }
-    let (verb, pronoun) = if stale.len() == 1 {
-        ("is", "it")
-    } else {
-        ("are", "them")
-    };
-    Some(format!(
-        "note: {} deployed by an earlier `pixel setup` {verb} retired in this pixel ({}) — run `pixel setup` to remove {pronoun}\n",
-        stale.join(" and "),
-        env!("CARGO_PKG_VERSION")
-    ))
-}
-
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
@@ -4127,7 +3937,7 @@ fn run() -> Result<(), String> {
     );
     let root = discover_root(&path).or_else(|_| discover_root(Path::new(".")));
     // `--metrics=off` and `PIXEL_METRICS=0` veto one invocation; the
-    // `metrics` key in `.pixel/config.json` (repo, then `~/.pixel/` global)
+    // `metrics` key in `.pixel/config.yaml` (repo, then `~/.pixel/` global)
     // is the persistent opt-out layer beneath them.
     let live = !protected
         && cli.metrics != "off"
@@ -4149,33 +3959,15 @@ fn run() -> Result<(), String> {
             update_notice::fetch_latest_tag,
         )
     });
-    // After `begin`, which zeroes the byte counters: both notes are rendered
-    // output the caller reads.
-    if let Some(note) = rename_note(&argv, !protected) {
-        eprint!("{note}");
-    }
-    let developer_build = std::env::current_exe().is_ok_and(|exe| is_developer_build(&exe));
-    if checks_deployed_prompts(&command_label, protected, developer_build)
-        && let Some(home) = std::env::var_os("HOME")
-        && let Some(note) =
-            stale_prompt_note(&pixel_setup::install::retired_prompts(Path::new(&home)))
-    {
-        eprint!("{note}");
-    }
     // Compatibility fallback must exec the original before any logging changes
     // its search corpus; its successful Pixel branch retains existing logging.
     let mut logger = match &root {
-        // The compatibility search and the retired hook verbs exit through
-        // their own path before any event is logged; spawning the writer
-        // would only create `.pixel` in unindexed repos, which the search
-        // then mistakes for an index.
+        // The compatibility search exits through its own path before any
+        // event is logged; spawning the writer would only create `.pixel` in
+        // unindexed repos, which the search then mistakes for an index.
         _ if matches!(
             &cli.command,
-            Command::SearchLikeRg { .. }
-                | Command::Brief { .. }
-                | Command::RunHook {
-                    cmd: HookCmd::Retired(_)
-                }
+            Command::SearchLikeRg { .. } | Command::Brief { .. }
         ) =>
         {
             pixel_actionlog::ActionLog::noop()
@@ -4326,7 +4118,7 @@ fn run() -> Result<(), String> {
 
 /// `pixel setup`: deploy the agent integrations (globally, or into one
 /// repository with `--repo`) and report what changed.
-fn setup_install(json: bool, shell: Option<String>, repo: Option<PathBuf>) -> Result<(), String> {
+fn setup_install(json: bool, repo: Option<PathBuf>) -> Result<(), String> {
     let is_global_install = repo.is_none();
     let config_root = repo.clone();
     let stdout_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
@@ -4338,7 +4130,6 @@ fn setup_install(json: bool, shell: Option<String>, repo: Option<PathBuf>) -> Re
         write_stdout(&pixel_setup::banner::render_start(color))?;
     }
     let report = pixel_setup::install::install(&pixel_setup::install::InstallOptions {
-        shell,
         repo,
         ..Default::default()
     })
@@ -4362,21 +4153,11 @@ fn setup_install(json: bool, shell: Option<String>, repo: Option<PathBuf>) -> Re
 }
 
 /// `pixel setup --remove`: take back everything `pixel setup` wrote.
-fn setup_remove(
-    json: bool,
-    shell: Option<String>,
-    repo: Option<PathBuf>,
-    dry_run: bool,
-    binary_path: Option<PathBuf>,
-    wrappers_only: bool,
-) -> Result<(), String> {
+fn setup_remove(json: bool, dry_run: bool, binary_path: Option<PathBuf>) -> Result<(), String> {
     let report = pixel_setup::uninstall::uninstall(&pixel_setup::uninstall::UninstallOptions {
         binary_path,
         running_binary: std::env::current_exe().ok(),
         dry_run,
-        shell,
-        wrappers_only,
-        repo,
         ..Default::default()
     })
     .map_err(|e| e.to_string())?;
@@ -5388,28 +5169,25 @@ fn run_command(
             }
         }
         // -------------------------------------------------------------
-        // M5/M6 — install / doctor / migrate / hook
+        // M5/M6 — install / doctor / hook
         // -------------------------------------------------------------
         Command::Setup {
             json,
-            shell,
             repo,
             yes,
             print,
             remove,
             dry_run,
             binary_path,
-            wrappers_only,
             selected_agents,
             selected_features,
             dummy_apply,
         } => {
             if remove {
-                setup_remove(json, shell, repo, dry_run, binary_path, wrappers_only)
+                setup_remove(json, dry_run, binary_path)
             } else {
                 let options = setup_cmd::SetupOptions {
                     repo,
-                    shell,
                     print,
                     // TEMPORARY (dev-flags): this one field, the three args above
                     // and the three clap args in the `Setup` variant are the
@@ -5428,7 +5206,7 @@ fn run_command(
                     None if print || setup_cmd::is_guided(&options, yes, json) => {
                         setup_cmd::run(options)
                     }
-                    None => setup_install(json, options.shell, options.repo),
+                    None => setup_install(json, options.repo),
                 }
             }
         }
@@ -5690,10 +5468,6 @@ fn run_command(
             }
             Ok(())
         }
-        Command::Migrate { .. } => {
-            eprintln!("{MIGRATE_REMOVED_NOTE}");
-            Ok(())
-        }
         Command::RunHook { cmd } => match cmd {
             HookCmd::TaskEvent {
                 provider,
@@ -5702,11 +5476,6 @@ fn run_command(
             } => task_hook::run(provider, event, part),
             HookCmd::Metrics { provider, event } => {
                 hook_metrics::run_metrics_hook(provider, event);
-            }
-            // Retired verbs: drain the payload the host wrote, answer nothing.
-            HookCmd::Retired(_) => {
-                let _ = hook_input::read_hook_payload();
-                std::process::exit(0);
             }
         },
         Command::Config { cmd } => match cmd {
@@ -5718,12 +5487,6 @@ fn run_command(
                 global,
                 path,
             }) => config_cmd::run_metrics(&path, global, value.as_deref().map(|v| v == "on")),
-            Some(ConfigCmd::Policy {
-                value,
-                global,
-                json,
-                path,
-            }) => config_cmd::run_policy(&path, global, value, json),
             Some(ConfigCmd::RemoteKey {
                 preset,
                 value,
@@ -6744,20 +6507,6 @@ mod tests {
                 "/repo".into(),
                 "--json".into(),
             ],
-            vec![
-                "pixel".to_string(),
-                "run-hook".into(),
-                "prompt-submit".into(),
-                "--provider".into(),
-                "claude".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "run-hook".into(),
-                "post-compaction".into(),
-                "--provider".into(),
-                "claude".into(),
-            ],
         ] {
             assert!(validate_cli_syntax(&argv).is_ok(), "argv {argv:?}");
         }
@@ -7154,138 +6903,14 @@ mod prompt_asset_parity {
             vec!["sample.md: `pixel impact a…b` has placeholders the normalizer cannot read"]
         );
     }
-
-    /// The kill switches (`PIXEL_DAEMON_AUTO_START=0`, `PIXEL_GUARD_*=off`)
-    /// fire only on an explicit off value: unset and any other value keep
-    /// the feature on.
-    #[test]
-    fn env_flag_off_fires_only_on_an_explicit_off_value() {
-        let name = format!("PIXEL_TEST_FLAG_{}_{}", std::process::id(), line!());
-        assert!(!crate::env_flag_off(&name), "unset");
-        for (value, expected) in [
-            ("0", true),
-            ("false", true),
-            ("off", true),
-            ("1", false),
-            ("", false),
-            ("no", false),
-        ] {
-            // SAFETY: the variable name is unique to this test (pid + line),
-            // so no other thread in the process reads or writes it.
-            unsafe {
-                std::env::set_var(&name, value);
-            }
-            assert_eq!(crate::env_flag_off(&name), expected, "{value:?}");
-        }
-        // SAFETY: as above.
-        unsafe {
-            std::env::remove_var(&name);
-        }
-    }
 }
 
 #[cfg(test)]
-mod renamed_command_tests {
-    use super::{
-        Cli, bounded_result_note, checks_deployed_prompts, is_developer_build, logged_args,
-        rename_note, renamed_invocation, stale_prompt_note,
-    };
-    use clap::CommandFactory;
-    use std::collections::BTreeSet;
-
-    /// The full `Cli` definition overflows a 2 MiB test thread in debug
-    /// builds (the reason `validate_cli_syntax` runs on 4 MiB); build and
-    /// parse it on a thread sized the same way.
-    fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(f)
-            .unwrap()
-            .join()
-            .unwrap()
-    }
+mod hook_prompt_tests {
+    use super::{bounded_result_note, is_developer_build, logged_args};
 
     fn argv(words: &[&str]) -> Vec<String> {
         words.iter().map(ToString::to_string).collect()
-    }
-
-    #[test]
-    fn clap_aliases_are_exactly_the_rename_table() {
-        // Every hidden alias the parser accepts must be a documented rename,
-        // and every documented rename must parse: a variant renamed again
-        // without updating the table fails here, not in a user's script.
-        // The renames of the commands that moved to plugins are the
-        // exception: no variant carries them, `plugin_cmd::dispatch` maps
-        // them to the plugin (`plugin_cli.rs` runs each one). A rename is an
-        // alias exactly when its target is a command the core builds in.
-        let (registered, built_in) = on_big_stack(|| {
-            let cli = Cli::command();
-            let mut registered = BTreeSet::new();
-            for sub in cli.get_subcommands() {
-                for alias in sub.get_all_aliases() {
-                    registered.insert((alias.to_string(), sub.get_name().to_string()));
-                }
-            }
-            let built_in: BTreeSet<String> = cli
-                .get_subcommands()
-                .map(|sub| sub.get_name().to_string())
-                .collect();
-            (registered, built_in)
-        });
-        let table: BTreeSet<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
-            .iter()
-            .filter(|(_, new)| built_in.contains(*new))
-            .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
-            .collect();
-        assert_eq!(registered, table);
-    }
-
-    #[test]
-    fn an_old_name_parses_to_the_current_subcommand() {
-        let name = |words: &'static [&'static str]| {
-            on_big_stack(move || {
-                Cli::command()
-                    .try_get_matches_from(words)
-                    .unwrap()
-                    .subcommand_name()
-                    .map(str::to_string)
-            })
-        };
-        // The action log and the metrics evidence key on this name, so an
-        // alias invocation is recorded exactly like the current spelling.
-        assert_eq!(
-            name(&["pixel", "ready", "--no-daemon", "--json"]).as_deref(),
-            Some("prepare-repo")
-        );
-        assert_eq!(
-            name(&["pixel", "hook", "session-start"]).as_deref(),
-            Some("run-hook")
-        );
-    }
-
-    #[test]
-    fn renamed_invocation_reads_the_command_word_only() {
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "ready"])),
-            Some(("ready", "prepare-repo"))
-        );
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "--metrics", "off", "changes", "."])),
-            Some(("changes", "what-changed")),
-            "the value of --metrics is not the command"
-        );
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "--metrics=off", "symbol", "x"])),
-            Some(("symbol", "find-symbol"))
-        );
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "prepare-repo", "ready"])),
-            None,
-            "a path named like an old command is not a renamed invocation"
-        );
-        assert_eq!(renamed_invocation(&argv(&["pixel", "impact", "x"])), None);
-        assert_eq!(renamed_invocation(&argv(&["pixel", "--help"])), None);
-        assert_eq!(renamed_invocation(&argv(&["pixel"])), None);
     }
 
     #[test]
@@ -7410,27 +7035,6 @@ mod renamed_command_tests {
         );
     }
 
-    #[test]
-    fn stale_prompt_note_names_each_stale_file_in_one_line() {
-        assert_eq!(stale_prompt_note(&[]), None);
-        let one = stale_prompt_note(&["agent-prompt.md"]).unwrap();
-        assert_eq!(
-            one,
-            format!(
-                "note: agent-prompt.md deployed by an earlier `pixel setup` is retired in this pixel ({}) — run `pixel setup` to remove it\n",
-                env!("CARGO_PKG_VERSION")
-            )
-        );
-        let both = stale_prompt_note(&["agent-prompt.md", "subagent-prompt.md"]).unwrap();
-        assert!(
-            both.starts_with(
-                "note: agent-prompt.md and subagent-prompt.md deployed by an earlier `pixel setup` are retired"
-            ) && both.ends_with("remove them\n"),
-            "{both}"
-        );
-        assert_eq!(both.lines().count(), 1, "{both}");
-    }
-
     const ROW_CAP: &str =
         "match list truncated at row limit 100; more matches exist — continue via next_offset";
     const BYTE_CAP: &str =
@@ -7508,30 +7112,10 @@ mod renamed_command_tests {
         assert_eq!(bounded_result_note(&basis, &hits, true), None);
     }
 
-    #[test]
-    fn deployed_prompts_are_checked_except_by_the_commands_that_own_them() {
-        assert!(checks_deployed_prompts("search-content", false, false));
-        assert!(checks_deployed_prompts("self-update", false, false));
-        assert!(!checks_deployed_prompts("search-content", true, false));
-        for owner in ["setup", "doctor"] {
-            assert!(!checks_deployed_prompts(owner, false, false), "{owner}");
-        }
-    }
-
-    /// A `pixel-dev` built from a branch differs from the release's deployed
-    /// prompts by construction: the note would be noise on every command,
-    /// and the fix it names would move every repository's hooks and prompts
-    /// onto that branch build.
-    #[test]
-    fn deployed_prompts_are_never_checked_by_a_side_build() {
-        assert!(!checks_deployed_prompts("search-content", false, true));
-        assert!(!checks_deployed_prompts("self-update", false, true));
-    }
-
     /// #549: a binary run from a checkout's `target/` prints the release's
-    /// version over its branch's prompts, so it is a developer build like
+    /// version over its branch's code, so it is a developer build like
     /// `pixel-dev`; a `pixel` anywhere else is an install and keeps the
-    /// stale-prompt note.
+    /// upgrade notice.
     #[test]
     fn a_cargo_build_is_a_developer_build_and_an_install_is_not() {
         let dir = std::path::Path::new("/nonexistent-pixel-549");
@@ -7544,16 +7128,6 @@ mod renamed_command_tests {
         assert!(!is_developer_build(
             &dir.join("mise/installs/pixel/0.6.1/bin/pixel")
         ));
-    }
-
-    #[test]
-    fn rename_note_is_one_line_and_skips_only_protected_streams() {
-        assert_eq!(
-            rename_note(&argv(&["pixel", "ready", "--json"]), true).as_deref(),
-            Some("note: 'ready' is now 'prepare-repo'; the old name stays accepted until 1.0\n")
-        );
-        assert_eq!(rename_note(&argv(&["pixel", "ready"]), false), None);
-        assert_eq!(rename_note(&argv(&["pixel", "prepare-repo"]), true), None);
     }
 }
 

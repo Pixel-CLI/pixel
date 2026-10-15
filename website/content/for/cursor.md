@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Cursor"
-description: "Pixel reaches Cursor through a rules file the repository ships, not through pixel setup: how to add it, what pixel doctor checks and how to remove it."
+description: "pixel setup adds the pixel skill to Cursor's skills directory and registers no hook: what it writes, what pixel doctor checks and how to remove it."
 agent: "cursor"
 ---
 

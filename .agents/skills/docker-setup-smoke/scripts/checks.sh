@@ -102,14 +102,14 @@ cp AGENTS.md /evidence/original-AGENTS.md
 git add -A
 git commit -qm init
 cp -R "$HOME/project" "$HOME/doctor-project"
-pixel setup --shell bash --json > /evidence/install-1.json
+pixel setup --json > /evidence/install-1.json
 report_ok /evidence/install-1.json
 test -s "$HOME/.local/share/pixel/agent-prompt.md"
 cp "$HOME/.local/share/pixel/agent-prompt.md" /evidence/first-prompt.md
 managed_state > /evidence/managed-1.txt
 personal_kept installed
 echo 'PASS global install keeps personal settings, hooks and instructions'
-pixel setup --shell bash --json > /evidence/install-2.json
+pixel setup --json > /evidence/install-2.json
 report_ok /evidence/install-2.json
 managed_state > /evidence/managed-2.txt
 cmp /evidence/managed-1.txt /evidence/managed-2.txt
@@ -214,17 +214,17 @@ cmp /evidence/original-AGENTS.md AGENTS.md
 echo 'PASS project uninstall restores user instructions exactly'
 # Uninstall deletes a binary pixel owns; a copy runs the second check.
 cp "$PIXEL_BIN_DIR/pixel" /tmp/pixel-runner
-pixel setup --remove --shell bash --json > /evidence/uninstall-1.json
+pixel setup --remove --json > /evidence/uninstall-1.json
 report_ok /evidence/uninstall-1.json
 test ! -e "$HOME/.local/share/pixel/agent-prompt.md"
 personal_kept uninstalled
 if [ "$PIXEL_OWNS_BINARY" = 1 ]; then
     test ! -e "$PIXEL_BIN_DIR/pixel"
-    /tmp/pixel-runner uninstall --shell bash --binary-path "$PIXEL_BIN_DIR/pixel" --json > /evidence/uninstall-2.json
+    /tmp/pixel-runner setup --remove --binary-path "$PIXEL_BIN_DIR/pixel" --json > /evidence/uninstall-2.json
 else
     # A package manager's binary stays for that manager to remove.
     test -x "$PIXEL_BIN_DIR/pixel"
-    pixel setup --remove --shell bash --json > /evidence/uninstall-2.json
+    pixel setup --remove --json > /evidence/uninstall-2.json
     test -x "$PIXEL_BIN_DIR/pixel"
 fi
 report_ok /evidence/uninstall-2.json

@@ -144,7 +144,7 @@ pub(crate) fn run(command: TaskCmd) -> Result<(), String> {
                 &format!("origin-{}", task.task_id),
                 "contract_origin",
                 json!({
-                    "repository_config":crate::config_file::preferred_path(&root.join(".pixel")),
+                    "repository_config":crate::config_file::path_in(&root.join(".pixel")),
                     "basis":"repository executable requirements plus task acceptance contract"
                 }),
             )?;

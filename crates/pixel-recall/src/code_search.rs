@@ -660,7 +660,7 @@ pub(crate) fn open_code_embedder(
 /// [`open_code_embedder_offline`] would not need the network.
 #[cfg_attr(test, mutants::skip)] // adapter reading $HOME; `potion_set_up` holds the rule and is tested
 pub fn code_model_on_disk() -> bool {
-    crate::potion_set_up(&crate::models_dir(), CODE_SEARCH_MODEL_REPO)
+    crate::potion_cached(&crate::models_dir(), CODE_SEARCH_MODEL_REPO)
 }
 
 /// The embedder `pixel search-meaning` ranks with, opened from the model
@@ -682,7 +682,7 @@ pub fn open_code_embedder_offline() -> Result<Box<dyn crate::embed::Embedder>, S
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WarmProbe {
     /// The code-search model's download finished
-    /// ([`crate::potion_set_up`] on [`CODE_SEARCH_MODEL_REPO`]): opening it
+    /// ([`crate::potion_cached`] on [`CODE_SEARCH_MODEL_REPO`]): opening it
     /// without a download would not hit the network.
     pub model_on_disk: bool,
     /// `<root>/.pixel/code-vectors/` holds a readable manifest naming at
@@ -697,7 +697,7 @@ pub struct WarmProbe {
 ///
 /// Strictly read-only and cheap: it never loads a model, never embeds,
 /// never downloads and never writes. `model_on_disk` reads the same
-/// download markers [`open_code_embedder`] checks ([`crate::potion_set_up`]
+/// download markers [`open_code_embedder`] checks ([`crate::potion_cached`]
 /// on [`crate::models_dir`]), and `vectors_*` read only the store's
 /// manifest — a small JSON file, atomically replaced — so `vectors_chunks`
 /// counts the rows the manifest names rather than loading a single vector.
@@ -722,7 +722,7 @@ fn warm_probe_in(root: &Path, models: &Path) -> WarmProbe {
     .manifest_rows()
     .unwrap_or(0);
     WarmProbe {
-        model_on_disk: crate::potion_set_up(models, CODE_SEARCH_MODEL_REPO),
+        model_on_disk: crate::potion_cached(models, CODE_SEARCH_MODEL_REPO),
         vectors_present: vectors_chunks > 0,
         vectors_chunks,
     }
@@ -3217,8 +3217,7 @@ mod tests {
     }
 
     /// `model_on_disk` reads the markers `require_set_up` admits: the
-    /// code-search repository's own marker, or a legacy `potion.ok` at all
-    /// — never another repository's.
+    /// code-search repository's own marker — never another repository's.
     #[test]
     fn warm_probe_should_read_the_same_markers_the_opener_admits() {
         let root = tempfile::tempdir().unwrap();
@@ -3242,17 +3241,6 @@ mod tests {
         assert!(
             !warm_probe_in(root.path(), models.path()).model_on_disk,
             "another repository's marker admits nothing"
-        );
-
-        let models = tempfile::tempdir().unwrap();
-        std::fs::write(
-            models.path().join(crate::LEGACY_POTION_MARKER),
-            "minishlab/potion-multilingual-128M",
-        )
-        .unwrap();
-        assert!(
-            warm_probe_in(root.path(), models.path()).model_on_disk,
-            "a legacy marker admits every model, as require_set_up does"
         );
     }
 

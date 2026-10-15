@@ -62,9 +62,9 @@ checked = 2026-09-30
 [[answer]]
 slug = "mcp-or-cli-context-cost"
 gist = "an MCP server costs its tool schemas on every turn, a CLI the prompt that teaches it; the size decides, not the protocol."
-short = '''An MCP server puts its tool schemas into the context of every turn; a CLI puts in the prompt that teaches the agent its commands. Measured on one machine, GitNexus's MCP tools cost about 19,700 tokens per turn and Pixel's CLI prompt about 4,160, 4.7× less. The protocol is not the lever, the size is: semble's and stacklit's MCP servers cost less than Pixel's prompt.'''
+short = '''An MCP server puts its tool schemas into the context of every turn; a CLI puts in the prompt that teaches the agent its commands. Measured on one machine, GitNexus's MCP tools cost about 19,700 tokens per turn and Pixel's CLI prompt, as 0.4.0 installed it, about 4,160, 4.7× less. The protocol is not the lever, the size is: semble's and stacklit's MCP servers cost less than that prompt.'''
 bench = ["against-gitnexus", "where-a-specialist-wins"]
-limits = '''Pixel is the lighter one only against GitNexus: semble costs about 980 tokens per turn and stacklit about 420, both less than Pixel. None of these figures counts what an answer costs once the agent asks. A user can switch off individual MCP tools, which shrinks a server's share.'''
+limits = '''Pixel is the lighter one only against GitNexus: semble costs about 980 tokens per turn and stacklit about 420, both less than Pixel. Pixel's figure is the prompt of release 0.4.0; later releases ship a skill instead, and that cost was not re-measured. None of these figures counts what an answer costs once the agent asks. A user can switch off individual MCP tools, which shrinks a server's share.'''
 related = ["vs/gitnexus/", "vs/semble/"]
 checked = 2026-09-25
 
@@ -73,7 +73,7 @@ checked = 2026-09-25
   value = "~19,700&nbsp;tok"
 
   [[answer.row]]
-  label = "Pixel, the agent prompt of its CLI"
+  label = "Pixel 0.4.0, the agent prompt it installed"
   value = "~4,160&nbsp;tok"
 
   [[answer.row]]
@@ -132,10 +132,10 @@ checked = 2026-09-30
 
 [[answer]]
 slug = "will-my-agent-use-the-tool"
-gist = "wire the protocol into each session, then check actual calls in the local action log."
-short = '''Agents can fall back to their familiar search and read tools. <code>pixel setup</code> puts Pixel's protocol into each supported session; <code>pixel action-log</code> lets you check which commands your agent actually ran.'''
+gist = "a prompt-submit brief and a skill put Pixel in front of the agent; check the wiring, then actual calls in the local action log."
+short = '''Agents can fall back to their familiar search and read tools. <code>pixel setup</code> adds a prompt-submit hook, so a code question arrives with a source-cited brief, and a <code>pixel</code> skill for follow-ups; <code>pixel action-log</code> (a plugin) lets you check which commands your agent actually ran.'''
 bench = ["on-whole-agent-tasks"]
-limits = '''Adoption rates with the current install hooks are not quantified here. The per-repository guard advises and never blocks, so an agent can still read a whole file. Tool use does not itself establish a time or cost gain.'''
+limits = '''Adoption rates of the brief and the skill are not quantified here. Neither blocks a search or a read, so an agent can still read a whole file. Tool use does not itself establish a time or cost gain.'''
 related = ["for/", "for/claude-code/"]
 checked = 2026-09-30
 
@@ -144,8 +144,12 @@ checked = 2026-09-30
   value = "<code>pixel doctor</code>"
 
   [[answer.row]]
+  label = "See what the agent receives"
+  value = "<code>pixel brief</code>"
+
+  [[answer.row]]
   label = "Check actual use"
-  value = "<code>pixel action-log</code>"
+  value = "<code>pixel action-log</code> (plugin)"
 
 [[answer]]
 slug = "what-will-a-change-break"

@@ -4,9 +4,9 @@
 //! `pixel setup`: the interactive per-agent, per-feature onboarding wizard.
 //!
 //! Ported from GitButler's `but agent setup` (read at `5cbe33d`). The planning
-//! half lives in [`pixel_setup::setup`], which knows the agent targets, the
-//! feature catalog and the managed block; this module owns the terminal, the
-//! global configuration file and the report.
+//! half lives in [`pixel_setup::setup`], which knows the agent targets and the
+//! feature catalog; this module owns the terminal, the global configuration
+//! file and the report.
 //!
 //! The shape of the run is GitButler's: collect every answer first, resolve it
 //! to a plan, print exactly what the plan would write, and only then apply.
@@ -37,10 +37,7 @@ pub struct SetupOptions {
     /// A repository to set up instead of the machine. Its root becomes the
     /// detection base and the write base.
     pub repo: Option<PathBuf>,
-    /// The shell whose profile is swept for the retired `claude()` wrapper,
-    /// as `pixel setup --shell` takes it.
-    pub shell: Option<String>,
-    /// Print the block the default answers produce and change nothing.
+    /// Print the skill the default answers deploy and change nothing.
     pub print: bool,
     /// The development-only switches. `TEMPORARY (dev-flags)`, see `dev`.
     pub dev: dev::Options,
@@ -98,7 +95,6 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
     };
 
     if options.print {
-        // The block is retired: what `pixel setup` deploys is the skill.
         print!("{}", pixel_setup::skill::PIXEL_SKILL);
         return Ok(());
     }
@@ -231,7 +227,6 @@ fn install_options(options: &SetupOptions, base: &Path, plan: &SetupPlan) -> Ins
     // TEMPORARY (dev-flags): `dummy` is `dev`'s; without it the value is `false`.
     let dummy = options.dev.dummy_apply;
     InstallOptions {
-        shell: options.shell.clone(),
         home: dummy.then(|| base.to_path_buf()),
         repo: (plan.scope == Scope::Repository).then(|| base.to_path_buf()),
         ..InstallOptions::default()
@@ -2172,12 +2167,10 @@ mod tests {
         .unwrap();
         let options = SetupOptions {
             repo: None,
-            shell: Some("fish".into()),
             print: false,
             dev: DevOptions::default(),
         };
         let global = install_options(&options, &base, &global_plan);
-        assert_eq!(global.shell.as_deref(), Some("fish"));
         assert_eq!(global.repo, None, "a machine-wide run is not repo-local");
         assert_eq!(global.home, None, "a real run installs under the real home");
 

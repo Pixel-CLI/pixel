@@ -1,7 +1,8 @@
 # The "What your agent gets" chapter of the home (layouts/index.html, #toolbox):
-# six questions an agent asks around an edit, the command the installed prompt
-# (crates/pixel-setup/assets/pixel-agent-prompt.md, "Retrieval commands")
-# maps each one to, and an excerpt of what that command printed.
+# six questions an agent asks around an edit, the command the `pixel` skill
+# (crates/pixel-setup/assets/pixel-agent-prompt.md, "Question to command")
+# maps it to (bar `plan-rollback`, a command of the pixel-git plugin), and an
+# excerpt of what that command printed.
 #
 # Every excerpt is real output, shortened, never rewritten: paths lose their
 # `src/requests/` prefix, long lines end with `…`, and a run of same-tier rows
@@ -71,7 +72,7 @@ lines = [
 ]
 
 [[card]]
-question = "Where do I roll back to?"
+question = "Where do I roll back to? (pixel-git plugin)"
 command = "pixel plan-rollback '…'"
 lines = [
   { text = "sessions.py" },

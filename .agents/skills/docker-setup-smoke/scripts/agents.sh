@@ -22,7 +22,7 @@ project="$HOME/agents-project"
 cp -R "$HOME/doctor-project" "$project"
 rm -rf "$project/.pixel"
 cd "$project"
-pixel setup --shell bash --json > /evidence/agents-install.json
+pixel setup --json > /evidence/agents-install.json
 pixel setup --repo . --json > /evidence/agents-repo-install.json
 pixel prepare-repo . > /evidence/agents-prepare.txt 2>&1
 # A compliant model's first call, then a native search the guards may route.

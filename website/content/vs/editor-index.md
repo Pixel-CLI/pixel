@@ -6,7 +6,7 @@ tool: "editor-index"
 
 ## How they differ
 
-An editor, or an AI editor, indexes the repository for its own search and its own agent, and keeps that index to itself. Pixel's index is a directory, `.pixel/`, behind a command line: any agent with a shell queries the same one, and `pixel setup` wires it into each agent's instructions.
+An editor, or an AI editor, indexes the repository for its own search and its own agent, and keeps that index to itself. Pixel's index is a directory, `.pixel/`, behind a command line: any agent with a shell queries the same one, and `pixel setup` wires it into each agent with a prompt-submit hook and a skill.
 
 ## Choosing
 

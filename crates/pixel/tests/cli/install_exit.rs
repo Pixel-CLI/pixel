@@ -12,7 +12,7 @@ use crate::support::{Scratch, pixel_command};
 fn json_flag_prints_the_machine_readable_report() {
     let home = Scratch::for_test("install-exit", "json");
     let out = pixel_command()
-        .args(["setup", "--shell", "zsh", "--json"])
+        .args(["setup", "--json"])
         .env("HOME", &*home)
         .env("CODEX_HOME", home.join(".codex"))
         .current_dir(&*home)
@@ -29,7 +29,7 @@ fn json_flag_prints_the_machine_readable_report() {
 fn a_piped_stdout_keeps_the_json_report_without_the_flag() {
     let home = Scratch::for_test("install-exit", "piped");
     let out = pixel_command()
-        .args(["setup", "--shell", "zsh"])
+        .args(["setup"])
         .env("HOME", &*home)
         .env("CODEX_HOME", home.join(".codex"))
         .current_dir(&*home)
@@ -60,7 +60,7 @@ fn a_piped_stdout_keeps_the_json_report_without_the_flag() {
 fn setup_writes_the_claude_task_hooks_into_a_temporary_home() {
     let home = Scratch::for_test("install-exit", "setup-writes");
     let out = pixel_command()
-        .args(["setup", "--shell", "zsh", "--json"])
+        .args(["setup", "--json"])
         .env("HOME", &*home)
         .env("CODEX_HOME", home.join(".codex"))
         .current_dir(&*home)
@@ -84,11 +84,7 @@ fn setup_writes_the_claude_task_hooks_into_a_temporary_home() {
 #[test]
 fn the_removal_flags_need_remove() {
     let home = Scratch::for_test("install-exit", "needs-remove");
-    for flag in [
-        &["--dry-run"][..],
-        &["--wrappers-only"],
-        &["--binary-path", "/nonexistent/pixel"],
-    ] {
+    for flag in [&["--dry-run"][..], &["--binary-path", "/nonexistent/pixel"]] {
         let out = pixel_command()
             .arg("setup")
             .args(flag)

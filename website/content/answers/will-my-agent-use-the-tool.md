@@ -1,6 +1,6 @@
 ---
 title: "Will my agent actually use the tool I give it?"
-description: "Why coding agents fall back to grep and whole-file reads, what made Claude Code call Pixel in every recorded run, and what is not measured."
+description: "Why coding agents fall back to grep and whole-file reads, what a prompt-submit brief and a skill change about that, and what is not measured."
 answer: "will-my-agent-use-the-tool"
 ---
 
@@ -12,10 +12,10 @@ An agent is trained on the tools every repository has: search, read, the shell. 
 
 ## What made the difference
 
-Pixel does not wait for the agent to discover it. `pixel setup` puts its protocol into every session of the agents it supports, and on Claude Code it does so through lifecycle hooks, so the guidance is there on the first turn of every session. `pixel setup --repo` adds a guard to one repository that flags untargeted reads of large files; it advises and never blocks.
+Pixel does not wait for the agent to discover it. `pixel setup` hooks the prompt-submit event of the agents it supports, so a code question arrives with a source-cited brief the agent did not have to ask for, and it installs a `pixel` skill whose description names the moments an agent greps instead: who calls X, where X is defined, what breaks before a rename. Neither blocks a search or a read, so the agent can still grep.
 
-Check actual use in your own sessions: the current installation has no quantified adoption rate here, and tool use alone does not establish a time or cost gain.
+Check actual use in your own sessions: the brief and the skill have no quantified adoption rate here, and tool use alone does not establish a time or cost gain.
 
 ## Check it on your machine
 
-`pixel doctor` reports whether the hooks and the protocol are in place for each agent, and `pixel action-log` reads the local log of every Pixel command that ran, so you see whether your agent called it. The [page for your agent](../../for/) lists what `pixel setup` writes for it.
+`pixel brief "<a question about your code>" .` prints the brief your agent receives with that prompt. `pixel doctor` reports whether the hooks are in place for each agent, and `pixel action-log` (a [command plugin](../../docs/#command-plugins)) reads the local log of every Pixel command that ran, so you see whether your agent called it. The [page for your agent](../../for/) lists what `pixel setup` writes for it.

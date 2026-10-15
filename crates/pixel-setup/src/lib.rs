@@ -1,15 +1,12 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! pixel-setup — M5/M6 rollout: idempotent `pixel setup`, `pixel doctor`,
-//! and the clean-cut deprecation of the usable-git/gitpixel/sniper MCP
-//! entries. pixel is a CLI + lifecycle integration tool, not an MCP server —
-//! install scrubs deprecated entries (and the Warp MCP entry older releases
-//! wrote), keeps Claude and Codex task lifecycle hooks, and gives Pi the
+//! pixel-setup — idempotent `pixel setup`, `pixel setup --remove` and
+//! `pixel doctor`. pixel is a CLI + lifecycle integration tool: install keeps
+//! Claude and Codex task lifecycle hooks, the `pixel` skill, the prompt-brief
+//! hooks of Devin, Gemini CLI, Antigravity and OpenCode, and gives Pi the
 //! explicit impact command as a local package. It deploys no prompt and
-//! wires no retrieval guard: what earlier releases wrote for OpenCode,
-//! Devin, Antigravity, zcode, Cursor and Copilot CLI is removed. Agent-config
-//! files are rewritten with managed markers only where applicable.
+//! wires no retrieval guard.
 
 use std::io;
 use std::path::PathBuf;
@@ -21,30 +18,23 @@ pub mod banner;
 pub mod bundled_probes;
 pub mod codex_config;
 pub mod config;
-pub mod copilot_config;
 pub mod doctor;
 pub mod install;
 pub mod opencode_config;
 mod pi_global;
 pub use pi_global::{CLASSIFY_PACKAGE_DIR, ClassifyPiPackage};
-mod pi_project;
-mod pixel_first;
-mod repo_git;
 mod routing;
 pub mod setup;
 pub mod skill;
 pub mod uninstall;
-mod warp;
 
-/// Shared error type for the install/doctor/migrate surface.
+/// Shared error type for the install/doctor surface.
 #[derive(Debug, Error)]
 pub enum InstallError {
     #[error("io: {0}")]
     Io(#[from] io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("config: {0}")]
-    Config(#[from] config::ConfigError),
     #[error("cannot resolve home directory")]
     NoHome,
     #[error("cannot resolve current executable: {0}")]

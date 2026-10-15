@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Devin"
-description: "Pixel reaches Devin as an optional plugin; pixel setup writes nothing for it and removes the hooks earlier releases wrote: how to add the plugin, check it and remove it."
+description: "pixel setup registers a prompt-submit evidence brief and the pixel skill for Devin, which keeps its native tools: what it writes, how to check it and how to remove it."
 agent: "devin"
 ---
 

@@ -61,7 +61,7 @@
 [pixel.traits]
 how = "A tree-sitter graph, text and embedding search"
 needs = "One binary, an index in <code>.pixel/</code>"
-reach = "Shell commands via hooks or rules, or MCP"
+reach = "Shell commands, with a skill and a prompt-submit hook"
 history = "Yes, and guarded Git writes"
 licence = "MIT"
 
@@ -105,7 +105,7 @@ checked = 2026-09-25
   page = true
 
   [[tool.row]]
-  label = "Context on every turn"
+  label = "Context on every turn (Pixel 0.4.0)"
   pixel = "~4,160&nbsp;tok"
   other = "~19,700&nbsp;tok"
   win = "pixel"
@@ -447,7 +447,7 @@ slug = "rtk"
 name = "RTK"
 about = "A Rust proxy that rewrites an agent's shell commands and compresses what they print: build logs, test runs, Git output."
 measure = "design"
-answer = '''They cut different tokens, so they add up. RTK shortens what a command prints once the agent has run it; Pixel shortens what the agent reads to find its way, by answering from an index instead of whole files. In Claude Code, <code>pixel setup</code> keeps an existing RTK hook working: Pixel's guard takes the searches it rewrites and hands every other shell call to RTK, so one hook answers each call.'''
+answer = '''They cut different tokens, so they add up. RTK shortens what a command prints once the agent has run it; Pixel shortens what the agent reads to find its way, by answering from an index instead of whole files. In Claude Code, <code>pixel setup</code> registers no hook that rewrites a shell call, so RTK's stays the only one: install both, in either order.'''
 wins = "it compresses the output of builds, tests, Git and other shell commands, which Pixel leaves as they are."
 checked = 2026-09-26
 
@@ -475,8 +475,8 @@ checked = 2026-09-26
 
   [[tool.row]]
   label = "Running both in Claude Code"
-  pixel = "One guard hook, RTK delegated"
-  other = "Its hook, adopted by <code>pixel setup</code>"
+  pixel = "No shell-rewriting hook of its own"
+  other = "Its hook stays the only one"
 
 [[tool]]
 slug = "semble"
@@ -484,7 +484,7 @@ name = "semble"
 about = "A search tool that finds code from a question in plain English, with a small context footprint."
 measure = "head-to-head"
 bench = "where-a-specialist-wins"
-answer = '''For a question in plain English, semble has the right file in its top 10 for 100% of 45 queries, Pixel 0.6.0 for 96%; Pixel puts it first more often, 87% against 64%, and answers in 0.7 s against 1.6 s on average. semble costs less context on every turn. Pixel adds the call graph, blast radius, Git history and guarded Git writes. They combine: semble for search and Pixel for the rest cost about 5,100 tokens of context per turn.'''
+answer = '''For a question in plain English, semble has the right file in its top 10 for 100% of 45 queries, Pixel 0.6.0 for 96%; Pixel puts it first more often, 87% against 64%, and answers in 0.7 s against 1.6 s on average. semble costs less context on every turn. Pixel adds the call graph, blast radius, Git history and guarded Git writes. They combine: semble for search and Pixel for the rest cost about 5,100 tokens of context per turn, counting the prompt Pixel 0.4.0 installed.'''
 wins = "a top 10 that held the right file on every query, and a lighter context on every turn."
 checked = 2026-09-27
 
@@ -507,7 +507,7 @@ checked = 2026-09-27
   win = "pixel"
 
   [[tool.row]]
-  label = "Context on every turn"
+  label = "Context on every turn (Pixel 0.4.0)"
   pixel = "~4,160&nbsp;tok"
   other = "~980&nbsp;tok"
   win = "other"

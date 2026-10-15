@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Pi"
-description: "Pi's explicit /pixel-impact command as a Pi package, removal of the retired system-prompt block and project extension, how to check it and how to remove it."
+description: "A local Pi package with the explicit /pixel-impact command and a prompt-submit evidence brief, plus the pixel skill: what pixel setup writes, how to check it and how to remove it."
 agent: "pi"
 ---
 

@@ -1,6 +1,6 @@
 ---
 title: "Pixel for OpenCode"
-description: "OpenCode keeps its native tools: what pixel setup removes from its global AGENTS.md and plugins, and how pixel doctor checks that nothing of Pixel's is left."
+description: "OpenCode keeps its native tools: pixel setup adds a prompt-brief plugin and the pixel skill, and pixel setup --remove takes both out."
 agent: "opencode"
 ---
 

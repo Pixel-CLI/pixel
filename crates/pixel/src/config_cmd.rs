@@ -9,16 +9,7 @@
 //! an unset layer defaults to on. `--metrics=off` and `PIXEL_METRICS=0`
 //! still veto a single invocation above every file layer.
 //!
-//! The `policy` key is the retired guard's switch. No hook reads it any more:
-//! the guard and its rewrite or deny of native retrieval are gone, and
-//! `pixel setup` registers only the task-event hook. The key stays readable
-//! and writable so an existing configuration file keeps validating, and
-//! `pixel config` still reports it. `PIXEL_POLICY` overrides it for one
-//! environment and the legacy `PIXEL_TARGETS_GUARD=0` kill switch still reads
-//! as `off`, both for that report only.
-//!
 //! YAML files live under `.pixel/` in the repository and home directory.
-//! Legacy JSON remains readable until install or setup creates the YAML equivalent.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -36,8 +27,6 @@ use pixel_setup::config::{BRIEF_PARTS_KEY, BRIEF_PARTS_MAX};
 /// The environment overrides and YAML switches exposed in the overview.
 const FEATURES: &[(&str, &str)] = &[
     (DAEMON_AUTO_START_FEATURE, DAEMON_AUTO_START_ENV),
-    ("task_context", "PIXEL_TASK_CONTEXT"),
-    ("task_boundary", "PIXEL_TASK_BOUNDARY"),
     (
         crate::execution_brief::chain::BRIEF_FEATURE,
         crate::execution_brief::chain::BRIEF_ENV,
@@ -73,142 +62,6 @@ fn feature_resolution(root: Option<&Path>, key: &str, env: &str) -> (bool, Strin
     (value.unwrap_or(true), source)
 }
 
-/// The retired guard's setting, kept so existing configuration still parses.
-/// Nothing acts on it. The three values are the YAML setting, the `--json`
-/// value, and the `pixel config policy` argument.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
-pub enum PolicyMode {
-    /// The default.
-    Advisory,
-    /// Accepted for configurations written by older releases; no hook reads it.
-    Enforce,
-    /// The legacy off switch; no hook reads it.
-    Off,
-}
-
-impl PolicyMode {
-    /// The exact setting spelling, as stored in YAML and printed in JSON.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Advisory => "advisory",
-            Self::Enforce => "enforce",
-            Self::Off => "off",
-        }
-    }
-
-    /// Parse one configuration value; an unknown spelling is not a policy.
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "advisory" => Some(Self::Advisory),
-            "enforce" => Some(Self::Enforce),
-            "off" => Some(Self::Off),
-            _ => None,
-        }
-    }
-}
-
-/// The layer that decided the effective policy.
-enum PolicySource {
-    /// The environment variable that overrode every file layer.
-    Environment(&'static str),
-    Repo,
-    Global,
-    Default,
-}
-
-/// Effective retrieval policy and the layer that set it.
-struct PolicyResolution {
-    mode: PolicyMode,
-    source: PolicySource,
-    /// The file that declared the setting, for the two file layers.
-    file: Option<PathBuf>,
-}
-
-impl PolicyResolution {
-    fn environment(mode: PolicyMode, variable: &'static str) -> Self {
-        Self {
-            mode,
-            source: PolicySource::Environment(variable),
-            file: None,
-        }
-    }
-
-    /// Layer name for `--json`: a fixed word the Pi extension can branch on.
-    fn source_name(&self) -> &'static str {
-        match self.source {
-            PolicySource::Environment(_) => "env",
-            PolicySource::Repo => "repo",
-            PolicySource::Global => "global",
-            PolicySource::Default => "default",
-        }
-    }
-
-    /// `pixel config policy` reports the layer in words.
-    fn layer(&self) -> String {
-        match (&self.source, &self.file) {
-            (PolicySource::Environment(variable), _) => format!("{variable} (environment)"),
-            (_, Some(file)) => format!("{} {}", self.source_name(), file.display()),
-            _ => "default (no config sets it)".into(),
-        }
-    }
-
-    /// The overview line names the variable or file the value came from.
-    fn overview_label(&self) -> String {
-        match (&self.source, &self.file) {
-            (PolicySource::Environment(variable), _) => (*variable).into(),
-            (_, Some(file)) => file.display().to_string(),
-            _ => "default".into(),
-        }
-    }
-}
-
-/// The policy one layer declares, or `None` when the layer does not
-/// pronounce itself (missing file, missing key, or unknown value). An
-/// unknown value is ignored rather than fatal: a hook must never break a
-/// session over a typo, and `pixel config` reports it when the file is
-/// validated.
-fn read_policy(path: &Path) -> Option<PolicyMode> {
-    PolicyMode::parse(read_config_doc(path)?.get("policy")?.as_str()?)
-}
-
-/// Effective retrieval policy for `root`: the `PIXEL_POLICY` environment
-/// override, the repository layer, the global layer, then the advisory
-/// default. `PIXEL_TARGETS_GUARD=0` (also `false`/`off`) remains the
-/// legacy kill switch over everything.
-fn policy_resolution(root: Option<&Path>) -> PolicyResolution {
-    const LEGACY_SWITCH: &str = "PIXEL_TARGETS_GUARD";
-    if crate::env_flag_off(LEGACY_SWITCH) {
-        return PolicyResolution::environment(PolicyMode::Off, LEGACY_SWITCH);
-    }
-    if let Ok(value) = std::env::var("PIXEL_POLICY") {
-        // An unrecognised value selects the advisory default, as it always has.
-        let mode = PolicyMode::parse(value.trim().to_ascii_lowercase().as_str())
-            .unwrap_or(PolicyMode::Advisory);
-        return PolicyResolution::environment(mode, "PIXEL_POLICY");
-    }
-    let repo = root.map(repo_config_path);
-    if let Some(mode) = repo.as_deref().and_then(read_policy) {
-        return PolicyResolution {
-            mode,
-            source: PolicySource::Repo,
-            file: repo,
-        };
-    }
-    let global = global_config_path();
-    if let Some(mode) = global.as_deref().and_then(read_policy) {
-        return PolicyResolution {
-            mode,
-            source: PolicySource::Global,
-            file: global,
-        };
-    }
-    PolicyResolution {
-        mode: PolicyMode::Advisory,
-        source: PolicySource::Default,
-        file: None,
-    }
-}
-
 pub fn ensure_template(root: Option<&Path>) -> Result<PathBuf, String> {
     let directory = if let Some(root) = root {
         root.join(".pixel")
@@ -242,15 +95,6 @@ fn validate(path: &Path) -> Result<(), String> {
         .is_some_and(|v| !matches!(v.as_str(), Some("on" | "off")))
     {
         return Err(format!("{}: metrics must be on or off", path.display()));
-    }
-    if doc
-        .get("policy")
-        .is_some_and(|v| !v.as_str().and_then(PolicyMode::parse).is_some())
-    {
-        return Err(format!(
-            "{}: policy must be advisory, enforce, or off",
-            path.display()
-        ));
     }
     classify_enabled_in(&doc)?;
     if let Some(classify) = doc.get("classify") {
@@ -328,12 +172,6 @@ pub fn overview(path: &Path) -> Result<(), String> {
         println!("{key}: {enabled} ({source})");
     }
     println!("{BRIEF_PARTS_KEY}: {}", brief_parts(root.as_deref()));
-    let policy = policy_resolution(root.as_deref());
-    println!(
-        "policy: {} ({})",
-        policy.mode.as_str(),
-        policy.overview_label()
-    );
     println!("classify.enabled: {} (global)", classify_enabled()?);
     println!(
         "classify.engine: {}",
@@ -380,12 +218,12 @@ fn read_metrics(path: &Path) -> Option<bool> {
 }
 
 fn repo_config_path(root: &Path) -> PathBuf {
-    crate::config_file::preferred_path(&root.join(".pixel"))
+    crate::config_file::path_in(&root.join(".pixel"))
 }
 
 fn global_config_path() -> Option<PathBuf> {
     std::env::var_os("HOME")
-        .map(|home| crate::config_file::preferred_path(&PathBuf::from(home).join(".pixel")))
+        .map(|home| crate::config_file::path_in(&PathBuf::from(home).join(".pixel")))
 }
 
 /// Effective live-metrics setting for `root`: repo layer first, then the
@@ -439,7 +277,7 @@ fn write_doc(path: &Path, mutate: impl FnOnce(&mut Value)) -> Result<(), String>
         "{}.{}.tmp",
         path.file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("config.json"),
+            .unwrap_or("config.yaml"),
         std::process::id(),
     ));
     if let Err(e) = write_private(&tmp, rendered.as_bytes()) {
@@ -643,7 +481,7 @@ fn setup_with_install(
 
 /// Setup and `config metrics on --global` write the global layer only, and a
 /// repo-level `metrics` still wins in its repository; without this note a
-/// stale legacy repo `config.json` defeats the answer the user just gave and
+/// stale repo `config.yaml` defeats the answer the user just gave and
 /// the footer stays hidden. Best effort: no repository, no saved answer, or a
 /// repo layer that agrees means no note.
 fn note_repo_override(
@@ -757,41 +595,22 @@ fn setup_with_keys(
         return Ok(false);
     };
     doc["metrics"] = json!(if metrics { "on" } else { "off" });
-    for (key, label) in [
-        (
-            "daemon_auto_start",
-            "Start the background repository daemon on demand?",
-        ),
-        (
-            "task_context",
-            "Suggest relevant code when an agent receives a prompt (retired: no hook reads this)?",
-        ),
-        (
-            "task_boundary",
-            "Detect task changes in agent prompts (retired: no hook reads this)?",
-        ),
-    ] {
-        let current = doc.get(key).and_then(Value::as_bool).unwrap_or(true);
-        let Some(value) = ask_bool(input, output, label, current, keys, color)? else {
-            return Ok(false);
-        };
-        doc[key] = json!(value);
-    }
-    // #863: the question is framed around the advisory direction, and its
-    // default is advisory — a stored `enforce` still wins so an explicit
-    // choice is not flipped by Enter.
-    let Some(advisory) = ask_bool(
+    let daemon_auto_start = doc
+        .get("daemon_auto_start")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let Some(daemon_auto_start) = ask_bool(
         input,
         output,
-        "Keep the retrieval policy advisory (recommend pixel retrieval to agents, never block)?",
-        doc.get("policy").and_then(Value::as_str) != Some(PolicyMode::Enforce.as_str()),
+        "Start the background repository daemon on demand?",
+        daemon_auto_start,
         keys,
         color,
     )?
     else {
         return Ok(false);
     };
-    doc["policy"] = json!(if advisory { "advisory" } else { "enforce" });
+    doc["daemon_auto_start"] = json!(daemon_auto_start);
     writeln!(output).map_err(|e| e.to_string())?;
     writeln!(output, "{}", classify_blurb(color)).map_err(|e| e.to_string())?;
     let Some(enabled) = ask_bool(
@@ -814,15 +633,6 @@ fn setup_with_keys(
             "daemon auto-start",
             yes_no(doc["daemon_auto_start"].as_bool().unwrap_or(true)),
         ),
-        (
-            "task context",
-            yes_no(doc["task_context"].as_bool().unwrap_or(true)),
-        ),
-        (
-            "task boundary",
-            yes_no(doc["task_boundary"].as_bool().unwrap_or(true)),
-        ),
-        ("policy", doc["policy"].as_str().unwrap_or("?").to_string()),
         (
             "classify",
             if enabled {
@@ -854,13 +664,7 @@ fn setup_with_keys(
         return Ok(false);
     }
     write_doc(path, |current| {
-        for key in [
-            "metrics",
-            "daemon_auto_start",
-            "task_context",
-            "task_boundary",
-            "policy",
-        ] {
+        for key in ["metrics", "daemon_auto_start"] {
             current[key] = doc[key].clone();
         }
         if !current.get("classify").is_some_and(Value::is_object) {
@@ -1321,65 +1125,6 @@ fn run_metrics_with(
     }
 }
 
-/// Printed when `enforce` is set, so a success message is never read as
-/// enforcement: the guard that acted on it was retired.
-const ENFORCE_SCOPE_NOTE: &str = "note: no hook reads the policy any more; `pixel run-hook guard` is retired, so enforce changes no agent's native retrieval";
-
-/// `pixel config policy [advisory|enforce|off] [--global] [--json]`: without
-/// a value, report the effective policy and the layer that set it; with one,
-/// persist it to the chosen layer. `--json` is the Pi extension's
-/// machine-readable form, so it never has to parse the prose.
-pub fn run_policy(
-    path: &Path,
-    global: bool,
-    value: Option<PolicyMode>,
-    json: bool,
-) -> Result<(), String> {
-    let root = crate::discover_root(path).ok();
-    match value {
-        None => {
-            let resolution = policy_resolution(root.as_deref());
-            if json {
-                let mut report = json!({
-                    "policy": resolution.mode.as_str(),
-                    "source": resolution.source_name(),
-                });
-                if let Some(file) = resolution.file.as_deref() {
-                    report["file"] = json!(file.display().to_string());
-                }
-                println!(
-                    "{}",
-                    serde_json::to_string(&report).map_err(|e| e.to_string())?
-                );
-            } else {
-                println!(
-                    "policy: {} — {}",
-                    resolution.mode.as_str(),
-                    resolution.layer()
-                );
-            }
-            Ok(())
-        }
-        Some(mode) => {
-            let target = if global {
-                global_config_path().ok_or("no HOME for the global config")?
-            } else {
-                repo_config_path(
-                    &root.ok_or("no repository root here — pass --global or run inside a repo")?,
-                )
-            };
-            write_doc(&target, |doc| {
-                doc["policy"] = Value::String(mode.as_str().to_string());
-            })?;
-            println!("policy: {} — wrote {}", mode.as_str(), target.display());
-            if mode == PolicyMode::Enforce {
-                println!("{ENFORCE_SCOPE_NOTE}");
-            }
-            Ok(())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1441,7 +1186,7 @@ mod tests {
             let mut calls = 0;
             let result = setup_with_install(
                 &path,
-                &mut std::io::Cursor::new("n\n\n\n\n\ny\ny\n"),
+                &mut std::io::Cursor::new("n\n\ny\ny\n"),
                 &mut Vec::new(),
                 false,
                 &KeyReader::inert(),
@@ -1472,8 +1217,7 @@ mod tests {
             assert_eq!(
                 crate::config_file::load(&path).unwrap(),
                 json!({
-                    "metrics":"off", "daemon_auto_start":true, "task_context":true,
-                    "task_boundary":true, "policy":"advisory",
+                    "metrics":"off", "daemon_auto_start":true,
                     "classify":{"enabled":expected_enabled, "engine":"remote"},
                     "future":42, "remote_keys":{"openrouter":"retained-secret"}
                 })
@@ -1489,7 +1233,7 @@ mod tests {
         let mut classify_runs = 0;
         let error = setup_with_install(
             &path,
-            &mut std::io::Cursor::new("n\n\n\n\n\ny\ny\n"),
+            &mut std::io::Cursor::new("n\n\ny\ny\n"),
             &mut Vec::new(),
             false,
             &KeyReader::inert(),
@@ -1511,7 +1255,7 @@ mod tests {
     fn setup_should_not_install_after_cancellation_or_disabling_classify() {
         for (answers, enabled, metrics, saved_expected) in [
             ("q\ny\n", true, "on", false),
-            ("n\n\n\n\n\nn\ny\n", false, "off", true),
+            ("n\n\nn\ny\n", false, "off", true),
         ] {
             let home = HomeGuard::set();
             let path = home.0.join("config.yaml");
@@ -1541,7 +1285,7 @@ mod tests {
         let path = home.0.join("config.yaml");
         let error = setup_with_install(
             &path,
-            &mut std::io::Cursor::new("\n\n\n\n\ny\ny\n"),
+            &mut std::io::Cursor::new("\n\ny\ny\n"),
             &mut Vec::new(),
             false,
             &KeyReader::inert(),
@@ -1557,13 +1301,13 @@ mod tests {
     }
 
     /// The 0.6.1 bug report: setup saved `metrics: "on"` globally while a
-    /// legacy repo `config.json` still carried `metrics: "off"`, so every
+    /// repo `config.yaml` still carried `metrics: "off"`, so every
     /// launch in that repository hid the footer and the answer looked ignored.
     #[test]
     fn repo_override_note_should_name_the_winning_repo_layer() {
         let home = HomeGuard::set();
         let repo = home.0.join("repo");
-        let legacy = repo.join(".pixel").join("config.json");
+        let legacy = repo.join(".pixel").join("config.yaml");
         write(&legacy, &json!({"metrics":"off"}).to_string());
         let mut out = Vec::new();
         note_repo_override(&mut out, true, Some(true), Some(&repo)).unwrap();
@@ -1591,7 +1335,7 @@ mod tests {
         // No repo-level metrics setting.
         write(
             &repo.join(".pixel").join("config.yaml"),
-            "policy: enforce\n",
+            "daemon_auto_start: false\n",
         );
         note_repo_override(&mut out, true, Some(true), Some(&repo)).unwrap();
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
@@ -1625,7 +1369,7 @@ mod tests {
         point_home(&home.0);
         let repo = home.0.join("repo");
         write(
-            &repo.join(".pixel").join("config.json"),
+            &repo.join(".pixel").join("config.yaml"),
             &json!({"metrics":"off"}).to_string(),
         );
 
@@ -1640,7 +1384,7 @@ mod tests {
 
         // The repo layer itself was left untouched: the note only reports.
         assert_eq!(
-            crate::config_file::load(&repo.join(".pixel").join("config.json")).unwrap(),
+            crate::config_file::load(&repo.join(".pixel").join("config.yaml")).unwrap(),
             json!({"metrics":"off"})
         );
         restore_home(saved_home);
@@ -1654,7 +1398,7 @@ mod tests {
         point_home(&home.0);
         let repo = home.0.join("repo");
         write(
-            &repo.join(".pixel").join("config.json"),
+            &repo.join(".pixel").join("config.yaml"),
             &json!({"metrics":"off"}).to_string(),
         );
 
@@ -1663,10 +1407,9 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("metrics: on — wrote"), "{text}");
         assert!(!text.contains("wins in this repository"), "{text}");
-        // The repo write targets the legacy json when no yaml exists, and no
-        // note is printed: the layer just written agrees by construction.
+        // No note is printed: the layer just written agrees by construction.
         assert_eq!(
-            crate::config_file::load(&repo.join(".pixel").join("config.json")).unwrap(),
+            crate::config_file::load(&repo.join(".pixel").join("config.yaml")).unwrap(),
             json!({"metrics":"on"})
         );
         restore_home(saved_home);
@@ -1706,7 +1449,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("n\nn\nn\nn\ny\nn\ny\n"),
+                &mut std::io::Cursor::new("n\nn\nn\ny\n"),
                 &mut output,
                 false,
             )
@@ -1716,8 +1459,7 @@ mod tests {
         assert_eq!(
             crate::config_file::load(&path).unwrap(),
             json!({
-                "metrics":"off", "daemon_auto_start":false, "task_context":false,
-                "task_boundary":false, "policy":"advisory",
+                "metrics":"off", "daemon_auto_start":false,
                 "classify":{"engine":"remote", "enabled":false},
                 "remote_keys":{"openrouter":"new-secret"}, "future":42
             })
@@ -1731,7 +1473,7 @@ mod tests {
         let path = home.0.join("config.yaml");
         let original = "# personal comment\nremote_keys: {openrouter: hidden-secret}\nclassify: {engine: remote}\nunknown: 42\n";
         write(&path, original);
-        for answers in ["q\n", "", "n\nn\nn\nn\nn\nn\nn\n", "n\nn\nn\nn\nn\nn\n"] {
+        for answers in ["q\n", "", "n\nn\nn\nn\n", "n\nn\nn\n"] {
             assert!(
                 !setup_with(
                     &path,
@@ -1747,7 +1489,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("n\nn\nn\nn\ny\nn\ny\n"),
+                &mut std::io::Cursor::new("n\nn\nn\ny\n"),
                 &mut output,
                 false,
             )
@@ -1757,8 +1499,7 @@ mod tests {
             crate::config_file::load(&path).unwrap(),
             json!({
                 "remote_keys": {"openrouter":"hidden-secret"}, "unknown":42,
-                "metrics":"off", "daemon_auto_start":false, "task_context":false,
-                "task_boundary":false, "policy":"advisory",
+                "metrics":"off", "daemon_auto_start":false,
                 "classify":{"engine":"remote", "enabled":false}
             })
         );
@@ -1787,7 +1528,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
+                &mut std::io::Cursor::new("\n\n\ny\n"),
                 &mut Vec::new(),
                 false,
             )
@@ -1797,16 +1538,11 @@ mod tests {
             crate::config_file::load(&path).unwrap()["classify"]["enabled"],
             false
         );
-        // Enter keeps the saved policy too, rather than defaulting the prompt.
-        assert_eq!(
-            crate::config_file::load(&path).unwrap()["policy"],
-            "advisory"
-        );
         let mut output = Vec::new();
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("y\ny\ny\ny\ny\ny\ny\n"),
+                &mut std::io::Cursor::new("y\ny\ny\ny\n"),
                 &mut output,
                 false,
             )
@@ -1820,11 +1556,7 @@ mod tests {
         );
         let doc = crate::config_file::load(&path).unwrap();
         assert_eq!(doc["metrics"], "on");
-        for key in ["daemon_auto_start", "task_context", "task_boundary"] {
-            assert_eq!(doc[key], true);
-        }
-        // `y` to the policy question is yes-to-advisory (#863).
-        assert_eq!(doc["policy"], "advisory");
+        assert_eq!(doc["daemon_auto_start"], true);
         assert_eq!(doc["classify"]["enabled"], true);
     }
 
@@ -1840,7 +1572,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\n\n\n"),
+                &mut std::io::Cursor::new("\n\n\n\n"),
                 &mut Vec::new(),
                 false
             )
@@ -1849,9 +1581,6 @@ mod tests {
         let saved = crate::config_file::load(&path).unwrap();
         assert_eq!(saved["metrics"], "on");
         assert_eq!(saved["daemon_auto_start"], true);
-        assert_eq!(saved["task_context"], true);
-        assert_eq!(saved["task_boundary"], true);
-        assert_eq!(saved["policy"], "advisory");
     }
 
     #[test]
@@ -1862,7 +1591,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
+                &mut std::io::Cursor::new("\n\n\ny\n"),
                 &mut Vec::new(),
                 false,
             )
@@ -1874,8 +1603,7 @@ mod tests {
         assert_eq!(
             crate::config_file::load(&path).unwrap(),
             json!({
-                "metrics":"on", "daemon_auto_start":true, "task_context":true,
-                "task_boundary":true, "policy":"advisory", "classify":{"enabled":true}
+                "metrics":"on", "daemon_auto_start":true, "classify":{"enabled":true}
             })
         );
         // A saved opt-out is respected: Enter keeps classify off rather
@@ -1884,7 +1612,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
+                &mut std::io::Cursor::new("\n\n\ny\n"),
                 &mut Vec::new(),
                 false,
             )
@@ -1899,7 +1627,7 @@ mod tests {
         assert_eq!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
+                &mut std::io::Cursor::new("\n\n\ny\n"),
                 &mut Vec::new(),
                 false,
             )
@@ -1912,12 +1640,12 @@ mod tests {
     fn the_classify_explanation_names_jev_and_the_default_shows_yes() {
         let home = HomeGuard::set();
         let path = home.0.join("config.yaml");
-        // Five noes answer the five questions before classify; q then
+        // Two noes answer the two questions before classify; q then
         // cancels at the classify question itself, after it was printed.
         let mut output = Vec::new();
         setup_with(
             &path,
-            &mut std::io::Cursor::new("n\nn\nn\nn\nn\nq\n"),
+            &mut std::io::Cursor::new("n\nn\nq\n"),
             &mut output,
             true,
         )
@@ -1942,7 +1670,7 @@ mod tests {
         let mut output = Vec::new();
         setup_with(
             &path,
-            &mut std::io::Cursor::new("n\nn\nn\nn\nn\nq\n"),
+            &mut std::io::Cursor::new("n\nn\nq\n"),
             &mut output,
             false,
         )
@@ -2023,39 +1751,6 @@ mod tests {
     }
 
     #[test]
-    fn yaml_should_drive_all_existing_readers_after_migration() {
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let home = HomeGuard::set();
-        let saved = home_env();
-        point_home(&home.0);
-        let legacy = home.0.join(".pixel/config.json");
-        write(
-            &legacy,
-            r#"{"metrics":"off","classify":{"engine":"remote","remote_preset":"deepseek","ollaya":{"base":"http://localhost:11435","argv":["ollaya","serve"]}},"remote_keys":{"deepseek":"key"}}"#,
-        );
-        let yaml = ensure_template(None).unwrap();
-        write(&legacy, "{}");
-        assert!(!metrics_enabled(None));
-        assert_eq!(classify_engine().as_deref(), Some("remote"));
-        assert_eq!(
-            classify_remote_preset(),
-            Some(crate::decide_remote::Preset::Deepseek)
-        );
-        assert_eq!(
-            ollaya_launch(),
-            Some(json!({"base":"http://localhost:11435","argv":["ollaya","serve"]}))
-        );
-        assert_eq!(
-            remote_key(crate::decide_remote::Preset::Deepseek).as_deref(),
-            Some("key")
-        );
-        set_classify_engine("local").unwrap();
-        assert_eq!(classify_engine().as_deref(), Some("local"));
-        assert_eq!(crate::config_file::load(&yaml).unwrap()["metrics"], "off");
-        restore_home(saved);
-    }
-
-    #[test]
     fn daemon_start_should_be_disabled_by_repo_yaml_without_an_environment_switch() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();
@@ -2106,30 +1801,6 @@ mod tests {
         );
         #[cfg(unix)]
         assert_eq!(mode(&path), 0o600);
-    }
-
-    #[test]
-    fn migration_should_preserve_legacy_values_and_leave_existing_yaml_alone() {
-        let home = HomeGuard::set();
-        let yaml = home.0.join("config.yaml");
-        let legacy = home.0.join("config.json");
-        let original = r#"{"metrics":"off","remote_keys":{"ollama":"secret"},"future":[1,2]}"#;
-        write(&legacy, original);
-        assert_eq!(crate::config_file::preferred_path(&home.0), legacy);
-        crate::config_file::ensure(&yaml).unwrap();
-        assert_eq!(
-            crate::config_file::load(&yaml).unwrap(),
-            serde_json::from_str::<Value>(original).unwrap()
-        );
-        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), original);
-        assert_eq!(crate::config_file::preferred_path(&home.0), yaml);
-        let contents = std::fs::read_to_string(&yaml).unwrap();
-        assert!(contents.contains("# metrics:"));
-        write(&legacy, "{}");
-        crate::config_file::ensure(&yaml).unwrap();
-        assert_eq!(std::fs::read_to_string(&yaml).unwrap(), contents);
-        #[cfg(unix)]
-        assert_eq!(mode(&yaml), 0o600);
     }
 
     #[test]
@@ -2241,7 +1912,7 @@ mod tests {
         validate(&path).unwrap();
         for invalid in [
             "metrics: false",
-            "task_context: 'off'",
+            "daemon_auto_start: 'off'",
             "classify: []",
             "classify: {engine: invalid}",
             "classify: {remote_preset: invalid}",
@@ -2254,7 +1925,7 @@ mod tests {
         }
         write(
             &path,
-            "metrics: 'on'\nclassify: {engine: local, remote_preset: deepseek}\ntask_context: true\n\
+            "metrics: 'on'\nclassify: {engine: local, remote_preset: deepseek}\ndaemon_auto_start: true\n\
              web_search: {searxng_url: https://sx.test}\nremote_keys: {perplexity: pplx}",
         );
         validate(&path).unwrap();
@@ -2411,11 +2082,11 @@ mod tests {
 
         assert!(metrics_enabled(Some(&repo)), "unset defaults on");
 
-        write(&repo.join(".pixel/config.json"), "{\"metrics\": \"off\"}");
+        write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert!(!metrics_enabled(Some(&repo)), "repo off wins");
 
-        write(&repo.join(".pixel/config.json"), "{\"metrics\": \"on\"}");
-        write(&home.0.join(".pixel/config.json"), "{\"metrics\": \"off\"}");
+        write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"on\"}");
+        write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert!(metrics_enabled(Some(&repo)), "repo on overrides global off");
         assert!(
             !metrics_enabled(Some(&repo.join("no-config-here"))),
@@ -2433,20 +2104,20 @@ mod tests {
         point_home(&home.0);
 
         let repo = home.0.join("repo");
-        write(&repo.join(".pixel/config.json"), "not json");
-        write(&home.0.join(".pixel/config.json"), "{\"metrics\": \"off\"}");
+        write(&repo.join(".pixel/config.yaml"), "not json");
+        write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert!(
             !metrics_enabled(Some(&repo)),
             "malformed repo falls through to global"
         );
 
-        write(&repo.join(".pixel/config.json"), "{\"metrics\": \"loud\"}");
+        write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"loud\"}");
         assert!(
             !metrics_enabled(Some(&repo)),
             "unknown value is not a setting"
         );
         write(
-            &home.0.join(".pixel/config.json"),
+            &home.0.join(".pixel/config.yaml"),
             "{\"metrics\": \"off\", \"future\": 1}",
         );
         assert!(!metrics_enabled(Some(&repo)));
@@ -2464,11 +2135,11 @@ mod tests {
     #[test]
     fn every_config_write_leaves_the_stored_keys_owner_only() {
         let home = HomeGuard::set();
-        let cfg = home.0.join(".pixel/config.json");
+        let cfg = home.0.join(".pixel/config.yaml");
         write(&cfg, "{\"remote_keys\": {\"openrouter\": \"sk-secret\"}}");
         // A world-readable leftover tmp from a crashed write must not lend
         // its mode to the next one.
-        let tmp = cfg.with_file_name(format!("config.json.{}.tmp", std::process::id()));
+        let tmp = cfg.with_file_name(format!("config.yaml.{}.tmp", std::process::id()));
         write(&tmp, "{}");
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2512,11 +2183,11 @@ mod tests {
 
         let repo = home.0.join("repo");
         std::fs::create_dir_all(repo.join(".pixel")).unwrap();
-        let cfg = repo.join(".pixel/config.json");
+        let cfg = repo.join(".pixel/config.yaml");
         write(&cfg, "{\"future\": {\"nested\": true}}");
 
         write_metrics(&cfg, false).unwrap();
-        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let doc: Value = crate::config_file::load(&cfg).unwrap();
         assert_eq!(doc["metrics"], "off");
         assert_eq!(doc["future"]["nested"], true);
         assert!(!metrics_enabled(Some(&repo)));
@@ -2551,7 +2222,7 @@ mod tests {
             "no repo handle still resolves through the default"
         );
 
-        write(&home.0.join(".pixel/config.json"), "{\"metrics\": \"off\"}");
+        write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert_eq!(
             metrics_resolution(Some(&repo)),
             (false, Source::Global),
@@ -2562,7 +2233,7 @@ mod tests {
             "without a repo the global layer is the answer"
         );
 
-        write(&repo.join(".pixel/config.json"), "{\"metrics\": \"on\"}");
+        write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"on\"}");
         assert_eq!(
             metrics_resolution(Some(&repo)),
             (true, Source::Repo),
@@ -2570,105 +2241,6 @@ mod tests {
         );
 
         restore_home(saved);
-    }
-
-    #[test]
-    fn policy_values_round_trip_and_reject_every_other_spelling() {
-        for mode in [PolicyMode::Advisory, PolicyMode::Enforce, PolicyMode::Off] {
-            assert_eq!(PolicyMode::parse(mode.as_str()), Some(mode));
-        }
-        for value in ["", "advisory ", "ADVISORY", "Enforce", "loud", "offf"] {
-            assert_eq!(PolicyMode::parse(value), None, "{value:?}");
-        }
-    }
-
-    #[test]
-    fn policy_resolution_reads_env_then_repo_then_global_and_labels_each_layer() {
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let home = HomeGuard::set();
-        let repo_dir = HomeGuard::set();
-        let saved_home = home_env();
-        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
-            ["PIXEL_POLICY", "PIXEL_TARGETS_GUARD"]
-                .into_iter()
-                .map(|name| (name, std::env::var_os(name)))
-                .collect();
-        for (name, _) in &saved {
-            // SAFETY: under crate::ENV_LOCK in tests only.
-            unsafe { std::env::remove_var(name) };
-        }
-        point_home(&home.0);
-        let repo = repo_dir.0.clone();
-        let global_path = home.0.join(".pixel/config.yaml");
-        let repo_path = repo.join(".pixel/config.yaml");
-
-        let default = policy_resolution(Some(&repo));
-        assert_eq!(default.mode, PolicyMode::Advisory);
-        assert_eq!(default.source_name(), "default");
-        assert_eq!(default.layer(), "default (no config sets it)");
-        assert_eq!(default.overview_label(), "default");
-
-        // A value the layer cannot read is not a policy: it falls through
-        // to the next layer.
-        write(&global_path, "policy: loudly\n");
-        write(&repo_path, "policy: null\n");
-        assert_eq!(policy_resolution(Some(&repo)).mode, PolicyMode::Advisory);
-
-        // Quoted like every YAML string: a bare `off` is a YAML boolean.
-        write(&global_path, "policy: \"off\"\n");
-        let global = policy_resolution(Some(&repo));
-        assert_eq!(global.mode, PolicyMode::Off);
-        assert_eq!(global.source_name(), "global");
-        assert_eq!(global.layer(), format!("global {}", global_path.display()));
-        assert_eq!(global.overview_label(), global_path.display().to_string());
-        assert_eq!(
-            policy_resolution(None).mode,
-            PolicyMode::Off,
-            "no repo handle reads global"
-        );
-
-        write(&repo_path, "policy: enforce\n");
-        let repo_layer = policy_resolution(Some(&repo));
-        assert_eq!(repo_layer.mode, PolicyMode::Enforce);
-        assert_eq!(repo_layer.source_name(), "repo");
-        assert_eq!(repo_layer.layer(), format!("repo {}", repo_path.display()));
-
-        for (value, expected) in [
-            ("Enforce ", PolicyMode::Enforce),
-            ("ADVISORY", PolicyMode::Advisory),
-            ("nonsense", PolicyMode::Advisory),
-        ] {
-            // SAFETY: under crate::ENV_LOCK in tests only.
-            unsafe { std::env::set_var("PIXEL_POLICY", value) };
-            let environment = policy_resolution(Some(&repo));
-            assert_eq!(environment.mode, expected, "{value:?}");
-            assert_eq!(environment.source_name(), "env");
-            assert_eq!(environment.file, None);
-            assert_eq!(environment.layer(), "PIXEL_POLICY (environment)");
-            assert_eq!(environment.overview_label(), "PIXEL_POLICY");
-        }
-
-        // The legacy kill switch outranks an explicit enforce.
-        // SAFETY: under crate::ENV_LOCK in tests only.
-        unsafe {
-            std::env::set_var("PIXEL_POLICY", "enforce");
-            std::env::set_var("PIXEL_TARGETS_GUARD", "0");
-        }
-        let legacy = policy_resolution(Some(&repo));
-        assert_eq!(legacy.mode, PolicyMode::Off);
-        assert_eq!(legacy.layer(), "PIXEL_TARGETS_GUARD (environment)");
-        assert_eq!(legacy.overview_label(), "PIXEL_TARGETS_GUARD");
-
-        for (name, value) in saved {
-            // SAFETY: under crate::ENV_LOCK in tests only.
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
-        }
-        restore_home(saved_home);
     }
 
     #[test]
@@ -2764,7 +2336,7 @@ mod tests {
         let home = HomeGuard::set();
         let saved = home_env();
         point_home(&home.0);
-        let path = home.0.join(".pixel/config.json");
+        let path = home.0.join(".pixel/config.yaml");
         write(&path, r#"{"metrics":"off","classify":"stale"}"#);
         let launch = json!({"base": "http://127.0.0.1:11435", "argv": ["ollaya", "serve"]});
         set_ollaya_launch(&launch).unwrap();
@@ -2781,7 +2353,7 @@ mod tests {
         let saved = home_env();
         point_home(&home.0);
 
-        let path = home.0.join(".pixel/config.json");
+        let path = home.0.join(".pixel/config.yaml");
         write(&path, r#"{"metrics":"off","classify":"stale"}"#);
         set_classify_engine("local").unwrap();
         assert_eq!(classify_engine().as_deref(), Some("local"));
@@ -2821,7 +2393,7 @@ mod tests {
             Some(crate::decide_remote::Preset::OpencodeGo)
         );
 
-        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let stored: Value = crate::config_file::load(&path).unwrap();
         assert_eq!(stored["metrics"], "off");
         assert_eq!(stored["classify"]["engine"], "local");
         assert_eq!(stored["classify"]["ollaya"]["model"], "winnow:e4b");

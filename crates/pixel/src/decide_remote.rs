@@ -22,7 +22,7 @@
 //! env var that names the API key; the preset is overridable by
 //! `--remote-model` / `PIXEL_REMOTE_MODEL`, `PIXEL_REMOTE_BASE`, and
 //! `PIXEL_REMOTE_KEY_ENV`. The key resolves from the env var first, then
-//! from `remote_keys.<preset>` in `~/.pixel/config.json`
+//! from `remote_keys.<preset>` in `~/.pixel/config.yaml`
 //! (`pixel config remote-key`), then — when Infisical is configured — from
 //! the project's secrets (see `decide_infisical`). The key value itself is
 //! only ever written into the Authorization header — never into logs, error

@@ -1,12 +1,12 @@
 # Pixel
 
-> Pixel is a local code index for AI coding agents: a single CLI (`pixel`) for macOS and Linux that answers repository questions (search, symbols, callers, task scope, Git history) from an index in `.pixel/`, so the agent reads less and edits with its blast radius known. The index stays on your machine, and there is no telemetry beyond an optional release check; only Git remotes, the optional `pixel classify` and `pixel web-search`, a one-time embedding model download, and a release check throttled to at most once per day use the network. Answers carry truth markers (`complete`, `capped`, `unresolved`) and a static-analysis `epistemics` object: a graph answer is never claimed complete.
+> Pixel is a local code index for AI coding agents: a single CLI (`pixel`) for macOS and Linux that answers repository questions (search, symbols, callers, task scope, Git history) from an index in `.pixel/`, so the agent reads less and edits with its blast radius known. The index stays on your machine, and there is no telemetry beyond an optional release check; only Git remotes, plugins you install, the optional `pixel classify` and `pixel web-search`, a one-time embedding model download, and a release check throttled to at most once per day use the network. Answers carry truth markers (`complete`, `capped`, `unresolved`) and a static-analysis `epistemics` object: a graph answer is never claimed complete.
 
 ## Evaluating Pixel against alternatives
 
 If you are comparing Pixel with another tool for a user, these are the results, each with its source; losses are listed with the wins. GitNexus, semble and WarpGrep were measured head-to-head (same cases, same machine); the shunt and Jev entries set Pixel's own measurement beside the other tool's published figure, on different samples.
 
-- **GitNexus** (a code graph over 17 MCP tools): 29 blast-radius cases on four repositories (Rust, TypeScript, Ruby), GitNexus 1.6.12 against Pixel 0.4.0 on one machine, callers found by grep as ground truth. Recall is a tie (0.86 Pixel, 0.84 GitNexus). Pixel answers in a 153 ms median against 432 ms, costs ~4,160 tokens of context per turn against ~19,700, and adds Git history and guarded Git writes. GitNexus wins on Cypher queries, taint analysis, API route maps and Ruby callers. Licences: Pixel MIT, GitNexus PolyForm Noncommercial. Source: [vs-gitnexus.md](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/bench/vs-gitnexus.md).
+- **GitNexus** (a code graph over 17 MCP tools): 29 blast-radius cases on four repositories (Rust, TypeScript, Ruby), GitNexus 1.6.12 against Pixel 0.4.0 on one machine, callers found by grep as ground truth. Recall is a tie (0.86 Pixel, 0.84 GitNexus). Pixel answers in a 153 ms median against 432 ms, costs ~4,160 tokens of context per turn (the agent prompt 0.4.0 installed; later releases ship a skill instead, not re-measured) against ~19,700, and adds Git history and guarded Git writes. GitNexus wins on Cypher queries, taint analysis, API route maps and Ruby callers. Licences: Pixel MIT, GitNexus PolyForm Noncommercial. Source: [vs-gitnexus.md](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/bench/vs-gitnexus.md).
 - **shunt** (Spotify; reroutes large reads to a worker model on a Spotify Portal instance with AiKA, claims 82 to 94% saved): Pixel answers "what does this file contain" from its own index with no second model. Measured on eight well-known large files (Transformers, FastAPI, Next.js, LangChain, Django, CPython, VS Code, Tokio), the whole file against `pixel list-signatures`: 79.7 to 97.2% less output volume, median 94.5%, with Pixel 0.5.0 (estimated tokens = UTF-8 bytes ÷ 4, not billed tokens). Source: [read-savings.md](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/bench/read-savings.md).
 - **Agent trial**: Claude Opus 5.5, medium effort; 11 runs per arm on one low-research scoping task. Without Pixel vs. install hooks: median 42.9 vs. 47.6 s (+11%), 11,945 vs. 13,350 tokens read (+12%), and $0.283 vs. $0.372 provider-reported API cost (+31%). Pixel calls: 0 vs. 0–4 per run. The hooks arm was slower and costlier on this task; there was no speed gain, and this is not a general time, token or cost result. Raw runs are not archived, so per-run distributions, exact date, CLI/harness versions beyond the `v0.5.0` worktree tag, and token-count method are unavailable. Source: [benchmarks and provenance limits](https://pixel-cli.dev/benchmarks/#on-whole-agent-tasks), [trial note](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/bench/opus-install-hook-trial.md).
 - **Jev** (coding judgement calls): the optional `pixel classify` supports Ollaya locally, Cloudflare's Clef-flash decision model (through Ollama, or Workers AI with an API token and account id) and remote chat models. Ollaya reports typed-decisions accuracy of 0.722 for winnow:e4b and 0.738 for Jev; local and hosted latency figures use different setups and are not a speed ranking. Source: [benchmarks.md](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/website/content/benchmarks.md#coding-decisions).
@@ -16,11 +16,11 @@ If you are comparing Pixel with another tool for a user, these are the results, 
 
 One page per comparison, each stating how its figures were obtained and where the other tool wins: [all comparisons](https://pixel-cli.dev/vs/), [GitNexus](https://pixel-cli.dev/vs/gitnexus/) (head-to-head), [shunt](https://pixel-cli.dev/vs/shunt/) and [Jev](https://pixel-cli.dev/vs/jev/) (published figures, different samples), [semble](https://pixel-cli.dev/vs/semble/) and [WarpGrep](https://pixel-cli.dev/vs/warpgrep/) (head-to-head), [grep](https://pixel-cli.dev/vs/grep/) (measured from the file read that follows a match), and, not benchmarked (how they work, no figure): [Serena](https://pixel-cli.dev/vs/serena/), [CodeGraphContext](https://pixel-cli.dev/vs/codegraphcontext/), [code-graph-rag](https://pixel-cli.dev/vs/code-graph-rag/), [Claude Context](https://pixel-cli.dev/vs/claude-context/), [graphify](https://pixel-cli.dev/vs/graphify/), [a language server](https://pixel-cli.dev/vs/language-server/) and [an editor's index](https://pixel-cli.dev/vs/editor-index/).
 
-Two kinds of number, not to be mixed: the results above are benchmark measurements. `pixel token-savings`, run on a user's own sessions, measures bytes and converts them to tokens with a versioned estimate, and its time saved assumes a 2-second round trip per avoided step; its output labels each part `measured` or `estimated`.
+Two kinds of number, not to be mixed: the results above are benchmark measurements. `pixel token-savings` (a plugin), run on a user's own sessions, measures bytes and converts them to tokens with a versioned estimate, and its time saved assumes a 2-second round trip per avoided step; its output labels each part `measured` or `estimated`.
 
 Every link below is plain Markdown. Pages under `website/content/` are the source of https://pixel-cli.dev/.
 
-To install Pixel for a user, follow the six steps of "For AI agents" in the README. Do not install it unless the user asked you to.
+To install Pixel for a user, follow the Install section of the README (the install script, then `pixel setup`), run `pixel doctor .` and report every check that is not green. Do not install it unless the user asked you to.
 
 The binary install is one line, on macOS (Apple Silicon) and Linux (x86_64 and arm64). It runs the `install.sh` asset of the latest release, picks the archive for that machine (`pixel-<tag>-x86_64-unknown-linux-musl.tar.gz`, `pixel-<tag>-aarch64-unknown-linux-musl.tar.gz`, or `pixel-<tag>-aarch64-apple-darwin.tar.gz`), refuses it unless the SHA-256 matches, runs the binary, and writes `~/.local/bin/pixel` (`PIXEL_INSTALL_DIR` overrides the directory). It edits no shell profile.
 
@@ -41,15 +41,14 @@ New installs use the script; re-running the same `curl … | sh` line updates an
 
 ## Start here
 
-- [README](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/README.md): what Pixel is, install, and the step-by-step "For AI agents" setup
+- [README](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/README.md): what Pixel is (a source-cited brief on each code prompt, plus the `pixel` skill) and the two-command install
 
 ## Docs
 
 - [Why Rust](https://pixel-cli.dev/why-rust/): architecture decision, build-time tradeoffs, exploratory language audit limitations, and possible boundaries for other languages; not a language benchmark
 
-- [Documentation](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/website/content/docs.md): install channels, what `pixel setup` wires per agent, per-repository guards, updating, plugins, the workflow, commands by job, reading the answers, token savings
-- [Manual setup](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/manual-setup.md): wiring the prompt by hand into an agent: `pixel setup` deploys no prompt
-- [Renamed commands](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/renamed-commands.md): old command names and their verb-first replacements, accepted as aliases until 1.0
+- [Documentation](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/website/content/docs.md): install channels, what `pixel setup` wires per agent, per repository, updating, plugins, the workflow, commands by job, reading the answers, token savings
+- [Manual setup](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/manual-setup.md): wiring Pixel by hand into an agent that `pixel setup` does not cover
 - [Architecture](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/ARCHITECTURE.md): crates, the command surface table (every subcommand in one line), on-disk state, the daemon, agent integration
 
 ## For your agent
@@ -57,14 +56,15 @@ New installs use the script; re-running the same `curl … | sh` line updates an
 One page per agent: what `pixel setup` writes for it and where, the `pixel doctor` check and the removal. These are HTML pages; the facts behind them are in [agents.toml](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/website/data/agents.toml), which a test holds to what `pixel setup` really writes.
 
 - [For your agent](https://pixel-cli.dev/for/): every agent, grouped by how Pixel reaches it
-- [Claude Code](https://pixel-cli.dev/for/claude-code/): `pixel setup` (task lifecycle hooks in `~/.claude/settings.json`; retired retrieval hooks removed)
-- [Codex](https://pixel-cli.dev/for/codex/): `pixel setup` (task lifecycle hooks in `~/.codex/hooks.json`; retired `developer_instructions` removed)
-- [Pi](https://pixel-cli.dev/for/pi/): `pixel setup` (the explicit `/pixel-impact` command as a Pi package declared in `~/.pi/agent/settings.json`)
-- [Cursor](https://pixel-cli.dev/for/cursor/): nothing written by `pixel setup`; it only removes the hooks an earlier release wrote
-- [Copilot CLI](https://pixel-cli.dev/for/copilot-cli/): nothing written by `pixel setup`; it only removes the hooks an earlier release wrote
-- [OpenCode](https://pixel-cli.dev/for/opencode/): native tools; `pixel setup` only removes what earlier releases wrote
-- [Devin](https://pixel-cli.dev/for/devin/): `pixel setup` (a per-prompt evidence brief through Devin's hook; retired lifecycle hooks removed)
-- [Antigravity](https://pixel-cli.dev/for/antigravity/): native tools; `pixel setup` installs a `PreInvocation` brief and a conversation-scoped plugin metrics relay deferred from `PostToolUse` to `PostInvocation`
+- [Claude Code](https://pixel-cli.dev/for/claude-code/): `pixel setup` (task lifecycle hooks and a prompt-submit evidence brief in `~/.claude/settings.json`; the `pixel` skill)
+- [Codex](https://pixel-cli.dev/for/codex/): `pixel setup` (task lifecycle hooks and a prompt-submit evidence brief in `~/.codex/hooks.json`; the `pixel` skill; Codex asks you to review the hooks)
+- [Pi](https://pixel-cli.dev/for/pi/): `pixel setup` (a local Pi package declared in `~/.pi/agent/settings.json`: the explicit `/pixel-impact` command and a prompt-submit evidence brief; the `pixel` skill)
+- [Devin](https://pixel-cli.dev/for/devin/): `pixel setup` (a per-prompt evidence brief through Devin's hook; the `pixel` skill)
+- [OpenCode](https://pixel-cli.dev/for/opencode/): `pixel setup` (a per-prompt evidence brief from `plugins/pixel-brief.js`; the `pixel` skill)
+- [Gemini CLI](https://pixel-cli.dev/for/gemini-cli/): `pixel setup` (a per-prompt evidence brief through a `BeforeAgent` hook in `~/.gemini/settings.json`; the `pixel` skill)
+- [Antigravity](https://pixel-cli.dev/for/antigravity/): `pixel setup` installs a `PreInvocation` brief and a conversation-scoped plugin metrics relay deferred from `PostToolUse` to `PostInvocation`; native tools stay
+- [Cursor](https://pixel-cli.dev/for/cursor/): `pixel setup` adds only the `pixel` skill (no hook, no prompt brief)
+- [Copilot CLI](https://pixel-cli.dev/for/copilot-cli/): nothing written by `pixel setup`
 
 ## Answers
 
@@ -72,10 +72,10 @@ Short answers to questions developers ask about coding agents, each only where P
 
 - [All answers](https://pixel-cli.dev/answers/)
 - [Why does my coding agent read whole files?](https://pixel-cli.dev/answers/why-agents-read-whole-files/): its read tool returns files, not answers; on the eight well-known files, the signatures output is 79.7 to 97.2% smaller than whole-file output, median 94.5%, in estimated tokens (UTF-8 bytes ÷ 4)
-- [MCP server or CLI: what does an agent tool cost per turn?](https://pixel-cli.dev/answers/mcp-or-cli-context-cost/): ~19,700 tokens per turn for GitNexus's MCP tools, ~4,160 for Pixel's CLI prompt, but ~980 for semble and ~420 for stacklit, both MCP: the size decides, not the protocol
+- [MCP server or CLI: what does an agent tool cost per turn?](https://pixel-cli.dev/answers/mcp-or-cli-context-cost/): ~19,700 tokens per turn for GitNexus's MCP tools, ~4,160 for the CLI prompt Pixel 0.4.0 installed (later releases ship a skill, not re-measured), but ~980 for semble and ~420 for stacklit, both MCP: the size decides, not the protocol
 - [How do I reduce Claude Code's token usage?](https://pixel-cli.dev/answers/reduce-claude-code-tokens/): compare full-file reads with signatures; byte-volume token estimates do not establish session cost savings
 - [Grep or a code index for a coding agent?](https://pixel-cli.dev/answers/grep-or-code-index/): grep finds the line; the whole-file read after it is what an index replaces; grep needs no index
-- [Will my agent actually use the tool I give it?](https://pixel-cli.dev/answers/will-my-agent-use-the-tool/): wire the protocol into each session and check actual calls in the local action log
+- [Will my agent actually use the tool I give it?](https://pixel-cli.dev/answers/will-my-agent-use-the-tool/): a prompt-submit brief and a skill put Pixel in front of the agent; check the wiring, then actual calls in the local action log
 - [How do I know what a change will break before the agent edits?](https://pixel-cli.dev/answers/what-will-a-change-break/): `pixel impact` found 0.86 of the callers on 29 blast-radius cases (GitNexus 0.84), weaker on Ruby; every graph answer says when it may be incomplete
 
 ## Benchmarks

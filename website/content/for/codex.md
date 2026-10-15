@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Codex"
-description: "What pixel setup writes into Codex's config.toml and hooks.json, the per-repository cleanup, the plugin alternative, how to check the wiring and how to remove it."
+description: "What pixel setup writes for Codex: the prompt-submit evidence brief in hooks.json and the pixel skill, the hook review Codex asks for, how to check the wiring and how to remove it."
 agent: "codex"
 ---
 

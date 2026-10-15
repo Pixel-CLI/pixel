@@ -18,10 +18,8 @@ on:
     # re-includes put back what the suite actually reads:
     #   - crates/**: the bundled agent prompts, checked by the install tests;
     #   - the files crates/pixel/tests/cli/docs_drift.rs reads: it asserts
-    #     that every `pixel <command>` quoted there exists, that the README
-    #     and CHANGELOG rename tables match RENAMED_COMMANDS row for row, and
-    #     that the rule ids of the rust-guidelines skill head real guideline
-    #     sections;
+    #     that every `pixel <command>` quoted there exists and that the rule
+    #     ids of the rust-guidelines skill head real guideline sections;
     #   - .github/changelog.d/**: the fragments scripts/test-prepare.py validates
     #     against the release script's contract, in the repository itself and
     #     not only in its fixtures;

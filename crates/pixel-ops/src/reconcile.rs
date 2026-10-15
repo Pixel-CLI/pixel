@@ -108,9 +108,7 @@ fn safe_rebase_abort(runner: &GitRunner) {
     }
 }
 
-/// True if `path` is inside a pixel sidecar directory — `.pixel/` (current)
-/// or `.gitpixel/` (legacy; `pixel migrate` is opt-in, so pre-migration
-/// repos still carry it).
+/// True if `path` is inside the pixel sidecar directory `.pixel/`.
 ///
 /// These are pixel-generated artifacts (index, graph, action log) that are
 /// normally untracked, never touched by a rebase (which only replays tracked
@@ -118,10 +116,7 @@ fn safe_rebase_abort(runner: &GitRunner) {
 /// rebase's clean-worktree precondition — otherwise the daemon's own
 /// sidecar writes block every `reconcile --into` / `rebase-if-clean` call.
 fn is_pixel_sidecar(path: &str) -> bool {
-    path == ".pixel"
-        || path.starts_with(".pixel/")
-        || path == ".gitpixel"
-        || path.starts_with(".gitpixel/")
+    path == ".pixel" || path.starts_with(".pixel/")
 }
 
 /// Filter pixel-sidecar entries from a `status_porcelain_or_err` result,
@@ -1846,10 +1841,6 @@ mod tests {
         assert!(is_pixel_sidecar(".pixel"));
         assert!(is_pixel_sidecar(".pixel/actions.jsonl"));
         assert!(is_pixel_sidecar(".pixel/state.json"));
-        // Legacy sidecar: `pixel migrate` is opt-in, so pre-migration repos
-        // still carry `.gitpixel/` dirt — same class, same filtering.
-        assert!(is_pixel_sidecar(".gitpixel"));
-        assert!(is_pixel_sidecar(".gitpixel/old"));
         assert!(!is_pixel_sidecar("src/main.rs"));
         assert!(!is_pixel_sidecar("pixel.md"));
         assert!(!is_pixel_sidecar(".pixelrc"));
@@ -1862,7 +1853,6 @@ mod tests {
         // file (e.g. a committed targets.json) with modifications is real
         // dirtiness a rebase could clobber — it must count.
         assert!(ignorable_sidecar_entry("??", ".pixel/actions.jsonl"));
-        assert!(ignorable_sidecar_entry("??", ".gitpixel/index"));
         assert!(!ignorable_sidecar_entry(" M", ".pixel/targets.json"));
         assert!(!ignorable_sidecar_entry("M ", ".pixel/targets.json"));
         assert!(!ignorable_sidecar_entry("A ", ".pixel/targets.json"));

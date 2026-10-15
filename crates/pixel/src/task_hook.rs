@@ -329,10 +329,9 @@ fn pixel_read_or_recovery(args: &[String]) -> bool {
     match operation.as_str() {
         "config" => {
             rest.is_empty()
-                || rest.len() == 1
-                    && matches!(rest[0].as_str(), "policy" | "metrics" | "--help" | "-h")
+                || rest.len() == 1 && matches!(rest[0].as_str(), "metrics" | "--help" | "-h")
         }
-        "task" | "task-state" => rest.first().is_some_and(|operation| {
+        "task-state" => rest.first().is_some_and(|operation| {
             matches!(
                 operation.as_str(),
                 "begin"
@@ -843,10 +842,7 @@ fn shell_leaf_mutates(command: &str, recovery: bool) -> bool {
             !pixel_read_or_recovery(args)
                 || !recovery
                     && args.first().is_some_and(|operation| {
-                        matches!(
-                            operation.as_str(),
-                            "task" | "task-state" | "doctor" | "build-index"
-                        )
+                        matches!(operation.as_str(), "task-state" | "doctor" | "build-index")
                     })
         }
         "git" => !git_read(args),
@@ -2048,7 +2044,7 @@ mod tests {
             assert_eq!(decision["decision"], "deny", "{tool}");
         }
         for command in [
-            "rtk proxy pixel task status abc",
+            "rtk proxy pixel task-state status abc",
             "pixel doctor . --fix",
             "git diff",
             "cat src/a.rs",
@@ -2169,9 +2165,7 @@ mod tests {
             "rg --pre /runner/mutator pattern",
             "rg --pre=/runner/mutator pattern",
             "rg --hostname-bin /runner/mutator pattern",
-            "pixel config policy off",
             "pixel config setup",
-            "pixel task evaluate --suite external.json",
             "pixel task-state evaluate --suite external.json",
             "sed -i 's/a/b/' file.rs",
             "sed -ni 's/a/b/' file.rs",
@@ -2253,12 +2247,11 @@ mod tests {
             "sed -n -e '1,20p' -- west.rs",
             "rg -- --pre",
             "pixel config",
-            "pixel config policy",
             "pixel config metrics",
-            "pixel task prepare task-1",
-            "pixel task verify task-1",
-            "pixel task recover task-1",
-            "pixel task contract task-1 --file contract.json",
+            "pixel task-state prepare task-1",
+            "pixel task-state verify task-1",
+            "pixel task-state recover task-1",
+            "pixel task-state contract task-1 --file contract.json",
             "pixel task-state status task-1 --json",
             "pixel task-state contract task-1 --definition '{}'",
         ] {
@@ -2297,23 +2290,23 @@ mod tests {
             "rg needle | uniq - source.txt",
             "rg needle | uniq -- - source.txt",
             "rg needle | tee source.txt",
-            "rg needle | pixel task prepare task-1",
             "rg needle | pixel task-state prepare task-1",
-            "rg needle; pixel task prepare task-1",
+            "rg needle; pixel task-state prepare task-1",
             "rg needle || rm source.txt",
             "cat source.txt && sed -i s/a/b/ source.txt",
             "rg needle | cat > source.txt",
             "rg $(touch source.txt) | sort",
             "rg \"$(touch source.txt)\" | sort",
-            "pixel task contract task-1 --definition $(cat secret)",
-            "pixel task contract task-1 --definition \"$(cat secret)\"",
+            "pixel task-state contract task-1 --definition $(cat secret)",
+            "pixel task-state contract task-1 --definition \"$(cat secret)\"",
         ] {
             assert!(shell_mutates(command), "{command}");
         }
         let definition =
             json!({"checks":[{"argv":["/bin/sh","-c","test \"$(cat source.txt)\" = original"]}]})
                 .to_string();
-        let command = format!("pixel task contract task-1 --definition '{definition}' --json");
+        let command =
+            format!("pixel task-state contract task-1 --definition '{definition}' --json");
         assert!(!shell_mutates(&command));
         assert_eq!(task_argv(&command).unwrap()[5], definition);
     }

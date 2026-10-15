@@ -37,7 +37,7 @@ model providers, and the website under `website/`.
 | Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `brief-decisions.jsonl`, `brief-feedback.jsonl`, `brief-sessions/`, `config.yaml`, `tasks/` | what the agent reads as ground truth; `actions.jsonl` and `brief-decisions.jsonl` (the typed prompt) can hold secrets; `brief-feedback.jsonl` holds repository paths and counts only; `brief-sessions/` holds hashes of paths and line numbers; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.pixel/plugins/`, `~/.pixel/trusted.toml` and `~/.pixel/plugins.toml` (the plugin host's installs, trust records and network opt-ins), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
-| Agent configurations | what `pixel setup` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. The guided `pixel setup` also writes a managed `pixel:setup` block into the instruction files of the agents the user picked (`~/.claude/CLAUDE.md`, `AGENTS.md`, …, shown in full and confirmed first, text around the block untouched, a symlinked dotfile written through) and `pixel-setup.md` rule files when asked. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote. The Antigravity IDE and CLI Pixel plugin dirs carry the `pixel` skill and the metrics hook | a hook command runs with the user's privileges on every agent tool call |
+| Agent configurations | what `pixel setup` writes: `~/.claude/settings.json`, `$CODEX_HOME/hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the `pixel` skill (`skills/pixel/SKILL.md`) under the agent config dirs, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); `--repo` writes only `.pixel/config.yaml`. The Antigravity IDE and CLI Pixel plugin dirs carry the `pixel` skill and the metrics hook | a hook command runs with the user's privileges on every agent tool call |
 | User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project) | credential theft, billing abuse |
 | Benchmark credentials | OAuth storage or an explicitly selected Claude gateway settings file read by `eval/claude_skill_pair.py` | credentials must reach only the selected model connection and stay out of benchmark receipts |
 | Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/release/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
@@ -116,8 +116,9 @@ executes `tool_input.command` and never rewrites or approves a command.
 
 The verbs earlier releases registered (`guard`, `composed-guard`,
 `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`)
-still parse, exit 0 and print nothing, so a registration an old
-install left behind can neither block a host nor add text to its context.
+no longer parse: `pixel run-hook` prints an error on stderr and exits 0, so a
+registration an old install left behind can neither block a host nor add text
+to its context.
 
 The active `metrics` hook relays only a finalized Pixel invocation's metric,
 correlated to its tool call, rather than a global latest record. Claude Code
@@ -358,20 +359,15 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   does not build in (`flow`, `plan-rollback`, `token-savings`,
   `squash-branch`, `fast-forward`) is looked up in the order above like any
   other name. Without a plugin, `pixel <name>` prints
-  `pixel install github:Pixel-CLI/<repo>` and exits 2; the pre-rename
-  spellings (`rescue`, `update`, `savings`, `rewrite`, `replay-flow`) resolve
-  to the plugin of the current name (`plugin_cmd::moved_name`). The core
+  `pixel install github:Pixel-CLI/<repo>` and exits 2. The core
   binary does not contain their code, but it logs every run of one: after the
   child exits, `plugin_cmd::log_run` appends the same record a core command
   gets to `.pixel/actions.jsonl` (command, arguments through `logged_args`,
   outcome, duration), so a credential in the arguments is masked the same
-  way. Plugin output is not metered. Text that `pixel setup` deploys, and the
-  next-step suggestions of `classify --task-intent`, `audit`, `plan` and the
-  brief, name a plugin command only when `pixel_plugin::Available` finds a
-  plugin that runs it; `pixel doctor`'s `plugins.references` check reports a
-  deployed instruction file that names a command no plugin provides, with the
-  `pixel install` command that would (it never runs a network install by
-  itself).
+  way. Plugin output is not metered. The next-step suggestions of
+  `classify --task-intent`, `audit`, `plan` and the brief name a plugin command
+  only when `pixel_plugin::Available` finds a plugin that runs it (nothing
+  runs a network install by itself).
 
 ## 4. Threats
 
@@ -595,21 +591,17 @@ stays so references to the later threats hold.
 ### T13. Withdrawn
 
 Pixel no longer composes a repository's Codex `PreToolUse` hooks behind its own
-wrapper. `pixel setup --repo` restores the original registrations from the
-private backup of an earlier release only while the backup and the managed
-hook still match their owned contract, skips tracked `.codex/hooks.json` and
-paths that alias the global hook file, and removes duplicate project task
-hooks only when the enabled global suite covers their events and Codex has
-approved each current definition (T14). A leftover `composed-guard`
-registration answers nothing. The id stays so references to the later threats
-hold.
+wrapper. `pixel setup --repo` writes no hook file and restores nothing from an
+earlier release's backup, so a project's hook files stay as found. A leftover
+`composed-guard` registration answers nothing. The id stays so references to
+the later threats hold.
 
 ### T14. `pixel setup` damages or weakens agent configurations (T, I, B5)
 
 - **Scenario**: an install loses a user's settings, or leaves a copy of a
   config that holds keys readable by others.
-- **Mitigation**: only managed blocks and hook entries are rewritten; a file
-  that does not parse is not touched; each changed file is backed up first;
+- **Mitigation**: only Pixel's hook entries, skill files and package are
+  rewritten; a file that does not parse is not touched; each changed file is backed up first;
   `doctor` checks every artifact (`pixel_setup::doctor::CHECKS`); hook
   commands quote the executable path.
 - **Status**: Partial.

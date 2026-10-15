@@ -75,7 +75,6 @@ impl Fixture {
             .env("PIXEL_DAEMON_AUTO_START", "0")
             .env("PIXEL_METRICS", "1")
             .env_remove("PIXEL_METRICS_ROUND_TRIP_MS")
-            .env_remove("PIXEL_TARGETS_GUARD")
             .env_remove("PIXEL_TARGETS_MANIFEST");
         cmd
     }
@@ -816,7 +815,7 @@ fn action_log_write_failure_does_not_change_success_or_reporting() {
     assert!(fixture.0.join(".pixel/actions.jsonl").is_dir());
 }
 
-/// A scratch HOME so the machine's real `~/.pixel/config.json` can never
+/// A scratch HOME so the machine's real `~/.pixel/config.yaml` can never
 /// leak a global layer into these tests.
 fn fake_home(fixture: &Fixture) -> PathBuf {
     let home = fixture.0.join("fake-home");
@@ -1117,32 +1116,9 @@ fn daemon_reindex_reports_actual_nested_index_counts() {
     assert_eq!(metric_lines(&reindexed).len(), 1);
 }
 
-/// A renamed command's note is rendered output the caller reads, like any
-/// other stderr line: `output_bytes` must count it, or every call through an
-/// old name is priced against less output than it printed.
-#[test]
-fn rename_note_counts_as_rendered_output() {
-    let fixture = Fixture::new();
-    let out = fixture.run(&["search", "login_user", ".", "--json", "--no-daemon"]);
-    assert_success(&out);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.starts_with("note: 'search' is now 'search-content'"),
-        "{stderr}"
-    );
-    let lines = metric_lines(&out);
-    assert_eq!(lines.len(), 1, "{out:?}");
-    let events = fixture.events("search-content");
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(
-        events[0]["metrics"]["output_bytes"],
-        out.stdout.len() + out.stderr.len() - lines[0].len() - 2
-    );
-}
-
 /// `prepare-repo --json` reports an already-running daemon on stderr
 /// (`daemon_start` in quiet mode, through `eprint!`): that line is rendered
-/// output too, and `output_bytes` must count it like the rename note.
+/// output too, and `output_bytes` must count it like any stderr line.
 #[test]
 fn quiet_daemon_report_counts_as_rendered_output() {
     let fixture = Fixture::new();

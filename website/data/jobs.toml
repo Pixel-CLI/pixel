@@ -1,7 +1,10 @@
-# The six before/after animations from the README, in its order. `media` is
-# a basename in docs/examples/ (mounted at /examples/ by hugo.toml): the page
-# plays <media>.mp4 with <media>.jpg as its poster, and the README shows
-# <media>.webp. docs/motion/scripts/render.sh writes all three.
+# The before/after animations of /docs/, in the order of docs/motion. `media`
+# is a basename in docs/examples/ (mounted at /examples/ by hugo.toml): the
+# page plays <media>.mp4 with <media>.jpg as its poster.
+# docs/motion/scripts/render.sh writes it. Each job names a command of the
+# core binary (`pixel --help`); the rollback and publish animations were
+# dropped with the commands they showed, which now live in the pixel-git
+# plugin.
 [[job]]
 id = "scope"
 name = "Scope before reading"
@@ -27,19 +30,5 @@ media = "pixel-impact-comparison"
 id = "rewrite"
 name = "Search stays familiar"
 command = "pixel search-content"
-text = "The hook turns rg and grep into indexed search. Same command."
+text = "Same regex as grep, indexed and capped; hits come back as path:line."
 media = "pixel-rewrite-comparison"
-
-[[job]]
-id = "rollback"
-name = "Rescue as a plan"
-command = "pixel plan-rollback"
-text = "Flags the likely breaking commit and the last good one. Resets nothing."
-media = "pixel-rollback-comparison"
-
-[[job]]
-id = "publish"
-name = "Publish without footguns"
-command = "pixel commit-and-push"
-text = "Review, then a leased push designed to be crash-safe. Never a raw --force."
-media = "pixel-publish-comparison"

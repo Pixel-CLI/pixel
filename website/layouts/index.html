@@ -13,8 +13,8 @@
   {{ $bench := "benchmarks/" | relURL }}
   {{/* The supported agents, shown by the hero's Works with row and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
   {{ $agents := hugo.Data.agents.agent }}
-  {{/* The prompt a visitor pastes into their agent instead of a shell: the repository README's "Let your agent install it" block, used by the Install terminal. */}}
-  {{ $agentPrompt := "Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the \"For AI agents\" section of its README, then tell me what changed and whether `pixel doctor .` is green." }}
+  {{/* The prompt a visitor pastes into their agent instead of a shell: it points at the root README's Install section (the install script, then `pixel setup`), used by the Install terminal. The README has no separate agent block any more, so the prompt carries the doctor step itself. */}}
+  {{ $agentPrompt := "Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the Install section of its README, run `pixel doctor .`, then tell me what changed and whether it is green." }}
   {{/* The shared Install terminal commands. The one-liner runs the install.sh asset of the latest release (release.yml uploads scripts/release/install.sh with every tag); $scriptSrc is that file at the tag of the version this site describes (crates/pixel/Cargo.toml, mounted as data/cli.toml, which the release bumps), so "read the script" opens the bytes the one-liner runs. $inspect is the same install for a visitor who reads before running: download, page through, then run. */}}
   {{ $scriptURL := printf "%s/releases/latest/download/install.sh" site.Params.github_url }}
   {{ $curl := printf "curl -fsSL %s | sh" $scriptURL }}
@@ -37,16 +37,16 @@
       <div class="hero__copy">
       {{/* What Pixel is, before what it does: a visitor otherwise cannot tell a CLI from a hosted service or an MCP server. */}}
       <p class="hero__kind">Open-source CLI &middot; runs on your machine</p>
-      {{/* Agents do not read every file whole: they grep, then read slices. The title names that search and the map Pixel gives instead; the lede says what the map is and that nobody learns a command. */}}
+      {{/* Agents do not read every file whole: they grep, then read slices. The title names that search and the map Pixel gives instead; the lede says what the map is, that it arrives with the code prompt (the prompt-submit brief) and that nobody learns a command. */}}
       <h1 class="hero__title hero__title--long"><span>Agents grep your code blind.</span> <span class="glow">Pixel hands them the map.</span></h1>
-      <p class="hero__lede"><strong>A local index of signatures and callers that your agent queries before it greps.</strong> One install, a handful of commands: you keep prompting as usual.</p>
+      <p class="hero__lede"><strong>A local index of signatures and callers. Your code questions reach the agent with a source-cited brief from it.</strong> One install, a handful of commands: you keep prompting as usual.</p>
       {{/* No install command here: the hero convinces, the Install chapter asks for the paste, with the script one click away. */}}
       <div class="hero__cta"><a class="button" href="#install">Try Pixel on your repo</a><a class="link hero__how" href="#how">See how it works</a></div>
-      {{/* Every supported agent, named: several are not household names. Marks from assets/logos/ (the ids inside a mark get a prefix, since the Compatibility grid inlines the same SVG). */}}
+      {{/* Every agent `pixel setup` writes for (wiring "install" in data/agents.toml), named: several are not household names. Marks from assets/logos/ (the ids inside a mark get a prefix, since the Compatibility grid inlines the same SVG). */}}
       <div class="hero__works">
         <p class="hero__works-label">Works with</p>
         <ul class="hero__agents">
-          {{ range $agents }}<li><span class="hero__mark hero__mark--{{ .logo }}">{{ replace (resources.Get (printf "logos/%s.svg" .logo)).Content "lobe-icons-" "hero-lobe-icons-" | safeHTML }}</span><span class="hero__agent-name">{{ .name }}</span></li>{{ end }}
+          {{ range where $agents "wiring" "install" }}<li><span class="hero__mark hero__mark--{{ .logo }}">{{ replace (resources.Get (printf "logos/%s.svg" .logo)).Content "lobe-icons-" "hero-lobe-icons-" | safeHTML }}</span><span class="hero__agent-name">{{ .name }}</span></li>{{ end }}
         </ul>
       </div>
       {{/* Keep each claim true to the binary: no account, no key for anything an agent runs (`pixel classify` is off by default and uses the key the user configures), no telemetry (SECURITY.md). The code stays local; the network use the FAQ lists carries no source. Platforms: the targets release.yml builds. */}}
@@ -140,7 +140,7 @@
     </section>
 
     {{/* ---------- scope: the same prompt as the Problem chapter, the other arm of its recording ---------- */}}
-    {{/* data/scope.toml is the task packet the Pixel arm received before its first call (scripts/dev/scope-board.py, from docs/bench/problem-trace/packet.txt): same task, same repository, same day as the trace above. The prompt-submit hook pixel setup writes delivers it, so nobody types a command, the agent included. */}}
+    {{/* data/scope.toml is the task packet the Pixel arm received before its first call (scripts/dev/scope-board.py, from docs/bench/problem-trace/packet.txt): same task, same repository, same day as the trace above. The prompt-submit hook of Pixel 0.6.1's pixel setup delivered it, so nobody typed a command, the agent included; current releases add the [PIXEL:BRIEF] on the same kind of hook, which this recording predates. */}}
     <section class="section section--center section--follows wrap" id="scope" aria-labelledby="scope-title">
       <p class="scope__handoff" aria-hidden="true">Same prompt, same repo</p>
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Scoping</span></p>
@@ -169,11 +169,11 @@
       </figure>
       {{/* `missed` restates what every Pixel run's answer named and the packet did not: the honest limit of a starting list, from the same runs. */}}
       {{ $missed := slice }}{{ range $s.missed }}{{ $missed = $missed | append (printf "<code>%s</code>" .) }}{{ end }}
-      <p class="board__note" data-reveal>The list Pixel handed over in the recording above, {{ (time $s.recorded).Format "2 Jan 2006" }}. Starting points, not a full change map: all {{ $s.runs }} agents with Pixel also named {{ delimit $missed ", " " and " | safeHTML }}, which it left out. You typed nothing: the hooks Pixel 0.6.1's <code>pixel setup</code> wrote asked; this release wires none by default. <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md#the-scoping-board">Raw runs</a></p>
+      <p class="board__note" data-reveal>The list Pixel handed over in the recording above, {{ (time $s.recorded).Format "2 Jan 2006" }}. Starting points, not a full change map: all {{ $s.runs }} agents with Pixel also named {{ delimit $missed ", " " and " | safeHTML }}, which it left out. You typed nothing: the prompt-submit hook Pixel 0.6.1's <code>pixel setup</code> wrote delivered it. Current releases add a different packet on that hook, the <code>[PIXEL:BRIEF]</code>; this recording predates it. <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md#the-scoping-board">Raw runs</a></p>
     </section>
 
     {{/* ---------- toolbox: what the agent can ask beyond outlines ---------- */}}
-    {{/* The six questions and their excerpts are data/toolbox.toml: real output on Requests, with the commands that regenerate it. The command under each question is the one the installed prompt maps it to; the agent picks it, nobody types it. The completeness line restates the prompt's "Reading results" (closed_world is always false). The recall item restates ARCHITECTURE.md (pixel-recall, On-disk state): a local corpus; its one download is the embedding model, which carries no session text. The three refusals beside it restate the How cards and ARCHITECTURE.md (`classify` off by default; `search-meaning` embeds locally, so the claim is about LLMs, not every model), which is why the specs below no longer repeat them. */}}
+    {{/* The six questions and their excerpts are data/toolbox.toml: real output on Requests, with the commands that regenerate it. The command under each question is the one the `pixel` skill (crates/pixel-setup/assets/pixel-agent-prompt.md) maps it to, bar `plan-rollback`, a plugin command; the agent picks it, nobody types it. The completeness line restates the prompt's "Reading results" (closed_world is always false). The recall item restates ARCHITECTURE.md (pixel-recall, On-disk state): a local corpus; its one download is the embedding model, which carries no session text. The three refusals beside it restate the How cards and ARCHITECTURE.md (`classify` off by default; `search-meaning` embeds locally, so the claim is about LLMs, not every model), which is why the specs below no longer repeat them. */}}
     {{ $tb := hugo.Data.toolbox }}
     <section class="section section--center wrap" id="toolbox" aria-labelledby="toolbox-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Toolbox</span></p>
@@ -195,10 +195,10 @@
       <p class="toolbox__key" data-reveal><span class="toolbox__k"><span class="toolbox__exact">exact</span> traced through the file or its imports</span> <span class="toolbox__k"><span class="toolbox__probable">probable</span> matched by a name only one connected file defines</span> <span class="toolbox__k"><b>depth&nbsp;1</b> calls it directly, <b>depth&nbsp;2</b> calls a caller</span></p>
       <p class="toolbox__honest" data-reveal><strong>Every answer says whether it is complete.</strong> Zero callers means none were found, not that none exist: a call made through a callback or a dynamic lookup can escape a static index.</p>
       <ul class="toolbox__not" data-reveal="stagger">
-        <li><strong>Your past sessions too</strong><code>pixel recall</code> searches the agent sessions already on your disk. Nothing is uploaded.</li>
-        <li><strong>No MCP server</strong>A command-line tool and hooks: the agent calls it from the shell it already has.</li>
+        <li><strong>Your past sessions too</strong><code>pixel recall</code>, a plugin, searches the agent sessions already on your disk. Nothing is uploaded.</li>
+        <li><strong>No MCP server</strong>A command-line tool, hooks and a skill: the agent calls it from the shell it already has.</li>
         <li><strong>No hosted index</strong>The index lives in <code>.pixel/</code>, inside your repository.</li>
-        <li><strong>No LLM between question and answer</strong>Your agent picks and runs the pixel command; the answer comes from the index, not a chat model. The one model-backed feature, <code>pixel classify</code>, is off by default and can run a local model.</li>
+        <li><strong>No LLM between question and answer</strong>Your agent, or its prompt hook, runs the pixel command; the answer comes from the index, not a chat model. The one model-backed feature, <code>pixel classify</code>, is off by default and can run a local model.</li>
       </ul>
       <p class="toolbox__more" data-reveal><a class="link" href="{{ "docs/" | relURL }}#commands">All commands</a></p>
     </section>
@@ -224,7 +224,7 @@
         <li>
           <span class="how__icon">{{ partial "icon.html" (dict "name" "robot" "size" 28) }}</span>
           <h3>Reach the agent</h3>
-          <p><code>pixel setup</code> tells each agent when to ask Pixel; the agent runs it from its shell.</p>
+          <p><code>pixel setup</code> hooks each agent's prompt submit to add a brief, and installs a skill for the rest; the agent runs the commands from its shell.</p>
         </li>
       </ol>
       {{/* The three tiers restate crates/pixel-graph/src/extract.rs: extract_inner gives the first eight languages of partials/languages.html their own walker and sends the last five to walk_generic ("coarse but better than absent"); any other file is in the text index only. */}}
@@ -250,7 +250,7 @@
       {{/* The two ways in, from each agent's `wiring` in data/agents.toml (the same split /for/ uses): install is what `pixel setup` writes, none is an agent Pixel leaves on its native tools. Each tile names what Pixel writes for it, or nothing. Each opens its /for/<slug>/ page. */}}
       {{ $ways := slice
         (dict "wiring" "install" "title" "Wired by pixel setup" "text" "The install writes the agent's own settings. Nothing else to do.")
-        (dict "wiring" "none" "title" "Native tools only" "text" "Nothing to wire: pixel setup only removes what an earlier release wrote, and the agent searches with its own tools.")
+        (dict "wiring" "none" "title" "Native tools only" "text" "Nothing to wire: pixel setup writes nothing for them, and the agent searches with its own tools.")
       }}
       <div class="ways" data-reveal="stagger">
         {{ range $ways }}
@@ -331,7 +331,7 @@
           <span class="get__n" aria-hidden="true">2</span>
           <h3>Connect your agent</h3>
           <div class="cmd"><code><span class="cmd__prompt" aria-hidden="true">$</span> pixel setup</code><button class="cmd__copy" type="button" data-copy="pixel setup">Copy</button></div>
-          <p>Hooks and rules in its settings. Restart your agent after. <a class="link" href="{{ "for/" | relURL }}">Files changed &amp; removal</a></p>
+          <p>Prompt hooks and the <code>pixel</code> skill, for the agents you pick. Restart the agent: your first code prompt starts the indexing. <a class="link" href="{{ "for/" | relURL }}">Files changed &amp; removal</a></p>
         </li>
         <li class="steps__item steps__item--opt">
           <span class="get__n" aria-hidden="true">3</span>
@@ -364,7 +364,7 @@
       {{ $body := "Repository (language, rough size):\nAgent:\nHow long I have run Pixel:\n\n```\n<paste the output of pixel token-savings>\n```\n\nOK to quote this on pixel-cli.dev under my name and role? (yes / no)" }}
       {{ $share := printf "%s/discussions/new?category=show-and-tell&title=%s&body=%s" site.Params.github_url (replace (urlquery $title) "+" "%20") (replace (urlquery $body) "+" "%20") }}
       <aside class="invite" data-reveal>
-        <p class="invite__text"><strong>Don't trust our numbers. Get yours.</strong> After a few agent sessions, <code>pixel token-savings</code> reports what Pixel's answers spared on your code. Post it, and with your permission we may quote you here.</p>
+        <p class="invite__text"><strong>Don't trust our numbers. Get yours.</strong> After a few agent sessions, <code>pixel token-savings</code> (a plugin) reports what Pixel's answers spared on your code. Post it, and with your permission we may quote you here.</p>
         <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
       </aside>
       {{/* The proofs an evaluator checks before running the script, last on the page now that the closing is gone. Signed releases: release.yml attests every archive and install.sh with SLSA build provenance, verified with gh attestation verify (SECURITY.md, "Verifying a release"). No telemetry beyond an optional release check: SECURITY.md. The changelog: a .github/changelog.d fragment per user-facing change, cut at each release (CONTRIBUTING.md). */}}

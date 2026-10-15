@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 //! End-to-end structural check kinds (`diff-in-scope`, `graph-resolves`,
-//! `tests-touched`) wired into `pixel task verify`.
+//! `tests-touched`) wired into `pixel task-state verify`.
 
 use std::path::Path;
 use std::process::Output;
@@ -20,7 +20,7 @@ fn repo(tag: &str) -> Scratch {
     git(&root, &["commit", "-qm", "initial"]);
     std::fs::create_dir(root.join(".pixel")).unwrap();
     std::fs::write(
-        root.join(".pixel/config.json"),
+        root.join(".pixel/config.yaml"),
         json!({"task":{"enforcement":"enforce"}}).to_string(),
     )
     .unwrap();
@@ -81,7 +81,7 @@ fn begin_with(root: &Path, checks: Value) -> String {
     good(
         root,
         &[
-            "task",
+            "task-state",
             "begin",
             "fix source",
             "--contract",
@@ -99,7 +99,14 @@ fn begin_with(root: &Path, checks: Value) -> String {
 fn prepare(root: &Path, id: &str) {
     let prepared = good(
         root,
-        &["task", "prepare", id, "--request-id", "prepare", "--json"],
+        &[
+            "task-state",
+            "prepare",
+            id,
+            "--request-id",
+            "prepare",
+            "--json",
+        ],
     );
     assert_eq!(prepared["phase"], "prepared");
 }
@@ -107,7 +114,14 @@ fn prepare(root: &Path, id: &str) {
 fn verify(root: &Path, id: &str) -> Value {
     good_or_failure(
         root,
-        &["task", "verify", id, "--request-id", "verify", "--json"],
+        &[
+            "task-state",
+            "verify",
+            id,
+            "--request-id",
+            "verify",
+            "--json",
+        ],
     )
 }
 

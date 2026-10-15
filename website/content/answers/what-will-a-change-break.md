@@ -14,4 +14,4 @@ An agent that changes a function's signature, its return value or what it throws
 
 Pixel parses the repository with tree-sitter into a graph of symbols, imports and calls. `pixel who-calls` returns the functions that call a symbol, `pixel impact` follows them upstream to the blast radius, and `pixel call-path` shows how one function reaches another. Each answer says how complete it is: a call the graph could not resolve is reported as such rather than dropped, and the answer carries a warning that static analysis never sees every dynamic call.
 
-Run it before the edit and give the list to the agent as the scope of the change, or let the agent run it: the protocol `pixel setup` deploys tells it to.
+Run it before the edit and give the list to the agent as the scope of the change, or let the agent run it: the `pixel` skill that `pixel setup` installs names `pixel impact` for exactly that moment.

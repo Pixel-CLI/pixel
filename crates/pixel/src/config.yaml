@@ -28,25 +28,6 @@
 # pixel setup after changing it; pixel doctor flags a mismatch.
 # brief_parts: 3
 
-# Retired: no hook reads it any more; the per-prompt brief has its own switch.
-# Was: suggest relevant code when your coding agent receives a prompt.
-# Environment override: PIXEL_TASK_CONTEXT=0
-# task_context: false
-
-# Retired: no hook reads it any more.
-# Was: detect changes of task in agent prompts.
-# Environment override: PIXEL_TASK_BOUNDARY=0
-# task_boundary: false
-
-# Retired retrieval policy (default: advisory). No hook reads it any more: the
-# guard that rewrote or denied native search is gone, so every value leaves
-# native tools untouched. The key stays valid so an older file keeps loading.
-# Environment override: PIXEL_POLICY
-#   advisory (default), enforce, or off. Quote it (a bare `off` is a YAML
-#   boolean): policy: "off"
-# PIXEL_TARGETS_GUARD=0 (also false or off) reads as off.
-# policy: enforce
-
 # Optional AI classification — separate from code search. Global settings only.
 # Disabled by default to avoid API costs or classifier model downloads.
 # Enable only when you want AI classification: pixel config classify on

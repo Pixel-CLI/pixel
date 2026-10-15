@@ -35,9 +35,7 @@ impl Fixture {
             // and no deployed prompt adds a note to stderr.
             .env("HOME", crate::support::neutral_home())
             .env_remove("RIPGREP_CONFIG_PATH")
-            .env_remove("GREP_OPTIONS")
-            .env_remove("PIXEL_POLICY")
-            .env_remove("PIXEL_TARGETS_GUARD");
+            .env_remove("GREP_OPTIONS");
         command
     }
 
@@ -419,9 +417,7 @@ impl TrackedFixture {
             // and no deployed prompt adds a note to stderr.
             .env("HOME", crate::support::neutral_home())
             .env_remove("RIPGREP_CONFIG_PATH")
-            .env_remove("GREP_OPTIONS")
-            .env_remove("PIXEL_POLICY")
-            .env_remove("PIXEL_TARGETS_GUARD");
+            .env_remove("GREP_OPTIONS");
         command
     }
 }

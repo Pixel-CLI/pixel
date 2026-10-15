@@ -20,12 +20,6 @@ use serde_json::{Value, json};
 use crate::config;
 use crate::install::{self, CheckStatus, InstallStep, Result, dry_run_summary};
 
-/// The extension file an earlier install copied into Pi's own extension
-/// directory, relative to the agent directory. A managed copy left there
-/// beside the package registers the command twice (`/pixel-impact:1`,
-/// `/pixel-impact:2`), so install and uninstall remove it.
-pub(crate) const LEGACY_EXTENSION: &str = "extensions/pixel-impact.ts";
-
 /// Pixel's Pi package directory, relative to the home directory.
 pub(crate) const PACKAGE_DIR: &str = ".local/share/pixel/pi-package";
 
@@ -83,10 +77,6 @@ impl PiPaths {
         }
     }
 
-    fn legacy_extension(&self) -> PathBuf {
-        self.agent_dir.join(LEGACY_EXTENSION)
-    }
-
     fn package_extension(&self) -> PathBuf {
         self.package_dir.join(PACKAGE_EXTENSION)
     }
@@ -132,11 +122,6 @@ fn package_manifest() -> String {
         "pi": { "extensions": [format!("./{PACKAGE_EXTENSION}"), format!("./{BRIEF_EXTENSION}")] },
     });
     format!("{manifest:#}\n")
-}
-
-fn is_managed(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
-        && fs::read_to_string(path).is_ok_and(|contents| contents.contains(config::MANAGED_BEGIN))
 }
 
 fn names_package(entry: &Value, source: &str) -> bool {
@@ -236,8 +221,6 @@ pub(crate) fn install(
     {
         packages.push(Value::String(source));
     }
-    let legacy = paths.legacy_extension();
-    let foreign_legacy = fs::symlink_metadata(&legacy).is_ok() && !is_managed(&legacy);
     if dry_run {
         return Ok(step(
             CheckStatus::Green,
@@ -278,20 +261,6 @@ pub(crate) fn install(
     if !declared {
         install::write_settings(&paths.settings, &settings, false)?;
     }
-    if is_managed(&legacy) {
-        config::backup_if_changing(&legacy, b"removed Pixel Pi impact extension")?;
-        fs::remove_file(&legacy)?;
-    }
-    if foreign_legacy {
-        return Ok(step(
-            CheckStatus::Yellow,
-            format!(
-                "explicit Pi impact package installed; a foreign {} may register /pixel-impact a second time",
-                legacy.display()
-            ),
-            paths,
-        ));
-    }
     Ok(step(
         CheckStatus::Green,
         "explicit Pi impact package installed".into(),
@@ -299,16 +268,14 @@ pub(crate) fn install(
     ))
 }
 
-/// Remove Pixel's package, its `packages` entry and a managed legacy copy;
-/// foreign settings, packages and extensions stay.
+/// Remove Pixel's package and its `packages` entry; foreign settings,
+/// packages and extensions stay.
 pub(crate) fn uninstall(paths: &PiPaths, dry_run: bool) -> Result<InstallStep> {
     let source = paths.package_source();
     let mut settings = read_settings_object(&paths.settings)
         .ok()
         .filter(|settings| declares_package(settings, &source));
-    let legacy = paths.legacy_extension();
-    let legacy_managed = is_managed(&legacy);
-    if settings.is_none() && !legacy_managed && !paths.package_dir.exists() {
+    if settings.is_none() && !paths.package_dir.exists() {
         return Ok(step(
             CheckStatus::Green,
             dry_run_summary(dry_run, "no Pixel Pi impact package found"),
@@ -346,11 +313,6 @@ pub(crate) fn uninstall(paths: &PiPaths, dry_run: bool) -> Result<InstallStep> {
             let _ = fs::remove_dir(dir);
         }
         let _ = fs::remove_dir(&paths.package_dir);
-        if legacy_managed {
-            config::backup_if_changing(&legacy, b"removed Pixel Pi impact extension")?;
-            fs::remove_file(&legacy)?;
-            // Keep the directory containing the recoverable sibling backup.
-        }
     }
     Ok(step(
         CheckStatus::Green,
@@ -407,19 +369,6 @@ pub(crate) fn check(paths: &PiPaths, exe: &Path, pi_installed: bool) -> PiImpact
             "the Pixel Pi impact package at {} or the pixel skill under {} is missing, stale or points to a different binary",
             paths.package_dir.display(),
             paths.agent_dir.display()
-        ));
-    }
-    let legacy = paths.legacy_extension();
-    if is_managed(&legacy) {
-        return PiImpactState::NeedsInstall(format!(
-            "a retired copy at {} registers /pixel-impact twice",
-            legacy.display()
-        ));
-    }
-    if fs::symlink_metadata(&legacy).is_ok() {
-        return PiImpactState::Manual(format!(
-            "a foreign {} may register /pixel-impact a second time",
-            legacy.display()
         ));
     }
     PiImpactState::Current
@@ -605,8 +554,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        LEGACY_EXTENSION, PACKAGE_DIR, PiImpactState, PiPaths, check, extension_source, install,
-        package_manifest, pi_in_paths, uninstall,
+        PACKAGE_DIR, PiImpactState, PiPaths, check, extension_source, install, package_manifest,
+        pi_in_paths, uninstall,
     };
     use crate::config;
     use crate::install::CheckStatus;
@@ -830,58 +779,16 @@ mod tests {
     }
 
     #[test]
-    fn install_should_retire_a_managed_legacy_copy_and_keep_a_foreign_one() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = configure_pi(home.path(), &json!({}));
-        let legacy = paths.agent_dir.join(LEGACY_EXTENSION);
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, extension_source(Path::new("/opt/old"))).unwrap();
-        install(&paths, Path::new("/opt/pixel"), false, false).unwrap();
-        // Package installed first, then the stale copy is caught by doctor.
-        fs::write(&legacy, extension_source(Path::new("/opt/old"))).unwrap();
-        assert!(matches!(
-            check(&paths, Path::new("/opt/pixel"), false),
-            PiImpactState::NeedsInstall(_)
-        ));
-        let step = install(&paths, Path::new("/opt/pixel"), false, false).unwrap();
-        assert_eq!(step.status, CheckStatus::Green);
-        assert!(
-            !legacy.exists(),
-            "a managed copy would register the command twice"
-        );
-        assert_eq!(
-            check(&paths, Path::new("/opt/pixel"), false),
-            PiImpactState::Current
-        );
-
-        fs::write(&legacy, "user-owned Pi extension").unwrap();
-        let step = install(&paths, Path::new("/opt/pixel"), false, false).unwrap();
-        assert_eq!(step.status, CheckStatus::Yellow);
-        assert_eq!(
-            fs::read_to_string(&legacy).unwrap(),
-            "user-owned Pi extension"
-        );
-        assert!(matches!(
-            check(&paths, Path::new("/opt/pixel"), false),
-            PiImpactState::Manual(_)
-        ));
-    }
-
-    #[test]
     fn uninstall_should_remove_only_pixels_package_entry_and_files() {
         let home = tempfile::tempdir().unwrap();
         let paths = configure_pi(home.path(), &json!({"packages": ["npm:other@1"]}));
         install(&paths, Path::new("/opt/pixel"), false, false).unwrap();
-        let legacy = paths.agent_dir.join(LEGACY_EXTENSION);
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, extension_source(Path::new("/opt/old"))).unwrap();
 
         let step = uninstall(&paths, false).unwrap();
         assert_eq!(step.status, CheckStatus::Green);
         assert!(step.summary.contains("removed"), "{step:?}");
         assert_eq!(settings(&paths), json!({"packages": ["npm:other@1"]}));
         assert!(!paths.package_dir.exists());
-        assert!(!legacy.exists());
 
         let step = uninstall(&paths, false).unwrap();
         assert!(

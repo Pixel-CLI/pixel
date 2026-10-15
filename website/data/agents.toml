@@ -1,28 +1,34 @@
 # The coding agents the site names, in the order the home shows them: the
-# hero's four marks and count, the Compatibility grid, the /for/<slug>/
-# pages, and the "What pixel setup wires" table of /docs/
-# (layouts/shortcodes/agents.html). One entry per agent; its mark is
-# assets/logos/<logo>.svg.
+# hero's Works with row (the agents `pixel setup` writes for), the
+# Compatibility grid, the /for/<slug>/ pages, and the "What pixel setup
+# wires" table of /docs/ (layouts/shortcodes/agents-install.html). One entry
+# per agent; its mark is assets/logos/<logo>.svg.
 #
 # Every fact here restates crates/pixel-setup. A pull
 # request that changes what `pixel setup` writes changes this file too:
-# crates/pixel/tests/cli/docs_drift.rs runs a real `pixel setup` and
-# `pixel setup --repo` into empty directories and fails when the files
-# they write differ from the `global`, `shared` and `repo` lists below, when
-# a `checks` id is not a `pixel doctor` check, or when an agent check of
-# `pixel doctor` belongs to no agent.
+# crates/pixel/tests/cli/docs_drift.rs runs a real `pixel setup` into an
+# empty directory and fails when the files it writes differ from the `global`
+# and `shared` lists below, when a `checks` id is not a `pixel doctor` check,
+# or when an agent check of `pixel doctor` belongs to no agent.
+#
+# What Pixel gives an agent is two things, and nothing else: a hook that adds
+# a source-cited evidence brief (`[PIXEL:BRIEF]`) before the model answers a
+# code prompt (Claude Code, Codex, Pi, Devin, OpenCode, Gemini CLI,
+# Antigravity), and the `pixel` skill (`skills/pixel/SKILL.md` under the
+# agent's configuration directory) that maps questions to commands. No
+# prompt, rules file, instruction block or retrieval guard is written: every
+# agent keeps its native search.
 #
 #   wiring  how Pixel reaches the agent:
 #             install  `pixel setup` writes the agent's own config
-#             none     nothing: the agent keeps its native tools, and
-#                      `pixel setup` only removes what an earlier release
-#                      wrote for it
+#             none     nothing: the agent keeps its native tools
 #   global  files `pixel setup` writes for this agent, from the home
 #           directory (`~/`); a trailing `/` is a directory Pixel owns
 #   when    the condition `pixel setup` checks before writing them
 #   wires   one Markdown line: what those files do (the /docs/ table)
 #   note    Markdown: one more paragraph under "What pixel setup writes"
-#   repo    files `pixel setup --repo` writes for it, from the repository
+#   repo    files `pixel setup --repo` writes for it, from the repository;
+#           none today: `pixel setup --repo` writes only `.pixel/config.yaml`
 #   repo_note  Markdown: one more paragraph under "Per repository"
 #   checks  the `pixel doctor` check ids that judge this agent's wiring
 #   lede    Markdown: the /for/<slug>/ page's opening line
@@ -31,7 +37,7 @@
 # exist (docs_drift.rs reads this file).
 
 # Written by every `pixel setup`, whichever agents are present. No agent
-# prompt is deployed: install removes the copies earlier releases wrote.
+# prompt is deployed.
 shared = [
   "~/.pixel/config.yaml",
   # The retrieval workflow as a skill, in every configured harness's skills dir.
@@ -54,81 +60,73 @@ shared = [
   "~/.pixel/plugins/rank-blocks/",
 ]
 
-# Repo-wide install artifacts and doctor checks, not owned by one agent entry.
-repo_shared = ["AGENTS.md"]
-repo_shared_checks = ["repo.warp-mcp", "repo.pixel-first", "repo.task-hook-observations"]
+# Doctor checks on Pixel's own files, which no single agent owns.
+repo_shared_checks = ["repo.task-hook-observations"]
 
 [[agent]]
 slug = "claude-code"
 name = "Claude Code"
 logo = "claude"
 wiring = "install"
-lede = "`pixel setup` preserves task lifecycle hooks while removing automatic retrieval prompts and advice. Each code prompt gets a bounded evidence brief; ordinary searches remain native."
+lede = "`pixel setup` registers Pixel's hooks in Claude Code: each code prompt reaches the model with a source-cited evidence brief, and the `pixel` skill covers follow-up questions. Ordinary searches remain native."
 global = ["~/.claude/settings.json"]
-wires = "task lifecycle hooks in `~/.claude/settings.json`; retired Pixel retrieval hooks are removed and foreign hooks are preserved"
-repo = [".claude/settings.local.json", ".claude/pixel-rtk-hooks.json"]
-checks = ["install.claude-hooks", "repo.claude-hooks"]
+wires = "hooks in `~/.claude/settings.json` (task lifecycle, a prompt-submit evidence brief and a metrics relay) and the `pixel` skill in `~/.claude/skills/pixel/`; foreign hooks are preserved and native search is untouched"
+checks = ["install.claude-hooks"]
 
 [[agent]]
 slug = "codex"
 name = "Codex"
 logo = "codex"
 wiring = "install"
-lede = "`pixel setup` removes retired Pixel prompt and metrics hooks while retaining task lifecycle controls. Each code prompt gets a bounded evidence brief; ordinary searches remain native."
-global = ["~/.codex/config.toml", "~/.codex/hooks.json"]
-when = "in `$CODEX_HOME` instead of `~/.codex` when that variable is set"
-wires = "task lifecycle hooks in `hooks.json`; removes Pixel's retired `developer_instructions` block while preserving foreign instructions"
-repo = [".codex/config.toml", ".codex/hooks.json", ".codex/pixel-composed-guard-backup.json"]
-repo_note = "Codex has no personal project file, so repository hook updates are skipped when Git tracks `.codex/hooks.json`: they would carry this machine's path into every clone. Existing owned composed hooks are migrated back to their original registrations."
-checks = ["install.codex-config", "install.codex-metrics-hook", "install.codex-hook-review", "repo.codex-config", "repo.codex-hooks", "repo.codex-hook-review"]
+lede = "`pixel setup` registers Pixel's hooks in Codex: each code prompt reaches the model with a source-cited evidence brief, and the `pixel` skill covers follow-up questions. Ordinary searches remain native."
+global = ["~/.codex/hooks.json", "~/.codex/skills/pixel/SKILL.md"]
+when = "in `$CODEX_HOME` instead of `~/.codex` when that variable is set; the skill only when `~/.codex` exists"
+wires = "task lifecycle hooks, a prompt-submit evidence brief and a metrics relay in `hooks.json`, and the `pixel` skill in `~/.codex/skills/pixel/`; native tools stay unchanged"
+note = "Codex runs a hook only after you review it with `/hooks` in `codex`; until then `pixel doctor` reports `install.codex-hook-review`, and Pixel never approves a hook for you."
+checks = ["install.codex-metrics-hook", "install.codex-hook-review"]
 
 [[agent]]
 slug = "pi"
 name = "Pi"
 logo = "pi"
 wiring = "install"
-lede = "`pixel setup` adds the pixel skill plus a local Pi package with the explicit `/pixel-impact <symbol>` command and a prompt-submit evidence brief. Pi keeps its native tools."
+lede = "`pixel setup` adds a local Pi package: the explicit `/pixel-impact <symbol>` command and a hook that adds a source-cited evidence brief to each prompt, plus the `pixel` skill for follow-ups. Pi keeps its native tools."
 global = ["~/.local/share/pixel/pi-package/package.json", "~/.local/share/pixel/pi-package/extensions/pixel-impact.ts", "~/.local/share/pixel/pi-package/extensions/pixel-brief.ts", "~/.pi/agent/settings.json", "~/.pi/agent/skills/pixel/SKILL.md"]
 when = "when Pi's agent directory (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) exists or `pi` is on PATH"
-wires = "the local package provides `/pixel-impact` and a `before_agent_start` hook that runs `pixel brief` on the submitted prompt and prepends its bounded evidence brief; Pi's native tools remain unchanged"
-note = "Your other Pi settings and packages stay: Pixel adds only its package path to `packages`, and `pixel setup --remove` takes it out again. A copy of the command an earlier release put in `extensions/` is removed, so Pi does not list it twice."
-repo_note = "`pixel setup --repo .` writes nothing for Pi: it removes the `.pi/extensions/pixel-guard.ts` an earlier release wrote."
-checks = ["install.pi-prompt", "install.pi-impact", "repo.pi-guard"]
-
-[[agent]]
-slug = "cursor"
-name = "Cursor"
-logo = "cursor"
-wiring = "none"
-lede = "`pixel setup` writes nothing for Cursor; it removes the hooks an earlier release put in `~/.cursor/hooks.json`."
-
-[[agent]]
-slug = "copilot-cli"
-name = "Copilot CLI"
-logo = "copilot"
-wiring = "none"
-lede = "`pixel setup` writes nothing for Copilot CLI; it removes the `~/.copilot/hooks/pixel.json` an earlier release wrote."
-
-[[agent]]
-slug = "opencode"
-name = "OpenCode"
-logo = "opencode"
-wiring = "install"
-lede = "OpenCode keeps its native tools; `pixel setup` adds a bounded evidence brief to each prompt and removes the `AGENTS.md` block and guard plugin an earlier release put in OpenCode's config directory."
-global = ["~/.config/opencode/plugins/pixel-brief.js"]
-wires = "a per-prompt evidence brief from the auto-loaded `plugins/pixel-brief.js`; ordinary searches remain native"
-note = "Your own instructions in that `AGENTS.md` stay: Pixel removes only the block between its `pixel:managed` markers, and the file when nothing else was in it. A `plugins/pixel.js` you wrote yourself is left alone."
-checks = ["install.opencode-agents-md"]
+wires = "the local package provides `/pixel-impact` and a `before_agent_start` hook that runs `pixel brief` on the submitted prompt and prepends its bounded evidence brief; the `pixel` skill sits in `~/.pi/agent/skills/pixel/`; Pi's native tools remain unchanged"
+note = "Your other Pi settings and packages stay: Pixel adds only its package path to `packages`, and `pixel setup --remove` takes it out again."
+checks = ["install.pi-impact"]
 
 [[agent]]
 slug = "devin"
 name = "Devin"
 logo = "devin"
 wiring = "install"
-lede = "Devin keeps its native tools; `pixel setup` adds a bounded evidence brief to each prompt and removes retired lifecycle hooks from `~/.config/devin/config.json`; `pixel setup --repo` removes the repository guard from `.devin/config.local.json`."
-global = ["~/.config/devin/config.json"]
-wires = "a per-prompt evidence brief through Devin's `UserPromptSubmit` hook; native tools stay unchanged"
-checks = ["install.devin-hooks", "repo.devin-hooks"]
+lede = "Devin keeps its native tools; `pixel setup` registers a prompt-submit hook that adds a source-cited evidence brief, plus the `pixel` skill for follow-ups."
+global = ["~/.config/devin/config.json", "~/.devin/skills/pixel/SKILL.md"]
+when = "when Devin's `~/.config/devin` directory exists; the skill only when `~/.devin` exists"
+wires = "a per-prompt evidence brief through Devin's `UserPromptSubmit` hook, with task lifecycle hooks, and the `pixel` skill in `~/.devin/skills/pixel/`; native tools stay unchanged"
+
+[[agent]]
+slug = "opencode"
+name = "OpenCode"
+logo = "opencode"
+wiring = "install"
+lede = "OpenCode keeps its native tools; `pixel setup` adds a plugin that puts a source-cited evidence brief in front of each code prompt, plus the `pixel` skill for follow-ups."
+global = ["~/.config/opencode/plugins/pixel-brief.js"]
+when = "when OpenCode's configuration directory exists (`$XDG_CONFIG_HOME/opencode` when that variable is set)"
+wires = "a per-prompt evidence brief from the auto-loaded `plugins/pixel-brief.js`, and the `pixel` skill in `~/.config/opencode/skills/pixel/`; ordinary searches remain native"
+
+[[agent]]
+slug = "gemini-cli"
+name = "Gemini CLI"
+logo = "gemini"
+wiring = "install"
+lede = "Gemini CLI keeps its native tools; `pixel setup` registers a `BeforeAgent` hook that adds a source-cited evidence brief to each code prompt, plus the `pixel` skill for follow-ups."
+global = ["~/.gemini/settings.json", "~/.gemini/skills/pixel/SKILL.md"]
+when = "when `~/.gemini` exists; the hook only where `~/.gemini/settings.json` already exists"
+wires = "a per-prompt evidence brief through a `BeforeAgent` hook in `~/.gemini/settings.json`, and the `pixel` skill in `~/.gemini/skills/pixel/`; native tools stay unchanged"
+note = "Your own hooks and keys in `settings.json` stay: a re-run replaces only Pixel's earlier entry, and `pixel setup --remove` takes it out."
 
 [[agent]]
 slug = "antigravity"
@@ -136,7 +134,25 @@ name = "Antigravity"
 logo = "antigravity"
 wiring = "install"
 lede = "Antigravity keeps its native tools; `pixel setup` installs a prompt brief and a deferred, conversation-scoped metrics relay in its IDE and CLI plugins."
-global = ["~/.gemini/config/config.json", "~/.gemini/config/plugins/pixel/plugin.json", "~/.gemini/config/plugins/pixel/hooks.json", "~/.gemini/config/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/antigravity-cli/plugins/pixel/plugin.json", "~/.gemini/antigravity-cli/plugins/pixel/hooks.json", "~/.gemini/antigravity-cli/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/config/import_manifest.json"]
-wires = "a `PreInvocation` evidence brief and a plugin metrics relay that queues by conversation artifact directory, then injects the matching one-line metric at `PostInvocation`; native tools stay unchanged"
-note = "Pixel returns `{}` from Antigravity `PostToolUse` and defers display until `PostInvocation`, whose documented `injectSteps` contract accepts the one-line ephemeral message. A user-defined `pixel-guard` in `~/.gemini/config/hooks.json` stays. The import manifest is maintained by AGY only when its CLI is available for plugin registration."
+global = ["~/.gemini/config/config.json", "~/.gemini/config/hooks.json", "~/.gemini/config/plugins/pixel/plugin.json", "~/.gemini/config/plugins/pixel/hooks.json", "~/.gemini/config/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/antigravity-cli/plugins/pixel/plugin.json", "~/.gemini/antigravity-cli/plugins/pixel/hooks.json", "~/.gemini/antigravity-cli/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/config/import_manifest.json"]
+when = "when `~/.gemini/config` exists; the brief hook only where `~/.gemini/config/hooks.json` already exists"
+wires = "a `PreInvocation` evidence brief, and a plugin that carries the `pixel` skill and a metrics relay which queues by conversation artifact directory, then injects the matching one-line metric at `PostInvocation`; native tools stay unchanged"
+note = "Pixel returns `{}` from Antigravity `PostToolUse` and defers display until `PostInvocation`, whose documented `injectSteps` contract accepts the one-line ephemeral message. A `pixel-brief` entry you wrote yourself in `~/.gemini/config/hooks.json` is kept. The import manifest is maintained by AGY only when its CLI is available for plugin registration."
 checks = ["install.antigravity"]
+
+[[agent]]
+slug = "cursor"
+name = "Cursor"
+logo = "cursor"
+wiring = "install"
+lede = "`pixel setup` adds the `pixel` skill to Cursor's skills directory. Pixel registers no hook for Cursor, so it gets the skill but no prompt brief, and keeps its native tools."
+global = ["~/.cursor/skills/pixel/SKILL.md"]
+when = "when `~/.cursor` exists, or when you pick Cursor in the guided setup"
+wires = "the `pixel` skill in `~/.cursor/skills/pixel/`; no hook, so no prompt brief; native tools stay unchanged"
+
+[[agent]]
+slug = "copilot-cli"
+name = "Copilot CLI"
+logo = "copilot"
+wiring = "none"
+lede = "`pixel setup` writes nothing for Copilot CLI: it keeps its native tools, and the `pixel` binary is available to it from a shell like any other command."

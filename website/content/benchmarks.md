@@ -88,7 +88,7 @@ The jobs both tools do: 29 blast-radius cases on four repositories in Rust, Type
 | Callers found (recall, 29 cases) | 0.86 | 0.84 |
 | Median time per answer | **153 ms** | 432 ms |
 | Mean answer size | **4.5 KB** | 11.0 KB |
-| Context cost on every turn | **~4,160 estimated tokens** | ~19,700 tokens |
+| Context cost on every turn (Pixel: the agent prompt 0.4.0 installed) | **~4,160 estimated tokens** | ~19,700 tokens |
 | Cold index of Pixel's repository | **9.3 s, 8.6 MB** | 28.7 s, 184 MB |
 | Git history and Git operations | **Yes** | No |
 | Cypher queries, taint analysis, API route maps | No | **Yes** |
@@ -120,15 +120,15 @@ token-counting method cannot be independently checked. The reported API cost
 is not invoice-verified, and the token count is not necessarily billed-token
 usage. [Known setup and provenance limits](https://github.com/Pixel-CLI/pixel/blob/main/docs/bench/opus-install-hook-trial.md) and the [available protocol note](https://github.com/Pixel-CLI/pixel/blob/main/docs/motion/README.md#the-agent-demo)
 
-Read volume, estimated tokens, elapsed duration and provider-reported cost are different quantities. Adoption rates with the current install hooks are not quantified here; inspect `pixel action-log` on your own sessions.
+Read volume, estimated tokens, elapsed duration and provider-reported cost are different quantities. Adoption rates of the prompt-submit brief and the `pixel` skill are not quantified here; inspect `pixel action-log` (a [command plugin](../docs/#command-plugins)) on your own sessions.
 
 ## Where a specialist wins
 
 - **Natural-language search, the top 10:** on 45 plain-English queries, semble has the right file in its top 10 for 100%, Pixel 0.6.0 for 96%. Pixel puts it first more often: 87%, against 64% for semble and 69% for WarpGrep, Morph's search subagent, whose top 10 reaches 71%. Average answer time 0.7 s for Pixel, 1.6 s for semble, 6.8 s for WarpGrep. The queries are each repository's own doc comments, which favours Pixel's chunks, cut along symbols with their comments. WarpGrep's figures are from its one run on the same queries, with Pixel 0.5.2; it is paid per search and sends the lines it reads to Morph's API. [Method and every row](https://github.com/Pixel-CLI/pixel/blob/main/docs/bench/vs-landscape.md#natural-language-retrieval--pixel-060-four-arms-45-queries)
 - **Compact repository map:** stacklit covers more directories for fewer tokens on 3 of 4 repositories.
-- **Context cost:** Pixel is 4.7× lighter than GitNexus, but heavier than semble (~980 tokens) and stacklit (~420).
+- **Context cost:** Pixel's prompt, as 0.4.0 installed it, is 4.7× lighter than GitNexus, but heavier than semble (~980 tokens) and stacklit (~420). Later releases ship that guidance as a skill instead of an always-on prompt; its cost per turn was not re-measured.
 
-They combine: semble for search and Pixel for the graph, history and Git costs about 5,100 always-on tokens. [Full comparison](https://github.com/Pixel-CLI/pixel/blob/main/docs/comparison.md)
+They combine: semble for search and Pixel for the graph, history and Git costs about 5,100 always-on tokens, counting the prompt Pixel 0.4.0 installed. [Full comparison](https://github.com/Pixel-CLI/pixel/blob/main/docs/comparison.md)
 
 ## Coding decisions
 

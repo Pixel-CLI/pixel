@@ -177,8 +177,6 @@ convention in this repo:
   act on — a removed command or flag with no alias, a changed JSON output or
   protocol field, a changed on-disk format under `.pixel/`, an install layout
   that `pixel setup` does not migrate.
-- `1.0.0` also removes the hidden pre-rename aliases (0.2.5's `Changed`
-  entry promises it); do not cut it by accident.
 
 Pick the version by that convention, state it with its one-line reason in a
 progress line, and go on; stop only on the cases Authority lists. Check that

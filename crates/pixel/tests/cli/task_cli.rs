@@ -22,7 +22,7 @@ fn repo(tag: &str) -> Scratch {
     // These tests exercise the enforcing gate; the product default is
     // advisory, so the fixture opts in explicitly.
     std::fs::write(
-        root.join(".pixel/config.json"),
+        root.join(".pixel/config.yaml"),
         json!({"task":{"enforcement":"enforce"}}).to_string(),
     )
     .unwrap();
@@ -70,7 +70,7 @@ fn begin(root: &Path) -> String {
     good(
         root,
         &[
-            "task",
+            "task-state",
             "begin",
             "fix source",
             "--contract",
@@ -141,7 +141,7 @@ fn prepared_session(root: &Path, provider: &str, session: &str) -> pixel_task::T
             "begin-prepared-session",
         )
         .unwrap();
-    good(root, &["task", "prepare", &task.task_id, "--json"]);
+    good(root, &["task-state", "prepare", &task.task_id, "--json"]);
     store.status(&task.task_id).unwrap()
 }
 
@@ -156,7 +156,7 @@ fn fresh_task_enforcement_requires_both_repository_enablement_and_a_gated_policy
         let root = repo(&format!("enforcement-{enabled}-{policy}"));
         if !enabled {
             std::fs::write(
-                root.join(".pixel/config.json"),
+                root.join(".pixel/config.yaml"),
                 json!({"task":{"enforcement":"off"}}).to_string(),
             )
             .unwrap();
@@ -248,7 +248,7 @@ fn coding_prompt_reuses_active_tasks_but_replaces_terminal_tasks() {
         json!({"session_id":"s","event_id":"active","prompt":"fix another file"}),
     );
     assert_eq!(active["task_id"], id);
-    good(&root, &["task", "cancel", id, "--json"]);
+    good(&root, &["task-state", "cancel", id, "--json"]);
     let question = hook(
         &root,
         "pi",
@@ -291,7 +291,7 @@ fn only_mutating_tool_outcomes_invalidate_live_preparation() {
         let mut task = prepared_session(&root, "pi", "s");
         let store = pixel_task::Store::open(&root).unwrap();
         if terminal {
-            good(&root, &["task", "cancel", &task.task_id, "--json"]);
+            good(&root, &["task-state", "cancel", &task.task_id, "--json"]);
             task = store.status(&task.task_id).unwrap();
         }
         std::fs::write(root.join("source.txt"), "external edit\n").unwrap();
@@ -377,7 +377,7 @@ fn task_mutation_should_require_the_exact_expected_revision() {
     let rejected = command(
         &root,
         &[
-            "task",
+            "task-state",
             "cancel",
             &id,
             "--expected-revision",
@@ -391,7 +391,7 @@ fn task_mutation_should_require_the_exact_expected_revision() {
     let accepted = good(
         &root,
         &[
-            "task",
+            "task-state",
             "cancel",
             &id,
             "--expected-revision",
@@ -412,13 +412,13 @@ fn task_should_verify_and_finish_an_unborn_repository() {
     git(&root, &["add", "."]);
     std::fs::create_dir(root.join(".pixel")).unwrap();
     let id = begin(&root);
-    good(&root, &["task", "prepare", &id, "--json"]);
-    good(&root, &["task", "verify", &id, "--json"]);
-    let review = good(&root, &["task", "review", &id, "--json"]);
+    good(&root, &["task-state", "prepare", &id, "--json"]);
+    good(&root, &["task-state", "verify", &id, "--json"]);
+    let review = good(&root, &["task-state", "review", &id, "--json"]);
     assert_eq!(review["review"]["passed"], true);
     assert_eq!(review["review"]["findings"], json!([]));
     assert_eq!(
-        good(&root, &["task", "finish", &id, "--json"])["phase"],
+        good(&root, &["task-state", "finish", &id, "--json"])["phase"],
         "complete"
     );
     assert!(
@@ -443,8 +443,8 @@ fn review_should_reject_staged_and_unstaged_whitespace_errors_independently() {
             git(&root, &["add", "source.txt"]);
         }
         let id = begin(&root);
-        good(&root, &["task", "prepare", &id, "--json"]);
-        let reviewed = good(&root, &["task", "review", &id, "--json"]);
+        good(&root, &["task-state", "prepare", &id, "--json"]);
+        let reviewed = good(&root, &["task-state", "review", &id, "--json"]);
         assert_eq!(reviewed["review"]["passed"], false, "staged={staged}");
         assert_eq!(
             reviewed["review"]["findings"],
@@ -515,7 +515,7 @@ fn enforced_tasks_should_reject_runtime_policy_downgrades() {
         "deny"
     );
     std::fs::write(
-        root.join(".pixel/config.json"),
+        root.join(".pixel/config.yaml"),
         json!({"task":{"enforcement":"off"}}).to_string(),
     )
     .unwrap();
@@ -603,7 +603,7 @@ fn weakening_should_require_both_terminal_streams_and_the_exact_confirmation() {
             .current_dir(&root)
             .env("PIXEL_METRICS", "0")
             .args([
-                "task",
+                "task-state",
                 "contract",
                 &id,
                 "--file",
@@ -661,7 +661,7 @@ fn native_stop_should_publish_only_verified_completion_and_preserve_live_observa
     let task = good(
         &root,
         &[
-            "task",
+            "task-state",
             "begin",
             "fix source",
             "--contract",
@@ -674,9 +674,9 @@ fn native_stop_should_publish_only_verified_completion_and_preserve_live_observa
         ],
     );
     let id = task["task_id"].as_str().unwrap();
-    good(&root, &["task", "prepare", id, "--json"]);
-    good(&root, &["task", "verify", id, "--json"]);
-    good(&root, &["task", "review", id, "--json"]);
+    good(&root, &["task-state", "prepare", id, "--json"]);
+    good(&root, &["task-state", "verify", id, "--json"]);
+    good(&root, &["task-state", "review", id, "--json"]);
     let finished = hook(
         &root,
         "pi",
@@ -693,7 +693,7 @@ fn native_stop_should_publish_only_verified_completion_and_preserve_live_observa
     assert_eq!(marker["pi"]["session_id"], "s");
     assert_eq!(marker["pi"]["event"], "stop");
     assert!(marker["pi"]["observed_unix"].as_u64().unwrap() > 0);
-    let events = good(&root, &["task", "events", id, "--json"]);
+    let events = good(&root, &["task-state", "events", id, "--json"]);
     assert_eq!(events["trajectory"]["coordinator_calls"], 1);
     let repeated = hook(
         &root,
@@ -703,7 +703,7 @@ fn native_stop_should_publish_only_verified_completion_and_preserve_live_observa
     );
     assert_eq!(repeated["decision"], "allow");
     assert_eq!(
-        good(&root, &["task", "events", id, "--json"])["trajectory"]["coordinator_calls"],
+        good(&root, &["task-state", "events", id, "--json"])["trajectory"]["coordinator_calls"],
         1
     );
     let store = pixel_task::Store::open(&root).unwrap();
@@ -794,25 +794,25 @@ fn repository_toolchain_pins_should_survive_every_contract_entry_path() {
     let root = repo("toolchain");
     let pins = json!({"compiler":"a".repeat(64)});
     std::fs::write(
-        root.join(".pixel/config.json"),
+        root.join(".pixel/config.yaml"),
         json!({"task":{"toolchain":pins}}).to_string(),
     )
     .unwrap();
-    let initial = good(&root, &["task", "begin", "fix source", "--json"]);
+    let initial = good(&root, &["task-state", "begin", "fix source", "--json"]);
     assert_eq!(initial["contract"]["toolchain"], pins);
     let from_file = begin(&root);
     assert_eq!(
-        good(&root, &["task", "status", &from_file, "--json"])["task"]["contract"]["toolchain"],
+        good(&root, &["task-state", "status", &from_file, "--json"])["task"]["contract"]["toolchain"],
         pins
     );
     let extended = json!({"compiler":"a".repeat(64), "driver":"b".repeat(64)});
     std::fs::write(
-        root.join(".pixel/config.json"),
+        root.join(".pixel/config.yaml"),
         json!({"task":{"toolchain":extended}}).to_string(),
     )
     .unwrap();
     assert_eq!(
-        good(&root, &["task", "status", &from_file, "--json"])["task"]["contract"]["toolchain"],
+        good(&root, &["task-state", "status", &from_file, "--json"])["task"]["contract"]["toolchain"],
         extended
     );
     let mut replacement = contract();
@@ -822,7 +822,7 @@ fn repository_toolchain_pins_should_survive_every_contract_entry_path() {
         !command(
             &root,
             &[
-                "task",
+                "task-state",
                 "contract",
                 &from_file,
                 "--file",
@@ -841,7 +841,7 @@ fn unconfigured_task_should_accept_an_inline_contract_without_authorizing_a_file
     let task = good(
         &root,
         &[
-            "task",
+            "task-state",
             "begin",
             "fix source",
             "--provider",
@@ -863,7 +863,7 @@ fn unconfigured_task_should_accept_an_inline_contract_without_authorizing_a_file
     let reason = denied["reason"].as_str().unwrap();
     assert!(reason.contains(id));
     assert!(reason.contains("--definition '<JSON>'"));
-    let declaration = format!("pixel task contract {id} --definition '{definition}' --json");
+    let declaration = format!("pixel task-state contract {id} --definition '{definition}' --json");
     assert_ne!(
         hook(
             &root,
@@ -876,7 +876,7 @@ fn unconfigured_task_should_accept_an_inline_contract_without_authorizing_a_file
     let strengthened = good(
         &root,
         &[
-            "task",
+            "task-state",
             "contract",
             id,
             "--definition",
@@ -892,7 +892,7 @@ fn unconfigured_task_should_accept_an_inline_contract_without_authorizing_a_file
     assert!(
         !command(
             &root,
-            &["task", "contract", id, "--definition", "{", "--json"]
+            &["task-state", "contract", id, "--definition", "{", "--json"]
         )
         .status
         .success()
@@ -905,7 +905,7 @@ fn unconfigured_task_should_accept_an_inline_contract_without_authorizing_a_file
         !command(
             &root,
             &[
-                "task",
+                "task-state",
                 "contract",
                 id,
                 "--definition",
@@ -922,7 +922,7 @@ fn unconfigured_task_should_accept_an_inline_contract_without_authorizing_a_file
 fn task_should_require_private_check_and_review_then_reject_same_head_edits() {
     let root = repo("lifecycle");
     let id = begin(&root);
-    let task = good(&root, &["task", "status", &id, "--json"]);
+    let task = good(&root, &["task-state", "status", &id, "--json"]);
     let attempt = task["task"]["attempt_id"].clone();
     let correlated = pixel_command()
         .current_dir(&root)
@@ -931,7 +931,7 @@ fn task_should_require_private_check_and_review_then_reject_same_head_edits() {
         .env("PIXEL_TASK_SPAN_ID", "fixture-span")
         .env("PIXEL_TASK_PARENT_SPAN_ID", "fixture-parent")
         .env("PIXEL_TASK_HOST_CALL_ID", "fixture-call")
-        .args(["task", "status", &id, "--json"])
+        .args(["task-state", "status", &id, "--json"])
         .output()
         .unwrap();
     assert!(
@@ -960,7 +960,7 @@ fn task_should_require_private_check_and_review_then_reject_same_head_edits() {
     let duplicate = good(
         &root,
         &[
-            "task",
+            "task-state",
             "begin",
             "fix source",
             "--contract",
@@ -973,18 +973,32 @@ fn task_should_require_private_check_and_review_then_reject_same_head_edits() {
     assert_eq!(duplicate["task_id"], id);
     assert_eq!(duplicate["revision"], 1);
     assert!(
-        !command(&root, &["task", "finish", &id, "--json"])
+        !command(&root, &["task-state", "finish", &id, "--json"])
             .status
             .success()
     );
     let prepared = good(
         &root,
-        &["task", "prepare", &id, "--request-id", "prepare", "--json"],
+        &[
+            "task-state",
+            "prepare",
+            &id,
+            "--request-id",
+            "prepare",
+            "--json",
+        ],
     );
     assert_eq!(prepared["phase"], "prepared");
     let verified = good(
         &root,
-        &["task", "verify", &id, "--request-id", "verify", "--json"],
+        &[
+            "task-state",
+            "verify",
+            &id,
+            "--request-id",
+            "verify",
+            "--json",
+        ],
     );
     assert_eq!(verified["receipts"][0]["outcome"], "passed");
     assert_ne!(
@@ -992,25 +1006,39 @@ fn task_should_require_private_check_and_review_then_reject_same_head_edits() {
         json!(root.as_ref())
     );
     assert!(
-        !command(&root, &["task", "finish", &id, "--json"])
+        !command(&root, &["task-state", "finish", &id, "--json"])
             .status
             .success()
     );
     let reviewed = good(
         &root,
-        &["task", "review", &id, "--request-id", "review", "--json"],
+        &[
+            "task-state",
+            "review",
+            &id,
+            "--request-id",
+            "review",
+            "--json",
+        ],
     );
     assert_eq!(reviewed["review"]["passed"], true);
     let finished = good(
         &root,
-        &["task", "finish", &id, "--request-id", "finish", "--json"],
+        &[
+            "task-state",
+            "finish",
+            &id,
+            "--request-id",
+            "finish",
+            "--json",
+        ],
     );
     assert_eq!(finished["phase"], "complete");
     std::fs::write(root.join("source.txt"), "regression\n").unwrap();
-    let status = good(&root, &["task", "status", &id, "--json"]);
+    let status = good(&root, &["task-state", "status", &id, "--json"]);
     assert_eq!(status["finish"]["allowed"], false);
     assert!(
-        !command(&root, &["task", "finish", &id, "--json"])
+        !command(&root, &["task-state", "finish", &id, "--json"])
             .status
             .success()
     );
@@ -1021,8 +1049,8 @@ fn task_should_reject_failed_check_and_keep_live_source_unchanged() {
     let root = repo("failed");
     let id = begin(&root);
     std::fs::write(root.join("source.txt"), "wrong\n").unwrap();
-    good(&root, &["task", "prepare", &id, "--json"]);
-    let output = command(&root, &["task", "verify", &id, "--json"]);
+    good(&root, &["task-state", "prepare", &id, "--json"]);
+    let output = command(&root, &["task-state", "verify", &id, "--json"]);
     assert!(!output.status.success());
     let verified: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(verified["receipts"][0]["outcome"], "failed");
@@ -1031,7 +1059,7 @@ fn task_should_reject_failed_check_and_keep_live_source_unchanged() {
         "wrong\n"
     );
     assert!(
-        !command(&root, &["task", "finish", &id, "--json"])
+        !command(&root, &["task-state", "finish", &id, "--json"])
             .status
             .success()
     );
@@ -1043,25 +1071,25 @@ fn contract_should_map_initial_criteria_preserve_repository_checks_and_reject_no
     let root = repo("contract");
     let requirement = contract()["checks"].clone();
     std::fs::write(
-        root.join(".pixel/config.json"),
+        root.join(".pixel/config.yaml"),
         json!({"task":{"checks":requirement,"conservative_checks":["content"]}}).to_string(),
     )
     .unwrap();
-    let task = good(&root, &["task", "begin", "fix source", "--json"]);
+    let task = good(&root, &["task-state", "begin", "fix source", "--json"]);
     let id = task["task_id"].as_str().unwrap();
     assert_eq!(task["contract"]["criteria"][0]["checks"], json!([]));
     // Omitted default fields and their serialized forms must be equivalent requirements.
-    let status = good(&root, &["task", "status", id, "--json"]);
+    let status = good(&root, &["task-state", "status", id, "--json"]);
     assert_eq!(status["task"]["contract"], task["contract"]);
     assert_eq!(
-        good(&root, &["task", "status", id, "--json"])["task"]["revision"],
+        good(&root, &["task-state", "status", id, "--json"])["task"]["revision"],
         status["task"]["revision"]
     );
     std::fs::write(root.join(".pixel/contract.json"), contract().to_string()).unwrap();
     let updated = good(
         &root,
         &[
-            "task",
+            "task-state",
             "contract",
             id,
             "--file",
@@ -1080,7 +1108,7 @@ fn contract_should_map_initial_criteria_preserve_repository_checks_and_reject_no
         !command(
             &root,
             &[
-                "task",
+                "task-state",
                 "contract",
                 id,
                 "--file",
@@ -1096,7 +1124,7 @@ fn contract_should_map_initial_criteria_preserve_repository_checks_and_reject_no
         !command(
             &root,
             &[
-                "task",
+                "task-state",
                 "contract",
                 id,
                 "--file",
@@ -1126,7 +1154,7 @@ fn native_hosts_should_deduplicate_denied_requests_and_stop_at_the_persistent_bu
         let store = pixel_task::Store::open(&root).unwrap();
         let task = store.find_session(provider, "session").unwrap().unwrap();
         let id = &task.task_id;
-        let events = good(&root, &["task", "events", id, "--json"]);
+        let events = good(&root, &["task-state", "events", id, "--json"]);
         assert_eq!(events["trajectory"]["observed_model_tool_requests"], 1);
         assert_eq!(events["trajectory"]["blocked_requests"], 1);
         assert_eq!(events["trajectory"]["coverage"], "partial");
@@ -1160,7 +1188,7 @@ fn native_hosts_should_deduplicate_denied_requests_and_stop_at_the_persistent_bu
             }
         }
         assert_eq!(store.status(id).unwrap().budget.continuations, 2);
-        let replay = good(&root, &["task", "replay", id, "--json"]);
+        let replay = good(&root, &["task-state", "replay", id, "--json"]);
         assert_eq!(replay["first_divergence"], Value::Null);
         assert_eq!(replay["counterfactual_outcome_established"], false);
         assert!(replay["frames_evaluated"].as_u64().unwrap() > 0);
@@ -1171,7 +1199,7 @@ fn native_hosts_should_deduplicate_denied_requests_and_stop_at_the_persistent_bu
 fn first_mutation_should_never_authorize_itself_and_failed_writes_should_invalidate_preparation() {
     let root = repo("fallback");
     std::fs::write(
-        root.join(".pixel/config.json"),
+        root.join(".pixel/config.yaml"),
         json!({"task":{"enforcement":"enforce","checks":contract()["checks"],"conservative_checks":["content"]}})
             .to_string(),
     )
@@ -1293,7 +1321,7 @@ fn task_model_request_and_native_hook_should_share_one_count_and_keep_available_
         .find_session("pi", "s")
         .unwrap()
         .unwrap();
-    let events = good(&root, &["task", "events", &task.task_id, "--json"]);
+    let events = good(&root, &["task-state", "events", &task.task_id, "--json"]);
     assert_eq!(events["trajectory"]["observed_model_tool_requests"], 1);
     assert_eq!(events["trajectory"]["model_responses"], 1);
     assert_eq!(
@@ -1320,7 +1348,7 @@ fn task_model_request_and_native_hook_should_share_one_count_and_keep_available_
 #[test]
 fn default_policy_observes_mutations_without_denying_them() {
     let root = repo("default-advisory");
-    std::fs::remove_file(root.join(".pixel/config.json")).unwrap();
+    std::fs::remove_file(root.join(".pixel/config.yaml")).unwrap();
     let result = hook(
         &root,
         "pi",

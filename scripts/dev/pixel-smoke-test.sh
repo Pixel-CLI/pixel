@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: MIT
 
 # pixel smoke test — exercises the INSTALLED pixel end to end: CLI surface,
-# the retired hook verbs, doctor, the install surface, the help of the
-# mandatory workflows, and the pre-rename command names (accepted as aliases
-# until 1.0).
+# the hook verbs an earlier release left registered, doctor, the install
+# surface and the help of the mandatory workflows.
 #
 #   scripts/dev/pixel-smoke-test.sh                 # binary from `command -v pixel`
 #   PIXEL_BIN=target/dev-release/pixel scripts/dev/pixel-smoke-test.sh
@@ -16,12 +15,12 @@
 # Read-only: nothing under $HOME is written. Run `pixel setup` first; the
 # doctor section reports what it left non-green. Exit 1 on any failure.
 #
-# `pixel run-hook task-event` is the only hook `pixel setup` registers. The
-# verbs earlier releases registered (guard, composed-guard, session-start,
-# prompt-submit, post-compaction, post-tool-use, metrics) stay accepted as
-# silent no-ops so a registration an old install left behind can never block
-# or fail a host; section 2 asserts exactly that, under both spellings of the
-# command (`run-hook`, and the `hook` every 0.2.x install wrote).
+# `pixel run-hook task-event` and `metrics` are the hooks `pixel setup`
+# registers. A verb an earlier release registered (guard, composed-guard,
+# session-start, prompt-submit, post-compaction, post-tool-use) is no longer
+# parsed, but `run-hook` still exits 0 with nothing on stdout for it, so a
+# registration an old install left behind can never block or fail a host;
+# section 2 asserts exactly that.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -81,15 +80,13 @@ echo "=== 1. CLI surface ==="
 [ "$("$PIXEL" -V 2>/dev/null | wc -l | tr -d ' ')" = 1 ] && ok "-V is one line" || no "-V" "expected one line"
 "$PIXEL" --help 2>&1 | grep -q "pixel" && ok "--help" || no "--help" "no output"
 
-echo "=== 2. Retired hook verbs — silent no-ops ==="
+echo "=== 2. Hook verbs of earlier releases — fail open ==="
 # An old install may still register any of these; each must exit 0 and print
-# nothing whatever the payload says, so a stale registration cannot block a
-# tool call, rewrite a command or inject context.
-for hook in run-hook hook; do
-    for verb in guard composed-guard session-start prompt-submit post-compaction post-tool-use metrics; do
-        OUT=$(payload Bash command "$RESET" | "$PIXEL" "$hook" "$verb" --provider claude 2>/dev/null); CODE=$?
-        expect_silent "$hook $verb"
-    done
+# nothing on stdout whatever the payload says, so a stale registration cannot
+# block a tool call, rewrite a command or inject context.
+for verb in guard composed-guard session-start prompt-submit post-compaction post-tool-use; do
+    OUT=$(payload Bash command "$RESET" | "$PIXEL" run-hook "$verb" --provider claude 2>/dev/null); CODE=$?
+    expect_silent "run-hook $verb"
 done
 OUT=$(payload shell command "$GREP" | "$PIXEL" run-hook guard --provider codex 2>/dev/null); CODE=$?
 expect_silent "run-hook guard --provider codex"
@@ -103,61 +100,25 @@ d=json.load(sys.stdin)
 s=d["summary"]; print("  green:",s["green"],"yellow:",s["yellow"],"red:",s["red"])
 for c in d["checks"]:
     if c["status"]!="green": print("  ", c["status"].upper(), c["id"], "—", c["summary"])
-sys.exit(0 if d["ok"] else 1)' && ok "doctor: ok" || no "doctor" "not ok (non-green checks listed above; PIXEL_SHELL=<shell> if only install.legacy-wrappers is red)"
+sys.exit(0 if d["ok"] else 1)' && ok "doctor: ok" || no "doctor" "not ok (non-green checks listed above; PIXEL_SHELL=<shell> if only binary.shell-path is red)"
 
 echo "=== 4. Install surface (what \`pixel setup\` leaves, read through doctor) ==="
-for id in install.agent-prompt install.pi-prompt install.pi-impact install.legacy-wrappers install.codex-config install.claude-hooks; do
+for id in install.pi-impact install.claude-hooks; do
     st=$(json_field "$DOC" "next(c['status'] for c in d['checks'] if c['id']=='$id')")
     [ "$st" = green ] && ok "doctor $id green" || no "doctor $id" "status '${st:-missing}'"
 done
-[ ! -e "$HOME/.local/share/pixel/agent-prompt.md" ] && ok "no agent-prompt.md deployed" || no "agent-prompt.md" "retired file remains at ~/.local/share/pixel (run: pixel setup)"
+[ -s "$HOME/.claude/skills/pixel/SKILL.md" ] && ok "the pixel skill is deployed for Claude" || no "pixel skill" "no ~/.claude/skills/pixel/SKILL.md (run: pixel setup)"
 
 echo "=== 5. Mandatory workflows + release gate — help surface ==="
 for cmd in scope-task find-code sync-branch check-release self-update; do
     "$PIXEL" "$cmd" --help 2>&1 | grep -F -q "Usage: $PIXEL_NAME $cmd" && ok "$cmd --help" || no "$cmd --help" "no usage line"
 done
-"$PIXEL" setup --help 2>&1 | grep -q -- "--wrappers-only" && ok "setup --remove --wrappers-only documented" || no "setup --help" "no --wrappers-only"
+"$PIXEL" setup --help 2>&1 | grep -q -- "--remove" && ok "setup --remove documented" || no "setup --help" "no --remove"
 
-echo "=== 6. Renamed commands — old and new names answer alike ==="
-# old_and_new <old> <new> <args…>: both spellings exit 0 with one JSON
-# document on stdout; only the old one prints the rename note on stderr.
-# PIXEL_METRICS=1 overrides a PIXEL_METRICS=0 exported by the caller.
-old_and_new() {
-    old=$1; new=$2; shift 2
-    ERR=$(mktemp)
-    NEW_OUT=$(PIXEL_METRICS=1 "$PIXEL" --metrics on "$new" "$@" 2>"$ERR"); NEW_CODE=$?
-    NEW_NOTE=$(grep -c "^note: '" "$ERR")
-    OLD_OUT=$(PIXEL_METRICS=1 "$PIXEL" --metrics on "$old" "$@" 2>"$ERR"); OLD_CODE=$?
-    OLD_NOTE=$(grep -c "^note: '$old' is now '$new'; the old name stays accepted until 1.0$" "$ERR")
-    rm -f "$ERR"
-    if [ "$NEW_CODE" -ne 0 ] || [ -z "$(json_field "$NEW_OUT" "'json'")" ]; then
-        no "$new" "expected exit 0 + JSON, got exit $NEW_CODE: $(printf '%s' "$NEW_OUT" | head -c 200)"
-    elif [ "$OLD_CODE" -ne 0 ] || [ -z "$(json_field "$OLD_OUT" "'json'")" ]; then
-        no "$old (alias of $new)" "expected exit 0 + JSON, got exit $OLD_CODE: $(printf '%s' "$OLD_OUT" | head -c 200)"
-    elif [ "$OLD_NOTE" -ne 1 ] || [ "$NEW_NOTE" -ne 0 ]; then
-        no "$old (alias of $new)" "rename note: $OLD_NOTE line(s) for $old, $NEW_NOTE for $new (want 1 and 0)"
-    else
-        ok "$old and $new both answer with JSON; only $old prints the rename note"
-    fi
-}
-old_and_new ready prepare-repo "$REPO" --no-daemon --json
-old_and_new changes what-changed --json "$REPO"
-old_and_new symbol find-symbol run_command --json "$REPO"
-# `impact` was never renamed: one name, no note.
-ERR=$(mktemp)
-OUT=$(PIXEL_METRICS=1 "$PIXEL" --metrics on impact run_command --json "$REPO" 2>"$ERR"); CODE=$?
-if [ "$CODE" -eq 0 ] && [ -n "$(json_field "$OUT" "'json'")" ] && ! grep -q "^note: '" "$ERR"; then ok "impact answers with JSON and no rename note"
+echo "=== 6. A core retrieval command answers with JSON ==="
+OUT=$(PIXEL_METRICS=1 "$PIXEL" --metrics on impact run_command --json "$REPO" 2>/dev/null); CODE=$?
+if [ "$CODE" -eq 0 ] && [ -n "$(json_field "$OUT" "'json'")" ]; then ok "impact answers with JSON"
 else no "impact" "exit $CODE: $(printf '%s' "$OUT" | head -c 200)"; fi
-rm -f "$ERR"
-# Alias teaching is independent of metrics reporting.
-ERR=$(mktemp)
-PIXEL_METRICS=0 "$PIXEL" symbol run_command --json "$REPO" >/dev/null 2>"$ERR"
-if grep -q "^note: 'symbol' is now 'find-symbol'; the old name stays accepted until 1.0$" "$ERR" && ! grep -q '🟩 Pixel' "$ERR"; then
-    ok "PIXEL_METRICS=0 preserves rename teaching without metrics"
-else
-    no "PIXEL_METRICS=0" "expected rename note without metrics reporting"
-fi
-rm -f "$ERR"
 
 echo ""
 echo "=== RESULTS ==="

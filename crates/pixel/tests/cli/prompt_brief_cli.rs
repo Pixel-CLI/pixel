@@ -914,7 +914,7 @@ fn a_hook_with_arguments_it_cannot_parse_says_so_and_exits_zero() {
             "--future-flag",
         ][..],
         &[
-            "hook",
+            "run-hook",
             "task-event",
             "--provider",
             "claude",
