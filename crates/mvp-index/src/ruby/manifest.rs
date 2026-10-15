@@ -32,16 +32,21 @@ const MAX_DEPTH: usize = 512;
 
 /// From the path alone: a Ruby source by name or extension, a binstub
 /// candidate (its shebang decides in [`accepts`]), or a `Gemfile.lock`,
-/// which yields facts only (v1 `build.rs:391-399`, `is_graph_candidate`).
+/// which yields facts only (v1 `build.rs:391-399`, `is_graph_candidate`),
+/// as a fixture file does ([`fixture_set`]).
 pub fn wants(path: &str) -> bool {
-    is_ruby_by_name(path) || is_binstub_candidate(path) || is_lockfile(path)
+    is_ruby_by_name(path)
+        || is_binstub_candidate(path)
+        || is_lockfile(path)
+        || fixture_set(path).is_some()
 }
 
 /// After reading: a binstub needs a Ruby shebang, and a generated blob is
-/// refused, as v1's gates do (`build.rs:319-379`). A lockfile is read as
-/// text, never parsed, so the blob guard does not apply to it.
+/// refused, as v1's gates do (`build.rs:319-379`). A lockfile or a
+/// fixture file is read as text, never parsed, so the blob guard does
+/// not apply to it.
 pub fn accepts(path: &str, content: &[u8]) -> bool {
-    if is_lockfile(path) {
+    if is_lockfile(path) || fixture_set(path).is_some() {
         return true;
     }
     if !is_ruby_by_name(path) && !has_ruby_shebang(content) {
@@ -97,6 +102,33 @@ pub fn has_ruby_shebang(content: &[u8]) -> bool {
 /// `Gemfile.lock`, at the root or in a project directory.
 pub fn is_lockfile(path: &str) -> bool {
     path == "Gemfile.lock" || path.ends_with("/Gemfile.lock")
+}
+
+/// The fixture set a file of Rails' default fixture path holds, at the
+/// root or in a project directory: its path under `test/fixtures/`
+/// without `.yml` (`test/fixtures/admin/users.yml` → `admin/users`),
+/// read for typed receivers (ADR-0038), never parsed.
+pub fn fixture_set(path: &str) -> Option<&str> {
+    const DIR: &str = "test/fixtures/";
+    let stem = path.strip_suffix(".yml")?;
+    let set = match stem.strip_prefix(DIR) {
+        Some(set) => set,
+        None => &stem[stem.find(&format!("/{DIR}"))? + DIR.len() + 1..],
+    };
+    (!set.is_empty() && !set.ends_with('/')).then_some(set)
+}
+
+/// The facts of a fixture file: whether it names its model class
+/// (`_fixture: model_class:`), which the rules do not read.
+pub fn fixture_facts(content: &[u8]) -> Vec<Fact> {
+    let names = String::from_utf8_lossy(content)
+        .lines()
+        .any(|line| line.trim_start().starts_with("model_class:"));
+    if names {
+        vec![Fact::FixtureClass]
+    } else {
+        Vec::new()
+    }
 }
 
 /// `Gemfile`, at the root or in a project directory (not `Gemfile.rb`).

@@ -21,10 +21,15 @@ mod ancestors;
 mod calls;
 mod constants;
 mod definers;
+mod gems;
 mod projects;
 mod rails;
 mod references;
+mod rspec;
+mod rspec_shared;
 mod scoped;
+mod stubs;
+mod typed;
 mod unplaced;
 
 use std::collections::{BTreeSet, HashMap};
@@ -119,6 +124,8 @@ fn run(files: &[(&str, &str)], before: &[FileRows]) -> Delta {
             .collect(),
         skipped: Vec::new(),
         untracked: Vec::new(),
+        index: None,
+        unsettled: false,
     };
     let indexed: Vec<FileRow> = before.iter().map(|rows| rows.file.clone()).collect();
     let extractor = (!before.is_empty()).then(lang::extractor);

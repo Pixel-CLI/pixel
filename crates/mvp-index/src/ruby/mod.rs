@@ -136,7 +136,7 @@ use crate::codec;
 use crate::lang::{Extraction, Rules, World};
 
 /// Bumped by any change to the grammar or these rules.
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 14;
 
 /// The nesting of an encoded [`Fact::Definee`] that has the one of the
 /// definee before it: no constant's name.
@@ -146,6 +146,11 @@ const SAME_SCOPE: &str = "^";
 pub const ROUTE: &str = ":route ";
 /// The qualifier of an association: `":association has_many"`.
 pub const ASSOCIATION: &str = ":association ";
+/// An association's flag (its site's second `extra`): it has an extension,
+/// a block, `extend:` or `extending` in its scope (ADR-0038).
+pub const ASSOCIATION_EXTENDED: char = 'e';
+/// An association's flag: it goes `through:` another.
+pub const ASSOCIATION_THROUGH: char = 't';
 /// The qualifier of an ancestor declaration: `":mixin include"`.
 pub const MIXIN: &str = ":mixin ";
 /// The qualifier of an alias's reference to its original method.
@@ -156,6 +161,32 @@ pub const DELEGATE: &str = ":delegate";
 /// what its source runs on (`extract::This`): a top-level block, a block a
 /// macro or `instance_eval` runs elsewhere, a `class << self` body.
 pub const REBOUND: &str = ":rebound";
+/// The qualifier of a call whose receiver is a chain the rules may type:
+/// `":value C:Room.find(1).messages"` (ADR-0038, `extract::values`).
+pub const VALUE: &str = ":value ";
+/// The root of a value path that starts at a constant (`C:Room`).
+pub const VALUE_CONSTANT: &str = "C:";
+/// The root of a value path that starts at a fixture accessor in a test
+/// (`F:users` for `users(:kevin)`).
+pub const VALUE_FIXTURE: &str = "F:";
+/// The root of a value path that starts at a name RSpec's example groups
+/// answer (`L:purchase` for a `let`, `L:subject`, `L:described_class`;
+/// ADR-0041).
+pub const VALUE_LET: &str = "L:";
+/// The root of a value path that starts at a factory_bot factory
+/// (`Y:purchase` for `create(:purchase)`, ADR-0041).
+pub const VALUE_FACTORY: &str = "Y:";
+/// The `parent` of a [`Fact::Group`] that is a shared group's block
+/// (`shared_context`), which runs in whatever group includes it.
+pub const SHARED_GROUP: u32 = u32::MAX;
+/// The `extra` of a call written where `self` is an example of the RSpec
+/// group declared at that line: `":group 12"` in an example, which runs on
+/// that group alone; `":group 12+"` in a hook, a `let`, a `subject` or a
+/// `def`, which run on its nested groups' examples too (ADR-0041).
+pub const GROUP: &str = ":group ";
+/// The step of a value path where the value may also be `nil`: a local
+/// read where its assignment may not have run.
+pub const MAYBE_NIL: &str = "?";
 /// The `extra` of an import written where it may not run when the file
 /// loads: under a condition, in a block or in a method body; and of an
 /// ancestor declaration written where it may not run when its body does
@@ -361,6 +392,11 @@ pub enum Fact {
     /// methods, and those of every module it brings along, may be any
     /// object's (R5-04).
     Spread { path: String, scope: Vec<String> },
+    /// The same for `include M` written in the body of an RSpec example
+    /// group ([`Fact::GroupInclude`]): mixed into the group's examples,
+    /// which RSpec's model names when it reads the program, and into an
+    /// object the rules cannot name otherwise (ADR-0041).
+    GroupSpread { path: String, scope: Vec<String> },
     /// Code evaluated on the class or module the constant `path` names,
     /// written in the nesting `scope` (innermost first) outside its body
     /// (`X.class_eval do def m`, `X.remove_method :m`, `X.include M`), may
@@ -431,6 +467,15 @@ pub enum Fact {
     /// the rules do not follow: a class or module reopened under a path
     /// holding that segment may be another (R8-09).
     Alias { segment: String },
+    /// An Active Record association `name` declared outside a class body
+    /// (a concern's `included do`, a block evaluated on a class): the
+    /// methods it generates land on a class the rules do not place, so no
+    /// typed receiver reads that name as a reader (ADR-0038).
+    LooseAssociation { name: String },
+    /// A fixture file names its model class (`_fixture: model_class:`),
+    /// which the rules do not read: its accessor types nothing
+    /// (ADR-0038).
+    FixtureClass,
     /// The constant `name` is assigned the class or module a constructor
     /// makes (`X = Struct.new`, `Class.new`, `Module.new`, `Data.define`).
     /// Assigned twice, in one file or two, Ruby replaces the first with
@@ -456,6 +501,83 @@ pub enum Fact {
         name: String,
         module: Option<String>,
     },
+    /// An RSpec example group (ADR-0041): the `describe` (or a form of it)
+    /// at `line`, nested in the group at `parent` (0: none), described by
+    /// the constant `described` as written in the nesting `scope` (empty:
+    /// none; `?`: an expression), with metadata of its own (`metadata`),
+    /// unknown from its own step (`opaque`) when its body holds a
+    /// statement the rules do not read, and with nested groups the rules
+    /// do not read (`nests`: `it_behaves_like`).
+    Group {
+        line: u32,
+        parent: u32,
+        described: String,
+        scope: Vec<String>,
+        metadata: bool,
+        opaque: bool,
+        nests: bool,
+    },
+    /// A method the group at `group` defines at `line`: a `def` (`def`),
+    /// else a `let` or a `subject` (ADR-0041).
+    Member {
+        group: u32,
+        name: String,
+        line: u32,
+        def: bool,
+    },
+    /// The value path of the last expression of the block of the `let` or
+    /// `subject` `name` at `line` in the group at `group`, when the rules
+    /// may type it (ADR-0041).
+    LetValue {
+        group: u32,
+        name: String,
+        line: u32,
+        value: String,
+    },
+    /// A `def` written where `self` is an RSpec example group: the group's
+    /// method when the program's RSpec is read, a [`Fact::Tainted`] name
+    /// otherwise (ADR-0041).
+    GroupDef { name: String },
+    /// `shared_context`, `shared_examples` or `shared_examples_for` named
+    /// `name`, whose block is the [`Fact::Group`] at `line` (parent
+    /// [`SHARED_GROUP`]); `scoped` when declared without a receiver
+    /// directly where `self` is a group, where RSpec makes it that
+    /// group's and its nested groups' alone, so no other file's (one sent
+    /// to `RSpec`, or declared anywhere else, is the whole program's);
+    /// with metadata of its own (`metadata`),
+    /// which includes it in groups with matching metadata (ADR-0041).
+    Shared {
+        name: String,
+        line: u32,
+        scoped: bool,
+        metadata: bool,
+    },
+    /// `include M` in the body of the group at `group`, `module` the
+    /// constant as written: a step after the group's own methods
+    /// (ADR-0041).
+    GroupInclude { group: u32, module: String },
+    /// `include_context` or `include_examples` of the shared group `name`
+    /// at `line` in the group at `group` (ADR-0041).
+    Include { group: u32, name: String, line: u32 },
+    /// A factory_bot factory (ADR-0041): its name, its class as written
+    /// (`class:`; empty: none; a string's name is rooted, `::X`), its
+    /// parent (the factory around it, or `parent:`; empty: none), the
+    /// nesting it is written in, and whether it may build anything
+    /// (`initialize_with`, an option the rules do not read, a
+    /// `FactoryBot.modify`).
+    Factory {
+        name: String,
+        class: String,
+        parent: String,
+        scope: Vec<String>,
+        initialized: bool,
+    },
+    /// The file calls `RSpec.configure` or `RSpec.describe`.
+    Rspec,
+    /// The file holds what the RSpec model does not read: a `minitest/spec`
+    /// load, a `prepend` into the configuration, a method named as RSpec's
+    /// DSL outside a group, RSpec's own classes reopened (ADR-0041).
+    RspecOff,
 }
 
 impl Fact {
@@ -524,6 +646,11 @@ impl Fact {
                 ],
                 Fact::Spread { path, scope } => {
                     let mut record = vec!["spread".to_owned(), path.clone()];
+                    record.extend(scope.iter().cloned());
+                    record
+                }
+                Fact::GroupSpread { path, scope } => {
+                    let mut record = vec!["group_spread".to_owned(), path.clone()];
                     record.extend(scope.iter().cloned());
                     record
                 }
@@ -613,6 +740,10 @@ impl Fact {
                 }
                 Fact::Alias { segment } => vec!["alias".to_owned(), segment.clone()],
                 Fact::Constructed { name } => vec!["constructed".to_owned(), name.clone()],
+                Fact::LooseAssociation { name } => {
+                    vec!["loose_association".to_owned(), name.clone()]
+                }
+                Fact::FixtureClass => vec!["fixture_class".to_owned()],
                 Fact::Hook { method, line } => {
                     vec!["hook".to_owned(), method.clone(), line.to_string()]
                 }
@@ -626,6 +757,103 @@ impl Fact {
                         .as_ref()
                         .map_or_else(String::new, |m| format!("={m}")),
                 ],
+                Fact::Group {
+                    line,
+                    parent,
+                    described,
+                    scope,
+                    metadata,
+                    opaque,
+                    nests,
+                } => {
+                    let flags = format!(
+                        "{}{}{}",
+                        if *metadata { "m" } else { "" },
+                        if *opaque { "o" } else { "" },
+                        if *nests { "n" } else { "" }
+                    );
+                    let mut record = vec![
+                        "group".to_owned(),
+                        line.to_string(),
+                        parent.to_string(),
+                        described.clone(),
+                        flags,
+                    ];
+                    record.extend(scope.iter().cloned());
+                    record
+                }
+                Fact::Member {
+                    group,
+                    name,
+                    line,
+                    def,
+                } => vec![
+                    "member".to_owned(),
+                    group.to_string(),
+                    name.clone(),
+                    line.to_string(),
+                    if *def { "def" } else { "let" }.to_owned(),
+                ],
+                Fact::LetValue {
+                    group,
+                    name,
+                    line,
+                    value,
+                } => vec![
+                    "let_value".to_owned(),
+                    group.to_string(),
+                    name.clone(),
+                    line.to_string(),
+                    value.clone(),
+                ],
+                Fact::GroupDef { name } => vec!["group_def".to_owned(), name.clone()],
+                Fact::Shared {
+                    name,
+                    line,
+                    scoped,
+                    metadata,
+                } => vec![
+                    "shared".to_owned(),
+                    name.clone(),
+                    line.to_string(),
+                    format!(
+                        "{}{}",
+                        if *scoped { "s" } else { "" },
+                        if *metadata { "m" } else { "" }
+                    ),
+                ],
+                Fact::GroupInclude { group, module } => {
+                    vec![
+                        "group_include".to_owned(),
+                        group.to_string(),
+                        module.clone(),
+                    ]
+                }
+                Fact::Include { group, name, line } => vec![
+                    "include".to_owned(),
+                    group.to_string(),
+                    name.clone(),
+                    line.to_string(),
+                ],
+                Fact::Factory {
+                    name,
+                    class,
+                    parent,
+                    scope,
+                    initialized,
+                } => {
+                    let mut record = vec![
+                        "factory".to_owned(),
+                        name.clone(),
+                        class.clone(),
+                        parent.clone(),
+                        if *initialized { "i" } else { "" }.to_owned(),
+                    ];
+                    record.extend(scope.iter().cloned());
+                    record
+                }
+                Fact::Rspec => vec!["rspec".to_owned()],
+                Fact::RspecOff => vec!["rspec_off".to_owned()],
             })
             .collect();
         codec::records(&records)
@@ -691,6 +919,10 @@ impl Fact {
                         path: first,
                         scope: rest.get(1..).unwrap_or_default().to_vec(),
                     },
+                    "group_spread" => Fact::GroupSpread {
+                        path: first,
+                        scope: rest.get(1..).unwrap_or_default().to_vec(),
+                    },
                     "evaluated" => Fact::Evaluated {
                         path: first,
                         side: rest.get(1)?.chars().next()?,
@@ -749,6 +981,8 @@ impl Fact {
                     },
                     "alias" => Fact::Alias { segment: first },
                     "constructed" => Fact::Constructed { name: first },
+                    "loose_association" => Fact::LooseAssociation { name: first },
+                    "fixture_class" => Fact::FixtureClass,
                     "hook" => Fact::Hook {
                         method: first,
                         line: rest.get(1)?.parse().ok()?,
@@ -764,6 +998,58 @@ impl Fact {
                             .and_then(|m| m.strip_prefix('='))
                             .map(str::to_owned),
                     },
+                    "group" => {
+                        let flags = rest.get(3)?;
+                        Fact::Group {
+                            line: first.parse().ok()?,
+                            parent: rest.get(1)?.parse().ok()?,
+                            described: rest.get(2)?.clone(),
+                            metadata: flags.contains('m'),
+                            opaque: flags.contains('o'),
+                            nests: flags.contains('n'),
+                            scope: rest.get(4..).unwrap_or_default().to_vec(),
+                        }
+                    }
+                    "member" => Fact::Member {
+                        group: first.parse().ok()?,
+                        name: rest.get(1)?.clone(),
+                        line: rest.get(2)?.parse().ok()?,
+                        def: rest.get(3)? == "def",
+                    },
+                    "let_value" => Fact::LetValue {
+                        group: first.parse().ok()?,
+                        name: rest.get(1)?.clone(),
+                        line: rest.get(2)?.parse().ok()?,
+                        value: rest.get(3)?.clone(),
+                    },
+                    "group_def" => Fact::GroupDef { name: first },
+                    "shared" => {
+                        let flags = rest.get(2)?;
+                        Fact::Shared {
+                            name: first,
+                            line: rest.get(1)?.parse().ok()?,
+                            scoped: flags.contains('s'),
+                            metadata: flags.contains('m'),
+                        }
+                    }
+                    "group_include" => Fact::GroupInclude {
+                        group: first.parse().ok()?,
+                        module: rest.get(1)?.clone(),
+                    },
+                    "include" => Fact::Include {
+                        group: first.parse().ok()?,
+                        name: rest.get(1)?.clone(),
+                        line: rest.get(2)?.parse().ok()?,
+                    },
+                    "factory" => Fact::Factory {
+                        name: first,
+                        class: rest.get(1)?.clone(),
+                        parent: rest.get(2)?.clone(),
+                        initialized: rest.get(3)? == "i",
+                        scope: rest.get(4..).unwrap_or_default().to_vec(),
+                    },
+                    "rspec" => Fact::Rspec,
+                    "rspec_off" => Fact::RspecOff,
                     _ => return None,
                 })
             })
@@ -916,6 +1202,10 @@ mod contract_tests {
             Fact::Constructed {
                 name: "Admin::Point".to_owned(),
             },
+            Fact::LooseAssociation {
+                name: "comments".to_owned(),
+            },
+            Fact::FixtureClass,
             Fact::Macro {
                 owner: "Post".to_owned(),
                 method: '.',
@@ -979,6 +1269,73 @@ mod contract_tests {
                 path: "Over".to_owned(),
                 scope: vec!["Admin".to_owned()],
             },
+            Fact::GroupSpread {
+                path: "Helpers".to_owned(),
+                scope: vec!["Admin".to_owned()],
+            },
+            Fact::Group {
+                line: 3,
+                parent: 1,
+                described: "Admin::User".to_owned(),
+                scope: vec!["Admin".to_owned()],
+                metadata: true,
+                opaque: false,
+                nests: true,
+            },
+            Fact::Group {
+                line: 1,
+                parent: 0,
+                described: String::new(),
+                scope: vec![],
+                metadata: false,
+                opaque: true,
+                nests: false,
+            },
+            Fact::Member {
+                group: 3,
+                name: "purchase".to_owned(),
+                line: 4,
+                def: false,
+            },
+            Fact::Member {
+                group: 3,
+                name: "helper".to_owned(),
+                line: 6,
+                def: true,
+            },
+            Fact::LetValue {
+                group: 3,
+                name: "purchase".to_owned(),
+                line: 4,
+                value: "C:Purchase.find(1)".to_owned(),
+            },
+            Fact::GroupDef {
+                name: "helper".to_owned(),
+            },
+            Fact::Shared {
+                name: "with a seller".to_owned(),
+                line: 3,
+                scoped: false,
+                metadata: true,
+            },
+            Fact::Include {
+                group: 3,
+                name: "with a seller".to_owned(),
+                line: 5,
+            },
+            Fact::GroupInclude {
+                group: 3,
+                module: "Admin::Helpers".to_owned(),
+            },
+            Fact::Factory {
+                name: "physical_product".to_owned(),
+                class: "::Link".to_owned(),
+                parent: "product".to_owned(),
+                scope: vec!["Admin".to_owned()],
+                initialized: true,
+            },
+            Fact::Rspec,
+            Fact::RspecOff,
         ];
         assert_eq!(Fact::decode_all(&Fact::encode_all(&facts)), facts);
     }

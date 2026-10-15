@@ -1302,10 +1302,11 @@ end
 }
 
 /// A module that extends one the graph cannot name may get its
-/// `included` hook there (a gem's `Hooky`, a gem concern's
-/// `ClassMethods`), which may act on the includer as the rules cannot
-/// read: its lookups prove nothing. A module the graph holds whole leaves
-/// the includer's chain known. Ruby 3.3, with a `Hooky#included` that
+/// `included` hook there (a gem's `Hooky`), which may act on the includer
+/// as the rules cannot read: its lookups prove nothing. A module the graph
+/// holds whole leaves the includer's chain known, and so does one that
+/// includes a gem's module, whose `ClassMethods` are taken to define no
+/// hook of the module's (#120). Ruby 3.3, with a `Hooky#included` that
 /// extends `ClassMethods`: `Post.go` is `:plug`, `Clean.go` `:base`.
 #[test]
 fn c10_ruby_ancestors_a_hook_from_a_module_outside_the_graph_is_unknown() {
@@ -1346,6 +1347,7 @@ end
             ("Post", Reference, 7, "Plug"),
             ("User", Reference, 15, "Base"),
             ("User", Reference, 16, "Mentionable"),
+            ("User.go", Call, 17, "Base.find"),
             ("Clean", Reference, 20, "Base"),
             ("Clean", Reference, 21, "Plain"),
             ("Clean.go", Call, 22, "Base.find"),
@@ -1354,11 +1356,7 @@ end
     );
     assert_unresolved(
         &rows,
-        &[
-            ("Post.go", Call, 8, "find"),
-            ("Post#run", Call, 9, "close"),
-            ("User.go", Call, 17, "find"),
-        ],
+        &[("Post.go", Call, 8, "find"), ("Post#run", Call, 9, "close")],
     );
 }
 

@@ -244,7 +244,7 @@ impl<'a> Index<'a> {
             _ if step.node != Node::Unknown => false,
             Stands::Any | Stands::Unread | Stands::Cut | Stands::Opaque { .. } => !(i > 0
                 && matches!(chain.steps[i - 1].node, Node::Known(o, _) if defines_no_hook(o))),
-            Stands::Concern => false,
+            Stands::Concern | Stands::Gem => false,
             Stands::Itself(module) => self.deeper(|| {
                 self.lookup(module, Side::Instance, name) != Lookup::NotFound
                     || self.may_hook(&self.chain(module, Side::Instance), name)

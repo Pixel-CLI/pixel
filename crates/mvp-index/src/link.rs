@@ -394,6 +394,8 @@ mod tests {
                 .collect(),
             skipped: Vec::new(),
             untracked: Vec::new(),
+            index: None,
+            unsettled: false,
         }
     }
 

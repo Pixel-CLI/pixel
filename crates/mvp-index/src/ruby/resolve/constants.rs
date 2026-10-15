@@ -212,7 +212,7 @@ impl<'a> Index<'a> {
     /// class, `new` is its own `initialize` (an inherited one is not
     /// followed), Active Job's `perform_*` its `perform`, and a mailer's
     /// action its instance method.
-    fn class_call(&self, owner: &'a str, name: &str) -> Option<Decision> {
+    pub(super) fn class_call(&self, owner: &'a str, name: &str) -> Option<Decision> {
         // Unless a module is prepended to its singleton class (D35).
         if self.own_first(owner)
             && let Some(explicit) = self.method(owner, Side::Singleton, name)
@@ -259,7 +259,12 @@ impl<'a> Index<'a> {
     /// more than the rules read, so such a call abstains as on main. The
     /// receiver's own method defined where a `class` or `module` keyword
     /// reopens it is main's too, and still found (R12-03).
-    fn public(&self, owner: &'a str, side: Side, found: Option<Decision>) -> Option<Decision> {
+    pub(super) fn public(
+        &self,
+        owner: &'a str,
+        side: Side,
+        found: Option<Decision>,
+    ) -> Option<Decision> {
         let Some(Some(id)) = found else {
             return found;
         };

@@ -71,6 +71,17 @@ impl Walker<'_> {
     /// hold. A module `Module.new` builds there is none of the graph's
     /// (`dsl::fresh`, #111).
     pub(in crate::ruby) fn spread(&mut self, args: &[Node]) {
+        self.spread_by(args, false);
+    }
+
+    /// [`Walker::spread`] for the mixin `call`: one an example group's
+    /// body records as its step is a [`Fact::GroupSpread`] (ADR-0041).
+    pub(in crate::ruby) fn spread_from(&mut self, call: Node, args: &[Node]) {
+        let group = self.group_mixins.contains(&call.id());
+        self.spread_by(args, group);
+    }
+
+    fn spread_by(&mut self, args: &[Node], group: bool) {
         let scope = self.context("", "").cref;
         let named: Vec<Node> = args
             .iter()
@@ -91,7 +102,11 @@ impl Walker<'_> {
                     .collect();
             }
             for (path, scope) in paths {
-                self.facts.push(Fact::Spread { path, scope });
+                self.facts.push(if group {
+                    Fact::GroupSpread { path, scope }
+                } else {
+                    Fact::Spread { path, scope }
+                });
             }
         }
     }

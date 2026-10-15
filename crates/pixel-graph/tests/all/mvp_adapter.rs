@@ -341,3 +341,38 @@ fn outside_a_git_work_tree_there_is_no_index() {
     assert!(!err.to_string().is_empty());
     assert!(!dir.path().join(".pixel/.pixel-mvp").exists());
 }
+
+// pixel-mvp's writer may keep a copy of git's index in its own state
+// directory (`git_index`, ADR-0039 there), named `git-index.<key>`. This
+// repository's state is `.pixel/` alone, and its `## On-disk state` lists
+// what `.pixel/.pixel-mvp/` holds: the adapter places no such copy, makes
+// no `.pixel-mvp/` at the work tree's top level, and leaves git's own
+// index as it found it.
+#[cfg(unix)]
+#[test]
+fn a_refresh_writes_only_its_index_under_the_state_directory_it_is_given() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fixture(&root);
+    let stamp = |path: &Path| {
+        let meta = fs::symlink_metadata(path).unwrap();
+        (meta.ino(), meta.len(), meta.mtime(), meta.mtime_nsec())
+    };
+    let git_index = root.join(".git/index");
+    let before = stamp(&git_index);
+    refresh(&root, &root.join(".pixel")).unwrap();
+    refresh(&root, &root.join(".pixel")).unwrap();
+    assert_eq!(stamp(&git_index), before, "git's index rewritten");
+    assert!(!root.join(".pixel-mvp").exists());
+    let mut held: Vec<String> = fs::read_dir(root.join(".pixel/.pixel-mvp"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    held.sort();
+    assert!(
+        held.iter().all(|name| !name.starts_with("git-index.")),
+        "{held:?}"
+    );
+    assert!(held.contains(&"graph.db".to_owned()), "{held:?}");
+}

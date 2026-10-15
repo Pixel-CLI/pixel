@@ -191,6 +191,51 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<Entry>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Places a copy of git's index at `name` in the state directory (ADR-0039,
+/// Q42): `bytes`, git's index as read, go to a temporary of this process
+/// made where nothing is, `refresh` has git refresh its stat cache, and a
+/// rename puts it at `name`, but only while `holds` says git's index is
+/// still the version read. Every other name `old` accepts goes: copies of
+/// other versions, a crashed run's temporaries. The writer calls this with
+/// its lock held, so no other process places one meanwhile. Whether the
+/// copy was placed; a state directory that is missing or not this user's
+/// is left as it is.
+pub fn place_git_index(
+    root: &Path,
+    name: &str,
+    bytes: &[u8],
+    refresh: impl FnOnce(&Path) -> bool,
+    holds: impl Fn() -> bool,
+    old: impl Fn(&str) -> bool,
+) -> std::io::Result<bool> {
+    if !matches!(own(root), Ok(true)) {
+        return Ok(false);
+    }
+    let base = dir(root);
+    for entry in std::fs::read_dir(&base)? {
+        let entry = entry?;
+        let other = entry.file_name().to_string_lossy().into_owned();
+        if other != name && old(&other) {
+            // By its name: a link a clone left there goes, never what it
+            // names (C-18).
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let temp = base.join(format!("{name}.{}.tmp", std::process::id()));
+    let placed = state_file::create_fresh(&temp)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, bytes))
+        .map(|()| refresh(&temp) && holds());
+    let placed = match placed {
+        Ok(true) => std::fs::rename(&temp, base.join(name)).map(|()| true),
+        other => other,
+    };
+    if !matches!(placed, Ok(true)) {
+        let _ = std::fs::remove_file(&temp);
+        let _ = std::fs::remove_file(base.join(format!("{name}.{}.tmp.lock", std::process::id())));
+    }
+    placed
+}
+
 /// Whether `.pixel-mvp/` of `root` exists, when it is a directory, not a
 /// link: a clone that commits it as a link (to another repository's
 /// state, or anywhere) or as anything else is refused, and no state is

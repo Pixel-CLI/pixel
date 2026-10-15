@@ -282,6 +282,8 @@ pub fn write_tree(root: &Path, files: &[(String, String)]) -> Tree {
         files: tree_files,
         skipped: Vec::new(),
         untracked: Vec::new(),
+        index: None,
+        unsettled: false,
     }
 }
 

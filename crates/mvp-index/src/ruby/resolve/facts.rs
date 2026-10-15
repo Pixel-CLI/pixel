@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use mvp_model::{Symbol, SymbolKind};
 
+use super::stubs::Tests;
 use super::{Side, split_method};
 use crate::ruby::dsl::ADDED;
 use crate::ruby::unread::{INTERPOLATED, Unread, fits};
@@ -127,9 +128,12 @@ pub(super) struct Facts {
     tainted: Names,
     /// The same for the definitions written in test files
     /// ([`super::test_file`]), which taint lookups only when
-    /// [`Facts::with_tests`] says so: the callers in test files (#106).
+    /// [`Facts::with_tests`] says so: the callers in test files (#106),
+    /// with the files whose stubs they meet (ADR-0039).
     test_tainted: Names,
     tests: bool,
+    /// Each test file's definitions on objects the rules cannot name.
+    test_tainted_by: HashMap<String, Names>,
     /// Owner → the names its instance methods define on the singleton
     /// class of the object they run on (`define_singleton_method(n)` in a
     /// `def`, [`Fact::Fronted`]): an object whose chain
@@ -142,9 +146,18 @@ pub(super) struct Facts {
     /// path, nesting ([`Fact::Spread`]); once placed, the modules.
     spread: Vec<(String, Vec<String>)>,
     spread_into: HashSet<String>,
-    /// The same written in test files: mixed in only for the callers in
-    /// test files ([`Facts::with_tests`], #106).
-    test_spread: Vec<(String, Vec<String>)>,
+    /// The same written in test files, with the file: mixed in only for
+    /// the callers in test files ([`Facts::with_tests`], #106).
+    test_spread: Vec<(String, String, Vec<String>)>,
+    /// The modules example groups include, with the file
+    /// ([`Fact::GroupSpread`]), until [`Facts::group_mixins`] says
+    /// whether RSpec's model names the groups; then, when it does, the
+    /// modules alone, mixed in for the callers in test files.
+    group_spread: Vec<(String, String, Vec<String>)>,
+    group_mixed: Vec<(String, Vec<String>)>,
+    /// The associations declared outside a class body
+    /// ([`Fact::LooseAssociation`], ADR-0038).
+    loose_associations: HashSet<String>,
 }
 
 /// Method names, some of them patterns of the names they may be
@@ -400,6 +413,9 @@ impl Facts {
                     Fact::Constructed { name } => {
                         *constructed.entry(name).or_default() += 1;
                     }
+                    Fact::LooseAssociation { name } => {
+                        facts.loose_associations.insert(name);
+                    }
                     Fact::Unread(unread) => {
                         let parsed = owners_of.get(path.as_str()).into_iter().flatten();
                         facts.unread(&unread, parsed.copied());
@@ -432,17 +448,26 @@ impl Facts {
                         facts.opaque.push((path, scope, side, prepend));
                     }
                     // `o.extend(M)` in a test file is a stub as well.
-                    Fact::Spread { path, scope } if super::test_file(path_of) => {
-                        facts.test_spread.push((path, scope));
+                    Fact::Spread {
+                        path: spread,
+                        scope,
+                    } if super::test_file(path_of) => {
+                        facts.test_spread.push((path.clone(), spread, scope));
                     }
                     Fact::Spread { path, scope } => facts.spread.push((path, scope)),
+                    // Only a spec file declares a group.
+                    Fact::GroupSpread {
+                        path: spread,
+                        scope,
+                    } => facts.group_spread.push((path.clone(), spread, scope)),
                     // A test file's definition on an object the rules
                     // cannot name is a stub, as `allow(x).to receive(:m)`
                     // or `x.stubs(:m)` are, which the rules do not read
                     // either: only a test runner loads the file, so only
                     // the callers in test files may meet it (#106).
                     Fact::Tainted { name } if super::test_file(path_of) => {
-                        facts.test_tainted.insert(name.as_deref());
+                        let by = facts.test_tainted_by.entry(path.clone()).or_default();
+                        by.insert(name.as_deref());
                     }
                     Fact::Tainted { name } => facts.taint(name.as_deref()),
                     Fact::Fronted { owner, name } => {
@@ -520,6 +545,17 @@ impl Facts {
     /// constructor made it.
     pub(super) fn constructed(&self, owner: &str) -> Option<&[(String, u32, u32)]> {
         self.constructed.get(owner).map(Vec::as_slice)
+    }
+
+    /// Whether an association `name` is declared outside a class body,
+    /// on a class the rules do not place (ADR-0038).
+    pub(super) fn loose_association(&self, name: &str) -> bool {
+        self.loose_associations.contains(name)
+    }
+
+    /// The associations declared outside a class body.
+    pub(super) fn loose_associations(&self) -> impl Iterator<Item = &str> {
+        self.loose_associations.iter().map(String::as_str)
     }
 
     fn unread(&mut self, unread: &Unread, parsed: impl Iterator<Item = impl Into<String>>) {
@@ -876,6 +912,16 @@ impl Facts {
         }
     }
 
+    /// Records that the test file `file` defines `name` on an object the
+    /// rules cannot name, as a [`Fact::Tainted`] there does: an example
+    /// group's `def` where RSpec's model is not read (ADR-0041).
+    pub(super) fn taint_test(&mut self, file: &str, name: &str) {
+        self.test_tainted_by
+            .entry(file.to_owned())
+            .or_default()
+            .insert(Some(name));
+    }
+
     /// Records that a method `name` (`None`: any) may be defined on an
     /// object the rules cannot name (R5-03, R5-04).
     pub(super) fn taint(&mut self, name: Option<&str>) {
@@ -888,22 +934,93 @@ impl Facts {
         self.tainted.fit(name) || self.tests && self.test_tainted.fit(name)
     }
 
+    /// Where the modules example groups include are mixed in: with
+    /// RSpec's model (`modelled`), into the examples of the group, an
+    /// object the model names, whose lookup reads the module as the
+    /// group's step and which no other lookup meets; so the module's
+    /// names are no object's the rules cannot name, but a call on `self`
+    /// in its methods may run on that group, which no chain of the graph
+    /// holds (R5-05). Without, into an object the rules cannot name, as
+    /// any test file's `o.extend(M)` is (ADR-0039). Read before
+    /// [`Facts::with_tests`].
+    pub(super) fn group_mixins(&mut self, modelled: bool) {
+        let group = std::mem::take(&mut self.group_spread);
+        if modelled {
+            self.group_mixed = group
+                .into_iter()
+                .map(|(_, path, scope)| (path, scope))
+                .collect();
+        } else {
+            self.test_spread.extend(group);
+        }
+    }
+
     /// Whether the definitions test files make on objects the rules
     /// cannot name taint lookups: for the callers in test files.
     /// Read before anything is placed.
-    pub(super) fn with_tests(&mut self, tests: bool) {
-        self.tests = tests;
-        if tests {
-            self.spread.append(&mut self.test_spread);
+    pub(super) fn with_tests(&mut self, tests: &Tests) {
+        self.tests = tests.any();
+        if self.tests {
+            self.mixed.extend(self.group_mixed.iter().cloned());
+        }
+        let mut names = Names::default();
+        for (file, by) in &self.test_tainted_by {
+            if tests.keeps(file) {
+                if by.any {
+                    names.insert(None);
+                }
+                for name in by.iter() {
+                    names.insert(Some(name));
+                }
+            }
+        }
+        self.test_tainted = names;
+        for (file, path, scope) in &self.test_spread {
+            if tests.keeps(file) {
+                self.spread.push((path.clone(), scope.clone()));
+            }
         }
     }
 
     /// Whether a test file defines a method on an object the rules cannot
-    /// name, or mixes a module into one.
+    /// name, or mixes a module into one or into an example group: the
+    /// callers in test files then need an index of their own.
     pub(super) fn test_tainted(&self) -> bool {
-        self.test_tainted.any
-            || self.test_tainted.iter().next().is_some()
+        !self.test_tainted_by.is_empty()
             || !self.test_spread.is_empty()
+            || !self.group_mixed.is_empty()
+    }
+
+    /// Whether the test file `file` defines a method on an object the
+    /// rules cannot name, or mixes a module into one (ADR-0039).
+    pub(super) fn stubs_in(&self, file: &str) -> bool {
+        self.test_tainted_by.contains_key(file) || self.spreads_in(file)
+    }
+
+    /// Whether the test file `file` mixes a module into an object the
+    /// rules cannot name.
+    pub(super) fn spreads_in(&self, file: &str) -> bool {
+        self.test_spread.iter().any(|(by, _, _)| by == file)
+    }
+
+    /// The modules the test file `file` mixes into objects the rules
+    /// cannot name, as written: path, nesting.
+    pub(super) fn spread_in<'s>(
+        &'s self,
+        file: &'s str,
+    ) -> impl Iterator<Item = (&'s str, &'s [String])> + 's {
+        self.test_spread
+            .iter()
+            .filter(move |(by, _, _)| by == file)
+            .map(|(_, path, scope)| (path.as_str(), scope.as_slice()))
+    }
+
+    /// Whether the test file `file` may define a method `name` on an
+    /// object the rules cannot name.
+    pub(super) fn stubbed_in(&self, file: &str, name: &str) -> bool {
+        self.test_tainted_by
+            .get(file)
+            .is_some_and(|names| names.fit(name))
     }
 
     /// Whether an instance method of some owner may define `name` on the

@@ -70,6 +70,11 @@ pub struct Tree {
     /// The files git lists as untracked and not ignored, in any language,
     /// outside Pixel's state: what [`changes`] counts whole.
     pub untracked: Vec<String>,
+    /// The copy of git's index the scan read in its place, when it was of
+    /// git's index as the scan found it ([`git_index`](crate::git_index)).
+    pub index: Option<PathBuf>,
+    /// Git's index has no refreshed copy yet: the writer makes one.
+    pub unsettled: bool,
 }
 
 /// One file to index.
@@ -178,10 +183,41 @@ pub fn scan_with(path: &Path, known: &Known<'_>) -> Result<Tree, TreeError> {
 /// The final HEAD and metadata checks still detect a checkout or save
 /// between discovery and the end of the scan (C-11).
 pub fn scan_discovered(repo: Repository, known: &Known<'_>) -> Result<Tree, TreeError> {
+    let Repository {
+        root,
+        commit,
+        index,
+    } = repo;
+    let copy = index
+        .as_deref()
+        .and_then(|source| crate::git_index::Copy::of(&root, source));
+    let unsettled = copy.as_ref().is_some_and(|copy| !copy.made());
+    // The copy stands for git's index only while that is the version it
+    // was made of, the scan's end included; else git's own index is read.
+    if let Some(copy) = copy.filter(crate::git_index::Copy::made)
+        && let Ok(tree) = scan_using(&root, commit.clone(), Some(copy.path()), known)
+        && copy.holds()
+    {
+        return Ok(tree);
+    }
+    let mut tree = scan_using(&root, commit, None, known)?;
+    tree.unsettled = unsettled;
+    Ok(tree)
+}
+
+/// [`scan_discovered`], git reading `index` in place of its own index file
+/// when it is given.
+pub(crate) fn scan_using(
+    root: &Path,
+    commit: Option<String>,
+    index: Option<&Path>,
+    known: &Known<'_>,
+) -> Result<Tree, TreeError> {
     let start = now_secs();
-    let Repository { root, commit } = repo;
-    let listed = git_bytes(
+    let root = root.to_path_buf();
+    let listed = git_with(
         &root,
+        index,
         &[
             "ls-files",
             "-z",
@@ -201,7 +237,7 @@ pub fn scan_discovered(repo: Repository, known: &Known<'_>) -> Result<Tree, Tree
             .filter_map(entry),
     );
     let read_tracked = each(&tracked, |file| read_one(&root, file, known, start));
-    let status = git_bytes(&root, STATUS, &[])?;
+    let status = git_with(&root, index, STATUS, &[])?;
     let untracked: Vec<String> = untracked_of(&status)
         .into_iter()
         .filter(|path| !in_state(path))
@@ -240,6 +276,8 @@ pub fn scan_discovered(repo: Repository, known: &Known<'_>) -> Result<Tree, Tree
         files,
         skipped,
         untracked,
+        index: index.map(Path::to_path_buf),
+        unsettled: false,
     })
 }
 
@@ -249,7 +287,11 @@ pub fn scan_discovered(repo: Repository, known: &Known<'_>) -> Result<Tree, Tree
 /// commit every file is untracked or staged, and counts as a whole.
 pub fn diff(root: &Path) -> Result<Diff, TreeError> {
     let committed = head(root).is_some();
-    let files = if committed { hunks(root)? } else { Vec::new() };
+    let files = if committed {
+        hunks(root, None)?
+    } else {
+        Vec::new()
+    };
     // Before the first commit, the staged files count whole too.
     let listed: &[&str] = if committed {
         &["--others"]
@@ -282,18 +324,23 @@ pub fn changes(tree: &Tree) -> Result<Diff, TreeError> {
     if !tree.dirty {
         return Ok(Diff::default());
     }
-    let files = hunks(&tree.root)?;
+    // The copy of git's index gone since the scan: git's own is read.
+    let files = match tree.index.as_deref() {
+        Some(index) => hunks(&tree.root, Some(index)).or_else(|_| hunks(&tree.root, None))?,
+        None => hunks(&tree.root, None)?,
+    };
     Ok(changed(files, tree.untracked.iter().map(String::as_str)))
 }
 
 /// The hunks of `git diff HEAD`, each file with the lines its hunks hold.
-fn hunks(root: &Path) -> Result<Vec<DiffFile>, TreeError> {
+fn hunks(root: &Path, index: Option<&Path>) -> Result<Vec<DiffFile>, TreeError> {
     let mut files: Vec<DiffFile> = Vec::new();
     // Quoted paths keep the output ASCII, so a name is read back byte
     // for byte; the prefixes are set whatever `diff.noprefix` or
     // `diff.mnemonicPrefix` say.
-    let out = git(
+    let out = git_with(
         root,
+        index,
         &[
             "-c",
             "core.quotePath=true",
@@ -308,7 +355,9 @@ fn hunks(root: &Path) -> Result<Vec<DiffFile>, TreeError> {
             "--",
             EXCLUDE_STATE,
         ],
-    )?;
+        &[],
+    )
+    .map(|out| String::from_utf8_lossy(&out).into_owned())?;
     let mut current: Option<usize> = None;
     // Lines of the current hunk still to come, old and new: a removed
     // or added line may itself read `+++ b/x`.
@@ -852,31 +901,49 @@ fn hash_owned(
 pub struct Repository {
     root: PathBuf,
     commit: Option<String>,
+    /// Git's index file, as `git rev-parse --git-path index` names it (a
+    /// linked work tree's is under its own git directory), made absolute;
+    /// `None` when git's answer could not be told from the root's.
+    index: Option<PathBuf>,
 }
 
 impl Repository {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Git's index file, when known.
+    pub fn index(&self) -> Option<&Path> {
+        self.index.as_deref()
+    }
 }
 
-/// Resolves the root and initial HEAD together. Git writes the root first,
-/// even before the first commit (exit 1); only a successful verification
-/// adds a final hash line. Split from the end so newlines in the root are
-/// preserved, including a trailing newline in its name.
+/// Resolves git's index file, the root and the initial HEAD together, in
+/// one git. Git writes the index file's path and the root first, even
+/// before the first commit (exit 1); only a successful verification adds
+/// a final hash line. Split from the end so newlines in the root are
+/// preserved, including a trailing newline in its name; when a newline in
+/// a name leaves the index file's path and the root ambiguous, they are
+/// asked again without the index file, which the scan then reads as git
+/// finds it.
 pub fn discover(path: &Path) -> Result<Repository, TreeError> {
+    resolve(path, true)
+}
+
+fn resolve(path: &Path, with_index: bool) -> Result<Repository, TreeError> {
     let failed = |detail| TreeError::NotAWorkTree {
         path: path.to_path_buf(),
         detail,
     };
+    let index_args: &[&str] = if with_index {
+        &["--git-path", "index"]
+    } else {
+        &[]
+    };
     let output = git_in(path)
-        .args([
-            "rev-parse",
-            "--show-toplevel",
-            "--verify",
-            "--quiet",
-            "HEAD",
-        ])
+        .arg("rev-parse")
+        .args(index_args)
+        .args(["--show-toplevel", "--verify", "--quiet", "HEAD"])
         .output()
         .map_err(|err| failed(err.to_string()))?;
     let detail = || String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -897,14 +964,36 @@ pub fn discover(path: &Path) -> Result<Repository, TreeError> {
     } else {
         return Err(failed(detail()));
     };
+    let mut index = None;
+    if with_index {
+        let mut lines = bytes.splitn(2, |b| *b == b'\n');
+        let (Some(git_path), Some(rest)) = (lines.next(), lines.next()) else {
+            return Err(failed(detail()));
+        };
+        if rest.contains(&b'\n') || git_path.is_empty() || rest.is_empty() {
+            return resolve(path, false);
+        }
+        // Relative to the directory git ran in; made absolute, and the
+        // same whichever directory of the work tree a command starts in.
+        index = std::fs::canonicalize(path.join(path_of(git_path))).ok();
+        bytes = rest;
+    }
+    Ok(Repository {
+        root: path_of(bytes),
+        commit,
+        index,
+    })
+}
+
+/// A path git printed, byte for byte where the platform allows.
+fn path_of(bytes: &[u8]) -> PathBuf {
     #[cfg(unix)]
-    let root = {
+    {
         use std::os::unix::ffi::OsStrExt;
         PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
-    };
+    }
     #[cfg(not(unix))]
-    let root = PathBuf::from(String::from_utf8_lossy(bytes).as_ref());
-    Ok(Repository { root, commit })
+    PathBuf::from(String::from_utf8_lossy(bytes).as_ref())
 }
 
 /// The top level of the work tree that contains `path`.
@@ -952,11 +1041,26 @@ fn git(root: &Path, args: &[&str]) -> Result<String, TreeError> {
 
 /// Runs git in `root` with `input` on its stdin and returns its stdout.
 fn git_bytes(root: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, TreeError> {
+    git_with(root, None, args, input)
+}
+
+/// [`git_bytes`], git reading `index` in place of its own index file when
+/// it is given.
+fn git_with(
+    root: &Path,
+    index: Option<&Path>,
+    args: &[&str],
+    input: &[u8],
+) -> Result<Vec<u8>, TreeError> {
     let failed = |detail: String| TreeError::Git {
         command: format!("git {}", args.join(" ")),
         detail,
     };
-    let mut child = git_in(root)
+    let mut command = git_in(root);
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", index);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1010,7 +1114,7 @@ pub const LOCAL_ENV: [&str; 15] = [
 /// says, that never takes `.git/index.lock`: a `status` finding the stat
 /// cache stale would otherwise rewrite `.git/index`, and the user's own git
 /// commands fail while it holds the lock.
-fn git_in(dir: &Path) -> Command {
+pub(crate) fn git_in(dir: &Path) -> Command {
     let mut command = Command::new("git");
     for var in LOCAL_ENV.iter().chain(&PATHSPEC_ENV) {
         command.env_remove(var);

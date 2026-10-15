@@ -1,7 +1,7 @@
 # mvp-lexicon (vendored)
 
 `fr-en.tsv` is a copy of `crates/pixel-adapter/lexicon/fr-en.tsv` of
-pixel-mvp at commit `4b23d4cdf72a283f5d60bc474c1d7bae1b6689bb` (`4b23d4c`), made by
+pixel-mvp at commit `35aaf1ca435c3de8bdc4b2a3f74399a0aaeeb29c` (`35aaf1c`), made by
 `scripts/dev/vendor-mvp.sh`, byte for byte. It is data, not a crate: one
 French form per line, a tab, and the English words code names its notion
 with, or `-` for a word that carries no meaning in a request. ADR-0032 of

@@ -44,13 +44,15 @@
 //! when they are defined by then (above in the same file, or in the one
 //! file defining their module; B3), their `base.include(X)` and family
 //! acting on the includer; any statement the rules do not read makes the
-//! includer's
-//! lists unknown from their front (D14), and so does a module hook that
-//! may come from a module outside the graph the hooked module extends
-//! (R7; `ActiveSupport::Concern` defines no `extended`, and a superclass's
-//! gem `inherited` is taken to change no chain). An object whose list
-//! such code left unknown may hold the module there, its ancestors and the
-//! modules under it: a call on `self` in them counts it (F1).
+//! includer's lists unknown from their front (D14), and so does a module
+//! hook that may come from a module outside the graph the hooked module
+//! extends (R7; `ActiveSupport::Concern` defines no `extended`, and a
+//! superclass's gem `inherited` is taken to change no chain), but not one
+//! from what mixing a gem's module into it put on its singleton class,
+//! which is taken to define none (#120, argued in `resolve`'s rules). An
+//! object whose list such code left unknown may hold the module there, its
+//! ancestors and the modules under it: a call on `self` in them counts it
+//! (F1).
 //! <https://docs.ruby-lang.org/en/master/Module.html#method-i-include>,
 //! <https://api.rubyonrails.org/classes/ActiveSupport/Concern.html>.
 //!
@@ -108,7 +110,7 @@ use crate::ruby::{singleton_of, singleton_scope};
 /// Deepest nesting of ancestor walks (an include or a superclass is one
 /// level); past it the rest is unknown, and so is the whole of each walk
 /// nested in the one that met it ([`Walks`], R6-04).
-const MAX_ANCESTOR_DEPTH: usize = 32;
+pub(super) const MAX_ANCESTOR_DEPTH: usize = 32;
 
 /// Most owners whose lists are built, or chains walked, inside one another,
 /// whatever led from one to the next (a lookup a hook needs, a macro's
@@ -296,6 +298,13 @@ enum Stands<'a> {
     /// `ActiveSupport::Concern` itself, a gem's module: its methods are
     /// the concern rules, none of them `extended` or `extend_object`.
     Concern,
+    /// What mixing a gem's module into a class or module of the graph may
+    /// have put on its singleton class (a gem concern's `ClassMethods`):
+    /// methods of its own and, of the graph's modules, only one mixed in
+    /// where the rules do not replay it, as [`Stands::Any`]; but no hook
+    /// of the module's, so the gem cannot change what mixing the module
+    /// into the application's classes inserts (#120).
+    Gem,
     /// The module's own list after `extend self`, with what an `include`
     /// the rules cannot place adds to it.
     Itself(&'a str),
@@ -429,7 +438,7 @@ impl Parts<'_> {
 
 /// The superclass an owner declares.
 #[derive(Clone, Copy, Debug)]
-enum Superclass<'a> {
+pub(super) enum Superclass<'a> {
     /// None declared: the class inherits from `Object`, where top-level
     /// functions live.
     None,
@@ -481,206 +490,6 @@ struct Building<'a, 'i> {
     singleton: Part<'a>,
     tail_instance: Vec<Step<'a>>,
     tail_singleton: Vec<Step<'a>>,
-}
-
-impl<'a> Building<'a, '_> {
-    fn part(&mut self, side: Side) -> (&mut Part<'a>, &[Step<'a>]) {
-        match side {
-            Side::Instance => (&mut self.instance, &self.tail_instance),
-            Side::Singleton => (&mut self.singleton, &self.tail_singleton),
-        }
-    }
-
-    /// Ruby's `include` of `ancestry` into this list (`include_modules_at`
-    /// with `search_super`).
-    fn include(&mut self, side: Side, ancestry: &[Step<'a>], decl: Decl<'a>) {
-        let owner = self.owner;
-        let index = self.index;
-        let played = self.maybe;
-        let inserted = self.at(decl);
-        let (part, tail) = self.part(side);
-        let mut at = part.origin + 1;
-        for step in ancestry {
-            let mut region = step.region;
-            // A step that may not be in the module's own list may not be
-            // here either (R5-07), nor one its declaration may put there
-            // after this one runs (R12-02).
-            let mut maybe = step.maybe || index.late(step, decl);
-            if step.node != Node::Unknown {
-                if let Some(j) = part.steps.iter().position(|s| s.node == step.node) {
-                    // Past a step that may not be there, or one the module
-                    // may not bring, where the rest goes depends on whether
-                    // it is (B4, R5-07).
-                    if (part.steps[j].maybe && j > at) || (maybe && j >= at) {
-                        part.steps.insert(at, Step::new(Node::Unknown));
-                        at += 1;
-                    } else if j >= at {
-                        at = j + 1;
-                    }
-                    continue;
-                }
-                if let Some(there) = tail.iter().find(|s| s.node == step.node) {
-                    // Whether the superclass's declaration has run by now:
-                    // not yet when it is below this one in the same file,
-                    // unknown when another file's load order decides.
-                    let ran = match there.at {
-                        _ if there.maybe => None,
-                        Some(by) => index.before((by.file, by.line), by.by, decl.at),
-                        None => Some(true),
-                    };
-                    match ran {
-                        Some(false) => {}
-                        // Declared where load order is unknown: here or
-                        // there, the same label for both.
-                        _ if there.region.is_some() => region = there.region,
-                        Some(true) => continue,
-                        None => maybe = true,
-                    }
-                }
-                // A step of this list or of the superclass's chain the rules
-                // cannot name may hold the module already, and Ruby skips
-                // it then (R5-06).
-                if let Node::Known(module, _) = step.node
-                    && part
-                        .steps
-                        .iter()
-                        .chain(tail)
-                        .any(|s| index.may_hold(*s, module))
-                {
-                    maybe = true;
-                }
-            }
-            if decl.uncertain {
-                region = Some((owner, side, false));
-            }
-            part.steps.insert(
-                at,
-                Step {
-                    node: step.node,
-                    region,
-                    at: Some(inserted),
-                    stands: step.stands,
-                    maybe: maybe || played,
-                },
-            );
-            at += 1;
-        }
-    }
-
-    /// Where `decl`, a declaration of the owner being built, is written.
-    fn at(&self, decl: Decl<'a>) -> At<'a> {
-        At {
-            file: decl.at.0,
-            line: decl.at.1,
-            by: self.owner,
-        }
-    }
-
-    /// Ruby's `prepend` of `ancestry` before the owner on this side.
-    fn prepend(&mut self, side: Side, ancestry: &[Step<'a>], decl: Decl<'a>) {
-        let owner = self.owner;
-        let index = self.index;
-        let played = self.maybe;
-        let (part, _) = self.part(side);
-        let mut at = 0;
-        for step in ancestry {
-            // One the module may not bring, now or yet (R5-07, R12-02).
-            let maybe = step.maybe || index.late(step, decl);
-            if step.node != Node::Unknown
-                && let Some(j) = part.steps[..part.origin]
-                    .iter()
-                    .position(|s| s.node == step.node)
-            {
-                // Past a step that may not be there, or one the module may
-                // not bring, where it goes depends on whether it is (B4,
-                // R5-07).
-                if (part.steps[j].maybe || maybe) && j >= at {
-                    part.steps.insert(at, Step::new(Node::Unknown));
-                    at += 1;
-                    part.origin += 1;
-                } else if j >= at {
-                    at = j + 1;
-                }
-                continue;
-            }
-            // A module prepended before that the rules cannot name may hold
-            // it already (R5-06).
-            let held = matches!(step.node, Node::Known(module, _)
-                if part.steps[..part.origin].iter().any(|s| index.may_hold(*s, module)));
-            let region = if decl.uncertain {
-                Some((owner, side, true))
-            } else {
-                step.region
-            };
-            let held = held || played || maybe;
-            part.steps.insert(
-                at,
-                Step {
-                    node: step.node,
-                    region,
-                    at: Some(At {
-                        file: decl.at.0,
-                        line: decl.at.1,
-                        by: owner,
-                    }),
-                    stands: step.stands,
-                    maybe: held,
-                },
-            );
-            at += 1;
-            part.origin += 1;
-        }
-    }
-
-    /// Whether `module` is among this side's ancestors when `decl` runs:
-    /// `base < self`, for a concern; `None` when a declaration in a file
-    /// loaded in an order the graph cannot tell decides (B4).
-    fn has(&mut self, side: Side, module: &'a str, decl: Decl<'a>) -> Option<bool> {
-        let node = Node::Known(module, Side::Instance);
-        let index = self.index;
-        let (part, tail) = self.part(side);
-        let mut own = part.steps.iter().filter(|s| s.node == node);
-        let mut has = match own.next() {
-            Some(step) if !step.maybe => return Some(true),
-            Some(_) => None,
-            None => Some(false),
-        };
-        for step in tail.iter().filter(|s| s.node == node) {
-            let ran = match step.at {
-                _ if step.maybe => None,
-                Some(by) => index.before((by.file, by.line), by.by, decl.at),
-                None => Some(true),
-            };
-            match ran {
-                Some(true) => return Some(true),
-                Some(false) => {}
-                None => has = None,
-            }
-        }
-        has
-    }
-
-    /// What mixing `module` into `object` does is beyond the rules (a
-    /// declaration played inside itself, or past [`MAX_ANCESTOR_DEPTH`]):
-    /// every lookup through `object` is unknown, and it may hold the module
-    /// anywhere (R5-01).
-    fn cut(&mut self, object: Object, module: &'a str, decl: Decl<'a>) {
-        self.unknown_front(object, decl);
-        if object == Object::Owner {
-            self.replaced.push((Side::Instance, module));
-        }
-        self.replaced.push((Side::Singleton, module));
-    }
-
-    /// Something the rules do not read may have prepended to `object`:
-    /// every lookup through it is unknown.
-    fn unknown_front(&mut self, object: Object, decl: Decl<'a>) {
-        let unknown = [Step::unread()];
-        if object == Object::Owner {
-            self.prepend(Side::Instance, &unknown, decl);
-        }
-        self.prepend(Side::Singleton, &unknown, decl);
-    }
 }
 
 /// Owners, read once and shared.
@@ -1116,6 +925,28 @@ impl<'a> Index<'a> {
         defining.chain(&behind.unsure).all(agrees)
     }
 
+    /// Whether no object that may hold `owner`'s instance step behind a
+    /// step the rules cannot name defines `name` before that step, or may
+    /// hold a class or module that does: what a lookup that finds `name`
+    /// nowhere on `owner`'s chain needs to prove no method of the graph
+    /// answers it there (a fixture accessor, ADR-0038).
+    pub(super) fn opaque_absent(&self, owner: &'a str, name: &str) -> bool {
+        let module = !self.classes.contains_key(owner);
+        let behind = self.behind();
+        behind
+            .steps
+            .iter()
+            .filter(|at| at.on == Side::Instance && (at.classes || module))
+            .all(|at| {
+                let hidden = match at.hidden {
+                    Hidden::Nothing => false,
+                    Hidden::Spread => behind.spread_defined.contains(name),
+                    Hidden::Anything => behind.defined.contains(name),
+                };
+                !hidden && self.lookup_in(&at.chain.steps[..at.at], name) == Lookup::NotFound
+            })
+    }
+
     /// Whether the ancestor `mixin` declares, which the rules cannot name,
     /// may be a class or module of the graph (B5): a constant whose value
     /// the rules do not read (`B2 = Base`), one another class may hold or
@@ -1341,9 +1172,23 @@ impl<'a> Index<'a> {
         }
         match step.stands {
             Stands::Concern => false,
-            Stands::Any => self.spread.contains(module),
+            Stands::Any | Stands::Gem => self.spread.contains(module),
             Stands::Unread | Stands::Cut | Stands::Opaque { .. } | Stands::Itself(_) => true,
         }
+    }
+
+    /// Whether including `module` into an object inserts only its own
+    /// chain, every step of which the graph names: a module, no concern,
+    /// with no `included` or `append_features` of its own or of a module
+    /// it extends, nor one the rules do not read (an RSpec group's
+    /// `include M`, ADR-0041).
+    pub(super) fn plain_include(&self, module: &'a str) -> bool {
+        !self.concerns.contains(module)
+            && !self.classes.contains_key(module)
+            && matches!(self.hook_def(module, "included"), hooks::HookDef::None)
+            && !self.replaces(module, "append_features")
+            && !self.unknown_hook(module)
+            && self.chain(module, Side::Instance).is_known()
     }
 
     /// Whether `owner` may be a core or standard-library class or module
@@ -1359,7 +1204,7 @@ impl<'a> Index<'a> {
     }
 
     /// The one superclass `owner` declares, its reopenings agreeing.
-    fn superclass(&self, owner: &'a str) -> Superclass<'a> {
+    pub(super) fn superclass(&self, owner: &'a str) -> Superclass<'a> {
         let walks = &self.walks;
         if let Some(superclass) = walks.kept(&walks.superclasses, &owner) {
             return superclass;
@@ -1391,7 +1236,7 @@ impl<'a> Index<'a> {
 
     /// `owner`'s declarations of the kinds `kinds` accepts, in the order
     /// Ruby runs them.
-    fn declarations(
+    pub(super) fn declarations(
         &self,
         owner: &str,
         kinds: impl Fn(MixinKind) -> bool,
@@ -1647,17 +1492,26 @@ impl<'a> Index<'a> {
                 stands: if custom { Stands::Unread } else { stands },
                 ..Step::new(Node::Unknown)
             }];
+            // What a gem's module adds to the singleton class defines no
+            // hook there (#120).
+            let extension = [Step {
+                stands: match unknown[0].stands {
+                    Stands::Any => Stands::Gem,
+                    other => other,
+                },
+                ..unknown[0]
+            }];
             match op {
                 Op::Prepend => {
                     b.prepend(side, &unknown, decl);
                     if object == Object::Owner {
-                        b.prepend(Side::Singleton, &unknown, decl);
+                        b.prepend(Side::Singleton, &extension, decl);
                     }
                 }
                 _ => {
                     b.include(side, &unknown, decl);
                     if object == Object::Owner && op == Op::Include {
-                        b.include(Side::Singleton, &unknown, decl);
+                        b.include(Side::Singleton, &extension, decl);
                     }
                 }
             }
@@ -1960,6 +1814,7 @@ fn constant_paths(text: &str) -> Vec<(usize, &str)> {
     paths
 }
 
+mod building;
 mod held;
 mod hooks;
 #[cfg(test)]

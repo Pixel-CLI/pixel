@@ -4,6 +4,8 @@
 //! The indexer: parses files with tree-sitter into symbols and edges. Each
 //! language is one grammar and one rule module (`ruby`, `rust`). It returns
 //! rows and writes nothing (ADR-0013): the binary hands them to the store.
+//! The one write it asks for is git's, to the copy of git's index the
+//! store placed in the state directory (`git_index`, ADR-0039).
 //!
 //! A run is `tree::scan`, then `link::plan` against the current generation,
 //! `extract::extract` of the planned files within an optional deadline, and
@@ -11,6 +13,7 @@
 
 pub mod codec;
 pub mod extract;
+pub mod git_index;
 pub mod guard;
 pub mod lang;
 pub mod link;

@@ -17,7 +17,10 @@ use tree_sitter::Node;
 use super::extract::{BoundKind, Defined, Defs, Landing, MixinBody, This, Walker, line, one_line};
 use super::routes::{camelize_path, singularize};
 use super::unread;
-use super::{ALIAS, ASSOCIATION, CONDITIONAL, DELEGATE, Fact, MIXIN};
+use super::{
+    ALIAS, ASSOCIATION, ASSOCIATION_EXTENDED, ASSOCIATION_THROUGH, CONDITIONAL, DELEGATE, Fact,
+    MIXIN,
+};
 use crate::lang::FILE_OWNER;
 
 /// Closed Rails callback list: positional symbols name instance methods,
@@ -151,12 +154,15 @@ fn push_symbol(w: &mut Walker, symbol: Node, method: &str, call: Node) {
 /// (`has_many :line_items` → `LineItem`). A `polymorphic: true`
 /// association, or a `through:` one without `class_name:`, has no single
 /// target; a computed name or `class_name:` neither.
+///
+/// The site's `extra` holds the association's own name, then its flags
+/// ([`ASSOCIATION_EXTENDED`], [`ASSOCIATION_THROUGH`]), which typed
+/// receivers read (ADR-0038). Declared outside a class body (a concern's
+/// `included do`), it is a [`Fact::LooseAssociation`]: the reader it
+/// generates lands on a class the rules do not place.
 /// <https://api.rubyonrails.org/classes/ActiveRecord/Associations/ClassMethods.html>
 pub(super) fn association(w: &mut Walker, call: Node, method: &str) {
-    if !MACROS.contains(&method)
-        || call.child_by_field_name("receiver").is_some()
-        || w.nearest() != Some(BoundKind::Class)
-    {
+    if !MACROS.contains(&method) || call.child_by_field_name("receiver").is_some() {
         return;
     }
     let Some(args) = call.child_by_field_name("arguments") else {
@@ -167,6 +173,19 @@ pub(super) fn association(w: &mut Walker, call: Node, method: &str) {
     let Some(name) = children.first().and_then(|n| association_name(w, *n)) else {
         return;
     };
+    if w.nearest() != Some(BoundKind::Class) {
+        w.facts.push(Fact::LooseAssociation { name });
+        return;
+    }
+    // An extension's methods come before the relation's: a block, an
+    // `extend:` option, or `extending` in its scope.
+    let extended = call.child_by_field_name("block").is_some()
+        || children.iter().any(|arg| {
+            (arg.kind() == "pair"
+                && w.field_text(*arg, "key")
+                    .is_some_and(|k| k.trim_start_matches(':').trim_end_matches(':') == "extend"))
+                || (arg.kind() == "lambda" && w.text(*arg).contains("extending"))
+        });
     let option = |key: &str| {
         children.iter().find_map(|arg| {
             (arg.kind() == "pair"
@@ -193,7 +212,15 @@ pub(super) fn association(w: &mut Walker, call: Node, method: &str) {
     if class_path.rsplit("::").next().is_none_or(str::is_empty) {
         return;
     }
-    let context = w.context(&class_path, &format!("{ASSOCIATION}{method}"));
+    let mut context = w.context(&class_path, &format!("{ASSOCIATION}{method}"));
+    let mut flags = String::new();
+    if extended {
+        flags.push(ASSOCIATION_EXTENDED);
+    }
+    if option("through").is_some() {
+        flags.push(ASSOCIATION_THROUGH);
+    }
+    context.extra = vec![name, flags];
     w.push_site(
         EdgeKind::Association,
         line(call),
@@ -225,6 +252,39 @@ fn association_name(w: &Walker, node: Node) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// Whether `call`, a receiverless `include`, is RSpec's matcher in an
+/// expectation: part of the argument of `to`, `not_to` or `to_not` sent to
+/// `expect(..)`, `expect { .. }` or `is_expected`, through the matchers
+/// that compose it (`include(a).and include(b)`, `all(include(a))`). An
+/// expectation runs where `self` is an example, which has RSpec's
+/// `include` and no `Module#include` (ADR-0039).
+fn rspec_matcher(w: &Walker, call: Node) -> bool {
+    let mut at = call;
+    while let Some(parent) = at.parent() {
+        match parent.kind() {
+            "argument_list" | "pair" | "hash" | "array" | "parenthesized_statements" => {}
+            "call" if parent.child_by_field_name("block").is_none() => {
+                let method = w.field_text(parent, "method").unwrap_or_default();
+                if matches!(method.as_str(), "to" | "not_to" | "to_not") {
+                    return parent
+                        .child_by_field_name("receiver")
+                        .is_some_and(|target| {
+                            target.kind() == "call"
+                                && target.child_by_field_name("receiver").is_none()
+                                && matches!(
+                                    w.field_text(target, "method").as_deref(),
+                                    Some("expect" | "is_expected")
+                                )
+                        });
+                }
+            }
+            _ => return false,
+        }
+        at = parent;
+    }
+    false
+}
+
 /// A receiver-less (or `self.`) `include`, `prepend` or `extend` in a class
 /// or module body: one ancestor per argument, kind prefixed `included:` in a
 /// concern's `included do` block and `prepended:` in its `prepended do`,
@@ -253,6 +313,9 @@ pub(super) fn mixin_call(w: &mut Walker, call: Node, method: &str) {
         Some("singleton_class" | "self.singleton_class") => true,
         Some(_) => return,
     };
+    if op == "include" && receiver.is_none() && rspec_matcher(w, call) {
+        return;
+    }
     // A concern's block runs on the includer, where its mixins act. A
     // block evaluated elsewhere (`K.class_eval { prepend M }`, `class <<
     // K`) mixes into an object whose lookup the rules do not replay
@@ -260,7 +323,7 @@ pub(super) fn mixin_call(w: &mut Walker, call: Node, method: &str) {
     if w.foreign() && !matches!(w.locals.landing(), Landing::Includers { .. }) {
         w.landed(Defined::Any, None);
         if w.unplaced() {
-            w.spread(&args);
+            w.spread_from(call, &args);
         } else {
             mixed(w, &args);
         }
@@ -282,7 +345,7 @@ pub(super) fn mixin_call(w: &mut Walker, call: Node, method: &str) {
             .hook_base()
             .is_some_and(|base| in_hook_eval(w, call, base))
         {
-            w.spread(&args);
+            w.spread_from(call, &args);
         }
         return;
     }

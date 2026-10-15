@@ -82,7 +82,12 @@
 //!   loop including its parameter over such an array of constants
 //!   includes each in turn;
 //! - a compact `class A::B` the nesting does not resolve finds `A` through
-//!   the ancestors of the innermost scope this file declares (B10).
+//!   the ancestors of the innermost scope this file declares (B10);
+//! - in a spec file, a `describe` block is an example group, whose
+//!   `def`s, `let`s and `subject`s, and whose calls in an example, are
+//!   recorded as the group's ([`Fact::Group`], `rspec`, ADR-0041); a `def`
+//!   there taints its name only where RSpec's model does not read the
+//!   program ([`Fact::GroupDef`]).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
@@ -93,18 +98,22 @@ use tree_sitter::{Node, Tree};
 use self::flow::{is_branch, passes_block_on};
 use self::locals::{Gate, Locals};
 use super::unread::{self, Unread};
-use super::{CONDITIONAL, Context, Fact, MIXIN, REBOUND, dsl, manifest, routes};
+use super::{Context, Fact, MIXIN, REBOUND, dsl, manifest, routes};
 use crate::lang::{Def, Extraction, FILE_OWNER, Site};
 use crate::text;
 
 pub use crate::guard::PARSE_BUDGET;
 
 mod constants;
+mod factories;
 mod flow;
 mod forwarding;
 mod hidden;
+mod imports;
 mod locals;
+mod rspec;
 mod taint;
+mod values;
 
 /// Deepest node the walker visits: the root is depth 0, and a node past
 /// the cap is skipped with its whole subtree (v1 `MAX_DEPTH`), which keeps
@@ -120,9 +129,14 @@ const REQUIRE_METHODS: &[&str] = &["require", "require_relative", "require_depen
 /// yields nothing but the driver's `File` symbol. A tree with syntax errors
 /// is still walked: what could be read is kept.
 pub fn extract(path: &str, content: &[u8]) -> Extraction {
-    if manifest::is_lockfile(path) {
+    let facts = if manifest::is_lockfile(path) {
+        Some(manifest::lock_gems(content))
+    } else {
+        manifest::fixture_set(path).map(|_| manifest::fixture_facts(content))
+    };
+    if let Some(facts) = facts {
         return Extraction {
-            facts: Fact::encode_all(&manifest::lock_gems(content)),
+            facts: Fact::encode_all(&facts),
             ..Extraction::default()
         };
     }
@@ -140,6 +154,9 @@ fn extract_tree(path: &str, content: &[u8]) -> Extraction {
     let mut walker = Walker::new(content);
     walker.rebinders = flow::rebinders(&walker, root);
     walker.exits = flow::exits(&walker, root);
+    walker.minitest = values::minitest(path);
+    walker.rspec = rspec::spec_code(path);
+    walker.spec_code = rspec::spec_code(path);
     walker.walk(root, None, None, 0);
     let unsettled = walker.unsettled();
     dsl::drop_overridden(&mut walker, &unsettled);
@@ -235,6 +252,22 @@ pub(super) struct Walker<'a> {
     exits: std::collections::HashSet<usize>,
     /// The names each body reads uncalled ([`flow::Uncalled`], R9-01).
     uncalled: flow::Uncalled,
+    /// The locals each open scope gate binds once (ADR-0038).
+    values: values::Gates<'a>,
+    /// The file is a Minitest one, whose test blocks run on a test case.
+    minitest: bool,
+    /// The file is a spec file, whose example groups are read (ADR-0041).
+    rspec: bool,
+    /// The file is RSpec's code: a spec file or a file under `spec/`.
+    spec_code: bool,
+    /// What each block, `def` and body around the walk makes of `self`, in
+    /// a spec file ([`rspec::Frame`]).
+    frames: Vec<rspec::Frame>,
+    /// The `let` and `subject` blocks the walk is in.
+    lets: Vec<rspec::LetBlock>,
+    /// The `include` calls written in an example group's body that the
+    /// group records as its steps ([`Fact::GroupInclude`]).
+    group_mixins: std::collections::HashSet<usize>,
 }
 
 /// `concerning :Topic do` (B6): the module it makes, which the owner
@@ -357,6 +390,13 @@ impl<'a> Walker<'a> {
             rebinders: std::collections::HashSet::new(),
             exits: std::collections::HashSet::new(),
             uncalled: flow::Uncalled::default(),
+            values: values::Gates::default(),
+            minitest: false,
+            rspec: false,
+            spec_code: false,
+            frames: Vec::new(),
+            lets: Vec::new(),
+            group_mixins: std::collections::HashSet::new(),
         }
     }
 
@@ -442,6 +482,12 @@ impl<'a> Walker<'a> {
         ) {
             self.constants.insert(name.clone());
         }
+        // RSpec's own classes reopened may change its DSL (ADR-0041).
+        if matches!(kind, SymbolKind::Class | SymbolKind::Module)
+            && (name == "RSpec::Core" || name.starts_with("RSpec::Core::"))
+        {
+            self.facts.push(Fact::RspecOff);
+        }
         self.defs.push(Def {
             kind,
             name,
@@ -516,23 +562,24 @@ impl<'a> Walker<'a> {
         });
     }
 
-    /// A call of `name` on `receiver` (`None` for no receiver), written at
-    /// `line`.
-    fn push_call(&mut self, name: &str, receiver: Option<&str>, line: u32) {
+    /// A call of `name` on `receiver` as written (`None` for no receiver),
+    /// at `line`, whose qualifier is the receiver's value path when it has
+    /// one (`typed`, ADR-0038), else the receiver as written.
+    fn push_call(&mut self, name: &str, receiver: Option<&str>, typed: Option<&str>, line: u32) {
         if name.is_empty() {
             return;
         }
-        let mut context = self.context(name, receiver.unwrap_or_default());
+        let qualifier = typed.or(receiver).unwrap_or_default();
+        let mut context = self.context(name, qualifier);
         if self.this() != This::Own {
             context.extra = vec![REBOUND.to_owned()];
         }
-        self.push_site(
-            EdgeKind::Call,
-            line,
-            None,
-            call_target(name, receiver),
-            &context,
-        );
+        // Written where `self` is an example of a group (ADR-0041).
+        if let Some(group) = self.group_marker() {
+            context.extra.push(group);
+        }
+        let target = values::call_target(name, receiver);
+        self.push_site(EdgeKind::Call, line, None, target, &context);
     }
 
     /// A reference to the method `name` that the DSL call `call` names
@@ -575,6 +622,10 @@ impl<'a> Walker<'a> {
             self.unread.merge(unread::scan(&self.text(node)));
             return;
         }
+        if !self.lets.is_empty() {
+            rspec::let_value(self, node);
+        }
+        let framed = self.rspec && rspec::enter(self, node, parent);
         let kind = node.kind();
         let block =
             matches!(kind, "block" | "do_block" | "lambda").then(|| self.block_kind(kind, parent));
@@ -649,7 +700,7 @@ impl<'a> Walker<'a> {
                 if let Some(key) = self.field_text(node, "key")
                     && !self.locals.is_local(&key)
                 {
-                    self.push_call(&key, None, line(node));
+                    self.push_call(&key, None, None, line(node));
                 }
             }
             "block" | "do_block" => {
@@ -755,6 +806,9 @@ impl<'a> Walker<'a> {
         }
         if scope.is_some() {
             self.locals.close();
+            if scope == Some(Scope::Gate) {
+                self.values.pop();
+            }
         }
         if owner_pushed {
             self.owners.pop();
@@ -762,6 +816,9 @@ impl<'a> Walker<'a> {
         // The module `concerning` made is included once its block has run.
         if self.concerned.last().is_some_and(|c| c.call == node.id()) {
             self.include_concerned(node);
+        }
+        if framed {
+            rspec::leave(self, node);
         }
     }
 
@@ -793,6 +850,10 @@ impl<'a> Walker<'a> {
         };
         self.locals
             .open(scope, kind, value_is_self, block, this, landing);
+        if scope == Scope::Gate {
+            let gate = values::Gates::open(self, node);
+            self.values.push(gate);
+        }
     }
 
     /// The `include` of the module `concerning` made, by the owner around
@@ -1351,13 +1412,26 @@ impl<'a> Walker<'a> {
     fn method(&mut self, node: Node) -> Option<usize> {
         let name = self.field_text(node, "name")?;
         let defs = self.locals.enclosing_defs();
+        if rspec::redefines_dsl(self, &name) {
+            self.facts.push(Fact::RspecOff);
+        }
+        // A `def` in an example group is the group's, when RSpec reads the
+        // file; else it is tainted as below (ADR-0041).
+        let in_group = rspec::def_in_group(self);
+        if in_group {
+            self.facts.push(Fact::GroupDef { name: name.clone() });
+        }
         if defs == Defs::Foreign {
             // In `class << X`, a method of the class or module `X` names
             // (B2).
             if let Landing::SingletonOf { path, scope, read } = self.locals.landing() {
                 return self.defined_on(path, scope, &read, &name, node);
             }
-            self.may_define(Defined::Def, Some(name.clone()));
+            if in_group {
+                self.landed(Defined::Def, Some(name.clone()));
+            } else {
+                self.may_define(Defined::Def, Some(name.clone()));
+            }
         }
         let Some(owner) = self.owners.last().map(|owner| owner.qualified.clone()) else {
             let kind = if self.locals.in_block() || defs != Defs::Instance {
@@ -1367,7 +1441,7 @@ impl<'a> Walker<'a> {
             };
             // `main`'s singleton class (R5-04); a foreign frame's `def` is
             // tainted where it lands.
-            if kind == SymbolKind::Method && defs != Defs::Foreign {
+            if kind == SymbolKind::Method && defs != Defs::Foreign && !in_group {
                 self.taint(Some(name.clone()));
             }
             return self.push_def(kind, name, node, false);
@@ -1428,25 +1502,6 @@ impl<'a> Walker<'a> {
         self.push_def(SymbolKind::Method, qualified, node, false)
     }
 
-    /// The `require`s of a region the grammar could not parse: a load
-    /// needs no enclosing structure to be read, unlike a definition's name
-    /// or a call's `self`.
-    fn imports_in(&mut self, node: Node, depth: usize) {
-        if depth > MAX_DEPTH {
-            return;
-        }
-        if node.kind() == "call"
-            && node.child_by_field_name("receiver").is_none()
-            && let Some(method) = self.field_text(node, "method")
-            && REQUIRE_METHODS.contains(&method.as_str())
-        {
-            self.import(node, &method);
-        }
-        for (child, _) in children(node) {
-            self.imports_in(child, depth + 1);
-        }
-    }
-
     /// A bare name: a binding, a local read, or a call of `self`.
     fn identifier(&mut self, node: Node, role: Ident) {
         match role {
@@ -1458,7 +1513,7 @@ impl<'a> Walker<'a> {
                 }
                 if !self.locals.is_local(&name) {
                     self.visibility_word(&name);
-                    self.push_call(&name, None, line(node));
+                    self.push_call(&name, None, None, line(node));
                 }
             }
             Ident::Name => {}
@@ -1482,7 +1537,7 @@ impl<'a> Walker<'a> {
         let before = self.defs.len();
         if let Some(method) = node.child_by_field_name("method") {
             let name = self.text(method);
-            let receiver = self.receiver(node);
+            let receiver = values::written(self, node);
             // `module_function()` and `public()` set the mode as the bare
             // words do; with arguments they only touch the methods named.
             if receiver.is_none()
@@ -1498,6 +1553,15 @@ impl<'a> Walker<'a> {
             dsl::outside(self, node, &name);
             dsl::exec_mixin(self, node, &name);
             dsl::association(self, node, &name);
+            if rspec::uses_rspec(self, node, &name) {
+                self.facts.push(Fact::Rspec);
+            }
+            factories::factory(self, node, &name);
+            if rspec::prepends_into_config(self, node, &name)
+                || (receiver.is_none() && rspec::loads_minitest_spec(self, node, &name))
+            {
+                self.facts.push(Fact::RspecOff);
+            }
             if receiver.is_none() && REQUIRE_METHODS.contains(&name.as_str()) {
                 self.import(node, &name);
             } else {
@@ -1508,16 +1572,16 @@ impl<'a> Walker<'a> {
                 // prove.
                 if !declared && method.kind() != "super" {
                     let line = line(method);
-                    let receiver = receiver.as_deref();
+                    let typed = values::typed(self, node);
+                    let (receiver, typed) = (receiver.as_deref(), typed.as_deref());
+                    let setter = format!("{name}=");
                     match assigned_through(node, parent, field) {
-                        Some(Assigned::Plain) => {
-                            self.push_call(&format!("{name}="), receiver, line)
-                        }
+                        Some(Assigned::Plain) => self.push_call(&setter, receiver, typed, line),
                         Some(Assigned::Operator) => {
-                            self.push_call(&format!("{name}="), receiver, line);
-                            self.push_call(&name, receiver, line);
+                            self.push_call(&setter, receiver, typed, line);
+                            self.push_call(&name, receiver, typed, line);
                         }
-                        None => self.push_call(&name, receiver, line),
+                        None => self.push_call(&name, receiver, typed, line),
                     }
                 }
             }
@@ -1549,97 +1613,6 @@ impl<'a> Walker<'a> {
         }
         (false, opened)
     }
-
-    /// The receiver as written; `Foo.new(args)` and `Job.set(args)` on a
-    /// constant keep the constant and the method only, which arguments
-    /// cannot change (v1 `ruby_receiver`).
-    fn receiver(&self, call: Node) -> Option<String> {
-        let receiver = call.child_by_field_name("receiver")?;
-        if receiver.kind() == "call"
-            && let Some(method) = self.field_text(receiver, "method")
-            && matches!(method.as_str(), "new" | "set")
-            && let Some(owner) = receiver.child_by_field_name("receiver")
-            && matches!(owner.kind(), "constant" | "scope_resolution")
-        {
-            return Some(format!("{}.{method}", self.text(owner)));
-        }
-        Some(self.text(receiver))
-    }
-
-    /// `require "x"` and its family: an import of the literal spec, with the
-    /// path `require` resolution reads.
-    fn import(&mut self, call: Node, method: &str) {
-        let Some(spec) = self.first_string_argument(call) else {
-            return;
-        };
-        let mut context = self.context(&spec, method);
-        context.extra = vec![require_path(method, &spec)];
-        // Under a condition, in a block or in a method body, the load may
-        // not run when the file does (R13).
-        if self.branches > 0 || self.locals.gate() == Gate::Method {
-            context.extra.push(CONDITIONAL.to_owned());
-        }
-        // A load is the file's, wherever it is written (the contract in
-        // `ruby/mod.rs`).
-        let file = Some(FILE_OWNER);
-        self.push_site(EdgeKind::Import, line(call), file, spec, &context);
-    }
-
-    /// The literal text of the first argument when it is a string without
-    /// interpolation; an escape sequence is skipped (v1
-    /// `ruby_first_string_argument`).
-    fn first_string_argument(&self, call: Node) -> Option<String> {
-        let args = call.child_by_field_name("arguments")?;
-        let mut cursor = args.walk();
-        let first = args.named_children(&mut cursor).next()?;
-        if first.kind() != "string" {
-            return None;
-        }
-        let mut spec = String::new();
-        let mut cursor = first.walk();
-        for part in first.children(&mut cursor) {
-            match part.kind() {
-                "string_content" => spec.push_str(&self.text(part)),
-                "interpolation" => return None,
-                _ => {}
-            }
-        }
-        (!spec.is_empty()).then_some(spec)
-    }
-}
-
-/// What `require` resolution resolves for `spec` loaded through `method`:
-/// `require_relative` names a file relative to the requiring one, kept as an
-/// explicit `./` or `../` path; `require`, `require_dependency` and `load`
-/// search the load path, kept bare. A load-path spec written as a relative
-/// or absolute path (`require "./x"`) is relative to the process's working
-/// directory, which the rules cannot know: `""`, which resolves to nothing
-/// (v1 `ruby_require_path`).
-pub fn require_path(method: &str, spec: &str) -> String {
-    let explicit = spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/');
-    match (method, explicit) {
-        ("require_relative", false) => format!("./{spec}"),
-        ("require_relative", true) => spec.to_owned(),
-        (_, false) => spec.to_owned(),
-        (_, true) => String::new(),
-    }
-}
-
-/// A call's target as written, on one line: `User.where`, `save`. A long
-/// receiver loses its start, never the method's name: `…tail.first`.
-fn call_target(name: &str, receiver: Option<&str>) -> String {
-    let Some(receiver) = receiver else {
-        return name.to_owned();
-    };
-    let receiver = receiver.split_whitespace().collect::<Vec<_>>().join(" ");
-    let whole = format!("{receiver}.{name}");
-    if whole.chars().count() <= text::SIGNATURE_CAP {
-        return whole;
-    }
-    let keep = text::SIGNATURE_CAP.saturating_sub(name.chars().count() + 2);
-    let skip = receiver.chars().count().saturating_sub(keep);
-    let tail: String = receiver.chars().skip(skip).collect();
-    format!("…{tail}.{name}")
 }
 
 /// `text` with every run of white space, line breaks included, made one
