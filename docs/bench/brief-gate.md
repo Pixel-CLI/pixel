@@ -428,6 +428,68 @@ What it says:
    rows rewritten by a script, daemon off): 13 of 37 briefed without it, 21
    with it, off-topic 27 and 26 silent.
 
+## Plain-word leads without the meaning search
+
+pixel-mvp's BM25 over each file's names and path (its ADR-0030, a test file at
+half its score under ADR-0031), moved into the brief under ADR-0036 of the
+pixel-mvp research repository as a fallback (`execution_brief/words.rs`,
+`PIXEL_BRIEF_BM25=auto`, off by default): when the `meaning` op does not
+answer, its leads are fused with the relevance co-files in the meaning
+leads' place. The documents are built from v1's own graph (`files`,
+`symbols`) with pixel-mvp's tokeniser (`mvp_model::terms`); nothing else
+moved, and nothing was tuned on this set: the constants are pixel-mvp's.
+
+The bar was written before the first run: on the pair "daemon, no model"
+(the brief as it ships offline: the hooks keep a daemon, the model was never
+downloaded), English hit@8 up by 5 points or more, at most 2 more off-topic
+prompts briefed, p95 over the 218 prompts up by 20 ms or less, and every
+brief byte-identical when the `meaning` op answers.
+
+| | |
+| --- | --- |
+| binaries | `main` at `d1ca8a43` and this change with `PIXEL_BRIEF_BM25=auto`, each `CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --profile dev-release -p pixel-cli` |
+| repository, set | a clean clone at `85bede7d`, `pixel prepare-repo --no-daemon` (`fixture_match: true` in every result; 543 files and 9 066 symbols in its graph), `prompts.jsonl` SHA-256 `4bd58566…6c041e`, split `all`: 63 English and 22 French rows with `expected_files` |
+| arms | **with model**: `--daemon on --warm-meaning`; **daemon, no model**: `--daemon on` with `HOME` an empty directory, so `~/.local/share/pixel/models` holds nothing and the `meaning` op answers `model_missing`; **no daemon**: `--daemon off` (the local route, which has no `meaning` op) |
+| runner | `PIXEL_BRIEF_PACK=0 python3 scripts/bench/bench-brief-gate.py --pixel <bin> --repo <fixture> --split all --repeat 3 --warmup 3`; 0 unstable rows, 0 errors, no Ollaya server; 2026-10-15 23:26 to 2026-10-16 00:40 UTC, 1-minute load 6 to 13 on 16 CPUs |
+| latency | the runner's latencies drift with the load of a shared machine between two runs taken minutes apart, so the bar was read on the "daemon, no model" pair with the two binaries alternated call by call on each prompt (the brief environment of the runner, a daemon of `main`, three rounds of the 218 prompts, the median per prompt), three times, at load 5 to 11; the last run is of this pull request's head |
+
+| | `main`, with model | `main`, daemon, no model | change, daemon, no model | `main`, no daemon | change, no daemon |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| English hit@8 (of 63) | 38 (60.3 %) | 27 (42.9 %) | **35 (55.6 %)** | 27 (42.9 %) | **35 (55.6 %)** |
+| French hit@8 (of 22) | 8 (36.4 %) | 3 (13.6 %) | **10 (45.5 %)** | 3 (13.6 %) | **10 (45.5 %)** |
+| on-topic briefed, English / French | 75/85, 21/37 | 75/85, 21/37 | 75/85, 21/37 | 75/85, 21/37 | 75/85, 21/37 |
+| off-topic silent (of 96) | 85 | 85 | 85 | 85 | 85 |
+| latency p50 / p95, 218 prompts, alternated (ms) | | 106 / 182, 98 / 165, 86 / 130 | 108 / 178, 103 / 165, 89 / 146 | | |
+
+With the model, the change's briefs are those of `main`, byte for byte (218 of
+218 `stdout_sha`), and so are they without it when the switch is off. Without
+the model and with it on, 82 briefs differ (61 English), all of them briefs
+that fired: the gate is untouched. English gains `bg-026`, `bg-070`,
+`bg-086`, `bg-136`, `bg-178`, `bg-203`, `bg-204`, `bg-215`, `bg-216` and loses
+`bg-109`; French gains seven and loses none. By split, English: dev 16 → 18
+of 32, test 11 → 17 of 31 (with the model: 22 and 16).
+
+What it says:
+
+1. **Most of the distance to the model, without it.** English hit@8 without
+   the model goes from 42.9 % to 55.6 %, against 60.3 % with it; the route
+   does not matter (the local route lands on the same counts). French goes
+   past the model (45.5 % against 36.4 %), on 22 rows; why was not measured.
+2. **The cost is the corpus, read on every briefed prompt.** Reading the
+   graph's files and symbols and counting their terms (on up to four threads)
+   takes 10 to 15 ms here; on the daemon route the graph's currency check
+   (about 9 ms, a walk of the tree) runs on a second connection meanwhile. The
+   82 briefs that change cost a median 8 to 11 ms more (p90 17 to 31); p95 over
+   the 218 prompts moves by −4, 0 and +16 ms. Two earlier builds gave the same
+   briefs at a higher cost: stemming every word occurrence on one thread,
+   +34 ms at p95, which fails the bar; the currency check before the read,
+   +12 ms at p95 in one order-balanced pair of runner passes and +22 ms
+   alternated under load 11.
+3. **Larger repositories pay more.** Not run through this bench: on a
+   10 993-file, 67 325-symbol Rails graph the read and count take about 60 ms
+   warm (320 ms the first time, from a cold page cache), inside the 3 s window
+   but on every plain prompt of a session without the model.
+
 ## Excavation: the agent-side metric
 
 *Excavation* is the native exploration an agent does to find the code a prompt

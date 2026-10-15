@@ -530,6 +530,18 @@ pub(crate) trait Evidence: Sync {
         let _ = (query, limit, deadline);
         Err("unavailable".to_string())
     }
+    /// At most `limit` leads for `query` ranked by its plain words (BM25 over
+    /// the indexed files' names and paths, `words.rs`): what the brief fuses
+    /// in place of the meaning leads when the meaning search did not answer.
+    fn word_leads(
+        &self,
+        query: &str,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<Vec<MeaningHit>, String> {
+        let _ = (query, limit, deadline);
+        Err("unavailable".to_string())
+    }
     /// One source line at `path:line` — "what it is" for a declaration
     /// (`export const CustomMenu = defineMultiStyleConfig(...)`, not just a
     /// file name). A plain line read, not an index operation; fakes that do
@@ -3248,6 +3260,8 @@ struct Gathered {
     /// The decision scored from an answered relevance probe.
     scored: Option<relevance::Verdict>,
     meaning: Option<Result<Vec<MeaningHit>, String>>,
+    /// The plain-word leads, asked only when the meaning search failed.
+    words: Option<Result<Vec<MeaningHit>, String>>,
     /// `Some(None)`: the judge ran and had no verdict.
     judged: Option<Option<Verdict>>,
 }
@@ -3256,6 +3270,7 @@ struct Gathered {
 enum Reply {
     Relevance(Result<RelevanceAnswer, String>),
     Meaning(Result<Vec<MeaningHit>, String>),
+    Words(Result<Vec<MeaningHit>, String>),
     Judge(Option<Verdict>),
 }
 
@@ -3289,11 +3304,16 @@ where
         if ask_meaning {
             let send = send.clone();
             scope.spawn(move || {
-                let _ = send.send(Reply::Meaning(evidence.meaning(
-                    typed,
-                    MEANING_LIMIT,
-                    deadline,
-                )));
+                let leads = evidence.meaning(typed, MEANING_LIMIT, deadline);
+                let fallback = leads.is_err();
+                let _ = send.send(Reply::Meaning(leads));
+                if fallback {
+                    let _ = send.send(Reply::Words(evidence.word_leads(
+                        typed,
+                        MEANING_LIMIT,
+                        deadline,
+                    )));
+                }
             });
         }
         scope.spawn(move || {
@@ -3305,6 +3325,7 @@ where
             match reply {
                 Reply::Relevance(answer) => got.relevance = Some(answer),
                 Reply::Meaning(leads) => got.meaning = Some(leads),
+                Reply::Words(leads) => got.words = Some(leads),
                 Reply::Judge(verdict) => got.judged = Some(verdict),
             }
             score(&mut got, typed, model);
@@ -3458,6 +3479,13 @@ fn fold_with(state: &Mutex<Brief>, plan: &Plan, got: &Gathered, session: &[Strin
         Some(Ok(answer)) => &answer.lines,
         _ => &[],
     };
+    // Without the meaning search's leads, the plain-word leads rank in their
+    // place; they reach the fusion only, never `brief.leads`.
+    let ranked: &[MeaningHit] = match (&got.meaning, &got.words) {
+        (Some(Ok(_)), _) => leads,
+        (_, Some(Ok(words))) => words,
+        _ => leads,
+    };
     // The gate would have closed this prompt and the session's files stand in
     // for what its words cannot say: they are the brief's files, and the
     // words' leads (off topic by the gate's own verdict) are left out.
@@ -3467,10 +3495,13 @@ fn fold_with(state: &Mutex<Brief>, plan: &Plan, got: &Gathered, session: &[Strin
             .scored
             .as_ref()
             .is_none_or(|scored| scored.tier == Tier::Off);
-    let (leads, lines): (&[MeaningHit], &[RichHit]) =
-        if lifted { (&[], &[]) } else { (leads, lines) };
+    let (leads, ranked, lines): (&[MeaningHit], &[MeaningHit], &[RichHit]) = if lifted {
+        (&[], &[], &[])
+    } else {
+        (leads, ranked, lines)
+    };
     let fused = RichFound {
-        hits: fuse_with(leads, lines, session, lifted),
+        hits: fuse_with(ranked, lines, session, lifted),
         capped: false,
     };
     let admit_json = plan.kind == QuestionKind::Config;
@@ -4520,6 +4551,8 @@ mod tests {
         meaning: Result<Vec<MeaningHit>, String>,
         /// How long the meaning search takes, on top of `pause`.
         meaning_pause: Duration,
+        /// The plain-word leads.
+        words: Result<Vec<MeaningHit>, String>,
         /// The semantic hint the fake advertises, when it models a warm index.
         semantic: Option<String>,
         /// Source line a `line_at` read answers with, when the fake models
@@ -4552,6 +4585,7 @@ mod tests {
                 relevance: Err("unavailable".into()),
                 meaning: Err("unavailable".into()),
                 meaning_pause: Duration::ZERO,
+                words: Err("unavailable".into()),
                 semantic: None,
                 source: None,
                 sources: Vec::new(),
@@ -4655,6 +4689,9 @@ mod tests {
             std::thread::sleep(self.meaning_pause);
             self.meaning.clone()
         }
+        fn word_leads(&self, _: &str, _: usize, _: Instant) -> Result<Vec<MeaningHit>, String> {
+            self.words.clone()
+        }
         fn semantic_hint(&self, phrase: &str) -> Option<String> {
             self.note(format!("semantic_hint {phrase}"));
             self.semantic.clone()
@@ -4711,6 +4748,14 @@ mod tests {
             deadline: Instant,
         ) -> Result<Vec<MeaningHit>, String> {
             self.0.meaning(query, limit, deadline)
+        }
+        fn word_leads(
+            &self,
+            query: &str,
+            limit: usize,
+            deadline: Instant,
+        ) -> Result<Vec<MeaningHit>, String> {
+            self.0.word_leads(query, limit, deadline)
         }
     }
 
@@ -6258,6 +6303,47 @@ mod tests {
     }
 
     #[test]
+    fn a_prose_prompt_without_meaning_leads_should_fuse_the_plain_word_leads_in_their_place() {
+        // No model on disk: the meaning search fails, and the file only the
+        // plain words found joins the co-files in the fusion, ahead of the
+        // doc the co-files name second. Without the fallback it is absent.
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.words = Ok(vec![lead("crates/pixel-daemon/src/api.rs", 40, "")]);
+        let finished = briefed(PROSE, fake, no_verdict);
+        assert_eq!(
+            files_line(finished.text.as_deref().unwrap_or_default()),
+            "files: crates/pixel-daemon/src/api.rs:40; crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready; docs/notes.md:12 — daemon startup notes"
+        );
+        // The receipt still says the meaning search did not answer: the
+        // plain words are not counted as one.
+        let text = finished.text.unwrap();
+        assert!(!text.contains("meaning search returned"), "{text}");
+        assert!(text.contains("coverage: 1/2 ops answered"), "{text}");
+    }
+
+    #[test]
+    fn a_prose_prompt_with_meaning_leads_should_never_read_the_plain_word_leads() {
+        // The fallback is a fallback: when the meaning search answers, the
+        // brief is byte for byte what it was before the plain words existed.
+        let with_words = || {
+            let mut fake = Fake::new();
+            fake.relevance = Ok(on_topic_answer());
+            fake.meaning = Ok(vec![lead(DAEMON, 280, "fn watch_ready() {")]);
+            fake.words = Ok(vec![lead("crates/pixel-daemon/src/api.rs", 40, "")]);
+            fake
+        };
+        let mut without = with_words();
+        without.words = Err("unavailable".into());
+        let with = briefed(PROSE, with_words(), no_verdict).text;
+        assert!(
+            !with.as_deref().unwrap_or_default().contains("api.rs"),
+            "{with:?}"
+        );
+        assert_eq!(with, briefed(PROSE, without, no_verdict).text);
+    }
+
+    #[test]
     fn a_prose_prompt_the_model_puts_off_should_render_nothing_and_say_why() {
         let mut fake = Fake::new();
         fake.relevance = Ok(off_topic_answer());
@@ -6569,6 +6655,7 @@ mod tests {
             relevance,
             scored,
             meaning: None,
+            words: None,
             judged,
         }
     }

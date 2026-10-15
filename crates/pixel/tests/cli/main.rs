@@ -54,3 +54,4 @@ mod update_notice_cli;
 mod upgrade_cli;
 mod vendored_boundary;
 mod version_cli;
+mod words_brief_cli;

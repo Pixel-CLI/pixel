@@ -20,8 +20,11 @@ use std::path::{Path, PathBuf};
 ///   `mvp-model`) through `pixel_graph::mvp_adapter` (ADR-0035 there);
 /// - `pixel-cli` reads pixel-mvp's French-prompt rules (`mvp_model::language`,
 ///   `sub_words`, `prompt_terms`, `fold`, `Lexicon`: pure functions over a
-///   prompt's text) through `execution_brief/french.rs` only (ADR-0032, moved
-///   under ADR-0036 there), and no index crate.
+///   prompt's text) through `execution_brief/french.rs` (ADR-0032, moved
+///   under ADR-0036 there), and its BM25 terms (`mvp_model::terms`,
+///   `sub_words`: the same tokeniser for a file's names and the prompt)
+///   through `execution_brief/words.rs` (ADR-0030 and ADR-0031 there), and no
+///   index crate: the plain-word leads read v1's own graph.
 const READERS: [(&str, &[&str]); 2] = [
     ("pixel-graph", &["mvp-index", "mvp-model", "mvp-store"]),
     ("pixel-cli", &["mvp-model"]),
@@ -109,15 +112,16 @@ fn only_the_named_readers_read_the_vendored_crates() {
         assert!(
             read.is_empty(),
             "`{name}` depends on {read:?}; the vendored mvp-* crates are read by {READERS:?} \
-             only, each through its adapter (pixel_graph::mvp_adapter, the brief's french.rs)"
+             only, each through its adapter (pixel_graph::mvp_adapter, the brief's french.rs and words.rs)"
         );
     }
 }
 
-/// In `pixel-cli`, one module reads pixel-mvp's rules: a second would tie
-/// more of the brief to a copy that cannot be edited here.
+/// In `pixel-cli`, two modules read pixel-mvp's rules, each for one part
+/// moved under ADR-0036: the French words and the plain-word leads. A third
+/// would tie more of the brief to a copy that cannot be edited here.
 #[test]
-fn only_the_briefs_french_module_reads_mvp_model_in_the_cli() {
+fn only_the_briefs_french_and_words_modules_read_mvp_model_in_the_cli() {
     let src = repo_root().join("crates/pixel/src");
     let mut readers = Vec::new();
     let mut pending = vec![src.clone()];
@@ -135,9 +139,13 @@ fn only_the_briefs_french_module_reads_mvp_model_in_the_cli() {
             }
         }
     }
+    readers.sort();
     assert_eq!(
         readers,
-        [PathBuf::from("execution_brief/french.rs")],
-        "pixel-cli reads mvp_model through execution_brief/french.rs only"
+        [
+            PathBuf::from("execution_brief/french.rs"),
+            PathBuf::from("execution_brief/words.rs"),
+        ],
+        "pixel-cli reads mvp_model through execution_brief/french.rs and words.rs only"
     );
 }

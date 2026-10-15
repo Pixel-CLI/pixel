@@ -60,7 +60,7 @@ MCP server. `pixel setup` registers no MCP server with any agent.
 | `mvp-store` | Vendored from pixel-mvp like `mvp-model`: pixel-mvp's graph store, one SQLite file (`graph.db`) in a `.pixel-mvp/` state directory under the root it is given, with one writer behind a lock, one generation published per transaction, and a damaged or foreign file refused and rebuilt. `pixel-graph`'s `mvp_adapter` refreshes and reads it. | mvp-model |
 | `mvp-index` | Vendored from pixel-mvp like `mvp-model`: pixel-mvp's indexer for Ruby and Rust. `tree` scans the work tree through git (tracked and untracked files, the commit and the dirty flag a generation names), `link::plan` diffs it against the stored generation, `extract` parses the planned files with tree-sitter into symbols and edges, and `link::link` decides every site of the generation again under each language's rules: an edge only where the rule proves its target, every other site kept unresolved. It writes nothing; its caller hands the rows to `mvp-store`. Its `git_index` (pixel-mvp's copy of git's index, ADR-0039 there) is placed by `mvp_adapter`'s refresh under `.pixel/.pixel-mvp/` (`base` `.pixel`, as `Writer::open` gets it), and the scan reads its stat cache (`scan_discovered_in`); git's own index is never written. It spawns `git` itself (`tree.rs`), outside `pixel-git`'s `GitRunner`: no timeout and no output cap. `pixel-graph`'s `mvp_adapter` runs it. | mvp-model |
 
-Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context` and `pixel-release`; `pixel-session`, `pixel-actionlog` and `pixel-plugin` depend on `pixel-git` only). The vendored `mvp-*` crates depend on each other and on third-party crates only, never on a `pixel-*` crate, so that each sync stays a copy; `pixel-graph` depends on them for the index (through `mvp_adapter`), and `pixel-cli` on `mvp-model` alone for the French-prompt rules of the brief (through `execution_brief/french.rs`); `crates/pixel/tests/cli/vendored_boundary.rs` names both readers and what each may read. `crates/mvp-lexicon/` is data, not a crate: pixel-mvp's French lexicon (`fr-en.tsv`), vendored byte for byte with its `VENDORED.md`, compiled into the brief. `pixel-daemon` is
+Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context` and `pixel-release`; `pixel-session`, `pixel-actionlog` and `pixel-plugin` depend on `pixel-git` only). The vendored `mvp-*` crates depend on each other and on third-party crates only, never on a `pixel-*` crate, so that each sync stays a copy; `pixel-graph` depends on them for the index (through `mvp_adapter`), and `pixel-cli` on `mvp-model` alone for the French-prompt rules and the plain-word terms of the brief (through `execution_brief/french.rs` and `execution_brief/words.rs`); `crates/pixel/tests/cli/vendored_boundary.rs` names both readers and what each may read. `crates/mvp-lexicon/` is data, not a crate: pixel-mvp's French lexicon (`fr-en.tsv`), vendored byte for byte with its `VENDORED.md`, compiled into the brief. `pixel-daemon` is
 the integration point and is the only library crate allowed to depend on
 almost everything. The CLI depends on the daemon plus whatever it needs for
 commands that never touch the daemon (install, check-release).
@@ -839,6 +839,17 @@ missing.
   fused leads of the `meaning` op (daemon only, resident vectors,
   `unavailable` while they build) join the co-files by reciprocal rank in
   the first `files:` of either brief.
+
+When the `meaning` op does not answer (no daemon, no embedding model on disk,
+vectors still building), plain-word leads take its leads' place in that fusion
+when `PIXEL_BRIEF_BM25=auto` (off by default; `execution_brief/words.rs`, ADR-0030
+and ADR-0031 of pixel-mvp, moved under its ADR-0036): BM25 (k1 1.2, b 0.75)
+over each graph file's path and its symbols' names and signatures, split and
+stemmed by the vendored `mvp_model::terms`, a test file at half its score, and
+none unless the best file holds two of the prompt's terms. The corpus is read
+from the graph on each call, read-only; the leads never reach the gate, the
+excerpts or the kind's seed, and a brief whose `meaning` op answered is
+unchanged.
 
 The chain runs at most six ops under one deadline, 3 s for a hook (`brief_window_ms` in
 `.pixel/config.yaml` or `PIXEL_BRIEF_WINDOW_MS`, clamped to 250 ms to 4.5 s so it ends before the 6 s hook

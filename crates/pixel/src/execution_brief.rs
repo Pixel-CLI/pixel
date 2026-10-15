@@ -26,6 +26,7 @@ pub(crate) mod relevance;
 pub(crate) mod routes;
 pub(crate) mod sent;
 pub(crate) mod session_paths;
+mod words;
 
 const MAX_CAPS: usize = 32;
 const MAX_EVIDENCE_PER_TARGET: usize = 8;

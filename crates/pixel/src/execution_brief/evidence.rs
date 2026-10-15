@@ -115,6 +115,38 @@ impl Live {
         }
     }
 
+    /// The plain-word leads from the graph: the one this brief already opened,
+    /// or, on the daemon route, where nothing else of a plain prompt's brief
+    /// opens it, a fresh one whose currency check (a walk of the tree) runs on
+    /// a connection of its own while the corpus is read; a stale graph's leads
+    /// are dropped.
+    fn graph_word_leads(
+        &self,
+        query: &str,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<Vec<MeaningHit>, String> {
+        let opened = self
+            .graph
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
+        if opened || self.route == Route::Local {
+            return self.with_graph(|store| super::words::leads(store, query, limit, deadline));
+        }
+        // The reading connection opens first, so the checking one never meets
+        // a database another connection is still recovering.
+        let store = open_graph(&self.root)?;
+        std::thread::scope(|scope| {
+            let current = scope.spawn(|| graph_current(&self.root, &open_graph(&self.root)?));
+            let leads = super::words::leads(&store, query, limit, deadline);
+            current
+                .join()
+                .unwrap_or_else(|_| Err("the graph check panicked".into()))?;
+            leads
+        })
+    }
+
     /// The text index, once proven to only need reading.
     fn index_set(&self) -> Result<Arc<IndexSet>, String> {
         let mut slot = self.set.lock().unwrap_or_else(PoisonError::into_inner);
@@ -592,6 +624,18 @@ impl Evidence for Live {
         }
     }
 
+    fn word_leads(
+        &self,
+        query: &str,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<Vec<MeaningHit>, String> {
+        if !super::words::enabled(std::env::var(super::words::WORDS_ENV).ok().as_deref()) {
+            return Err("plain-word leads are off".into());
+        }
+        self.graph_word_leads(query, limit, deadline)
+    }
+
     fn semantic_hint(&self, phrase: &str) -> Option<String> {
         match self.route {
             // Read-only: the probe checks the model's on-disk marker and the
@@ -782,6 +826,14 @@ fn index_current(root: &Path) -> bool {
 /// The published graph, read-only, once its extractor version and source
 /// signature match the tree; any other state is an error that names it.
 fn open_current_graph(root: &Path) -> Result<GraphStore, String> {
+    let store = open_graph(root)?;
+    graph_current(root, &store)?;
+    Ok(store)
+}
+
+/// The published graph, read-only, from the extractor this build writes;
+/// whether it covers the working tree is [`graph_current`]'s question.
+fn open_graph(root: &Path) -> Result<GraphStore, String> {
     let database = root
         .join(pixel_index::index::SHARD_DIR)
         .join(pixel_daemon::api::GRAPH_DB_FILE);
@@ -799,16 +851,22 @@ fn open_current_graph(root: &Path) -> Result<GraphStore, String> {
     if version.as_deref() != Some(EXTRACTOR_VERSION) {
         return Err("the graph extractor is outdated".into());
     }
+    Ok(store)
+}
+
+/// Whether `store` covers the working tree at `root`: its freshness
+/// signature is the tree's.
+fn graph_current(root: &Path, store: &GraphStore) -> Result<(), String> {
     let stored = store
         .meta_get(FRESHNESS_KEY)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "the graph freshness is unknown".to_string())?;
     let current =
-        freshness_signature_trusting_stat(root, &store).map_err(|error| error.to_string())?;
+        freshness_signature_trusting_stat(root, store).map_err(|error| error.to_string())?;
     if stored != current {
         return Err("the graph is stale".into());
     }
-    Ok(store)
+    Ok(())
 }
 
 fn local_symbols(store: &GraphStore, name: &str) -> Result<Vec<SymbolHit>, String> {
@@ -1685,6 +1743,58 @@ mod tests {
             open_current_graph(&root).err().as_deref(),
             Some("the graph freshness is unknown")
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn daemon_route_word_leads_should_rank_a_current_graph_and_drop_a_stale_graphs() {
+        use pixel_graph::store::SymbolKind;
+        let root = scratch("word-leads");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/rename.rs"), "pub fn rename_symbol() {}\n").unwrap();
+        let dir = root.join(pixel_index::index::SHARD_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = GraphStore::open(&dir.join(pixel_daemon::api::GRAPH_DB_FILE)).unwrap();
+        store
+            .meta_set(EXTRACTOR_VERSION_KEY, EXTRACTOR_VERSION)
+            .unwrap();
+        let file = store.replace_file("src/rename.rs", "oid", "rust").unwrap();
+        store
+            .insert_symbol(
+                file,
+                "src/rename.rs#rename_symbol#function",
+                "rename_symbol",
+                "rename_symbol",
+                SymbolKind::Function,
+                1,
+                1,
+                "pub fn rename_symbol() {}",
+            )
+            .unwrap();
+        let live = Live::new(&root, Route::Daemon);
+        let deadline = Instant::now() + WINDOW;
+        // The corpus reads fine, but nothing says the graph covers the tree:
+        // its leads could name files that changed, so there are none.
+        assert_eq!(
+            live.graph_word_leads("renaming symbols", 8, deadline)
+                .unwrap_err(),
+            "the graph freshness is unknown"
+        );
+        let signature = freshness_signature_trusting_stat(&root, &store).unwrap();
+        store.meta_set(FRESHNESS_KEY, &signature).unwrap();
+        drop(store);
+        let leads = live
+            .graph_word_leads("renaming symbols", 8, deadline)
+            .unwrap();
+        assert_eq!(
+            leads
+                .iter()
+                .map(|lead| (lead.path.as_str(), lead.start_line))
+                .collect::<Vec<_>>(),
+            [("src/rename.rs", 1)]
+        );
+        // Read on connections of their own: the brief's graph is not opened.
+        assert!(live.graph.lock().unwrap().is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
