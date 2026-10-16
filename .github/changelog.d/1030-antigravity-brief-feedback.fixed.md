@@ -1,0 +1,1 @@
+**brief:** an Antigravity prompt's brief now leaves its `prompt` and `part` lines in `.pixel/brief-feedback.jsonl`, keyed by the hook's `conversationId`, and its part line counts the `ephemeralMessage` it injected. Antigravity sends no `session_id`, so before this the read feedback skipped every Antigravity brief, and the part cache and the region dedupe had no session to key on.

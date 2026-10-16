@@ -25,7 +25,8 @@ on:
     #     not only in its fixtures;
     #   - .agents/skills/release/: prepare.sh, which scripts/test-prepare.py
     #     runs;
-    #   - .agents/skills/pixel-retro/: lead_time.py and its contract test.
+    #   - .agents/skills/pixel-retro/: lead_time.py and its contract test;
+    #   - .agents/skills/ultima-arena/: ultima_arena.py and its contract test.
     # Every other skill is excluded: no test reads it.
     # Add a path here when a test starts reading one. Pushes to main stay
     # unfiltered so every merge there keeps a complete run. No branch
@@ -60,6 +61,7 @@ on:
       - ".agents/skills/release/**"
       # test_lead_time.py, test_adherence.py:
       - ".agents/skills/pixel-retro/**"
+      - ".agents/skills/ultima-arena/**"
       - "scripts/README.md"
 
 # A release-prepare pull request into main (`release-x.y.z` branch whose
@@ -241,6 +243,7 @@ jobs:
           ^\.github/workflows/
           ^\.agents/skills/release/
           ^\.agents/skills/pixel-retro/
+          ^\.agents/skills/ultima-arena/
           ^eval/
           ^\.cargo/mutants\.toml$
           (^|/)Cargo\.toml$
@@ -490,6 +493,10 @@ jobs:
       - name: Retro adherence contract (synthetic transcripts, no network)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 .agents/skills/pixel-retro/test_adherence.py
+
+      - name: Ultima arena contract (fake herdr and pixel, no model, no Herdr)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 .agents/skills/ultima-arena/ultima_arena.py --self-test
 
       - name: Action pin check contract (tags, short SHAs, unparsed forms refused)
         if: ${{ needs.changes.outputs.scripts == 'true' }}

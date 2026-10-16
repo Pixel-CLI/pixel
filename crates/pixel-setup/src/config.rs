@@ -79,9 +79,9 @@ pub const BRIEF_WINDOW_ENV: &str = "PIXEL_BRIEF_WINDOW_MS";
 /// slows every lookup at once, and a brief cut to nothing by a 750 ms window answered nothing at all. The hook
 /// is killed by its host after [`HOOK_TIMEOUT`] seconds; this stays well under it.
 pub const BRIEF_WINDOW_HOOK_DEFAULT_MS: u64 = 3_000;
-/// Milliseconds the `pixel brief` command gives the brief: Pi's extension kills the command after 1.2 s.
+/// Milliseconds the `pixel brief` command gives the brief: OpenCode's extension kills the command after 1.2 s.
 pub const BRIEF_WINDOW_COMMAND_DEFAULT_MS: u64 = 750;
-/// Longest window the `brief` command gets whatever the setting says: Pi kills the command after 1.2 s.
+/// Longest window the `brief` command gets whatever the setting says: OpenCode kills the command after 1.2 s.
 pub const BRIEF_WINDOW_COMMAND_MAX_MS: u64 = 1_000;
 /// Shortest window a setting may ask for.
 pub const BRIEF_WINDOW_MIN_MS: u64 = 250;
