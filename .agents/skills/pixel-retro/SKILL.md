@@ -78,7 +78,11 @@ find ~/code /tmp/pxwt -maxdepth 4 -path '*/.pixel/actions.jsonl' -mtime -1 2>/de
 ```
 
 then per root `pixel action-log --errors-only --json --limit 500 <root>`,
-keeping entries whose `ts_ms` falls in the window. A read op that takes
+keeping entries whose `ts_ms` falls in the window. Count each
+`invocation_id` once and place it by its `cwd`, not by the log it was read
+from: a worktree bootstrap that copies the main checkout's `.pixel/` copies
+`actions.jsonl` with it (verified 2026-10-16, a downstream repository's Codex
+worktrees: one `find-symbol` in four logs). A read op that takes
 seconds is a friction even when it succeeds; group the slow ones by how
 they were served:
 
