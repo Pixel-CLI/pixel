@@ -3385,6 +3385,7 @@ fn refusal_lifting(
                         && scored.basis != Basis::NoGraph
                         && !lift
                         && !admitted_by_kind(kind, Some(scored))
+                        && !admitted_by_coverage(scored)
                 })
                 .map(|scored| Admission::Closed(off_topic_reason(scored)))
         }
@@ -3393,7 +3394,9 @@ fn refusal_lifting(
             // uses, and whether or not the probe could be asked.
             _ if admitted_by_kind(kind, got.scored.as_ref()) => None,
             (Some(Err(reason)), _) => Some(Admission::Closed(format!("relevance: {reason}"))),
-            (_, Some(scored)) if scored.tier == Tier::Off && !lift => {
+            (_, Some(scored))
+                if scored.tier == Tier::Off && !lift && !admitted_by_coverage(scored) =>
+            {
                 Some(Admission::Closed(off_topic_reason(scored)))
             }
             (None, _) if complete => Some(Admission::Closed(
@@ -3432,6 +3435,16 @@ fn admitted_by_kind(kind: QuestionKind, scored: Option<&relevance::Verdict>) -> 
         }),
         _ => false,
     }
+}
+
+/// A prompt the model read as off topic is still about the repository when
+/// one structural co-file holds half or more of its informative keywords:
+/// the words name something the codebase knows by name or symbol — the bar
+/// a walkthrough already passes, made of coverage on top of it.
+fn admitted_by_coverage(scored: &relevance::Verdict) -> bool {
+    scored.features.shared >= FLOW_MIN_SHARED
+        && scored.features.shared * 2 >= scored.features.informative
+        && scored.features.structural_files > 0
 }
 
 fn judge_reason(verdict: &Verdict) -> String {
@@ -3512,6 +3525,7 @@ fn fold_with(state: &Mutex<Brief>, plan: &Plan, got: &Gathered, session: &[Strin
             _ if lifted => Admission::Context,
             Some(scored) if scored.basis == Basis::NoGraph => Admission::Unjudged,
             Some(scored) if scored.tier != Tier::Off => Admission::Open,
+            Some(scored) if admitted_by_coverage(scored) => Admission::Open,
             scored if admitted_by_kind(plan.kind, scored.as_ref()) => Admission::Kind(plan.kind),
             Some(scored) => Admission::Closed(off_topic_reason(scored)),
             None => Admission::Unjudged,
@@ -7606,6 +7620,20 @@ mod tests {
     }
 
     #[test]
+    fn fold_should_open_a_covered_prompt_instead_of_admitting_it_by_kind() {
+        // A walkthrough that shares enough words to pass its own bypass is
+        // still an open brief: its answered evidence renders, where a Kind
+        // admission without a pack would print nothing.
+        let plan = Plan::from_typed(WALK, false, None);
+        let state = Mutex::new(Brief::default());
+        let got = off_covered(2, 4, 4);
+        fold(&state, &plan, &got);
+        let brief = edit(&state, |brief| brief.clone());
+        assert_eq!(brief.admission, Admission::Open);
+        assert!(!brief.silenced);
+    }
+
+    #[test]
     fn a_decision_should_name_the_model_that_made_it() {
         let finished = briefed(PROSE, Fake::new(), no_verdict);
         assert_eq!(
@@ -9106,8 +9134,8 @@ mod tests {
                 "{signal:?}"
             );
             assert!(
-                refusal(signal, &off_with(5, 9), true, true, QuestionKind::Lookup).is_some(),
-                "{signal:?}: any other kind stays behind the gate"
+                refusal(signal, &off_with(1, 9), true, true, QuestionKind::Lookup).is_some(),
+                "{signal:?}: one shared word is not coverage for a kind with no bypass"
             );
         }
         // A tour does not need the probe to have answered at all.
@@ -9117,6 +9145,50 @@ mod tests {
             None
         );
         assert!(refusal(Signal::Prose, &failed, true, true, QuestionKind::Lookup).is_some());
+    }
+
+    /// `off_with`, with the informative-word count the coverage floor weighs.
+    fn off_covered(shared: usize, informative: usize, structural: usize) -> Gathered {
+        let mut got = off_with(shared, structural);
+        if let Some(scored) = got.scored.as_mut() {
+            scored.features.informative = informative;
+        }
+        got
+    }
+
+    #[test]
+    fn refusal_should_let_an_off_score_through_when_one_file_covers_the_words() {
+        for signal in [Signal::Prose, Signal::Weak] {
+            for kind in [
+                QuestionKind::Lookup,
+                QuestionKind::Config,
+                QuestionKind::Tests,
+            ] {
+                // Half or more of the informative words in one file the graph
+                // knows by symbol: kinds with no bypass of their own pass.
+                assert_eq!(
+                    refusal(signal, &off_covered(3, 5, 2), true, true, kind),
+                    None,
+                    "{signal:?} {kind:?}"
+                );
+                // The boundary is inclusive: exactly half the words covers.
+                assert_eq!(
+                    refusal(signal, &off_covered(2, 4, 4), true, true, kind),
+                    None,
+                    "{signal:?} {kind:?}"
+                );
+                // The same coverage with no structural footing stays closed.
+                assert!(
+                    refusal(signal, &off_covered(3, 5, 0), true, true, kind).is_some(),
+                    "{signal:?} {kind:?}: shared text is not a named thing"
+                );
+                // One shared word, however structural the files, is not coverage.
+                assert!(
+                    refusal(signal, &off_covered(1, 4, 9), true, true, kind).is_some(),
+                    "{signal:?} {kind:?}: one shared word is not coverage"
+                );
+            }
+        }
     }
 
     #[test]
