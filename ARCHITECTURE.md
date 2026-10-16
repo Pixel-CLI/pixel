@@ -215,7 +215,12 @@ Machine-wide:
 Envelope<Value>`. The Unix-socket daemon reads one JSON `Op` per line and
 writes one JSON `Envelope` line back. Request handling is single-threaded; an
 accept thread and a `notify` watcher feed one channel. The watcher debounces
-filesystem events and refreshes the index and graph for changed files. It is
+filesystem events and refreshes the index and graph for changed files. Only
+events admitted by `record_event` extend the 500 ms quiet window; the first
+pending event caps queue wait at `MAX_PENDING_WAIT` (2 s), so ignored-tree
+traffic and continuous edits cannot postpone the timer forever. Applying the
+batch can take additional time. Both a timer flush and a pre-request flush
+clear the first-event timestamp. It is
 registered on its own thread so the daemon answers from its first request: a
 recursive watch walks every directory under the root, ignored ones included,
 and took 11 to 28 s over a repository's 11 515 `node_modules` directories.
@@ -359,7 +364,9 @@ envelope talks to the daemon socket directly.
   shards to changes since, and an overlay covers the dirty working tree.
   `pixel status` reports whether each layer is fresh.
 - The graph is built lazily on the first graph command and updated per file
-  by the daemon watcher. Without a daemon (CI, `PIXEL_DAEMON_AUTO_START=0`,
+  by the daemon watcher. Its quiet debounce extends only for recorded content
+  events and is capped from the first pending edit (see Daemon and wire contract).
+  Without a daemon (CI, `PIXEL_DAEMON_AUTO_START=0`,
   a copied `.pixel/`), the first graph command after an edit compares the
   tree's per-file content hashes with the stored ones in one walk and
   re-extracts only the added/edited files, drops the removed ones and

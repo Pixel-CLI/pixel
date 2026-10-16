@@ -1,0 +1,1 @@
+**daemon:** Ignored watcher events no longer delay pending edits. Real edit bursts still debounce for 500 ms, with a two-second maximum queue wait so continuous editing cannot postpone graph updates forever.
