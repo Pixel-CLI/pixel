@@ -88,6 +88,12 @@ fn read(path: &Path) -> Result<Option<Entry>> {
     if metadata.is_dir() {
         return Ok(Some(Entry::Directory));
     }
+    if !metadata.is_file() {
+        return Err(crate::InstallError::Setup(format!(
+            "setup output is not a regular file: {}",
+            path.display()
+        )));
+    }
     Ok(Some(Entry::File {
         bytes: fs::read(path)?,
         mode: fs::metadata(path)?.permissions().mode() & 0o777,
@@ -106,6 +112,15 @@ fn collect_tree(
     if let Some(entry) = read(path)? {
         if entry == Entry::Directory {
             let resolved = fs::canonicalize(path)?;
+            if path
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .is_some_and(|parent| parent.starts_with(&resolved))
+            {
+                return Err(crate::InstallError::Setup(
+                    "setup output links to an ancestor directory".into(),
+                ));
+            }
             if ancestors.contains(&resolved) {
                 return Ok(());
             }
@@ -313,12 +328,16 @@ pub(crate) fn remove(
             }
             continue;
         }
-        let current = read(file)?;
-        let changed = current.as_ref().is_some_and(|entry| {
-            fingerprint(entry) != owned.installed
-                || fs::canonicalize(file).ok().as_ref()
-                    != Some(owned.location.as_ref().unwrap_or(file))
-        });
+        let replaced = fs::symlink_metadata(file).is_ok()
+            && (fs::canonicalize(file).ok().as_ref()
+                != Some(owned.location.as_ref().unwrap_or(file))
+                || fs::metadata(file)
+                    .is_ok_and(|metadata| !metadata.is_file() && !metadata.is_dir()));
+        let current = if replaced { None } else { read(file)? };
+        let changed = replaced
+            || current
+                .as_ref()
+                .is_some_and(|entry| fingerprint(entry) != owned.installed);
         if changed {
             retained.insert(
                 file.clone(),
@@ -496,6 +515,37 @@ mod tests {
                     "repeated removal keeps the edit"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn snapshot_should_reject_links_that_would_scan_the_users_entire_home() {
+        let home = tempfile::tempdir().unwrap();
+        let link = home.path().join(".claude/skills/pixel");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(home.path(), &link).unwrap();
+        assert!(Snapshot::capture(home.path(), true).is_err());
+        assert_eq!(fs::read_link(link).unwrap(), home.path());
+        assert!(!home.path().join(STATE).exists());
+    }
+
+    #[test]
+    fn snapshots_should_refuse_special_files_but_removal_should_keep_user_replacements() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join(".pixel/config.yaml");
+        let before = Snapshot::capture(home.path(), true).unwrap();
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "installed").unwrap();
+        before.finish().unwrap();
+        fs::remove_file(&file).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(&file).unwrap();
+        assert!(matches!(Snapshot::capture(home.path(), true),
+            Err(crate::InstallError::Setup(message)) if message.contains("not a regular file")));
+        for _ in 0..2 {
+            let steps = remove(home.path(), true, false).unwrap().unwrap();
+            assert!(steps.iter().any(|step| step.status == CheckStatus::Yellow
+                && step.detail.as_deref() == file.to_str()));
+            assert!(file.exists());
         }
     }
 

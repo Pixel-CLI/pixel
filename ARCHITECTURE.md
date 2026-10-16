@@ -574,6 +574,8 @@ the remaining receipt stays private so repeated removal cannot delete those edit
 through the legacy removers. Symlinked output directories are followed without
 cycles; a retargeted link preserves files at its new destination. Generated-file
 writes follow complete file-symlink chains and preserve target permissions.
+Snapshotting rejects directory links to ancestors and non-regular files before
+setup writes, preventing a scan of the whole home or a blocking read of a FIFO.
 
 `pixel setup` has two ways to run, and one installer behind both. At a terminal
 (stdin and stdout, `CI` unset, no `--yes`, `--json` or `--print`) it is the
