@@ -64,12 +64,21 @@ pub fn parse_sha256(text: &str) -> Option<String> {
 }
 
 /// Download `url` to `dest`, mark it executable and check it against
-/// `<url>.sha256` when that exists. A mismatch or a failed download leaves
-/// nothing at `dest`.
+/// `<url>.sha256` when that exists. The bytes land beside `dest` first and
+/// replace it only once checked, so a mismatch or a failed download leaves
+/// `dest` as it was: absent, or the program the repository shipped.
 pub fn download_program(url: &str, dest: &Path, allow_file: bool) -> Result<Downloaded, String> {
-    let result = download_checked(url, dest, allow_file);
+    let Some(name) = dest.file_name() else {
+        return Err(format!("{} names no file", dest.display()));
+    };
+    let partial = dest.with_file_name(format!(".{}.download", name.to_string_lossy()));
+    let result = download_checked(url, &partial, allow_file).and_then(|downloaded| {
+        std::fs::rename(&partial, dest)
+            .map(|()| downloaded)
+            .map_err(|e| format!("cannot install {}: {e}", dest.display()))
+    });
     if result.is_err() {
-        let _ = std::fs::remove_file(dest);
+        let _ = std::fs::remove_file(&partial);
     }
     result
 }
