@@ -400,9 +400,17 @@ def overfit(probe_dir, prompt, oracle_paths=(), others=None):
 def snapshot(clone):
     """What read-only means: the working tree status and the tracked files' size and mtime."""
     status = subprocess.run(["git", "status", "--porcelain"], cwd=clone, capture_output=True, text=True).stdout
-    stat = subprocess.run("git ls-files -z | xargs -0 stat -f '%N %z %m' 2>/dev/null || true", shell=True, cwd=clone,
-                          capture_output=True, text=True).stdout
-    return hashlib.sha256((status + stat).encode()).hexdigest()
+    # Read in-process: GNU `stat -f` is the file system's status, whose free-block count moves with any write on
+    # the machine (#986).
+    tracked = subprocess.run(["git", "ls-files", "-z"], cwd=clone, capture_output=True, text=True).stdout
+    stat = []
+    for name in sorted(filter(None, tracked.split("\0"))):
+        try:
+            st = os.lstat(Path(clone) / name)
+            stat.append(f"{name} {st.st_size} {st.st_mtime_ns}")
+        except OSError:
+            stat.append(f"{name} missing")
+    return hashlib.sha256((status + "\n".join(stat)).encode()).hexdigest()
 
 
 def evaluate(probe, qset, pixel_bin, ids, home):
@@ -820,6 +828,27 @@ class SelfTest(unittest.TestCase):
         script.write_text(body)
         script.chmod(0o755)
         return directory
+
+    def test_a_snapshot_moves_with_a_tracked_file_and_not_with_a_write_elsewhere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "a.txt").write_text("a\n")
+            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                   "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null"}
+            for argv in (["init", "-q"], ["add", "."], ["commit", "-q", "-m", "a"]):
+                subprocess.run(["git", *argv], cwd=repo, env=env, capture_output=True, check=True)
+            before = snapshot(repo)
+            # A megabyte written beside the repository moves the file system's free blocks, not the repository.
+            with open(Path(tmp) / "elsewhere", "wb") as out:
+                out.write(os.urandom(1 << 20))
+                out.flush()
+                os.fsync(out.fileno())
+            os.sync()
+            self.assertEqual(snapshot(repo), before)
+            # Same content, new mtime: `git status` stays clean, the tracked file's stat does not.
+            os.utime(repo / "a.txt", (0, 0))
+            self.assertNotEqual(snapshot(repo), before)
 
     def test_check_all_holds_for_the_shipped_probes_and_names_a_broken_one(self):
         self.assertEqual(check_all(), [])
