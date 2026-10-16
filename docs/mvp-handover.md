@@ -10,7 +10,7 @@ import of model, store and index is pixel-mvp `e91e8da`; the lexicon is from
   workspace, include in the scheduled mutation campaign. ORIGIN.md records
   provenance, not a restriction. The copy-over script is retired.
 - French prompt rules and BM25: maintained in `execution_brief/french.rs`
-  and `words.rs`; lexicon data in `crates/mvp-lexicon`.
+  and `words.rs`; lexicon data and its generator in `crates/mvp-lexicon`.
 - Plugin clone restrictions and executable-bit trust hashes, and fail-open,
   single-JSON-line hooks: already implemented and tested in Pixel.
 
@@ -23,7 +23,7 @@ also updates its undo format when required. No private checkout is needed.
 ## Product work continues in Pixel
 
 - Ruby hybrid stays opt-in. Its refresh can delay a brief after an edit;
-  improve daemon responsiveness and incremental work before enabling it.
+  improve daemon responsiveness and incremental work before enabling it (#1040).
   The recorded experiment is pixel-research-mvp's
   `evaluation/results/2026-10-16-ruby-hybrid-daemon.md`. Reassess MVP #111
   against the imported head before treating its old edge counts as current.
