@@ -147,8 +147,27 @@ fn edit_array(text: &str, old: &[Value], new: &[Value]) -> serde_json::Result<St
         let matching = spans
             .iter()
             .enumerate()
-            .find(|(i, (_, _, candidate))| !used.contains(i) && candidate == value);
-        if let Some((index, (start, end, _))) = matching {
+            .find(|(i, (_, _, candidate))| !used.contains(i) && candidate == value)
+            .or_else(|| {
+                spans
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, (_, _, candidate))| {
+                        !used.contains(i)
+                            && candidate.is_object()
+                            && value.is_object()
+                            && !new.contains(candidate)
+                    })
+                    .max_by_key(|(_, (_, _, candidate))| {
+                        candidate
+                            .as_object()
+                            .expect("object candidate")
+                            .iter()
+                            .filter(|(key, old)| value.get(*key) == Some(*old))
+                            .count()
+                    })
+            });
+        if let Some((index, (start, end, original))) = matching {
             if let Some(prior) = previous {
                 if index > 0 && prior == spans[index - 1].1 {
                     out.push_str(&text[prior..*start]);
@@ -156,7 +175,7 @@ fn edit_array(text: &str, old: &[Value], new: &[Value]) -> serde_json::Result<St
                     out.push(',');
                 }
             }
-            out.push_str(&text[*start..*end]);
+            out.push_str(&edit(&text[*start..*end], original, value)?);
             used.insert(index);
             previous = Some(*end);
         } else {
@@ -211,6 +230,17 @@ mod tests {
             let result = patch(text, &value).unwrap();
             assert_eq!(serde_json::from_str::<Value>(&result).unwrap(), value);
         }
+    }
+
+    #[test]
+    fn patch_should_keep_user_tokens_when_a_shared_hook_group_loses_a_pixel_entry() {
+        let text = r#"{"hooks":[{ "matcher" : "*", "hooks" : [ { "command" : "mine", "timeout": 1e2 }, {"command":"pixel"} ]}]}"#;
+        let mut value: Value = serde_json::from_str(text).unwrap();
+        value["hooks"][0]["hooks"].as_array_mut().unwrap().pop();
+        let result = patch(text, &value).unwrap();
+        assert!(result.contains(r#"{ "command" : "mine", "timeout": 1e2 }"#));
+        assert!(result.contains(r#""matcher" : "*", "hooks" : [ "#));
+        assert!(!result.contains("pixel"));
     }
 
     #[test]

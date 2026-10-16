@@ -69,10 +69,5 @@ first-party probe shipped with pixel; `pixel setup` keeps it current
 \ no newline at end of file
 
 ## after setup --remove
---- home/.gemini/pixel.pixel-bak.{STAMP3}/SKILL.md 0644 = tests/setup/.agents/skill.md
 --- home/.gemini/settings.json.pixel-bak.{STAMP1} 0644 = home/.gemini/settings.json.pixel-bak.{STAMP1} (after setup, twice)
 --- home/.gemini/settings.json.pixel-bak.{STAMP2} 0644 = home/.gemini/settings.json (after setup, twice)
---- home/.gemini/skills/ (empty directory)
---- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
---- home/.pixel/plugins/ (empty directory)
---- home/.pixel/setup-receipt.json 0600 = home/.pixel/setup-receipt.json (after setup, twice)

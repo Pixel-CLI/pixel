@@ -181,13 +181,3 @@ first-party probe shipped with pixel; `pixel setup` keeps it current
 \ no newline at end of file
 
 ## after setup --remove
---- home/.codex/hooks.json 0600
-{
-  
-}
---- home/.codex/hooks.json.pixel-bak.{STAMP1} 0644 = home/.codex/hooks.json (after setup, twice)
---- home/.codex/pixel.pixel-bak.{STAMP2}/SKILL.md 0644 = tests/setup/.agents/skill.md
---- home/.codex/skills/ (empty directory)
---- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
---- home/.pixel/plugins/ (empty directory)
---- home/.pixel/setup-receipt.json 0600 = home/.pixel/setup-receipt.json (after setup, twice)

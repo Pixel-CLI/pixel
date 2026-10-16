@@ -97,17 +97,5 @@ first-party probe shipped with pixel; `pixel setup` keeps it current
 \ no newline at end of file
 
 ## after setup --remove
---- home/.gemini/antigravity-cli/plugins/ (empty directory)
---- home/.gemini/config/config.json 0644
-{"user":"kept",
-  "plugins": {
-    
-  }}
 --- home/.gemini/config/config.json.pixel-bak.{STAMP1} 0644 = home/.gemini/config/config.json.pixel-bak.{STAMP1} (after setup, twice)
---- home/.gemini/config/config.json.pixel-bak.{STAMP3} 0644 = home/.gemini/config/config.json (after setup, twice)
---- home/.gemini/config/plugins/ (empty directory)
---- home/.gemini/pixel.pixel-bak.{STAMP2}/SKILL.md 0644 = tests/setup/.agents/skill.md
---- home/.gemini/skills/ (empty directory)
---- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
---- home/.pixel/plugins/ (empty directory)
---- home/.pixel/setup-receipt.json 0600 = home/.pixel/setup-receipt.json (after setup, twice)
+--- home/.gemini/config/config.json.pixel-bak.{STAMP2} 0644 = home/.gemini/config/config.json (after setup, twice)

@@ -69,6 +69,14 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
     let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
     let pi_paths = crate::pi_global::PiPaths::resolve(&home, options.home.is_some());
+    if let Some(mut steps) = crate::receipt::remove(&home, options.home.is_some(), dry_run)? {
+        steps.push(remove_binary(&target, dry_run)?);
+        steps.push(backups_step(
+            &find_backups(&global_backup_dirs(&home, &codex_home, &opencode_dir)),
+            dry_run,
+        ));
+        return Ok(install::install_report(&binary_path, &home, dry_run, steps));
+    }
     let steps = vec![
         // 1. Remove pixel run-hook entries from every tool's settings file.
         remove_claude_hooks(&home, &exe, dry_run)?,
@@ -405,6 +413,7 @@ fn parent_of(root: &Path, rel: &str) -> PathBuf {
 /// rewrites a file, hence may have left a backup beside it.
 fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![
+        home.join(".pixel"),
         home.join(".claude"),
         home.join(config::DEVIN_CONFIG_DIR),
         parent_of(home, config::CODEX_HOOKS_FILE),

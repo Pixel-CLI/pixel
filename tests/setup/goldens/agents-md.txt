@@ -9,5 +9,3 @@
 \ no newline at end of file
 
 ## after setup --remove
---- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
---- home/.pixel/setup-receipt.json 0600 = home/.pixel/setup-receipt.json (after setup, twice)

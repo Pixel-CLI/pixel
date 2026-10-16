@@ -347,6 +347,15 @@ fn check(index: usize, slug: &str, name: &str) {
         reported_backups(&report, &root),
         "{name}: every backup left behind is one the remove report tells the user about"
     );
+    let without_backups: Snapshot = removed
+        .iter()
+        .filter(|(path, _)| !path.contains(".pixel-bak."))
+        .map(|(path, entry)| (path.clone(), entry.clone()))
+        .collect();
+    assert_eq!(
+        without_backups, seeded,
+        "{name}: removal returns the HOME byte for byte, except reported backups"
+    );
     let bin = Path::new(env!("CARGO_BIN_EXE_pixel"))
         .canonicalize()
         .unwrap();
@@ -428,4 +437,105 @@ goldens! {
     opencode_setup_and_remove_match_the_golden: 7, "opencode", "OpenCode";
     pi_setup_and_remove_match_the_golden: 8, "pi", "pi";
     agents_md_setup_and_remove_match_the_golden: 9, "agents-md", "AGENTS.md";
+}
+
+#[test]
+fn remove_should_keep_and_report_files_edited_after_setup_without_touching_a_preview() {
+    let root = fixture("edited");
+    run(&root, &["setup", "--selected-agents=1", FEATURES]);
+    let paths = [".pixel/config.yaml", ".claude/skills/pixel/SKILL.md"];
+    for path in paths {
+        fs::write(root.join("home").join(path), "my edited file\n").unwrap();
+    }
+    let before = snapshot(&root);
+    run(&root, &["setup", "--remove", "--dry-run", "--json"]);
+    assert_eq!(
+        snapshot(&root),
+        before,
+        "preview changes no bytes or directories"
+    );
+    let report = run(
+        &root,
+        &[
+            "setup",
+            "--remove",
+            "--binary-path",
+            root.join("absent-pixel").to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+    for path in paths {
+        let file = root.join("home").join(path);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "my edited file\n");
+        assert!(
+            report["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| step["status"] == "yellow"
+                    && step["detail"] == file.to_str().unwrap()
+                    && step["summary"] == "kept a file changed after setup"),
+            "{report}"
+        );
+    }
+}
+
+#[test]
+fn remove_should_restore_a_preexisting_skill_and_name_its_recovery_copies() {
+    let root = fixture("preexisting-skill");
+    let skill = root.join("home/.claude/skills/pixel/SKILL.md");
+    fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    fs::write(&skill, "my own skill\n").unwrap();
+    let original = snapshot(&root);
+    run(&root, &["setup", "--selected-agents=1", FEATURES]);
+    let report = run(
+        &root,
+        &[
+            "setup",
+            "--remove",
+            "--binary-path",
+            root.join("absent-pixel").to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let removed = snapshot(&root);
+    assert_eq!(backups_in(&removed), reported_backups(&report, &root));
+    let without_backups: Snapshot = removed
+        .into_iter()
+        .filter(|(path, _)| !path.contains(".pixel-bak."))
+        .collect();
+    assert_eq!(without_backups, original);
+}
+
+#[test]
+fn remove_should_keep_preexisting_empty_directories_and_user_yaml_bytes() {
+    let root = fixture("preexisting-empty");
+    let home = root.join("home");
+    fs::create_dir_all(home.join(".claude/skills/pixel")).unwrap();
+    fs::create_dir_all(home.join(".pixel")).unwrap();
+    fs::write(
+        home.join(".pixel/config.yaml"),
+        "# my choices\nmetrics: 'off'\n",
+    )
+    .unwrap();
+    let original = snapshot(&root);
+    run(&root, &["setup", "--selected-agents=1", FEATURES]);
+    let report = run(
+        &root,
+        &[
+            "setup",
+            "--remove",
+            "--binary-path",
+            root.join("absent-pixel").to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let removed = snapshot(&root);
+    assert_eq!(backups_in(&removed), reported_backups(&report, &root));
+    let without_backups: Snapshot = removed
+        .into_iter()
+        .filter(|(path, _)| !path.contains(".pixel-bak."))
+        .collect();
+    assert_eq!(without_backups, original);
 }

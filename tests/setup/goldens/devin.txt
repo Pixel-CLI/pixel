@@ -124,8 +124,3 @@ first-party probe shipped with pixel; `pixel setup` keeps it current
 ## after setup --remove
 --- home/.config/devin/config.json.pixel-bak.{STAMP1} 0644 = home/.config/devin/config.json.pixel-bak.{STAMP1} (after setup, twice)
 --- home/.config/devin/config.json.pixel-bak.{STAMP2} 0644 = home/.config/devin/config.json (after setup, twice)
---- home/.devin/pixel.pixel-bak.{STAMP3}/SKILL.md 0644 = tests/setup/.agents/skill.md
---- home/.devin/skills/ (empty directory)
---- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
---- home/.pixel/plugins/ (empty directory)
---- home/.pixel/setup-receipt.json 0600 = home/.pixel/setup-receipt.json (after setup, twice)

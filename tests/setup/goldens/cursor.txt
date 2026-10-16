@@ -10,7 +10,3 @@
 \ no newline at end of file
 
 ## after setup --remove
---- home/.cursor/pixel.pixel-bak.{STAMP1}/SKILL.md 0644 = tests/setup/.agents/skill.md
---- home/.cursor/skills/ (empty directory)
---- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
---- home/.pixel/setup-receipt.json 0600 = home/.pixel/setup-receipt.json (after setup, twice)

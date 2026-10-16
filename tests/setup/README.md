@@ -53,3 +53,9 @@ record of each agent's install and uninstall, one test per agent of
 module doc lists what is normalised). It is marked `TEMPORARY (dev-flags)`
 because it uses those flags; when they go, it is ported to the wizard's typed
 answers, not deleted.
+
+Global setup also writes a private ownership receipt. The per-agent tests require
+removal to return the seeded HOME byte for byte, apart from reported backups.
+Receipt fingerprints are rendered as `{SHA256:<deployed path>}` from the actual
+file bytes, whose content the same golden pins. Separate tests cover edited
+files, preexisting skills/directories/YAML, and a removal preview with no writes.

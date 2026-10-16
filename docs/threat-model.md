@@ -287,6 +287,11 @@ original bytes and installed fingerprints in `~/.pixel/setup-receipt.json`,
 written atomically through a private 0600 temporary file. This receipt can
 contain configuration secrets and has the same user-only boundary as those
 configuration files. Only setup output paths are captured, never the whole home.
+Removal validates all receipt paths before its first write (including rejecting
+parent traversal), compares installed fingerprints and modes, and preserves
+files changed after setup. Restores use private temporary files and preserve
+existing symlinks. Only setup-created empty directories are pruned; backups
+remain and are listed in the report.
 Hook commands embed the
 absolute binary path, quoted by `routing::quoted_executable`. The binary
 reaches users through `scripts/release/install.sh` (archive checked against the
