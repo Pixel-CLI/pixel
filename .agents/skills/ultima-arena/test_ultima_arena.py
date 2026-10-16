@@ -305,6 +305,16 @@ class PureTests(unittest.TestCase):
         both = ua.judge_metrics("  │ " + box + "\n" + box, [rec], 0)
         self.assertEqual((both["occurrences"], both["outside_tool_framing"]), (2, True))
 
+    def test_a_prompt_submit_notice_the_pane_wrapped_still_shows_the_brief(self):
+        # Run 3, Claude: the notice split after "pixel" at the pane's width.
+        wrapped = "  ⎿  UserPromptSubmit says: 🟩 pixel\n     prompt-submit ❀ 657.9ms\n"
+        self.assertEqual(ua.prompt_submit_line(wrapped), "🟩 pixel prompt-submit ❀ 657.9ms")
+        self.assertEqual(ua.prompt_submit_line("↳ Hook · 🟩 pixel prompt-submit ❀ 680.0ms"), "↳ Hook · 🟩 pixel prompt-submit ❀ 680.0ms")
+        self.assertIsNone(ua.prompt_submit_line("🟩 pixel search-content ❀ 1.0ms ❀ #abcdef"))
+        self.assertIsNone(ua.prompt_submit_line("did the prompt-submit 🟩 pixel line show? yes"))
+        logged = {"verdict": "PASS"}
+        self.assertEqual(ua.judge_brief_shown(logged, ua.brief_on_screen(wrapped, ua.prompt_submit_line(wrapped)))["verdict"], "PASS")
+
     def test_a_header_the_pane_wrapped_still_matches_its_record(self):
         rec = {"command": "search-content", "invocation_id": "9-18df019d61b44c70-0", "ts_ms": 200}
         wrapped = "↳ Hook · 🟩 pixel search-content ❀\n  │ 109.1ms ❀ #b44\n  │ c70\n      │"

@@ -191,12 +191,17 @@ def parse_boxes(scrollback: str) -> list[dict]:
     return boxes
 
 
+SUBMIT_FLAT = re.compile(r"🟩 ?pixel prompt-submit ?❀ ?[0-9.]+ ?ms")
+
+
 def prompt_submit_line(scrollback: str) -> str | None:
-    """The `🟩 pixel prompt-submit ❀ Xms` relay (Claude, Codex, pi), when on screen."""
+    """The `🟩 pixel prompt-submit ❀ Xms` relay (Claude, Codex, pi), when on screen: the whole
+    line when it fits, else the header with the pane's line breaks joined (Claude wraps it)."""
     for line in scrollback.splitlines():
-        if "🟩 pixel prompt-submit" in line:
+        if SUBMIT_FLAT.search(line):
             return line.strip()
-    return None
+    m = SUBMIT_FLAT.search(WRAP.sub(" ", scrollback))
+    return m[0] if m else None
 
 
 def turn_records(actions: list[dict], since_ms: int, until_ms: int | None = None) -> list[dict]:
