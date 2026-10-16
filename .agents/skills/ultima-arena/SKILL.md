@@ -1,0 +1,72 @@
+---
+name: ultima-arena
+description: "Install Pixel from a repository, start Claude Code, Codex, pi, agy and Devin in one Herdr grid in random order, send each the same neutral prompt, and judge per CLI from evidence only whether the prompt-submit brief and a Pixel metrics line reached it. Use for /ultima-arena, 'ultima arena', 'test brief and metrics across all CLIs', or after a change to a hook, relay or install."
+---
+
+# ultima-arena: brief and metrics, five CLIs, evidence only
+
+`ultima_arena.py` (next to this file) answers two questions for each CLI,
+from files and screens, never from what the model says:
+
+| Check | PASS when |
+| --- | --- |
+| `brief` | `<repo>/.pixel/brief-feedback.jsonl` holds a `prompt` line and a `part` line with `bytes > 0` of that CLI's `provider`, both with `ts` at or after the moment the prompt was sent. |
+| `metrics` | the CLI's scrollback shows `🟩 pixel search-content … #<id>` and `<repo>/.pixel/actions.jsonl` holds a `search-content` record, `ts_ms` at or after the prompt, whose `invocation_id` middle field ends in that `<id>` (last six characters, as `format_metrics_line` shows). |
+
+The prompt never mentions metrics (a hard guard refuses `metric`, `🟩`, `❀`)
+and the answer is never scored: a model asked about metrics says yes.
+
+```bash
+S=.agents/skills/ultima-arena/ultima_arena.py
+python3 $S --repo ~/Documents/pixel               # install, then run (from a Herdr pane)
+python3 $S --repo ~/Documents/pixel --skip-install  # use the pixel already on PATH
+python3 $S abort                                   # close the panes the last run created
+python3 $S --self-test                             # offline contract, no Herdr, no model
+```
+
+Flags: `--repo PATH` (default: git toplevel of the cwd; may be another checkout
+than the script's), `--skip-install`, `--seed N` (default time-based, printed
+and stored), `--clis claude,codex,pi,agy,devin`, `--timeout SECS` per CLI
+(default 300), `--out DIR` (default `<repo>/eval/arena-results/ultima-<UTC>/`,
+gitignored). Exit 0 when every CLI passes both checks, 1 otherwise, 2 for a
+usage or environment problem (no Herdr pane, `PIXEL_BRIEF_LOG` off, install failed).
+
+## What a run does
+
+1. **Install** (unless `--skip-install`): `pixel self-update --repo <repo> --build "cargo build --profile dev-release -p pixel-cli"`,
+   `pixel setup --yes`, `pixel build-index --history .`, `pixel doctor <repo> --fail-on yellow --json`.
+   Self-update and setup are fatal (a mise or Homebrew `pixel` is refused by
+   self-update itself: the message is surfaced); the index and a yellow doctor are recorded, not fatal.
+   The receipt records `pixel --version`, `command -v pixel` and the repo HEAD. It rewires the **home** install
+   to this build, as AGENTS.md "Optional Local Install Verification" describes; hand it back with `pixel setup` afterwards.
+2. **Grid** in the operator's tab (`$HERDR_PANE_ID`, which stays on the left): five cells on the right, three on top and two below,
+   split sequentially (parallel Herdr splits race) with ratios 1/3, 1/2 for equal columns. Panes and agents are named `ultima-<cli>`;
+   every created pane id is saved to `$TMPDIR/ultima-arena-<uid>/last-run.json` as it is made.
+3. **Order**: `random.Random(seed).shuffle`; agents are started and prompted in that order. An `agent_pane_busy` start is retried.
+4. **Dialogs**: Codex's hook review (`hooks need review`, `t trust all`) is trusted only when every hook command in
+   `$CODEX_HOME/hooks.json` and `<repo>/.codex/hooks.json` is Pixel's own `<path>/pixel run-hook …`; otherwise the CLI is
+   `needs-operator` and no key is pressed. A folder-trust dialog is accepted (option number, then Enter); a tool approval is
+   accepted only when the pending command is exactly the arena's `pixel search-content` line. Anything else ends as `blocked-dialog` with the screen excerpt.
+5. **Stagger**: the next CLI is prompted after the previous one's `search-content` record appears (bound 60 s). The metrics relay
+   stays silent when identical Pixel invocations overlap in one repository, so run no other Pixel command in `--repo` during the run.
+6. **Wait and judge**: `herdr agent prompt` without `--wait` (it reports `agent_prompt_stalled` for a prompt that ran), then poll
+   `agent get`; scrollback is read with `agent read --source recent-unwrapped --lines 2000` because pi's notices scroll out of `visible`.
+7. **Receipt** in `--out`: `receipt.json` (identity, seed, order, prompt, per CLI the evidence and verdicts, install steps),
+   `receipt.md` (table), `<cli>.scrollback.txt`. The last line printed is `N/5 brief, M/5 metrics`.
+
+Statuses: `done`, `timeout`, `start-failed`, `blocked-dialog`, `needs-operator`. Per CLI the receipt also holds the
+`prompt-submit` relay line (Claude, Codex, pi), the shell call count, and for metrics `seen`, `occurrences` and
+`outside_tool_framing` (a box not inside `│ ⎿ └` framing; best effort, a heuristic on the screen text).
+
+## What it proves, and what it does not
+
+- Proves: for this repo, binary and prompt, the hook wrote a brief that the host received (`part` bytes) and the user's screen showed a
+  metrics box that belongs to a real invocation of that CLI's turn.
+- Does not prove the model used the brief, that a box is the *relay* rather than the shell tool's own output (look at `occurrences` and `outside_tool_framing`),
+  or anything about prompts other than this one. One prompt, one run per CLI: a FAIL is a lead to confirm with `agent-session-debugging`, not a verdict on a flaky run.
+- `PIXEL_BRIEF_LOG=0|false|off` removes the brief evidence: the run refuses to start.
+- The prompt's search path `crates/pixel/src` must exist in `--repo`, so it runs against a pixel checkout.
+
+## Provider strings (crates/pixel/src/task_hook.rs `TaskProvider::as_str`)
+
+`claude`, `codex`, `pi`, `antigravity` (the `agy` CLI), `devin`. Timestamps: `ts` in milliseconds on every `brief-feedback.jsonl` line, `ts_ms` on `actions.jsonl`.
