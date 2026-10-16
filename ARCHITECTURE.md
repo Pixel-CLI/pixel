@@ -1299,6 +1299,10 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
     **Dependency policy** (`cargo deny`, then
     `scripts/ci/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
     reads, accepts the same advisories as `deny.toml`).
+- `mvp-reference.yml` runs the imported index truth test on the pinned public
+  once-campfire and Pixel repositories when its sources change. The ordinary
+  pixel-graph suite also exercises corruption recovery, incremental/full
+  equivalence and provenance through the production refresh adapter.
 - Other workflows: `mutants.yml` (01:17 UTC on `main`, only the cumulative
   diff since the latest completed campaign; no pull-request trigger).
   `scripts/ci/mutants-nightly-range.py` selects a checkpoint from trusted

@@ -961,3 +961,10 @@ first candidates for one.
   a mitigation is quoted as the code spells it and checked against the tree
   before the push; a mitigation that no longer exists is deleted, not kept
   "for history".
+
+### Index reference validation
+
+`mvp-reference.yml` checks out two public repositories at full commit IDs and
+parses them as source data. It does not execute their code or build scripts.
+Both checkouts disable persisted credentials; the workflow has read-only
+contents permission and uses no deployment secrets.

@@ -20,6 +20,15 @@ when storage changes, bump mvp-store's schema as required. The adapter's
 source signature includes the extractor versions. A Ruby merge rule change
 also updates its undo format when required. No private checkout is needed.
 
+## Regression checks
+
+Pixel's `mvp_integrity` integration tests exercise the production refresh
+adapter for mixed Ruby/Rust edits, corruption recovery and provenance without
+rewriting git's index. The original library tests remain in their crates.
+`mvp-reference.yml` runs the imported C-10 truth test on both original pinned
+public repositories. Binary-specific MVP install/telemetry/selector tests
+are not copied into an unrelated CLI; Pixel keeps its own entry-point tests.
+
 ## Product work continues in Pixel
 
 - Ruby hybrid stays opt-in. Its refresh can delay a brief after an edit;
