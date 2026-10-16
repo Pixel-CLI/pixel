@@ -1,0 +1,12 @@
+# `pixel setup --selected-agents=4 --selected-features=1,2,3` (Cursor), then `pixel setup --remove`,
+# on the fixture of crates/pixel/tests/cli/setup_goldens_cli.rs.
+# Paths are relative to the fixture root; see the module doc to regenerate.
+
+## after setup, twice
+--- home/.cursor/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
+--- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
+
+## after setup --remove
+--- home/.cursor/pixel.pixel-bak.{STAMP1}/SKILL.md 0644 = tests/setup/.agents/skill.md
+--- home/.cursor/skills/ (empty directory)
+--- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml

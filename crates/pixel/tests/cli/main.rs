@@ -41,6 +41,8 @@ mod run_recipe_cli;
 mod scope_task_precision;
 mod search_compat_cli;
 mod setup_cli;
+#[cfg(unix)]
+mod setup_goldens_cli;
 mod sidecar_trust_cli;
 mod support;
 mod targets_cli;

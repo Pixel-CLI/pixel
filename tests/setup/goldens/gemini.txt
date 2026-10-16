@@ -1,0 +1,77 @@
+# `pixel setup --selected-agents=5 --selected-features=1,2,3` (Gemini CLI), then `pixel setup --remove`,
+# on the fixture of crates/pixel/tests/cli/setup_goldens_cli.rs.
+# Paths are relative to the fixture root; see the module doc to regenerate.
+
+## after setup, twice
+--- home/.gemini/settings.json 0644
+{
+  "hooks": {
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "command": "'{PIXEL_BIN}' run-hook task-event --provider gemini --event prompt-submit",
+            "name": "pixel-brief",
+            "timeout": 10000,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ]
+  },
+  "theme": "Default"
+}
+--- home/.gemini/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
+--- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
+--- home/.pixel/plugins/cand-j-callers/.pixel-bundled 0644
+first-party probe shipped with pixel; `pixel setup` keeps it current
+--- home/.pixel/plugins/cand-j-callers/pixel-plugin.toml 0644 = probes/cand-j-callers/pixel-plugin.toml
+--- home/.pixel/plugins/cand-j-callers/probe 0755 = probes/cand-j-callers/probe
+--- home/.pixel/plugins/cand-j-chain/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/cand-j-chain/pixel-plugin.toml 0644 = probes/cand-j-chain/pixel-plugin.toml
+--- home/.pixel/plugins/cand-j-chain/probe 0755 = probes/cand-j-chain/probe
+--- home/.pixel/plugins/cand-j-stop-cause/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/cand-j-stop-cause/pixel-plugin.toml 0644 = probes/cand-j-stop-cause/pixel-plugin.toml
+--- home/.pixel/plugins/cand-j-stop-cause/probe 0755 = probes/cand-j-stop-cause/probe
+--- home/.pixel/plugins/cand-k-code-sites/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/cand-k-code-sites/pixel-plugin.toml 0644 = probes/cand-k-code-sites/pixel-plugin.toml
+--- home/.pixel/plugins/cand-k-code-sites/probe 0755 = probes/cand-k-code-sites/probe
+--- home/.pixel/plugins/cand-k-commit-patch/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/cand-k-commit-patch/pixel-plugin.toml 0644 = probes/cand-k-commit-patch/pixel-plugin.toml
+--- home/.pixel/plugins/cand-k-commit-patch/probe 0755 = probes/cand-k-commit-patch/probe
+--- home/.pixel/plugins/config-registry/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/config-registry/pixel-plugin.toml 0644 = probes/config-registry/pixel-plugin.toml
+--- home/.pixel/plugins/config-registry/probe 0755 = probes/config-registry/probe
+--- home/.pixel/plugins/doc-sections/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/doc-sections/pixel-plugin.toml 0644 = probes/doc-sections/pixel-plugin.toml
+--- home/.pixel/plugins/doc-sections/probe 0755 = probes/doc-sections/probe
+--- home/.pixel/plugins/error-origin/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/error-origin/pixel-plugin.toml 0644 = probes/error-origin/pixel-plugin.toml
+--- home/.pixel/plugins/error-origin/probe 0755 = probes/error-origin/probe
+--- home/.pixel/plugins/flow-rank/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/flow-rank/pixel-plugin.toml 0644 = probes/flow-rank/pixel-plugin.toml
+--- home/.pixel/plugins/flow-rank/probe 0755 = probes/flow-rank/probe
+--- home/.pixel/plugins/history-fallback/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/history-fallback/pixel-plugin.toml 0644 = probes/history-fallback/pixel-plugin.toml
+--- home/.pixel/plugins/history-fallback/probe 0755 = probes/history-fallback/probe
+--- home/.pixel/plugins/name-files/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/name-files/pixel-plugin.toml 0644 = probes/name-files/pixel-plugin.toml
+--- home/.pixel/plugins/name-files/probe 0755 = probes/name-files/probe
+--- home/.pixel/plugins/overview-answer-evidence/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/overview-answer-evidence/pixel-plugin.toml 0644 = probes/overview-answer-evidence/pixel-plugin.toml
+--- home/.pixel/plugins/overview-answer-evidence/probe 0755 = probes/overview-answer-evidence/probe
+--- home/.pixel/plugins/rank-blocks/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/rank-blocks/pixel-plugin.toml 0644 = probes/rank-blocks/pixel-plugin.toml
+--- home/.pixel/plugins/rank-blocks/probe 0755 = probes/rank-blocks/probe
+
+## after setup --remove
+--- home/.gemini/pixel.pixel-bak.{STAMP2}/SKILL.md 0644 = tests/setup/.agents/skill.md
+--- home/.gemini/settings.json 0644
+{
+  "theme": "Default"
+}
+--- home/.gemini/settings.json.pixel-bak.{STAMP1} 0644 = home/.gemini/settings.json (after setup, twice)
+--- home/.gemini/skills/ (empty directory)
+--- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
+--- home/.pixel/plugins/ (empty directory)

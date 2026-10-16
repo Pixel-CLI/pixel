@@ -1,9 +1,11 @@
 # A `--dummy-apply` run writes its agents' files here, which is exactly what the
-# flag is for: the tracked goldens live under .agents/, and README.md explains
-# them. Ignoring everything else lets a developer run the wizard against this
-# directory without leaving artefacts in a pull request.
+# flag is for: the tracked goldens live under .agents/ and goldens/, and
+# README.md explains them. Ignoring everything else lets a developer run the
+# wizard against this directory without leaving artefacts in a pull request.
 *
 !.agents/
 !.agents/**
+!goldens/
+!goldens/**
 !README.md
 !.gitignore

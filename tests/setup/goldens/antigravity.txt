@@ -1,0 +1,107 @@
+# `pixel setup --selected-agents=6 --selected-features=1,2,3` (Antigravity), then `pixel setup --remove`,
+# on the fixture of crates/pixel/tests/cli/setup_goldens_cli.rs.
+# Paths are relative to the fixture root; see the module doc to regenerate.
+
+## after setup, twice
+--- home/.gemini/antigravity-cli/plugins/pixel/hooks.json 0644
+{
+  "pixel-guard": {
+    "PostInvocation": [
+      {
+        "command": "'{PIXEL_BIN}' run-hook metrics --provider antigravity --event post-invocation",
+        "timeout": 10,
+        "type": "command"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "'{PIXEL_BIN}' run-hook metrics --provider antigravity",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "enabled": true
+  }
+}
+--- home/.gemini/antigravity-cli/plugins/pixel/plugin.json 0644
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "description": "Deterministic AST code retrieval and code-graph navigation layer for Antigravity.",
+  "displayName": "Pixel Code Intelligence",
+  "managedBy": "pixel",
+  "name": "pixel",
+  "version": "{VERSION}"
+}
+--- home/.gemini/antigravity-cli/plugins/pixel/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
+--- home/.gemini/config/config.json 0644
+{
+  "plugins": {
+    "pixel": {
+      "enabled": true
+    }
+  },
+  "user": "kept"
+}
+--- home/.gemini/config/plugins/pixel/hooks.json 0644 = home/.gemini/antigravity-cli/plugins/pixel/hooks.json (after setup, twice)
+--- home/.gemini/config/plugins/pixel/plugin.json 0644 = home/.gemini/antigravity-cli/plugins/pixel/plugin.json (after setup, twice)
+--- home/.gemini/config/plugins/pixel/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
+--- home/.gemini/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
+--- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
+--- home/.pixel/plugins/cand-j-callers/.pixel-bundled 0644
+first-party probe shipped with pixel; `pixel setup` keeps it current
+--- home/.pixel/plugins/cand-j-callers/pixel-plugin.toml 0644 = probes/cand-j-callers/pixel-plugin.toml
+--- home/.pixel/plugins/cand-j-callers/probe 0755 = probes/cand-j-callers/probe
+--- home/.pixel/plugins/cand-j-chain/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/cand-j-chain/pixel-plugin.toml 0644 = probes/cand-j-chain/pixel-plugin.toml
+--- home/.pixel/plugins/cand-j-chain/probe 0755 = probes/cand-j-chain/probe
+--- home/.pixel/plugins/cand-j-stop-cause/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/cand-j-stop-cause/pixel-plugin.toml 0644 = probes/cand-j-stop-cause/pixel-plugin.toml
+--- home/.pixel/plugins/cand-j-stop-cause/probe 0755 = probes/cand-j-stop-cause/probe
+--- home/.pixel/plugins/cand-k-code-sites/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/cand-k-code-sites/pixel-plugin.toml 0644 = probes/cand-k-code-sites/pixel-plugin.toml
+--- home/.pixel/plugins/cand-k-code-sites/probe 0755 = probes/cand-k-code-sites/probe
+--- home/.pixel/plugins/cand-k-commit-patch/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/cand-k-commit-patch/pixel-plugin.toml 0644 = probes/cand-k-commit-patch/pixel-plugin.toml
+--- home/.pixel/plugins/cand-k-commit-patch/probe 0755 = probes/cand-k-commit-patch/probe
+--- home/.pixel/plugins/config-registry/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/config-registry/pixel-plugin.toml 0644 = probes/config-registry/pixel-plugin.toml
+--- home/.pixel/plugins/config-registry/probe 0755 = probes/config-registry/probe
+--- home/.pixel/plugins/doc-sections/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/doc-sections/pixel-plugin.toml 0644 = probes/doc-sections/pixel-plugin.toml
+--- home/.pixel/plugins/doc-sections/probe 0755 = probes/doc-sections/probe
+--- home/.pixel/plugins/error-origin/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/error-origin/pixel-plugin.toml 0644 = probes/error-origin/pixel-plugin.toml
+--- home/.pixel/plugins/error-origin/probe 0755 = probes/error-origin/probe
+--- home/.pixel/plugins/flow-rank/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/flow-rank/pixel-plugin.toml 0644 = probes/flow-rank/pixel-plugin.toml
+--- home/.pixel/plugins/flow-rank/probe 0755 = probes/flow-rank/probe
+--- home/.pixel/plugins/history-fallback/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/history-fallback/pixel-plugin.toml 0644 = probes/history-fallback/pixel-plugin.toml
+--- home/.pixel/plugins/history-fallback/probe 0755 = probes/history-fallback/probe
+--- home/.pixel/plugins/name-files/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/name-files/pixel-plugin.toml 0644 = probes/name-files/pixel-plugin.toml
+--- home/.pixel/plugins/name-files/probe 0755 = probes/name-files/probe
+--- home/.pixel/plugins/overview-answer-evidence/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/overview-answer-evidence/pixel-plugin.toml 0644 = probes/overview-answer-evidence/pixel-plugin.toml
+--- home/.pixel/plugins/overview-answer-evidence/probe 0755 = probes/overview-answer-evidence/probe
+--- home/.pixel/plugins/rank-blocks/.pixel-bundled 0644 = home/.pixel/plugins/cand-j-callers/.pixel-bundled (after setup, twice)
+--- home/.pixel/plugins/rank-blocks/pixel-plugin.toml 0644 = probes/rank-blocks/pixel-plugin.toml
+--- home/.pixel/plugins/rank-blocks/probe 0755 = probes/rank-blocks/probe
+
+## after setup --remove
+--- home/.gemini/antigravity-cli/plugins/ (empty directory)
+--- home/.gemini/config/config.json 0644
+{
+  "plugins": {},
+  "user": "kept"
+}
+--- home/.gemini/config/plugins/ (empty directory)
+--- home/.gemini/pixel.pixel-bak.{STAMP1}/SKILL.md 0644 = tests/setup/.agents/skill.md
+--- home/.gemini/skills/ (empty directory)
+--- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
+--- home/.pixel/plugins/ (empty directory)

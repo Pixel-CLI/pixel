@@ -1417,7 +1417,9 @@ fn io(err: std::io::Error) -> String {
 //      and the `dev::dummy_root` / `dev::skips_config` blocks they guard:
 //      each one wraps the production code, so deleting the wrapper leaves it;
 //   4. delete the scripted cases in `crates/pixel/tests/cli/setup_cli.rs`
-//      (marked the same way) and the `tests/setup/` gitignore entry, if any.
+//      (marked the same way) and the `tests/setup/` gitignore entry, if any;
+//      port `crates/pixel/tests/cli/setup_goldens_cli.rs` (marked the same
+//      way) to the wizard's typed answers instead: its goldens outlive the flags.
 //
 // Nothing else refers to them: `setup::goldens` renders and applies in-process
 // and the golden files are compared without the command line.

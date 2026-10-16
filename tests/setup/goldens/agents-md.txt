@@ -1,0 +1,9 @@
+# `pixel setup --selected-agents=9 --selected-features=1,2,3` (AGENTS.md), then `pixel setup --remove`,
+# on the fixture of crates/pixel/tests/cli/setup_goldens_cli.rs.
+# Paths are relative to the fixture root; see the module doc to regenerate.
+
+## after setup, twice
+--- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
+
+## after setup --remove
+--- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
