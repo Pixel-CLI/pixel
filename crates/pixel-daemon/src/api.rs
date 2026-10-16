@@ -1524,20 +1524,15 @@ impl Service {
             Ok(graph) => graph,
             Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
         };
-        let stored_signature = match graph.meta_get(pixel_graph::build::FRESHNESS_KEY) {
-            Ok(signature) => signature,
-            Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
-        };
-        let extractor_version = match graph.meta_get(pixel_graph::build::EXTRACTOR_VERSION_KEY) {
-            Ok(version) => version,
-            Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
-        };
-        let graph_signature = pixel_graph::build::freshness_signature(&self.root);
-        if stored_signature.as_deref() != Some(graph_signature.as_str())
-            || extractor_version.as_deref() != Some(pixel_graph::build::EXTRACTOR_VERSION)
-        {
-            return unavailable(TargetsFactsUnavailableReason::GraphStale);
-        }
+        // One stat-cached walk answers the stored signature, the extractor
+        // version and the tree's signature at once: files unchanged since
+        // the last walk are stat-only instead of re-read and re-hashed, so
+        // the freshness check stops dominating the request's window.
+        let graph_signature =
+            match bridge::tree_delta_cached(&self.root, &graph_path, &mut self.hash_cache) {
+                Ok(Some(delta)) if delta.fresh => delta.signature,
+                _ => return unavailable(TargetsFactsUnavailableReason::GraphStale),
+            };
 
         let inputs = TargetsFactsInputs {
             task: task.to_owned(),
@@ -3832,16 +3827,30 @@ pub(crate) fn probe_cap(keyword: &str) -> String {
 /// Word-bounded so "auth" cannot count every "author" as signal. A probe the
 /// index cannot run is skipped: it is not recorded in `probed`.
 pub(crate) fn probe_content(index: &IndexSet, keywords: &[String]) -> ContentProbes {
+    // One thread per keyword: a ubiquitous word's whole-index probe costs as
+    // much as the brief's window, and the words pay it in series otherwise.
+    let results: Vec<_> = std::thread::scope(|scope| {
+        let workers: Vec<_> = keywords
+            .iter()
+            .map(|keyword| {
+                scope.spawn(move || {
+                    // Keywords are [a-z0-9_]+ by construction (tokenize_task),
+                    // but escape defensively anyway.
+                    let pattern = format!(r"(?i)\b{}\b", regex_escape_keyword(keyword));
+                    index
+                        .search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
+                        .ok()
+                        .map(|(matches, stats)| (keyword, matches, stats))
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .filter_map(|w| w.join().ok().flatten())
+            .collect()
+    });
     let mut probes = ContentProbes::default();
-    for keyword in keywords {
-        // Keywords are [a-z0-9_]+ by construction (tokenize_task), but
-        // escape defensively anyway.
-        let pattern = format!(r"(?i)\b{}\b", regex_escape_keyword(keyword));
-        let Ok((matches, stats)) =
-            index.search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
-        else {
-            continue;
-        };
+    for (keyword, matches, stats) in results {
         probes.probed.insert(keyword.clone());
         if stats.truncated {
             probes.truncated.insert(keyword.clone());
