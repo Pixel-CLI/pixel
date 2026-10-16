@@ -53,7 +53,7 @@ MCP server. `pixel setup` registers no MCP server with any agent.
 | `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` reporting, and `summarize_metrics`, which the `token-savings` plugin prints. | git |
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
-| `pixel-setup` | Idempotent `pixel setup`, `pixel setup --remove`, `pixel doctor`. The guided run at a terminal is the `setup/` module (agent detection and targets, the four-feature catalog (Token super savior, command timing and savings, on-demand daemon, AI classification), the plan) in front of the same installer, which `install_selected` limits to the agents and hook groups the plan picked. Global install: Claude and Codex task lifecycle hooks, the `pixel` skill (`skills/pixel/SKILL.md`) deployed into every configured harness's skills dir — a guided run writes only the selected agents' roots — and the explicit Pi `/pixel-impact` package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`) when Pi is present. No always-on prompt, rules file or instruction block is deployed: guidance reaches the wired harnesses as the `pixel` skill only (Copilot CLI and the generic `AGENTS.md` target get none), and the install cleans up nothing earlier releases wrote. Where a host's configuration already exists, Gemini CLI, OpenCode, Devin and Antigravity get their brief and metrics hooks (see "Agent integration"). An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo` skips every global step and writes only the repository's `.pixel/config.yaml` template. Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `banner` logo card (a short logo pulse, not an animation) and ends on the `banner` summary. `pixel doctor` reports `web-search.provider` green, and says so, when `pixel-utilities` is not installed (`pixel_plugin::Available`). | proto, daemon, index, facts, git, plugin |
+| `pixel-setup` | Idempotent `pixel setup`, `pixel setup --remove`, `pixel doctor`. The guided run at a terminal is the `setup/` module (agent detection and targets, the four-feature catalog (Token super savior, command timing and savings, on-demand daemon, AI classification), the plan) in front of the same installer, which `install_selected` limits to the agents and hook groups the plan picked. Global install: Claude and Codex task lifecycle hooks, the `pixel` skill (`skills/pixel/SKILL.md`) deployed into every configured harness's skills dir — a guided run writes only the selected agents' roots — and, when Pi is present, the Pi package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`): the explicit `/pixel-impact` command, the prompt-submit brief and the metrics relay. No always-on prompt, rules file or instruction block is deployed: guidance reaches the wired harnesses as the `pixel` skill only (Copilot CLI and the generic `AGENTS.md` target get none), and the install cleans up nothing earlier releases wrote. Where a host's configuration already exists, Gemini CLI, OpenCode, Devin and Antigravity get their brief and metrics hooks (see "Agent integration"). An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo` skips every global step and writes only the repository's `.pixel/config.yaml` template. Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `banner` logo card (a short logo pulse, not an animation) and ends on the `banner` summary. `pixel doctor` reports `web-search.provider` green, and says so, when `pixel-utilities` is not installed (`pixel_plugin::Available`). | proto, daemon, index, facts, git, plugin |
 | `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`, and an optional `commands` list so one binary serves several `pixel <command>` words, run as `<run> <command> <args…>`; two plugins of a tier answering to one command are an error naming both, in `resolve`, `list` and `install`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (the library behind `pixel install`: a local directory, a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL, or `github:<owner>/<repo>[@<ref>]`, whose unshipped program is fetched as a release asset with `curl`), `remove` (`pixel uninstall`), `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. `Available` is the set of moved commands (`MOVED_COMMANDS`) that a plugin runs on this host, with the host's own reason for one that is installed but blocked (untrusted, not enabled): text that would name a plugin command asks it first. `read_only_invocation` says which moved commands and modes only read, for the task gate: `repo-state`, `review-changes` and the history reads always; `recall` and `list-errors` only when their first argument is a read mode (an option first makes it not a read, so an option value is never taken for the mode); `list-branches` unless `--fetch`. Home, repo root, PATH and the GitHub base URL are fields of `Host`, never read from the process. | git |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
 | `mvp-model` | Vendored from pixel-mvp at a pinned commit (`crates/mvp-model/VENDORED.md`, ADR-0035 there): the row types of pixel-mvp's index (files, symbols, edges with a target or none, provenance) and the `Graph` read trait. Pure: no I/O, enforced by its own `clippy.toml`. `src/` is a copy, synced by `scripts/dev/vendor-mvp.sh`, never edited here. | none |
@@ -177,7 +177,8 @@ Machine-wide:
 - `~/.local/share/pixel/flows/`: saved flows, written by the `pixel-flow`
   plugin (`$PIXEL_FLOW_DIR` overrides); the core only reads it (`plan_cmd::flow_dir`).
 - `~/.local/share/pixel/pi-package/`: the Pi package `pixel setup` writes
-  (`package.json`, `extensions/pixel-impact.ts`, `extensions/pixel-brief.ts`) and declares in the
+  (`package.json`, `extensions/pixel-impact.ts`, and `extensions/pixel-brief.ts`, which carries the
+  prompt-submit brief and the metrics relay) and declares in the
   `packages` list of Pi's `settings.json`; `pixel setup --remove` removes both.
 - `<harness root>/skills/pixel/SKILL.md`: the `pixel` skill (`crate::skill::PIXEL_SKILL`),
   under `~/.claude` and each of `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`,
@@ -567,7 +568,9 @@ installer owns every write, so the two paths cannot disagree on a file.
 The provider-neutral task layer lives above retrieval. `run-hook task-event`
 normalizes Claude, Codex and Pi events into `task_bridge`; it never changes
 the retrieval daemon's wire protocol. Global Claude/Codex installation owns
-one native lifecycle registration; Pi's project extension owns its lifecycle.
+one native lifecycle registration; a Pi host that drives the task lifecycle
+sends its own events, and Pixel's Pi package sends only brief-only ones (see
+"Agent integration").
 A project-only native install still relies on the global lifecycle layer.
 Foreign hooks and trust settings are preserved. Doctor distinguishes registered
 hooks from actual observations; neither establishes complete host coverage.
@@ -626,8 +629,11 @@ its own extension point:
   `~/.pi/agent`) exists or `pi` is on `PATH`, a local Pi package under
   `~/.local/share/pixel/pi-package/` (`package.json`,
   `extensions/pixel-impact.ts`, which registers the explicit
-  `/pixel-impact <symbol>` command, and `extensions/pixel-brief.ts`, whose
-  `before_agent_start` hook runs `pixel brief`) and its absolute path in the
+  `/pixel-impact <symbol>` command, and `extensions/pixel-brief.ts`, which
+  runs `pixel run-hook task-event --provider pi` on `before_agent_start`
+  (the prompt-submit brief), on `session_start` and `session_compact`, and
+  `pixel run-hook metrics --provider pi` on the `tool_result` of a bash call
+  that ran `pixel`; see the hook table) and its absolute path in the
   `packages` list of Pi's `settings.json`, which keeps every other key and
   package. A settings file that does not parse, or an agent path that is not a
   directory, is left untouched and reported yellow.
@@ -692,12 +698,16 @@ doctor`.
 `pixel run-hook` exposes task lifecycle and metrics entry
 points. `task-event` is registered for Claude Code, Codex, Devin, Gemini CLI
 and Antigravity; the metrics relay is registered for Claude Code, Codex and
-Antigravity:
+Antigravity. Pi has no hook registration: its package (`extensions/pixel-brief.ts`)
+runs both entry points from Pi's extension events:
 
 | Hook event | Command | Effect |
 | --- | --- | --- |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`, `SubagentStart`, `SubagentStop`, plus `PostToolUseFailure` (Claude) or `Interrupt` (Codex) | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks. Once enforced, a task retains its gates if runtime settings change. On `prompt-submit` it also returns the `[PIXEL:BRIEF]` evidence brief as `additionalContext` (see below). On `SessionStart` and a briefed `UserPromptSubmit` it may start the repository's daemon in the background (see "Keeping a daemon behind the brief"). Every hook of the table also leaves its line in `.pixel/brief-feedback.jsonl` after it has answered the host (`prompt-submit` parts, `post-tool-use`, `tool-failure`, `stop`): the read feedback of the brief, best effort and silent, so it adds no registration and cannot fail a host. |
 | `UserPromptSubmit` (Claude Code and Codex, `brief_parts` entries; default 3) | `pixel run-hook task-event --provider <host> --event prompt-submit --part K/N` | The brief split over `N` hooks (see "A brief larger than one hook"). Part 1 is the entry above with the ledger and the brief; parts 2 to `N` only print their slice. |
+| `before_agent_start` (Pi, `pixel-brief.ts`) | `pixel run-hook task-event --provider pi --event prompt-submit` | Payload `{session_id, cwd, prompt, brief_only: true}` on stdin. `brief_only` (`BRIEF_ONLY` in `task_hook.rs`) keeps the ledger out: no task is bound, nothing is gated or enforced, and the answer is the bare decision `{"decision":"observe","context":<brief>}`. The brief gets the configured `brief_parts` budget (3 by default) as one message, the 3 s hook window, and leaves its line in `.pixel/brief-feedback.jsonl` and the per-session dedupe. A delivered brief adds the `🟩 pixel prompt-submit` `systemMessage` under the same `metrics` rules as the other hosts. The package injects `context` as the `pixel-brief` custom message with the untrusted-data trailer, and shows `systemMessage` to the user only (`ctx.ui.notify`, never part of the model's context). A Pi payload without `brief_only` keeps `TaskProvider::Pi`'s ledger-only behaviour and gets no brief. |
+| `session_start`, `session_compact` (Pi, `pixel-brief.ts`) | `pixel run-hook task-event --provider pi --event session-start` | Payload `{session_id, cwd, source, brief_only: true}`; `source` is `clear` for a new session, `compact` after a compaction and `startup` otherwise. It may start the repository's daemon and, for `clear` and `compact`, forgets what the brief already sent. |
+| `tool_result` of a bash call that ran `pixel` (Pi, `pixel-brief.ts`) | `pixel run-hook metrics --provider pi` | Claude-shaped payload (`tool_name`, `tool_input.command`, `tool_response`, `cwd`, `session_id`). Relays the finalized Pixel metrics line as `systemMessage`, whether or not the bash result already holds the box, as Codex does; the package shows it to the user only and never rewrites the tool result. |
 | `PostToolUse` (Claude Code, matching `Bash`) | `pixel run-hook metrics --provider claude` | Relays the finalized Pixel metrics line to Claude's `systemMessage` after a shell call. |
 | `PostToolUse` (Codex) | `pixel run-hook metrics --provider codex` | Relays the finalized Pixel metrics line through Codex's documented `systemMessage`, including when the tool result already contains the box. |
 | `PostToolUse` (Antigravity, `pixel-guard` in the IDE and CLI Pixel plugins) | `pixel run-hook metrics --provider antigravity` | Matches a finalized metric to the tool call, stores it in that conversation's artifact directory keyed by `stepIdx`, and returns `{}` as required by Antigravity. |
@@ -773,9 +783,10 @@ The brief (`execution_brief/chain.rs`, `evidence.rs`, `relevance.rs`,
 `decision_log.rs`, `routes.rs`) is built on every prompt-submit event of a
 host that has a prompt hook: Claude Code, Codex and Devin through
 `task-event`, Gemini through `BeforeAgent`, Antigravity through
-`PreInvocation`. Pi (`extensions/pixel-brief.ts`) and OpenCode
-(`plugins/pixel-brief.js`) run `pixel brief` instead, and `start_brief` in
-`task_hook.rs` skips `TaskProvider::Pi` for that reason. A prompt starts one
+`PreInvocation`, and Pi through its package (`extensions/pixel-brief.ts`),
+which sends a `brief_only` `task-event` (`start_brief` serves
+`TaskProvider::Pi` only for that marker). OpenCode (`plugins/pixel-brief.js`)
+runs `pixel brief` instead. A prompt starts one
 by its shape (`brief_signal`), the typed text only, the last paragraph of a
 long untagged paste:
 
@@ -853,7 +864,7 @@ unchanged.
 
 The chain runs at most six ops under one deadline, 3 s for a hook (`brief_window_ms` in
 `.pixel/config.yaml` or `PIXEL_BRIEF_WINDOW_MS`, clamped to 250 ms to 4.5 s so it ends before the 6 s hook
-decision and the host's 10 s kill; 750 ms for the `brief` command, never more than 1 s since Pi cuts it off at 1.2 s). Parts 2 to N
+decision and the host's 10 s kill; 750 ms for the `brief` command, never more than 1 s since OpenCode's plugin cuts it off at 1.2 s). Parts 2 to N
 wait for part 1 as long as part 1 may take (the 6 s hook decision bound). A kind-admitted brief whose window ended before its pack
 renders the best files as a `confidence: low` lead instead of nothing. The ops are the two probes of
 a Weak or Prose prompt, `search-content -F -l` on the first anchor,
@@ -922,7 +933,7 @@ credential-shaped path.
 ZERO precision and the share of gold spans inside the `read:` ranges. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
 explicit cue (config, setting, env, flag, option, default), not `install` or
 `hook`. That
-block's cap is `PROSE_BRIEF_BYTES` (3584, under Pi's 4000-byte extension
+block's cap is `PROSE_BRIEF_BYTES` (3584, under OpenCode's 4000-byte plugin
 cap; `PLAIN_PROSE_BRIEF_BYTES`, 2 KiB, without answer evidence); over the
 cap the last excerpt block's lines go first, then the block before it, the
 first block last, never the receipt. Strong and low-tier briefs carry
@@ -960,9 +971,11 @@ characters, at most `MAX_PARTS` (8). The count is the `brief_parts`
 setting (1 to 8, default 3: the hooks `pixel install` registers), overridden
 by `PIXEL_BRIEF_PARTS`; the `brief` command prints at most `CLI_CHARS`
 (3 900) unless that variable is set or its caller passes `--parts N`, which
-gives it the budget of an N-part hook (pack and probes) as one text. The Pi
-and OpenCode extensions pass `--parts 3` and accept up to 30 000 bytes, so
-they get what the three Claude and Codex hooks carry. `PIXEL_BRIEF_PACK=0|false|off`
+gives it the budget of an N-part hook (pack and probes) as one text. The
+OpenCode plugin passes `--parts 3` and accepts up to 30 000 bytes, and Pi's
+`brief_only` `task-event` takes the configured `brief_parts` (`brief_budget` in
+`task_hook.rs`) and the same 30 000 bytes, so both get what the three Claude and
+Codex hooks carry. `PIXEL_BRIEF_PACK=0|false|off`
 brings the packet back. A low-tier ("maybe") prompt gets at most one part of it, always as a lead.
 A pack of regions alone, with no symbol or passage behind it, ends on
 a lead ("not a verified answer") instead of the directive, and one the window

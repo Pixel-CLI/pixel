@@ -63,6 +63,18 @@ fn hook(
     payload: &Value,
     configure: impl FnOnce(&mut std::process::Command),
 ) -> Value {
+    hook_as("codex", root, event, part, payload, configure)
+}
+
+/// [`hook`] for another `--provider`.
+fn hook_as(
+    provider: &str,
+    root: &Path,
+    event: &str,
+    part: Option<&str>,
+    payload: &Value,
+    configure: impl FnOnce(&mut std::process::Command),
+) -> Value {
     let mut command = pixel_command();
     command
         .current_dir(root)
@@ -74,7 +86,7 @@ fn hook(
             "run-hook",
             "task-event",
             "--provider",
-            "codex",
+            provider,
             "--event",
             event,
         ])
@@ -475,4 +487,154 @@ fn a_session_should_not_be_sent_the_same_source_twice_until_the_host_starts_it_o
         // Whatever was just sent, or kept, is withheld from the next prompt.
         assert_eq!(blocks_of(&ask(SESSION, &|_| {})), 0, "{source}");
     }
+}
+
+/// A Pi prompt as Pixel's Pi package sends it: the brief alone, no ledger.
+fn pi_prompt(root: &Path, session: &str) -> Value {
+    let mut payload = prompt_payload(root, session);
+    payload["brief_only"] = json!(true);
+    payload
+}
+
+/// The brief a Pi hook answer carries: Pi's envelope is the bare decision.
+fn pi_context(output: &Value) -> Option<&str> {
+    output["context"].as_str()
+}
+
+/// Ask `run` until the brief arrives (a loaded machine ends its window first).
+fn pi_brief_eventually(run: &dyn Fn() -> Value) -> Value {
+    (0..5)
+        .map(|_| run())
+        .find(|output| pi_context(output).is_some())
+        .expect("the brief arrives within five asks")
+}
+
+#[test]
+fn a_pi_prompt_that_asks_for_the_brief_alone_should_get_it_and_the_metrics_line_with_no_task_bound()
+{
+    let root = indexed("pi-brief");
+    let output = pi_brief_eventually(&|| {
+        hook_as(
+            "pi",
+            &root,
+            "prompt-submit",
+            None,
+            &pi_prompt(&root, "pi-session"),
+            |command| {
+                command.env_remove("PIXEL_METRICS");
+            },
+        )
+    });
+    let brief = pi_context(&output).unwrap();
+    assert!(brief.starts_with("[PIXEL:BRIEF]"), "{brief}");
+    assert_eq!(output["decision"], "observe");
+    assert!(
+        output.get("hookSpecificOutput").is_none(),
+        "Pi's envelope is the bare decision: {output}"
+    );
+    let line = output["systemMessage"].as_str().unwrap();
+    assert!(line.starts_with("🟩 pixel prompt-submit ❀ "), "{line}");
+    assert!(
+        !brief.contains('🟩'),
+        "the metrics line is for the user, not the model"
+    );
+    assert!(
+        !root.join(".pixel/tasks").exists(),
+        "no task is bound for a brief-only event"
+    );
+    let lines = log_lines(&root);
+    let prompts = of_kind(&lines, "prompt");
+    assert!(!prompts.is_empty(), "{lines:?}");
+    assert!(prompts.iter().all(|line| line["provider"] == "pi"));
+    assert!(
+        prompts
+            .iter()
+            .any(|line| line["bytes"].as_u64() == Some(brief.len() as u64)),
+        "{prompts:?}"
+    );
+}
+
+#[test]
+fn a_pi_brief_should_carry_no_metrics_line_when_metrics_are_off() {
+    let root = indexed("pi-metrics-off");
+    let output = pi_brief_eventually(&|| {
+        hook_as(
+            "pi",
+            &root,
+            "prompt-submit",
+            None,
+            &pi_prompt(&root, "pi-session"),
+            |_| {},
+        )
+    });
+    assert!(pi_context(&output).unwrap().starts_with("[PIXEL:BRIEF]"));
+    assert!(output.get("systemMessage").is_none(), "{output}");
+}
+
+#[test]
+fn a_pi_prompt_without_the_marker_should_keep_the_ledger_and_get_no_brief() {
+    let root = indexed("pi-ledger");
+    let output = hook_as(
+        "pi",
+        &root,
+        "prompt-submit",
+        None,
+        &prompt_payload(&root, "pi-session"),
+        |command| {
+            command.env_remove("PIXEL_METRICS");
+        },
+    );
+    assert_eq!(pi_context(&output), None, "{output}");
+    assert!(output.get("systemMessage").is_none(), "{output}");
+    assert!(
+        root.join(".pixel/tasks").exists(),
+        "the ledger ran for a host that drives the lifecycle itself"
+    );
+    assert!(of_kind(&log_lines(&root), "prompt").is_empty());
+}
+
+#[test]
+fn a_pi_session_start_should_forget_what_a_compaction_or_a_new_session_dropped_and_bind_no_task() {
+    let root = indexed("pi-session");
+    let ask = || {
+        hook_as(
+            "pi",
+            &root,
+            "prompt-submit",
+            None,
+            &pi_prompt(&root, SESSION),
+            with_pack,
+        )
+    };
+    let blocks = |output: &Value| {
+        pi_context(output)
+            .unwrap_or_default()
+            .matches("\n### ")
+            .count()
+    };
+    assert!(
+        (0..5).map(|_| blocks(&ask())).any(|blocks| blocks > 0),
+        "the first prompt of a session gets the pack"
+    );
+    assert_eq!(blocks(&ask()), 0, "the same source is not sent twice");
+    for (source, again) in [("startup", false), ("compact", true), ("clear", true)] {
+        let start = hook_as(
+            "pi",
+            &root,
+            "session-start",
+            None,
+            &json!({"session_id": SESSION, "cwd": &*root, "source": source,
+                    "hook_event_name": "SessionStart", "brief_only": true}),
+            |_| {},
+        );
+        assert_eq!(start, json!({"decision": "observe"}), "{source}");
+        if again {
+            assert!(
+                (0..5).map(|_| blocks(&ask())).any(|blocks| blocks > 0),
+                "{source}: sent again after a start-over"
+            );
+        }
+        assert_eq!(blocks(&ask()), 0, "{source}");
+    }
+    assert!(!root.join(".pixel/tasks").exists());
 }

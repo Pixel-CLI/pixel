@@ -606,7 +606,7 @@ stays so references to the later threats hold.
   one) also quotes multi-line source excerpts, comments included: per chunk
   the signature, its first doc line and up to six body lines, or a flow's
   hops, a test's first assertion, a config constant, under a 3584-byte cap
-  (`PROSE_BRIEF_BYTES`, below Pi's 4000-byte limit). `Evidence::lines_at`
+  (`PROSE_BRIEF_BYTES`, below OpenCode's 4000-byte limit). `Evidence::lines_at`
   reads them only from files the searches named, refuses a credential-shaped
   path, and `PIXEL_BRIEF_ANSWER=0` drops them. The excerpts are shown only
   for the ZERO step ("Answer from these lines"), which no validated rule

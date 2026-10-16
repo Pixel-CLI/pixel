@@ -63,7 +63,7 @@ pub(crate) const BRIEF_ENV: &str = "PIXEL_BRIEF";
 /// every lookup at once and a window that ends first leaves the agent no
 /// brief at all. The environment (`PIXEL_BRIEF_WINDOW_MS`), then the
 /// repository's and the global `brief_window_ms`, then the default of the
-/// caller (the hook's, or the `brief` command's, which Pi cuts off sooner),
+/// caller (the hook's, or the `brief` command's, which OpenCode cuts off sooner),
 /// clamped to what the hook that runs the brief can wait for.
 pub(crate) fn window_for(root: &Path, command: bool) -> Duration {
     let home = std::env::var_os("HOME")
@@ -87,8 +87,8 @@ pub(crate) fn window_for(root: &Path, command: bool) -> Duration {
     )
 }
 
-/// The window for a configured `ms`: the `brief` command is cut off by Pi
-/// after 1.2 s, so a setting tuned for the hook never lets it run past
+/// The window for a configured `ms`: the `brief` command is cut off by
+/// OpenCode's extension after 1.2 s, so a setting tuned for the hook never lets it run past
 /// [`pixel_setup::config::BRIEF_WINDOW_COMMAND_MAX_MS`].
 fn window_of(ms: u64, command: bool) -> Duration {
     let cap = pixel_setup::config::BRIEF_WINDOW_COMMAND_MAX_MS;
@@ -103,7 +103,7 @@ pub(crate) const MAX_OPS: usize = 6;
 pub(crate) const BRIEF_BYTES: usize = 2048;
 /// Size cap of a confident brief that carries a search receipt or answer
 /// excerpts (a plain-language prompt, or a weak one the gate put in the high
-/// tier). Pi's extension caps injected context at 4000 bytes: stay under.
+/// tier). OpenCode's extension caps injected context at 4000 bytes: stay under.
 pub(crate) const PROSE_BRIEF_BYTES: usize = 3584;
 const _: () = assert!(PROSE_BRIEF_BYTES < 4000);
 /// Size cap of a code-shaped brief that names ranges to read.
@@ -2652,10 +2652,10 @@ pub(crate) struct ProbeSetup {
     /// part, but a probe that answers it may fill all of them).
     pub(crate) cap: usize,
     /// What the probes are given at least after the chain: [`PROBE_FLOOR`] for a
-    /// hook, nothing for the `brief` command (Pi kills it at 1.2 s).
+    /// hook, nothing for the `brief` command (OpenCode kills it at 1.2 s).
     pub(crate) floor: Duration,
     /// Bytes the merged brief may hold when the host drops a longer one (the
-    /// `brief` command's Pi and OpenCode extensions drop above 4 000).
+    /// `brief` command's OpenCode extension drops above 4 000).
     pub(crate) max_bytes: Option<usize>,
 }
 
@@ -2865,8 +2865,8 @@ pub(crate) fn start_in(prompt: &str, root: &Path, parts: u8, session: Session) -
     try_start_as(prompt, root, false, parts, Some(session)).ok()
 }
 
-/// [`start_in`] for the `brief` command, which hosts without a prompt hook (Pi,
-/// OpenCode) run and which they drop above 4 000 bytes: a region pack stays
+/// [`start_in`] for the `brief` command, which a host without a prompt hook
+/// (OpenCode) runs and which it drops above 4 000 bytes: a region pack stays
 /// under that unless `PIXEL_BRIEF_PARTS` says the host takes more.
 pub(crate) fn start_for_command(prompt: &str, root: &Path, parts: u8) -> Option<Pending> {
     try_start_for_command(prompt, root, parts).ok()

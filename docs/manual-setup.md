@@ -15,7 +15,10 @@ wire (Copilot CLI, ...)? You don't need `pixel setup`.
    `[PIXEL:BRIEF]`, and Claude Code, Codex and Antigravity a metrics relay.
    Gemini CLI and OpenCode get a brief hook only.
 3. **Install Pi's package when Pi is present**: the explicit `/pixel-impact`
-   command and a hook that adds the brief.
+   command, a hook that adds the brief on each prompt (the `task-event`
+   prompt-submit entry, without the task ledger) and a relay that shows the
+   metrics line after a `pixel` bash call (the same `metrics` entry Claude
+   Code and Codex use).
 4. **Store the settings and the first-party brief probes** under `~/.pixel/`.
 
 No prompt, rules file or instruction block is written, and every agent keeps
@@ -113,8 +116,9 @@ fresh session.
 ### Pi
 
 Pi uses a package, which is separate from the skill: the explicit
-`/pixel-impact <symbol>` command requests bounded graph evidence, and a
-`before_agent_start` hook adds the brief. Neither replaces native tools. By
+`/pixel-impact <symbol>` command requests bounded graph evidence, a
+`before_agent_start` hook adds the brief and a `tool_result` hook shows the
+metrics line. None replaces native tools. By
 hand, add the package path to `packages` in Pi's `settings.json`. See [Pi
 integration](pi-harness.md) for the files. The package step also writes the
 skill to `~/.pi/agent/skills/pixel/SKILL.md`.

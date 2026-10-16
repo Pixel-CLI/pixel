@@ -26,6 +26,13 @@ const _: () = assert!(5_000 + 1_000 <= DECISION_TIMEOUT.as_millis() as u64);
 // together stay inside Pi's eight-second deadline, the tighter of the two.
 const _: () =
     assert!(crate::hook_input::STDIN_WAIT.as_millis() + DECISION_TIMEOUT.as_millis() < 8_000);
+/// Payload field of Pixel's own Pi package (`extensions/pixel-brief.ts`): the
+/// event carries a prompt or a session start for the evidence brief alone. The
+/// ledger stays out of it (no task is bound, no gate or enforcement applies),
+/// so only the brief, its read-feedback line, the daemon warm-start and the
+/// metrics `systemMessage` run. A Pi host that drives the task lifecycle
+/// itself does not send it and keeps `TaskProvider::Pi`'s ledger-only events.
+const BRIEF_ONLY: &str = "brief_only";
 const UNAVAILABLE: &str = "Pixel task state is unavailable. Reads and recovery remain available; edits and completion require a working task ledger.";
 
 /// Hosts with a verified task lifecycle adapter.
@@ -1118,13 +1125,19 @@ fn process(
     }
     // The brief runs beside the ledger: it needs neither, and a slow ledger
     // must not use up its window.
-    let brief = start_brief(provider, event, &payload, part.map_or(1, |part| part.count));
+    let parts = brief_budget(provider, &payload, part);
+    let brief = start_brief(provider, event, &payload, parts);
     forget_sent(provider, event, &payload);
     if let Some(root) = session_start_root(provider, event, &payload) {
         // A start is a nicety: whatever it came to, the hook goes on.
         let _ = crate::execution_brief::autostart::warm(&root);
     }
     let ledger = || {
+        // Pixel's Pi package asked for the brief alone: no task is bound and
+        // nothing is gated, so the ledger has nothing to answer.
+        if brief_only(provider, &payload) {
+            return json!({"decision": "observe"});
+        }
         handle_at(&payload_cwd(provider, &payload), provider, event, &payload).unwrap_or_else(
             |_| {
                 unavailable(
@@ -1148,6 +1161,36 @@ fn process(
         (decision, finish_brief(provider, event, &payload, brief))
     };
     envelope(provider, event, &with_context(decision, text))
+}
+
+/// Hook-sized parts the brief of this event may fill. A hook serving slice
+/// K of N gets N. Without `--part` the one hook prints the whole brief: one
+/// part, except for Pixel's Pi package ([`BRIEF_ONLY`]), which has no per-hook
+/// cap on a message and gets the configured `brief_parts` (repository layer,
+/// then global, 3 by default), as `pixel brief --parts 3` gave it before.
+fn brief_budget(provider: TaskProvider, payload: &Value, part: Option<BriefPart>) -> u8 {
+    if let Some(part) = part {
+        return part.count;
+    }
+    if !brief_only(provider, payload) {
+        return 1;
+    }
+    let root = crate::discover_root(&payload_cwd(provider, payload)).ok();
+    crate::config_cmd::brief_parts(root.as_deref())
+}
+
+/// Whether a prompt-submit `output` carries a brief, the condition for the
+/// 🟩 `systemMessage`. Pi's envelope is the bare decision, so its brief is the
+/// `context`, and only a [`BRIEF_ONLY`] payload counts: a ledger note of a Pi
+/// host that drives the lifecycle itself is not a brief.
+fn delivered_brief(provider: TaskProvider, raw: Option<&str>, output: &Value) -> bool {
+    if provider != TaskProvider::Pi {
+        return output.get("hookSpecificOutput").is_some();
+    }
+    output.get("context").is_some_and(Value::is_string)
+        && raw
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .is_some_and(|payload| brief_only(provider, &payload))
 }
 
 /// Where the first part stores the brief of this prompt and the others read
@@ -1400,8 +1443,20 @@ fn follow(provider: TaskProvider, raw: &str, part: BriefPart, bound: Duration) -
     })
 }
 
+/// Whether `payload` is Pixel's Pi package asking for the brief alone
+/// ([`BRIEF_ONLY`]). Never true for another provider.
+fn brief_only(provider: TaskProvider, payload: &Value) -> bool {
+    provider == TaskProvider::Pi && payload.get(BRIEF_ONLY).and_then(Value::as_bool) == Some(true)
+}
+
+/// Whether `provider` takes the evidence brief from this payload: every
+/// prompt-hook host, and Pi only when its package asked for the brief alone.
+fn briefed(provider: TaskProvider, payload: &Value) -> bool {
+    provider != TaskProvider::Pi || brief_only(provider, payload)
+}
+
 fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -> Option<String> {
-    if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {
+    if !briefed(provider, payload) || event != TaskHookEvent::PromptSubmit {
         return None;
     }
     match provider {
@@ -1440,14 +1495,15 @@ fn session_start_root(
     event: TaskHookEvent,
     payload: &Value,
 ) -> Option<std::path::PathBuf> {
-    if provider == TaskProvider::Pi || event != TaskHookEvent::SessionStart {
+    if !briefed(provider, payload) || event != TaskHookEvent::SessionStart {
         return None;
     }
     crate::discover_root(&payload_cwd(provider, payload)).ok()
 }
 
-/// Start the evidence brief for a Claude or Codex prompt; Pi, every other
-/// event and a prompt outside a repository start none.
+/// Start the evidence brief for a prompt of a briefed host (Pi only when its
+/// package sent [`BRIEF_ONLY`]); every other event and a prompt outside a
+/// repository start none.
 fn start_brief(
     provider: TaskProvider,
     event: TaskHookEvent,
@@ -1611,7 +1667,7 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
     if event == TaskHookEvent::PromptSubmit
         && part.is_none_or(|part| part.index == 1)
         && let Some(output) = &mut output
-        && output.get("hookSpecificOutput").is_some()
+        && delivered_brief(provider, raw.as_deref(), output)
         && metrics_on(provider, raw.as_deref())
     {
         output["systemMessage"] = json!(format!(
@@ -2629,6 +2685,166 @@ mod tests {
             .is_none()
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn indexed_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("pixel-hook-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let shard_dir = root.join(pixel_index::index::SHARD_DIR);
+        std::fs::create_dir_all(&shard_dir).unwrap();
+        std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b"x").unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn pi_should_be_briefed_only_when_its_package_asks_for_the_brief_alone() {
+        let prompt = "callers of `fetchUser`";
+        let marked = json!({"prompt": prompt, "brief_only": true});
+        let plain = json!({"prompt": prompt});
+        assert!(brief_only(TaskProvider::Pi, &marked));
+        assert!(!brief_only(TaskProvider::Pi, &plain));
+        assert_eq!(
+            brief_prompt(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &marked).as_deref(),
+            Some(prompt)
+        );
+        assert_eq!(
+            brief_prompt(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &plain),
+            None
+        );
+        for marker in [json!(false), json!("true"), json!(1), Value::Null] {
+            let payload = json!({"prompt": prompt, "brief_only": marker});
+            assert!(!brief_only(TaskProvider::Pi, &payload), "{marker}");
+            assert_eq!(
+                brief_prompt(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &payload),
+                None,
+                "{marker}"
+            );
+        }
+        for event in [TaskHookEvent::PreToolUse, TaskHookEvent::Stop] {
+            assert_eq!(brief_prompt(TaskProvider::Pi, event, &marked), None);
+        }
+        // The marker is Pi's: no other provider turns its ledger off with it.
+        for provider in [
+            TaskProvider::Claude,
+            TaskProvider::Codex,
+            TaskProvider::Devin,
+            TaskProvider::Gemini,
+            TaskProvider::Antigravity,
+        ] {
+            assert!(!brief_only(provider, &marked), "{provider:?}");
+        }
+    }
+
+    #[test]
+    fn a_pi_brief_should_start_and_a_pi_session_should_warm_only_on_the_brief_only_marker() {
+        let root = indexed_root("pi-brief-only");
+        let marked = json!({"prompt": "callers of `fetchUser`", "cwd": root, "brief_only": true});
+        let plain = json!({"prompt": "callers of `fetchUser`", "cwd": root});
+        assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &marked, 1).is_some());
+        assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &plain, 1).is_none());
+        assert_eq!(
+            session_start_root(TaskProvider::Pi, TaskHookEvent::SessionStart, &marked),
+            Some(root.clone())
+        );
+        assert_eq!(
+            session_start_root(TaskProvider::Pi, TaskHookEvent::SessionStart, &plain),
+            None
+        );
+        assert_eq!(
+            session_start_root(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &marked),
+            None
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_brief_only_pi_event_should_bind_no_task_and_answer_observe() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let root = indexed_root("pi-no-ledger");
+        for (event, extra) in [
+            (
+                TaskHookEvent::PromptSubmit,
+                json!({"prompt": "where is `fetchUser` used"}),
+            ),
+            (TaskHookEvent::SessionStart, json!({"source": "startup"})),
+        ] {
+            let mut payload = json!({
+                "session_id": "pi-session", "cwd": root, "brief_only": true,
+            });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let output = process(TaskProvider::Pi, event, &payload.to_string(), None);
+            assert_eq!(output["decision"], "observe", "{event:?}: {output}");
+            assert!(output.get("coverage").is_none(), "{event:?}: {output}");
+            assert!(output.get("hookSpecificOutput").is_none(), "{event:?}");
+        }
+        assert!(
+            !root.join(".pixel/tasks").exists(),
+            "the ledger bound or recorded something for a brief-only event"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_brief_budget_should_be_one_part_unless_a_hook_part_or_the_pi_package_says_more() {
+        let root = indexed_root("pi-budget");
+        let marked = json!({"cwd": root, "brief_only": true});
+        let plain = json!({"cwd": root});
+        std::fs::write(root.join(".pixel/config.yaml"), "brief_parts: 4\n").unwrap();
+        assert_eq!(brief_budget(TaskProvider::Pi, &marked, None), 4);
+        assert_eq!(brief_budget(TaskProvider::Pi, &plain, None), 1);
+        assert_eq!(brief_budget(TaskProvider::Claude, &marked, None), 1);
+        assert_eq!(brief_budget(TaskProvider::Claude, &plain, None), 1);
+        for provider in [TaskProvider::Pi, TaskProvider::Claude] {
+            assert_eq!(brief_budget(provider, &marked, Some(part(2, 3))), 3);
+            assert_eq!(brief_budget(provider, &plain, Some(part(1, 2))), 2);
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_metrics_line_should_follow_a_delivered_brief_only() {
+        let marked = json!({"brief_only": true}).to_string();
+        let plain = json!({}).to_string();
+        let pi_brief = json!({"decision": "observe", "context": "[PIXEL:BRIEF]"});
+        assert!(delivered_brief(TaskProvider::Pi, Some(&marked), &pi_brief));
+        // Not Pi's package: a ledger note of a host driving the lifecycle.
+        assert!(!delivered_brief(TaskProvider::Pi, Some(&plain), &pi_brief));
+        assert!(!delivered_brief(TaskProvider::Pi, None, &pi_brief));
+        assert!(!delivered_brief(
+            TaskProvider::Pi,
+            Some("not json"),
+            &pi_brief
+        ));
+        for output in [
+            json!({"decision": "observe"}),
+            json!({"decision": "observe", "context": 42}),
+            json!({"hookSpecificOutput": {"additionalContext": "x"}}),
+        ] {
+            assert!(!delivered_brief(TaskProvider::Pi, Some(&marked), &output));
+        }
+        let claude_brief = envelope(
+            TaskProvider::Claude,
+            TaskHookEvent::PromptSubmit,
+            &json!({"decision": "observe", "context": "[PIXEL:BRIEF]"}),
+        );
+        assert!(delivered_brief(
+            TaskProvider::Claude,
+            Some(&plain),
+            &claude_brief
+        ));
+        assert!(!delivered_brief(
+            TaskProvider::Claude,
+            Some(&plain),
+            &json!({})
+        ));
+        assert!(!delivered_brief(
+            TaskProvider::Claude,
+            Some(&marked),
+            &json!({"decision": "observe", "context": "bare"})
+        ));
     }
 
     #[test]
