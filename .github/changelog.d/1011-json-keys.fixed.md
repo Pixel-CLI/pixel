@@ -1,1 +1,1 @@
-**install:** Edit JSON settings by key during setup and removal, keeping the spelling and formatting of the user’s untouched settings. Codex hooks use the same atomic writer and backups.
+**install:** Edit JSON settings by key during setup and removal, keeping the spelling and formatting of the user’s untouched settings. Codex hooks use the same atomic writer and backups. ([#1012](https://github.com/Pixel-CLI/pixel/pull/1012))
