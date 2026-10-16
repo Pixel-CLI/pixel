@@ -160,9 +160,12 @@ python3 .agents/skills/pixel-retro/lead_time.py $W            # reads gh pr view
 python3 .agents/skills/pixel-retro/lead_time.py $W --no-gh    # offline: edit → PR open only
 ```
 
-It reads the Claude Code transcripts of this repository and its
-`.claude/worktrees/` (another path with `--projects <dir>`), and prints per
-PR the time from its first edit to `gh pr create`, from there to the last
+It reads every Claude Code session (subagents included) and Codex rollout
+(`sessions/` and `archived_sessions/`) written to in the window, whatever
+directory it ran in (narrow with `--projects <dir>` / `--codex <dir>`), and
+keeps the PRs whose `gh pr create` URL names this repository's `origin`
+slug: a sibling checkout opens PRs here, and a sibling repository's `#33` is
+not this one's. It prints per PR the time from its first edit to `gh pr create`, from there to the last
 check completion on the final head, the pushes in that session, and the
 session's time split into tool, model, idle (waiting on a background task)
 and human; then the median lead time and the commands with the most
@@ -173,6 +176,13 @@ blocking time. Read the numbers with their limits:
   it did.
 - **One session per PR.** Follow-up pushes from another session count in
   open → green but not in the split.
+- **Codex edits are inferred.** A Codex unit starts at its first
+  `apply_patch` or at the first shell command that writes a file (`sed -i`,
+  a script calling `write_text`, a redirection into a source file); an edit
+  done another way starts it later.
+- **A PR opened elsewhere is missing.** Cloud sessions, another machine or a
+  person opening it by hand leave no local transcript: compare the count
+  with `gh pr list --search 'created:>=<window start>'`.
 - **Compare windows, not sessions.** A rule change (#418 on 2026-09-30, say)
   shows as a shift of the median and of the top blocking commands between a
   window before it and one after, quoted with both commands.
