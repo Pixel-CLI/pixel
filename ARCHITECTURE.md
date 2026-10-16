@@ -339,8 +339,11 @@ core does not see the plugin's output), and exits with the plugin's own code
 plugin, a network plugin not enabled, or a `run` that leaves its directory
 stops with exit 1 and the command that fixes it; a name in
 `pixel_plugin::MOVED_COMMANDS` that no plugin provides prints the
-`pixel install github:Pixel-CLI/<repo>` hint and exits 2; any other name keeps
-clap's error. That table maps the 30 commands (#878) that live in the plugin
+`pixel install github:Pixel-CLI/<repo>` hint and exits 2; a name in
+`removed_commands::REMOVED_COMMANDS` (the 41 pre-rename aliases 0.8.0
+removed) prints ``'<old>' was removed in 0.8.0; use `pixel <new>` `` (with the
+install command when `<new>` is a plugin command no plugin provides) and
+exits 2, without running anything; any other name keeps clap's error. That table maps the 30 commands (#878) that live in the plugin
 repositories `pixel-git`, `pixel-flow`, `pixel-recall`, `pixel-telemetry` and
 `pixel-utilities` to their repository. The core builds in none of them but
 `check-release` (the release workflow runs it before any plugin could be

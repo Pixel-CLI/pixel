@@ -64,6 +64,7 @@ mod prompt_continuation;
 mod prompt_intent;
 mod prompt_key;
 mod reference_cmd;
+mod removed_commands;
 mod search_compat;
 mod search_filter;
 mod serve_trace;

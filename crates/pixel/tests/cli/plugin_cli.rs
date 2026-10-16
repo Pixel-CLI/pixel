@@ -312,6 +312,45 @@ fn an_unknown_command_without_a_plugin_keeps_clap_error() {
     assert_eq!(nested.status.code(), Some(2));
 }
 
+/// A name 0.8.0 removed (#965) is not run, and the error names the command
+/// that replaced it, not clap's nearest spelling (`ready` once got "a
+/// similar subcommand exists: 'rename'").
+#[test]
+fn a_removed_command_names_its_replacement_and_nothing_else() {
+    let world = World::new("removed");
+    for (args, line) in [
+        (
+            &["ready"][..],
+            "pixel: 'ready' was removed in 0.8.0; use `pixel prepare-repo`\n",
+        ),
+        (
+            &["--metrics", "off", "uses", "foo"][..],
+            "pixel: 'uses' was removed in 0.8.0; use `pixel who-calls`\n",
+        ),
+        (
+            &["history"][..],
+            "pixel: 'history' was removed in 0.8.0; use `pixel commit-history`, a plugin command: pixel install github:Pixel-CLI/pixel-git\n",
+        ),
+    ] {
+        let out = world.pixel(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert_eq!(stderr(&out), line, "{args:?}");
+        assert!(!stderr(&out).contains("rename"), "{args:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{args:?}");
+    }
+    assert!(action_log(&world).is_empty(), "a hint is not a run");
+}
+
+/// A hook entry an old install wrote (`pixel hook …`) still fails open with
+/// exit 0, before the removed-command hint is considered.
+#[test]
+fn an_old_hook_entry_still_fails_open() {
+    let world = World::new("removed-hook");
+    let out = world.pixel(&["hook", "prompt-submit"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(!stderr(&out).contains("was removed"), "{}", stderr(&out));
+}
+
 #[test]
 fn install_reports_a_bad_source_and_keeps_the_credentials_of_a_url_out_of_the_log() {
     let world = World::new("addbad");

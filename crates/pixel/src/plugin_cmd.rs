@@ -190,13 +190,21 @@ enum Plan {
     Unknown,
 }
 
-/// Decide what `pixel <name> <args…>` does when the core has no such command.
+/// Decide what `pixel <name> <args…>` does when the core has no such command:
+/// a plugin of that name runs; otherwise a moved command gets its plugin
+/// hint and a name 0.8.0 removed gets its replacement.
 fn plan(host: &Host, name: &str, args: &[OsString], env: Env<'_>, moved: &[(&str, &str)]) -> Plan {
     match pixel_plugin::resolve(host, name) {
         Ok(Some(plugin)) => Plan::Run(pixel_plugin::command(&plugin, args, env)),
-        Ok(None) => pixel_plugin::moved_hint(moved, name).map_or(Plan::Unknown, |hint| {
-            Plan::Stop(hint, pixel_plugin::HINT_EXIT)
-        }),
+        Ok(None) => pixel_plugin::moved_hint(moved, name)
+            .or_else(|| {
+                crate::removed_commands::removed_hint(name, moved, |current| {
+                    matches!(pixel_plugin::resolve(host, current), Ok(Some(_)))
+                })
+            })
+            .map_or(Plan::Unknown, |hint| {
+                Plan::Stop(hint, pixel_plugin::HINT_EXIT)
+            }),
         Err(error) => Plan::Stop(error.to_string(), 1),
     }
 }
@@ -334,6 +342,39 @@ mod tests {
         assert_eq!(
             message,
             "\"made-up-cmd\" moved to a plugin: pixel install github:Pixel-CLI/pixel-made-up"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_removed_name_names_its_replacement_and_drops_the_install_once_the_plugin_runs() {
+        let dir = scratch("removed");
+        let host = host_at(&dir);
+        let table = [("commit-history", "pixel-git")];
+        let Plan::Stop(message, code) = plan(&host, "ready", &[], env(), &table) else {
+            panic!("expected the removed-command hint");
+        };
+        assert_eq!(code, 2);
+        assert_eq!(
+            message,
+            "'ready' was removed in 0.8.0; use `pixel prepare-repo`"
+        );
+        let Plan::Stop(message, _) = plan(&host, "history", &[], env(), &table) else {
+            panic!("expected the removed-command hint");
+        };
+        assert_eq!(
+            message,
+            "'history' was removed in 0.8.0; use `pixel commit-history`, a plugin command: pixel install github:Pixel-CLI/pixel-git"
+        );
+        let exe = dir.join("bin/pixel-commit-history");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Plan::Stop(message, _) = plan(&host, "history", &[], env(), &table) else {
+            panic!("expected the removed-command hint");
+        };
+        assert_eq!(
+            message,
+            "'history' was removed in 0.8.0; use `pixel commit-history`"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
