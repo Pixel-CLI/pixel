@@ -433,8 +433,8 @@ What it says:
 pixel-mvp's BM25 over each file's names and path (its ADR-0030, a test file at
 half its score under ADR-0031), moved into the brief under ADR-0036 of the
 pixel-mvp research repository as a fallback (`execution_brief/words.rs`,
-`PIXEL_BRIEF_BM25=auto`, off by default): when the `meaning` op does not
-answer, its leads are fused with the relevance co-files in the meaning
+`PIXEL_BRIEF_BM25`, on by default since the switch was measured, `0` turns
+it off): when the `meaning` op does not answer, its leads are fused with the relevance co-files in the meaning
 leads' place. The documents are built from v1's own graph (`files`,
 `symbols`) with pixel-mvp's tokeniser (`mvp_model::terms`); nothing else
 moved, and nothing was tuned on this set: the constants are pixel-mvp's.

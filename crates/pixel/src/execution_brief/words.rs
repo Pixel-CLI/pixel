@@ -33,8 +33,8 @@ use pixel_graph::GraphStore;
 
 use super::chain::MeaningHit;
 
-/// The switch: `auto` (also `1`, `true` or `on`) ranks plain words when the
-/// meaning search did not answer; unset, or any other value, never does.
+/// The switch: `auto`, the default, ranks plain words when the meaning search
+/// did not answer; `0`, `false` or `off` never does.
 pub(crate) const WORDS_ENV: &str = "PIXEL_BRIEF_BM25";
 
 /// BM25's constants (pixel-mvp's ADR-0030): the usual k1 and b.
@@ -55,7 +55,7 @@ const MAX_SYMBOLS: i64 = 400_000;
 
 /// Whether [`WORDS_ENV`]'s value turns the leads on.
 pub(crate) fn enabled(value: Option<&str>) -> bool {
-    matches!(value, Some("auto" | "1" | "true" | "on"))
+    !matches!(value, Some("0" | "false" | "off"))
 }
 
 /// One symbol of a file, as the graph has it.
@@ -389,18 +389,13 @@ mod tests {
     }
 
     #[test]
-    fn the_switch_should_be_off_unless_it_is_turned_on() {
-        for value in [Some("auto"), Some("1"), Some("true"), Some("on")] {
+    fn the_switch_should_be_on_unless_it_is_turned_off() {
+        // `yes` and an unset variable were off while the switch was opt-in:
+        // with the default on, only the three opt-outs leave the leads out.
+        for value in [None, Some(""), Some("auto"), Some("1"), Some("yes")] {
             assert!(enabled(value), "{value:?}");
         }
-        for value in [
-            None,
-            Some(""),
-            Some("0"),
-            Some("false"),
-            Some("off"),
-            Some("yes"),
-        ] {
+        for value in [Some("0"), Some("false"), Some("off")] {
             assert!(!enabled(value), "{value:?}");
         }
     }

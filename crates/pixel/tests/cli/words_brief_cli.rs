@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! The brief's plain-word leads (`execution_brief/words.rs`), on with
-//! `PIXEL_BRIEF_BM25=auto`: with no daemon there is no meaning search, and a
+//! The brief's plain-word leads (`execution_brief/words.rs`), on unless
+//! `PIXEL_BRIEF_BM25=0`: with no daemon there is no meaning search, and a
 //! prompt whose words the code names in other forms ("renaming", `rename`)
 //! reaches the file through BM25 over its path and symbol names, where the
 //! relevance co-files, which match whole words, do not.
@@ -126,8 +126,8 @@ fn a_prompt_in_other_forms_of_the_codes_names_should_start_at_the_file_its_plain
     // words, start at the doc comment that spells them.
     let off = stdout(&brief(&root, PROMPT, Some("0")));
     assert_eq!(first_file(&off), "src/refactor/edit.rs", "{off}");
-    // Off by default: a host that sets nothing gets the brief it had.
-    assert_eq!(stdout(&brief(&root, PROMPT, None)), off);
+    // On by default: a host that sets nothing gets the leads.
+    assert_eq!(stdout(&brief(&root, PROMPT, None)), ranked);
 }
 
 #[test]

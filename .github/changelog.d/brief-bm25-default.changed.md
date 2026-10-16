@@ -1,0 +1,1 @@
+**brief:** the plain-word leads are now on by default when the meaning search cannot answer (`PIXEL_BRIEF_BM25=0` turns them off). On `eval/brief-gate/` with a daemon but no embedding model, English hit@8 goes from 27 to 35 of 63 and French from 3 to 10 of 22, no gate decision moves, and briefs with the model are byte-identical.

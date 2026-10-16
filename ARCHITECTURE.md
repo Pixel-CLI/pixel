@@ -842,7 +842,7 @@ missing.
 
 When the `meaning` op does not answer (no daemon, no embedding model on disk,
 vectors still building), plain-word leads take its leads' place in that fusion
-when `PIXEL_BRIEF_BM25=auto` (off by default; `execution_brief/words.rs`, ADR-0030
+unless `PIXEL_BRIEF_BM25=0|false|off` (`execution_brief/words.rs`, ADR-0030
 and ADR-0031 of pixel-mvp, moved under its ADR-0036): BM25 (k1 1.2, b 0.75)
 over each graph file's path and its symbols' names and signatures, split and
 stemmed by the vendored `mvp_model::terms`, a test file at half its score, and
