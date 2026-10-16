@@ -970,4 +970,5 @@ first candidates for one.
 `mvp-reference.yml` checks out two public repositories at full commit IDs and
 parses them as source data. It does not execute their code or build scripts.
 Both checkouts disable persisted credentials; the workflow has read-only
-contents permission and uses no deployment secrets.
+contents permission and uses no deployment secrets. The reference job restores
+and saves no shared build cache.
