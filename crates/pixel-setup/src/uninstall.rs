@@ -422,6 +422,11 @@ fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Ve
     for root in config::SKILL_ROOTS {
         dirs.push(home.join(root));
     }
+    for root in [".claude"].iter().chain(config::SKILL_ROOTS) {
+        for skill in ["pixel", "pixel-classify"] {
+            dirs.push(home.join(root).join("skills").join(skill));
+        }
+    }
     dirs
 }
 

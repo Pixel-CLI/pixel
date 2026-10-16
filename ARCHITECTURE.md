@@ -167,6 +167,12 @@ are used only when `pixel_git::repo_path` finds them inside the root.
 
 Machine-wide:
 
+- `~/.pixel/setup-receipt.json`: global CLI setup’s private (0600), atomically
+  replaced ownership receipt. It stores original bytes/modes of rewritten files,
+  fingerprints of installed files and which output directories setup created.
+  It covers the guided and unattended paths, including global YAML settings;
+  previews and repository installs write no receipt.
+
 - `~/.pixel/plugins/<name>/`: the user's plugins (`pixel install` copies
   one here; `pixel uninstall` deletes it). `~/.pixel/trusted.toml`: one `[[trusted]]`
   record (`name`, `sha256` of the plugin directory) per trusted repo plugin,
@@ -553,6 +559,8 @@ Setup and removal edit JSON settings by key, retaining untouched values and thei
 formatting. Codex hook writes use the shared atomic settings writer; setup reads
 Codex TOML review state without rewriting it. Gemini and Antigravity use this
 writer too, taking a `.pixel-bak.*` copy before every changed configuration write.
+Global CLI setup records its output paths in the private ownership receipt;
+reinstalls retain the original ownership rather than adopting their own outputs.
 
 `pixel setup` has two ways to run, and one installer behind both. At a terminal
 (stdin and stdout, `CI` unset, no `--yes`, `--json` or `--print`) it is the

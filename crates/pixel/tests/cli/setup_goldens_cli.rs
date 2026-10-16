@@ -37,6 +37,7 @@
 //! flags.
 
 use crate::support::{Scratch, git, pixel_command};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -201,6 +202,22 @@ impl Normaliser {
                 format!(".pixel-bak.{stamp}"),
                 format!(".pixel-bak.{{STAMP{}}}", index + 1),
             ));
+        }
+        // Receipts hash deployed bytes that contain fixture paths. Pin each hash to
+        // the actual file it authenticates, then normalize the path like other fields.
+        let mut hashes = BTreeSet::new();
+        for phase in phases {
+            for (path, entry) in *phase {
+                if let Entry::File { bytes, .. } = entry {
+                    let digest = Sha256::digest(bytes)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    if hashes.insert(digest.clone()) {
+                        pairs.insert(0, (digest, format!("{{SHA256:{path}}}")));
+                    }
+                }
+            }
         }
         pairs.push((env!("CARGO_PKG_VERSION").into(), "{VERSION}".into()));
         Self(pairs)

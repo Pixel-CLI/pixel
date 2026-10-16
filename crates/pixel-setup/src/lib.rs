@@ -24,6 +24,7 @@ mod json_edit;
 pub mod opencode_config;
 mod pi_global;
 pub use pi_global::{CLASSIFY_PACKAGE_DIR, ClassifyPiPackage};
+pub mod receipt;
 mod routing;
 pub mod setup;
 pub mod skill;

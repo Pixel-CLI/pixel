@@ -5,8 +5,12 @@
 ## after setup, twice
 --- home/.cursor/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
 --- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
+--- home/.pixel/setup-receipt.json 0600
+{"{HOME}/.cursor/skills":{"original":null,"installed":"directory"},"{HOME}/.cursor/skills/pixel":{"original":null,"installed":"directory"},"{HOME}/.cursor/skills/pixel/SKILL.md":{"original":null,"installed":"644:{SHA256:home/.cursor/skills/pixel/SKILL.md}"},"{HOME}/.pixel":{"original":null,"installed":"directory"},"{HOME}/.pixel/config.yaml":{"original":null,"installed":"600:{SHA256:home/.pixel/config.yaml}"}}
+\ no newline at end of file
 
 ## after setup --remove
 --- home/.cursor/pixel.pixel-bak.{STAMP1}/SKILL.md 0644 = tests/setup/.agents/skill.md
 --- home/.cursor/skills/ (empty directory)
 --- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
+--- home/.pixel/setup-receipt.json 0600 = home/.pixel/setup-receipt.json (after setup, twice)

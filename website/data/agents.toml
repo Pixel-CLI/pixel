@@ -40,6 +40,7 @@
 # Written by every `pixel setup`, whichever agents are present. No agent
 # prompt is deployed.
 shared = [
+  "~/.pixel/setup-receipt.json",
   "~/.pixel/config.yaml",
   # The retrieval workflow as a skill, in every configured harness's skills dir.
   "~/.claude/skills/pixel/SKILL.md",

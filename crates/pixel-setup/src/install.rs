@@ -532,7 +532,7 @@ pub(crate) fn write_settings(
 }
 
 /// The real file a settings path points at if it is a symlink, else `None`.
-fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
     let meta = fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_symlink() {
         return None;
@@ -547,7 +547,7 @@ fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
 
 /// A sibling temp file name unique to this process so concurrent writers of
 /// the same settings path can never collide on one shared temp file.
-fn unique_temp_path(path: &Path) -> PathBuf {
+pub(crate) fn unique_temp_path(path: &Path) -> PathBuf {
     static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
