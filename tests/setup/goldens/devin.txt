@@ -66,6 +66,7 @@
         "hooks": [
           {
             "command": "'{PIXEL_BIN}' run-hook task-event --provider devin --event prompt-submit || true",
+            "show_output": true,
             "timeout": 10,
             "type": "command"
           }

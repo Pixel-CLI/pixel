@@ -89,6 +89,18 @@ Need more than the brief? `pixel setup` drops a `pixel` skill into each agent's 
 
 <sub>*Estimated tokens (bytes ÷ 4), Pixel 0.5.x, no billed cost. Every number has a protocol, and we publish the losses too: [benchmarks](https://pixel-cli.dev/benchmarks/).</sub>
 
+## 🆚 Alternatives
+
+Keeping the agent's context bill down is an idea whose time has come — teams at AWS and Spotify ship their own takes on it:
+
+| | What it does | Mechanism | Cost model |
+|---|---|---|---|
+| **Pixel** | Attaches cited repo context (`file:line` brief: definitions, callers, tests, git history) before the model sees your prompt | Local code graph + prompt-submit hook | Deterministic index lookup — no model call, no latency, free |
+| [AWS AgentCore Memory sample](https://github.com/aws-samples/anthropic-on-aws/tree/main/agent-sdk-agentcore-memory) | Wraps every `query()`: fetches short-term history and long-term summaries before the call, saves turns after | Claude Agent SDK + managed AgentCore Memory | Managed AWS service; LLM-extracted cross-session memory, not code structure |
+| [Spotify `shunt`](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt) | Hooks block the agent from reading large files directly; a skill delegates the read to a cheaper internal LLM that summarizes (82–94% token savings claimed) | Claude Code `PreToolUse` hooks → AiKA modes via Portal CLI | An extra billed model call per delegated read or codegen |
+
+Same goal, different lever: those delegate work to another model or service, Pixel makes the context a **deterministic lookup in a local index**. No extra tokens, no extra round trip, no cloud dependency — the same brief every time, cited to the line.
+
 ## 🔌 Works with
 
 **Claude Code · Codex · pi · Devin · OpenCode · Gemini CLI · Antigravity**

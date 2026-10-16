@@ -64,6 +64,7 @@ mod prompt_continuation;
 mod prompt_intent;
 mod prompt_key;
 mod reference_cmd;
+mod removed_commands;
 mod search_compat;
 mod search_filter;
 mod serve_trace;
@@ -353,8 +354,8 @@ enum Command {
     },
     /// `pixel brief "<prompt>"` — the evidence brief a prompt-submit hook
     /// injects for Claude and Codex, on stdout. Harnesses without a
-    /// prompt-submit context channel (Pi's `before_agent_start` extension)
-    /// call this directly. Empty output means no brief (a non-code prompt,
+    /// prompt-submit hook (OpenCode's `pixel-brief` plugin) call this
+    /// directly. Empty output means no brief (a non-code prompt,
     /// an unindexed repository, or `PIXEL_BRIEF=0`).
     Brief {
         /// The user's prompt, verbatim.

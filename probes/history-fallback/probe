@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: MIT
 
 """history-fallback: a history question whose brief has no history block (no history index, a lookup that missed
-the window) is answered from git itself: `log --grep` on the prompt's rarest words, a `-S` pickaxe on the
-rarest, then the top commit's message, stat, patch and first tag. Read-only git, deterministic."""
+the window) is answered from git itself: the commits naming a version the prompt quotes, else `log --grep` on the
+prompt's rarest words, a `-S` pickaxe on the rarest, then the top commit's message, stat, patch (a merge against its
+first parent) and first tag. Read-only git, deterministic."""
 import json
 import re
 import subprocess
@@ -18,10 +19,48 @@ def git(root, *args):
     return subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=20).stdout
 
 
+# A version the prompt quotes ("3.10", "v5.3.0"): the most specific token a history question carries, and
+# one the letter-only word lists below never see.
+VERSION = re.compile(r"(?<![\w.])v?(\d+\.\d+(?:\.\d+)*)(?!\w|\.\d)")
+# Words any history question uses: they name no commit of their own.
+ASKING = {"which", "what", "when", "where", "commit", "commits", "change", "changed", "changes", "release",
+          "released", "made", "make", "does", "version", "versions"}
+
+
+def stems(text):
+    return {w[:4] for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in ASKING}
+
+
+def by_version(root, prompt):
+    """``[(sha, "%h %as %s")]`` of the commits naming a version the prompt quotes, best first: the commit its
+    exact release tag points at, then the subjects sharing most of the prompt's other word stems, then the
+    newest. Only the tagged commit and subjects sharing a stem are kept: a bare number names no commit."""
+    asked = stems(VERSION.sub(" ", prompt))
+    for version in dict.fromkeys(VERSION.findall(prompt)):
+        pattern = "(^|[^0-9.])" + re.escape(version) + "([^0-9.]|\\.([^0-9]|$)|$)"
+        log = git(root, "log", "-i", "-E", "-n", "20", "--format=%H\t%h %as %s", f"--grep={pattern}")
+        found = [line.split("\t", 1) for line in log.splitlines()]
+        tagged = next((sha for sha in (git(root, "rev-list", "-n", "1", f"refs/tags/{tag}", "--").strip()
+                                       for tag in (f"v{version}", version)) if sha), "")
+        if tagged and tagged not in (sha for sha, _ in found):
+            found.insert(0, [tagged, git(root, "show", "-s", "--format=%h %as %s", tagged).strip()])
+        shared = lambda line: len(asked & stems(line.split(" ", 2)[-1]))
+        ranked = sorted(enumerate(found), key=lambda c: (c[1][0] != tagged, -shared(c[1][1]), c[0]))
+        kept = [(sha, line) for _, (sha, line) in ranked if sha == tagged or shared(line)]
+        if kept:
+            return kept
+    return []
+
+
 def main():
     req = json.load(sys.stdin)
     root, prompt, brief = req["repo_root"], req["prompt"], req.get("brief", "")
     if re.search(r"^### history", brief, re.M):
+        return
+    named = by_version(root, prompt)
+    if named:
+        versions = list(dict.fromkeys(VERSION.findall(prompt)))
+        show(root, versions, [line for _, line in named], named[0][1].split()[0])
         return
     words = [w for w in dict.fromkeys(re.findall(r"[a-z]{5,}", prompt.lower()))]
     messages = git(root, "log", "-i", "-n", "20000", "--format=%B%x00").lower().split("\0")
@@ -50,13 +89,16 @@ def main():
     shas = [line.split()[0] for line in shown] or [line.split()[0] for line in pick]
     if not shas:
         return
-    sha = shas[0]
+    show(root, words, shown or pick, shas[0])
+
+
+def show(root, words, shown, sha):
     message = git(root, "show", "-s", "--format=%h %ad %an%n%B", "--date=short", sha).strip().splitlines()
     body = message[:MESSAGE_LINES] + git(root, "show", "--format=", "--stat=100", "--patch", "-U2",
-                                         "--no-ext-diff", sha).splitlines()
+                                         "--diff-merges=first-parent", "--no-ext-diff", sha).splitlines()
     tags = git(root, "tag", "--contains", sha, "--sort=creatordate").split("\n")
     print(f"### history — commits matching {', '.join(words[:3])}")
-    print("\n".join(shown or pick))
+    print("\n".join(shown))
     print(f"### commit {sha} — message, files and patch")
     print("\n".join(line[:160] for line in body[:PATCH_LINES]))
     if tags and tags[0]:

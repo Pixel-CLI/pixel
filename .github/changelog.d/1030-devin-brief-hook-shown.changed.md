@@ -1,0 +1,1 @@
+**setup:** Devin's prompt-submit hook now sets `show_output`, so Devin prints `✱ Running hook` and `✱ Hook completed` for Pixel's brief. Devin draws neither the hook's `systemMessage` nor its output, so before this a delivered brief left nothing on screen. Rerun `pixel setup` to update an existing Devin config.

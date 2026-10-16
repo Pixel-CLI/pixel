@@ -18,8 +18,8 @@
 //!
 //! The entry points are the ones `pixel setup` registers, `pixel run-hook
 //! task-event` (every provider and event) and `pixel run-hook metrics`, and
-//! `pixel brief`, which the Pi and OpenCode extensions run as their
-//! prompt-submit hook and whose stdout they inject as the brief.
+//! `pixel brief`, which the OpenCode plugin runs as its
+//! prompt-submit hook and whose stdout it injects as the brief.
 //!
 //! What pixel-mvp's C-26 says beyond this does not port: v1's task gate
 //! denies an edit or a stop on an enforced session by design, which
@@ -781,8 +781,8 @@ fn a_hook_whose_stdin_is_left_open_should_answer_in_time() {
     assert!(relay.took < Duration::from_secs(5), "{:?}", relay.took);
 }
 
-/// `pixel brief` is the prompt hook of the Pi and OpenCode extensions, which
-/// inject its stdout whole: stdout is the brief or nothing, never the metrics
+/// `pixel brief` is the prompt hook of the OpenCode plugin, which injects its
+/// stdout whole: stdout is the brief or nothing, never the metrics
 /// line (on by default) or a note; `--json` is one object on one line.
 #[test]
 fn brief_stdout_should_be_the_brief_or_nothing() {

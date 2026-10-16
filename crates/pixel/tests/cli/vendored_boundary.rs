@@ -1,14 +1,10 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! The vendored `mvp-*` crates stay a copy of pixel-mvp
-//! (`crates/mvp-*/VENDORED.md`). A sync is `scripts/dev/vendor-mvp.sh` plus the
-//! gates, so these crates may not grow a dependency on a `pixel-*` crate,
-//! and they keep pixel-mvp's own shape: `mvp-model` depends on no internal
-//! crate, every other `mvp-*` crate on `mvp-model` only (pixel-mvp's
-//! ADR-0013). On the other side, each reader is named here with what it may
-//! read and why: a reader ties its code to a copy it cannot edit, so it reads
-//! through one adapter module.
+//! The owned mvp-* foundations keep their independent dependency boundary.
+//! Their origin is recorded in ORIGIN.md; edits and tests belong here.
+//! Each consumer reads through an adapter rather than coupling the index
+//! to the rest of the product.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -71,17 +67,17 @@ fn members() -> Vec<(String, BTreeSet<String>)> {
 }
 
 #[test]
-fn vendored_mvp_crates_depend_only_on_mvp_model() {
+fn imported_mvp_crates_depend_only_on_mvp_model() {
     let members = members();
-    let vendored: Vec<_> = members
+    let imported: Vec<_> = members
         .iter()
         .filter(|(name, _)| name.starts_with("mvp-"))
         .collect();
     assert!(
-        vendored.iter().any(|(name, _)| name == "mvp-model"),
-        "no vendored mvp-model in the workspace: {members:?}"
+        imported.iter().any(|(name, _)| name == "mvp-model"),
+        "no imported mvp-model in the workspace: {members:?}"
     );
-    for (name, deps) in vendored {
+    for (name, deps) in imported {
         let allowed: BTreeSet<String> = if name == "mvp-model" {
             BTreeSet::new()
         } else {
@@ -90,13 +86,13 @@ fn vendored_mvp_crates_depend_only_on_mvp_model() {
         assert!(
             deps.is_subset(&allowed),
             "`{name}` is a copy of pixel-mvp and may depend on {allowed:?} only, not {deps:?}: \
-             a change of its dependencies lands in pixel-mvp first (crates/{name}/VENDORED.md)"
+             keep the independent foundation boundary (crates/{name}/ORIGIN.md)"
         );
     }
 }
 
 #[test]
-fn only_the_named_readers_read_the_vendored_crates() {
+fn only_the_named_readers_read_the_imported_crates() {
     for (name, deps) in members() {
         if name.starts_with("mvp-") {
             continue;
@@ -111,7 +107,7 @@ fn only_the_named_readers_read_the_vendored_crates() {
             .collect();
         assert!(
             read.is_empty(),
-            "`{name}` depends on {read:?}; the vendored mvp-* crates are read by {READERS:?} \
+            "`{name}` depends on {read:?}; the imported mvp-* crates are read by {READERS:?} \
              only, each through its adapter (pixel_graph::mvp_adapter, the brief's french.rs and words.rs)"
         );
     }

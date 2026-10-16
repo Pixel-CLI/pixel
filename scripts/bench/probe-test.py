@@ -400,9 +400,17 @@ def overfit(probe_dir, prompt, oracle_paths=(), others=None):
 def snapshot(clone):
     """What read-only means: the working tree status and the tracked files' size and mtime."""
     status = subprocess.run(["git", "status", "--porcelain"], cwd=clone, capture_output=True, text=True).stdout
-    stat = subprocess.run("git ls-files -z | xargs -0 stat -f '%N %z %m' 2>/dev/null || true", shell=True, cwd=clone,
-                          capture_output=True, text=True).stdout
-    return hashlib.sha256((status + stat).encode()).hexdigest()
+    # Read in-process: GNU `stat -f` is the file system's status, whose free-block count moves with any write on
+    # the machine (#986).
+    tracked = subprocess.run(["git", "ls-files", "-z"], cwd=clone, capture_output=True, text=True).stdout
+    stat = []
+    for name in sorted(filter(None, tracked.split("\0"))):
+        try:
+            st = os.lstat(Path(clone) / name)
+            stat.append(f"{name} {st.st_size} {st.st_mtime_ns}")
+        except OSError:
+            stat.append(f"{name} missing")
+    return hashlib.sha256((status + "\n".join(stat)).encode()).hexdigest()
 
 
 def evaluate(probe, qset, pixel_bin, ids, home):
@@ -422,9 +430,11 @@ def evaluate(probe, qset, pixel_bin, ids, home):
         if applies:
             snap = snapshot(q["clone"])
             first, ms, error = run_probe(probe, request, pixel_bin, home)
-            second, _, _ = run_probe(probe, request, pixel_bin, home) if not error else ("", 0, None)
+            second, _, again = run_probe(probe, request, pixel_bin, home) if not error else ("", 0, None)
+            # A second run that failed or overran its budget is that error, not a different answer.
+            error = error or (again and f"second run: {again}")
             row.update(probe_ms=ms, error=error, ran=error is None and bool(first.strip()),
-                       deterministic=first == second, read_only=snapshot(q["clone"]) == snap)
+                       deterministic=error is not None or first == second, read_only=snapshot(q["clone"]) == snap)
             row["stray"] = parse_output(first)[3]
             if row["ran"]:
                 text = merge(q["text"] or "[PIXEL:BRIEF]\n", [(probe.name, probe.mode, first)])
@@ -714,9 +724,9 @@ def check_all(probes_dir=None):
                        "kind": "lookup", "session_files": []}
             before = snapshot(repo)
             first, ms, error = run_probe(probe, request, "pixel", tmp)
-            second, _, _ = run_probe(probe, request, "pixel", tmp)
-            if error:
-                problems.append(f"{directory.name}: {error}")
+            second, _, again = run_probe(probe, request, "pixel", tmp)
+            if error or again:
+                problems.append(f"{directory.name}: {error or 'second run: ' + again}")
             elif first != second:
                 problems.append(f"{directory.name}: not deterministic")
             elif parse_output(first)[3]:
@@ -819,13 +829,39 @@ class SelfTest(unittest.TestCase):
         script.chmod(0o755)
         return directory
 
+    def test_a_snapshot_moves_with_a_tracked_file_and_not_with_a_write_elsewhere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "a.txt").write_text("a\n")
+            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                   "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null"}
+            for argv in (["init", "-q"], ["add", "."], ["commit", "-q", "-m", "a"]):
+                subprocess.run(["git", *argv], cwd=repo, env=env, capture_output=True, check=True)
+            before = snapshot(repo)
+            # A megabyte written beside the repository moves the file system's free blocks, not the repository.
+            with open(Path(tmp) / "elsewhere", "wb") as out:
+                out.write(os.urandom(1 << 20))
+                out.flush()
+                os.fsync(out.fileno())
+            os.sync()
+            self.assertEqual(snapshot(repo), before)
+            # Same content, new mtime: `git status` stays clean, the tracked file's stat does not.
+            os.utime(repo / "a.txt", (0, 0))
+            self.assertNotEqual(snapshot(repo), before)
+
     def test_check_all_holds_for_the_shipped_probes_and_names_a_broken_one(self):
         self.assertEqual(check_all(), [])
         with tempfile.TemporaryDirectory() as tmp:
             self.write_probe(tmp, "ok", body="#!/bin/sh\ncat >/dev/null\nprintf '### a — b\\nline\\n'\n")
             self.write_probe(tmp, "noisy", body="#!/bin/sh\ncat >/dev/null\necho stray\n")
             self.write_probe(tmp, "flaky", body="#!/bin/sh\ncat >/dev/null\nprintf '### a — %s\\n' $$\n")
+            # Over its budget on the second run only: a timeout, not a different answer.
+            self.write_probe(tmp, "slow", body="#!/bin/sh\ncat >/dev/null\n[ -e \"$HOME/slow-ran\" ] && sleep 2\n"
+                                               "touch \"$HOME/slow-ran\"\nprintf '### a — b\\nline\\n'\n")
             problems = check_all(tmp)
+            self.assertIn("slow: second run: timeout", problems)
+            self.assertFalse(any(p.startswith("slow: not deterministic") for p in problems), problems)
             self.assertTrue(any(p.startswith("noisy: lines outside") for p in problems), problems)
             self.assertTrue(any(p.startswith("flaky: not deterministic") for p in problems), problems)
             self.assertFalse(any(p.startswith("ok:") for p in problems), problems)

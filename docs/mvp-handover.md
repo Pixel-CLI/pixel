@@ -1,0 +1,56 @@
+# MVP maintenance handover
+
+Pixel is the maintenance home of the MVP foundations (ADR-0036). The last
+import of model, store and index is pixel-mvp `e91e8da`; the lexicon is from
+`35aaf1c` and is byte-identical to the lexicon at `e91e8da`.
+
+## Owned here
+
+- `crates/mvp-model`, `mvp-store`, `mvp-index`: edit directly, test in this
+  workspace, include in the scheduled mutation campaign. ORIGIN.md records
+  provenance, not a restriction. The copy-over script is retired.
+- French prompt rules and BM25: maintained in `execution_brief/french.rs`
+  and `words.rs`; lexicon data in `crates/mvp-lexicon`.
+- Plugin clone restrictions and executable-bit trust hashes, and fail-open,
+  single-JSON-line hooks: already implemented and tested in Pixel.
+
+Keep crate names, graph paths and the origin commit unchanged during the
+handover. When extraction changes, bump the relevant version in mvp-index;
+when storage changes, bump mvp-store's schema as required. The adapter's
+source signature includes the extractor versions. A Ruby merge rule change
+also updates its undo format when required. No private checkout is needed.
+
+## Product work continues in Pixel
+
+- Ruby hybrid stays opt-in. Its refresh can delay a brief after an edit;
+  improve daemon responsiveness and incremental work before enabling it.
+  The recorded experiment is pixel-research-mvp's
+  `evaluation/results/2026-10-16-ruby-hybrid-daemon.md`. Reassess MVP #111
+  against the imported head before treating its old edge counts as current.
+- Setup preservation and complete removal are tracked by #1011. Carry the
+  settings durability fix from MVP #85 into Pixel's writers.
+- mvp-index still invokes git outside GitRunner. Its timeout/output bounds
+  and the imported lint baseline can be tightened here without reopening
+  the experimental repository.
+
+## Deliberately retained product architecture
+
+Pixel keeps its daemon, brief, plugin protocol and per-agent setup code.
+The standalone MVP minimap/selector, classify CLI, plugin supervisor and
+telemetry service are not imported wholesale. Their useful guarantees are
+ported against Pixel's actual entry points. A harness-table refactor is not
+required for the handover: Pixel supports integrations the MVP table does
+not describe. It can be evaluated as a Pixel feature independently.
+
+The evaluation protocol and historical evidence remain in
+Pixel-CLI/pixel-research-mvp. ADR-0043 measures Pixel with the imported parts
+on and off; it does not require maintaining a second product binary.
+
+## Archive checklist
+
+- Merge ownership, lexicon tooling and index regression-check PRs.
+- Keep installation fixes and unresolved Ruby work tracked in Pixel.
+- Resolve the disposition of MVP #85 and open tracker issues; archive the
+  MVP with a pointer to Pixel only after the migration PRs merge.
+- Retire any deployed MVP hooks/package separately, preserving user config.
+  Archiving a repository does not uninstall an existing binary or service.
