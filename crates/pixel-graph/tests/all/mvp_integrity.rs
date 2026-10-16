@@ -54,6 +54,28 @@ fn refresh_should_match_a_clean_build_after_targets_move_or_disappear() {
     let before = refresh(&root, &state).unwrap();
     let before_rows = rows(&before);
     let before_generation = before.provenance().unwrap().generation;
+    let removed_targets: Vec<_> = [("helper", "src/util.rs"), ("name", "app/models/user.rb")]
+        .into_iter()
+        .map(|(name, file)| {
+            let matches: Vec<_> = before
+                .named(name)
+                .unwrap()
+                .into_iter()
+                .filter(|symbol| symbol.file == file)
+                .collect();
+            assert_eq!(matches.len(), 1, "fixture definition {file}:{name}");
+            let uid = matches.into_iter().next().unwrap().uid;
+            assert!(
+                before
+                    .all_edges()
+                    .unwrap()
+                    .iter()
+                    .any(|edge| edge.dst.as_ref() == Some(&uid)),
+                "fixture must actually call {uid} before it is removed"
+            );
+            uid
+        })
+        .collect();
     drop(before);
 
     fs::write(root.join("src/util.rs"), "pub fn renamed() {}\n").unwrap();
@@ -78,7 +100,7 @@ fn refresh_should_match_a_clean_build_after_targets_move_or_disappear() {
         incremental.all_edges().unwrap().iter().all(|edge| {
             edge.dst
                 .as_ref()
-                .is_none_or(|uid| !uid.contains("#helper") && !uid.ends_with("#User#name"))
+                .is_none_or(|uid| !removed_targets.contains(uid))
         }),
         "removed Rust and Ruby targets must not survive an update"
     );

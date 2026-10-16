@@ -24,6 +24,8 @@
 #             none     nothing: the agent keeps its native tools
 #   global  files `pixel setup` writes for this agent, from the home
 #           directory (`~/`); a trailing `/` is a directory Pixel owns
+#           Changed existing configs also get <file>.pixel-bak.<timestamp>-<seq>
+#           companions containing their original bytes; uninstall keeps them.
 #   when    the condition `pixel setup` checks before writing them
 #   wires   one Markdown line: what those files do (the /docs/ table)
 #   note    Markdown: one more paragraph under "What pixel setup writes"
@@ -126,7 +128,7 @@ lede = "Gemini CLI keeps its native tools; `pixel setup` registers a `BeforeAgen
 global = ["~/.gemini/settings.json", "~/.gemini/skills/pixel/SKILL.md"]
 when = "when `~/.gemini` exists; the hook only where `~/.gemini/settings.json` already exists"
 wires = "a per-prompt evidence brief through a `BeforeAgent` hook in `~/.gemini/settings.json`, and the `pixel` skill in `~/.gemini/skills/pixel/`; native tools stay unchanged"
-note = "Your own hooks and keys in `settings.json` stay: a re-run replaces only Pixel's earlier entry, and `pixel setup --remove` takes it out."
+note = "Your own hooks and keys in `settings.json` stay: a re-run replaces only Pixel's earlier entry, and `pixel setup --remove` takes it out. Changed settings are backed up beside the file as `settings.json.pixel-bak.<timestamp>-<seq>`; removal keeps those copies."
 
 [[agent]]
 slug = "antigravity"
@@ -137,7 +139,7 @@ lede = "Antigravity keeps its native tools; `pixel setup` installs a prompt brie
 global = ["~/.gemini/config/config.json", "~/.gemini/config/hooks.json", "~/.gemini/config/plugins/pixel/plugin.json", "~/.gemini/config/plugins/pixel/hooks.json", "~/.gemini/config/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/antigravity-cli/plugins/pixel/plugin.json", "~/.gemini/antigravity-cli/plugins/pixel/hooks.json", "~/.gemini/antigravity-cli/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/config/import_manifest.json"]
 when = "when `~/.gemini/config` exists; the brief hook only where `~/.gemini/config/hooks.json` already exists"
 wires = "a `PreInvocation` evidence brief, and a plugin that carries the `pixel` skill and a metrics relay which queues by conversation artifact directory, then injects the matching one-line metric at `PostInvocation`; native tools stay unchanged"
-note = "Pixel returns `{}` from Antigravity `PostToolUse` and defers display until `PostInvocation`, whose documented `injectSteps` contract accepts the one-line ephemeral message. A `pixel-brief` entry you wrote yourself in `~/.gemini/config/hooks.json` is kept. The import manifest is maintained by AGY only when its CLI is available for plugin registration."
+note = "Changed configuration files keep their original bytes in sibling `<file>.pixel-bak.<timestamp>-<seq>` backups, retained on removal. Pixel returns `{}` from Antigravity `PostToolUse` and defers display until `PostInvocation`, whose documented `injectSteps` contract accepts the one-line ephemeral message. A `pixel-brief` entry you wrote yourself in `~/.gemini/config/hooks.json` is kept. The import manifest is maintained by AGY only when its CLI is available for plugin registration."
 checks = ["install.antigravity"]
 
 [[agent]]

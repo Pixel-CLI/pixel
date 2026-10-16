@@ -829,6 +829,23 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
     }
     let mut written = BTreeSet::new();
     files_under(&home, &home, &mut written);
+    // Timestamped backup companions are documented beside the global lists.
+    // Only an exact copy of a seeded configuration is exempt from the list:
+    // an arbitrary new file, extra backup or damaged original still fails.
+    for (file, seed) in SEEDED {
+        let prefix = format!("{file}.pixel-bak.");
+        let backups: Vec<_> = written
+            .iter()
+            .filter(|path| path.starts_with(&prefix))
+            .cloned()
+            .collect();
+        assert_eq!(backups.len(), 1, "one backup of {file}");
+        assert_eq!(
+            std::fs::read(home.join(&backups[0])).unwrap(),
+            seed.as_bytes()
+        );
+        written.remove(&backups[0]);
+    }
 
     let data = agents_data();
     let claimed: Vec<String> = string_list(data.get("shared"))
