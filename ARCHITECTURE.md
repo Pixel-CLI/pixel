@@ -648,7 +648,10 @@ its own extension point:
   `BeforeAgent` hook in `~/.gemini/settings.json`. OpenCode:
   `plugins/pixel-brief.js` in `~/.config/opencode` (`$XDG_CONFIG_HOME`
   honoured), whose `chat.message` hook runs `pixel brief`. Devin: the task
-  events in its hooks file, `prompt-submit` among them. Antigravity: a
+  events in its hooks file, `prompt-submit` among them; that entry alone sets
+  `show_output`, because Devin draws neither `systemMessage` nor a hook's
+  stdout or stderr, and its `✱ Hook completed: <command>` line is the only
+  on-screen trace that the brief ran. Antigravity: a
   `pixel-brief` entry in `~/.gemini/config/hooks.json` running on
   `PreInvocation`, plus the IDE (`plugin_dir`) and CLI (`cli_plugin_dir`) Pixel plugins, each
   carrying `skills/pixel/SKILL.md` (exactly `crate::skill::PIXEL_SKILL`) and a `pixel-guard`

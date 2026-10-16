@@ -315,6 +315,16 @@ class PureTests(unittest.TestCase):
         logged = {"verdict": "PASS"}
         self.assertEqual(ua.judge_brief_shown(logged, ua.brief_on_screen(wrapped, ua.prompt_submit_line(wrapped)))["verdict"], "PASS")
 
+    def test_devin_s_hook_completed_line_shows_the_brief_even_wrapped(self):
+        # Devin 3000.11.92 with `show_output`: the command wraps inside "prompt-submit".
+        exe = "'/Users/u/.local/bin/pixel' run-hook task-event --provider devin --event"
+        done = f" ✱ Running hook: {exe} prompt-submit\n   || true...\n\n ✱ Hook completed: {exe} prompt-\n   submit || true\n"
+        self.assertEqual(ua.devin_hook_line(done), f"✱ Hook completed: {exe} prompt-")
+        self.assertEqual(ua.judge_brief_shown({"verdict": "PASS"}, ua.brief_on_screen(done, None))["verdict"], "PASS")
+        self.assertIsNone(ua.devin_hook_line(f" ✱ Running hook: {exe} prompt-submit || true...\n"))
+        self.assertIsNone(ua.devin_hook_line(f" ✱ Hook completed: {exe} session-start\n ✱ Running hook: {exe} prompt-submit\n"))
+        self.assertIsNone(ua.devin_hook_line(done.replace("provider devin", "provider claude")))
+
     def test_a_header_the_pane_wrapped_still_matches_its_record(self):
         rec = {"command": "search-content", "invocation_id": "9-18df019d61b44c70-0", "ts_ms": 200}
         wrapped = "↳ Hook · 🟩 pixel search-content ❀\n  │ 109.1ms ❀ #b44\n  │ c70\n      │"

@@ -236,15 +236,31 @@ def judge_metrics(scrollback: str, actions: list[dict], since_ms: int, until_ms:
 
 
 BRIEF_TEXT_MARKERS = ("[PIXEL:BRIEF]", "[pixel-brief]")
+DEVIN_HOOK_DONE = "Hookcompleted:"
+DEVIN_BRIEF_VERB = "run-hooktask-event--providerdevin--eventprompt-submit"
+
+
+def devin_hook_line(scrollback: str) -> str | None:
+    """Devin's `✱ Hook completed: '<pixel>' run-hook task-event --provider devin --event
+    prompt-submit` line, which `show_output` prints: Devin draws neither the hook's
+    `systemMessage` nor its output. Matched with every space removed, since Devin wraps the
+    command mid-word (`prompt-` / `submit`)."""
+    squeezed = re.sub(r"\s+", "", WRAP.sub(" ", scrollback))
+    for chunk in squeezed.split("✱")[1:]:
+        if chunk.startswith(DEVIN_HOOK_DONE) and DEVIN_BRIEF_VERB in chunk[:600]:
+            raw = [line.strip() for line in scrollback.splitlines() if "Hook completed:" in line]
+            return raw[0] if raw else "✱ Hook completed: … --provider devin --event prompt-submit"
+    return None
 
 
 def brief_on_screen(scrollback: str, submit_line: str | None) -> str | None:
-    """What on the pane shows the brief reached the host: its text (pi prints it) or the
-    `🟩 pixel prompt-submit` notice, which the hook adds only to a delivered brief (Claude, Codex)."""
+    """What on the pane shows the brief reached the host: its text (pi prints it), the
+    `🟩 pixel prompt-submit` notice, which the hook adds only to a delivered brief (Claude, Codex),
+    or Devin's `✱ Hook completed` line for the brief hook (the logged `part` bytes say it delivered)."""
     for marker in BRIEF_TEXT_MARKERS:
         if marker in scrollback:
             return marker
-    return submit_line
+    return submit_line or devin_hook_line(scrollback)
 
 
 def judge_brief_shown(logged: dict, shown: str | None) -> dict:
