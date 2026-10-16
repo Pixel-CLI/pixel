@@ -54,7 +54,7 @@ MCP server. `pixel setup` registers no MCP server with any agent.
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-setup` | Idempotent `pixel setup`, `pixel setup --remove`, `pixel doctor`. The guided run at a terminal is the `setup/` module (agent detection and targets, the four-feature catalog (Token super savior, command timing and savings, on-demand daemon, AI classification), the plan) in front of the same installer, which `install_selected` limits to the agents and hook groups the plan picked. Global install: Claude and Codex task lifecycle hooks, the `pixel` skill (`skills/pixel/SKILL.md`) deployed into every configured harness's skills dir — a guided run writes only the selected agents' roots — and, when Pi is present, the Pi package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`): the explicit `/pixel-impact` command, the prompt-submit brief and the metrics relay. No always-on prompt, rules file or instruction block is deployed: guidance reaches the wired harnesses as the `pixel` skill only (Copilot CLI and the generic `AGENTS.md` target get none), and the install cleans up nothing earlier releases wrote. Where a host's configuration already exists, Gemini CLI, OpenCode, Devin and Antigravity get their brief and metrics hooks (see "Agent integration"). An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo` skips every global step and writes only the repository's `.pixel/config.yaml` template. Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `banner` logo card (a short logo pulse, not an animation) and ends on the `banner` summary. `pixel doctor` reports `web-search.provider` green, and says so, when `pixel-utilities` is not installed (`pixel_plugin::Available`). | proto, daemon, index, facts, git, plugin |
-| `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`, and an optional `commands` list so one binary serves several `pixel <command>` words, run as `<run> <command> <args…>`; two plugins of a tier answering to one command are an error naming both, in `resolve`, `list` and `install`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (the library behind `pixel install`: a local directory, a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL, or `github:<owner>/<repo>[@<ref>]`, whose unshipped program is fetched as a release asset with `curl`), `remove` (`pixel uninstall`), `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. `Available` is the set of moved commands (`MOVED_COMMANDS`) that a plugin runs on this host, with the host's own reason for one that is installed but blocked (untrusted, not enabled): text that would name a plugin command asks it first. `read_only_invocation` says which moved commands and modes only read, for the task gate: `repo-state`, `review-changes` and the history reads always; `recall` and `list-errors` only when their first argument is a read mode (an option first makes it not a read, so an option value is never taken for the mode); `list-branches` unless `--fetch`. Home, repo root, PATH and the GitHub base URL are fields of `Host`, never read from the process. | git |
+| `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`, and an optional `commands` list so one binary serves several `pixel <command>` words, run as `<run> <command> <args…>`; two plugins of a tier answering to one command are an error naming both, in `resolve`, `list` and `install`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (the library behind `pixel install`: a local directory, a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL, or `github:<owner>/<repo>[@<ref>]`, whose program is fetched as a release asset with `curl`, over the file the repository ships at `run` when there is one, a launcher say), `remove` (`pixel uninstall`), `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. `Available` is the set of moved commands (`MOVED_COMMANDS`) that a plugin runs on this host, with the host's own reason for one that is installed but blocked (untrusted, not enabled): text that would name a plugin command asks it first. `read_only_invocation` says which moved commands and modes only read, for the task gate: `repo-state`, `review-changes` and the history reads always; `recall` and `list-errors` only when their first argument is a read mode (an option first makes it not a read, so an option value is never taken for the mode); `list-branches` unless `--fetch`. Home, repo root, PATH and the GitHub base URL are fields of `Host`, never read from the process. | git |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
 | `mvp-model` | Owned here, originally copied from pixel-mvp at a recorded commit (`crates/mvp-model/ORIGIN.md`, ADR-0035 there): the row types of pixel-mvp's index (files, symbols, edges with a target or none, provenance) and the `Graph` read trait. Pure: no I/O, enforced by its own `clippy.toml`. Sources and tests are maintained here; see `docs/mvp-handover.md`. | none |
 | `mvp-store` | Owned here like `mvp-model`: pixel-mvp's graph store, one SQLite file (`graph.db`) in a `.pixel-mvp/` state directory under the root it is given, with one writer behind a lock, one generation published per transaction, and a damaged or foreign file refused and rebuilt. `pixel-graph`'s `mvp_adapter` refreshes and reads it. | mvp-model |
@@ -115,7 +115,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel review-gate` | Deterministic pre-review: `what-changed` plus the mechanical rules — credential-shaped added lines, and changed symbols whose callers were not themselves changed — each finding carrying its witness; the caps it fired ride the epistemics envelope |
 | `pixel find-code` | Engine 1: resolve a phrase to code via the concept index |
 | `pixel setup` | Set pixel up for the agent CLIs on this machine (or in one repository with `--repo`). In a terminal (stdin and stdout, no `CI`, none of `--yes`/`--json`/`--print`) it is the guided setup: detect the agents, ask which to write for and which features to switch on, review every skill file, hook step, setting and note, and write nothing until one confirmation; cancelling writes nothing. Otherwise it deploys without asking: the `pixel` skill, Claude and Codex task lifecycle hooks, Pi's package when configured, the brief hooks of the other configured hosts. `--print` renders the skill the default answers deploy and changes nothing; `--remove` removes everything either path wrote: the skills, the hook entries from the settings files, the Pi package, the brief probes, and the pixel binary itself |
-| `pixel install` | Install a plugin into `~/.pixel/plugins/<name>/` from `github:<owner>/<repo>[@<ref>]` (a shallow clone; a program the repository does not ship comes from the release asset `pixel-<name>-<target-triple>`, checked against `<asset>.sha256` when one is published, else the `cargo install --git` command is printed and the plugin stays not runnable), a git URL or a local directory; `npm:<package>` exits 2 with a "not supported yet" reason |
+| `pixel install` | Install a plugin into `~/.pixel/plugins/<name>/` from `github:<owner>/<repo>[@<ref>]` (a shallow clone; the program `run` names comes from the release asset `pixel-<name>-<target-triple>`, checked against `<asset>.sha256` when one is published and written beside `run` before it replaces what the repository ships there; without a usable asset a shipped program stays and the `cargo install --git … --force` command that replaces it is printed, and an unshipped one leaves the plugin not runnable with the `cargo install --git` command printed), a git URL or a local directory; `npm:<package>` exits 2 with a "not supported yet" reason |
 | `pixel uninstall` | Delete an installed plugin and forget its source and network opt-in |
 | `pixel check-release` | Check that a release tag is consistent with the tree before anything is built or published: crates/pixel/Cargo.toml carries the version, Cargo.lock is fresh for every workspace member, CHANGELOG.md has the `## [x.y.z]` heading and an empty Unreleased section. |
 | `pixel self-update` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
@@ -168,6 +168,16 @@ are used only when `pixel_git::repo_path` finds them inside the root.
 
 Machine-wide:
 
+- `~/.pixel/setup-receipt.json`: global CLI setup’s private (0600), atomically
+  replaced ownership receipt. It stores original bytes/modes of rewritten files,
+  fingerprints of installed files and which output directories setup created.
+  It covers the guided and unattended paths, including global YAML settings;
+  previews and repository installs write no receipt. Removal verifies every receipt
+  path against setup's output paths before changing anything, restores/deletes
+  unchanged files and prunes only created empty directories. Edited files stay
+  in place with a yellow report step; older installs without a receipt use the
+  legacy marker-based removers.
+
 - `~/.pixel/plugins/<name>/`: the user's plugins (`pixel install` copies
   one here; `pixel uninstall` deletes it). `~/.pixel/trusted.toml`: one `[[trusted]]`
   record (`name`, `sha256` of the plugin directory) per trusted repo plugin,
@@ -217,7 +227,12 @@ Machine-wide:
 Envelope<Value>`. The Unix-socket daemon reads one JSON `Op` per line and
 writes one JSON `Envelope` line back. Request handling is single-threaded; an
 accept thread and a `notify` watcher feed one channel. The watcher debounces
-filesystem events and refreshes the index and graph for changed files. It is
+filesystem events and refreshes the index and graph for changed files. Only
+events admitted by `record_event` extend the 500 ms quiet window; the first
+pending event caps queue wait at `MAX_PENDING_WAIT` (2 s), so ignored-tree
+traffic and continuous edits cannot postpone the timer forever. Applying the
+batch can take additional time. Both a timer flush and a pre-request flush
+clear the first-event timestamp. It is
 registered on its own thread so the daemon answers from its first request: a
 recursive watch walks every directory under the root, ignored ones included,
 and took 11 to 28 s over a repository's 11 515 `node_modules` directories.
@@ -340,8 +355,11 @@ core does not see the plugin's output), and exits with the plugin's own code
 plugin, a network plugin not enabled, or a `run` that leaves its directory
 stops with exit 1 and the command that fixes it; a name in
 `pixel_plugin::MOVED_COMMANDS` that no plugin provides prints the
-`pixel install github:Pixel-CLI/<repo>` hint and exits 2; any other name keeps
-clap's error. That table maps the 30 commands (#878) that live in the plugin
+`pixel install github:Pixel-CLI/<repo>` hint and exits 2; a name in
+`removed_commands::REMOVED_COMMANDS` (the 41 pre-rename aliases 0.8.0
+removed) prints ``'<old>' was removed in 0.8.0; use `pixel <new>` `` (with the
+install command when `<new>` is a plugin command no plugin provides) and
+exits 2, without running anything; any other name keeps clap's error. That table maps the 30 commands (#878) that live in the plugin
 repositories `pixel-git`, `pixel-flow`, `pixel-recall`, `pixel-telemetry` and
 `pixel-utilities` to their repository. The core builds in none of them but
 `check-release` (the release workflow runs it before any plugin could be
@@ -361,7 +379,9 @@ envelope talks to the daemon socket directly.
   shards to changes since, and an overlay covers the dirty working tree.
   `pixel status` reports whether each layer is fresh.
 - The graph is built lazily on the first graph command and updated per file
-  by the daemon watcher. Without a daemon (CI, `PIXEL_DAEMON_AUTO_START=0`,
+  by the daemon watcher. Its quiet debounce extends only for recorded content
+  events and is capped from the first pending edit (see Daemon and wire contract).
+  Without a daemon (CI, `PIXEL_DAEMON_AUTO_START=0`,
   a copied `.pixel/`), the first graph command after an edit compares the
   tree's per-file content hashes with the stored ones in one walk and
   re-extracts only the added/edited files, drops the removed ones and
@@ -550,6 +570,29 @@ envelope talks to the daemon socket directly.
   block.
 
 ## Agent integration
+
+Setup and removal edit JSON settings by key, retaining untouched values and their
+formatting. Codex hook writes use the shared atomic settings writer; setup reads
+Codex TOML review state without rewriting it. Gemini and Antigravity use this
+writer too, taking a `.pixel-bak.*` copy before every changed configuration write.
+Global CLI setup records its output paths in the private ownership receipt;
+reinstalls retain the original ownership of unchanged outputs. If a user edited
+an output before reinstalling, that edit becomes its restore baseline.
+Removal takes back unchanged writes, including the global YAML template and newly
+created hook files, while reporting and preserving files edited after setup.
+Recovery copies stay in place and the report lists them, including nested skill
+backups; preexisting empty directories are kept. When removal preserves edits,
+the remaining receipt stays private so repeated removal cannot delete those edits
+through the legacy removers. Symlinked output directories are followed without
+cycles; a retargeted link preserves files at its new destination. Generated-file
+writes follow complete file-symlink chains and preserve target permissions.
+Snapshotting rejects directory links to ancestors and non-regular files before
+setup writes, preventing a scan of the whole home or a blocking read of a FIFO.
+
+Setup and removal edit JSON settings by key, retaining untouched values and their
+formatting. Codex hook writes use the shared atomic settings writer; setup reads
+Codex TOML review state without rewriting it. Gemini and Antigravity use this
+writer too, taking a `.pixel-bak.*` copy before every changed configuration write.
 
 `pixel setup` has two ways to run, and one installer behind both. At a terminal
 (stdin and stdout, `CI` unset, no `--yes`, `--json` or `--print`) it is the

@@ -356,6 +356,25 @@ pub struct JsxElementRow {
 // fingerprint. Deterministic: same input -> same output, no RNG / no LLM.
 
 /// FNV-1a 64-bit hash of a byte slice. Stable across runs and platforms.
+/// The last segment of a qualified name (`finish` for `ActionLog::finish`
+/// or `Builder.finish`), or `None` when `name` is not qualified.
+///
+/// A name is qualified when `::` or `.` splits it into at least two
+/// non-empty segments; `Foo.`, `::finish` and `a..b` are not, so a stray
+/// separator never turns into a search for an empty name.
+pub fn qualified_leaf(name: &str) -> Option<&str> {
+    let mut segments = name.split("::").flat_map(|part| part.split('.'));
+    let first = segments.next()?;
+    let mut leaf = None;
+    for segment in segments {
+        leaf = Some(segment);
+        if segment.is_empty() {
+            return None;
+        }
+    }
+    leaf.filter(|_| !first.is_empty())
+}
+
 pub fn fnv1a64(text: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in text.as_bytes() {
@@ -1357,6 +1376,56 @@ impl GraphStore {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![name, scope, limit], Self::row_to_symbol)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The symbols `name` designates: those called `name`, else, when `name`
+    /// is qualified (`ActionLog::finish`, `Builder.finish`), those whose
+    /// qualified name ends with it.
+    ///
+    /// Every lookup a user's name reaches goes through here, so an agent
+    /// can write a method the way the graph prints it in a uid. `::` and
+    /// `.` are the same separator: the stored spelling differs by language
+    /// (Rust `Owner::leaf`, Ruby `Module::Class.method`, Python and
+    /// JavaScript `Owner.leaf`), the agent's need not follow it. A stored
+    /// name that ends the input matches too, so a module path the graph
+    /// does not record (`pixel_actionlog::ActionLog::finish`) still finds
+    /// `ActionLog::finish`; the overlap is always at least `Owner.leaf`.
+    pub fn symbols_named(
+        &self,
+        name: &str,
+        scope: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SymbolRow>> {
+        let rows = self.symbols_by_name(name, scope, limit)?;
+        let Some(leaf) = qualified_leaf(name) else {
+            return Ok(rows);
+        };
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+        let dotted = name.replace("::", ".");
+        // `nq` is the stored qualified name in the same dotted spelling.
+        // Either side ends the other on a segment boundary: the input is a
+        // suffix of `nq` (`Log.finish` in `ActionLog.finish` does not
+        // count, the character before must be a dot), or `nq`, qualified
+        // itself, is a suffix of the input.
+        let sql = format!(
+            "SELECT {} FROM (SELECT *, replace(qualified, '::', '.') AS nq FROM symbols \
+               WHERE name = ?1 \
+                 AND (?2 IS NULL OR file_id IN \
+                   (SELECT id FROM files \
+                     WHERE path = ?2 OR substr(path, 1, length(?2) + 1) = ?2 || '/'))) \
+             WHERE (substr(nq, -length(?3)) = ?3 \
+                     AND (length(nq) = length(?3) OR substr(nq, -length(?3) - 1, 1) = '.')) \
+                OR (instr(nq, '.') > 0 AND length(?3) > length(nq) \
+                     AND substr(?3, -length(nq)) = nq \
+                     AND substr(?3, -length(nq) - 1, 1) = '.') \
+             ORDER BY kind, uid LIMIT ?4",
+            Self::SYMBOL_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![leaf, scope, dotted, limit], Self::row_to_symbol)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
