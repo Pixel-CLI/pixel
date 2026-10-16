@@ -968,3 +968,11 @@ first candidates for one.
 parses them as source data. It does not execute their code or build scripts.
 Both checkouts disable persisted credentials; the workflow has read-only
 contents permission and uses no deployment secrets.
+
+### Setup configuration replacement
+
+The shared text and JSON settings writers synchronize staged bytes before
+atomic rename. Gemini brief and Antigravity configuration updates use the
+JSON writer, retaining backups, symlink targets and existing permissions.
+A failed write or sync is returned before replacement. Parent directories
+are not synchronized; full power-loss durability has not been established.

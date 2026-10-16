@@ -85,7 +85,7 @@ fn imported_mvp_crates_depend_only_on_mvp_model() {
         };
         assert!(
             deps.is_subset(&allowed),
-            "`{name}` is a copy of pixel-mvp and may depend on {allowed:?} only, not {deps:?}: \
+            "`{name}` is an independent foundation and may depend on {allowed:?} only, not {deps:?}: \
              keep the independent foundation boundary (crates/{name}/ORIGIN.md)"
         );
     }
@@ -115,7 +115,7 @@ fn only_the_named_readers_read_the_imported_crates() {
 
 /// In `pixel-cli`, two modules read pixel-mvp's rules, each for one part
 /// moved under ADR-0036: the French words and the plain-word leads. A third
-/// would tie more of the brief to a copy that cannot be edited here.
+/// would couple more of the brief to the independent index implementation.
 #[test]
 fn only_the_briefs_french_and_words_modules_read_mvp_model_in_the_cli() {
     let src = repo_root().join("crates/pixel/src");

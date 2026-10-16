@@ -36,8 +36,10 @@ are not copied into an unrelated CLI; Pixel keeps its own entry-point tests.
   The recorded experiment is pixel-research-mvp's
   `evaluation/results/2026-10-16-ruby-hybrid-daemon.md`. Reassess MVP #111
   against the imported head before treating its old edge counts as current.
-- Setup preservation and complete removal are tracked by #1011. Carry the
-  settings durability fix from MVP #85 into Pixel's writers.
+- Setup preservation and complete removal are tracked by #1011. The staged
+  file synchronization from MVP #85 is carried into Pixel's writers, and
+  Gemini/Antigravity use the backup-preserving settings writer. Byte-exact
+  restoration and leftover-file removal remain Pixel work under #1011.
 - mvp-index still invokes git outside GitRunner. Its timeout/output bounds
   and the imported lint baseline can be tightened here without reopening
   the experimental repository.
@@ -57,7 +59,8 @@ on and off; it does not require maintaining a second product binary.
 
 ## Archive checklist
 
-- Merge ownership, lexicon tooling and index regression-check PRs.
+- Merge the stack: #1039 ownership, #1041 lexicon tooling, #1042 index
+  regression checks, then the settings safety PR.
 - Keep installation fixes and unresolved Ruby work tracked in Pixel.
 - Resolve the disposition of MVP #85 and open tracker issues; archive the
   MVP with a pointer to Pixel only after the migration PRs merge.

@@ -342,13 +342,15 @@ fn stable_exe_path_in(executable_path: PathBuf, paths: &std::ffi::OsStr) -> Path
 
 /// Replace `path` with `content` in one step: the bytes already there are
 /// backed up first, the new bytes go to a sibling temp file, and that file is
-/// renamed over the target. A crash mid-write leaves the old profile intact
-/// instead of a half-written one — a shell profile is read by every
+/// synced before being renamed over the target. A crash mid-write leaves
+/// the old profile intact instead of a half-written one — it is read by every
 /// interactive shell, and it is the user's file.
 pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<()> {
     config::backup_if_changing(path, content.as_bytes())?;
     let tmp = path.with_extension("pixel-tmp");
-    fs::write(&tmp, content)?;
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
     fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -518,6 +520,7 @@ pub(crate) fn write_settings(
     if let Ok(meta) = fs::metadata(target) {
         fs::set_permissions(&tmp, meta.permissions())?;
     }
+    file.sync_all()?;
     fs::rename(&tmp, target)?;
     Ok(backup_path)
 }
