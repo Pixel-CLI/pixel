@@ -4,7 +4,7 @@
 
 ## after setup, twice
 --- home/.gemini/settings.json 0644
-{
+{"theme":"Default",
   "hooks": {
     "BeforeAgent": [
       {
@@ -19,9 +19,9 @@
         "matcher": "*"
       }
     ]
-  },
-  "theme": "Default"
-}
+  }}
+--- home/.gemini/settings.json.pixel-bak.{STAMP1} 0644
+{"theme":"Default"}
 --- home/.gemini/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
 --- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
 --- home/.pixel/plugins/cand-j-callers/.pixel-bundled 0644
@@ -66,12 +66,9 @@ first-party probe shipped with pixel; `pixel setup` keeps it current
 --- home/.pixel/plugins/rank-blocks/probe 0755 = probes/rank-blocks/probe
 
 ## after setup --remove
---- home/.gemini/pixel.pixel-bak.{STAMP2}/SKILL.md 0644 = tests/setup/.agents/skill.md
---- home/.gemini/settings.json 0644
-{
-  "theme": "Default"
-}
---- home/.gemini/settings.json.pixel-bak.{STAMP1} 0644 = home/.gemini/settings.json (after setup, twice)
+--- home/.gemini/pixel.pixel-bak.{STAMP3}/SKILL.md 0644 = tests/setup/.agents/skill.md
+--- home/.gemini/settings.json.pixel-bak.{STAMP1} 0644 = home/.gemini/settings.json.pixel-bak.{STAMP1} (after setup, twice)
+--- home/.gemini/settings.json.pixel-bak.{STAMP2} 0644 = home/.gemini/settings.json (after setup, twice)
 --- home/.gemini/skills/ (empty directory)
 --- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
 --- home/.pixel/plugins/ (empty directory)

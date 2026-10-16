@@ -39,14 +39,14 @@
 }
 --- home/.gemini/antigravity-cli/plugins/pixel/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
 --- home/.gemini/config/config.json 0644
-{
+{"user":"kept",
   "plugins": {
     "pixel": {
       "enabled": true
     }
-  },
-  "user": "kept"
-}
+  }}
+--- home/.gemini/config/config.json.pixel-bak.{STAMP1} 0644
+{"user":"kept"}
 --- home/.gemini/config/plugins/pixel/hooks.json 0644 = home/.gemini/antigravity-cli/plugins/pixel/hooks.json (after setup, twice)
 --- home/.gemini/config/plugins/pixel/plugin.json 0644 = home/.gemini/antigravity-cli/plugins/pixel/plugin.json (after setup, twice)
 --- home/.gemini/config/plugins/pixel/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
@@ -96,12 +96,14 @@ first-party probe shipped with pixel; `pixel setup` keeps it current
 ## after setup --remove
 --- home/.gemini/antigravity-cli/plugins/ (empty directory)
 --- home/.gemini/config/config.json 0644
-{
-  "plugins": {},
-  "user": "kept"
-}
+{"user":"kept",
+  "plugins": {
+    
+  }}
+--- home/.gemini/config/config.json.pixel-bak.{STAMP1} 0644 = home/.gemini/config/config.json.pixel-bak.{STAMP1} (after setup, twice)
+--- home/.gemini/config/config.json.pixel-bak.{STAMP3} 0644 = home/.gemini/config/config.json (after setup, twice)
 --- home/.gemini/config/plugins/ (empty directory)
---- home/.gemini/pixel.pixel-bak.{STAMP1}/SKILL.md 0644 = tests/setup/.agents/skill.md
+--- home/.gemini/pixel.pixel-bak.{STAMP2}/SKILL.md 0644 = tests/setup/.agents/skill.md
 --- home/.gemini/skills/ (empty directory)
 --- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
 --- home/.pixel/plugins/ (empty directory)

@@ -551,7 +551,8 @@ envelope talks to the daemon socket directly.
 
 Setup and removal edit JSON settings by key, retaining untouched values and their
 formatting. Codex hook writes use the shared atomic settings writer; setup reads
-Codex TOML review state without rewriting it.
+Codex TOML review state without rewriting it. Gemini and Antigravity use this
+writer too, taking a `.pixel-bak.*` copy before every changed configuration write.
 
 `pixel setup` has two ways to run, and one installer behind both. At a terminal
 (stdin and stdout, `CI` unset, no `--yes`, `--json` or `--print`) it is the

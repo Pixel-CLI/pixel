@@ -4,6 +4,7 @@
 # wires" table of /docs/ (layouts/shortcodes/agents-install.html). One entry
 # per agent; its mark is assets/logos/<logo>.svg.
 #
+# Changed existing configs also get timestamped `.pixel-bak.*` recovery copies.
 # Every fact here restates crates/pixel-setup. A pull
 # request that changes what `pixel setup` writes changes this file too:
 # crates/pixel/tests/cli/docs_drift.rs runs a real `pixel setup` into an
@@ -126,7 +127,7 @@ lede = "Gemini CLI keeps its native tools; `pixel setup` registers a `BeforeAgen
 global = ["~/.gemini/settings.json", "~/.gemini/skills/pixel/SKILL.md"]
 when = "when `~/.gemini` exists; the hook only where `~/.gemini/settings.json` already exists"
 wires = "a per-prompt evidence brief through a `BeforeAgent` hook in `~/.gemini/settings.json`, and the `pixel` skill in `~/.gemini/skills/pixel/`; native tools stay unchanged"
-note = "Your own hooks and keys in `settings.json` stay: a re-run replaces only Pixel's earlier entry, and `pixel setup --remove` takes it out."
+note = "A changed `settings.json` is backed up to a timestamped `.pixel-bak.*` sibling. Your own formatting, hooks and keys stay: a re-run replaces only Pixel's earlier entry, and `pixel setup --remove` takes it out."
 
 [[agent]]
 slug = "antigravity"
