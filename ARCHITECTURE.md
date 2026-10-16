@@ -572,7 +572,8 @@ Recovery copies stay in place and the report lists them, including nested skill
 backups; preexisting empty directories are kept. When removal preserves edits,
 the remaining receipt stays private so repeated removal cannot delete those edits
 through the legacy removers. Symlinked output directories are followed without
-cycles; a retargeted link preserves files at its new destination.
+cycles; a retargeted link preserves files at its new destination. Generated-file
+writes follow complete file-symlink chains and preserve target permissions.
 
 `pixel setup` has two ways to run, and one installer behind both. At a terminal
 (stdin and stdout, `CI` unset, no `--yes`, `--json` or `--print`) it is the

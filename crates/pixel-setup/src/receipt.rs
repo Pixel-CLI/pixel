@@ -500,6 +500,47 @@ mod tests {
     }
 
     #[test]
+    fn setup_and_remove_should_preserve_chained_dotfile_links_and_their_targets() {
+        let home = tempfile::tempdir().unwrap();
+        let managed = tempfile::tempdir().unwrap();
+        let original = "my dotfile\n";
+        let target = managed.path().join("SKILL.md");
+        let intermediate = managed.path().join("skill-link");
+        let skill = home.path().join(".claude/skills/pixel/SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(&target, original).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, &intermediate).unwrap();
+        std::os::unix::fs::symlink(&intermediate, &skill).unwrap();
+        let options = crate::install::InstallOptions {
+            home: Some(home.path().into()),
+            executable_path: Some("/tmp/pixel".into()),
+            ..Default::default()
+        };
+        let selection = crate::install::InstallSelection {
+            agents: vec![crate::setup::AgentTarget::ClaudeCode],
+            ..Default::default()
+        };
+        let before = Snapshot::begin(&options).unwrap().unwrap();
+        crate::install::install_selected(&options, Some(&selection)).unwrap();
+        before.finish().unwrap();
+        assert_eq!(fs::read_link(&skill).unwrap(), intermediate);
+        assert_eq!(fs::read_link(&intermediate).unwrap(), target);
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            crate::skill::PIXEL_SKILL
+        );
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        remove(home.path(), true, false).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), original);
+        assert_eq!(fs::read_link(&skill).unwrap(), intermediate);
+        assert_eq!(fs::read_link(&intermediate).unwrap(), target);
+    }
+
+    #[test]
     fn reinstall_should_restore_the_users_intervening_edit() {
         let home = tempfile::tempdir().unwrap();
         let file = home.path().join(".pixel/config.yaml");

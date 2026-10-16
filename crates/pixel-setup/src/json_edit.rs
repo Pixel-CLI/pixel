@@ -64,13 +64,17 @@ fn edit(text: &str, old: &Value, new: &Value) -> serde_json::Result<String> {
     }
     let mut rendered = Vec::new();
     let mut used = std::collections::BTreeSet::new();
-    for (start, end, (key, value_start), value) in &members {
+    for (index, (start, end, (key, value_start), value)) in members.iter().enumerate() {
         if let Some(replacement) = new.get(key) {
             used.insert(key.clone());
             rendered.push((
                 *start,
                 *end,
-                if old.get(key) == Some(replacement) {
+                if old.get(key) == Some(replacement)
+                    || members[index + 1..]
+                        .iter()
+                        .any(|(_, _, (later, _), _)| later == key)
+                {
                     text[*start..*end].to_owned()
                 } else {
                     format!(
@@ -229,6 +233,15 @@ mod tests {
         assert!(changed.contains(r#""mine": 1e2, "mine" : 2"#));
         installed.as_object_mut().unwrap().remove("hooks");
         assert_eq!(patch(&changed, &installed).unwrap(), text);
+    }
+
+    #[test]
+    fn patch_should_change_only_the_effective_duplicate_key() {
+        let text = r#"{"hooks": { "inactive" : 1e2 }, "hooks": {}}"#;
+        let installed = json!({"hooks": {"pixel": true}});
+        let changed = patch(text, &installed).unwrap();
+        assert!(changed.contains(r#""hooks": { "inactive" : 1e2 }"#));
+        assert_eq!(serde_json::from_str::<Value>(&changed).unwrap(), installed);
     }
 
     #[test]

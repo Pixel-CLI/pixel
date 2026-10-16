@@ -347,9 +347,18 @@ fn stable_exe_path_in(executable_path: PathBuf, paths: &std::ffi::OsStr) -> Path
 /// interactive shell, and it is the user's file.
 pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<()> {
     config::backup_if_changing(path, content.as_bytes())?;
-    let tmp = path.with_extension("pixel-tmp");
-    fs::write(&tmp, content)?;
-    fs::rename(&tmp, path)?;
+    let resolved = resolve_symlink_target(path);
+    let target = resolved.as_deref().unwrap_or(path);
+    let tmp = unique_temp_path(target);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    file.write_all(content.as_bytes())?;
+    if let Ok(metadata) = fs::metadata(target) {
+        file.set_permissions(metadata.permissions())?;
+    }
+    fs::rename(&tmp, target)?;
     Ok(())
 }
 
@@ -536,6 +545,9 @@ pub(crate) fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
     let meta = fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_symlink() {
         return None;
+    }
+    if let Ok(target) = path.canonicalize() {
+        return Some(target);
     }
     let target = fs::read_link(path).ok()?;
     Some(if target.is_absolute() {
