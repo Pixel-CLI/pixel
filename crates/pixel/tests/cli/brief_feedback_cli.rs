@@ -645,3 +645,60 @@ fn a_pi_session_start_should_forget_what_a_compaction_or_a_new_session_dropped_a
     }
     assert!(!root.join(".pixel/tasks").exists());
 }
+
+/// An Antigravity prompt as its `PreInvocation` hook sends it: no
+/// `session_id` and no `cwd`, the conversation, the workspace and the
+/// transcript the typed prompt is read from.
+fn antigravity_prompt(root: &Path, conversation: &str) -> Value {
+    let transcript = root.join(".pixel/agy-transcript.jsonl");
+    std::fs::write(
+        &transcript,
+        json!({"role": "user", "content": PROMPT}).to_string(),
+    )
+    .unwrap();
+    json!({"conversationId": conversation, "workspacePaths": [root], "invocationNum": 0,
+           "transcriptPath": transcript, "artifactDirectoryPath": root.join(".pixel"),
+           "modelName": "test"})
+}
+
+#[test]
+fn an_antigravity_brief_should_leave_its_feedback_lines_under_the_conversation() {
+    let root = indexed("antigravity-brief");
+    let output = (0..5)
+        .map(|_| {
+            hook_as(
+                "antigravity",
+                &root,
+                "prompt-submit",
+                None,
+                &antigravity_prompt(&root, "agy-conversation"),
+                |_| {},
+            )
+        })
+        .find(|output| output["injectSteps"][0]["ephemeralMessage"].is_string())
+        .expect("the brief arrives within five asks");
+    let brief = output["injectSteps"][0]["ephemeralMessage"]
+        .as_str()
+        .unwrap();
+    assert!(brief.starts_with("[PIXEL:BRIEF]"), "{brief}");
+    let lines = log_lines(&root);
+    let prompts = of_kind(&lines, "prompt");
+    assert!(
+        prompts.iter().any(|line| line["provider"] == "antigravity"
+            && line["bytes"].as_u64() == Some(brief.len() as u64)),
+        "{lines:?}"
+    );
+    // The part line of the delivering call counts the `ephemeralMessage`.
+    let last = *of_kind(&lines, "part").last().unwrap();
+    assert_eq!(last["provider"], "antigravity", "{last}");
+    assert_eq!(last["bytes"].as_u64(), Some(brief.len() as u64), "{last}");
+    // Keyed by the conversation, hashed like every host's session id.
+    let session = last["session"].as_str().unwrap();
+    assert_eq!(session.len(), 16, "{last}");
+    assert!(!session.contains("agy-conversation"), "{last}");
+    assert!(
+        prompts
+            .iter()
+            .all(|line| line["session"] == last["session"])
+    );
+}

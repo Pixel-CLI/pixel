@@ -129,6 +129,19 @@ fn string<'a>(payload: &'a Value, names: &[&str]) -> Option<&'a str> {
         .find_map(|name| payload.get(name)?.as_str().filter(|s| !s.is_empty()))
 }
 
+/// The keys a host names its session by, for the brief's own state: Claude,
+/// Codex, Devin and Pi's package send `session_id`; Antigravity sends only
+/// `conversationId`, so without it the read feedback, the part cache and the
+/// region dedupe of an Antigravity brief had no session at all.
+const BRIEF_SESSION_KEYS: &[&str] = &["session_id", "sessionId", "conversationId"];
+
+/// The session a brief belongs to (see [`BRIEF_SESSION_KEYS`]). The task
+/// ledger keeps `session_id` / `sessionId` only: Antigravity registers no
+/// lifecycle hook, and binding its conversations is not this lookup's call.
+fn brief_session(payload: &Value) -> Option<&str> {
+    string(payload, BRIEF_SESSION_KEYS)
+}
+
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -1200,7 +1213,7 @@ fn part_path(provider: TaskProvider, payload: &Value) -> Option<std::path::PathB
     let root = crate::discover_root(&payload_cwd(provider, payload)).ok()?;
     Some(brief_parts::cache_path(
         &root,
-        string(payload, &["session_id", "sessionId"]),
+        brief_session(payload),
         &prompt,
     ))
 }
@@ -1274,7 +1287,7 @@ fn note_prompt(
     finished: Option<&crate::execution_brief::chain::Finished>,
 ) {
     use crate::execution_brief::{decision_log, feedback};
-    let Some(session) = string(payload, &["session_id", "sessionId"]) else {
+    let Some(session) = brief_session(payload) else {
         return;
     };
     let Some(path) = crate::discover_root(&payload_cwd(provider, payload))
@@ -1302,17 +1315,16 @@ fn note_prompt(
 }
 
 /// The bytes of brief a prompt-submit response carries: the
-/// `hookSpecificOutput.additionalContext` of the wrapped envelopes, or the
-/// bare decision's `context` Pi's package reads ([`BRIEF_ONLY`] payloads
-/// only, as in [`delivered_brief`]: a ledger note is not a brief).
+/// `hookSpecificOutput.additionalContext` of the wrapped envelopes, the
+/// `ephemeralMessage` Antigravity's `injectSteps` carries, or the bare
+/// decision's `context` Pi's package reads ([`BRIEF_ONLY`] payloads only, as
+/// in [`delivered_brief`]: a ledger note is not a brief).
 fn context_bytes(provider: TaskProvider, payload: &Value, output: &Value) -> usize {
-    let text = if provider == TaskProvider::Pi {
-        if !brief_only(provider, payload) {
-            return 0;
-        }
-        output["context"].as_str()
-    } else {
-        output["hookSpecificOutput"]["additionalContext"].as_str()
+    let text = match provider {
+        TaskProvider::Pi if !brief_only(provider, payload) => return 0,
+        TaskProvider::Pi => output["context"].as_str(),
+        TaskProvider::Antigravity => output["injectSteps"][0]["ephemeralMessage"].as_str(),
+        _ => output["hookSpecificOutput"]["additionalContext"].as_str(),
     };
     text.map_or(0, str::len)
 }
@@ -1342,7 +1354,7 @@ fn note_event(
     let Some(payload) = raw.and_then(|raw| serde_json::from_str::<Value>(raw).ok()) else {
         return;
     };
-    let Some(session) = string(&payload, &["session_id", "sessionId"]) else {
+    let Some(session) = brief_session(&payload) else {
         return;
     };
     let cwd = payload_cwd(provider, &payload);
@@ -1492,7 +1504,7 @@ fn forget_sent(provider: TaskProvider, event: TaskHookEvent, payload: &Value) {
     {
         return;
     }
-    let Some(session) = string(payload, &["session_id", "sessionId"]) else {
+    let Some(session) = brief_session(payload) else {
         return;
     };
     if let Ok(root) = crate::discover_root(&payload_cwd(provider, payload)) {
@@ -1528,7 +1540,7 @@ fn start_brief(
     // calls and the dirty files of the tree. Only the path is taken here; the
     // transcript is read, for paths alone, inside the brief's own window.
     let session = crate::execution_brief::chain::Session {
-        id: string(payload, &["session_id", "sessionId"]).map(str::to_string),
+        id: brief_session(payload).map(str::to_string),
         transcript: string(payload, &["transcript_path", "transcriptPath"])
             .map(std::path::PathBuf::from),
     };
@@ -2872,6 +2884,27 @@ mod tests {
         assert_eq!(context_bytes(TaskProvider::Claude, &plain, &wrapped), 3);
         assert_eq!(context_bytes(TaskProvider::Codex, &marked, &wrapped), 3);
         assert_eq!(context_bytes(TaskProvider::Claude, &marked, &pi_brief), 0);
+        let injected = json!({"injectSteps": [{"ephemeralMessage": "[PIXEL:BRIEF]x"}]});
+        assert_eq!(
+            context_bytes(TaskProvider::Antigravity, &plain, &injected),
+            14
+        );
+        assert_eq!(
+            context_bytes(TaskProvider::Antigravity, &plain, &wrapped),
+            0
+        );
+        assert_eq!(context_bytes(TaskProvider::Claude, &plain, &injected), 0);
+    }
+
+    #[test]
+    fn the_brief_session_should_be_antigravity_s_conversation_when_no_session_id_is_sent() {
+        let conversation = json!({"conversationId": "c-1", "workspacePaths": ["/r"]});
+        assert_eq!(brief_session(&conversation), Some("c-1"));
+        let both = json!({"session_id": "s-1", "conversationId": "c-1"});
+        assert_eq!(brief_session(&both), Some("s-1"));
+        assert_eq!(brief_session(&json!({"sessionId": "s-2"})), Some("s-2"));
+        assert_eq!(brief_session(&json!({"conversationId": ""})), None);
+        assert_eq!(brief_session(&json!({})), None);
     }
 
     #[test]
