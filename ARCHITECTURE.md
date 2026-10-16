@@ -870,6 +870,14 @@ that comes down to operations, one content word or a link stays declined. The
 decision log's `typed` is the excerpt, credential shapes masked like any typed
 text; a declined paste logs nothing of it.
 
+An acknowledgement, a greeting and a harness envelope start no brief
+(`prompt_continuation.rs`). A prompt is an envelope when it opens, after any
+leading `<system-reminder>` block, with one of recall's `ORCHESTRATOR_PREFIXES`
+(`pixel_recall::intent`): `<task-notification>`, a command wrapper, Codex's
+`<realtime_delegation>` and `<send_user_message_question_reply>`. The same list
+keeps those turns out of recall's embeddings and session titles, so a new
+envelope is added there, once.
+
 Unless `PIXEL_BRIEF_FRENCH=0`, a prompt that pixel-mvp's
 rule reads as French (`mvp_model::language`: two French function words or
 more, outnumbering its English ones) is searched, judged and gated on the

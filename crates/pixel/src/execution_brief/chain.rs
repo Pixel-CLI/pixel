@@ -4417,15 +4417,36 @@ mod tests {
     fn plan_should_decline_a_prompt_that_asks_nothing_about_code() {
         assert_eq!(Plan::from_prompt("ok thanks"), None);
         assert_eq!(Plan::from_prompt("commit and push this"), None);
+        // Codex's envelopes carry the identifiers of whatever they relay.
+        let delegation = [
+            "<realtime_delegation>",
+            "  <input>where is fetchUser</input>",
+            "</realtime_delegation>",
+        ]
+        .join("\n");
+        let reply = [
+            "<send_user_message_question_reply>",
+            "[{\"question\":\"where is fetchUser\",\"answer\":\"src/api.rs\"}]",
+            "</send_user_message_question_reply>",
+        ]
+        .join("\n");
+        let reminded = format!("<system-reminder>ctx</system-reminder>\n{delegation}");
         for envelope in [
             "<task-notification><task-id>x</task-id>fetchUser retry_count failed</task-notification>",
             "<system-reminder>callers of `fetchUser`</system-reminder>",
             "<command-name>/review</command-name> `fetchUser`",
+            delegation.as_str(),
+            reply.as_str(),
+            reminded.as_str(),
         ] {
             assert_eq!(Plan::from_prompt(envelope), None, "{envelope}");
         }
         assert!(
             Plan::from_prompt("fix the hook: a <task-notification> reaches `fetchUser`").is_some()
+        );
+        assert!(
+            Plan::from_prompt("fix the hook: a <realtime_delegation> reaches `fetchUser`")
+                .is_some()
         );
         assert_eq!(
             Plan::from_prompt("<pasted_content id=1>fetchUser retry_count</pasted_content> thanks"),
@@ -7083,6 +7104,21 @@ mod tests {
         assert_eq!(why("callers of `fetchUser`", closed), Some("disabled"));
         assert_eq!(why("callers of `fetchUser`", unindexed), Some("unindexed"));
         assert_eq!(why("ok", OPEN), Some("continuation"));
+        // Codex's envelopes are the harness speaking, whatever their body names.
+        let delegation = [
+            "<realtime_delegation>",
+            "  <input>where is fetchUser</input>",
+            "</realtime_delegation>",
+        ]
+        .join("\n");
+        let reply = [
+            "<send_user_message_question_reply>",
+            "[{\"question\":\"where is fetchUser\",\"answer\":\"src/api.rs\"}]",
+            "</send_user_message_question_reply>",
+        ]
+        .join("\n");
+        assert_eq!(why(&delegation, OPEN), Some("continuation"));
+        assert_eq!(why(&reply, OPEN), Some("continuation"));
         assert_eq!(why("thanks, that works", OPEN), Some("not_about_code"));
         assert_eq!(why("commit and push", OPEN), Some("not_about_code"));
         assert_eq!(why("callers of `fetchUser`", OPEN), None);
