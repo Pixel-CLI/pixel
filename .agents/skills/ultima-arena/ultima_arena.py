@@ -47,10 +47,12 @@ HERE = pathlib.Path(__file__).resolve().parent
 SEARCH_TERM = "start_brief"
 SEARCH_PATH = "crates/pixel/src"
 SHELL_CMD = f"pixel search-content -F {SEARCH_TERM} {SEARCH_PATH}"
+# The shell command comes first: a model handed a brief that says "answer from
+# this context" skipped a command asked for after the question (pi, run 1).
 PROMPT = (
-    f"Where is `{SEARCH_TERM}` defined and what calls it? "
-    f"Run `{SHELL_CMD}` once in the shell, keep its full output, "
-    "then answer in two lines with file:line. Do not edit any file."
+    f"Before answering, run exactly this shell command once and keep its full output: `{SHELL_CMD}`. "
+    f"Then answer in two lines with file:line: where is `{SEARCH_TERM}` defined and what calls it? "
+    "Do not edit any file."
 )
 # The prompt must never lead the model toward the thing being measured.
 PROMPT_FORBIDDEN = re.compile(r"metric|🟩|❀", re.IGNORECASE)
@@ -197,13 +199,32 @@ def judge_metrics(scrollback: str, actions: list[dict], since_ms: int) -> dict:
     }
 
 
-def judge_display(relay: dict, submit_line: str | None) -> dict:
-    """Metrics PASS when a Pixel 🟩 line reached the pane by a hook: the prompt-submit notice, or a
-    `search-content` box whose id the action log holds (`relay`). A model that answers from the
-    brief makes no Pixel call, so the relay cannot fire; the notice still shows the brief's line.
-    `sources` names which of the two was on screen."""
-    sources = [name for name, seen in (("relay", relay.get("verdict") == "PASS"), ("prompt-submit", submit_line is not None)) if seen]
-    return {**relay, "verdict": "PASS" if sources else "FAIL", "relay_verdict": relay.get("verdict"), "sources": sources}
+BRIEF_TEXT_MARKERS = ("[PIXEL:BRIEF]", "[pixel-brief]")
+
+
+def brief_on_screen(scrollback: str, submit_line: str | None) -> str | None:
+    """What on the pane shows the brief reached the host: its text (pi prints it) or the
+    `🟩 pixel prompt-submit` notice, which the hook adds only to a delivered brief (Claude, Codex)."""
+    for marker in BRIEF_TEXT_MARKERS:
+        if marker in scrollback:
+            return marker
+    return submit_line
+
+
+def judge_brief_shown(logged: dict, shown: str | None) -> dict:
+    """Brief PASS when the hook logged it for that provider *and* the pane shows it."""
+    ok = logged.get("verdict") == "PASS" and shown is not None
+    return {**logged, "verdict": "PASS" if ok else "FAIL", "logged": logged.get("verdict") == "PASS",
+            "on_screen": shown is not None, "screen_evidence": shown}
+
+
+def judge_relay(relay: dict, shell_calls: int) -> dict:
+    """Metrics PASS when the pane shows the 🟩 box of this CLI's Pixel call (`judge_metrics`).
+    NO-CALL when the model ran no Pixel command and no box is on screen: nothing to relay, so
+    neither a pass nor a relay failure."""
+    if relay.get("verdict") != "PASS" and shell_calls < 2 and not relay.get("box_ids_without_record"):
+        return {**relay, "verdict": "NO-CALL"}
+    return relay
 
 
 def shell_call_count(scrollback: str) -> int:
@@ -650,13 +671,14 @@ class Arena:
             cell.metrics = {"verdict": "N/A"}
             return
         cell.scrollback = self.h.read(cell.name, "recent-unwrapped", SCROLLBACK_LINES)
-        cell.brief = judge_brief(read_jsonl(self.cfg.repo / ".pixel" / FEEDBACK_FILE), cell.cli.provider, cell.t_prompt_ms)
-        relay = judge_metrics(cell.scrollback, read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE), cell.t_prompt_ms)
         cell.submit_line = prompt_submit_line(cell.scrollback)
-        cell.metrics = judge_display(relay, cell.submit_line)
+        logged = judge_brief(read_jsonl(self.cfg.repo / ".pixel" / FEEDBACK_FILE), cell.cli.provider, cell.t_prompt_ms)
+        cell.brief = judge_brief_shown(logged, brief_on_screen(cell.scrollback, cell.submit_line))
         cell.shell_calls = shell_call_count(cell.scrollback)
-        if relay["verdict"] != "PASS" and cell.shell_calls < 2:
-            cell.events.append("no Pixel shell call on this pane: the model answered without running the command, so the relay could not fire")
+        relay = judge_metrics(cell.scrollback, read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE), cell.t_prompt_ms)
+        cell.metrics = judge_relay(relay, cell.shell_calls)
+        if cell.metrics["verdict"] == "NO-CALL":
+            cell.events.append("no Pixel shell call on this pane: the model answered without running the command, so nothing could be relayed")
         if not cell.elapsed_s:
             cell.elapsed_s = round(time.time() - cell.sent_at, 1)
         if cell.status in ("waiting", "pending"):
@@ -749,14 +771,15 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
     }
     (cfg.out / "receipt.json").write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
     rows = [
-        "| order | CLI | status | brief | metrics | prompt-submit line | relay | Pixel shell call | elapsed |",
+        "| order | CLI | status | brief | logged | on screen | metrics | Pixel shell call | elapsed |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for i, name in enumerate(order, 1):
         c = cells[name]
+        shown = c.brief.get("screen_evidence")
         rows.append(
-            f"| {i} | {name} | {c.status} | {c.brief.get('verdict', 'N/A')} | {c.metrics.get('verdict', 'N/A')} "
-            f"| {'yes' if c.submit_line else 'no'} | {c.metrics.get('relay_verdict', 'N/A')} "
+            f"| {i} | {name} | {c.status} | {c.brief.get('verdict', 'N/A')} | {'yes' if c.brief.get('logged') else 'no'} "
+            f"| {('`' + shown + '`') if shown else 'no'} | {c.metrics.get('verdict', 'N/A')} "
             f"| {'yes' if c.shell_calls >= 2 else 'no'} | {c.elapsed_s}s |"
         )
     s = doc["summary"]

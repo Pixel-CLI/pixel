@@ -146,6 +146,8 @@ elif a[:2] == ["agent", "prompt"]:
     after = [] if scen == "no-call" else ["$ pixel search-content -F start_brief crates/pixel/src", "crates/pixel/src/task_hook.rs:228:pub fn start_brief"]
     if cli in ("claude", "codex", "pi"):
         after.append("🟩 pixel prompt-submit ❀ 41ms")
+    elif scen != "hidden-brief":
+        after.append("[PIXEL:BRIEF] kind: lookup")  # the brief text, as a host that prints it shows it
     if scen == "no-call":
         pass
     elif scen == "claim-only":
@@ -362,24 +364,31 @@ class RunTests(unittest.TestCase):
         self.assertIn("5/5 brief, 4/5 metrics", out)
         m = fx.receipt()["clis"]["devin"]["metrics"]
         self.assertEqual((m["verdict"], m["box_ids_without_record"], m["record_found"]), ("FAIL", ["ffffff"], True))
-        self.assertEqual((m["relay_verdict"], m["sources"]), ("FAIL", []))
 
-    def test_an_answer_from_the_brief_alone_passes_on_the_prompt_submit_notice(self):
+    def test_an_answer_without_a_pixel_call_is_no_call_not_a_relay_failure(self):
         fx = Fixture(self)
         fx.scenarios = {"pi": "no-call", "agy": "no-call"}
         rc, out, _ = fx.run()
         self.assertEqual(rc, 1)
-        self.assertIn("5/5 brief, 4/5 metrics", out)
+        self.assertIn("5/5 brief, 3/5 metrics", out)
         clis = fx.receipt()["clis"]
-        pi, agy = clis["pi"], clis["agy"]
-        # pi has the notice: metrics reached the screen although no relay could fire.
-        self.assertEqual((pi["metrics"]["verdict"], pi["metrics"]["relay_verdict"], pi["metrics"]["sources"]), ("PASS", "FAIL", ["prompt-submit"]))
-        self.assertTrue(any("no Pixel shell call" in e for e in pi["events"]), pi["events"])
-        # agy has neither the notice nor a box: nothing reached the screen.
-        self.assertEqual((agy["metrics"]["verdict"], agy["metrics"]["sources"]), ("FAIL", []))
-        self.assertEqual(clis["claude"]["metrics"]["sources"], ["relay", "prompt-submit"])
-        self.assertEqual(clis["devin"]["metrics"]["sources"], ["relay"])
+        for name in ("pi", "agy"):
+            c = clis[name]
+            self.assertEqual((c["metrics"]["verdict"], c["shell_call_seen"]), ("NO-CALL", False), name)
+            self.assertTrue(any("no Pixel shell call" in e for e in c["events"]), c["events"])
         self.assertEqual({c["status"] for c in clis.values()}, {"done"})
+
+    def test_a_brief_the_hook_logged_but_the_pane_never_shows_fails(self):
+        fx = Fixture(self)
+        fx.scenarios = {"devin": "hidden-brief"}
+        rc, out, _ = fx.run()
+        self.assertEqual(rc, 1)
+        self.assertIn("4/5 brief, 5/5 metrics", out)
+        b = fx.receipt()["clis"]["devin"]["brief"]
+        self.assertEqual((b["verdict"], b["logged"], b["on_screen"], b["screen_evidence"]), ("FAIL", True, False, None))
+        shown = fx.receipt()["clis"]
+        self.assertEqual(shown["claude"]["brief"]["screen_evidence"], "🟩 pixel prompt-submit ❀ 41ms")
+        self.assertEqual(shown["agy"]["brief"]["screen_evidence"], "[PIXEL:BRIEF]")
 
     def test_metrics_fails_when_only_the_answer_claims_them(self):
         fx = Fixture(self)

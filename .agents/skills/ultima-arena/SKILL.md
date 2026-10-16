@@ -10,12 +10,13 @@ from files and screens, never from what the model says:
 
 | Check | PASS when |
 | --- | --- |
-| `brief` | `<repo>/.pixel/brief-feedback.jsonl` holds a `prompt` line and a `part` line with `bytes > 0` of that CLI's `provider`, both with `ts` at or after the moment the prompt was sent. |
-| `metrics` | a Pixel 🟩 line reached the CLI's screen by a hook (`sources` names which): the `🟩 pixel prompt-submit ❀ Xms` notice (Claude, Codex, pi), or the **relay**: `🟩 pixel search-content … #<id>` where `<repo>/.pixel/actions.jsonl` holds a `search-content` record, `ts_ms` at or after the prompt, whose `invocation_id` middle field ends in that `<id>` (last six characters, as `format_metrics_line` shows). |
+| `brief` | **logged**: `<repo>/.pixel/brief-feedback.jsonl` holds a `prompt` line and a `part` line with `bytes > 0` of that CLI's `provider`, both with `ts` at or after the moment the prompt was sent; **and on screen**: the pane shows the brief's text (`[PIXEL:BRIEF]`, pi's `[pixel-brief]`) or the `🟩 pixel prompt-submit ❀ Xms` notice, which the hook adds only to a delivered brief. |
+| `metrics` | the pane shows `🟩 pixel search-content … #<id>` and `<repo>/.pixel/actions.jsonl` holds a `search-content` record, `ts_ms` at or after the prompt, whose `invocation_id` middle field ends in that `<id>` (last six characters, as `format_metrics_line` shows). |
 
-A model that answers from the brief alone runs no Pixel command, so the relay
-cannot fire (`relay_verdict` FAIL, an event says so); the prompt-submit notice
-still shows the brief's own line, and that is what passes.
+`NO-CALL` (metrics) means the model answered without running the Pixel
+command: there was nothing to relay, so it is neither a pass nor a relay
+failure, and the run still exits 1. The prompt asks for the command before the
+question for that reason.
 
 The prompt never mentions metrics (a hard guard refuses `metric`, `🟩`, `❀`)
 and the answer is never scored: a model asked about metrics says yes.
