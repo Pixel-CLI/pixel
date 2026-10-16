@@ -148,12 +148,13 @@ pub(crate) fn read_symbols_like(
     rows.map(|row| row.map_err(sql)).collect()
 }
 
-/// The declaration `uid` names, or the only one called that.
+/// The declaration `uid` names, or the only one called that (a qualified
+/// name included, as the daemon resolves it).
 fn root_symbol(store: &GraphStore, uid: &str) -> Result<i64, String> {
     if let Some(row) = store.symbol_by_uid(uid).map_err(sql)? {
         return Ok(row.id);
     }
-    let rows = store.symbols_by_name(uid, None, 2).map_err(sql)?;
+    let rows = store.symbols_named(uid, None, 2).map_err(sql)?;
     match rows.as_slice() {
         [only] => Ok(only.id),
         [] => Err(format!("no symbol named '{uid}'")),
@@ -483,6 +484,42 @@ mod tests {
             read_callee_tree(&store, "run", 1, 5)
                 .unwrap_err()
                 .contains("more than one")
+        );
+    }
+
+    /// The brief's root lookup resolves a qualified method like the daemon:
+    /// the in-process route would otherwise refuse what `impact` answers.
+    #[test]
+    fn read_callee_tree_should_resolve_a_qualified_method_name() {
+        let (store, _) = store(
+            &[("log.rs", "rust")],
+            &[
+                (
+                    0,
+                    "finish",
+                    "ActionLog::finish",
+                    SymbolKind::Method,
+                    1,
+                    2,
+                    "fn finish()",
+                ),
+                (
+                    0,
+                    "finish",
+                    "Hasher::finish",
+                    SymbolKind::Method,
+                    3,
+                    4,
+                    "fn finish()",
+                ),
+            ],
+        );
+        let tree = read_callee_tree(&store, "ActionLog::finish", 1, 5).unwrap();
+        assert_eq!(
+            tree.iter()
+                .map(|node| node.uid.as_str())
+                .collect::<Vec<_>>(),
+            ["log.rs#ActionLog::finish#method"]
         );
     }
 }

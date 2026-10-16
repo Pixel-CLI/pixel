@@ -91,7 +91,7 @@ const MATCH_AFTER: u64 = 14;
 const CONTINUATION_CHARS: usize = 48;
 
 /// Characters of a pack the `pixel brief` command prints when nothing says
-/// otherwise: the Pi and OpenCode extensions that run it drop a brief over
+/// otherwise: the OpenCode extension that runs it drops a brief over
 /// 4 000 bytes.
 pub(crate) const CLI_CHARS: usize = 3_900;
 const _: () = assert!(CLI_CHARS < 4_000);
@@ -121,7 +121,7 @@ impl Limit {
 /// The limit the switches give. Off wins. [`PARTS_ENV`], when set, is the
 /// host's own count. Without it a hook gets the `brief_parts` setting
 /// (`setting`, the hooks `pixel install` registered), and the `brief` command
-/// (which Pi and OpenCode run) the size they accept. Pure: the caller reads
+/// (which OpenCode runs) the size it accepts. Pure: the caller reads
 /// the environment and the setting.
 pub(crate) fn limit_for(
     pack: Option<&str>,

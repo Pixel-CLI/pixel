@@ -99,12 +99,17 @@ fn task_hook_group_with(exe: &Path, provider: &str, event: &str, flags: &str) ->
         .display()
         .to_string()
         .replace('\'', "'\\''");
-    serde_json::json!({"hooks":[{
+    let mut group = serde_json::json!({"hooks":[{
         "type":"command",
         "command":format!("'{executable}' run-hook task-event --provider {provider} --event {event}{flags}{}",
             if event == "prompt-submit" { " || true" } else { "" }),
         "timeout":if matches!(event, "session-end" | "interrupt") { 3 } else { 10 }
-    }]})
+    }]});
+    // Devin shows no hook output; `show_output` prints that the brief hook ran.
+    if provider == "devin" && event == "prompt-submit" {
+        group["hooks"][0]["show_output"] = true.into();
+    }
+    group
 }
 
 /// Check every synchronous task boundary exactly once before comparing the

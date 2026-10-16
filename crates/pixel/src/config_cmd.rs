@@ -140,7 +140,7 @@ fn validate(path: &Path) -> Result<(), String> {
 
 /// How many `UserPromptSubmit` hooks `pixel setup` registers for the prompt
 /// brief: `brief_parts` from the repository layer, then the global one, else 3.
-fn brief_parts(root: Option<&Path>) -> u8 {
+pub(crate) fn brief_parts(root: Option<&Path>) -> u8 {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
