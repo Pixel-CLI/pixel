@@ -859,6 +859,17 @@ long untagged paste:
   relevance probe and the meaning search run at once on the deadline, and
   only the gate decides whether the repository is the subject.
 
+A prompt with nothing typed but a `<pasted_content>` block has no shape of its
+own, and the paste is someone else's text. It is judged on the head of the
+paste's first paragraph and the tail of its last (`pasted_task`: 300 and 299
+characters joined by a line break, so the whole stays within `PASTE_TAIL_CHARS`
+and neither `brief_task` nor the decision log cuts it; links dropped), and only
+ever as plain language, whatever identifiers the paste holds, so the gate above
+always decides it. The plain-language rule applies to that excerpt, so a paste
+that comes down to operations, one content word or a link stays declined. The
+decision log's `typed` is the excerpt, credential shapes masked like any typed
+text; a declined paste logs nothing of it.
+
 Unless `PIXEL_BRIEF_FRENCH=0`, a prompt that pixel-mvp's
 rule reads as French (`mvp_model::language`: two French function words or
 more, outnumbering its English ones) is searched, judged and gated on the

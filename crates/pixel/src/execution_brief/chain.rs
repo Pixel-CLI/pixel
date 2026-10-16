@@ -2700,7 +2700,8 @@ pub(crate) struct Pending {
     log: Option<PathBuf>,
     /// The daemon start this prompt gave, when it gave one.
     kicked: Option<autostart::Kicked>,
-    /// The text the brief judged: the typed prompt, or its last paragraph.
+    /// The text the brief judged: the typed prompt, its last paragraph, or the
+    /// excerpt of the paste for a prompt that is only a pasted block.
     task: String,
     signal: Signal,
     /// Where the ranges the pack sends are remembered for the session.
@@ -7256,6 +7257,107 @@ mod tests {
         assert_eq!(record.signal, None);
         assert_eq!((record.ops, record.answered, record.bytes), (0, 0, 0));
         assert!(record.ts_ms > 1_577_836_800_000, "{}", record.ts_ms);
+    }
+
+    /// A prompt that is only a pasted block: what the thread is about, a log
+    /// nobody asks about, and what is wanted of it.
+    fn pasted_only_prompt() -> String {
+        [
+            "<pasted_content id=\"1\">",
+            PROSE,
+            "",
+            "a log that matters little",
+            "",
+            "and make the watcher wait for the first scan",
+            "</pasted_content id=\"1\">",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn a_prompt_that_is_only_a_pasted_block_should_be_briefed_on_its_head_and_tail() {
+        let prompt = pasted_only_prompt();
+        let task = [PROSE, "and make the watcher wait for the first scan"].join("\n");
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![lead(DAEMON, 280, "fn watch_ready() {")]);
+        let fake = Arc::new(fake);
+        let seen = Arc::clone(&fake);
+        let finished = try_start_with(
+            &prompt,
+            OPEN,
+            SECOND,
+            move |_| Box::new(Shared(fake)),
+            no_verdict,
+            model_high,
+            Around::default(),
+        )
+        .expect("a paste with a task starts a brief")
+        .finish_with_record();
+        // The probes read the task, never the log between its two ends.
+        assert_eq!(
+            sorted(seen.calls()),
+            [
+                format!("meaning {task} limit 8"),
+                format!("relevance {task}")
+            ]
+        );
+        let text = finished.text.expect("an on-topic paste is briefed");
+        assert!(text.contains(DAEMON), "{text}");
+        let record = finished.record;
+        assert_eq!(
+            (record.signal, record.gate, record.enforced),
+            (Some("prose"), "open", true)
+        );
+        assert_eq!(record.typed, task);
+        assert_eq!(record.sha256, decision_log::sha256_hex(&task));
+    }
+
+    #[test]
+    fn a_pasted_block_should_still_meet_the_gate_and_reach_the_log_masked() {
+        // Plain language, whatever the paste holds: the gate closes a paste
+        // the repository is not about.
+        let mut off = Fake::new();
+        off.relevance = Ok(off_topic_answer());
+        let closed = briefed_with(&pasted_only_prompt(), off, no_verdict, model_off);
+        assert_eq!(closed.text, None);
+        assert_eq!(
+            (closed.record.signal, closed.record.gate),
+            (Some("prose"), "closed")
+        );
+        // A credential in the paste is masked in the log like one typed.
+        let leaking = [
+            "<pasted_content>",
+            "the daemon misses changes, the key is sk-abcdef123456 here",
+            "</pasted_content>",
+        ]
+        .join("\n");
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        let logged = briefed(&leaking, fake, no_verdict).record.typed;
+        assert_eq!(
+            logged,
+            "the daemon misses changes, the key is <redacted> here"
+        );
+    }
+
+    #[test]
+    fn a_pasted_block_beside_typed_words_should_still_be_declined_as_not_about_code() {
+        let beside =
+            "<pasted_content>the daemon misses changes made during startup</pasted_content> thanks";
+        let declined = try_start_with(
+            beside,
+            OPEN,
+            SECOND,
+            |_| Box::new(Fake::new()),
+            no_verdict,
+            model_high,
+            Around::default(),
+        );
+        assert_eq!(declined.err(), Some(Declined::NotAboutCode));
+        // Its record keeps the typed words only: the paste is not logged.
+        let record = declined_record(Declined::NotAboutCode, beside);
+        assert_eq!(record.typed, "thanks");
     }
 
     #[test]
