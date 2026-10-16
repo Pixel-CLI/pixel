@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -175,7 +176,16 @@ pub fn backup_if_changing(path: &Path, new_content: &[u8]) -> io::Result<Option<
         Some(parent) => parent.join(backup_name),
         None => PathBuf::from(backup_name),
     };
-    fs::write(&backup_path, &current)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut backup = options.open(&backup_path)?;
+    backup.write_all(&current)?;
+    backup.set_permissions(fs::metadata(path)?.permissions())?;
     Ok(Some(backup_path))
 }
 

@@ -291,7 +291,8 @@ Removal validates all receipt paths before its first write (including rejecting
 parent traversal), compares installed fingerprints and modes, and preserves
 files changed after setup. Restores use private temporary files and preserve
 existing symlinks. Only setup-created empty directories are pruned; backups
-remain and are listed in the report.
+remain and are listed in the report. Recovery copies are created privately
+and retain the original file's permission bits.
 Hook commands embed the
 absolute binary path, quoted by `routing::quoted_executable`. The binary
 reaches users through `scripts/release/install.sh` (archive checked against the
