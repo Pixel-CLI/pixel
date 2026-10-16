@@ -1092,9 +1092,14 @@ short follow-up (`is_follow_up`: at most ten words that ask for a change or
 lean on what came before) that the gate would have closed is let through
 instead, when the session has files: the files are the brief
 (`Admission::Context`, gate `open`, reason `context: …`, rendered as a low-tier
-maybe) and the off-topic leads of its words are dropped. A source that has not
-answered inside its window adds nothing. `PIXEL_BRIEF_CONTEXT=0|false|off`
-turns it off, and the `brief` command, which has no session, never uses it.
+maybe) and the off-topic leads of its words are dropped. The lift is checked
+before the relevance probe's outcome (`refusal_lifting`), so a probe that
+failed (`relevance: facts: index_stale`) or did not answer in time no more
+closes the follow-up than an off-topic score does, and a lifted brief counts as
+answered when neither probe could be asked: the session's files alone make it.
+A source that has not answered inside its window adds nothing.
+`PIXEL_BRIEF_CONTEXT=0|false|off` turns it off, and the `brief` command, which
+has no session, never uses it.
 
 **Evidence sent once** (`execution_brief/sent.rs`). A session that asks again
 about code it was just sent would get the same lines again, and they would fill

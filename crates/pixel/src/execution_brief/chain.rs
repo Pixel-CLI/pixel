@@ -3356,7 +3356,9 @@ fn score(got: &mut Gathered, typed: &str, model: Model) {
 /// Why `signal`'s prompt gets no brief, if it does not. `complete`: no more
 /// answers are coming, so a probe that never answered counts as "cannot tell".
 /// `lift`: a short follow-up of a session that is working on files, which the
-/// relevance gate does not close (see [`is_follow_up`]).
+/// relevance gate does not close (see [`is_follow_up`]): not by scoring it off
+/// topic, and not by a probe that failed or never answered, which says nothing
+/// about the prompt.
 /// Plain language must be shown on topic by the repository, the intent judge
 /// having no say in it; a weak prompt is refused by the judge, and by the
 /// relevance decision when `enforce_weak`.
@@ -3393,10 +3395,11 @@ fn refusal_lifting(
             // A tour or a review is about the repository whatever words it
             // uses, and whether or not the probe could be asked.
             _ if admitted_by_kind(kind, got.scored.as_ref()) => None,
+            // The session's files place a short follow-up whatever the probe
+            // said or failed to say: `fold_with` lifts it onto them.
+            _ if lift => None,
             (Some(Err(reason)), _) => Some(Admission::Closed(format!("relevance: {reason}"))),
-            (_, Some(scored))
-                if scored.tier == Tier::Off && !lift && !admitted_by_coverage(scored) =>
-            {
+            (_, Some(scored)) if scored.tier == Tier::Off && !admitted_by_coverage(scored) => {
                 Some(Admission::Closed(off_topic_reason(scored)))
             }
             (None, _) if complete => Some(Admission::Closed(
@@ -3535,6 +3538,10 @@ fn fold_with(state: &Mutex<Brief>, plan: &Plan, got: &Gathered, session: &[Strin
         if answers > 0 {
             brief.answered += answers;
             brief.searched = true;
+        } else if lifted {
+            // No probe could be asked, but the session's files are the brief:
+            // without this `fit` drops it as a brief of failures.
+            brief.answered = 1;
         }
         brief.confidence = if lifted {
             Some(relevance::LOW_CONFIDENCE_LINE.to_string())
@@ -6754,6 +6761,51 @@ mod tests {
     }
 
     #[test]
+    fn refusal_lifting_should_not_close_a_lifted_prose_prompt_whatever_the_probe_says() {
+        let lookup = QuestionKind::Lookup;
+        let failed = gathered(Some(Err("facts: index_stale".into())), None, Tier::Off);
+        let silent = gathered(None, Some(None), Tier::Off);
+        let off = gathered(Some(Ok(off_topic_answer())), None, Tier::Off);
+        for (got, complete, closed) in [
+            (&failed, false, "relevance: facts: index_stale"),
+            (&failed, true, "relevance: facts: index_stale"),
+            (&silent, true, "relevance: no answer before the deadline"),
+            (
+                &off,
+                false,
+                "off topic: score -1.00, 3/3 key terms in the best file",
+            ),
+        ] {
+            assert_eq!(
+                refusal_lifting(Signal::Prose, got, complete, false, lookup, false),
+                Some(Admission::Closed(closed.into())),
+                "unlifted: {closed}"
+            );
+            assert_eq!(
+                refusal_lifting(Signal::Prose, got, complete, false, lookup, true),
+                None,
+                "lifted: {closed}"
+            );
+        }
+    }
+
+    #[test]
+    fn refusal_lifting_should_leave_a_judge_denial_standing_for_a_lifted_weak_prompt() {
+        let denied = gathered(Some(Ok(on_topic_answer())), said("none", 0.9), Tier::High);
+        assert_eq!(
+            refusal_lifting(
+                Signal::Weak,
+                &denied,
+                true,
+                false,
+                QuestionKind::Lookup,
+                true
+            ),
+            Some(Admission::Denied("judge: none (0.90)".into()))
+        );
+    }
+
+    #[test]
     fn refusal_should_deny_a_weak_prompt_only_on_none_and_close_it_only_when_enforced() {
         let on = |tier| Some(Ok(on_topic_answer())).map(|answer| (answer, tier));
         let on_gathered = |judged, tier| {
@@ -9496,11 +9548,9 @@ mod tests {
         }
     }
 
-    /// Start `prompt` on an off-topic repository, with `around`.
-    fn briefed_off_topic(prompt: &str, around: Around) -> Finished {
-        let mut fake = Fake::new();
-        fake.relevance = Ok(off_topic_answer());
-        fake.meaning = Ok(vec![lead(DAEMON, 1, "an unrelated lead")]);
+    /// Start `prompt` on `fake`, with `around` and a model that puts every
+    /// prompt it scores off topic.
+    fn briefed_around(prompt: &str, fake: Fake, around: Around) -> Finished {
         try_start_with(
             prompt,
             OPEN,
@@ -9512,6 +9562,27 @@ mod tests {
         )
         .expect("the prompt starts a brief")
         .finish_with_record()
+    }
+
+    /// Start `prompt` on an off-topic repository, with `around`.
+    fn briefed_off_topic(prompt: &str, around: Around) -> Finished {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(off_topic_answer());
+        fake.meaning = Ok(vec![lead(DAEMON, 1, "an unrelated lead")]);
+        briefed_around(prompt, fake, around)
+    }
+
+    /// A short follow-up that names nothing: plain language, so the relevance
+    /// gate alone decides it, and few enough words to be lifted.
+    const FOLLOW_UP: &str = "now make the daemon faster";
+
+    /// A repository whose relevance probe fails, as it does behind a stale
+    /// base shard, while the meaning search still answers.
+    fn probe_failed() -> Fake {
+        let mut fake = Fake::new();
+        fake.relevance = Err("facts: index_stale".into());
+        fake.meaning = Ok(vec![lead(DAEMON, 1, "an unrelated lead")]);
+        fake
     }
 
     #[test]
@@ -9537,11 +9608,73 @@ mod tests {
     }
 
     #[test]
+    fn a_short_follow_up_should_be_let_through_on_the_session_files_when_the_relevance_probe_fails()
+    {
+        assert_eq!(
+            brief_signal(FOLLOW_UP),
+            Some((FOLLOW_UP.to_string(), Signal::Prose))
+        );
+        assert!(is_follow_up(FOLLOW_UP));
+        let finished = briefed_around(
+            FOLLOW_UP,
+            probe_failed(),
+            around_session(&["src/a.rs"], &["src/b.rs", "src/a.rs"]),
+        );
+        let text = finished.text.expect("the session's files make a brief");
+        assert!(text.contains("\nfiles: src/a.rs; src/b.rs\n"), "{text}");
+        assert!(text.contains(relevance::LOW_CONFIDENCE_LINE), "{text}");
+        assert!(
+            !text.contains(DAEMON),
+            "the words' own leads are left out of a lifted brief: {text}"
+        );
+        let record = finished.record;
+        assert_eq!(
+            (record.signal, record.gate, record.tier),
+            (Some("prose"), "open", Some("low"))
+        );
+        assert_eq!(
+            record.reason.as_deref(),
+            Some("context: a short follow-up on the session's files")
+        );
+        assert_eq!(finished.paths, vec!["src/a.rs", "src/b.rs"]);
+    }
+
+    #[test]
+    fn a_lifted_follow_up_should_be_briefed_on_the_session_files_when_no_probe_answered() {
+        // The relevance probe fails and the meaning search is unavailable: the
+        // only evidence left is the session's own files.
+        let mut fake = Fake::new();
+        fake.relevance = Err("facts: index_stale".into());
+        let finished = briefed_around(
+            FOLLOW_UP,
+            fake,
+            around_session(&["src/a.rs"], &["src/b.rs", "src/a.rs"]),
+        );
+        let text = finished.text.expect("the session's files make a brief");
+        assert!(text.contains("\nfiles: src/a.rs; src/b.rs\n"), "{text}");
+        assert!(text.contains(relevance::LOW_CONFIDENCE_LINE), "{text}");
+        let record = finished.record;
+        assert_eq!((record.gate, record.tier), ("open", Some("low")));
+        assert_eq!((record.ops, record.answered), (2, 1));
+        assert_eq!(finished.paths, vec!["src/a.rs", "src/b.rs"]);
+    }
+
+    #[test]
     fn the_same_follow_up_without_session_files_should_stay_closed() {
         for around in [Around::default(), around_session(&[], &[])] {
             let finished = briefed_off_topic("now fix the test", around);
             assert_eq!(finished.text, None);
             assert_eq!(finished.record.gate, "closed");
+        }
+        // A failed probe closes it as well when there is no session to lift it.
+        for around in [Around::default(), around_session(&[], &[])] {
+            let finished = briefed_around(FOLLOW_UP, probe_failed(), around);
+            assert_eq!(finished.text, None);
+            assert_eq!(finished.record.gate, "closed");
+            assert_eq!(
+                finished.record.reason.as_deref(),
+                Some("relevance: facts: index_stale")
+            );
         }
     }
 
