@@ -100,14 +100,7 @@ Keeping the agent's context bill down is an idea whose time has come — teams a
 | [Spotify `shunt`](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt) | Hooks block the agent from reading large files directly; a skill delegates the read to a cheaper internal LLM that summarizes (82–94% token savings claimed) | Claude Code `PreToolUse` hooks → AiKA modes via Portal CLI | An extra billed model call per delegated read or codegen |
 | [xerj](https://github.com/xerj-org/xerj) | Indexes any folder (code through tree-sitter, plus docs, logs and PDFs) into a local Elasticsearch-compatible engine that the agent searches instead of reading files (2.7× fewer output tokens than grep claimed on reference coding) | Local server + `xerj search` / `xerj def` CLI, or the MCP tool and skill `xerj init` installs | Free and local, but a server to keep running and a search call per lookup |
 
-**Measured: Pixel alone vs. Pixel + xerj.** We appended xerj's top five `xerj search` passages to Pixel's brief and ran the 13 census prompts (ripgrep, requests, excalidraw, pixel) in Claude Code, one run per arm: `arena.sh run-set census --agent claude`, then the same with `--brief-extra`, Pixel 0.8.0, xerj 1.0.0-rc.95.
-
-| 13 census prompts, Claude Code, 1 run per arm | Tool calls | Tokens |
-|---|---:|---:|
-| Pixel brief | **26** | 1.81M |
-| Pixel brief + xerj passages | 37 (+42%) | 2.51M (+39%) |
-
-xerj helped on 4 prompts, hurt on 5 and changed nothing on 4. `xerj autoindex` took 38 s (ripgrep), 58 s (requests), 184 s (excalidraw) and 368 s (pixel) on an M4 Max, most of it in the server's final refresh.
+We tried xerj's top passages appended to Pixel's brief on 13 arena prompts in Claude Code (one run each): **26 tool calls with the Pixel brief, 37 with xerj added**, and 1.81M → 2.51M tokens. [Method, per-prompt results and indexing times](docs/bench/vs-xerj.md).
 
 Same goal, different lever: AWS and Spotify delegate work to another model or service, and xerj gives the agent a search engine it still has to call. Pixel makes the context a **deterministic lookup in a local index**, attached before the prompt. No extra tokens, no extra round trip, no cloud dependency — the same brief every time, cited to the line.
 
