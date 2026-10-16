@@ -64,6 +64,18 @@ def agent_of(name):
     return st["agents"].get(name)
 
 
+def agy_store(conversation, rows):
+    """agy's own record of a conversation: one SQLite file, a step per (type, text)."""
+    import sqlite3
+    d = os.environ["HOME"] + "/.gemini/antigravity-cli/conversations"
+    os.makedirs(d, exist_ok=True)
+    c = sqlite3.connect(d + "/" + conversation + ".db")
+    c.execute("CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer NOT NULL DEFAULT 0, step_payload blob)")
+    c.executemany("INSERT INTO steps VALUES (?, ?, ?)", [(i, k, b"\x08Z\x02\n" + t.encode()) for i, (k, t) in enumerate(rows)])
+    c.commit()
+    c.close()
+
+
 if a[:2] == ["pane", "split"]:
     st["n"] += 1
     pid = "p%d" % st["n"]
@@ -145,18 +157,22 @@ elif a[:2] == ["agent", "prompt"]:
         append(REPO + "/.pixel/actions.jsonl", {"invocation_id": "123-18df019d6%s-0" % i6, "ts_ms": t + 1, "pid": 1,
                "command": "search-content", "args": "-F start_brief crates/pixel/src", "cwd": REPO, "outcome": "ok", "duration_ms": 12})
     after = [] if scen == "no-call" else ["$ pixel search-content -F start_brief crates/pixel/src", "crates/pixel/src/task_hook.rs:228:pub fn start_brief"]
+    box = None if scen in ("no-call", "claim-only") else "🟩 pixel search-content ❀ 12.3ms ❀ #%s" % ("ffffff" if scen == "orphan-box" else i6)
     if cli in ("claude", "codex", "pi"):
         after.append("🟩 pixel prompt-submit ❀ 41ms")
-    elif scen != "hidden-brief":
-        after.append("[PIXEL:BRIEF] kind: lookup")  # the brief text, as a host that prints it shows it
-    if scen == "no-call":
-        pass
-    elif scen == "claim-only":
+    elif cli == "devin" and scen != "hidden-brief":  # what `show_output` prints
+        after += [" ✱ Hook completed: '/x/pixel' run-hook task-event --provider devin --event prompt-", "   submit || true"]
+    if cli == "agy":  # agy draws no hook output: the brief and the relay land in its store only
+        rows = [] if scen == "hidden-brief" else [(90, "[PIXEL:BRIEF] kind: lookup")]
+        if scen != "no-call":
+            rows.append((132, "🟩 pixel search-content ❀ 12.3ms ❀ #%s" % i6))  # the tool's own output
+        if box:
+            rows.append((90, box))
+        agy_store(sess, rows)
+    elif box:
+        after.append(box)
+    if scen == "claim-only":
         after.append("The pixel metrics line was displayed: search-content 12ms #%s" % i6)
-    elif scen == "orphan-box":
-        after.append("🟩 pixel search-content ❀ 12.3ms ❀ #ffffff")
-    else:
-        after.append("🟩 pixel search-content ❀ 12.3ms ❀ #%s" % i6)
     after.append("answer: crates/pixel/src/task_hook.rs:228")
     g["screen"].append("> " + text)
     g["after"] = after
@@ -180,7 +196,9 @@ esac
 exit 0
 """
 
-COMMON = ["--poll-s", "0.02", "--gap", "0", "--start-timeout", "3", "--timeout", "5", "--seed", "7"]
+# Generous timeouts: no test waits one out (each ends on a finished fake turn), and a fake
+# `herdr` call costs ~0.3 s of Python start-up on a loaded Mac, which made 3 s flaky.
+COMMON = ["--poll-s", "0.02", "--gap", "0", "--start-timeout", "30", "--timeout", "60", "--seed", "7"]
 
 
 def git(cwd, *args):
@@ -439,7 +457,35 @@ class RunTests(unittest.TestCase):
         self.assertEqual((b["verdict"], b["logged"], b["on_screen"], b["screen_evidence"]), ("FAIL", True, False, None))
         shown = fx.receipt()["clis"]
         self.assertEqual(shown["claude"]["brief"]["screen_evidence"], "🟩 pixel prompt-submit ❀ 41ms")
-        self.assertEqual(shown["agy"]["brief"]["screen_evidence"], "[PIXEL:BRIEF]")
+        agy = shown["agy"]
+        self.assertEqual((agy["brief"]["screen_evidence"], agy["metrics"]["verdict"]), ("agy store: [PIXEL:BRIEF]", "PASS"))
+        self.assertEqual(agy["agy_store"], {"conversations": ["s-agy"], "ephemeral_steps": 2})
+        self.assertNotIn("🟩", (fx.tmp / "out" / "agy.scrollback.txt").read_text())
+        self.assertIn("#aaaaa4", (fx.tmp / "out" / "agy.injected.txt").read_text())
+        self.assertNotIn("agy_store", shown["claude"])
+
+    def test_agy_counts_only_injected_steps_of_the_turn_s_conversation(self):
+        store = pathlib.Path(tempfile.mkdtemp(prefix="ultima-agy-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(store, ignore_errors=True))
+        import sqlite3
+
+        def db(name, rows):
+            with contextlib.closing(sqlite3.connect(store / f"{name}.db")) as c:
+                c.execute("CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, step_payload blob)")
+                c.executemany("INSERT INTO steps VALUES (?, ?, ?)", [(i, k, t.encode()) for i, (k, t) in enumerate(rows)])
+                c.commit()
+
+        tool_box, relay = "🟩 pixel search-content ❀ 1ms ❀ #aaaaa4", "🟩 pixel search-content ❀ 1ms ❀ #bbbbb4"
+        db("conv-1", [(14, "the prompt"), (90, "[PIXEL:BRIEF] x"), (132, tool_box), (90, relay)])
+        db("older", [(90, "[PIXEL:BRIEF] old")])
+        got = ua.agy_injected(["conv-1"], 0, store)
+        self.assertEqual(got, {"conversations": ["conv-1"], "steps": ["[PIXEL:BRIEF] x", relay]})
+        # No session in the brief log: every conversation file written since the prompt.
+        os.utime(store / "older.db", (1, 1))
+        self.assertEqual(ua.agy_injected([], 10_000, store)["conversations"], ["conv-1"])
+        self.assertEqual(ua.agy_injected(["../conv-1"], 10_000, store)["conversations"], ["conv-1"])
+        self.assertEqual(ua.agy_injected([], ua.now_ms() + 60_000, store), {"conversations": [], "steps": []})
+        self.assertEqual(ua.agy_injected(["conv-1"], 0, store / "missing"), {"conversations": [], "steps": []})
 
     def test_metrics_fails_when_only_the_answer_claims_them(self):
         fx = Fixture(self)

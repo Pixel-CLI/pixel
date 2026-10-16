@@ -26,6 +26,7 @@ model asked about metrics would say yes. See SKILL.md.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import datetime
 import json
@@ -34,6 +35,7 @@ import pathlib
 import random
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -157,6 +159,7 @@ def judge_brief(rows: list[dict], provider: str, since_ms: int) -> dict:
         "injected": sorted({str(i) for p in prompts for i in p.get("injected", [])})[:8],
         "late_parts": sum(1 for q in parts if q.get("late")),
         "same_session": same_session,
+        "sessions": sorted({str(p["session"]) for p in prompts if p.get("session")}),
     }
 
 
@@ -261,6 +264,37 @@ def brief_on_screen(scrollback: str, submit_line: str | None) -> str | None:
         if marker in scrollback:
             return marker
     return submit_line or devin_hook_line(scrollback)
+
+
+# agy draws no hook output (1.4.0: of every response shape tried, only a `userMessage` step
+# shows, as a fake user turn), so what its hooks injected is read back from its own store:
+# one SQLite file per conversation, each injected `ephemeralMessage` a step of type 90. A
+# tool's own output is another type (132 for run_command), so its box never counts as relayed.
+AGY_PROVIDER = "antigravity"
+AGY_STORE = pathlib.PurePath(".gemini/antigravity-cli/conversations")
+AGY_EPHEMERAL_STEP = 90
+
+
+def agy_injected(sessions: list[str], since_ms: int, store: pathlib.Path | None = None) -> dict:
+    """The `ephemeralMessage` steps agy stored for the turn: from the conversations the brief log
+    names (its `session` is agy's `conversationId`), else from every conversation file written
+    since the prompt."""
+    store = store or pathlib.Path.home() / AGY_STORE
+    dbs = [store / f"{s}.db" for s in sessions if re.fullmatch(r"[\w-]+", s)]
+    dbs = [db for db in dbs if db.is_file()]
+    if not dbs:
+        with contextlib.suppress(OSError):
+            dbs = [db for db in store.glob("*.db") if db.stat().st_mtime * 1000 >= since_ms]
+    dbs = sorted(set(dbs))
+    steps = []
+    for db in dbs:
+        try:
+            with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
+                rows = conn.execute("SELECT step_payload FROM steps WHERE step_type = ? ORDER BY idx", (AGY_EPHEMERAL_STEP,)).fetchall()
+        except sqlite3.Error:
+            continue
+        steps += [bytes(payload).decode("utf-8", "replace") for (payload,) in rows if payload]
+    return {"conversations": [db.stem for db in dbs], "steps": steps}
 
 
 def judge_brief_shown(logged: dict, shown: str | None) -> dict:
@@ -473,6 +507,7 @@ class Cell:
     screen0: str = ""
     last_screen: str = ""
     stable: int = 0
+    store: dict = dataclasses.field(default_factory=dict)  # agy only: `agy_injected`
 
     @property
     def name(self) -> str:
@@ -724,11 +759,18 @@ class Arena:
         cell.scrollback = self.h.read(cell.name, "recent-unwrapped", SCROLLBACK_LINES)
         cell.submit_line = prompt_submit_line(cell.scrollback)
         logged = judge_brief(read_jsonl(self.cfg.repo / ".pixel" / FEEDBACK_FILE), cell.cli.provider, cell.t_prompt_ms)
-        cell.brief = judge_brief_shown(logged, brief_on_screen(cell.scrollback, cell.submit_line))
+        shown = brief_on_screen(cell.scrollback, cell.submit_line)
+        evidence = cell.scrollback
+        if cell.cli.provider == AGY_PROVIDER:  # agy shows nothing: what it stored stands in for its screen
+            cell.store = agy_injected(logged["sessions"], cell.t_prompt_ms)
+            injected = "\n".join(cell.store["steps"])
+            shown = shown or next((f"agy store: {m}" for m in BRIEF_TEXT_MARKERS if m in injected), None)
+            evidence += "\n" + injected
+        cell.brief = judge_brief_shown(logged, shown)
         actions = read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE)
         until = cell.t_done_ms or None
         cell.shell_calls = shell_call_count(actions, cell.t_prompt_ms, until)
-        relay = judge_metrics(cell.scrollback, actions, cell.t_prompt_ms, until)
+        relay = judge_metrics(evidence, actions, cell.t_prompt_ms, until)
         cell.metrics = judge_relay(relay, cell.shell_calls)
         if cell.metrics["verdict"] == "NO-CALL":
             cell.events.append("no Pixel shell call on this pane: the model answered without running the command, so nothing could be relayed")
@@ -793,6 +835,8 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
     for name in order:
         c = cells[name]
         (cfg.out / f"{name}.scrollback.txt").write_text(c.scrollback, encoding="utf-8")
+        if c.store:
+            (cfg.out / f"{name}.injected.txt").write_text("\n\f\n".join(c.store["steps"]), encoding="utf-8")
         per_cli[name] = {
             "provider": c.cli.provider,
             "pane": c.pane,
@@ -808,6 +852,7 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
             "keys_sent": c.keys_sent,
             "events": c.events,
             "screen_excerpt": c.excerpt,
+            **({"agy_store": {"conversations": c.store["conversations"], "ephemeral_steps": len(c.store["steps"])}} if c.store else {}),
             "ok": c.ok,
         }
     doc = {
@@ -847,7 +892,7 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
         "",
         f"**{s['brief']}/{s['of']} brief, {s['metrics']}/{s['of']} metrics**",
         "",
-        "Verdicts come from `.pixel/brief-feedback.jsonl`, `.pixel/actions.jsonl` and each CLI's scrollback; the model's answer is not scored.",
+        "Verdicts come from `.pixel/brief-feedback.jsonl`, `.pixel/actions.jsonl`, each CLI's scrollback and, for agy, which draws no hook output, the `ephemeralMessage` steps of its conversation store; the model's answer is not scored.",
     ]
     (cfg.out / "receipt.md").write_text("\n".join(md) + "\n", encoding="utf-8")
 
