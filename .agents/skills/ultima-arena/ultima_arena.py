@@ -61,6 +61,10 @@ BUILD_CMD = "cargo build --profile dev-release -p pixel-cli"
 NAME_PREFIX = "ultima-"
 # Herdr reports a turn that ended as `done` (Claude, Codex, agy, Devin) or `idle` (pi).
 FINISHED = ("idle", "done")
+# Polls a screen must hold still before its turn counts as ended: Herdr sees no
+# state change on pi, so the screen is the only signal there.
+STABLE_POLLS = 3
+OPERATOR_SHARE = 0.3
 FEEDBACK_FILE = "brief-feedback.jsonl"
 ACTIONS_FILE = "actions.jsonl"
 BRIEF_LOG_OFF = ("0", "false", "off")  # decision_log::enabled
@@ -160,13 +164,30 @@ BOX = re.compile(r"🟩 pixel (?P<op>[\w-]+)[^\n]*?❀ (?P<ms>[0-9.]+)ms ❀ #(?
 FRAMING = ("│", "⎿", "└", "┃", "|", "┆")
 
 
+# A narrow pane hard-wraps a header over two or three lines (Codex, Claude): the
+# flat pass joins every line break, with the framing that follows it, into one space.
+WRAP = re.compile(r"[ \t]*\n[ \t│┃⎿└├|┆]*")
+BOX_FLAT = re.compile(
+    r"🟩 ?pixel (?P<op>[\w-]+) [^🟩]*?❀ ?(?P<ms>[0-9.]+) ?ms ?❀ ?#(?P<id>(?:[0-9A-Fa-f] ?){6})"
+)
+
+
 def parse_boxes(scrollback: str) -> list[dict]:
-    """Every `🟩 pixel <op> ❀ <ms>ms ❀ #<id>` header; `framed` when it sits inside tool-output framing."""
+    """Every `🟩 pixel <op> ❀ <ms>ms ❀ #<id>` header; `framed` when it sits inside tool-output framing.
+
+    Headers on one line come first; a header only the flat pass finds was wrapped
+    by the pane, and its framing is unknown (`framed` None)."""
     boxes = []
     for line in scrollback.splitlines():
         m = BOX.search(line)
         if m:
             boxes.append({"op": m["op"], "ms": float(m["ms"]), "id": m["id"].lower(), "line": line.strip(), "framed": line.strip().startswith(FRAMING)})
+    whole = {(b["op"], b["id"]) for b in boxes}
+    for m in BOX_FLAT.finditer(WRAP.sub(" ", scrollback)):
+        key = (m["op"], m["id"].replace(" ", "").lower())
+        if key not in whole:
+            whole.add(key)
+            boxes.append({"op": key[0], "ms": float(m["ms"]), "id": key[1], "line": m[0], "framed": None})
     return boxes
 
 
@@ -178,20 +199,30 @@ def prompt_submit_line(scrollback: str) -> str | None:
     return None
 
 
-def judge_metrics(scrollback: str, actions: list[dict], since_ms: int) -> dict:
-    """PASS when a displayed `search-content` box carries the id of a record the log gained after `since_ms`."""
+def turn_records(actions: list[dict], since_ms: int, until_ms: int | None = None) -> list[dict]:
+    """The `search-content` records of one turn: written at or after `since_ms` and, when the turn
+    ended, by `until_ms`. Turns run one at a time, so the window belongs to one CLI."""
+    return [
+        r for r in actions
+        if r.get("command") == "search-content" and isinstance(r.get("ts_ms"), (int, float))
+        and r["ts_ms"] >= since_ms and (until_ms is None or r["ts_ms"] <= until_ms)
+        and isinstance(r.get("invocation_id"), str)
+    ]
+
+
+def judge_metrics(scrollback: str, actions: list[dict], since_ms: int, until_ms: int | None = None) -> dict:
+    """PASS when a displayed `search-content` box carries the id of a record of this turn."""
     records = {}
-    for r in actions:
-        ts = r.get("ts_ms")
-        if r.get("command") == "search-content" and isinstance(ts, (int, float)) and ts >= since_ms and isinstance(r.get("invocation_id"), str):
-            records[short_id(r["invocation_id"]).lower()] = r
+    for r in turn_records(actions, since_ms, until_ms):
+        records[short_id(r["invocation_id"]).lower()] = r
     boxes = [b for b in parse_boxes(scrollback) if b["op"] == "search-content"]
     matched = [b for b in boxes if b["id"] in records]
     return {
         "verdict": "PASS" if matched else "FAIL",
         "seen": bool(matched),
         "occurrences": len(matched),
-        "outside_tool_framing": (any(not b["framed"] for b in matched) if matched else None),
+        # None when no matched header sat whole on one line: a wrapped header's framing is unknown.
+        "outside_tool_framing": (any(not b["framed"] for b in known) if (known := [b for b in matched if b["framed"] is not None]) else None),
         "box_lines": [b["line"] for b in matched][:6],
         "box_ids_without_record": sorted({b["id"] for b in boxes if b["id"] not in records}),
         "record_ids": sorted(records),
@@ -222,14 +253,15 @@ def judge_relay(relay: dict, shell_calls: int) -> dict:
     """Metrics PASS when the pane shows the 🟩 box of this CLI's Pixel call (`judge_metrics`).
     NO-CALL when the model ran no Pixel command and no box is on screen: nothing to relay, so
     neither a pass nor a relay failure."""
-    if relay.get("verdict") != "PASS" and shell_calls < 2 and not relay.get("box_ids_without_record"):
+    if relay.get("verdict") != "PASS" and shell_calls < 1 and not relay.get("box_ids_without_record"):
         return {**relay, "verdict": "NO-CALL"}
     return relay
 
 
-def shell_call_count(scrollback: str) -> int:
-    # The prompt itself quotes the command once, so two or more means a call ran.
-    return len(re.findall(rf"pixel search-content[^\n]*{SEARCH_TERM}", scrollback))
+def shell_call_count(actions: list[dict], since_ms: int, until_ms: int | None = None) -> int:
+    """The arena's own Pixel calls in one turn, from the action log: a narrow pane wraps the
+    command on screen and a compact UI (agy) hides it, the log does neither."""
+    return sum(1 for r in turn_records(actions, since_ms, until_ms) if SEARCH_TERM in str(r.get("args", "")))
 
 
 # ---------------------------------------------------------------- herdr
@@ -329,7 +361,9 @@ def grid_plan(n: int) -> list[tuple[str, str, float, str]]:
     """
     top = (n + 1) // 2
     bottom = n - top
-    steps = [("t0", "root", "right", 0.5)]
+    # The operator keeps OPERATOR_SHARE of the width: five agents in the rest
+    # wrapped every Pixel header at half width (run 2).
+    steps = [("t0", "root", "right", OPERATOR_SHARE)]
     if bottom:
         steps.append(("b0", "t0", "down", 0.5))
     for row, count in (("t", top), ("b", bottom)):
@@ -414,6 +448,10 @@ class Cell:
     metrics: dict = dataclasses.field(default_factory=dict)
     submit_line: str | None = None
     shell_calls: int = 0
+    t_done_ms: int = 0
+    screen0: str = ""
+    last_screen: str = ""
+    stable: int = 0
 
     @property
     def name(self) -> str:
@@ -432,7 +470,7 @@ class Settings:
     clis: list[str]
     timeout: float = 300.0
     start_timeout: float = 90.0
-    stagger_max: float = 60.0
+    gap_s: float = 3.0  # pause after one turn ends, before the next prompt
     poll_s: float = 2.0
     skip_install: bool = False
     state_dir: pathlib.Path = dataclasses.field(default_factory=lambda: state_dir())
@@ -609,6 +647,7 @@ class Arena:
     def send_prompt(self, cell: Cell) -> bool:
         agent = self.h.get(cell.name)
         cell.seq0 = int(agent.get("state_change_seq", cell.seq0))
+        cell.screen0 = cell.last_screen = self.h.read(cell.name, "visible", 60)
         cell.t_prompt_ms = now_ms()
         cell.sent_at = time.time()
         res = self.h.prompt(cell.name, guard_prompt(PROMPT))
@@ -619,26 +658,14 @@ class Arena:
         return True
 
     def record_since(self, cell: Cell) -> bool:
-        return any(
-            r.get("command") == "search-content" and isinstance(r.get("ts_ms"), (int, float)) and r["ts_ms"] >= cell.t_prompt_ms
-            for r in read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE)
-        )
-
-    def wait_for_record(self, cell: Cell) -> None:
-        """Stagger: the next CLI is prompted after this one's `search-content` record, or after the bound.
-
-        The metrics relay stays silent when identical Pixel invocations overlap in one repository.
-        """
-        end = time.time() + self.cfg.stagger_max
-        while time.time() < end:
-            if self.record_since(cell):
-                time.sleep(self.cfg.poll_s)  # let the relay read its record before another call starts
-                return
-            time.sleep(self.cfg.poll_s / 2)
-        cell.events.append(f"stagger bound ({self.cfg.stagger_max:g}s) passed without a search-content record")
+        return bool(turn_records(read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE), cell.t_prompt_ms))
 
     def settle(self, cells: list[Cell]) -> None:
-        """Poll until every prompted cell is idle again after its turn, or its own deadline passes."""
+        """Poll until each prompted cell's turn ended, or its own deadline passes.
+
+        A turn ended when Herdr reports `idle` or `done` after the cell moved (its
+        state counter changed, or its screen did: Herdr sees no state change on pi)
+        and the screen then held still for `STABLE_POLLS` polls."""
         pending = [c for c in cells if c.status == "waiting"]
         while pending:
             for cell in list(pending):
@@ -648,18 +675,21 @@ class Arena:
                 if act in ("needs-operator", "blocked-dialog"):
                     pending.remove(cell)
                     continue
+                cell.stable = cell.stable + 1 if screen == cell.last_screen else 0
+                cell.last_screen = screen
                 agent = self.h.get(cell.name)
-                moved = int(agent.get("state_change_seq", cell.seq0)) != cell.seq0
-                finished = agent.get("agent_status") in FINISHED
-                if finished and moved and waited >= 3 * self.cfg.poll_s and self.record_since(cell):
+                moved = int(agent.get("state_change_seq", cell.seq0)) != cell.seq0 or screen != cell.screen0
+                finished = agent.get("agent_status") in FINISHED and moved and cell.stable >= STABLE_POLLS
+                if finished and waited >= 3 * self.cfg.poll_s and self.record_since(cell):
                     cell.status = "done"
-                elif finished and moved and waited >= 10 * self.cfg.poll_s:
-                    cell.status = "done"  # idle again with no record: judged below on its evidence
+                elif finished and waited >= 10 * self.cfg.poll_s:
+                    cell.status = "done"  # ended with no record: judged below on its evidence
                 elif waited >= self.cfg.timeout:
-                    cell.status, cell.note = "timeout", f"still not idle after {self.cfg.timeout:g}s"
+                    cell.status, cell.note = "timeout", f"turn not ended after {self.cfg.timeout:g}s"
                 if cell.status != "waiting":
                     pending.remove(cell)
                     cell.elapsed_s = round(time.time() - cell.sent_at, 1)
+                    cell.t_done_ms = now_ms()
             if pending:
                 time.sleep(self.cfg.poll_s)
 
@@ -674,8 +704,10 @@ class Arena:
         cell.submit_line = prompt_submit_line(cell.scrollback)
         logged = judge_brief(read_jsonl(self.cfg.repo / ".pixel" / FEEDBACK_FILE), cell.cli.provider, cell.t_prompt_ms)
         cell.brief = judge_brief_shown(logged, brief_on_screen(cell.scrollback, cell.submit_line))
-        cell.shell_calls = shell_call_count(cell.scrollback)
-        relay = judge_metrics(cell.scrollback, read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE), cell.t_prompt_ms)
+        actions = read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE)
+        until = cell.t_done_ms or None
+        cell.shell_calls = shell_call_count(actions, cell.t_prompt_ms, until)
+        relay = judge_metrics(cell.scrollback, actions, cell.t_prompt_ms, until)
         cell.metrics = judge_relay(relay, cell.shell_calls)
         if cell.metrics["verdict"] == "NO-CALL":
             cell.events.append("no Pixel shell call on this pane: the model answered without running the command, so nothing could be relayed")
@@ -702,13 +734,15 @@ class Arena:
             self.say(f"{cell.name}: starting in {cell.pane}")
             if self.start_agent(cell):
                 started.append(cell)
-        prompted = []
+        # One turn at a time, in the random order: Pixel calls that overlap in one
+        # repository silence the metrics relay (run 2 lost Claude's that way), and
+        # an exclusive window ties every record to one CLI.
         for cell in started:
             if self.send_prompt(cell):
                 self.say(f"{cell.name}: prompted")
-                prompted.append(cell)
-                self.wait_for_record(cell)
-        self.settle(prompted)
+                self.settle([cell])
+                self.say(f"{cell.name}: {cell.status} after {cell.elapsed_s:g}s")
+                time.sleep(cfg.gap_s)
         for name in order:
             self.judge(self.cells[name])
         write_receipt(cfg, order, ident, install, self.cells)
@@ -748,7 +782,7 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
             "brief": c.brief,
             "metrics": c.metrics,
             "prompt_submit_line": {"seen": c.submit_line is not None, "text": c.submit_line},
-            "shell_call_seen": c.shell_calls >= 2,
+            "shell_call_seen": c.shell_calls >= 1,
             "shell_call_count": c.shell_calls,
             "keys_sent": c.keys_sent,
             "events": c.events,
@@ -780,7 +814,7 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
         rows.append(
             f"| {i} | {name} | {c.status} | {c.brief.get('verdict', 'N/A')} | {'yes' if c.brief.get('logged') else 'no'} "
             f"| {('`' + shown + '`') if shown else 'no'} | {c.metrics.get('verdict', 'N/A')} "
-            f"| {'yes' if c.shell_calls >= 2 else 'no'} | {c.elapsed_s}s |"
+            f"| {'yes' if c.shell_calls >= 1 else 'no'} | {c.elapsed_s}s |"
         )
     s = doc["summary"]
     md = [
@@ -850,7 +884,7 @@ def parse(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--timeout", type=float, default=300.0, help="seconds per CLI after its prompt (default 300)")
     ap.add_argument("--out", help="receipt directory (default: <repo>/eval/arena-results/ultima-<UTC>)")
     ap.add_argument("--start-timeout", type=float, default=90.0, help=argparse.SUPPRESS)
-    ap.add_argument("--stagger-max", type=float, default=60.0, help=argparse.SUPPRESS)
+    ap.add_argument("--gap", type=float, default=3.0, help=argparse.SUPPRESS)
     ap.add_argument("--poll-s", type=float, default=2.0, help=argparse.SUPPRESS)
     ap.add_argument("--self-test", action="store_true", help="run the offline contract tests and exit")
     return ap.parse_args(argv)
@@ -891,7 +925,7 @@ def main(argv: list[str] | None = None) -> int:
             clis=names,
             timeout=args.timeout,
             start_timeout=args.start_timeout,
-            stagger_max=args.stagger_max,
+            gap_s=args.gap,
             poll_s=args.poll_s,
             skip_install=args.skip_install,
         )

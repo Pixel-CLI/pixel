@@ -44,7 +44,7 @@ usage or environment problem (no Herdr pane, `PIXEL_BRIEF_LOG` off, install fail
    self-update itself: the message is surfaced); the index and a yellow doctor are recorded, not fatal.
    The receipt records `pixel --version`, `command -v pixel` and the repo HEAD. It rewires the **home** install
    to this build, as AGENTS.md "Optional Local Install Verification" describes; hand it back with `pixel setup` afterwards.
-2. **Grid** in the operator's tab (`$HERDR_PANE_ID`, which stays on the left): five cells on the right, three on top and two below,
+2. **Grid** in the operator's tab (`$HERDR_PANE_ID`, which stays on the left with 30 % of the width): five cells on the right, three on top and two below,
    split sequentially (parallel Herdr splits race) with ratios 1/3, 1/2 for equal columns. Panes and agents are named `ultima-<cli>`;
    every created pane id is saved to `$TMPDIR/ultima-arena-<uid>/last-run.json` as it is made.
 3. **Order**: `random.Random(seed).shuffle`; agents are started and prompted in that order. An `agent_pane_busy` start is retried.
@@ -52,10 +52,14 @@ usage or environment problem (no Herdr pane, `PIXEL_BRIEF_LOG` off, install fail
    `$CODEX_HOME/hooks.json` and `<repo>/.codex/hooks.json` is Pixel's own `<path>/pixel run-hook …`; otherwise the CLI is
    `needs-operator` and no key is pressed. A folder-trust dialog is accepted (option number, then Enter); a tool approval is
    accepted only when the pending command is exactly the arena's `pixel search-content` line. Anything else ends as `blocked-dialog` with the screen excerpt.
-5. **Stagger**: the next CLI is prompted after the previous one's `search-content` record appears (bound 60 s). The metrics relay
-   stays silent when identical Pixel invocations overlap in one repository, so run no other Pixel command in `--repo` during the run.
+5. **One turn at a time**: all five start, but the next CLI is prompted only after the previous turn ended (plus a 3 s gap).
+   The metrics relay stays silent when Pixel invocations overlap in one repository (a run that prompted on the previous
+   CLI's first record lost Claude's relay that way), and an exclusive window ties every `actions.jsonl` record to one CLI:
+   the Pixel shell call is counted from the log, not from the screen, which wraps or hides it. Run no other Pixel command in `--repo` during the run.
 6. **Wait and judge**: `herdr agent prompt` without `--wait` (it reports `agent_prompt_stalled` for a prompt that ran), then poll
-   `agent get` until the turn ended (`done` for Claude, Codex, agy and Devin, `idle` for pi); scrollback is read with `agent read --source recent-unwrapped --lines 2000` because pi's notices scroll out of `visible`.
+   `agent get` until the turn ended: `done` (Claude, Codex, agy, Devin) or `idle` (pi) after the state counter or the screen
+   moved, then three polls of a still screen (Herdr sees no state change on pi). 🟩 headers are also matched with line breaks
+   joined, since a narrow pane hard-wraps them. Scrollback is read with `agent read --source recent-unwrapped --lines 2000` because pi's notices scroll out of `visible`.
 7. **Receipt** in `--out`: `receipt.json` (identity, seed, order, prompt, per CLI the evidence and verdicts, install steps),
    `receipt.md` (table), `<cli>.scrollback.txt`. The last line printed is `N/5 brief, M/5 metrics`.
 

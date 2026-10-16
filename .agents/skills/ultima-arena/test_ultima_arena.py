@@ -106,10 +106,11 @@ elif a[:2] == ["agent", "get"]:
     if not g:
         print(json.dumps({"error": {"code": "agent_not_found"}}))
         sys.exit(1)
-    if g["status"] == "working" and time.time() >= g["ready_at"]:
-        # As live Herdr reports it: a finished turn is `idle` for pi, `done` for the others.
-        g["status"] = "idle" if g["kind"] == "pi" else "done"
-        g["seq"] += 1
+    if (g["status"] == "working" or g.get("silent")) and g["after"] and time.time() >= g["ready_at"]:
+        if not g.get("silent"):  # a silent agent's state never moves, as live Herdr shows pi
+            # As live Herdr reports it: a finished turn is `idle` for pi, `done` for the others.
+            g["status"] = "idle" if g["kind"] == "pi" else "done"
+            g["seq"] += 1
         g["screen"] += g["after"]
         g["after"] = []
     out({"result": {"agent": {"agent": g["kind"], "agent_status": g["status"], "state_change_seq": g["seq"],
@@ -159,7 +160,10 @@ elif a[:2] == ["agent", "prompt"]:
     after.append("answer: crates/pixel/src/task_hook.rs:228")
     g["screen"].append("> " + text)
     g["after"] = after
-    g["status"] = "working"
+    if scen == "silent-state":
+        g["silent"] = True
+    else:
+        g["status"] = "working"
     g["ready_at"] = time.time() + 0.15
     out({"result": {}})
 else:
@@ -176,7 +180,7 @@ esac
 exit 0
 """
 
-COMMON = ["--poll-s", "0.02", "--stagger-max", "2", "--start-timeout", "3", "--timeout", "5", "--seed", "7"]
+COMMON = ["--poll-s", "0.02", "--gap", "0", "--start-timeout", "3", "--timeout", "5", "--seed", "7"]
 
 
 def git(cwd, *args):
@@ -273,7 +277,7 @@ class PureTests(unittest.TestCase):
     def test_grid_is_three_over_two_with_equal_columns(self):
         self.assertEqual(
             ua.grid_plan(5),
-            [("t0", "root", "right", 0.5), ("b0", "t0", "down", 0.5), ("t1", "t0", "right", 1 / 3), ("t2", "t1", "right", 0.5), ("b1", "b0", "right", 0.5)],
+            [("t0", "root", "right", ua.OPERATOR_SHARE), ("b0", "t0", "down", 0.5), ("t1", "t0", "right", 1 / 3), ("t2", "t1", "right", 0.5), ("b1", "b0", "right", 0.5)],
         )
         self.assertEqual(ua.cell_keys(5), ["t0", "t1", "t2", "b0", "b1"])
 
@@ -300,6 +304,33 @@ class PureTests(unittest.TestCase):
         self.assertIs(framed["outside_tool_framing"], False)
         both = ua.judge_metrics("  │ " + box + "\n" + box, [rec], 0)
         self.assertEqual((both["occurrences"], both["outside_tool_framing"]), (2, True))
+
+    def test_a_header_the_pane_wrapped_still_matches_its_record(self):
+        rec = {"command": "search-content", "invocation_id": "9-18df019d61b44c70-0", "ts_ms": 200}
+        wrapped = "↳ Hook · 🟩 pixel search-content ❀\n  │ 109.1ms ❀ #b44\n  │ c70\n      │"
+        m = ua.judge_metrics(wrapped, [rec], 0)
+        self.assertEqual((m["verdict"], m["occurrences"], m["outside_tool_framing"]), ("PASS", 1, None))
+        self.assertEqual(ua.parse_boxes(wrapped)[0]["framed"], None)
+        self.assertEqual(ua.judge_metrics(wrapped.replace("#b44", "#000"), [rec], 0)["verdict"], "FAIL")
+
+    def test_records_count_only_inside_the_turn_window(self):
+        recs = [
+            {"command": "search-content", "invocation_id": f"9-18df019d61b4{i:04x}-0", "ts_ms": ts, "args": "-F start_brief crates/pixel/src"}
+            for i, ts in enumerate((99, 100, 150, 200, 201))
+        ] + [{"command": "impact", "invocation_id": "9-18df019d61b4ffff-0", "ts_ms": 150, "args": "start_brief"}]
+        self.assertEqual(ua.shell_call_count(recs, 100, 200), 3)
+        self.assertEqual(ua.shell_call_count(recs, 100), 4)
+        box = "🟩 pixel search-content ❀ 1.0ms ❀ #b40004"  # the record at 201, after the turn ended
+        self.assertEqual(ua.judge_metrics(box, recs, 100, 200)["verdict"], "FAIL")
+        self.assertEqual(ua.judge_metrics(box, recs, 100, 201)["verdict"], "PASS")
+
+    def test_a_cli_whose_state_never_moves_ends_on_a_still_screen(self):
+        fx = Fixture(self)
+        fx.scenarios = {"pi": "silent-state"}
+        rc, out, _ = fx.run()
+        self.assertEqual(rc, 0, out)
+        pi = fx.receipt()["clis"]["pi"]
+        self.assertEqual((pi["status"], pi["brief"]["verdict"], pi["metrics"]["verdict"]), ("done", "PASS", "PASS"))
 
     def test_codex_hooks_are_pixels_only_when_every_command_is(self):
         fx = Fixture(self)
