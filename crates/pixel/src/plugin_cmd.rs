@@ -121,6 +121,19 @@ fn render_installed(added: &pixel_plugin::Added) -> String {
             };
             out.push_str(&format!("downloaded {} ({checked})\n", got.url));
         }
+        Binary::Shipped {
+            git_url,
+            reference,
+            download_error,
+        } => {
+            let build =
+                pixel_plugin::cargo_install_command(git_url, reference.as_deref(), &added.dir);
+            out.push_str(&format!(
+                "{name} runs the repository's own `{run}`: no release asset replaced it ({download_error})\nif `{name}` then reports a missing program, build it into the plugin with: {build} --force\n",
+                name = added.name,
+                run = added.manifest.run,
+            ));
+        }
         Binary::Missing {
             git_url,
             reference,
@@ -528,6 +541,25 @@ mod tests {
         assert!(
             text.contains("build it with: cargo install --git https://github.com/acme/tool.git --rev v2 --root /h/.pixel/plugins/tool\n"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_shipped_program_without_a_release_asset_names_the_build_that_replaces_it() {
+        // The Pixel-CLI plugins ship a launcher at `run` that only finds a
+        // separately built binary: "installed" alone sent the user to a first
+        // run that failed (2026-10 retro).
+        let shipped = Binary::Shipped {
+            git_url: "https://github.com/acme/tool.git".to_owned(),
+            reference: None,
+            download_error: "cannot download u: HTTP 404".to_owned(),
+        };
+        assert_eq!(
+            render_installed(&installed(Path::new("/h/.pixel/plugins"), "tool", shipped)),
+            "installed plugin tool 1.4.2 in /h/.pixel/plugins/tool\n\
+             tool runs the repository's own `bin/tool`: no release asset replaced it (cannot download u: HTTP 404)\n\
+             if `tool` then reports a missing program, build it into the plugin with: \
+             cargo install --git https://github.com/acme/tool.git --root /h/.pixel/plugins/tool --force\n"
         );
     }
 

@@ -383,12 +383,15 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   `https://github.com` clone URL;
   `PIXEL_GITHUB_BASE_URL` (the user's own environment) redirects it to a
   mirror or a `file://` tree and must itself be one of the allowed schemes.
-  A program the repository does not ship is downloaded by `curl` restricted
-  to `https` (redirects included), capped at 256 MiB and 300 s, into the
-  plugin directory only (no symlink on the path is followed), made executable
-  and compared with `<asset>.sha256` when the release publishes one; a
-  mismatch removes the file and leaves the plugin not runnable. A release
-  without a digest is installed unverified and says so.
+  The program `run` names is downloaded from the repository's release by
+  `curl` restricted to `https` (redirects included), capped at 256 MiB and
+  300 s, into the plugin directory only (no symlink on the path is followed),
+  made executable and compared with `<asset>.sha256` when the release
+  publishes one, all in a file beside `run`; only a checked download replaces
+  the file the repository ships there, and a mismatch removes the download,
+  keeping the shipped file or, without one, leaving the plugin not runnable.
+  The asset and the shipped file have one publisher, the repository. A
+  release without a digest is installed unverified and says so.
 - **PATH lookup skips empty entries**, which a shell reads as the working
   directory, so a file in the repository is not found as `pixel-<name>`.
 - **Environment.** A plugin receives `PIXEL_API`, `PIXEL_REPO_ROOT`,
