@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 //! pixel-mvp's index in front of this graph, for Rust (ADR-0035 of the
-//! pixel-mvp research repository; `crates/mvp-index/VENDORED.md`).
+//! pixel-mvp research repository; `crates/mvp-index/ORIGIN.md`).
 //!
 //! The adapter keeps this graph's symbols and answers, in this graph's
 //! rows, what pixel-mvp's rules decide at each Rust site:
@@ -48,8 +48,8 @@ pub mod ruby_switch;
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 /// The pixel-mvp commit the `mvp-*` crates were copied from. A test holds it
-/// equal to the one `crates/mvp-index/VENDORED.md` names, so a sync that
-/// forgets it fails.
+/// equal to `crates/mvp-index/ORIGIN.md`. It stays fixed after the handover;
+/// extraction changes bump the language versions, storage changes the schema.
 pub const MVP_COMMIT: &str = "e91e8da";
 
 /// Meta key: where the graph's Rust edges come from. Absent when they are
@@ -94,8 +94,8 @@ impl RustSource {
 }
 
 /// The [`GRAPH_SOURCE_KEY`] value of a graph whose Rust edges are
-/// pixel-mvp's: the vendored commit and its extractor versions, so that a
-/// sync that changes either makes every such graph stale.
+/// from the imported index: the fixed origin and current extractor versions.
+/// An extraction change bumps its version and makes existing graphs stale.
 pub fn mvp_source() -> String {
     format!("rust=mvp {MVP_COMMIT} {}", mvp_index::extractor())
 }
@@ -710,14 +710,14 @@ mod tests {
     }
 
     #[test]
-    fn the_commit_is_the_one_vendored_md_names() {
+    fn the_origin_commit_matches_the_provenance_record() {
         let vendored = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../mvp-index/VENDORED.md"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../mvp-index/ORIGIN.md"),
         )
         .unwrap();
         assert!(
             vendored.contains(&format!("(`{MVP_COMMIT}`)")),
-            "MVP_COMMIT is {MVP_COMMIT}, VENDORED.md names another commit"
+            "MVP_COMMIT is {MVP_COMMIT}, ORIGIN.md names another commit"
         );
     }
 

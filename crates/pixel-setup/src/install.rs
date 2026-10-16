@@ -342,14 +342,24 @@ fn stable_exe_path_in(executable_path: PathBuf, paths: &std::ffi::OsStr) -> Path
 
 /// Replace `path` with `content` in one step: the bytes already there are
 /// backed up first, the new bytes go to a sibling temp file, and that file is
-/// renamed over the target. A crash mid-write leaves the old profile intact
-/// instead of a half-written one — a shell profile is read by every
+/// synced before being renamed over the target. A crash mid-write leaves
+/// the old profile intact instead of a half-written one — it is read by every
 /// interactive shell, and it is the user's file.
 pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<()> {
     config::backup_if_changing(path, content.as_bytes())?;
-    let tmp = path.with_extension("pixel-tmp");
-    fs::write(&tmp, content)?;
-    fs::rename(&tmp, path)?;
+    let resolved = resolve_symlink_target(path);
+    let target = resolved.as_deref().unwrap_or(path);
+    let tmp = unique_temp_path(target);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    file.write_all(content.as_bytes())?;
+    if let Ok(metadata) = fs::metadata(target) {
+        file.set_permissions(metadata.permissions())?;
+    }
+    file.sync_all()?;
+    fs::rename(&tmp, target)?;
     Ok(())
 }
 
@@ -476,7 +486,7 @@ pub(crate) fn read_settings(path: &Path) -> Result<serde_json::Value> {
     }
 }
 
-/// Serialize and write `value` to `path`, backing up any pre-existing,
+/// Edit changed JSON keys in `path`, backing up any pre-existing,
 /// content-differing file first. In dry-run mode, performs no write, no
 /// backup, and no directory creation, and always returns `Ok(None)`.
 pub(crate) fn write_settings(
@@ -484,7 +494,16 @@ pub(crate) fn write_settings(
     value: &serde_json::Value,
     dry_run: bool,
 ) -> Result<Option<PathBuf>> {
-    let serialized = format!("{}\n", serde_json::to_string_pretty(value)?);
+    let serialized = match fs::read_to_string(path) {
+        Ok(text) if serde_json::from_str::<serde_json::Value>(&text).is_ok() => {
+            crate::json_edit::patch(&text, value)?
+        }
+        Ok(_) => format!("{}\n", serde_json::to_string_pretty(value)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            format!("{}\n", serde_json::to_string_pretty(value)?)
+        }
+        Err(error) => return Err(error.into()),
+    };
     if dry_run {
         return Ok(None);
     }
@@ -518,15 +537,19 @@ pub(crate) fn write_settings(
     if let Ok(meta) = fs::metadata(target) {
         fs::set_permissions(&tmp, meta.permissions())?;
     }
+    file.sync_all()?;
     fs::rename(&tmp, target)?;
     Ok(backup_path)
 }
 
 /// The real file a settings path points at if it is a symlink, else `None`.
-fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
     let meta = fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_symlink() {
         return None;
+    }
+    if let Ok(target) = path.canonicalize() {
+        return Some(target);
     }
     let target = fs::read_link(path).ok()?;
     Some(if target.is_absolute() {
@@ -538,7 +561,7 @@ fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
 
 /// A sibling temp file name unique to this process so concurrent writers of
 /// the same settings path can never collide on one shared temp file.
-fn unique_temp_path(path: &Path) -> PathBuf {
+pub(crate) fn unique_temp_path(path: &Path) -> PathBuf {
     static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

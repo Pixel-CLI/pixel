@@ -60,15 +60,7 @@ fn read_hooks(path: &Path) -> std::result::Result<serde_json::Value, String> {
 }
 
 fn write_hooks(path: &Path, value: &serde_json::Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.pixel-tmp");
-    fs::write(
-        &tmp,
-        format!("{}\n", serde_json::to_string_pretty(value).unwrap()),
-    )?;
-    fs::rename(&tmp, path)?;
+    crate::install::write_settings(path, value, false)?;
     Ok(())
 }
 

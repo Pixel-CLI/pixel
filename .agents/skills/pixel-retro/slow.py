@@ -22,6 +22,12 @@ Runs of pixel's own test suite are counted apart, never mixed into the
 groups: a cwd under a `crates/` directory, or in the system temp dir
 (`/var/folders/` on macOS, `/tmp/` on Linux) except the `/tmp/pxwt/`
 worktrees the skill reads on purpose.
+
+A line is counted once, by its `invocation_id`, however many logs hold it:
+a worktree bootstrap that copies the main checkout's `.pixel/` copies its
+`actions.jsonl` too (four copies of one `find-symbol` on 2026-10-16 read as
+`n=4 repos=4`). `repos` counts the distinct `cwd` the calls ran in, not the
+files they were read from.
 """
 import collections, datetime, json, re, sys
 
@@ -68,18 +74,18 @@ def attribute(event):
     return best[1:]
 
 
-def main(argv):
-    min_ms = 5000
-    if "--min-ms" in argv:
-        i = argv.index("--min-ms")
-        min_ms = int(argv[i + 1])
-        del argv[i:i + 2]
-    if len(argv) < 2:
-        sys.exit(__doc__)
-    since_ms = parse_window(argv[0], datetime.datetime.now(UTC)).timestamp() * 1000
+def identity(event):
+    """What makes two log lines one invocation: its id, or for a line
+    without one its pid, time and arguments."""
+    return event.get("invocation_id") or (event.get("pid"), event.get("ts_ms"), event.get("args"))
+
+
+def collect(paths, since_ms, min_ms):
+    """(groups, test-suite lines skipped, copies dropped) over `paths`."""
     groups = collections.defaultdict(list)
-    skipped = 0
-    for path in argv[1:]:
+    skipped = copies = 0
+    seen = set()
+    for path in paths:
         with open(path) as log:
             for line in log:
                 try:
@@ -90,13 +96,30 @@ def main(argv):
                         or event.get("duration_ms", 0) < min_ms
                         or not is_read_op(event)):
                     continue
+                if identity(event) in seen:
+                    copies += 1
+                    continue
+                seen.add(identity(event))
                 if TEST_CWD.search(event.get("cwd", "")):
                     skipped += 1
                     continue
                 key = (event["command"],) + attribute(event)
-                groups[key].append((event["duration_ms"], event.get("invocation_id", "?"), path))
+                groups[key].append((event["duration_ms"], event.get("invocation_id", "?"), event.get("cwd", path)))
+    return groups, skipped, copies
+
+
+def main(argv):
+    min_ms = 5000
+    if "--min-ms" in argv:
+        i = argv.index("--min-ms")
+        min_ms = int(argv[i + 1])
+        del argv[i:i + 2]
+    if len(argv) < 2:
+        sys.exit(__doc__)
+    since_ms = parse_window(argv[0], datetime.datetime.now(UTC)).timestamp() * 1000
+    groups, skipped, copies = collect(argv[1:], since_ms, min_ms)
     print(f"slow read ops >= {min_ms} ms since {argv[0]}: {sum(map(len, groups.values()))} line(s)"
-          f", {skipped} from the test suite left out")
+          f", {skipped} from the test suite left out, {copies} copied line(s) counted once")
     for key, rows in sorted(groups.items(), key=lambda kv: -sum(r[0] for r in kv[1])):
         rows.sort(reverse=True)
         command, route, reason, phase = key

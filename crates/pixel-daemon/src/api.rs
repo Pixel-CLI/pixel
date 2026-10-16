@@ -1979,9 +1979,12 @@ impl Service {
         let store = self.graph.as_ref().unwrap();
         let files = file_map(store)?;
         let syms = store
-            .symbols_by_name(name, None, 50)
+            .symbols_named(name, None, 50)
             .map_err(|e| e.to_string())?;
-        let envelope = store.envelope_for_name(name).map_err(|e| e.to_string())?;
+        // A qualified name (`ActionLog::finish`) matched on its leaf: the
+        // unresolved call sites that bound the answer are counted under it.
+        let called = syms.first().map_or(name, |s| s.name.as_str());
+        let envelope = store.envelope_for_name(called).map_err(|e| e.to_string())?;
         let mut out = json!({
             "symbols": syms.iter().map(|s| symbol_json(s, &files)).collect::<Vec<_>>(),
             "envelope": envelope,
@@ -2981,7 +2984,7 @@ impl Service {
                 .ok_or_else(|| format!("no symbol with uid {uid:?}"))?
         } else {
             let mut syms = store
-                .symbols_by_name(name, None, 50)
+                .symbols_named(name, None, 50)
                 .map_err(|e| e.to_string())?;
             if let Some(file) = file {
                 let rel = normalize_file_arg(&self.root, file);
@@ -4487,9 +4490,11 @@ enum Resolved {
 /// `uid_or_name` protocol: '#' means uid; otherwise a name, with the
 /// disambiguation protocol (`{candidates: [...], hint}`) on ambiguity.
 ///
-/// When nothing matches, the error names the recovery
-/// (`pixel find-symbol`) instead of only restating the input, so an agent
-/// that guessed the identifier wrong learns the lookup that answers.
+/// A qualified name (`ActionLog::finish`, `Builder.finish`) resolves
+/// through [`GraphStore::symbols_named`], like `find-symbol`. When nothing
+/// matches, the error names the recovery (`pixel find-symbol`) instead of
+/// only restating the input, so an agent that guessed the identifier wrong
+/// learns the lookup that answers.
 fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, String> {
     if uid_or_name.contains('#') {
         return store
@@ -4503,15 +4508,21 @@ fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, Str
             });
     }
     let syms = store
-        .symbols_by_name(uid_or_name, None, 50)
+        .symbols_named(uid_or_name, None, 50)
         .map_err(|e| e.to_string())?;
     match syms.len() {
-        0 => Err(format!(
-            "no symbol named {uid_or_name:?}; run `pixel find-symbol {uid_or_name}` to list matching symbols"
-        )),
+        0 => Err(not_found_hint(uid_or_name)),
         1 => Ok(Resolved::One(syms.into_iter().next().unwrap())),
         _ => Ok(Resolved::Many(syms)),
     }
+}
+
+/// The not-found error for `name`, whose `find-symbol` hint can answer: a
+/// qualified name that matched nothing would miss again under
+/// `find-symbol`, so the hint searches its leaf, which lists every owner.
+fn not_found_hint(name: &str) -> String {
+    let search = pixel_graph::store::qualified_leaf(name).unwrap_or(name);
+    format!("no symbol named {name:?}; run `pixel find-symbol {search}` to list matching symbols")
 }
 
 /// `impact` on a graph the caller already opened and checked, answered as
@@ -6227,6 +6238,129 @@ mod tests {
         assert!(hit.ok, "{hit:?}");
         assert_eq!(hit.data()["target"], "a.ts#alpha#function", "{hit:?}");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A method written the way the graph prints it in a uid
+    /// (`ActionLog::finish`, `Builder.finish`) resolves on every route the
+    /// name reaches: `impact`, `uses`, `symbol` (`find-symbol`) and the
+    /// in-process `impact_on_graph`. Before, only the bare leaf or the uid
+    /// answered, and the miss hint sent the agent to a `find-symbol` that
+    /// failed the same way.
+    #[test]
+    fn qualified_method_names_resolve_on_every_route_and_misses_hint_the_leaf() {
+        let root = tmpdir("qualified-names");
+        std::fs::write(
+            root.join("log.rs"),
+            [
+                "pub struct ActionLog;",
+                "impl ActionLog { pub fn finish(&self) {} }",
+                "pub struct Hasher;",
+                "impl Hasher { pub fn finish(&self) {} }",
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("snap_a.rs"),
+            "pub struct Snapshot;\nimpl Snapshot { pub fn finish(self) {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("snap_b.rs"),
+            "pub struct Snapshot;\nimpl Snapshot { pub fn finish(self) {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("build.py"),
+            "class Builder:\n    def finish(self):\n        return 1\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "qualified fixture"]);
+        let action_log = "log.rs#ActionLog::finish#method";
+
+        let mut svc = Service::open(&root).unwrap();
+        for name in ["ActionLog::finish", "ActionLog.finish"] {
+            let impact = svc.handle(Request::Impact {
+                uid_or_name: name.into(),
+                direction: "upstream".into(),
+                depth: Some(2),
+            });
+            assert!(impact.ok, "{name}: {impact:?}");
+            assert_eq!(impact.data()["target"], action_log, "{name}");
+        }
+        let uses = svc.handle(Request::Uses {
+            uid_or_name: "ActionLog::finish".into(),
+            role: "callers".into(),
+            offset: None,
+        });
+        assert!(uses.ok, "{uses:?}");
+        assert_eq!(uses.data()["symbol"]["uid"], action_log, "{uses:?}");
+
+        let uids = |response: &Response| -> Vec<String> {
+            let key = if response.data()["candidates"].is_array() {
+                "candidates"
+            } else {
+                "symbols"
+            };
+            let mut uids: Vec<String> = response.data()[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["uid"].as_str().unwrap().to_string())
+                .collect();
+            uids.sort();
+            uids
+        };
+        let found = svc.handle(Request::Symbol {
+            name: "ActionLog::finish".into(),
+        });
+        assert!(found.ok, "{found:?}");
+        assert_eq!(uids(&found), vec![action_log.to_string()]);
+        // The dotted spelling a Python uid carries, and the Rust one for it.
+        for name in ["Builder.finish", "Builder::finish"] {
+            let found = svc.handle(Request::Symbol { name: name.into() });
+            assert_eq!(
+                uids(&found),
+                vec!["build.py#Builder.finish#method".to_string()],
+                "{name}"
+            );
+        }
+
+        // Two `Snapshot::finish`: the disambiguation answer, both listed.
+        let ambiguous = svc.handle(Request::Impact {
+            uid_or_name: "Snapshot::finish".into(),
+            direction: "upstream".into(),
+            depth: Some(2),
+        });
+        assert!(ambiguous.ok, "{ambiguous:?}");
+        assert_eq!(
+            uids(&ambiguous),
+            vec![
+                "snap_a.rs#Snapshot::finish#method".to_string(),
+                "snap_b.rs#Snapshot::finish#method".to_string(),
+            ]
+        );
+
+        // A qualified miss points at the leaf, which `find-symbol` can list.
+        let miss = svc.handle(Request::Impact {
+            uid_or_name: "Nothing::finish".into(),
+            direction: "upstream".into(),
+            depth: Some(2),
+        });
+        let error = miss.error.as_ref().expect("a qualified miss is an error");
+        assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
+        assert_eq!(
+            error.message,
+            "no symbol named \"Nothing::finish\"; run `pixel find-symbol finish` to list matching symbols"
+        );
+
+        let store = GraphStore::open_read_only(&svc.graph_db_path()).unwrap();
+        let in_process = impact_on_graph(&store, "ActionLog::finish", "upstream", Some(2)).unwrap();
+        assert_eq!(in_process["target"], action_log);
         let _ = std::fs::remove_dir_all(&root);
     }
 

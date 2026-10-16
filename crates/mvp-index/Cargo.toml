@@ -1,19 +1,17 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-# Vendored from pixel-mvp (VENDORED.md): `src/` is a copy, this manifest is
-# the workspace's.
+# Owned and maintained here; see ORIGIN.md for provenance.
 
 [package]
 name = "mvp-index"
-description = "pixel-mvp's indexer: tree-sitter grammars and one rule module per language (Ruby, Rust); returns rows, writes nothing. Vendored, see VENDORED.md."
+description = "pixel-mvp's indexer: tree-sitter grammars and one rule module per language (Ruby, Rust); returns rows, writes nothing. Maintained here; see ORIGIN.md."
 version = "0.8.0"
 edition.workspace = true
 license.workspace = true
 publish = false
 
-# pixel-mvp's lint table, not the workspace's: the vendored source is kept
-# as pixel-mvp checks it, so a sync stays a copy (VENDORED.md).
+# Retain the imported lint baseline; tightening it is a separate change.
 [lints.rust]
 unsafe_code = "forbid"
 

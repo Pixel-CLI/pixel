@@ -456,7 +456,7 @@ fn command_table_order_reads_the_first_cell_of_each_row() {
 }
 
 /// Whether a dependency is a workspace member: a `pixel-*` crate, or an
-/// `mvp-*` crate vendored from pixel-mvp (`crates/mvp-*/VENDORED.md`).
+/// `mvp-*` crate imported from pixel-mvp (`crates/mvp-*/ORIGIN.md`).
 fn is_internal(dep: &str) -> bool {
     dep.starts_with("pixel-") || dep.starts_with("mvp-")
 }
@@ -487,7 +487,7 @@ fn member_deps(root: &Path, member: &str) -> (String, BTreeSet<String>, BTreeSet
 
 /// The `Depends on (pixel crates)` cell of the `## Crates` table, read as
 /// `(normal deps, dev deps when the cell lists them)`. A short name stands
-/// for `pixel-<name>`; a vendored `mvp-*` crate is written in full.
+/// for `pixel-<name>`; a imported `mvp-*` crate is written in full.
 /// `libraries` is every library crate, which the `every library crate
 /// except …` form starts from.
 fn documented_deps(
@@ -829,6 +829,22 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
     }
     let mut written = BTreeSet::new();
     files_under(&home, &home, &mut written);
+    // Timestamped backups are conditional recovery copies, not installed wiring.
+    // Check their bytes separately rather than advertising a timestamp in the site.
+    for (file, seed) in SEEDED {
+        let prefix = format!("{file}.pixel-bak.");
+        let backups: Vec<_> = written
+            .iter()
+            .filter(|path| path.starts_with(&prefix))
+            .cloned()
+            .collect();
+        assert_eq!(backups.len(), 1, "one recovery copy of {file}");
+        assert_eq!(
+            std::fs::read_to_string(home.join(&backups[0])).unwrap(),
+            *seed
+        );
+        written.remove(&backups[0]);
+    }
 
     let data = agents_data();
     let claimed: Vec<String> = string_list(data.get("shared"))

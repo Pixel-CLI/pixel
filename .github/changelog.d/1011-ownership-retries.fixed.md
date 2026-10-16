@@ -1,0 +1,1 @@
+**install:** Repeated removal preserves previously kept edits; reinstall restores intervening user changes. Directory symlinks work during setup, and retargeted links keep their new destination. Generated-file writes preserve dotfile symlinks and permissions. Untouched duplicate JSON keys retain their bytes.

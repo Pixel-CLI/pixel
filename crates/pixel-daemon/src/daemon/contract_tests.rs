@@ -289,9 +289,16 @@ fn flush_pending_should_apply_nothing_and_keep_the_deadline_when_nothing_is_pend
     let mut pending = BTreeMap::new();
     let deadline = Some(Instant::now());
     let mut flush_at = deadline;
-    flush_pending(&mut corpus, &mut pending, &mut flush_at);
+    let mut first_pending_at = deadline;
+    flush_pending(
+        &mut corpus,
+        &mut pending,
+        &mut flush_at,
+        &mut first_pending_at,
+    );
     assert!(corpus.applied.lock().unwrap().is_empty());
     assert_eq!(flush_at, deadline);
+    assert_eq!(first_pending_at, deadline);
 }
 
 fn tempfile_root(tag: &str) -> PathBuf {

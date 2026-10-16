@@ -35,7 +35,7 @@ model providers, and the website under `website/`.
 | --- | --- | --- |
 | Source and history of indexed repositories | the working tree, read through `pixel-git::GitRunner` and the walkers in `pixel-index`/`pixel-graph` | confidentiality of code the user did not mean to share; integrity of what the agent is told about it |
 | Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `brief-decisions.jsonl`, `brief-feedback.jsonl`, `brief-sessions/`, `config.yaml`, `tasks/` | what the agent reads as ground truth; `actions.jsonl` and `brief-decisions.jsonl` (the typed prompt) can hold secrets; `brief-feedback.jsonl` holds repository paths and counts only; `brief-sessions/` holds hashes of paths and line numbers; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
-| Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.pixel/plugins/`, `~/.pixel/trusted.toml` and `~/.pixel/plugins.toml` (the plugin host's installs, trust records and network opt-ins), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
+| Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.pixel/setup-receipt.json` (original setup-edited configuration, potentially including keys), `~/.pixel/plugins/`, `~/.pixel/trusted.toml` and `~/.pixel/plugins.toml` (the plugin host's installs, trust records and network opt-ins), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
 | Agent configurations | what `pixel setup` writes: `~/.claude/settings.json`, `$CODEX_HOME/hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the `pixel` skill (`skills/pixel/SKILL.md`) under the agent config dirs, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); `--repo` writes only `.pixel/config.yaml`. The Antigravity IDE and CLI Pixel plugin dirs carry the `pixel` skill and the metrics hook | a hook command runs with the user's privileges on every agent tool call |
 | User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project) | credential theft, billing abuse |
@@ -282,7 +282,21 @@ repository file.
 `pixel setup` edits agent configs in place, rewriting only its own managed
 blocks and hook entries, refusing files that do not parse, and leaving a
 `<file>.pixel-bak.<nanos>-<seq>` copy of each file it changes
-(`pixel_setup::config::backup_if_changing`). Hook commands embed the
+(`pixel_setup::config::backup_if_changing`). Global CLI setup also records
+original bytes and installed fingerprints in `~/.pixel/setup-receipt.json`,
+written atomically through a private 0600 temporary file. This receipt can
+contain configuration secrets and has the same user-only boundary as those
+configuration files. Only setup output paths are captured, never the whole home.
+Removal validates all receipt paths before its first write (including rejecting
+parent traversal), compares installed fingerprints and modes, and preserves
+files changed after setup. Restores use private temporary files and preserve
+existing symlinks. Resolved output locations are checked before cleanup so
+retargeting a link does not transfer ownership to its new destination. A partial
+receipt remains when edits are kept, preserving that decision across retries.
+Only setup-created empty directories are pruned; backups
+remain and are listed in the report. Recovery copies are created privately
+and retain the original file's permission bits.
+Hook commands embed the
 absolute binary path, quoted by `routing::quoted_executable`. The binary
 reaches users through `scripts/release/install.sh` (archive checked against the
 release's `.sha256`), Homebrew, mise, or the `setup-pixel` action (exact
@@ -383,12 +397,15 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   `https://github.com` clone URL;
   `PIXEL_GITHUB_BASE_URL` (the user's own environment) redirects it to a
   mirror or a `file://` tree and must itself be one of the allowed schemes.
-  A program the repository does not ship is downloaded by `curl` restricted
-  to `https` (redirects included), capped at 256 MiB and 300 s, into the
-  plugin directory only (no symlink on the path is followed), made executable
-  and compared with `<asset>.sha256` when the release publishes one; a
-  mismatch removes the file and leaves the plugin not runnable. A release
-  without a digest is installed unverified and says so.
+  The program `run` names is downloaded from the repository's release by
+  `curl` restricted to `https` (redirects included), capped at 256 MiB and
+  300 s, into the plugin directory only (no symlink on the path is followed),
+  made executable and compared with `<asset>.sha256` when the release
+  publishes one, all in a file beside `run`; only a checked download replaces
+  the file the repository ships there, and a mismatch removes the download,
+  keeping the shipped file or, without one, leaving the plugin not runnable.
+  The asset and the shipped file have one publisher, the repository. A
+  release without a digest is installed unverified and says so.
 - **PATH lookup skips empty entries**, which a shell reads as the working
   directory, so a file in the repository is not found as `pixel-<name>`.
 - **Environment.** A plugin receives `PIXEL_API`, `PIXEL_REPO_ROOT`,
@@ -961,3 +978,19 @@ first candidates for one.
   a mitigation is quoted as the code spells it and checked against the tree
   before the push; a mitigation that no longer exists is deleted, not kept
   "for history".
+
+### Index reference validation
+
+`mvp-reference.yml` checks out two public repositories at full commit IDs and
+parses them as source data. It does not execute their code or build scripts.
+Both checkouts disable persisted credentials; the workflow has read-only
+contents permission and uses no deployment secrets. The reference job restores
+and saves no shared build cache.
+
+### Setup configuration replacement
+
+The shared text and JSON settings writers synchronize staged bytes before
+atomic rename. Gemini brief and Antigravity configuration updates use the
+JSON writer, retaining backups, symlink targets and existing permissions.
+A failed write or sync is returned before replacement. Parent directories
+are not synchronized; full power-loss durability has not been established.

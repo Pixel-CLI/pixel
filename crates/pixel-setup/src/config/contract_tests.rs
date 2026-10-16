@@ -61,3 +61,23 @@ fn merge_hook_entry_should_replace_only_the_marked_entry_when_reinstalling() {
         json!([nested("pixel m")])
     );
 }
+
+#[test]
+fn backup_should_preserve_the_original_permissions_and_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = home();
+    let source = home.path().join("config.yaml");
+    fs::write(&source, "my private settings\n").unwrap();
+    for mode in [0o600, 0o640] {
+        fs::set_permissions(&source, fs::Permissions::from_mode(mode)).unwrap();
+        let backup = backup_if_changing(&source, b"changed").unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            "my private settings\n"
+        );
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
+}

@@ -69,6 +69,14 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
     let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
     let pi_paths = crate::pi_global::PiPaths::resolve(&home, options.home.is_some());
+    if let Some(mut steps) = crate::receipt::remove(&home, options.home.is_some(), dry_run)? {
+        steps.push(remove_binary(&target, dry_run)?);
+        steps.push(backups_step(
+            &find_backups(&global_backup_dirs(&home, &codex_home, &opencode_dir)),
+            dry_run,
+        ));
+        return Ok(install::install_report(&binary_path, &home, dry_run, steps));
+    }
     let steps = vec![
         // 1. Remove pixel run-hook entries from every tool's settings file.
         remove_claude_hooks(&home, &exe, dry_run)?,
@@ -405,6 +413,7 @@ fn parent_of(root: &Path, rel: &str) -> PathBuf {
 /// rewrites a file, hence may have left a backup beside it.
 fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![
+        home.join(".pixel"),
         home.join(".claude"),
         home.join(config::DEVIN_CONFIG_DIR),
         parent_of(home, config::CODEX_HOOKS_FILE),
@@ -421,6 +430,11 @@ fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Ve
     // `.pixel-bak` dir in that harness's root (`.claude` is above).
     for root in config::SKILL_ROOTS {
         dirs.push(home.join(root));
+    }
+    for root in [".claude"].iter().chain(config::SKILL_ROOTS) {
+        for skill in ["pixel", "pixel-classify"] {
+            dirs.push(home.join(root).join("skills").join(skill));
+        }
     }
     dirs
 }
@@ -640,3 +654,43 @@ mod backup_tests {
 
 #[cfg(test)]
 mod contract_tests;
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+
+    #[test]
+    fn setup_should_return_user_json_and_toml_bytes_after_removal() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = Path::new("/tmp/pixel");
+        for relative in [
+            ".claude/settings.json",
+            ".codex/hooks.json",
+            ".pi/agent/settings.json",
+            ".config/devin/config.json",
+        ] {
+            let path = home.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let text = "{\n  \"theme\" : \"dark\", \"number\": 1e2\n}\n";
+            fs::write(&path, text).unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(text).unwrap();
+            value["hooks"] = serde_json::json!({"SessionStart":[{"hooks":[{"command":"pixel run-hook task-event --provider claude --event session-start"}]}]});
+            install::write_settings(&path, &value, false).unwrap();
+            assert!(
+                fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("\"number\": 1e2")
+            );
+            remove_pixel_hooks_from_settings(&path, exe, false).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), text, "{relative}");
+        }
+        let toml = home.path().join(".codex/config.toml");
+        let text = "# my model\nmodel  = 'o3'\n";
+        fs::write(&toml, text).unwrap();
+        crate::codex_config::install_task_hooks(&home.path().join(".codex"), exe, 1, false)
+            .unwrap();
+        remove_pixel_hooks_from_settings(&home.path().join(config::CODEX_HOOKS_FILE), exe, false)
+            .unwrap();
+        assert_eq!(fs::read_to_string(toml).unwrap(), text);
+    }
+}

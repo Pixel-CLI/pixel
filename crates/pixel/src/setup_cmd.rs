@@ -197,6 +197,7 @@ fn run_questions(
         return Ok(());
     }
 
+    let receipt = pixel_setup::receipt::Snapshot::begin(&install).map_err(|e| e.to_string())?;
     let hooks = pixel_setup::install::install_selected(&install, Some(&selection))
         .map_err(|e| e.to_string())?;
     // TEMPORARY (dev-flags): the `if` is `dev`'s; without it the block below
@@ -207,16 +208,23 @@ fn run_questions(
             config_cmd::set_global_key(key.key, key.value.to_json())?;
         }
     }
+    if let Some(receipt) = receipt {
+        receipt.finish().map_err(|e| e.to_string())?;
+    }
     report(output, &plan, &hooks, scripted, screens)?;
     // Picking AI classification opens its own journey after the files land:
     // the engine menu (local Ollaya, remote preset, OpenAI Decisions, Jev,
     // Clef-flash) and the optional harness helpers. A scripted run gets the
     // printed suggestion instead of a second set of questions.
     if answers.features.contains(&Feature::Classify) {
+        let receipt = pixel_setup::receipt::Snapshot::begin(&install).map_err(|e| e.to_string())?;
         if !scripted {
             screens.steps.banner(output, "Classify", color)?;
         }
         crate::classify_setup::install_step(!scripted, input, output)?;
+        if let Some(receipt) = receipt {
+            receipt.finish().map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
