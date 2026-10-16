@@ -4,7 +4,7 @@
 
 ## after setup, twice
 --- home/.config/devin/config.json 0644
-{
+{"model":"swe-1",
   "hooks": {
     "PostToolUse": [
       {
@@ -73,9 +73,7 @@
         ]
       }
     ]
-  },
-  "model": "swe-1"
-}
+  }}
 --- home/.config/devin/config.json.pixel-bak.{STAMP1} 0644
 {"model":"swe-1"}
 --- home/.devin/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
@@ -122,10 +120,6 @@ first-party probe shipped with pixel; `pixel setup` keeps it current
 --- home/.pixel/plugins/rank-blocks/probe 0755 = probes/rank-blocks/probe
 
 ## after setup --remove
---- home/.config/devin/config.json 0644
-{
-  "model": "swe-1"
-}
 --- home/.config/devin/config.json.pixel-bak.{STAMP1} 0644 = home/.config/devin/config.json.pixel-bak.{STAMP1} (after setup, twice)
 --- home/.config/devin/config.json.pixel-bak.{STAMP2} 0644 = home/.config/devin/config.json (after setup, twice)
 --- home/.devin/pixel.pixel-bak.{STAMP3}/SKILL.md 0644 = tests/setup/.agents/skill.md

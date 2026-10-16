@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::install::{CheckStatus, InstallStep, Result};
+use crate::install::{self, CheckStatus, InstallStep, Result};
 
 pub(crate) fn antigravity_config_dir(home: &Path) -> PathBuf {
     home.join(".gemini/config")
@@ -209,7 +209,7 @@ fn remove_brief_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallSt
         )));
     }
     root.remove("pixel-brief");
-    fs::write(&h_path, serde_json::to_string_pretty(&root_val)? + "\n")?;
+    install::write_settings(&h_path, &root_val, false)?;
     Ok(step(
         "removed the prompt brief hook from global hooks.json".into(),
     ))
@@ -294,7 +294,7 @@ pub fn install_gemini_brief(home: &Path, exe: &Path, dry_run: bool) -> Result<In
             "timeout": 10000
         }]
     }));
-    fs::write(&path, serde_json::to_string_pretty(&root_val)? + "\n")?;
+    install::write_settings(&path, &root_val, false)?;
     Ok(step(
         CheckStatus::Green,
         "registered the prompt brief hook for Gemini CLI".into(),
@@ -353,7 +353,7 @@ pub fn install_antigravity_brief(home: &Path, exe: &Path, dry_run: bool) -> Resu
             "timeout": 10
         }]
     });
-    fs::write(&path, serde_json::to_string_pretty(&root_val)? + "\n")?;
+    install::write_settings(&path, &root_val, false)?;
     Ok(step(
         CheckStatus::Green,
         "registered the prompt brief hook for Antigravity".into(),
@@ -425,16 +425,16 @@ fn install_antigravity_plugin_with_agy(
     let hooks_text = serde_json::to_string_pretty(&hooks)? + "\n";
     for path in [&ide_dir, &cli_dir] {
         fs::create_dir_all(path.join("skills/pixel"))?;
-        fs::write(path.join("plugin.json"), &manifest_text)?;
+        install::write_atomically(&path.join("plugin.json"), &manifest_text)?;
         fs::write(
             path.join("skills/pixel/SKILL.md"),
             crate::skill::PIXEL_SKILL,
         )?;
-        fs::write(path.join("hooks.json"), &hooks_text)?;
+        install::write_atomically(&path.join("hooks.json"), &hooks_text)?;
     }
-    let registration = run_agy_plugin_with(agy, home, "install", Some(&cli_dir));
     config_value["plugins"]["pixel"]["enabled"] = json!(true);
-    fs::write(&config, serde_json::to_string_pretty(&config_value)? + "\n")?;
+    install::write_settings(&config, &config_value, false)?;
+    let registration = run_agy_plugin_with(agy, home, "install", Some(&cli_dir));
     let registration_error = registration.as_ref().err().map(ToString::to_string);
     let registered = registration.unwrap_or(false);
     let (status, registration_summary) = if let Some(error) = registration_error {
@@ -656,10 +656,7 @@ fn remove_antigravity_with_agy(
         && let Some(plugins) = v.get_mut("plugins").and_then(Value::as_object_mut)
         && plugins.remove("pixel").is_some()
     {
-        let _ = fs::write(
-            &cfg_path,
-            serde_json::to_string_pretty(&v).unwrap_or_default() + "\n",
-        );
+        install::write_settings(&cfg_path, &v, false)?;
         removed_items.push("config.json entry");
     }
 
@@ -680,6 +677,65 @@ fn remove_antigravity_with_agy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brief_rewrites_should_back_up_original_bytes_and_preserve_user_formatting() {
+        for gemini in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let path = if gemini {
+                home.path().join(".gemini/settings.json")
+            } else {
+                hooks_path(home.path())
+            };
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = "{ \"user\" : 1e2 }\n";
+            fs::write(&path, original).unwrap();
+            let exe = Path::new("/tmp/pixel");
+            let install = || {
+                if gemini {
+                    install_gemini_brief(home.path(), exe, false)
+                } else {
+                    install_antigravity_brief(home.path(), exe, false)
+                }
+            };
+            install().unwrap();
+            let installed = fs::read(&path).unwrap();
+            install().unwrap();
+            let backups = || {
+                fs::read_dir(path.parent().unwrap())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| {
+                        path.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .contains(".pixel-bak.")
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let first = backups();
+            assert_eq!(first.len(), 1, "reinstall creates no no-op backup");
+            assert_eq!(fs::read(&first[0]).unwrap(), original.as_bytes());
+            if gemini {
+                crate::uninstall::uninstall(&crate::uninstall::UninstallOptions {
+                    home: Some(home.path().to_path_buf()),
+                    executable_path: Some(exe.into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            } else {
+                remove_brief_hook(home.path(), exe, false).unwrap();
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            let backups = backups();
+            assert_eq!(backups.len(), 2);
+            assert!(
+                backups
+                    .iter()
+                    .any(|path| fs::read(path).unwrap() == installed)
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]

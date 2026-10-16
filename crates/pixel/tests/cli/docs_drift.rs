@@ -829,6 +829,22 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
     }
     let mut written = BTreeSet::new();
     files_under(&home, &home, &mut written);
+    // Timestamped backups are conditional recovery copies, not installed wiring.
+    // Check their bytes separately rather than advertising a timestamp in the site.
+    for (file, seed) in SEEDED {
+        let prefix = format!("{file}.pixel-bak.");
+        let backups: Vec<_> = written
+            .iter()
+            .filter(|path| path.starts_with(&prefix))
+            .cloned()
+            .collect();
+        assert_eq!(backups.len(), 1, "one recovery copy of {file}");
+        assert_eq!(
+            std::fs::read_to_string(home.join(&backups[0])).unwrap(),
+            *seed
+        );
+        written.remove(&backups[0]);
+    }
 
     let data = agents_data();
     let claimed: Vec<String> = string_list(data.get("shared"))

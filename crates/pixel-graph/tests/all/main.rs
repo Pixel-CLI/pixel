@@ -18,6 +18,7 @@ mod import_resolution;
 mod mvp_adapter;
 mod mvp_adapter_ruby;
 mod mvp_integrity;
+mod qualified_symbol_lookup;
 mod rails_routes;
 mod resolve_receiver_shadowing;
 mod ruby_ancestors;
