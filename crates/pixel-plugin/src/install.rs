@@ -59,6 +59,17 @@ pub enum Binary {
     Present,
     /// A `github:` source did not ship it; a release asset was downloaded.
     Downloaded(Downloaded),
+    /// A `github:` source shipped it and no release asset replaced it: the
+    /// plugin runs the repository's own file, which may only find a program
+    /// built elsewhere (a launcher), so the build stays one command away.
+    Shipped {
+        /// The git URL `cargo install --git` builds from.
+        git_url: String,
+        /// The ref the plugin was cloned at, when one was asked for.
+        reference: Option<String>,
+        /// Why no release asset was used.
+        download_error: String,
+    },
     /// A `github:` source did not ship it and no release asset could be
     /// fetched: the plugin is installed and cannot run until it is built.
     Missing {
@@ -93,10 +104,12 @@ pub fn redact_source(source: &str) -> String {
 /// of a repository that holds several; without it the source must hold
 /// exactly one manifest.
 ///
-/// A `github:` source whose manifest names a program the repository does not
-/// contain (it is built, not committed) gets the release asset
-/// `pixel-<name>-<target>`; without one the plugin is still installed, with
-/// [`Binary::Missing`] saying how to build it.
+/// A `github:` source gets the release asset `pixel-<name>-<target>` as the
+/// program its manifest names, over the file the repository ships there (a
+/// launcher that finds a separately built program, say). Without one, a
+/// shipped program stays ([`Binary::Shipped`]) and an absent one leaves the
+/// plugin installed but not runnable ([`Binary::Missing`]); both say how to
+/// build it.
 pub fn add(host: &Host, source: &str, name: Option<&str>) -> Result<Added, Error> {
     if let Some(name) = name
         && !manifest::valid_name(name)
@@ -155,9 +168,9 @@ pub fn add(host: &Host, source: &str, name: Option<&str>) -> Result<Added, Error
         .map_err(|e| Error::io(format!("stage in {}", plugins.display()), e))?;
     let staged = staging.path().join(&manifest.name);
     copy_tree(&from, &staged)?;
-    let binary = match (&github, unbuilt) {
-        (Some(github), true) => fetch_program(host, github, &staged, &manifest),
-        _ => Binary::Present,
+    let binary = match &github {
+        Some(github) => fetch_program(host, github, &staged, &manifest),
+        None => Binary::Present,
     };
     std::fs::rename(&staged, &dest)
         .map_err(|e| Error::io(format!("install {}", dest.display()), e))?;
@@ -244,37 +257,52 @@ fn program_is_absent(dir: &Path, manifest: &Manifest) -> bool {
         .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// Put the release asset of `manifest` at `<staged>/<run>`, or say why not.
+/// Put the release asset of `manifest` at `<staged>/<run>`, or say why not
+/// and what the plugin runs instead.
 fn fetch_program(host: &Host, github: &GitHubSource, staged: &Path, manifest: &Manifest) -> Binary {
-    let missing = |download_error: String| Binary::Missing {
-        git_url: redact_source(&github.clone_url(host.github_base())),
-        reference: github.reference.clone(),
-        download_error,
+    let download_error = match fetch_asset(host, github, staged, manifest) {
+        Ok(downloaded) => return Binary::Downloaded(downloaded),
+        Err(reason) => reason,
     };
-    let Some(target) = fetch::release_target() else {
-        return missing("no release asset is published for this platform".to_owned());
-    };
+    let git_url = redact_source(&github.clone_url(host.github_base()));
+    let reference = github.reference.clone();
+    if program_is_absent(staged, manifest) {
+        Binary::Missing {
+            git_url,
+            reference,
+            download_error,
+        }
+    } else {
+        Binary::Shipped {
+            git_url,
+            reference,
+            download_error,
+        }
+    }
+}
+
+fn fetch_asset(
+    host: &Host,
+    github: &GitHubSource,
+    staged: &Path,
+    manifest: &Manifest,
+) -> Result<Downloaded, String> {
+    let target = fetch::release_target()
+        .ok_or_else(|| "no release asset is published for this platform".to_owned())?;
     let asset = fetch::asset_name(&manifest.name, &target);
     let url = format!("{}/{asset}", github.release_url(host.github_base()));
-    let parent = match fetch::program_parent(staged, &manifest.run) {
-        Ok(parent) => parent,
-        Err(reason) => return missing(reason),
-    };
-    let Some(file_name) = Path::new(&manifest.run).file_name() else {
-        return missing(format!("`run` = \"{}\" names no file", manifest.run));
-    };
+    let parent = fetch::program_parent(staged, &manifest.run)?;
+    let file_name = Path::new(&manifest.run)
+        .file_name()
+        .ok_or_else(|| format!("`run` = \"{}\" names no file", manifest.run))?;
     let dest = parent.join(file_name);
     let allow_file = host.github_base().starts_with("file://");
-    match fetch::download_program(&url, &dest, allow_file) {
-        Ok(downloaded) => match contained_program(staged, manifest) {
-            Ok(_) => Binary::Downloaded(downloaded),
-            Err(e) => {
-                let _ = std::fs::remove_file(&dest);
-                missing(e.to_string())
-            }
-        },
-        Err(reason) => missing(reason),
-    }
+    let downloaded = fetch::download_program(&url, &dest, allow_file)?;
+    contained_program(staged, manifest).map_err(|e| {
+        let _ = std::fs::remove_file(&dest);
+        e.to_string()
+    })?;
+    Ok(downloaded)
 }
 
 /// `cargo install --git <url> [--rev <ref>] --root <root>`: builds the
@@ -994,6 +1022,17 @@ mod tests {
         .unwrap();
     }
 
+    /// The shape of the Pixel-CLI plugins: `run` = `bin/tool` is committed,
+    /// a launcher that only finds a binary built elsewhere.
+    const LAUNCHER: &str = "#!/bin/sh\necho 'no tool binary installed' >&2\nexit 1\n";
+
+    fn launcher(work: &Path) {
+        unbuilt(work);
+        fs::create_dir_all(work.join("bin")).unwrap();
+        fs::write(work.join("bin/tool"), LAUNCHER).unwrap();
+        fs::set_permissions(work.join("bin/tool"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     fn publish_asset(base: &Path, tail: &str, name: &str, bytes: &[u8]) -> PathBuf {
         let target = fetch::release_target().expect("a platform with release assets");
         let dir = base.join("acme/tool/releases").join(tail);
@@ -1011,7 +1050,11 @@ mod tests {
         });
         let added = add(&f.host, "github:acme/tool", None).unwrap();
         assert_eq!(added.name, "tool");
-        assert_eq!(added.binary, Binary::Present);
+        assert!(
+            matches!(added.binary, Binary::Shipped { .. }),
+            "{:?}",
+            added.binary
+        );
         assert!(added.dir.join("run.sh").is_file());
         assert!(!added.dir.join(".git").exists());
         assert_eq!(
@@ -1168,6 +1211,93 @@ mod tests {
             "{problem}"
         );
         assert!(crate::render(&rows).contains("  ! tool: not runnable:"));
+    }
+
+    #[test]
+    fn a_release_asset_replaces_the_launcher_the_repository_ships() {
+        let mut f = fixture();
+        let base = github_base(&mut f, "acme", "tool", launcher);
+        publish_asset(&base, "latest/download", "tool", b"#!/bin/sh\necho built\n");
+        let added = add(&f.host, "github:acme/tool", None).unwrap();
+        assert!(
+            matches!(added.binary, Binary::Downloaded(_)),
+            "{:?}",
+            added.binary
+        );
+        assert_eq!(
+            fs::read_to_string(added.dir.join("bin/tool")).unwrap(),
+            "#!/bin/sh\necho built\n"
+        );
+        assert!(
+            !added.dir.join("bin/.tool.download").exists(),
+            "no partial file is left beside the program"
+        );
+    }
+
+    #[test]
+    fn without_a_release_asset_a_shipped_launcher_stays_and_the_build_is_named() {
+        let mut f = fixture();
+        github_base(&mut f, "acme", "tool", launcher);
+        let added = add(&f.host, "github:acme/tool@v1", None).unwrap();
+        let Binary::Shipped {
+            git_url,
+            reference,
+            download_error,
+        } = &added.binary
+        else {
+            panic!(
+                "expected the shipped program and its build: {:?}",
+                added.binary
+            );
+        };
+        assert_eq!(git_url, &format!("{}/acme/tool.git", f.host.github_base()));
+        assert_eq!(reference.as_deref(), Some("v1"));
+        assert!(
+            download_error.starts_with("cannot download "),
+            "{download_error}"
+        );
+        assert_eq!(
+            fs::read_to_string(added.dir.join("bin/tool")).unwrap(),
+            LAUNCHER,
+            "a failed download leaves the shipped file untouched"
+        );
+        assert!(!added.dir.join("bin/.tool.download").exists());
+    }
+
+    #[test]
+    fn a_rejected_asset_leaves_the_shipped_launcher_in_place() {
+        let mut f = fixture();
+        let base = github_base(&mut f, "acme", "tool", launcher);
+        let asset = publish_asset(&base, "latest/download", "tool", b"payload");
+        fs::write(format!("{}.sha256", asset.display()), "00".repeat(32)).unwrap();
+        let added = add(&f.host, "github:acme/tool", None).unwrap();
+        let Binary::Shipped { download_error, .. } = &added.binary else {
+            panic!("expected the shipped program: {:?}", added.binary);
+        };
+        assert!(
+            download_error.contains("does not match its published sha256"),
+            "{download_error}"
+        );
+        assert_eq!(
+            fs::read_to_string(added.dir.join("bin/tool")).unwrap(),
+            LAUNCHER
+        );
+    }
+
+    #[test]
+    fn a_local_source_runs_what_it_ships_without_asking_a_release() {
+        let mut f = fixture();
+        let base = github_base(&mut f, "acme", "tool", launcher);
+        publish_asset(&base, "latest/download", "tool", b"payload");
+        let src = f.tmp.path().join("local");
+        fs::create_dir_all(&src).unwrap();
+        launcher(&src);
+        let added = add(&f.host, src.to_str().unwrap(), None).unwrap();
+        assert_eq!(added.binary, Binary::Present);
+        assert_eq!(
+            fs::read_to_string(added.dir.join("bin/tool")).unwrap(),
+            LAUNCHER
+        );
     }
 
     #[test]

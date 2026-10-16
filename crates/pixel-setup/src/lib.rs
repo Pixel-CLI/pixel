@@ -21,6 +21,7 @@ pub mod codex_config;
 pub mod config;
 pub mod doctor;
 pub mod install;
+mod json_edit;
 pub mod opencode_config;
 mod pi_global;
 pub use pi_global::{CLASSIFY_PACKAGE_DIR, ClassifyPiPackage};

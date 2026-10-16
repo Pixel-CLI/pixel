@@ -4,7 +4,7 @@
 
 ## after setup, twice
 --- home/.claude/settings.json 0644
-{
+{"theme":"dark",
   "hooks": {
     "PostToolUse": [
       {
@@ -133,9 +133,7 @@
         ]
       }
     ]
-  },
-  "theme": "dark"
-}
+  }}
 --- home/.claude/settings.json.pixel-bak.{STAMP1} 0644
 {"theme":"dark"}
 --- home/.claude/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
@@ -183,10 +181,6 @@ first-party probe shipped with pixel; `pixel setup` keeps it current
 
 ## after setup --remove
 --- home/.claude/pixel.pixel-bak.{STAMP3}/SKILL.md 0644 = tests/setup/.agents/skill.md
---- home/.claude/settings.json 0644
-{
-  "theme": "dark"
-}
 --- home/.claude/settings.json.pixel-bak.{STAMP1} 0644 = home/.claude/settings.json.pixel-bak.{STAMP1} (after setup, twice)
 --- home/.claude/settings.json.pixel-bak.{STAMP2} 0644 = home/.claude/settings.json (after setup, twice)
 --- home/.claude/skills/ (empty directory)

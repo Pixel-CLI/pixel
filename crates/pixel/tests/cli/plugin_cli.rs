@@ -312,6 +312,45 @@ fn an_unknown_command_without_a_plugin_keeps_clap_error() {
     assert_eq!(nested.status.code(), Some(2));
 }
 
+/// A name 0.8.0 removed (#965) is not run, and the error names the command
+/// that replaced it, not clap's nearest spelling (`ready` once got "a
+/// similar subcommand exists: 'rename'").
+#[test]
+fn a_removed_command_names_its_replacement_and_nothing_else() {
+    let world = World::new("removed");
+    for (args, line) in [
+        (
+            &["ready"][..],
+            "pixel: 'ready' was removed in 0.8.0; use `pixel prepare-repo`\n",
+        ),
+        (
+            &["--metrics", "off", "uses", "foo"][..],
+            "pixel: 'uses' was removed in 0.8.0; use `pixel who-calls`\n",
+        ),
+        (
+            &["history"][..],
+            "pixel: 'history' was removed in 0.8.0; use `pixel commit-history`, a plugin command: pixel install github:Pixel-CLI/pixel-git\n",
+        ),
+    ] {
+        let out = world.pixel(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert_eq!(stderr(&out), line, "{args:?}");
+        assert!(!stderr(&out).contains("rename"), "{args:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{args:?}");
+    }
+    assert!(action_log(&world).is_empty(), "a hint is not a run");
+}
+
+/// A hook entry an old install wrote (`pixel hook …`) still fails open with
+/// exit 0, before the removed-command hint is considered.
+#[test]
+fn an_old_hook_entry_still_fails_open() {
+    let world = World::new("removed-hook");
+    let out = world.pixel(&["hook", "prompt-submit"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(!stderr(&out).contains("was removed"), "{}", stderr(&out));
+}
+
 #[test]
 fn install_reports_a_bad_source_and_keeps_the_credentials_of_a_url_out_of_the_log() {
     let world = World::new("addbad");
@@ -632,9 +671,27 @@ fn install_github_clones_the_repo_and_the_plugin_runs() {
         &["install", "github:acme/hello"],
         &[("PIXEL_GITHUB_BASE_URL", &base_url(&base))],
     );
+    let text = ok(&out);
     assert!(
-        ok(&out).starts_with("installed plugin hello 2.0.0 in "),
+        text.starts_with("installed plugin hello 2.0.0 in "),
         "{out:?}"
+    );
+    // No release asset: the shipped program runs, and the report says what
+    // replaces it if it is only a launcher for a separately built binary.
+    assert!(
+        text.contains(&format!(
+            "hello runs the repository's own `run.sh`: no release asset replaced it (cannot download {}/acme/hello/releases/latest/download/pixel-hello-",
+            base_url(&base)
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "build it into the plugin with: cargo install --git {}/acme/hello.git --root {} --force\n",
+            base_url(&base),
+            world.user_plugins().join("hello").display()
+        )),
+        "{text}"
     );
     assert!(world.user_plugins().join("hello/run.sh").is_file());
     assert!(ok(&world.pixel(&["hello", "a b"])).starts_with("args=a b\napi=1\n"));
@@ -676,6 +733,35 @@ fn install_github_downloads_the_release_asset_for_an_unbuilt_program() {
         "{text}"
     );
     assert!(ok(&world.pixel(&["built", "go"])).starts_with("args=go\napi=1\n"));
+}
+
+#[test]
+fn install_github_runs_the_release_asset_over_a_shipped_launcher() {
+    // The Pixel-CLI plugins commit `bin/<name>` as a launcher and publish
+    // the real program as the release asset: the asset is what must run.
+    let world = World::new("github-launcher");
+    let base = github_base(&world, "launched", "bin/launched", true);
+    let target = pixel_plugin::release_target().expect("a platform with release assets");
+    let dir = base.join("acme/launched/releases/latest/download");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("pixel-launched-{target}")),
+        "#!/bin/sh\necho from-asset\n",
+    )
+    .unwrap();
+    let out = world.pixel_with(
+        &["install", "github:acme/launched"],
+        &[("PIXEL_GITHUB_BASE_URL", &base_url(&base))],
+    );
+    let text = ok(&out);
+    assert!(
+        text.contains(&format!(
+            "downloaded {}/acme/launched/releases/latest/download/pixel-launched-{target} ",
+            base_url(&base)
+        )),
+        "{text}"
+    );
+    assert_eq!(ok(&world.pixel(&["launched"])), "from-asset\n");
 }
 
 #[test]

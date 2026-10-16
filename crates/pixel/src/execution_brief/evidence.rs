@@ -871,7 +871,7 @@ fn graph_current(root: &Path, store: &GraphStore) -> Result<(), String> {
 
 fn local_symbols(store: &GraphStore, name: &str) -> Result<Vec<SymbolHit>, String> {
     let rows = store
-        .symbols_by_name(name, None, SYMBOL_ROWS)
+        .symbols_named(name, None, SYMBOL_ROWS)
         .map_err(|error| error.to_string())?;
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
@@ -1363,7 +1363,7 @@ fn resolve_uid(store: &GraphStore, name_or_uid: &str) -> Result<String, String> 
         return Ok(name_or_uid.to_string());
     }
     let rows = store
-        .symbols_by_name(name_or_uid, None, 2)
+        .symbols_named(name_or_uid, None, 2)
         .map_err(|error| error.to_string())?;
     match rows.len() {
         1 => Ok(rows[0].uid.clone()),
@@ -2593,5 +2593,38 @@ mod tests {
         let stale = Live::new(Path::new("/nowhere"), Route::Local);
         *stale.graph.lock().unwrap() = Some(Err("graph is stale".into()));
         assert_eq!(stale.repo_map(deadline).unwrap_err(), "graph is stale");
+    }
+
+    /// The local route's symbol and name→uid lookups answer a qualified
+    /// method as the daemon's `symbol` and `impact` do, so the brief does not
+    /// depend on which route served it.
+    #[test]
+    fn the_local_lookups_should_resolve_a_qualified_method_name() {
+        use pixel_graph::store::SymbolKind;
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let file = store.replace_file("src/log.rs", "oid", "rust").unwrap();
+        for (qualified, line) in [("ActionLog::finish", 1), ("Hasher::finish", 3)] {
+            store
+                .insert_symbol(
+                    file,
+                    &format!("src/log.rs#{qualified}#method"),
+                    "finish",
+                    qualified,
+                    SymbolKind::Method,
+                    line,
+                    line,
+                    "fn finish()",
+                )
+                .unwrap();
+        }
+        let hits = local_symbols(&store, "ActionLog::finish").unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.uid.as_str()).collect::<Vec<_>>(),
+            ["src/log.rs#ActionLog::finish#method"]
+        );
+        assert_eq!(
+            resolve_uid(&store, "Hasher.finish").unwrap(),
+            "src/log.rs#Hasher::finish#method"
+        );
     }
 }

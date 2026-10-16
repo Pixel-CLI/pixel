@@ -230,12 +230,10 @@ export default function (pi: ExtensionAPI) {
   "private": true
 }
 --- home/.pi/agent/settings.json 0644
-{
-  "defaultModel": "sonnet",
+{"defaultModel":"sonnet",
   "packages": [
     "{HOME}/.local/share/pixel/pi-package"
-  ]
-}
+  ]}
 --- home/.pi/agent/settings.json.pixel-bak.{STAMP1} 0644
 {"defaultModel":"sonnet"}
 --- home/.pi/agent/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
@@ -285,10 +283,10 @@ first-party probe shipped with pixel; `pixel setup` keeps it current
 --- home/.local/share/pixel/ (empty directory)
 --- home/.pi/agent/pixel.pixel-bak.{STAMP2}/SKILL.md 0644 = tests/setup/.agents/skill.md
 --- home/.pi/agent/settings.json 0644
-{
-  "defaultModel": "sonnet",
-  "packages": []
-}
+{"defaultModel":"sonnet",
+  "packages": [
+    
+  ]}
 --- home/.pi/agent/settings.json.pixel-bak.{STAMP1} 0644 = home/.pi/agent/settings.json.pixel-bak.{STAMP1} (after setup, twice)
 --- home/.pi/agent/settings.json.pixel-bak.{STAMP3} 0644 = home/.pi/agent/settings.json (after setup, twice)
 --- home/.pi/agent/skills/ (empty directory)

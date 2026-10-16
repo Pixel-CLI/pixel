@@ -476,7 +476,7 @@ pub(crate) fn read_settings(path: &Path) -> Result<serde_json::Value> {
     }
 }
 
-/// Serialize and write `value` to `path`, backing up any pre-existing,
+/// Edit changed JSON keys in `path`, backing up any pre-existing,
 /// content-differing file first. In dry-run mode, performs no write, no
 /// backup, and no directory creation, and always returns `Ok(None)`.
 pub(crate) fn write_settings(
@@ -484,7 +484,16 @@ pub(crate) fn write_settings(
     value: &serde_json::Value,
     dry_run: bool,
 ) -> Result<Option<PathBuf>> {
-    let serialized = format!("{}\n", serde_json::to_string_pretty(value)?);
+    let serialized = match fs::read_to_string(path) {
+        Ok(text) if serde_json::from_str::<serde_json::Value>(&text).is_ok() => {
+            crate::json_edit::patch(&text, value)?
+        }
+        Ok(_) => format!("{}\n", serde_json::to_string_pretty(value)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            format!("{}\n", serde_json::to_string_pretty(value)?)
+        }
+        Err(error) => return Err(error.into()),
+    };
     if dry_run {
         return Ok(None);
     }
