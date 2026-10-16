@@ -11,7 +11,11 @@ from files and screens, never from what the model says:
 | Check | PASS when |
 | --- | --- |
 | `brief` | `<repo>/.pixel/brief-feedback.jsonl` holds a `prompt` line and a `part` line with `bytes > 0` of that CLI's `provider`, both with `ts` at or after the moment the prompt was sent. |
-| `metrics` | the CLI's scrollback shows `🟩 pixel search-content … #<id>` and `<repo>/.pixel/actions.jsonl` holds a `search-content` record, `ts_ms` at or after the prompt, whose `invocation_id` middle field ends in that `<id>` (last six characters, as `format_metrics_line` shows). |
+| `metrics` | a Pixel 🟩 line reached the CLI's screen by a hook (`sources` names which): the `🟩 pixel prompt-submit ❀ Xms` notice (Claude, Codex, pi), or the **relay**: `🟩 pixel search-content … #<id>` where `<repo>/.pixel/actions.jsonl` holds a `search-content` record, `ts_ms` at or after the prompt, whose `invocation_id` middle field ends in that `<id>` (last six characters, as `format_metrics_line` shows). |
+
+A model that answers from the brief alone runs no Pixel command, so the relay
+cannot fire (`relay_verdict` FAIL, an event says so); the prompt-submit notice
+still shows the brief's own line, and that is what passes.
 
 The prompt never mentions metrics (a hard guard refuses `metric`, `🟩`, `❀`)
 and the answer is never scored: a model asked about metrics says yes.
@@ -50,7 +54,7 @@ usage or environment problem (no Herdr pane, `PIXEL_BRIEF_LOG` off, install fail
 5. **Stagger**: the next CLI is prompted after the previous one's `search-content` record appears (bound 60 s). The metrics relay
    stays silent when identical Pixel invocations overlap in one repository, so run no other Pixel command in `--repo` during the run.
 6. **Wait and judge**: `herdr agent prompt` without `--wait` (it reports `agent_prompt_stalled` for a prompt that ran), then poll
-   `agent get`; scrollback is read with `agent read --source recent-unwrapped --lines 2000` because pi's notices scroll out of `visible`.
+   `agent get` until the turn ended (`done` for Claude, Codex, agy and Devin, `idle` for pi); scrollback is read with `agent read --source recent-unwrapped --lines 2000` because pi's notices scroll out of `visible`.
 7. **Receipt** in `--out`: `receipt.json` (identity, seed, order, prompt, per CLI the evidence and verdicts, install steps),
    `receipt.md` (table), `<cli>.scrollback.txt`. The last line printed is `N/5 brief, M/5 metrics`.
 

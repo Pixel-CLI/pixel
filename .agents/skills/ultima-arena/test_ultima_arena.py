@@ -107,7 +107,8 @@ elif a[:2] == ["agent", "get"]:
         print(json.dumps({"error": {"code": "agent_not_found"}}))
         sys.exit(1)
     if g["status"] == "working" and time.time() >= g["ready_at"]:
-        g["status"] = "idle"
+        # As live Herdr reports it: a finished turn is `idle` for pi, `done` for the others.
+        g["status"] = "idle" if g["kind"] == "pi" else "done"
         g["seq"] += 1
         g["screen"] += g["after"]
         g["after"] = []
@@ -139,12 +140,15 @@ elif a[:2] == ["agent", "prompt"]:
     if scen != "no-brief":
         append(REPO + "/.pixel/brief-feedback.jsonl", {"t": "prompt", "ts": t, "session": sess, "provider": pr, "bytes": 900, "kind": "strong", "injected": ["crates/pixel/src/task_hook.rs"]})
         append(REPO + "/.pixel/brief-feedback.jsonl", {"t": "part", "ts": t, "session": sess, "provider": pr, "bytes": 900, "late": False})
-    append(REPO + "/.pixel/actions.jsonl", {"invocation_id": "123-18df019d6%s-0" % i6, "ts_ms": t + 1, "pid": 1,
-           "command": "search-content", "args": "-F start_brief crates/pixel/src", "cwd": REPO, "outcome": "ok", "duration_ms": 12})
-    after = ["$ pixel search-content -F start_brief crates/pixel/src", "crates/pixel/src/task_hook.rs:228:pub fn start_brief"]
+    if scen != "no-call":
+        append(REPO + "/.pixel/actions.jsonl", {"invocation_id": "123-18df019d6%s-0" % i6, "ts_ms": t + 1, "pid": 1,
+               "command": "search-content", "args": "-F start_brief crates/pixel/src", "cwd": REPO, "outcome": "ok", "duration_ms": 12})
+    after = [] if scen == "no-call" else ["$ pixel search-content -F start_brief crates/pixel/src", "crates/pixel/src/task_hook.rs:228:pub fn start_brief"]
     if cli in ("claude", "codex", "pi"):
         after.append("🟩 pixel prompt-submit ❀ 41ms")
-    if scen == "claim-only":
+    if scen == "no-call":
+        pass
+    elif scen == "claim-only":
         after.append("The pixel metrics line was displayed: search-content 12ms #%s" % i6)
     elif scen == "orphan-box":
         after.append("🟩 pixel search-content ❀ 12.3ms ❀ #ffffff")
@@ -351,12 +355,31 @@ class RunTests(unittest.TestCase):
 
     def test_metrics_fails_when_the_box_id_has_no_record(self):
         fx = Fixture(self)
-        fx.scenarios = {"pi": "orphan-box"}
+        # Devin shows no prompt-submit notice, so the orphan box is its only 🟩 line.
+        fx.scenarios = {"devin": "orphan-box"}
         rc, out, _ = fx.run()
         self.assertEqual(rc, 1)
         self.assertIn("5/5 brief, 4/5 metrics", out)
-        m = fx.receipt()["clis"]["pi"]["metrics"]
+        m = fx.receipt()["clis"]["devin"]["metrics"]
         self.assertEqual((m["verdict"], m["box_ids_without_record"], m["record_found"]), ("FAIL", ["ffffff"], True))
+        self.assertEqual((m["relay_verdict"], m["sources"]), ("FAIL", []))
+
+    def test_an_answer_from_the_brief_alone_passes_on_the_prompt_submit_notice(self):
+        fx = Fixture(self)
+        fx.scenarios = {"pi": "no-call", "agy": "no-call"}
+        rc, out, _ = fx.run()
+        self.assertEqual(rc, 1)
+        self.assertIn("5/5 brief, 4/5 metrics", out)
+        clis = fx.receipt()["clis"]
+        pi, agy = clis["pi"], clis["agy"]
+        # pi has the notice: metrics reached the screen although no relay could fire.
+        self.assertEqual((pi["metrics"]["verdict"], pi["metrics"]["relay_verdict"], pi["metrics"]["sources"]), ("PASS", "FAIL", ["prompt-submit"]))
+        self.assertTrue(any("no Pixel shell call" in e for e in pi["events"]), pi["events"])
+        # agy has neither the notice nor a box: nothing reached the screen.
+        self.assertEqual((agy["metrics"]["verdict"], agy["metrics"]["sources"]), ("FAIL", []))
+        self.assertEqual(clis["claude"]["metrics"]["sources"], ["relay", "prompt-submit"])
+        self.assertEqual(clis["devin"]["metrics"]["sources"], ["relay"])
+        self.assertEqual({c["status"] for c in clis.values()}, {"done"})
 
     def test_metrics_fails_when_only_the_answer_claims_them(self):
         fx = Fixture(self)

@@ -57,6 +57,8 @@ PROMPT_FORBIDDEN = re.compile(r"metric|🟩|❀", re.IGNORECASE)
 
 BUILD_CMD = "cargo build --profile dev-release -p pixel-cli"
 NAME_PREFIX = "ultima-"
+# Herdr reports a turn that ended as `done` (Claude, Codex, agy, Devin) or `idle` (pi).
+FINISHED = ("idle", "done")
 FEEDBACK_FILE = "brief-feedback.jsonl"
 ACTIONS_FILE = "actions.jsonl"
 BRIEF_LOG_OFF = ("0", "false", "off")  # decision_log::enabled
@@ -193,6 +195,15 @@ def judge_metrics(scrollback: str, actions: list[dict], since_ms: int) -> dict:
         "record_ids": sorted(records),
         "record_found": bool(records),
     }
+
+
+def judge_display(relay: dict, submit_line: str | None) -> dict:
+    """Metrics PASS when a Pixel 🟩 line reached the pane by a hook: the prompt-submit notice, or a
+    `search-content` box whose id the action log holds (`relay`). A model that answers from the
+    brief makes no Pixel call, so the relay cannot fire; the notice still shows the brief's line.
+    `sources` names which of the two was on screen."""
+    sources = [name for name, seen in (("relay", relay.get("verdict") == "PASS"), ("prompt-submit", submit_line is not None)) if seen]
+    return {**relay, "verdict": "PASS" if sources else "FAIL", "relay_verdict": relay.get("verdict"), "sources": sources}
 
 
 def shell_call_count(scrollback: str) -> int:
@@ -618,9 +629,10 @@ class Arena:
                     continue
                 agent = self.h.get(cell.name)
                 moved = int(agent.get("state_change_seq", cell.seq0)) != cell.seq0
-                if agent.get("agent_status") == "idle" and moved and waited >= 3 * self.cfg.poll_s and self.record_since(cell):
+                finished = agent.get("agent_status") in FINISHED
+                if finished and moved and waited >= 3 * self.cfg.poll_s and self.record_since(cell):
                     cell.status = "done"
-                elif agent.get("agent_status") == "idle" and moved and waited >= 10 * self.cfg.poll_s:
+                elif finished and moved and waited >= 10 * self.cfg.poll_s:
                     cell.status = "done"  # idle again with no record: judged below on its evidence
                 elif waited >= self.cfg.timeout:
                     cell.status, cell.note = "timeout", f"still not idle after {self.cfg.timeout:g}s"
@@ -639,9 +651,12 @@ class Arena:
             return
         cell.scrollback = self.h.read(cell.name, "recent-unwrapped", SCROLLBACK_LINES)
         cell.brief = judge_brief(read_jsonl(self.cfg.repo / ".pixel" / FEEDBACK_FILE), cell.cli.provider, cell.t_prompt_ms)
-        cell.metrics = judge_metrics(cell.scrollback, read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE), cell.t_prompt_ms)
+        relay = judge_metrics(cell.scrollback, read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE), cell.t_prompt_ms)
         cell.submit_line = prompt_submit_line(cell.scrollback)
+        cell.metrics = judge_display(relay, cell.submit_line)
         cell.shell_calls = shell_call_count(cell.scrollback)
+        if relay["verdict"] != "PASS" and cell.shell_calls < 2:
+            cell.events.append("no Pixel shell call on this pane: the model answered without running the command, so the relay could not fire")
         if not cell.elapsed_s:
             cell.elapsed_s = round(time.time() - cell.sent_at, 1)
         if cell.status in ("waiting", "pending"):
@@ -733,12 +748,16 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
         },
     }
     (cfg.out / "receipt.json").write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
-    rows = ["| order | CLI | status | brief | metrics | prompt-submit line | elapsed |", "| --- | --- | --- | --- | --- | --- | --- |"]
+    rows = [
+        "| order | CLI | status | brief | metrics | prompt-submit line | relay | Pixel shell call | elapsed |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
     for i, name in enumerate(order, 1):
         c = cells[name]
         rows.append(
             f"| {i} | {name} | {c.status} | {c.brief.get('verdict', 'N/A')} | {c.metrics.get('verdict', 'N/A')} "
-            f"| {'yes' if c.submit_line else 'no'} | {c.elapsed_s}s |"
+            f"| {'yes' if c.submit_line else 'no'} | {c.metrics.get('relay_verdict', 'N/A')} "
+            f"| {'yes' if c.shell_calls >= 2 else 'no'} | {c.elapsed_s}s |"
         )
     s = doc["summary"]
     md = [
