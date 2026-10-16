@@ -456,7 +456,7 @@ fn command_table_order_reads_the_first_cell_of_each_row() {
 }
 
 /// Whether a dependency is a workspace member: a `pixel-*` crate, or an
-/// `mvp-*` crate vendored from pixel-mvp (`crates/mvp-*/VENDORED.md`).
+/// `mvp-*` crate imported from pixel-mvp (`crates/mvp-*/ORIGIN.md`).
 fn is_internal(dep: &str) -> bool {
     dep.starts_with("pixel-") || dep.starts_with("mvp-")
 }
@@ -487,7 +487,7 @@ fn member_deps(root: &Path, member: &str) -> (String, BTreeSet<String>, BTreeSet
 
 /// The `Depends on (pixel crates)` cell of the `## Crates` table, read as
 /// `(normal deps, dev deps when the cell lists them)`. A short name stands
-/// for `pixel-<name>`; a vendored `mvp-*` crate is written in full.
+/// for `pixel-<name>`; a imported `mvp-*` crate is written in full.
 /// `libraries` is every library crate, which the `every library crate
 /// except …` form starts from.
 fn documented_deps(
