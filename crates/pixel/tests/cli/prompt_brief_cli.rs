@@ -327,7 +327,7 @@ fn a_missing_graph_should_leave_the_text_evidence_and_build_nothing() {
 }
 
 /// `pixel brief "<prompt>"` is the same chain, on stdout, for harnesses
-/// without a prompt-submit context channel (Pi's extension calls it).
+/// without a prompt-submit context channel (OpenCode's plugin calls it).
 #[test]
 fn the_brief_command_should_print_the_brief_or_stay_silent() {
     let root = indexed("brief-cmd");

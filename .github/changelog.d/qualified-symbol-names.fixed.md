@@ -1,0 +1,1 @@
+**graph, daemon:** `impact`, `who-calls`, `call-path`, `pack-context`, `evaluate`, `rename` and `find-symbol` accept a method by its qualified name (`ActionLog::finish`, `Builder.finish`, either separator), as the graph prints it in a uid; it used to answer `no symbol named`. A qualified miss now suggests `pixel find-symbol <leaf>` instead of a lookup that failed the same way.

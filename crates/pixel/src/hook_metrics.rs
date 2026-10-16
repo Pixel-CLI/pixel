@@ -32,6 +32,8 @@ pub enum Provider {
     Claude,
     Codex,
     Devin,
+    /// Pi's extension sends a Claude-shaped payload and shows `systemMessage`.
+    Pi,
     /// Antigravity's `toolCall` payload is normalized to the shared shape.
     Antigravity,
 }
@@ -393,7 +395,9 @@ fn metrics_relay_response(provider: Option<Provider>, line: &str) -> Value {
     match provider {
         // Codex's shell result can carry stderr without surfacing the footer
         // in the transcript, so PostToolUse uses the documented visible field.
-        Some(Provider::Codex) => serde_json::json!({"systemMessage": line}),
+        // Pi's extension shows `systemMessage` to the user and never to the
+        // model, which already reads the box in the bash result.
+        Some(Provider::Codex | Provider::Pi) => serde_json::json!({"systemMessage": line}),
         _ => post_tool_use_advisory(line),
     }
 }
@@ -402,15 +406,20 @@ fn metrics_relay_response(provider: Option<Provider>, line: &str) -> Value {
 /// `additionalContext` for every provider. A box already in the result is a
 /// duplicate for the model, so it is dropped, except for Claude Code: its
 /// Bash result carries hidden stderr, while Codex's documented `systemMessage`
-/// is the user-visible relay when its shell result hides the footer.
+/// is the user-visible relay when its shell result hides the footer. Pi
+/// relays like Codex: its extension shows the `systemMessage` to the user
+/// whether or not the bash result holds the box.
 fn metrics_hook_response(provider: Option<Provider>, payload: &Value) -> Option<Value> {
     if !result_carries_metrics_box(payload) {
         return metrics_hook_line(payload).map(|line| metrics_relay_response(provider, &line));
     }
-    matches!(provider, Some(Provider::Claude | Provider::Codex))
-        .then(|| metrics_record_line(payload))
-        .flatten()
-        .map(|line| serde_json::json!({"systemMessage": line}))
+    matches!(
+        provider,
+        Some(Provider::Claude | Provider::Codex | Provider::Pi)
+    )
+    .then(|| metrics_record_line(payload))
+    .flatten()
+    .map(|line| serde_json::json!({"systemMessage": line}))
 }
 
 /// Resolve the payload to the metrics line of the invocation it describes,
@@ -1146,6 +1155,33 @@ mod tests {
         shown["tool_input"] = serde_json::json!({"command": "pixel impact other.rs"});
         assert_eq!(metrics_hook_response(Some(Provider::Claude), &shown), None);
         assert_eq!(metrics_hook_response(Some(Provider::Codex), &shown), None);
+    }
+
+    /// Pi relays like Codex: always the user-only `systemMessage`, whether or
+    /// not the bash result already holds the box, and never `additionalContext`
+    /// (the model reads the box in the result itself).
+    #[test]
+    fn metrics_hook_response_relays_to_pi_as_a_system_message_only() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("pi-response");
+        let plain = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
+        let line = metrics_hook_line(&plain).expect("seeded record");
+        let mut shown = plain.clone();
+        shown["tool_response"] = serde_json::json!({"stdout": line, "stderr": ""});
+        let expected = Some(serde_json::json!({"systemMessage": line}));
+        assert_eq!(metrics_hook_response(Some(Provider::Pi), &plain), expected);
+        assert_eq!(metrics_hook_response(Some(Provider::Pi), &shown), expected);
+        // Shown, but no record matches: nothing to finalize.
+        shown["tool_input"] = serde_json::json!({"command": "pixel impact other.rs"});
+        assert_eq!(metrics_hook_response(Some(Provider::Pi), &shown), None);
+        assert_eq!(
+            <Provider as clap::ValueEnum>::from_str("pi", false),
+            Ok(Provider::Pi)
+        );
+        // Pi's lowercase tool name is a shell tool.
+        let mut lower = plain;
+        lower["tool_name"] = serde_json::json!("bash");
+        assert_eq!(metrics_hook_response(Some(Provider::Pi), &lower), expected);
     }
 
     #[test]
