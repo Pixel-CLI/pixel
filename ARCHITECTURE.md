@@ -549,6 +549,10 @@ envelope talks to the daemon socket directly.
 
 ## Agent integration
 
+Setup and removal edit JSON settings by key, retaining untouched values and their
+formatting. Codex hook writes use the shared atomic settings writer; setup reads
+Codex TOML review state without rewriting it.
+
 `pixel setup` has two ways to run, and one installer behind both. At a terminal
 (stdin and stdout, `CI` unset, no `--yes`, `--json` or `--print`) it is the
 guided setup of `pixel-setup::setup`: it detects the agent CLIs by their

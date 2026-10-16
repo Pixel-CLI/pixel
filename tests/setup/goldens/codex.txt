@@ -3,7 +3,7 @@
 # Paths are relative to the fixture root; see the module doc to regenerate.
 
 ## after setup, twice
---- home/.codex/hooks.json 0644
+--- home/.codex/hooks.json 0600
 {
   "hooks": {
     "Interrupt": [
@@ -178,8 +178,10 @@ first-party probe shipped with pixel; `pixel setup` keeps it current
 --- home/.pixel/plugins/rank-blocks/probe 0755 = probes/rank-blocks/probe
 
 ## after setup --remove
---- home/.codex/hooks.json 0644
-{}
+--- home/.codex/hooks.json 0600
+{
+  
+}
 --- home/.codex/hooks.json.pixel-bak.{STAMP1} 0644 = home/.codex/hooks.json (after setup, twice)
 --- home/.codex/pixel.pixel-bak.{STAMP2}/SKILL.md 0644 = tests/setup/.agents/skill.md
 --- home/.codex/skills/ (empty directory)
