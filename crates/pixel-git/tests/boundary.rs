@@ -39,15 +39,12 @@ fn crates_dir() -> PathBuf {
         .unwrap()
 }
 
-/// Whether `name` is a crate vendored from pixel-mvp (`crates/mvp-*`,
-/// `VENDORED.md`): its `src/` is a copy that each sync replaces, so it keeps
-/// pixel-mvp's own rules instead of these walks. Its git spawns are
-/// pixel-mvp's (`mvp-index`'s `tree.rs`, which clears git's local
-/// environment and takes no optional lock but has no timeout), and a test
-/// seam may follow a `#[cfg(test)] mod` (`mvp-store`'s `checked.rs`), which
-/// only shortens what `docs_drift`'s printed-command walk reads of it.
+/// Imported foundations retain their existing git execution boundary for
+/// now: mvp-index clears git's local environment but does not use GitRunner.
+/// Consolidating those subprocesses is tracked in docs/mvp-handover.md.
+/// This exemption does not exempt them from ordinary tests or mutations.
 fn vendored(name: &str) -> bool {
-    name.starts_with("mvp-")
+    matches!(name, "mvp-model" | "mvp-store" | "mvp-index")
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {

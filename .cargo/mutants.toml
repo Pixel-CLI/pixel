@@ -11,13 +11,8 @@
 # and the freshness signature, which sat outside the gate for as long as the
 # glob did. An exclusion here must never be able to swallow a module;
 # scripts/test-mutants-config.py holds that line.
-# The crates vendored from pixel-mvp (`crates/mvp-*`, each with its
-# VENDORED.md) are copies a sync replaces: a survivor there can only be
-# fixed in pixel-mvp, and the first nightly after they land would mutate
-# tens of thousands of copied lines. They leave the gate as a whole crate,
-# never one module, and scripts/test-mutants-config.py refuses the glob for
-# a crate without a VENDORED.md.
-exclude_globs = ["crates/pixel-bench/**", "**/benches/**", "crates/*/build.rs", "crates/mvp-*/**"]
+# The owned mvp-* foundations participate like every other library.
+exclude_globs = ["crates/pixel-bench/**", "**/benches/**", "crates/*/build.rs"]
 
 # Debug output is diagnostic, never part of the wire contract. Display is
 # deliberately kept: tokens, error codes and op names reach JSON and the

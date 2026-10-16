@@ -28,6 +28,9 @@ use crate::api::{Request, Response, ServeError, Service, failure_response};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEBOUNCE: Duration = Duration::from_millis(500);
+/// Four debounce windows retain burst batching while bounding queue wait during
+/// continuous edits to two seconds; applying the batch can take additional time.
+const MAX_PENDING_WAIT: Duration = Duration::from_secs(2);
 /// Longest the main loop sleeps before re-checking that the served root
 /// still exists. A daemon whose root was deleted (a removed worktree, a
 /// test fixture) has nothing left to serve and must not sit on the machine
@@ -473,6 +476,7 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
     // absolute path -> removed?
     let mut pending: BTreeMap<PathBuf, bool> = BTreeMap::new();
     let mut flush_at: Option<Instant> = None;
+    let mut first_pending_at = None;
     let mut last_activity = Instant::now();
     let mut shutdown = false;
     let sweep_every = service.sweep_interval();
@@ -506,7 +510,13 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
                     match message {
                         Msg::Conn(stream) => streams.push(stream),
                         Msg::AcceptFailed => failed = true,
-                        Msg::Fs(ev) => note_event(&root, &ev, &mut pending, &mut flush_at),
+                        Msg::Fs(ev) => note_event(
+                            &root,
+                            &ev,
+                            &mut pending,
+                            &mut flush_at,
+                            &mut first_pending_at,
+                        ),
                         Msg::WatcherError(error) => service.watcher_error(&error),
                         Msg::WatchReady(ready) => {
                             _watcher = watch_ready(&mut service, ready);
@@ -516,7 +526,12 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
                 // Apply the debounced batch before serving the connections:
                 // the debounce coalesces bursts between requests, it must
                 // not let a request read the index from before a mutation.
-                flush_pending(&mut service, &mut pending, &mut flush_at);
+                flush_pending(
+                    &mut service,
+                    &mut pending,
+                    &mut flush_at,
+                    &mut first_pending_at,
+                );
                 for stream in streams {
                     if !shutdown {
                         handle_conn(&mut service, stream, &mut shutdown);
@@ -528,7 +543,13 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
                 continue;
             }
             Ok(Msg::AcceptFailed) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Ok(Msg::Fs(ev)) => note_event(&root, &ev, &mut pending, &mut flush_at),
+            Ok(Msg::Fs(ev)) => note_event(
+                &root,
+                &ev,
+                &mut pending,
+                &mut flush_at,
+                &mut first_pending_at,
+            ),
             Ok(Msg::WatcherError(error)) => service.watcher_error(&error),
             Ok(Msg::WatchReady(ready)) => _watcher = watch_ready(&mut service, ready),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -537,7 +558,12 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
         if let Some(at) = flush_at
             && Instant::now() >= at
         {
-            flush_pending(&mut service, &mut pending, &mut flush_at);
+            flush_pending(
+                &mut service,
+                &mut pending,
+                &mut flush_at,
+                &mut first_pending_at,
+            );
         }
 
         if let (Some(at), Some(every)) = (next_sweep, sweep_every)
@@ -655,14 +681,15 @@ fn root_removed(root: &Path) -> bool {
 /// events (a `chmod`, a `touch`) cannot change an answer either. Every event
 /// that can change content (create, modify data or name, remove) is still
 /// recorded.
-fn record_event(root: &Path, ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) {
+fn record_event(root: &Path, ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) -> bool {
     if matches!(
         ev.kind,
         notify::EventKind::Access(_)
             | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
     ) {
-        return;
+        return false;
     }
+    let mut recorded = false;
     for path in &ev.paths {
         let root_git_exclude = path
             .strip_prefix(root)
@@ -681,20 +708,23 @@ fn record_event(root: &Path, ev: &notify::Event, pending: &mut BTreeMap<PathBuf,
         let removed = matches!(ev.kind, notify::EventKind::Remove(_)) || !path.exists();
         // A later create/modify wins over an earlier remove and vice versa.
         pending.insert(path.clone(), removed);
+        recorded = true;
     }
+    recorded
 }
 
-/// Record one watcher event and, when a change is pending afterwards, push
-/// the debounce deadline back to `DEBOUNCE` from now.
+/// Only recorded events move the quiet deadline, capped from the first pending event.
 fn note_event(
     root: &Path,
     ev: &notify::Event,
     pending: &mut BTreeMap<PathBuf, bool>,
     flush_at: &mut Option<Instant>,
+    first_pending_at: &mut Option<Instant>,
 ) {
-    record_event(root, ev, pending);
-    if !pending.is_empty() {
-        *flush_at = Some(Instant::now() + DEBOUNCE);
+    if record_event(root, ev, pending) {
+        let now = Instant::now();
+        let first = *first_pending_at.get_or_insert(now);
+        *flush_at = Some((now + DEBOUNCE).min(first + MAX_PENDING_WAIT));
     }
 }
 
@@ -705,6 +735,7 @@ fn flush_pending(
     service: &mut dyn Corpus,
     pending: &mut BTreeMap<PathBuf, bool>,
     flush_at: &mut Option<Instant>,
+    first_pending_at: &mut Option<Instant>,
 ) {
     if pending.is_empty() {
         return;
@@ -712,6 +743,7 @@ fn flush_pending(
     let batch: Vec<(PathBuf, bool)> = std::mem::take(pending).into_iter().collect();
     service.apply_changes(&batch);
     *flush_at = None;
+    *first_pending_at = None;
 }
 
 fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool) {
@@ -1176,6 +1208,122 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    struct FlushedCorpus {
+        root: PathBuf,
+        applied: mpsc::Sender<(Instant, Vec<(PathBuf, bool)>)>,
+    }
+
+    impl Corpus for FlushedCorpus {
+        fn root(&self) -> &Path {
+            &self.root
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            failure_response("stub", "stub corpus")
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
+            let _ = self.applied.send((Instant::now(), changes.to_vec()));
+        }
+    }
+
+    /// Wait on the production event loop's apply notification, without a client
+    /// connection that could force the pending batch to flush prematurely.
+    fn autonomous_flush(tag: &str, noise: Option<&str>, limit: Duration) -> Duration {
+        let root = scratch_root(tag);
+        let source = root.join("edited.rs");
+        std::fs::write(&source, "fn edited() {}\n").unwrap();
+        let (applied, flushed) = mpsc::channel();
+        let corpus = FlushedCorpus {
+            root: root.clone(),
+            applied,
+        };
+        let (registered, watch) = mpsc::channel();
+        let register: Registrar = Box::new(move |_, tx| {
+            registered.send(tx).unwrap();
+            Ok(Box::new(()))
+        });
+        let daemon = std::thread::spawn(move || run_corpus_with(corpus, register));
+        let events = watch
+            .recv_timeout(Duration::from_secs(3))
+            .expect("watch registration");
+        let changed = |path| {
+            notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(path)
+        };
+        let started = Instant::now();
+        events.send(Msg::Fs(changed(source.clone()))).unwrap();
+        let (stop, stopped) = mpsc::channel();
+        let noise_path = noise.map(|path| root.join(path));
+        let emitter = std::thread::spawn(move || {
+            if let Some(path) = noise_path {
+                for _ in 0..200 {
+                    // This is the input event cadence, not an assertion sleep.
+                    if stopped.recv_timeout(Duration::from_millis(25)).is_ok() {
+                        return;
+                    }
+                    if events.send(Msg::Fs(changed(path.clone()))).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        let result = flushed.recv_timeout(limit);
+        let _ = stop.send(());
+        emitter.join().unwrap();
+        let sock = socket_path(&root);
+        let stopped = shutdown(&sock);
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            stopped.is_ok(),
+            "daemon must stop after the timed observation"
+        );
+        let (at, batch) = result.expect("the timer must apply the source edit without any request");
+        assert_eq!(
+            batch,
+            [(source, false)],
+            "ignored paths never enter a batch"
+        );
+        at.duration_since(started)
+    }
+
+    #[test]
+    fn ignored_events_every_25_ms_should_not_delay_a_pending_edit() {
+        let elapsed = autonomous_flush(
+            "ignored-debounce",
+            Some(".pixel/noise"),
+            Duration::from_millis(1500),
+        );
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "retain the quiet debounce"
+        );
+    }
+
+    #[test]
+    fn continuous_edits_should_flush_by_the_maximum_wait() {
+        let elapsed = autonomous_flush(
+            "bounded-debounce",
+            Some("edited.rs"),
+            Duration::from_secs(3),
+        );
+        assert!(
+            elapsed >= Duration::from_secs(2),
+            "real edits extend the quiet deadline up to the cap"
+        );
+    }
+
+    #[test]
+    fn a_single_edit_should_flush_after_the_debounce_without_a_request() {
+        let elapsed = autonomous_flush("single-debounce", None, Duration::from_millis(1500));
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "do not flush before the debounce"
+        );
+    }
+
     /// A change starts the debounce timer a full `DEBOUNCE` from now; an
     /// event that leaves nothing pending (a read) does not start it.
     #[test]
@@ -1186,14 +1334,27 @@ mod tests {
         std::fs::write(&file, "fn a() {}\n").unwrap();
         let mut pending = BTreeMap::new();
         let mut flush_at = None;
+        let mut first_pending_at = None;
 
         let read = notify::Event::new(EventKind::Access(AccessKind::Any)).add_path(file.clone());
-        note_event(&root, &read, &mut pending, &mut flush_at);
+        note_event(
+            &root,
+            &read,
+            &mut pending,
+            &mut flush_at,
+            &mut first_pending_at,
+        );
         assert_eq!(flush_at, None);
 
         let before = Instant::now();
         let create = notify::Event::new(EventKind::Create(CreateKind::File)).add_path(file.clone());
-        note_event(&root, &create, &mut pending, &mut flush_at);
+        note_event(
+            &root,
+            &create,
+            &mut pending,
+            &mut flush_at,
+            &mut first_pending_at,
+        );
         assert_eq!(pending.get(&file), Some(&false));
         let at = flush_at.expect("a pending change starts the debounce");
         assert!(
@@ -1284,8 +1445,14 @@ mod tests {
         };
         let mut pending = BTreeMap::new();
         let mut flush_at = None;
+        let mut first_pending_at = None;
 
-        flush_pending(&mut corpus, &mut pending, &mut flush_at);
+        flush_pending(
+            &mut corpus,
+            &mut pending,
+            &mut flush_at,
+            &mut first_pending_at,
+        );
         assert!(
             batches.lock().unwrap().is_empty(),
             "an empty batch must not reach the corpus"
@@ -1293,7 +1460,13 @@ mod tests {
 
         pending.insert(changed.clone(), false);
         flush_at = Some(Instant::now() + Duration::from_secs(60));
-        flush_pending(&mut corpus, &mut pending, &mut flush_at);
+        first_pending_at = Some(Instant::now() - MAX_PENDING_WAIT);
+        flush_pending(
+            &mut corpus,
+            &mut pending,
+            &mut flush_at,
+            &mut first_pending_at,
+        );
         assert_eq!(
             batches.lock().unwrap().as_slice(),
             [vec![changed]],
@@ -1304,6 +1477,10 @@ mod tests {
             "the batch must be consumed, never applied twice"
         );
         assert_eq!(flush_at, None, "the debounce timer must not fire again");
+        assert_eq!(
+            first_pending_at, None,
+            "a new batch gets a new maximum wait"
+        );
     }
 
     /// A read is not a change. `notify`'s inotify backend reports an

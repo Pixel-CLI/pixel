@@ -480,6 +480,8 @@ jobs:
       - name: Mutation gate config contract (no module silently excluded)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-mutants-config.py
+      - name: French lexicon is reproducible without the MVP checkout
+        run: python3 -I crates/mvp-lexicon/test_generate.py
 
       # The agent A/B harness end to end against fixture CLIs: no model call.
       - name: Agent A/B harness contract (fixture claude/codex/pixel, disposable repo)
