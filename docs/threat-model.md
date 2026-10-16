@@ -290,7 +290,10 @@ configuration files. Only setup output paths are captured, never the whole home.
 Removal validates all receipt paths before its first write (including rejecting
 parent traversal), compares installed fingerprints and modes, and preserves
 files changed after setup. Restores use private temporary files and preserve
-existing symlinks. Only setup-created empty directories are pruned; backups
+existing symlinks. Resolved output locations are checked before cleanup so
+retargeting a link does not transfer ownership to its new destination. A partial
+receipt remains when edits are kept, preserving that decision across retries.
+Only setup-created empty directories are pruned; backups
 remain and are listed in the report. Recovery copies are created privately
 and retain the original file's permission bits.
 Hook commands embed the

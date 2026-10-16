@@ -25,6 +25,8 @@ enum Entry {
 struct Owned {
     original: Option<Entry>,
     installed: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    location: Option<PathBuf>,
 }
 
 type Receipt = BTreeMap<PathBuf, Owned>;
@@ -71,7 +73,7 @@ fn roots(home: &Path, explicit: bool) -> Vec<PathBuf> {
 }
 
 fn read(path: &Path) -> Result<Option<Entry>> {
-    let metadata = match fs::symlink_metadata(path) {
+    let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error)
             if matches!(
@@ -93,14 +95,28 @@ fn read(path: &Path) -> Result<Option<Entry>> {
 }
 
 fn collect(path: &Path, entries: &mut BTreeMap<PathBuf, Entry>) -> Result<()> {
+    collect_tree(path, entries, &mut Vec::new())
+}
+
+fn collect_tree(
+    path: &Path,
+    entries: &mut BTreeMap<PathBuf, Entry>,
+    ancestors: &mut Vec<PathBuf>,
+) -> Result<()> {
     if let Some(entry) = read(path)? {
         if entry == Entry::Directory {
+            let resolved = fs::canonicalize(path)?;
+            if ancestors.contains(&resolved) {
+                return Ok(());
+            }
+            ancestors.push(resolved);
             for child in fs::read_dir(path)? {
                 let child = child?;
                 if !child.file_name().to_string_lossy().contains(".pixel-bak.") {
-                    collect(&child.path(), entries)?;
+                    collect_tree(&child.path(), entries, ancestors)?;
                 }
             }
+            ancestors.pop();
         }
         entries.insert(path.to_path_buf(), entry);
     }
@@ -184,32 +200,54 @@ impl Snapshot {
                 continue;
             }
             let installed = fingerprint(&entry);
-            receipt
-                .entry(path.clone())
-                .and_modify(|owned| owned.installed.clone_from(&installed))
-                .or_insert_with(|| Owned {
-                    original: self.entries.get(&path).cloned(),
-                    installed,
-                });
+            let location = fs::canonicalize(&path)
+                .ok()
+                .filter(|target| *target != path);
+            let original = self.entries.get(&path);
+            if let Some(owned) = receipt.get_mut(&path) {
+                // A reinstall starts a new ownership baseline when the user
+                // changed the previous output. Removing it must restore that edit.
+                if original.is_none_or(|entry| fingerprint(entry) != owned.installed)
+                    || owned.location != location
+                {
+                    owned.original = original.cloned();
+                }
+                owned.installed = installed;
+                owned.location = location;
+            } else {
+                receipt.insert(
+                    path,
+                    Owned {
+                        original: original.cloned(),
+                        installed,
+                        location,
+                    },
+                );
+            }
         }
         if receipt.is_empty() {
             return Ok(());
         }
-        let bytes = serde_json::to_vec(&receipt)?;
-        if fs::read(&path).is_ok_and(|current| current == bytes) {
-            return Ok(());
-        }
-        fs::create_dir_all(path.parent().expect("receipt parent"))?;
-        let temporary = crate::install::unique_temp_path(&path);
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(&bytes)?;
-        fs::rename(temporary, path)?;
-        Ok(())
+        save(home, &receipt)
     }
+}
+
+fn save(home: &Path, receipt: &Receipt) -> Result<()> {
+    let path = home.join(STATE);
+    let bytes = serde_json::to_vec(receipt)?;
+    if fs::read(&path).is_ok_and(|current| current == bytes) {
+        return Ok(());
+    }
+    fs::create_dir_all(path.parent().expect("receipt parent"))?;
+    let temporary = crate::install::unique_temp_path(&path);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    fs::rename(temporary, path)?;
+    Ok(())
 }
 
 /// Undo only unchanged writes from a receipt; older installations use the legacy removers.
@@ -235,11 +273,13 @@ pub(crate) fn remove(
     let allowed = roots(home, explicit);
     let mut steps = Vec::new();
     let mut directories = Vec::new();
+    let mut retained = Receipt::new();
     // Validate the entire receipt before the first mutation, including lexical traversal.
-    for file in receipt.keys() {
+    for (file, owned) in &receipt {
+        let directory = owned.installed == "directory" && owned.original.is_none();
         if !allowed
             .iter()
-            .any(|root| file.starts_with(root) || root.starts_with(file))
+            .any(|root| file.starts_with(root) || (directory && root.starts_with(file)))
             || file == home
             || file.parent().is_none()
             || file
@@ -253,18 +293,52 @@ pub(crate) fn remove(
     }
     for (file, owned) in &receipt {
         if owned.installed == "directory" {
-            if owned.original.is_none() {
+            if fs::symlink_metadata(file).is_ok_and(|metadata| !metadata.is_dir()) {
+                retained.insert(
+                    file.clone(),
+                    Owned {
+                        original: None,
+                        installed: "directory".into(),
+                        location: None,
+                    },
+                );
+                steps.push(InstallStep {
+                    id: "setup-ownership".into(),
+                    status: CheckStatus::Yellow,
+                    summary: "kept a directory replaced after setup".into(),
+                    detail: Some(file.display().to_string()),
+                });
+            } else if owned.original.is_none() {
                 directories.push(file);
             }
             continue;
         }
         let current = read(file)?;
-        let changed = current
-            .as_ref()
-            .is_some_and(|entry| fingerprint(entry) != owned.installed);
+        let changed = current.as_ref().is_some_and(|entry| {
+            fingerprint(entry) != owned.installed
+                || fs::canonicalize(file).ok().as_ref()
+                    != Some(owned.location.as_ref().unwrap_or(file))
+        });
+        if changed {
+            retained.insert(
+                file.clone(),
+                Owned {
+                    original: owned.original.clone(),
+                    installed: owned.installed.clone(),
+                    location: owned.location.clone(),
+                },
+            );
+        }
         if !dry_run && !changed && current.is_some() {
             if let Some(Entry::File { bytes, mode }) = &owned.original {
-                crate::config::backup_if_changing(file, bytes)?;
+                if let Some(backup) = crate::config::backup_if_changing(file, bytes)? {
+                    steps.push(InstallStep {
+                        id: "setup-ownership-backup".into(),
+                        status: CheckStatus::Green,
+                        summary: "saved a recovery copy before restoring the original file".into(),
+                        detail: Some(backup.display().to_string()),
+                    });
+                }
                 let resolved = crate::install::resolve_symlink_target(file);
                 let target = resolved.as_deref().unwrap_or(file);
                 let temporary = crate::install::unique_temp_path(target);
@@ -299,7 +373,23 @@ pub(crate) fn remove(
         });
     }
     if !dry_run {
-        fs::remove_file(path)?;
+        if retained.is_empty() {
+            fs::remove_file(path)?;
+        } else {
+            // Keep the remaining ownership so another remove cannot fall back
+            // to the legacy marker-based removers and delete a preserved edit.
+            for directory in &directories {
+                retained.insert(
+                    (*directory).clone(),
+                    Owned {
+                        original: None,
+                        installed: "directory".into(),
+                        location: None,
+                    },
+                );
+            }
+            save(home, &retained)?;
+        }
         directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
         for directory in directories {
             match fs::remove_dir(directory) {
@@ -353,7 +443,11 @@ mod tests {
             );
             let skill = home.path().join(".claude/skills/pixel/SKILL.md");
             if edit == "content" {
-                fs::write(&skill, "my changes").unwrap();
+                fs::write(
+                    &skill,
+                    fs::read_to_string(&skill).unwrap() + "\nmy changes\n",
+                )
+                .unwrap();
             }
             if edit == "mode" {
                 fs::set_permissions(&skill, fs::Permissions::from_mode(0o600)).unwrap();
@@ -386,7 +480,117 @@ mod tests {
                             && step.detail.as_deref() == skill.to_str())
                 );
             }
-            assert!(!home.path().join(STATE).exists());
+            if edit == "none" {
+                assert!(!home.path().join(STATE).exists());
+            } else {
+                crate::uninstall::uninstall(&crate::uninstall::UninstallOptions {
+                    home: Some(home.path().into()),
+                    binary_path: Some(home.path().join("absent")),
+                    executable_path: Some("/tmp/pixel".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+                assert_eq!(
+                    read(&skill).unwrap(),
+                    kept,
+                    "repeated removal keeps the edit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reinstall_should_restore_the_users_intervening_edit() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join(".pixel/config.yaml");
+        let before = Snapshot::capture(home.path(), true).unwrap();
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "first install").unwrap();
+        before.finish().unwrap();
+        fs::write(&file, "user's intervening edit").unwrap();
+        let before = Snapshot::capture(home.path(), true).unwrap();
+        fs::write(&file, "second install").unwrap();
+        before.finish().unwrap();
+        remove(home.path(), true, false).unwrap();
+        assert_eq!(fs::read_to_string(file).unwrap(), "user's intervening edit");
+    }
+
+    #[test]
+    fn removal_should_follow_the_original_directory_link_but_not_a_retargeted_link() {
+        for retarget in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let original = tempfile::tempdir().unwrap();
+            let other = tempfile::tempdir().unwrap();
+            let link = home.path().join(".claude/skills/pixel");
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(original.path(), &link).unwrap();
+            let before = Snapshot::capture(home.path(), true).unwrap();
+            fs::write(link.join("SKILL.md"), "installed").unwrap();
+            before.finish().unwrap();
+            if retarget {
+                fs::write(other.path().join("SKILL.md"), "installed").unwrap();
+                fs::remove_file(&link).unwrap();
+                std::os::unix::fs::symlink(other.path(), &link).unwrap();
+            }
+            let steps = remove(home.path(), true, false).unwrap().unwrap();
+            assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+            assert_eq!(link.join("SKILL.md").exists(), retarget);
+            assert_eq!(
+                steps.iter().any(|step| step.status == CheckStatus::Yellow),
+                retarget
+            );
+            if retarget {
+                assert_eq!(
+                    fs::read_to_string(other.path().join("SKILL.md")).unwrap(),
+                    "installed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reinstall_should_adopt_the_users_retargeted_link_as_its_baseline() {
+        let home = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/skills/pixel");
+        let before = Snapshot::capture(home.path(), true).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), "first install").unwrap();
+        before.finish().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        fs::write(other.path().join("SKILL.md"), "first install").unwrap();
+        std::os::unix::fs::symlink(other.path(), &dir).unwrap();
+        let before = Snapshot::capture(home.path(), true).unwrap();
+        fs::write(dir.join("SKILL.md"), "second install").unwrap();
+        before.finish().unwrap();
+        remove(home.path(), true, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+            "first install"
+        );
+        assert!(fs::symlink_metadata(&dir).unwrap().is_symlink());
+    }
+
+    #[test]
+    fn removal_should_keep_a_created_directory_replaced_with_a_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let before = Snapshot::capture(home.path(), true).unwrap();
+        let dir = home.path().join(".claude/skills/pixel");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), "installed").unwrap();
+        before.finish().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        fs::write(other.path().join("SKILL.md"), "installed").unwrap();
+        std::os::unix::fs::symlink(other.path(), &dir).unwrap();
+        for _ in 0..2 {
+            let steps = remove(home.path(), true, false).unwrap().unwrap();
+            assert!(steps.iter().any(|step| step.status == CheckStatus::Yellow));
+            assert!(fs::symlink_metadata(&dir).unwrap().is_symlink());
+            assert_eq!(
+                fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+                "installed"
+            );
         }
     }
 
@@ -403,6 +607,7 @@ mod tests {
             Owned {
                 original: None,
                 installed: fingerprint(&read(&config).unwrap().unwrap()),
+                location: None,
             },
         );
         receipt.insert(
@@ -410,6 +615,7 @@ mod tests {
             Owned {
                 original: None,
                 installed: "bad".into(),
+                location: None,
             },
         );
         let state = home.path().join(STATE);

@@ -46,7 +46,10 @@ fn edit(text: &str, old: &Value, new: &Value) -> serde_json::Result<String> {
     let count = old.as_object().expect("object pair").len();
     let mut pos = 1;
     let mut members = Vec::with_capacity(count);
-    for _ in 0..count {
+    while {
+        pos += text[pos..].len() - text[pos..].trim_start().len();
+        text.as_bytes()[pos] != b'}'
+    } {
         let (start, _, value) = token(text, &mut pos)?;
         let key = value.as_str().expect("validated object key").to_owned();
         pos += text[pos..].len() - text[pos..].trim_start().len();
@@ -67,11 +70,15 @@ fn edit(text: &str, old: &Value, new: &Value) -> serde_json::Result<String> {
             rendered.push((
                 *start,
                 *end,
-                format!(
-                    "{}{}",
-                    &text[*start..*value_start],
-                    edit(&text[*value_start..*end], value, replacement)?
-                ),
+                if old.get(key) == Some(replacement) {
+                    text[*start..*end].to_owned()
+                } else {
+                    format!(
+                        "{}{}",
+                        &text[*start..*value_start],
+                        edit(&text[*value_start..*end], value, replacement)?
+                    )
+                },
             ));
         }
     }
@@ -211,6 +218,17 @@ mod tests {
             assert_eq!(serde_json::from_str::<Value>(&changed).unwrap(), installed);
             assert_eq!(patch(&changed, &original).unwrap(), text);
         }
+    }
+
+    #[test]
+    fn patch_should_leave_duplicate_user_keys_untouched_when_adding_hooks() {
+        let text = r#"{ "mine": 1e2, "mine" : 2 }"#;
+        let mut installed: Value = serde_json::from_str(text).unwrap();
+        installed["hooks"] = json!({"pixel": true});
+        let changed = patch(text, &installed).unwrap();
+        assert!(changed.contains(r#""mine": 1e2, "mine" : 2"#));
+        installed.as_object_mut().unwrap().remove("hooks");
+        assert_eq!(patch(&changed, &installed).unwrap(), text);
     }
 
     #[test]
