@@ -552,6 +552,13 @@ fn a_pi_prompt_that_asks_for_the_brief_alone_should_get_it_and_the_metrics_line_
             .any(|line| line["bytes"].as_u64() == Some(brief.len() as u64)),
         "{prompts:?}"
     );
+    // The part line of the delivering call counts the bare `context` Pi reads,
+    // not the wrapped envelope's `additionalContext` it never carries.
+    let parts = of_kind(&lines, "part");
+    let last = parts.last().unwrap();
+    assert_eq!(last["provider"], "pi", "{last}");
+    assert_eq!(last["bytes"].as_u64(), Some(brief.len() as u64), "{last}");
+    assert_eq!(last["late"], false, "{last}");
 }
 
 #[test]

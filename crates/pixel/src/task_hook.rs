@@ -1301,11 +1301,20 @@ fn note_prompt(
     let _ = decision_log::append(&path, &line, feedback::MAX_LINES);
 }
 
-/// The bytes of additional context a hook response carries.
-fn context_bytes(output: &Value) -> usize {
-    output["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .map_or(0, str::len)
+/// The bytes of brief a prompt-submit response carries: the
+/// `hookSpecificOutput.additionalContext` of the wrapped envelopes, or the
+/// bare decision's `context` Pi's package reads ([`BRIEF_ONLY`] payloads
+/// only, as in [`delivered_brief`]: a ledger note is not a brief).
+fn context_bytes(provider: TaskProvider, payload: &Value, output: &Value) -> usize {
+    let text = if provider == TaskProvider::Pi {
+        if !brief_only(provider, payload) {
+            return 0;
+        }
+        output["context"].as_str()
+    } else {
+        output["hookSpecificOutput"]["additionalContext"].as_str()
+    };
+    text.map_or(0, str::len)
 }
 
 /// Write the read-feedback line of a hook that has already answered the host:
@@ -1357,7 +1366,10 @@ fn note_event(
                 provider_name,
                 &decision_log::sha256_hex(&prompt),
                 (index, count),
-                (output.map_or(0, context_bytes), output.is_none()),
+                (
+                    output.map_or(0, |output| context_bytes(provider, &payload, output)),
+                    output.is_none(),
+                ),
             );
             decision_log::append(&path, &line, feedback::MAX_LINES)
         }
@@ -2845,6 +2857,21 @@ mod tests {
             Some(&marked),
             &json!({"decision": "observe", "context": "bare"})
         ));
+    }
+
+    #[test]
+    fn the_feedback_part_should_count_the_brief_bytes_each_envelope_carries() {
+        let marked = json!({"brief_only": true});
+        let plain = json!({});
+        let pi_brief = json!({"decision": "observe", "context": "[PIXEL:BRIEF]"});
+        let wrapped = json!({"hookSpecificOutput": {"additionalContext": "abc"}});
+        assert_eq!(context_bytes(TaskProvider::Pi, &marked, &pi_brief), 13);
+        // A ledger note of a Pi host that drives the lifecycle is not a brief.
+        assert_eq!(context_bytes(TaskProvider::Pi, &plain, &pi_brief), 0);
+        assert_eq!(context_bytes(TaskProvider::Pi, &marked, &wrapped), 0);
+        assert_eq!(context_bytes(TaskProvider::Claude, &plain, &wrapped), 3);
+        assert_eq!(context_bytes(TaskProvider::Codex, &marked, &wrapped), 3);
+        assert_eq!(context_bytes(TaskProvider::Claude, &marked, &pi_brief), 0);
     }
 
     #[test]
