@@ -176,9 +176,10 @@ pub fn resolve_argument(
     }
     // The scope goes into the query, never over its result: see
     // [`GraphStore::symbols_by_name`] for why narrowing a capped page lets
-    // the cap invent both absences and false unique matches.
+    // the cap invent both absences and false unique matches. A qualified
+    // name (`Owner::leaf`) resolves as it does for `impact`.
     let scope = scope.map(normalize_scope);
-    let rows = store.symbols_by_name(value, scope.as_deref(), NAME_LOOKUP_LIMIT)?;
+    let rows = store.symbols_named(value, scope.as_deref(), NAME_LOOKUP_LIMIT)?;
     match rows.len() {
         0 => Err(not_found()),
         1 => Ok(rows.into_iter().next().expect("length checked")),
