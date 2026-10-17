@@ -19,6 +19,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cycles;
+use crate::daemon::WatchReport;
 use crate::meaning::Meaning;
 use crate::relevance;
 use pixel_context::estimate_tokens;
@@ -316,6 +317,9 @@ pub struct Service {
     /// `notify` backend errors reported by the transport loop: a watcher
     /// that stopped seeing changes leaves the same stale answers.
     watcher_failures: FailureLog,
+    /// The registered watch, once the transport loop reports it live: until
+    /// then edits are caught up from `git status`, not observed.
+    watch: Option<WatchReport>,
     /// Lazily opened on first `scope: "hybrid"` search; kept warm for the
     /// daemon's lifetime. `None` = not yet loaded (not tried, download in
     /// progress, or load failed transiently).
@@ -447,6 +451,7 @@ impl Service {
             graph: None,
             graph_failures: FailureLog::default(),
             watcher_failures: FailureLog::default(),
+            watch: None,
             embedder: None,
             embedder_unavailable: false,
             embedder_download_started: false,
@@ -473,6 +478,7 @@ impl Service {
             graph: None,
             graph_failures: FailureLog::default(),
             watcher_failures: FailureLog::default(),
+            watch: None,
             embedder: None,
             embedder_unavailable: true,
             embedder_download_started: false,
@@ -628,6 +634,11 @@ impl Service {
             index.opened_head().map(str::to_owned),
             index.overlay_paths(),
         )
+    }
+
+    /// Record the watch the transport loop registered, for `status`.
+    pub(crate) fn note_watch_ready(&mut self, report: WatchReport) {
+        self.watch = Some(report);
     }
 
     /// Count a `notify` backend error reported by the transport loop.
@@ -2963,6 +2974,10 @@ impl Service {
                 // means answers may have been served from a stale index.
                 "graph_update_failures": self.graph_failures.count(),
                 "notify_errors": self.watcher_failures.count(),
+                "ready": self.watch.is_some(),
+                "recursive": self.watch.map(|w| w.recursive),
+                "watched_dirs": self.watch.map(|w| w.dirs),
+                "registration_ms": self.watch.map(|w| w.elapsed.as_millis()),
             },
             "facts": facts_visibility(&self.root),
             "embedding": embedding_status(&self.root, self.embedder.is_some()),

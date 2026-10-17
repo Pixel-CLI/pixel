@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use pixel_daemon::daemon::{Corpus, run_corpus, socket_path};
+use pixel_daemon::daemon::{Corpus, WatchReport, run_corpus, socket_path};
 use pixel_daemon::{Request, Response, Service};
 
 use crate::support::git;
@@ -145,8 +145,8 @@ impl Corpus for GatedCorpus {
     // The watch registers on its own thread, so the edit below can land
     // before it is live; the wrapped `Service` catches up only if the
     // wrapper forwards the callback.
-    fn watch_ready(&mut self) {
-        self.service.watch_ready();
+    fn watch_ready(&mut self, report: &WatchReport) {
+        self.service.watch_ready(report);
         let _ = self.ready.send(Ok(()));
     }
 

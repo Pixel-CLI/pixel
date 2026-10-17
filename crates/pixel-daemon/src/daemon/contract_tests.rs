@@ -244,7 +244,11 @@ fn default_corpus_should_watch_its_root_and_do_nothing_on_sweep_or_ready() {
     let mut corpus = EchoCorpus::new();
     assert_eq!(corpus.watch_paths(), vec![corpus.root.clone()]);
     corpus.sweep();
-    corpus.watch_ready();
+    corpus.watch_ready(&WatchReport {
+        dirs: 1,
+        recursive: true,
+        elapsed: Duration::ZERO,
+    });
     assert!(corpus.applied.lock().unwrap().is_empty());
 }
 
@@ -411,6 +415,35 @@ fn service_apply_changes_should_apply_a_batch_of_adds_and_removals() {
     service.apply_changes(&[(root.join("a.rs"), true), (root.join("b.rs"), false)]);
 
     assert_eq!(search_hits(&mut service, "vexlor"), vec!["b.rs"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `status` says whether the watch is live and what it covers, so a
+/// registration that grows back to every ignored directory, or slows
+/// down, is visible without a profiler.
+#[test]
+fn service_status_should_report_the_watch_once_it_is_live() {
+    let root = tempfile_root("service-watch-report");
+    let mut service = Service::open(&root).unwrap();
+    let status = |service: &mut Service| {
+        let resp = Corpus::handle(service, Request::Status {});
+        serde_json::to_value(&resp).unwrap()["result"]["watcher"].clone()
+    };
+    let before = status(&mut service);
+    assert_eq!(before["ready"], false, "{before}");
+    assert!(before["watched_dirs"].is_null(), "{before}");
+    assert!(before["registration_ms"].is_null(), "{before}");
+
+    service.watch_ready(&WatchReport {
+        dirs: 2216,
+        recursive: false,
+        elapsed: Duration::from_millis(131),
+    });
+    let after = status(&mut service);
+    assert_eq!(after["ready"], true, "{after}");
+    assert_eq!(after["watched_dirs"], 2216, "{after}");
+    assert_eq!(after["recursive"], false, "{after}");
+    assert_eq!(after["registration_ms"], 131, "{after}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

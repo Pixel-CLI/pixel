@@ -186,22 +186,55 @@ enum Msg {
     /// instead of dropped on the callback thread.
     WatcherError(String),
     /// The background watch registration finished: the guard that keeps the
-    /// watch alive, or why it could not be set up.
-    WatchReady(Result<WatchGuard, String>),
+    /// watch alive and what it covers, or why it could not be set up.
+    WatchReady(Result<(WatchGuard, WatchReport), String>),
 }
 
 /// Git's empty tree (SHA-1): the base a first commit is diffed from.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+/// A registered watch, alive for as long as the loop holds it.
+trait Watch: Send {
+    /// Start watching `dir`, a directory that appeared after registration,
+    /// and the directories under it that are not ignored; return the files
+    /// already inside, whose creation no watch could see.
+    ///
+    /// # Errors
+    ///
+    /// The backend refused a watch (an exhausted inotify `max_user_watches`).
+    fn extend(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String>;
+}
+
 /// Keeps a registered watch alive for as long as the loop holds it.
-type WatchGuard = Box<dyn Send>;
+type WatchGuard = Box<dyn Watch>;
+
+/// A watch as its registrar hands it over, before the loop times it.
+struct Registered {
+    guard: WatchGuard,
+    /// Directories holding a watch: one per root for a recursive watch.
+    dirs: usize,
+    recursive: bool,
+}
+
+/// What the watch registration covered and how long it took, shown by
+/// `status` so a watch that grows or slows down again is visible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatchReport {
+    /// Directories holding a watch: one per root for a recursive watch.
+    pub dirs: usize,
+    /// One recursive watch per root (FSEvents) rather than one watch per
+    /// directory that is not ignored (inotify).
+    pub recursive: bool,
+    /// From the start of the registration to the watch being live.
+    pub elapsed: Duration,
+}
 
 /// Registers the watch on `paths`, forwarding its events into the loop's
-/// channel. Runs off the serving thread: a recursive watch walks every
-/// directory under the root, ignored ones included (11 515 `node_modules`
-/// directories made a repository wait 11 to 28 s for its first answer).
+/// channel. Runs off the serving thread, so a slow registration never delays
+/// an answer (11 515 `node_modules` directories once made a repository wait
+/// 11 to 28 s for its first one).
 type Registrar =
-    Box<dyn FnOnce(Vec<PathBuf>, mpsc::Sender<Msg>) -> Result<WatchGuard, String> + Send>;
+    Box<dyn FnOnce(Vec<PathBuf>, mpsc::Sender<Msg>) -> Result<Registered, String> + Send>;
 
 /// A corpus a daemon can serve: the repo `Service`, or the machine-wide
 /// transcript recall service. The transport (socket, watcher, debounce,
@@ -232,10 +265,10 @@ pub trait Corpus {
     /// Periodic maintenance, called every `sweep_interval` from the loop
     /// thread (default: nothing).
     fn sweep(&mut self) {}
-    /// The watch is registered and reporting. Changes made while it was
-    /// being set up were not observed, so a corpus that can list its changed
-    /// files re-reads them here (default: nothing).
-    fn watch_ready(&mut self) {}
+    /// The watch is registered and reporting, as `report` describes. Changes
+    /// made while it was being set up were not observed, so a corpus that can
+    /// list its changed files re-reads them here (default: nothing).
+    fn watch_ready(&mut self, _report: &WatchReport) {}
     /// The watcher backend reported an error: changes may have been missed,
     /// so answers can be stale until the next event. The default logs it; a
     /// corpus that reports health counts it too.
@@ -280,7 +313,8 @@ impl Corpus for Service {
     /// -- f` or `git stash` leaves `git status` clean), and what a HEAD move
     /// (`git checkout <branch>`, `git pull`) rewrote. A path is removed when
     /// it is gone from disk, as for a watcher event.
-    fn watch_ready(&mut self) {
+    fn watch_ready(&mut self, report: &WatchReport) {
+        self.note_watch_ready(*report);
         let root = Service::root(self).to_path_buf();
         let (opened_head, mut paths) = self.index_catch_up();
         paths.extend(
@@ -386,17 +420,22 @@ pub(crate) fn spawn_facts_ingest(root: &Path) {
 
 /// Run any corpus daemon in the foreground.
 pub fn run_corpus(service: impl Corpus) -> Result<(), ServeError> {
-    run_corpus_with(service, Box::new(register_recursive_watch))
+    // FSEvents follows a whole tree from one stream without walking it;
+    // inotify needs one watch per directory, so it only gets the ones whose
+    // events the loop keeps.
+    let register: Registrar = if cfg!(target_os = "macos") {
+        Box::new(register_recursive_watch)
+    } else {
+        Box::new(register_pruned_watch)
+    };
+    run_corpus_with(service, register)
 }
 
-/// Watch every path recursively, forwarding events and backend errors into
-/// the loop's channel.
+/// The platform watcher, forwarding events and backend errors into the
+/// loop's channel.
 #[cfg_attr(test, mutants::skip)] // adapter over the notify backend; the loop's handling is tested
-fn register_recursive_watch(
-    paths: Vec<PathBuf>,
-    tx: mpsc::Sender<Msg>,
-) -> Result<WatchGuard, String> {
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+fn forwarding_watcher(tx: mpsc::Sender<Msg>) -> Result<notify::RecommendedWatcher, String> {
+    notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         let msg = match res {
             Ok(ev) => Msg::Fs(ev),
             Err(error) => Msg::WatcherError(error.to_string()),
@@ -404,13 +443,172 @@ fn register_recursive_watch(
         // The only send failure is a dropped receiver: the loop is exiting.
         let _ = tx.send(msg);
     })
-    .map_err(|e| format!("watcher init: {e}"))?;
+    .map_err(|e| format!("watcher init: {e}"))
+}
+
+/// One recursive watch per root, which already covers every directory
+/// created under it.
+struct RecursiveWatch(
+    #[expect(dead_code, reason = "held for its Drop")] notify::RecommendedWatcher,
+);
+
+impl Watch for RecursiveWatch {
+    fn extend(&mut self, _dir: &Path) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// Watch every path recursively: the macOS registration, where FSEvents
+/// walks nothing and holds no descriptor per directory.
+#[cfg_attr(test, mutants::skip)] // adapter over the notify backend; the loop's handling is tested
+fn register_recursive_watch(
+    paths: Vec<PathBuf>,
+    tx: mpsc::Sender<Msg>,
+) -> Result<Registered, String> {
+    let mut watcher = forwarding_watcher(tx)?;
     for path in &paths {
         watcher
             .watch(path, RecursiveMode::Recursive)
             .map_err(|e| format!("watch {}: {e}", path.display()))?;
     }
-    Ok(Box::new(watcher))
+    Ok(Registered {
+        guard: Box::new(RecursiveWatch(watcher)),
+        dirs: paths.len(),
+        recursive: true,
+    })
+}
+
+/// One non-recursive watch per directory that is not ignored, under the
+/// roots it was registered for.
+struct PrunedWatch {
+    watcher: notify::RecommendedWatcher,
+    roots: Vec<PathBuf>,
+}
+
+impl Watch for PrunedWatch {
+    fn extend(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String> {
+        let Some(root) = self.roots.iter().find(|root| dir.starts_with(root)) else {
+            return Ok(Vec::new());
+        };
+        if ignored_below(root, dir) || !dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let tree = unignored_tree(dir, true);
+        watch_each(&mut self.watcher, &tree.dirs)?;
+        Ok(tree.files)
+    }
+}
+
+/// Watch each directory under `paths` that is not ignored, one
+/// non-recursive watch each: the registration everywhere but macOS. A
+/// recursive inotify watch walks and watches every ignored directory too
+/// (15 825 watches where 2 216 suffice), and past `max_user_watches` it
+/// fails, leaving the daemon without live updates. `<root>/.git/info` is
+/// watched as well: its `exclude` is an ignore-control file.
+#[cfg_attr(test, mutants::skip)] // the walk and the extension are tested; this joins them to the backend
+fn register_pruned_watch(paths: Vec<PathBuf>, tx: mpsc::Sender<Msg>) -> Result<Registered, String> {
+    let mut watcher = forwarding_watcher(tx)?;
+    let dirs = pruned_watch_dirs(&paths);
+    let watched = watch_each(&mut watcher, &dirs)?;
+    Ok(Registered {
+        guard: Box::new(PrunedWatch {
+            watcher,
+            roots: paths,
+        }),
+        dirs: watched,
+        recursive: false,
+    })
+}
+
+/// The directories a pruned watch registers for `roots`.
+fn pruned_watch_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for root in roots {
+        dirs.extend(unignored_tree(root, false).dirs);
+        let git_info = root.join(".git").join("info");
+        if git_info.is_dir() {
+            dirs.push(git_info);
+        }
+    }
+    dirs
+}
+
+/// Add one non-recursive watch per directory in a single backend commit;
+/// return how many hold one. A directory removed since the walk is skipped.
+fn watch_each(watcher: &mut impl Watcher, dirs: &[PathBuf]) -> Result<usize, String> {
+    let mut paths = watcher.paths_mut();
+    let mut watched = 0;
+    for dir in dirs {
+        match paths.add(dir, RecursiveMode::NonRecursive) {
+            Ok(()) => watched += 1,
+            Err(error) if vanished(&error) => {}
+            Err(error) => return Err(format!("watch {}: {error}", dir.display())),
+        }
+    }
+    paths.commit().map_err(|e| format!("watch commit: {e}"))?;
+    Ok(watched)
+}
+
+/// The backend refused a path because it no longer exists.
+fn vanished(error: &notify::Error) -> bool {
+    match &error.kind {
+        notify::ErrorKind::PathNotFound => true,
+        notify::ErrorKind::Io(io) => io.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
+/// The directories and regular files under a directory, pruned at the ones
+/// the event filter drops anyway.
+struct Tree {
+    /// `top` first, then every directory below it whose name is not in
+    /// `IGNORED_DIRS`; symlinks are not followed.
+    dirs: Vec<PathBuf>,
+    /// The regular files in those directories, when asked for.
+    files: Vec<PathBuf>,
+}
+
+/// Walk `top` without descending into an ignored directory.
+fn unignored_tree(top: &Path, with_files: bool) -> Tree {
+    let mut tree = Tree {
+        dirs: vec![top.to_path_buf()],
+        files: Vec::new(),
+    };
+    let mut stack = vec![top.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if !is_ignored_dir(&entry.file_name()) {
+                    tree.dirs.push(entry.path());
+                    stack.push(entry.path());
+                }
+            } else if with_files && kind.is_file() {
+                tree.files.push(entry.path());
+            }
+        }
+    }
+    tree
+}
+
+/// A directory name whose whole subtree the watch skips.
+fn is_ignored_dir(name: &std::ffi::OsStr) -> bool {
+    IGNORED_DIRS.iter().any(|d| name == *d)
+}
+
+/// `dir` sits in an ignored directory below `root`.
+fn ignored_below(root: &Path, dir: &Path) -> bool {
+    dir.strip_prefix(root).is_ok_and(|relative| {
+        relative.components().any(|c| match c {
+            Component::Normal(name) => is_ignored_dir(name),
+            _ => false,
+        })
+    })
 }
 
 /// [`run_corpus`] with the watch registration as a parameter, so a test can
@@ -461,11 +659,22 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
     // through the same channel: a watch that stopped reporting is exactly
     // the failure that leaves the index stale, so it must not be dropped.
     let watch_paths = service.watch_paths();
-    let mut _watcher: Option<WatchGuard> = None;
+    let mut watcher: Option<WatchGuard> = None;
+    // Directories created since the last pass, extended into the watch
+    // (held until it is registered).
+    let mut created: Vec<PathBuf> = Vec::new();
     if !watch_paths.is_empty() {
         let tx_watch = tx.clone();
         std::thread::spawn(move || {
-            let ready = register(watch_paths, tx_watch.clone());
+            let started = Instant::now();
+            let ready = register(watch_paths, tx_watch.clone()).map(|registered| {
+                let report = WatchReport {
+                    dirs: registered.dirs,
+                    recursive: registered.recursive,
+                    elapsed: started.elapsed(),
+                };
+                (registered.guard, report)
+            });
             let _ = tx_watch.send(Msg::WatchReady(ready));
         });
     }
@@ -516,19 +725,30 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
                     match message {
                         Msg::Conn(stream) => streams.push(stream),
                         Msg::AcceptFailed => failed = true,
-                        Msg::Fs(ev) => note_event(
-                            &root,
-                            &ev,
-                            &mut pending,
-                            &mut flush_at,
-                            &mut first_pending_at,
-                        ),
+                        Msg::Fs(ev) => {
+                            note_event(
+                                &root,
+                                &ev,
+                                &mut pending,
+                                &mut flush_at,
+                                &mut first_pending_at,
+                            );
+                            created.extend(created_dirs(&ev));
+                        }
                         Msg::WatcherError(error) => service.watcher_error(&error),
                         Msg::WatchReady(ready) => {
-                            _watcher = watch_ready(&mut service, ready);
+                            watcher = watch_ready(&mut service, ready);
                         }
                     }
                 }
+                extend_watch(
+                    watcher.as_mut(),
+                    &mut created,
+                    &mut service,
+                    &mut pending,
+                    &mut flush_at,
+                    &mut first_pending_at,
+                );
                 // Apply the debounced batch before serving the connections:
                 // the debounce coalesces bursts between requests, it must
                 // not let a request read the index from before a mutation.
@@ -549,17 +769,28 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
                 continue;
             }
             Ok(Msg::AcceptFailed) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Ok(Msg::Fs(ev)) => note_event(
-                &root,
-                &ev,
-                &mut pending,
-                &mut flush_at,
-                &mut first_pending_at,
-            ),
+            Ok(Msg::Fs(ev)) => {
+                note_event(
+                    &root,
+                    &ev,
+                    &mut pending,
+                    &mut flush_at,
+                    &mut first_pending_at,
+                );
+                created.extend(created_dirs(&ev));
+            }
             Ok(Msg::WatcherError(error)) => service.watcher_error(&error),
-            Ok(Msg::WatchReady(ready)) => _watcher = watch_ready(&mut service, ready),
+            Ok(Msg::WatchReady(ready)) => watcher = watch_ready(&mut service, ready),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        extend_watch(
+            watcher.as_mut(),
+            &mut created,
+            &mut service,
+            &mut pending,
+            &mut flush_at,
+            &mut first_pending_at,
+        );
 
         if let Some(at) = flush_at
             && Instant::now() >= at
@@ -611,10 +842,13 @@ impl Drop for ReleaseOnExit {
 
 /// Take the registered watch: keep its guard and let the corpus catch up on
 /// what changed meanwhile, or report why there is no watch.
-fn watch_ready(service: &mut impl Corpus, ready: Result<WatchGuard, String>) -> Option<WatchGuard> {
+fn watch_ready(
+    service: &mut impl Corpus,
+    ready: Result<(WatchGuard, WatchReport), String>,
+) -> Option<WatchGuard> {
     match ready {
-        Ok(guard) => {
-            service.watch_ready();
+        Ok((guard, report)) => {
+            service.watch_ready(&report);
             Some(guard)
         }
         Err(error) => {
@@ -751,9 +985,60 @@ fn note_event(
     first_pending_at: &mut Option<Instant>,
 ) {
     if record_event(root, ev, pending) {
-        let now = Instant::now();
-        let first = *first_pending_at.get_or_insert(now);
-        *flush_at = Some((now + DEBOUNCE).min(first + MAX_PENDING_WAIT));
+        arm_flush(flush_at, first_pending_at);
+    }
+}
+
+/// Push the quiet deadline a `DEBOUNCE` away, capped at `MAX_PENDING_WAIT`
+/// from the first pending change.
+fn arm_flush(flush_at: &mut Option<Instant>, first_pending_at: &mut Option<Instant>) {
+    let now = Instant::now();
+    let first = *first_pending_at.get_or_insert(now);
+    *flush_at = Some((now + DEBOUNCE).min(first + MAX_PENDING_WAIT));
+}
+
+/// The directories an event created or moved in: a per-directory watch does
+/// not see inside them until it is extended to them.
+fn created_dirs(ev: &notify::Event) -> Vec<PathBuf> {
+    if !matches!(
+        ev.kind,
+        notify::EventKind::Create(_)
+            | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+    ) {
+        return Vec::new();
+    }
+    ev.paths.iter().filter(|p| p.is_dir()).cloned().collect()
+}
+
+/// Extend the watch to the directories created since the last call, and
+/// record the files already inside them as pending changes: they were
+/// written before any watch could see them. Without a watch yet, the
+/// directories wait for it.
+fn extend_watch(
+    watch: Option<&mut WatchGuard>,
+    created: &mut Vec<PathBuf>,
+    service: &mut impl Corpus,
+    pending: &mut BTreeMap<PathBuf, bool>,
+    flush_at: &mut Option<Instant>,
+    first_pending_at: &mut Option<Instant>,
+) {
+    let Some(watch) = watch else {
+        return;
+    };
+    let mut recorded = false;
+    for dir in std::mem::take(created) {
+        match watch.extend(&dir) {
+            Ok(files) => {
+                for file in files {
+                    pending.insert(file, false);
+                    recorded = true;
+                }
+            }
+            Err(error) => service.watcher_error(&error),
+        }
+    }
+    if recorded {
+        arm_flush(flush_at, first_pending_at);
     }
 }
 
@@ -1052,6 +1337,28 @@ mod tests {
         );
     }
 
+    /// A watch that covers nothing: the loop tests drive events by hand.
+    impl Watch for () {
+        fn extend(&mut self, _dir: &Path) -> Result<Vec<PathBuf>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The report of a watch registered at once on one root.
+    const STUB_REPORT: WatchReport = WatchReport {
+        dirs: 1,
+        recursive: true,
+        elapsed: Duration::ZERO,
+    };
+
+    fn stub_watch() -> Registered {
+        Registered {
+            guard: Box::new(()),
+            dirs: 1,
+            recursive: true,
+        }
+    }
+
     fn scratch_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("pixel-daemon-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1295,7 +1602,7 @@ mod tests {
         let (registered, watch) = mpsc::channel();
         let register: Registrar = Box::new(move |_, tx| {
             registered.send(tx).unwrap();
-            Ok(Box::new(()))
+            Ok(stub_watch())
         });
         let daemon = std::thread::spawn(move || run_corpus_with(corpus, register));
         let events = watch
@@ -1791,7 +2098,7 @@ mod tests {
             failure_response("stub", "stub corpus")
         }
         fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
-        fn watch_ready(&mut self) {
+        fn watch_ready(&mut self, _report: &WatchReport) {
             self.ready.fetch_add(1, Ordering::SeqCst);
         }
         fn watcher_error(&mut self, error: &str) {
@@ -1820,7 +2127,7 @@ mod tests {
             // Held until the test has been answered; never longer than 5 s.
             let _ = gate.recv_timeout(Duration::from_secs(5));
             registered_flag.store(true, Ordering::SeqCst);
-            Ok(Box::new(()))
+            Ok(stub_watch())
         });
         let started = Instant::now();
         let daemon = std::thread::spawn(move || run_corpus_with(corpus, register));
@@ -1940,7 +2247,7 @@ mod tests {
             "no event, no refresh"
         );
 
-        Corpus::watch_ready(&mut svc);
+        Corpus::watch_ready(&mut svc, &STUB_REPORT);
         assert_eq!(search_hits(&mut svc, "betaNeedle"), 1);
         assert_eq!(search_hits(&mut svc, "alphaNeedle"), 0);
         assert_eq!(search_hits(&mut svc, "gammaNeedle"), 1);
@@ -1992,7 +2299,7 @@ mod tests {
         assert_eq!(search_hits(&mut svc, "betaNeedle"), 0);
 
         git_in(&root, &["checkout", "--", "a.rs", "b.rs"]);
-        Corpus::watch_ready(&mut svc);
+        Corpus::watch_ready(&mut svc, &STUB_REPORT);
         assert_eq!(search_hits(&mut svc, "draftNeedle"), 0, "discarded edit");
         assert_eq!(search_hits(&mut svc, "alphaNeedle"), 1, "committed text");
         assert_eq!(search_hits(&mut svc, "betaNeedle"), 1, "restored deletion");
@@ -2045,7 +2352,7 @@ mod tests {
         git_in(&root, &["add", "a.rs"]);
         git_in(&root, &["commit", "-qm", "first"]);
         assert_eq!(search_hits(&mut svc, "firstNeedle"), 0, "no event yet");
-        Corpus::watch_ready(&mut svc);
+        Corpus::watch_ready(&mut svc, &STUB_REPORT);
         assert_eq!(search_hits(&mut svc, "firstNeedle"), 1);
         drop(svc);
         let _ = std::fs::remove_dir_all(&root);
@@ -2064,13 +2371,13 @@ mod tests {
         assert_eq!(search_hits(&mut svc, "alphaNeedle"), 1);
 
         git_in(&root, &["checkout", "-q", "other"]);
-        Corpus::watch_ready(&mut svc);
+        Corpus::watch_ready(&mut svc, &STUB_REPORT);
         assert_eq!(search_hits(&mut svc, "otherNeedle"), 1, "modified on HEAD");
         assert_eq!(search_hits(&mut svc, "newNeedle"), 1, "added on HEAD");
         assert_eq!(search_hits(&mut svc, "alphaNeedle"), 0, "old text");
 
         git_in(&root, &["checkout", "-q", "-"]);
-        Corpus::watch_ready(&mut svc);
+        Corpus::watch_ready(&mut svc, &STUB_REPORT);
         assert_eq!(
             search_hits(&mut svc, "newNeedle"),
             0,
@@ -2224,6 +2531,238 @@ mod tests {
         assert!(!pid_path(&root).exists(), "pid file left behind");
         assert!(!lock.exists(), "lock file left behind");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `root` relative paths of `paths`, sorted, `.` for the root itself.
+    fn relative(root: &Path, paths: &[PathBuf]) -> Vec<String> {
+        let mut out: Vec<String> = paths
+            .iter()
+            .map(|p| {
+                let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                if rel.is_empty() { ".".to_string() } else { rel }
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// A tree with tracked sources beside ignored directories at the top
+    /// and nested inside a source directory.
+    fn mixed_tree(tag: &str) -> PathBuf {
+        let root = scratch_root(tag);
+        for dir in [
+            "src/a/b",
+            "node_modules/pkg/lib",
+            "src/node_modules/dep",
+            "src/build/out",
+            ".git/info",
+            ".git/objects/ab",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        for file in [
+            "src/a/f.rs",
+            "node_modules/pkg/lib/g.js",
+            "src/build/out/h.o",
+            "top.rs",
+        ] {
+            std::fs::write(root.join(file), "x\n").unwrap();
+        }
+        root
+    }
+
+    /// The watch skips every directory the event filter drops anyway, at
+    /// any depth, and keeps the sources beside them.
+    #[test]
+    fn unignored_tree_should_skip_ignored_directories_at_any_depth() {
+        let root = mixed_tree("unignored-tree");
+        let tree = unignored_tree(&root, true);
+        assert_eq!(
+            relative(&root, &tree.dirs),
+            [".", "src", "src/a", "src/a/b"]
+        );
+        assert_eq!(relative(&root, &tree.files), ["src/a/f.rs", "top.rs"]);
+        assert!(
+            unignored_tree(&root, false).files.is_empty(),
+            "the registration walk collects no files"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `.git` is pruned, but its `info/exclude` is an ignore-control file the
+    /// event filter keeps, so its directory is watched on its own.
+    #[test]
+    fn pruned_watch_dirs_should_add_the_git_info_directory() {
+        let root = mixed_tree("pruned-dirs");
+        assert_eq!(
+            relative(&root, &pruned_watch_dirs(std::slice::from_ref(&root))),
+            [".", ".git/info", "src", "src/a", "src/a/b"]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Only the components below the watched root count: a root that
+    /// itself sits under a directory named `build` is still watched.
+    #[test]
+    fn ignored_below_should_judge_only_the_components_under_the_root() {
+        let root = Path::new("/work/build/repo");
+        assert!(!ignored_below(root, Path::new("/work/build/repo/src")));
+        assert!(ignored_below(
+            root,
+            Path::new("/work/build/repo/src/node_modules/x")
+        ));
+        assert!(ignored_below(root, Path::new("/work/build/repo/target")));
+        assert!(!ignored_below(root, Path::new("/elsewhere/target")));
+    }
+
+    #[test]
+    fn created_dirs_should_take_existing_directories_from_create_and_rename_events() {
+        let root = mixed_tree("created-dirs");
+        let dir = root.join("src/a");
+        let file = root.join("top.rs");
+        let event = |kind| {
+            notify::Event::new(kind)
+                .add_path(dir.clone())
+                .add_path(file.clone())
+        };
+        let create = event(notify::EventKind::Create(notify::event::CreateKind::Folder));
+        assert_eq!(created_dirs(&create), std::slice::from_ref(&dir));
+        let renamed = event(notify::EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::To,
+        )));
+        assert_eq!(created_dirs(&renamed), std::slice::from_ref(&dir));
+        let modified = event(notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )));
+        assert!(
+            created_dirs(&modified).is_empty(),
+            "a data change creates nothing"
+        );
+        let removed = event(notify::EventKind::Remove(notify::event::RemoveKind::Folder));
+        assert!(created_dirs(&removed).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Records the directories the loop extends the watch to, and answers
+    /// with the files it was told are inside.
+    struct ExtendingWatch {
+        extended: mpsc::Sender<PathBuf>,
+        files: Vec<PathBuf>,
+    }
+
+    impl Watch for ExtendingWatch {
+        fn extend(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String> {
+            let _ = self.extended.send(dir.to_path_buf());
+            Ok(std::mem::take(&mut self.files))
+        }
+    }
+
+    /// A directory created while the watch was still registering waits for
+    /// it: once live, the watch is extended to that directory and the file
+    /// already inside reaches the corpus with no event of its own.
+    #[test]
+    fn a_directory_created_before_the_watch_landed_should_be_extended_into_it() {
+        let root = scratch_root("extend-early");
+        let fresh = root.join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let inside = fresh.join("inside.rs");
+        std::fs::write(&inside, "fn inside() {}\n").unwrap();
+        let (applied, flushed) = mpsc::channel();
+        let corpus = FlushedCorpus {
+            root: root.clone(),
+            applied,
+        };
+        let (extended, extensions) = mpsc::channel();
+        let created = fresh.clone();
+        let files = vec![inside.clone()];
+        let register: Registrar = Box::new(move |_, tx| {
+            let event =
+                notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
+                    .add_path(created);
+            tx.send(Msg::Fs(event)).unwrap();
+            Ok(Registered {
+                guard: Box::new(ExtendingWatch { extended, files }),
+                dirs: 1,
+                recursive: false,
+            })
+        });
+        let daemon = std::thread::spawn(move || run_corpus_with(corpus, register));
+        let dir = extensions.recv_timeout(Duration::from_secs(5));
+        let batch = flushed.recv_timeout(Duration::from_secs(5));
+        shutdown(&socket_path(&root)).expect("shutdown");
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            dir.expect("the watch is extended to the new directory"),
+            fresh
+        );
+        let (_, batch) = batch.expect("the file inside is applied");
+        assert_eq!(batch, [(inside, false)]);
+    }
+
+    /// Hands the loop's watch report and applied batches to the test.
+    struct ObservedCorpus {
+        root: PathBuf,
+        reports: mpsc::Sender<WatchReport>,
+        applied: mpsc::Sender<Vec<(PathBuf, bool)>>,
+    }
+
+    impl Corpus for ObservedCorpus {
+        fn root(&self) -> &Path {
+            &self.root
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            failure_response("stub", "stub corpus")
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
+            let _ = self.applied.send(changes.to_vec());
+        }
+        fn watch_ready(&mut self, report: &WatchReport) {
+            let _ = self.reports.send(*report);
+        }
+    }
+
+    /// The pruned registration on the real backend: it watches exactly the
+    /// directories that are not ignored, and a file written in a directory
+    /// created afterwards still reaches the corpus, which a non-recursive
+    /// watch alone never reports.
+    #[test]
+    fn a_pruned_watch_should_cover_a_directory_created_after_it() {
+        let root = mixed_tree("pruned-live");
+        let (reports, report) = mpsc::channel();
+        let (applied, batches) = mpsc::channel();
+        let corpus = ObservedCorpus {
+            root: root.clone(),
+            reports,
+            applied,
+        };
+        let daemon =
+            std::thread::spawn(move || run_corpus_with(corpus, Box::new(register_pruned_watch)));
+        let report = report.recv_timeout(Duration::from_secs(10));
+        let late = root.join("src/late/deeper");
+        std::fs::create_dir_all(&late).unwrap();
+        let file = late.join("late.rs");
+        std::fs::write(&file, "fn late() {}\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = false;
+        while !seen && Instant::now() < deadline {
+            if let Ok(batch) = batches.recv_timeout(Duration::from_millis(200)) {
+                seen = batch
+                    .iter()
+                    .any(|(path, removed)| path == &file && !removed);
+            }
+        }
+        shutdown(&socket_path(&root)).expect("shutdown");
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let report = report.expect("the watch registers");
+        assert_eq!(report.dirs, 5, "root, .git/info, src, src/a, src/a/b");
+        assert!(!report.recursive);
+        assert!(
+            seen,
+            "the file in the late directory never reached the corpus"
+        );
     }
 
     #[test]
