@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use crate::cycles;
 use crate::daemon::WatchReport;
 use crate::meaning::Meaning;
+use crate::plane::Plane;
 use crate::relevance;
 use pixel_context::estimate_tokens;
 use pixel_facts::FactsStore;
@@ -677,15 +678,18 @@ impl Service {
         {
             return (*state, Err(error.to_string()));
         }
-        let result = match kind {
-            "execution_brief" => self.op_targets(query, Some(limit), Some("P1"), false, false),
-            "search" => self.op_search(query, Some(limit), None, None, None, None),
-            "resolve" => self.op_resolve(query, Some(limit)),
-            "impact" => self.op_impact(query, "upstream", Some(2)),
+        let result = match crate::plane::evidence_request(kind, query, limit) {
+            Some(req) if crate::plane::plane(&req) != Plane::Read => {
+                Err(format!("unsupported evidence query kind: {kind}"))
+            }
             // Ranks from the resident vectors the writable service builds;
-            // a replica never builds, embeds a chunk or reads a file.
-            "meaning" => self.meaning.answer(state.generation, query, Some(limit)),
-            _ => Err(format!("unsupported evidence query kind: {kind}")),
+            // a replica never builds, embeds a chunk or reads a file. The
+            // generation is the one held above, not a second lock.
+            Some(Request::Meaning { query, limit }) => {
+                self.meaning.answer(state.generation, &query, limit)
+            }
+            Some(req) => self.dispatch(req),
+            None => Err(format!("unsupported evidence query kind: {kind}")),
         };
         if let Some(graph) = &self.graph {
             let _ = graph.conn().execute_batch("ROLLBACK");
@@ -1178,10 +1182,7 @@ impl Service {
         let full_dirty_list = matches!(op_name, "inspect" | "review");
         // Ops that write repo state (commit/push/branch/sync/rename/…) make
         // any cached HEAD/branch/dirty triple stale the moment they return.
-        let mutates_repo = matches!(
-            op_name,
-            "publish" | "push" | "ship" | "branch_op" | "update" | "sync" | "rename" | "reindex"
-        );
+        let mutates_repo = crate::plane::plane(&req).mutates_repo();
         match self.dispatch(req) {
             Ok(v) => {
                 if mutates_repo {

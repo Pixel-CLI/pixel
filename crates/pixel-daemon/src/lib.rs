@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod evaluate;
 pub mod evidence;
 mod meaning;
+mod plane;
 pub mod recall_service;
 pub mod relevance;
 
