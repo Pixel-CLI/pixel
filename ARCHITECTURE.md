@@ -772,7 +772,7 @@ runs both entry points from Pi's extension events:
 | `session_start`, `session_compact` (Pi, `pixel-brief.ts`) | `pixel run-hook task-event --provider pi --event session-start` | Payload `{session_id, cwd, source, brief_only: true}`; `source` is `clear` for a new session, `compact` after a compaction and `startup` otherwise. It may start the repository's daemon and, for `clear` and `compact`, forgets what the brief already sent. |
 | `tool_result` of a bash call that ran `pixel` (Pi, `pixel-brief.ts`) | `pixel run-hook metrics --provider pi` | Claude-shaped payload (`tool_name`, `tool_input.command`, `tool_response`, `cwd`, `session_id`). Relays the finalized Pixel metrics line as `systemMessage`, whether or not the bash result already holds the box, as Codex does; the package shows it to the user only and never rewrites the tool result. |
 | `PostToolUse` (Claude Code, matching `Bash`) | `pixel run-hook metrics --provider claude` | Relays the finalized Pixel metrics line to Claude's `systemMessage` after a shell call. |
-| `PostToolUse` (Codex) | `pixel run-hook metrics --provider codex` | Relays the finalized Pixel metrics line through Codex's documented `systemMessage`, including when the tool result already contains the box. |
+| `PostToolUse` (Codex) | `pixel run-hook metrics --provider codex` | Relays the finalized Pixel metrics line through Codex's documented `systemMessage` only when its exact identity header appears in this tool result and uniquely matches a command/cwd record. Missing or ambiguous evidence stays silent. |
 | `PostToolUse` (Antigravity, `pixel-guard` in the IDE and CLI Pixel plugins) | `pixel run-hook metrics --provider antigravity` | Matches a finalized metric to the tool call, stores it in that conversation's artifact directory keyed by `stepIdx`, and returns `{}` as required by Antigravity. |
 | `PostInvocation` (Antigravity, `pixel-guard` in the IDE and CLI Pixel plugins) | `pixel run-hook metrics --provider antigravity --event post-invocation` | Consumes matching pending metrics for the same `conversationId` and `artifactDirectoryPath`, injects each as one `ephemeralMessage`, and clears the stored record. |
 
@@ -1308,6 +1308,14 @@ Antigravity use host-supported metrics hooks where available; mock-wrapper tests
 prove command output and stream/exit preservation, not actual model adherence or
 live-host duplicate suppression. Chat relay remains a separately verifiable
 boundary.
+
+Codex's metrics hook requires the finalized record's exact identity header
+(command, duration and short invocation ID) as a complete string line in the
+current `tool_response`, together with the command-argument and effective-cwd
+match. It rejects legacy records without an ID, colliding headers and results
+with several matching footers. Without that evidence it emits nothing: an
+earlier same-command record cannot establish that this call ran. Other hosts
+retain their command/cwd lookup and overlapping-invocation suppression.
 
 
 ### Brief probes

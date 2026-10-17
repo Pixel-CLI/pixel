@@ -134,7 +134,12 @@ serializes overlapping starts. The build is the ordinary indexing of 3.4 and
 
 The active `metrics` hook relays only a finalized Pixel invocation's metric,
 correlated to its tool call, rather than a global latest record. Claude Code
-and Codex receive a `systemMessage`. Antigravity returns `{}` at `PostToolUse`
+and Codex receive a `systemMessage`. Codex requires an exact identity header
+from the current tool result matching one finalized command/cwd record; absent
+or ambiguous headers are silent, so a failed call cannot claim an earlier
+record merely because its arguments match. The tool result remains untrusted
+advisory evidence, not authorization or task-completion proof.
+Antigravity returns `{}` at `PostToolUse`
 and queues the line under its canonical artifact directory, accepted only
 beneath the user's `.gemini` directory. `PostInvocation` requires a matching
 `conversationId`, verifies the record's `stepIdx` matches its file name, and

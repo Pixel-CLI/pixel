@@ -5,14 +5,12 @@
 //! invocation's finalized 🟩 metrics line through hosts' visible hook message
 //! channels when shell tool results keep stderr out of the transcript. The hook
 //! reads the tool-call payload, matches the shell command's pixel invocation
-//! to the newest finalized action record for the effective cwd, and re-emits
+//! to a finalized action record for the effective cwd, and re-emits
 //! its metrics line in the provider's hook-response contract. Every miss —
 //! malformed payload, no pixel call, suppressed or missing metrics, an
 //! ambiguous overlap — is a silent exit 0: the relay is advisory and must
-//! never turn a tool call into a failure.
-//!
-//! Restored verbatim from the implementation retired in `14feba45` (the
-//! `guard.rs` cluster), narrowed to the metrics path.
+//! never turn a tool call into a failure. Codex additionally requires the
+//! record's exact identity header in this tool result and a unique match.
 
 use std::path::{Path, PathBuf};
 
@@ -402,14 +400,21 @@ fn metrics_relay_response(provider: Option<Provider>, line: &str) -> Value {
     }
 }
 
-/// The hook's answer. A box missing from the result is replayed as
-/// `additionalContext` for every provider. A box already in the result is a
+/// The hook's answer. Outside Codex, a box missing from the result is replayed
+/// through the provider's advisory channel. A box already in the result is a
 /// duplicate for the model, so it is dropped, except for Claude Code: its
-/// Bash result carries hidden stderr, while Codex's documented `systemMessage`
-/// is the user-visible relay when its shell result hides the footer. Pi
+/// Bash result carries hidden stderr. Codex requires a unique matching header
+/// from this result before using its user-visible `systemMessage`. Pi
 /// relays like Codex: its extension shows the `systemMessage` to the user
 /// whether or not the bash result holds the box.
 fn metrics_hook_response(provider: Option<Provider>, payload: &Value) -> Option<Value> {
+    if provider == Some(Provider::Codex) {
+        // The log has no shared Codex tool-use ID. Only a footer in this
+        // result can bind a finalized record to this particular call.
+        let response = payload.get("tool_response")?;
+        return metrics_record_line_with_result(payload, Some(response))
+            .map(|line| serde_json::json!({"systemMessage": line}));
+    }
     if !result_carries_metrics_box(payload) {
         return metrics_hook_line(payload).map(|line| metrics_relay_response(provider, &line));
     }
@@ -435,12 +440,26 @@ fn metrics_hook_line(payload: &Value) -> Option<String> {
 
 /// The finalized record's line for the invocation, whether or not the tool
 /// result already shows it.
-// Skip: the overlap guard's `other_start < latest_end` clause is dead — `latest`
-// is the newest same-command record, so `other_start <= latest_start < latest_end`
-// always holds for real durations; its `<`->`<=` flip only differs for a
-// zero-duration newest record, which the action log never emits.
-#[cfg_attr(test, mutants::skip)]
 fn metrics_record_line(payload: &Value) -> Option<String> {
+    metrics_record_line_with_result(payload, None)
+}
+
+/// Whether a string leaf of the tool result contains the exact footer header.
+fn result_has_metrics_header(result: &Value, header: &str) -> bool {
+    match result {
+        Value::String(text) => text.lines().any(|line| line.trim() == header),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| result_has_metrics_header(value, header)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| result_has_metrics_header(value, header)),
+        _ => false,
+    }
+}
+
+/// Match by command/cwd, optionally requiring a unique header from this result.
+fn metrics_record_line_with_result(payload: &Value, response: Option<&Value>) -> Option<String> {
     let tool = payload.get("tool_name")?.as_str()?;
     if !METRICS_SHELL_TOOLS.contains(&tool) {
         return None;
@@ -489,8 +508,25 @@ fn metrics_record_line(payload: &Value) -> Option<String> {
             event.args == invocation.args
                 && canonical(Path::new(&event.cwd)) == tool_cwd
                 && event.metrics.is_some()
+                && response.is_none_or(|result| {
+                    event
+                        .invocation_id
+                        .as_deref()
+                        .is_some_and(|id| !id.is_empty())
+                        && pixel_actionlog::format_metrics_line(event).is_some_and(|line| {
+                            result_has_metrics_header(
+                                result,
+                                line.lines().next().unwrap_or_default(),
+                            )
+                        })
+                })
         })
         .collect();
+    // A shortened ID can collide, and a compound result can contain more
+    // than one footer. Neither identifies a unique invocation.
+    if response.is_some() && matching.len() != 1 {
+        return None;
+    }
     let latest = matching.first()?;
     let latest_start = latest.ts_ms;
     let latest_end =
@@ -1119,6 +1155,141 @@ mod tests {
     }
 
     #[test]
+    fn codex_metrics_should_stay_silent_when_the_call_wrote_no_record() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("codex-missing-record");
+        fixture.record_interval(
+            "impact",
+            "impact src/login.rs",
+            "claude-123456",
+            pixel_actionlog::now_ms().saturating_sub(60_000),
+            1_000,
+        );
+        let mut payload = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
+        payload["tool_response"] = serde_json::json!({"output": "pixel: bad path src/login.rs"});
+        assert_eq!(metrics_hook_response(Some(Provider::Codex), &payload), None);
+    }
+
+    #[test]
+    fn codex_metrics_should_relay_the_result_record_instead_of_a_newer_call() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("codex-result-record");
+        let mut payload = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
+        let line = metrics_record_line(&payload).unwrap();
+        payload["tool_response"] =
+            serde_json::json!({"content": [{"text": format!("output\n{line}\n")}]});
+        fixture.record_interval(
+            "impact",
+            "impact src/login.rs",
+            "another-abcdef",
+            pixel_actionlog::now_ms().saturating_add(60_000),
+            1_000,
+        );
+        let expected = Some(serde_json::json!({"systemMessage": line}));
+        assert_eq!(
+            metrics_hook_response(Some(Provider::Codex), &payload),
+            expected
+        );
+        payload["tool_response"] =
+            serde_json::json!({"output": "🟩 pixel impact ❀ 4.0ms ❀ #absent"});
+        assert_eq!(metrics_hook_response(Some(Provider::Codex), &payload), None);
+    }
+
+    #[test]
+    fn codex_metrics_should_reject_colliding_headers_and_multiple_matching_footers() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("codex-ambiguous");
+        let mut payload = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
+        let initial = metrics_record_line(&payload).unwrap();
+        let start = pixel_actionlog::now_ms().saturating_add(60_000);
+        fixture.record_interval("impact", "impact src/login.rs", "one-123456", start, 1_000);
+        let second = metrics_record_line(&payload).unwrap();
+        payload["tool_response"] = serde_json::json!({"output": format!("{initial}\n{second}")});
+        assert_eq!(metrics_hook_response(Some(Provider::Codex), &payload), None);
+        fixture.record_interval(
+            "impact",
+            "impact src/login.rs",
+            "two-123456",
+            start + 2_000,
+            1_000,
+        );
+        payload["tool_response"] = serde_json::json!({"output": second});
+        assert_eq!(metrics_hook_response(Some(Provider::Codex), &payload), None);
+    }
+
+    #[test]
+    fn codex_metrics_should_reject_a_legacy_record_without_an_invocation_id() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("codex-legacy");
+        let mut event =
+            pixel_actionlog::tail(&pixel_actionlog::ActionLog::path_for_root(&fixture.root), 1)
+                .unwrap()
+                .pop()
+                .unwrap();
+        for id in [None, Some(String::new())] {
+            event.invocation_id = id;
+            let line = pixel_actionlog::format_metrics_line(&event).unwrap();
+            fixture.append_event(event.clone()); // append_event consumes it; the next case reuses it.
+            let mut payload = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
+            payload["tool_response"] = serde_json::json!({"stderr": line});
+            assert_eq!(metrics_hook_response(Some(Provider::Codex), &payload), None);
+        }
+    }
+
+    #[test]
+    fn codex_metrics_should_keep_effective_cwd_and_opt_out_checks() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("codex-cwd-optout");
+        let mut payload = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
+        let line = metrics_record_line(&payload).unwrap();
+        payload["cwd"] = serde_json::json!("/");
+        payload["tool_input"]["command"] = serde_json::json!(format!(
+            "cd {} && pixel impact src/login.rs",
+            fixture.root.display()
+        ));
+        payload["tool_response"] = serde_json::json!({"stderr": line});
+        assert_eq!(
+            metrics_hook_response(Some(Provider::Codex), &payload),
+            Some(serde_json::json!({"systemMessage": line}))
+        );
+        payload["tool_input"]["command"] = serde_json::json!(format!(
+            "cd {} && PIXEL_METRICS=0 pixel impact src/login.rs",
+            fixture.root.display()
+        ));
+        assert_eq!(metrics_hook_response(Some(Provider::Codex), &payload), None);
+        payload["tool_input"]["command"] = serde_json::json!(format!(
+            "cd {} && pixel impact src/login.rs",
+            fixture.root.display()
+        ));
+        std::fs::write(
+            fixture.root.join(".pixel/config.yaml"),
+            "{\"metrics\": \"off\"}\n",
+        )
+        .unwrap();
+        assert_eq!(metrics_hook_response(Some(Provider::Codex), &payload), None);
+    }
+
+    #[test]
+    fn metrics_header_should_match_complete_string_lines_only() {
+        let header = "🟩 pixel impact ❀ 4.0ms ❀ #123456";
+        for result in [
+            serde_json::json!(header),
+            serde_json::json!({"stderr": format!("output\n {header} \nfooter")}),
+            serde_json::json!([null, {"content": [{"text": header}]}]),
+        ] {
+            assert!(result_has_metrics_header(&result, header), "{result}");
+        }
+        for result in [
+            serde_json::json!(format!("prefix {header}")),
+            serde_json::json!(format!("{header}suffix")),
+            serde_json::json!({header: "object key, not output"}),
+            serde_json::json!([null, false, 42, ""]),
+        ] {
+            assert!(!result_has_metrics_header(&result, header), "{result}");
+        }
+    }
+
+    #[test]
     fn metrics_hook_response_relays_visible_metrics_for_claude_and_codex_users() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let fixture = MetricsFixture::new("response");
@@ -1136,7 +1307,8 @@ mod tests {
         }
         assert_eq!(
             metrics_hook_response(Some(Provider::Codex), &plain),
-            Some(serde_json::json!({"systemMessage": line}))
+            None,
+            "Codex needs invocation evidence from this tool result"
         );
         // A box in tool_result isn't sufficient for a user-visible result in
         // Claude or Codex; both use their documented systemMessage field.
