@@ -2,15 +2,17 @@
 // SPDX-License-Identifier: MIT
 
 //! Unix-socket NDJSON daemon: one JSON `Request` per line, one JSON
-//! `Response` line back. Single-threaded request handling: an accept thread
-//! blocked on the listener and a notify watcher feed one mpsc channel, and
-//! the event loop sleeps on that channel alone, so a long mutation (a
-//! `sync-branch` is several git commands of up to 120 s each) delays every
-//! other request on this root. The loop therefore drains the debounced
-//! watcher batch before it serves a connection: a request following a
-//! mutation never reads an index built before it. A worker thread owning the
-//! `Service` behind a `Mutex` would keep the queue moving during a mutation;
-//! until then the queue waits and the answers stay ordered and fresh.
+//! `Response` line back. Two threads share the work. The writer, the thread
+//! that called [`run_corpus`], owns the corpus (`Service` is not `Send`) and
+//! runs one [`Job`] at a time. The loop, on its own thread, owns the socket,
+//! the watcher, the debounce and the idle and root checks; an accept thread
+//! hands each connection to a connection thread that reads its request lines
+//! and passes each one to the loop. The loop sends the writer, in arrival
+//! order, the debounced watcher batch and then the requests behind it, so a
+//! request following a mutation never reads an index built before it. The
+//! writer still runs everything in order: a long mutation (a `sync-branch`
+//! is several git commands of up to 120 s each) delays every request queued
+//! behind it, until reads move to replicas (#1087).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -18,7 +20,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
@@ -79,8 +81,12 @@ const MAX_REQUEST_LINE: usize = 64 * 1024;
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(5);
 /// Maximum number of requests served on a single connection before it is
 /// closed. Prevents a single long-lived client from monopolizing the
-/// single-threaded daemon indefinitely.
+/// writer's queue indefinitely.
 const MAX_REQUESTS_PER_CONN: u32 = 64;
+/// Connection threads alive at once. Past it the accept thread waits for one
+/// to end, and further connections wait in the listener's backlog, as they
+/// did when the loop served one connection at a time.
+const MAX_CONN_THREADS: usize = 32;
 
 /// $TMPDIR/pixel-<xxh3-of-canonical-root>.sock
 ///
@@ -176,18 +182,33 @@ fn probe_ping(stream: &mut UnixStream) -> bool {
 }
 
 enum Msg {
-    /// A connection the accept thread took off the listener.
-    Conn(UnixStream),
+    /// One request a connection thread read, and where its answer goes.
+    Request(Request, mpsc::Sender<Response>),
     /// The listener failed; the loop exits as it did on an accept error.
     AcceptFailed,
     Fs(notify::Event),
-    /// A `notify` callback error, forwarded to the loop (the single owner of
+    /// A `notify` callback error, forwarded to the loop (which queues it for
     /// the corpus) so a watch that stopped reporting is counted and logged
     /// instead of dropped on the callback thread.
     WatcherError(String),
     /// The background watch registration finished: the guard that keeps the
     /// watch alive and what it covers, or why it could not be set up.
     WatchReady(Result<(WatchGuard, WatchReport), String>),
+    /// The writer stopped (a panic outside any request): nothing will
+    /// answer, so the loop exits.
+    WriterGone,
+}
+
+/// What the loop hands the writer, in the order it decided it. The writer
+/// runs one job at a time, so the order the loop sees (a watcher batch, then
+/// the request that followed it) is the order the corpus sees.
+enum Job {
+    Apply(Vec<(PathBuf, bool)>),
+    Serve(Request, mpsc::Sender<Response>),
+    GitMoved,
+    WatcherError(String),
+    WatchReady(WatchReport),
+    Sweep,
 }
 
 /// Git's empty tree (SHA-1): the base a first commit is diffed from.
@@ -664,23 +685,180 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
     let _ = std::fs::remove_file(&sock); // stale leftover
 
     let listener = UnixListener::bind(&sock)?;
-    let bound = socket_identity(&sock);
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
     std::fs::write(pid_path(&root), std::process::id().to_string())?;
     // From here every way out of this function, a panic included, releases
     // the socket, pid and lock files.
     let _release = ReleaseOnExit([sock.clone(), pid_path(&root), lock_path.clone()]);
 
+    eprintln!(
+        "pixel daemon: root={} socket={}",
+        root.display(),
+        sock.display()
+    );
+
     let (tx, rx) = mpsc::channel::<Msg>();
+    let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
+    let lane = Lane {
+        root,
+        sock,
+        listener,
+        register,
+        watch_paths: service.watch_paths(),
+        sweep_every: service.sweep_interval(),
+        tx: tx.clone(),
+        rx,
+        writer: Queued::new(service.root().to_path_buf(), jobs_tx),
+    };
+    let dispatcher = std::thread::spawn(move || run_loop(lane));
+    // Declared after the queue's receiver, so a panic unwinding out of the
+    // writer wakes the loop before the receiver goes.
+    let wake = WakeOnDrop(tx);
+    run_writer(&mut service, &jobs_rx);
+    drop(wake);
+    if let Err(payload) = dispatcher.join() {
+        std::panic::resume_unwind(payload);
+    }
+    Ok(())
+}
+
+/// Everything the loop thread owns.
+struct Lane {
+    root: PathBuf,
+    sock: PathBuf,
+    listener: UnixListener,
+    register: Registrar,
+    watch_paths: Vec<PathBuf>,
+    sweep_every: Option<Duration>,
+    tx: mpsc::Sender<Msg>,
+    rx: mpsc::Receiver<Msg>,
+    writer: Queued,
+}
+
+/// The writer: run every job on the corpus, in order, until the loop drops
+/// the queue. A panic in a request answers that request with a failure
+/// ([`answer`]); a panic anywhere else unwinds out of here.
+fn run_writer(service: &mut dyn Corpus, jobs: &mpsc::Receiver<Job>) {
+    for job in jobs {
+        match job {
+            Job::Apply(batch) => service.apply_changes(&batch),
+            Job::Serve(req, reply) => {
+                // The client may have gone: its answer has nowhere to go.
+                let _ = reply.send(answer(service, req));
+            }
+            Job::GitMoved => service.git_moved(),
+            Job::WatcherError(error) => service.watcher_error(&error),
+            Job::WatchReady(report) => service.watch_ready(&report),
+            Job::Sweep => service.sweep(),
+        }
+    }
+}
+
+/// Tells the loop the writer stopped, when dropped.
+struct WakeOnDrop(mpsc::Sender<Msg>);
+
+impl Drop for WakeOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.send(Msg::WriterGone);
+    }
+}
+
+/// The loop's handle on the writer: each corpus callback the loop makes
+/// becomes a job in the writer's queue, in the order the loop makes it.
+struct Queued {
+    root: PathBuf,
+    jobs: mpsc::Sender<Job>,
+    /// A send failed: the writer is gone and nothing will answer.
+    gone: bool,
+}
+
+impl Queued {
+    fn new(root: PathBuf, jobs: mpsc::Sender<Job>) -> Self {
+        Queued {
+            root,
+            jobs,
+            gone: false,
+        }
+    }
+
+    fn send(&mut self, job: Job) {
+        if self.jobs.send(job).is_err() {
+            self.gone = true;
+        }
+    }
+
+    /// Queue `req` without waiting: the writer sends the answer to `reply`.
+    fn serve(&mut self, req: Request, reply: mpsc::Sender<Response>) {
+        self.send(Job::Serve(req, reply));
+    }
+}
+
+impl Corpus for Queued {
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Queue `req` and wait for its answer. The loop never calls it (it
+    /// queues with [`Queued::serve`] and moves on); it keeps the handle a
+    /// complete corpus.
+    fn handle(&mut self, req: Request) -> Response {
+        let op = req.op_name();
+        let (reply, answer) = mpsc::channel();
+        self.serve(req, reply);
+        answer
+            .recv()
+            .unwrap_or_else(|_| failure_response(op, "daemon writer stopped"))
+    }
+
+    fn apply_change(&mut self, abs: &Path, removed: bool) {
+        self.send(Job::Apply(vec![(abs.to_path_buf(), removed)]));
+    }
+
+    fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
+        self.send(Job::Apply(changes.to_vec()));
+    }
+
+    fn sweep(&mut self) {
+        self.send(Job::Sweep);
+    }
+
+    fn watch_ready(&mut self, report: &WatchReport) {
+        self.send(Job::WatchReady(*report));
+    }
+
+    fn git_moved(&mut self) {
+        self.send(Job::GitMoved);
+    }
+
+    fn watcher_error(&mut self, error: &str) {
+        self.send(Job::WatcherError(error.to_owned()));
+    }
+}
+
+/// The loop: socket, watcher, debounce, idle and root checks. It never runs
+/// a corpus callback itself; each one goes to the writer through
+/// `lane.writer`, in the order the loop decides it.
+fn run_loop(lane: Lane) {
+    let Lane {
+        root,
+        sock,
+        listener,
+        register,
+        watch_paths,
+        sweep_every,
+        tx,
+        rx,
+        writer: mut service,
+    } = lane;
+    let bound = socket_identity(&sock);
     let stop = Arc::new(AtomicBool::new(false));
-    let acceptor = spawn_acceptor(listener, tx.clone(), Arc::clone(&stop));
+    let acceptor = spawn_acceptor(listener, tx.clone(), Arc::clone(&stop), root.clone());
 
     // Watcher: raw notify events into the channel; debounced below. It is
     // registered on its own thread so the loop answers from the first
     // request; `WatchReady` hands the loop its guard. A backend error goes
     // through the same channel: a watch that stopped reporting is exactly
     // the failure that leaves the index stale, so it must not be dropped.
-    let watch_paths = service.watch_paths();
     let mut watcher: Option<WatchGuard> = None;
     // Directories created since the last pass, extended into the watch
     // (held until it is registered).
@@ -701,12 +879,7 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
             let _ = tx_watch.send(Msg::WatchReady(ready));
         });
     }
-
-    eprintln!(
-        "pixel daemon: root={} socket={}",
-        root.display(),
-        sock.display()
-    );
+    drop(tx);
 
     // absolute path -> removed?
     let mut pending: BTreeMap<PathBuf, bool> = BTreeMap::new();
@@ -714,13 +887,12 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
     let mut first_pending_at = None;
     let mut last_activity = Instant::now();
     let mut shutdown = false;
-    let sweep_every = service.sweep_interval();
     let mut next_sweep = sweep_every.map(|every| Instant::now() + every);
 
     // Compared on every pass: a directory swapped in at the same path must
     // stop this daemon as surely as a deleted one.
     let opened_root = root_identity(&root);
-    while !shutdown {
+    while !shutdown && !service.gone {
         let now = Instant::now();
         let idle_left = IDLE_TIMEOUT
             .checked_sub(now.duration_since(last_activity))
@@ -736,18 +908,18 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
         };
 
         match rx.recv_timeout(timeout.max(Duration::from_millis(1))) {
-            Ok(Msg::Conn(stream)) => {
+            Ok(Msg::Request(req, reply)) => {
                 last_activity = Instant::now();
                 // The watcher may have queued a mutation just before this
-                // connection. Drain those events before the request so the
+                // request. Drain those events before the request so the
                 // first post-mutation read never sees the preceding
-                // publication; connections drained meanwhile wait their turn.
-                let mut streams = vec![stream];
+                // publication; requests drained meanwhile wait their turn.
+                let mut requests = vec![(req, reply)];
                 let mut failed = false;
                 while let Ok(message) = rx.try_recv() {
                     match message {
-                        Msg::Conn(stream) => streams.push(stream),
-                        Msg::AcceptFailed => failed = true,
+                        Msg::Request(req, reply) => requests.push((req, reply)),
+                        Msg::AcceptFailed | Msg::WriterGone => failed = true,
                         Msg::Fs(ev) => {
                             if moves_head(&root, &ev) {
                                 service.git_moved();
@@ -775,18 +947,21 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
                     &mut flush_at,
                     &mut first_pending_at,
                 );
-                // Apply the debounced batch before serving the connections:
-                // the debounce coalesces bursts between requests, it must
-                // not let a request read the index from before a mutation.
+                // Queue the debounced batch ahead of the requests: the
+                // debounce coalesces bursts between requests, it must not
+                // let a request read the index from before a mutation.
                 flush_pending(
                     &mut service,
                     &mut pending,
                     &mut flush_at,
                     &mut first_pending_at,
                 );
-                for stream in streams {
+                for (req, reply) in requests {
+                    // Nothing after a shutdown is served; dropping `reply`
+                    // tells its connection.
                     if !shutdown {
-                        handle_conn(&mut service, stream, &mut shutdown);
+                        shutdown = matches!(req, Request::Shutdown);
+                        service.serve(req, reply);
                     }
                 }
                 if failed {
@@ -794,7 +969,9 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
                 }
                 continue;
             }
-            Ok(Msg::AcceptFailed) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(Msg::AcceptFailed | Msg::WriterGone) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break;
+            }
             Ok(Msg::Fs(ev)) => {
                 if moves_head(&root, &ev) {
                     service.git_moved();
@@ -852,8 +1029,12 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
         }
     }
 
+    // Closing the queue lets the writer finish the jobs already in it, the
+    // request in flight included, then return. Requests still in `rx` are
+    // dropped with it: their connections learn nothing will answer.
+    drop(service);
+    drop(rx);
     let _ = stop_acceptor(&sock, bound, &stop, acceptor);
-    Ok(())
 }
 
 /// The files a running daemon owns, removed when the serving function ends:
@@ -887,16 +1068,19 @@ fn watch_ready(
     }
 }
 
-/// Accept connections on a blocking listener and hand them to the loop, so
-/// an idle daemon sleeps instead of polling the listener. The thread ends on
-/// `stop` (checked after each accept), on an accept error, or once the loop
-/// has dropped its receiver.
+/// Accept connections on a blocking listener and give each one a connection
+/// thread that reads its requests and hands them to the loop, so an idle
+/// daemon sleeps instead of polling the listener and a slow client never
+/// holds the loop. The thread ends on `stop` (checked after each accept), on
+/// an accept error, or once the loop has dropped its receiver.
 fn spawn_acceptor(
     listener: UnixListener,
     tx: mpsc::Sender<Msg>,
     stop: Arc<AtomicBool>,
+    root: PathBuf,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let slots = Arc::new(Slots::new(MAX_CONN_THREADS));
         for stream in listener.incoming() {
             if stop.load(Ordering::Acquire) {
                 return;
@@ -905,11 +1089,86 @@ fn spawn_acceptor(
                 let _ = tx.send(Msg::AcceptFailed);
                 return;
             };
-            if tx.send(Msg::Conn(stream)).is_err() {
-                return;
-            }
+            let slot = Slots::acquire(&slots);
+            let mut forward = Forward {
+                root: root.clone(),
+                tx: tx.clone(),
+            };
+            std::thread::spawn(move || {
+                let _slot = slot;
+                let mut shutdown = false;
+                handle_conn(&mut forward, stream, &mut shutdown);
+            });
         }
     })
+}
+
+/// A bound on the connection threads alive at once.
+struct Slots {
+    busy: Mutex<usize>,
+    freed: Condvar,
+    cap: usize,
+}
+
+impl Slots {
+    fn new(cap: usize) -> Self {
+        Slots {
+            busy: Mutex::new(0),
+            freed: Condvar::new(),
+            cap,
+        }
+    }
+
+    /// Wait for a free slot and take it; dropping the guard gives it back.
+    fn acquire(slots: &Arc<Slots>) -> Slot {
+        let mut busy = slots.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        while *busy >= slots.cap {
+            busy = slots
+                .freed
+                .wait(busy)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *busy += 1;
+        Slot(Arc::clone(slots))
+    }
+}
+
+/// A taken slot, given back when its connection thread ends (a panic too).
+struct Slot(Arc<Slots>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut busy = self.0.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        *busy -= 1;
+        self.0.freed.notify_one();
+    }
+}
+
+/// A connection thread's corpus: each request goes to the loop, which queues
+/// it for the writer, and the answer comes back on its own channel.
+struct Forward {
+    root: PathBuf,
+    tx: mpsc::Sender<Msg>,
+}
+
+impl Corpus for Forward {
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn handle(&mut self, req: Request) -> Response {
+        let op = req.op_name();
+        let (reply, answer) = mpsc::channel();
+        if self.tx.send(Msg::Request(req, reply)).is_err() {
+            return failure_response(op, "daemon is shutting down");
+        }
+        answer
+            .recv()
+            .unwrap_or_else(|_| failure_response(op, "daemon is shutting down"))
+    }
+
+    /// Never called: the loop owns the watcher, not a connection.
+    fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
 }
 
 /// The `(device, inode)` of the socket file at `path`, `None` when it is gone.
@@ -1608,9 +1867,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The accept thread hands each connection to the loop's channel and
-    /// stops when told to: the daemon's own wake-up connection ends it, so
-    /// `run_corpus` returns without a thread still blocked in `accept`.
+    /// The accept thread gives each connection a thread that hands its
+    /// requests to the loop's channel, and stops when told to: the daemon's
+    /// own wake-up connection ends it, so `run_corpus` returns without a
+    /// thread still blocked in `accept`.
     #[test]
     fn acceptor_should_forward_connections_and_stop_when_woken() {
         let root = scratch_root("acceptor");
@@ -1618,13 +1878,24 @@ mod tests {
         let listener = UnixListener::bind(&sock).unwrap();
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
-        let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop));
+        let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop), root.clone());
 
-        let _client = UnixStream::connect(&sock).unwrap();
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(5)),
-            Ok(Msg::Conn(_))
-        ));
+        let mut client = UnixStream::connect(&sock).unwrap();
+        writeln!(client, "{}", serde_json::to_string(&Request::Ping).unwrap()).unwrap();
+        let Ok(Msg::Request(req, reply)) = rx.recv_timeout(Duration::from_secs(5)) else {
+            panic!("the connection's request must reach the loop");
+        };
+        assert_eq!(req, Request::Ping);
+        reply
+            .send(Response::success("ping", serde_json::json!({"pong": true})))
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(&client).read_line(&mut line).unwrap();
+        let answered: Response = serde_json::from_str(&line).unwrap();
+        assert!(answered.ok, "the loop's answer reaches the client: {line}");
 
         assert!(stop_acceptor(
             &sock,
@@ -1804,7 +2075,7 @@ mod tests {
         let listener = UnixListener::bind(&sock).unwrap();
         let (tx, _rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
-        let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop));
+        let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop), root.clone());
         let bound = socket_identity(&sock);
         std::fs::remove_file(&sock).unwrap();
 
@@ -1824,7 +2095,7 @@ mod tests {
         let listener = UnixListener::bind(&sock).unwrap();
         let (tx, _rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
-        let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop));
+        let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop), root.clone());
         let bound = socket_identity(&sock);
         std::fs::remove_file(&sock).unwrap();
         let _other_daemon = UnixListener::bind(&sock).unwrap();
@@ -2969,6 +3240,227 @@ mod tests {
             ReadResult::Ok
         ));
         assert_eq!((first.as_str(), second.as_str()), ("ab", "cd"));
+    }
+
+    /// A corpus that holds every `status` until the test releases it.
+    struct HeldCorpus {
+        root: PathBuf,
+        started: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Corpus for HeldCorpus {
+        fn root(&self) -> &Path {
+            &self.root
+        }
+        fn handle(&mut self, req: Request) -> Response {
+            if matches!(req, Request::Status {}) {
+                self.started.send(()).unwrap();
+                self.release
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the test releases the held request");
+            }
+            Response::success(req.op_name(), serde_json::json!({"served": req.op_name()}))
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn watch_paths(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
+    }
+
+    /// A shutdown that arrives while the writer runs a long request ends
+    /// the daemon only after that request is answered: the loop closes the
+    /// queue, it does not abandon what is in it (#1149).
+    #[test]
+    fn a_shutdown_should_wait_for_the_request_in_flight() {
+        let root = scratch_root("held-shutdown");
+        let sock = socket_path(&root);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let served = root.clone();
+        let daemon = std::thread::spawn(move || {
+            run_corpus(HeldCorpus {
+                root: served,
+                started: started_tx,
+                release: release_rx,
+            })
+        });
+        wait_until("socket to bind", Duration::from_secs(10), || sock.exists());
+
+        let held_sock = sock.clone();
+        let held = std::thread::spawn(move || request(&held_sock, &Request::Status {}));
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the writer takes the held request");
+        let bye_sock = sock.clone();
+        let bye = std::thread::spawn(move || request(&bye_sock, &Request::Shutdown));
+        // The shutdown reaches the loop and the queue while `status` runs.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!daemon.is_finished(), "the daemon left a request in flight");
+        release_tx.send(()).unwrap();
+
+        let held = held.join().unwrap();
+        assert_eq!(held["ok"], true, "{held}");
+        assert_eq!(held["result"]["served"], "status", "{held}");
+        let bye = bye.join().unwrap();
+        assert_eq!(bye["ok"], true, "{bye}");
+        assert_eq!(bye["op"], "shutdown", "{bye}");
+        wait_until("daemon to exit", Duration::from_secs(10), || {
+            daemon.is_finished()
+        });
+        daemon.join().unwrap().unwrap();
+        assert!(!sock.exists(), "socket left behind");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every callback the loop makes reaches the writer as a job, in the
+    /// order it was made, and the writer runs them in that order: a watcher
+    /// batch queued before a request is applied before it is answered.
+    #[test]
+    fn queued_callbacks_should_reach_the_writer_in_order() {
+        let (jobs_tx, jobs_rx) = mpsc::channel();
+        let mut queued = Queued::new(PathBuf::from("/repo"), jobs_tx);
+        let (reply, answer) = mpsc::channel();
+        queued.git_moved();
+        queued.apply_changes(&[(PathBuf::from("/repo/a.rs"), false)]);
+        queued.apply_change(Path::new("/repo/b.rs"), true);
+        queued.watcher_error("lost");
+        queued.watch_ready(&STUB_REPORT);
+        queued.sweep();
+        queued.serve(Request::Ping, reply);
+        drop(queued);
+
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut writer = LogCorpus(Arc::clone(&log));
+        run_writer(&mut writer, &jobs_rx);
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "git_moved",
+                "apply /repo/a.rs false",
+                "apply /repo/b.rs true",
+                "watcher_error lost",
+                "watch_ready 1",
+                "sweep",
+                "handle ping",
+            ]
+        );
+        assert_eq!(answer.recv().unwrap().op, "ping");
+    }
+
+    /// Writes down every callback the writer makes, in order.
+    struct LogCorpus(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Corpus for LogCorpus {
+        fn root(&self) -> &Path {
+            Path::new("/repo")
+        }
+        fn handle(&mut self, req: Request) -> Response {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("handle {}", req.op_name()));
+            Response::success(req.op_name(), serde_json::json!({}))
+        }
+        fn apply_change(&mut self, abs: &Path, removed: bool) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("apply {} {removed}", abs.display()));
+        }
+        fn git_moved(&mut self) {
+            self.0.lock().unwrap().push("git_moved".into());
+        }
+        fn watcher_error(&mut self, error: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("watcher_error {error}"));
+        }
+        fn watch_ready(&mut self, report: &WatchReport) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("watch_ready {}", report.dirs));
+        }
+        fn sweep(&mut self) {
+            self.0.lock().unwrap().push("sweep".into());
+        }
+    }
+
+    /// Once the writer is gone, a send marks the handle so the loop exits,
+    /// and a waiting `handle` answers with a failure instead of hanging.
+    #[test]
+    fn queued_should_notice_a_writer_that_is_gone() {
+        let (jobs_tx, jobs_rx) = mpsc::channel();
+        let mut queued = Queued::new(PathBuf::from("/repo"), jobs_tx);
+        queued.sweep();
+        assert!(!queued.gone, "a live writer is not gone");
+        drop(jobs_rx);
+        let answered = queued.handle(Request::Status {});
+        assert!(queued.gone);
+        assert!(!answered.ok);
+        assert_eq!(answered.op, "status");
+        assert_eq!(
+            answered.error.map(|e| e.message),
+            Some("daemon writer stopped".to_string())
+        );
+    }
+
+    /// A connection whose request cannot reach the loop, or gets no answer,
+    /// is told the daemon is shutting down.
+    #[test]
+    fn forward_should_answer_shutting_down_when_the_loop_is_gone() {
+        let (tx, rx) = mpsc::channel();
+        let mut forward = Forward {
+            root: PathBuf::from("/repo"),
+            tx,
+        };
+        let loop_side = std::thread::spawn(move || {
+            let Ok(Msg::Request(req, reply)) = rx.recv() else {
+                panic!("the request reaches the loop");
+            };
+            assert_eq!(req, Request::Ping);
+            drop(reply);
+            // The loop goes away with the next request still unsent.
+        });
+        let unanswered = forward.handle(Request::Ping);
+        loop_side.join().unwrap();
+        let unsent = forward.handle(Request::Status {});
+        for (reply, op) in [(unanswered, "ping"), (unsent, "status")] {
+            assert!(!reply.ok);
+            assert_eq!(reply.op, op);
+            assert_eq!(
+                reply.error.map(|e| e.message),
+                Some("daemon is shutting down".to_string())
+            );
+        }
+    }
+
+    /// The accept thread never runs more connection threads than the cap:
+    /// a slot past it waits until one is given back.
+    #[test]
+    fn slots_should_wait_at_the_cap_until_one_is_given_back() {
+        let slots = Arc::new(Slots::new(2));
+        let first = Slots::acquire(&slots);
+        let _second = Slots::acquire(&slots);
+        let (got_tx, got_rx) = mpsc::channel();
+        let waiting = Arc::clone(&slots);
+        let third = std::thread::spawn(move || {
+            let slot = Slots::acquire(&waiting);
+            got_tx.send(()).unwrap();
+            slot
+        });
+        assert!(
+            got_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a third slot was handed out at a cap of two"
+        );
+        drop(first);
+        got_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a given-back slot is taken");
+        drop(third.join().unwrap());
+        assert_eq!(*slots.busy.lock().unwrap(), 1);
     }
 }
 
