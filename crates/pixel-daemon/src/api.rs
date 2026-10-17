@@ -19,6 +19,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cycles;
+use crate::daemon::WatchReport;
 use crate::meaning::Meaning;
 use crate::relevance;
 use pixel_context::estimate_tokens;
@@ -250,7 +251,17 @@ pub fn facts_visibility(root: &Path) -> Value {
         Ok(None) => return json!({"present": false}),
         Err(e) => return json!({"present": false, "error": e.to_string()}),
     };
-    let state = facts.index_state();
+    let refs = facts.refs_hash().ok();
+    let total = pixel_git::GitRunner::new(root)
+        .rev_list_count_all()
+        .unwrap_or(0);
+    visibility_of(&facts, refs.as_deref(), total)
+}
+
+/// [`facts_visibility`] of an open store, its freshness judged against
+/// `refs` and `rev_list_total` the repository's `rev-list --all` count.
+fn visibility_of(facts: &FactsStore, refs: Option<&str>, rev_list_total: u64) -> Value {
+    let state = facts.index_state_at(refs);
     let count = |sql: &str| -> i64 { facts.conn().query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
     let phase_a_done: bool = facts
         .conn()
@@ -264,10 +275,7 @@ pub fn facts_visibility(root: &Path) -> Value {
     // visible as commits_indexed < total_commits. The facts universe also
     // covers stash/reflog-only commits that `--all` doesn't count, so take
     // the max — indexed exceeding rev-list is healthy, not suspicious.
-    let total_commits = pixel_git::GitRunner::new(root)
-        .rev_list_count_all()
-        .unwrap_or(0)
-        .max(state.total_commits);
+    let total_commits = rev_list_total.max(state.total_commits);
     json!({
         "present": true,
         "schema_version": state.schema_version,
@@ -302,6 +310,20 @@ fn embedding_status(root: &Path, embedder_resident: bool) -> Value {
     })
 }
 
+/// An open history store and the identity of the db file it was opened on.
+struct OpenFacts {
+    store: FactsStore,
+    file: (u64, u64),
+}
+
+/// Device and inode of the history db, `None` when it does not exist.
+fn history_db_identity(root: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(pixel_facts::store::history_db_path(root))
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
 pub struct Service {
     root: PathBuf,
     index: Arc<RwLock<IndexSet>>,
@@ -316,6 +338,9 @@ pub struct Service {
     /// `notify` backend errors reported by the transport loop: a watcher
     /// that stopped seeing changes leaves the same stale answers.
     watcher_failures: FailureLog,
+    /// The registered watch, once the transport loop reports it live: until
+    /// then edits are caught up from `git status`, not observed.
+    watch: Option<WatchReport>,
     /// Lazily opened on first `scope: "hybrid"` search; kept warm for the
     /// daemon's lifetime. `None` = not yet loaded (not tried, download in
     /// progress, or load failed transiently).
@@ -327,15 +352,31 @@ pub struct Service {
     embedder_unavailable: bool,
     /// A background download has been spawned — prevents duplicate threads.
     embedder_download_started: bool,
+    /// The history store, kept open between facts and status requests:
+    /// opening it runs the `.pixel` trust check (a `git ls-files` spawn),
+    /// the DDL and the pragmas. Reopened, and so re-checked, whenever the
+    /// db file is another one than the store holds (a rebuild by another
+    /// process, a replaced or relinked `.pixel/`).
+    facts: Option<OpenFacts>,
+    /// `git rev-list --count --all` for `status`, under the refs hash it
+    /// was counted at: it can only change when a ref moves.
+    commit_total: Option<(String, u64)>,
+    /// History-store opens and `rev-list` counts run, for the tests that
+    /// pin them to the first request and to a moved db or ref.
+    #[cfg(test)]
+    facts_opens: usize,
+    #[cfg(test)]
+    rev_list_runs: usize,
     /// The facts/history warm loop is demand-driven: spawned on the first
     /// facts-consuming request, not at daemon start — users who never touch
     /// history commands never pay for the index.
     facts_warmer_started: AtomicBool,
-    /// Short-TTL cache of the `repo_snapshot` triple (HEAD, branch, dirty
-    /// list). Every snapshot-carrying op used to pay 3 git subprocesses;
-    /// a burst of scope-task+impact+find-code now costs one round-trip.
-    /// Invalidated by watcher batches and every writing op.
-    snapshot_cache: Option<(Instant, SnapshotInfo)>,
+    /// Caches of what `repo_snapshot` reports, one git subprocess each: a
+    /// burst of scope-task+impact+find-code costs one round-trip. A writing
+    /// op or a HEAD move seen under `.git` drops all three; a watcher batch
+    /// drops only the dirty list, since a working-tree edit moves neither
+    /// HEAD nor the branch. HEAD is also the one the graph check reads.
+    git_state: GitStateCache,
     /// Short-TTL cache of the `git log --since=90.days` activity map behind
     /// `engine_signals`. The decay weights shift negligibly over the TTL;
     /// only successful scans are cached so a transient git failure still
@@ -351,11 +392,115 @@ pub struct Service {
     meaning: Arc<Meaning>,
 }
 
-/// How long a cached [`SnapshotInfo`] may be served. One concurrent burst
-/// of retrieval ops (scope-task + impact + find-code back to back) shares
-/// one git round-trip; dirty-state staleness inside the window is the
-/// accepted trade, and writing ops + watcher batches invalidate anyway.
+/// How long a cached HEAD, branch or dirty list may be served. One
+/// concurrent burst of retrieval ops (scope-task + impact + find-code back
+/// to back) shares one git round-trip; staleness inside the window (a
+/// commit made outside pixel) is the accepted trade, and writing ops and
+/// watcher batches invalidate anyway.
 const SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(1000);
+
+/// How long HEAD and the branch may be served once the watch covers
+/// `.git`: a commit, a checkout or a reset drops them through
+/// `Corpus::git_moved`, so the TTL only bounds an event the backend lost.
+const WATCHED_REF_TTL: Duration = Duration::from_secs(60);
+
+/// The git state a snapshot reports, each value cached on its own.
+struct GitStateCache {
+    /// For the dirty list: a tracked file under an ignored directory
+    /// (`vendor/`, `build/`) changes without a watcher event.
+    ttl: Duration,
+    /// For HEAD and the branch: `SNAPSHOT_CACHE_TTL` until the watch
+    /// covers `.git`, then `WATCHED_REF_TTL`.
+    ref_ttl: Duration,
+    head: Option<(Instant, Option<String>)>,
+    branch: Option<(Instant, Option<String>)>,
+    dirty: Option<(Instant, Vec<String>)>,
+    /// Git lookups actually run, for the tests that count them.
+    #[cfg(test)]
+    lookups: usize,
+}
+
+impl GitStateCache {
+    fn new() -> Self {
+        Self {
+            ttl: SNAPSHOT_CACHE_TTL,
+            ref_ttl: SNAPSHOT_CACHE_TTL,
+            head: None,
+            branch: None,
+            dirty: None,
+            #[cfg(test)]
+            lookups: 0,
+        }
+    }
+
+    /// Forget everything: a writing op may have moved any of it.
+    fn clear(&mut self) {
+        self.head = None;
+        self.branch = None;
+        self.dirty = None;
+    }
+
+    fn head(&mut self, root: &Path) -> Option<String> {
+        let ttl = self.ref_ttl;
+        self.lookup(
+            |cache| &mut cache.head,
+            ttl,
+            || pixel_index::gitsync::rev_parse_head(root),
+        )
+    }
+
+    /// HEAD read now, whatever the cache holds, and kept for the rest of
+    /// the request: the answer to a freshness gate, which a commit made
+    /// outside pixel a moment ago must not pass.
+    fn fresh_head(&mut self, root: &Path) -> Option<String> {
+        self.head = None;
+        self.head(root)
+    }
+
+    fn branch(&mut self, root: &Path) -> Option<String> {
+        let ttl = self.ref_ttl;
+        self.lookup(
+            |cache| &mut cache.branch,
+            ttl,
+            || pixel_index::gitsync::current_branch(root),
+        )
+    }
+
+    fn dirty(&mut self, root: &Path) -> Vec<String> {
+        let ttl = self.ttl;
+        self.lookup(
+            |cache| &mut cache.dirty,
+            ttl,
+            || {
+                pixel_index::gitsync::status_porcelain(root)
+                    .into_iter()
+                    .map(|(_xy, path)| path)
+                    .collect()
+            },
+        )
+    }
+
+    /// The value in `slot` while younger than `ttl`, else a fresh `run`.
+    fn lookup<T: Clone>(
+        &mut self,
+        slot: impl Fn(&mut Self) -> &mut Option<(Instant, T)>,
+        ttl: Duration,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        if let Some((at, value)) = slot(self)
+            && at.elapsed() < ttl
+        {
+            return value.clone();
+        }
+        #[cfg(test)]
+        {
+            self.lookups += 1;
+        }
+        let value = run();
+        *slot(self) = Some((Instant::now(), value.clone()));
+        value
+    }
+}
 
 /// How long the `git log` activity map may be served. Churn decays on a
 /// 14-day half-life, so a minute of reuse never moves a ranking; the TTL
@@ -447,11 +592,18 @@ impl Service {
             graph: None,
             graph_failures: FailureLog::default(),
             watcher_failures: FailureLog::default(),
+            watch: None,
             embedder: None,
             embedder_unavailable: false,
             embedder_download_started: false,
+            facts: None,
+            commit_total: None,
+            #[cfg(test)]
+            facts_opens: 0,
+            #[cfg(test)]
+            rev_list_runs: 0,
             facts_warmer_started: AtomicBool::new(false),
-            snapshot_cache: None,
+            git_state: GitStateCache::new(),
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
             meaning,
@@ -473,11 +625,18 @@ impl Service {
             graph: None,
             graph_failures: FailureLog::default(),
             watcher_failures: FailureLog::default(),
+            watch: None,
             embedder: None,
             embedder_unavailable: true,
             embedder_download_started: false,
+            facts: None,
+            commit_total: None,
+            #[cfg(test)]
+            facts_opens: 0,
+            #[cfg(test)]
+            rev_list_runs: 0,
             facts_warmer_started: AtomicBool::new(true),
-            snapshot_cache: None,
+            git_state: GitStateCache::new(),
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
             meaning: Arc::clone(&self.meaning),
@@ -569,9 +728,9 @@ impl Service {
         if files.is_empty() {
             return;
         }
-        // A watcher batch means the working tree changed: the cached
-        // snapshot's dirty list is stale as of right now.
-        self.snapshot_cache = None;
+        // A watcher batch means the working tree changed: the cached dirty
+        // list is stale as of right now. HEAD and the branch are not.
+        self.git_state.dirty = None;
         let publication = Arc::clone(&self.publication);
         let mut state = publication.write_or_recover();
         state.healthy = false;
@@ -630,8 +789,25 @@ impl Service {
         )
     }
 
+    /// Record the watch the transport loop registered, for `status`. Once
+    /// it covers `.git`, HEAD and the branch are cached until they move.
+    pub(crate) fn note_watch_ready(&mut self, report: WatchReport) {
+        self.watch = Some(report);
+        if report.git_dir {
+            self.git_state.ref_ttl = WATCHED_REF_TTL;
+        }
+    }
+
+    /// HEAD or a branch moved: the cached git state describes another commit.
+    pub(crate) fn note_git_moved(&mut self) {
+        self.git_state.clear();
+    }
+
     /// Count a `notify` backend error reported by the transport loop.
     pub(crate) fn note_watcher_error(&mut self, error: &str) {
+        // A lost event may have been a HEAD move: stop trusting the watch
+        // for it.
+        self.git_state.ref_ttl = SNAPSHOT_CACHE_TTL;
         note_failure(
             &mut self.watcher_failures,
             &format!("watcher error: {error}"),
@@ -674,7 +850,7 @@ impl Service {
 
     fn ensure_graph_inner(&mut self) -> Result<Option<Value>, String> {
         let db = self.graph_db_path();
-        let gitless = pixel_index::gitsync::rev_parse_head(&self.root).is_none();
+        let gitless = self.git_state.head(&self.root).is_none();
         let mut built = None;
         if !db.exists() {
             built = Some(self.full_rebuild_info("missing")?);
@@ -1002,7 +1178,7 @@ impl Service {
         match self.dispatch(req) {
             Ok(v) => {
                 if mutates_repo {
-                    self.snapshot_cache = None;
+                    self.git_state.clear();
                 }
                 let mut env = Envelope::success(op_name, v);
                 if attach_snapshot {
@@ -1039,26 +1215,13 @@ impl Service {
     /// staged / untracked) repo-relative paths. `token` is left `None`
     /// here — pixel-ops computes the validated snapshot token separately.
     fn repo_snapshot(&mut self) -> SnapshotInfo {
-        if let Some((at, snapshot)) = &self.snapshot_cache
-            && at.elapsed() < SNAPSHOT_CACHE_TTL
-        {
-            return snapshot.clone();
-        }
-        let head = pixel_index::gitsync::rev_parse_head(&self.root);
-        let branch = pixel_index::gitsync::current_branch(&self.root);
-        let dirty: Vec<String> = pixel_index::gitsync::status_porcelain(&self.root)
-            .into_iter()
-            .map(|(_xy, path)| path)
-            .collect();
-        let snapshot = SnapshotInfo {
+        SnapshotInfo {
             token: None,
-            head,
-            branch,
-            dirty,
+            head: self.git_state.head(&self.root),
+            branch: self.git_state.branch(&self.root),
+            dirty: self.git_state.dirty(&self.root),
             dirty_count: None,
-        };
-        self.snapshot_cache = Some((Instant::now(), snapshot.clone()));
-        snapshot
+        }
     }
 
     fn dispatch(&mut self, req: Request) -> Result<Value, String> {
@@ -1555,7 +1718,7 @@ impl Service {
             Ok(index) => index.status(),
             Err(_) => return unavailable(TargetsFactsUnavailableReason::IndexUnavailable),
         };
-        if index_status.commit_oid != pixel_index::gitsync::rev_parse_head(&self.root) {
+        if index_status.commit_oid != self.git_state.fresh_head(&self.root) {
             return unavailable(TargetsFactsUnavailableReason::IndexStale);
         }
 
@@ -2963,8 +3126,13 @@ impl Service {
                 // means answers may have been served from a stale index.
                 "graph_update_failures": self.graph_failures.count(),
                 "notify_errors": self.watcher_failures.count(),
+                "ready": self.watch.is_some(),
+                "recursive": self.watch.map(|w| w.recursive),
+                "watched_dirs": self.watch.map(|w| w.dirs),
+                "registration_ms": self.watch.map(|w| w.elapsed.as_millis()),
+                "git_dir": self.watch.map(|w| w.git_dir),
             },
-            "facts": facts_visibility(&self.root),
+            "facts": self.facts_status(),
             "embedding": embedding_status(&self.root, self.embedder.is_some()),
         }))
     }
@@ -3287,11 +3455,15 @@ impl Service {
     /// Budget: `PIXEL_FACTS_QUERY_BUDGET_MS` (default 3000ms) — a query is
     /// never blocked longer than that; the attached `index_state` tells the
     /// caller whether coverage is complete.
-    fn facts_open_and_catch_up(&self) -> Result<FactsStore, String> {
-        let mut facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
-        if !facts.index_state().fresh {
-            pixel_facts::ingest::lazy_ingest(&mut facts)
-                .map_err(|e| format!("facts lazy ingest failed: {e}"))?;
+    fn facts_open_and_catch_up(&mut self) -> Result<&mut FactsStore, String> {
+        {
+            let facts = self
+                .cached_facts(true)?
+                .ok_or("history db vanished on open")?;
+            if !facts.index_state().fresh {
+                pixel_facts::ingest::lazy_ingest(facts)
+                    .map_err(|e| format!("facts lazy ingest failed: {e}"))?;
+            }
         }
         // First facts use: start the keep-fresh warm loop. `lazy_ingest` above
         // serves this request within its budget; the warmer finishes the job
@@ -3299,7 +3471,72 @@ impl Service {
         if self.facts_warmer_needed() {
             crate::daemon::spawn_facts_ingest(&self.root);
         }
-        Ok(facts)
+        // A rebuild during the ingest replaced the file: this reopens it.
+        self.cached_facts(true)?
+            .ok_or_else(|| "history db vanished on open".to_string())
+    }
+
+    /// The kept history store, opened (`create`: built when absent) unless
+    /// the one held is still on the db file that exists now. `Ok(None)`
+    /// only without `create`, when there is no db.
+    fn cached_facts(&mut self, create: bool) -> Result<Option<&mut FactsStore>, String> {
+        let current = history_db_identity(&self.root);
+        let reusable =
+            matches!((&self.facts, current), (Some(open), Some(file)) if open.file == file);
+        if !reusable {
+            self.facts = None;
+            #[cfg(test)]
+            {
+                self.facts_opens += 1;
+            }
+            let store = if create {
+                FactsStore::open(&self.root).map_err(|e| e.to_string())?
+            } else {
+                match FactsStore::open_existing(&self.root).map_err(|e| e.to_string())? {
+                    Some(store) => store,
+                    None => return Ok(None),
+                }
+            };
+            let file = history_db_identity(&self.root)
+                .ok_or_else(|| "history db vanished on open".to_string())?;
+            self.facts = Some(OpenFacts { store, file });
+        }
+        Ok(self.facts.as_mut().map(|open| &mut open.store))
+    }
+
+    /// `git rev-list --count --all` for the `facts` block of `status`.
+    fn count_commits(&mut self) -> Option<u64> {
+        #[cfg(test)]
+        {
+            self.rev_list_runs += 1;
+        }
+        pixel_git::GitRunner::new(&self.root).rev_list_count_all()
+    }
+
+    /// The `facts` block of `status`, from the kept store: no trust-check
+    /// spawn once it is open, the refs read once, and `rev-list` run only
+    /// when they moved.
+    fn facts_status(&mut self) -> Value {
+        let refs = match self.cached_facts(false) {
+            Ok(Some(store)) => store.refs_hash().ok(),
+            Ok(None) => return json!({"present": false}),
+            Err(e) => return json!({"present": false, "error": e}),
+        };
+        let total = match (&self.commit_total, refs.as_deref()) {
+            (Some((at, total)), Some(refs)) if at == refs => *total,
+            _ => match self.count_commits() {
+                Some(total) => {
+                    self.commit_total = refs.clone().map(|refs| (refs, total));
+                    total
+                }
+                None => 0,
+            },
+        };
+        let open = self
+            .facts
+            .as_ref()
+            .expect("cached_facts just returned the open store");
+        visibility_of(&open.store, refs.as_deref(), total)
     }
 
     /// The facts db exactly as it stands, for a `read_only` history
@@ -3308,18 +3545,15 @@ impl Service {
     /// error because the read-only contract forbids the open-and-catch-up
     /// that would serve it. The answer's `index_state` says how stale the
     /// index it came from was.
-    fn facts_open_read_only(&self) -> Result<FactsStore, String> {
-        match FactsStore::open_existing(&self.root) {
-            Ok(Some(facts)) => Ok(facts),
-            Ok(None) => Err("facts index absent or not built".to_string()),
-            Err(e) => Err(e.to_string()),
-        }
+    fn facts_open_read_only(&mut self) -> Result<&mut FactsStore, String> {
+        self.cached_facts(false)?
+            .ok_or_else(|| "facts index absent or not built".to_string())
     }
 
     /// The facts store an op sees: `read_only` takes the index as it
     /// stands, otherwise the open-and-catch-up path that built today's
     /// behaviour.
-    fn facts_for(&self, read_only: bool) -> Result<FactsStore, String> {
+    fn facts_for(&mut self, read_only: bool) -> Result<&mut FactsStore, String> {
         if read_only {
             self.facts_open_read_only()
         } else {
@@ -3343,7 +3577,7 @@ impl Service {
     ) -> Result<Value, String> {
         let facts = self.facts_for(read_only)?;
         let result = pixel_facts::search::search(
-            &facts,
+            facts,
             query,
             facet.unwrap_or("all").into(),
             limit.unwrap_or(200),
@@ -7855,6 +8089,146 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A committed `login.rs` in a git fixture, served by a service whose
+    /// git-state cache outlives the test (no TTL expiry mid-assertion).
+    fn cached_git_service(tag: &str) -> (PathBuf, Service) {
+        let root = tmpdir(tag);
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut service = Service::open(&root).unwrap();
+        service.git_state.ttl = Duration::from_secs(600);
+        service.git_state.ref_ttl = Duration::from_secs(600);
+        (root, service)
+    }
+
+    /// The agent rhythm is edit, then ask: the watcher batch in between
+    /// leaves HEAD and the branch cached, and only `git status` runs again,
+    /// so the snapshot still lists the edited file.
+    #[test]
+    fn an_edit_should_refresh_only_the_dirty_list_of_the_snapshot() {
+        let (root, mut service) = cached_git_service("snapshot-after-edit");
+        let before = service.repo_snapshot();
+        assert_eq!(service.git_state.lookups, 3, "head, branch, dirty");
+        assert!(before.dirty.is_empty(), "{before:?}");
+
+        std::fs::write(root.join("login.rs"), "pub fn login_edited() {}\n").unwrap();
+        service.refresh_files(&[("login.rs", false)]);
+        let after = service.repo_snapshot();
+        assert_eq!(
+            service.git_state.lookups, 4,
+            "only the dirty list is looked up again"
+        );
+        assert_eq!(after.dirty, ["login.rs"]);
+        assert_eq!(after.head, before.head);
+        assert_eq!(after.branch, before.branch);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A writing op may move HEAD, the branch and the tree: all three are
+    /// looked up again. Within the TTL nothing is.
+    #[test]
+    fn git_state_cache_should_serve_within_its_ttl_until_cleared() {
+        let (root, mut service) = cached_git_service("snapshot-clear");
+        let first = service.repo_snapshot();
+        let again = service.repo_snapshot();
+        assert_eq!(service.git_state.lookups, 3);
+        assert_eq!(first, again);
+        service.git_state.clear();
+        let _ = service.repo_snapshot();
+        assert_eq!(service.git_state.lookups, 6);
+        service.git_state.ttl = Duration::ZERO;
+        service.git_state.ref_ttl = Duration::ZERO;
+        let _ = service.repo_snapshot();
+        assert_eq!(
+            service.git_state.lookups, 9,
+            "an expired value is looked up again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A commit the watcher saw under `.git` drops HEAD and the branch, so
+    /// the next snapshot names the new commit at once, whatever the TTL.
+    #[test]
+    fn a_head_move_should_drop_the_cached_head() {
+        let (root, mut service) = cached_git_service("snapshot-head-moved");
+        let primed = service.repo_snapshot();
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        assert_eq!(
+            service.repo_snapshot().head,
+            primed.head,
+            "cached until told"
+        );
+        crate::daemon::Corpus::git_moved(&mut service);
+        let moved = service.repo_snapshot();
+        assert_ne!(moved.head, primed.head);
+        assert_eq!(service.git_state.lookups, 6, "head, branch and dirty again");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// HEAD outlives the one-second TTL only while the watch covers `.git`,
+    /// and stops as soon as the watcher may have lost an event.
+    #[test]
+    fn head_should_be_cached_longer_only_while_the_watch_covers_git() {
+        let (root, mut service) = cached_git_service("snapshot-ref-ttl");
+        let report = |git_dir| crate::daemon::WatchReport {
+            dirs: 1,
+            recursive: true,
+            elapsed: Duration::ZERO,
+            git_dir,
+        };
+        service.git_state.ref_ttl = SNAPSHOT_CACHE_TTL;
+        service.note_watch_ready(report(false));
+        assert_eq!(service.git_state.ref_ttl, SNAPSHOT_CACHE_TTL);
+        service.note_watch_ready(report(true));
+        assert_eq!(service.git_state.ref_ttl, WATCHED_REF_TTL);
+        assert_eq!(
+            service.git_state.ttl,
+            Duration::from_secs(600),
+            "the dirty list keeps its own"
+        );
+        service.note_watcher_error("queue overflow");
+        assert_eq!(service.git_state.ref_ttl, SNAPSHOT_CACHE_TTL);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The targets-facts gate reads HEAD fresh, so a commit made outside
+    /// pixel stales the index at once, and the snapshot of that same answer
+    /// carries the HEAD the gate judged, not the one cached before the
+    /// commit: one read per request, shared.
+    #[test]
+    fn targets_facts_should_share_its_fresh_head_with_the_snapshot() {
+        let (root, mut service) = cached_git_service("targets-facts-one-head");
+        let primed = service.repo_snapshot();
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        let moved = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let moved = String::from_utf8(moved.stdout).unwrap().trim().to_string();
+        assert_ne!(primed.head.as_deref(), Some(moved.as_str()));
+
+        let response = service.handle(Request::TargetsFacts {
+            task: "change session".into(),
+            limit: Some(8),
+            relevance_only: false,
+        });
+        assert_eq!(response.data()["reason"], "index_stale", "{response:?}");
+        assert_eq!(
+            response.snapshot.as_ref().and_then(|s| s.head.as_deref()),
+            Some(moved.as_str()),
+            "the snapshot must describe the HEAD the gate judged"
+        );
+        assert_eq!(service.git_state.lookups, 4, "primed 3, then one HEAD read");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn targets_facts_refuse_stale_index_without_reopening_it() {
         let root = tmpdir("targets-facts-stale-index");
@@ -8714,7 +9088,7 @@ mod tests {
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "init"]);
 
-        let svc = Service::open(&root).unwrap();
+        let mut svc = Service::open(&root).unwrap();
         std::fs::remove_dir_all(root.join(".git")).unwrap();
 
         let error = match svc.facts_open_and_catch_up() {
@@ -8723,6 +9097,98 @@ mod tests {
         };
         assert!(error.contains("facts lazy ingest failed"), "{error}");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn history_query(read_only: bool) -> Request {
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: Some(5),
+            read_only,
+        }
+    }
+
+    /// Every facts request after the first reads the store already open:
+    /// no `.pixel` trust check, no DDL. A db another process replaced (a
+    /// rebuild, a reset) is reopened, so its trust check runs again.
+    #[test]
+    fn facts_requests_should_reuse_the_open_store_until_the_db_file_changes() {
+        let root = tmpdir("facts-store-kept");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut svc = Service::open(&root).unwrap();
+        svc.facts_warmer_started.store(true, Ordering::SeqCst);
+
+        assert!(svc.handle(history_query(false)).ok);
+        assert!(svc.handle(history_query(true)).ok);
+        assert!(svc.handle(Request::Status {}).ok);
+        assert!(svc.handle(history_query(false)).ok);
+        assert_eq!(svc.facts_opens, 1, "one open serves every later request");
+
+        let db = pixel_facts::store::history_db_path(&root);
+        let moved = db.with_extension("moved");
+        std::fs::copy(&db, &moved).unwrap();
+        std::fs::remove_file(&db).unwrap();
+        std::fs::rename(&moved, &db).unwrap();
+        assert!(svc.handle(history_query(true)).ok);
+        assert_eq!(svc.facts_opens, 2, "a replaced db file is opened again");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The kept store does not keep the trust verdict past its file: a
+    /// `.pixel/` the repository now tracks is refused as soon as the db the
+    /// store was opened on is replaced, as a checkout of it would.
+    #[test]
+    fn a_replaced_db_should_be_refused_when_the_repository_tracks_pixel() {
+        let root = tmpdir("facts-store-tracked");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut svc = Service::open(&root).unwrap();
+        svc.facts_warmer_started.store(true, Ordering::SeqCst);
+        assert!(svc.handle(history_query(false)).ok);
+
+        let db = pixel_facts::store::history_db_path(&root);
+        let copy = db.with_extension("copy");
+        std::fs::copy(&db, &copy).unwrap();
+        std::fs::remove_file(&db).unwrap();
+        std::fs::rename(&copy, &db).unwrap();
+        git(&root, &["add", "-f", ".pixel/history.db"]);
+        let refused = svc.handle(history_query(true));
+        assert!(!refused.ok, "{refused:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `status` counts the repository's commits once per refs state: the
+    /// prompt hook asks for it on every prompt, and `rev-list --all` only
+    /// changes when a ref moves.
+    #[test]
+    fn status_should_count_commits_again_only_after_a_ref_moves() {
+        let root = tmpdir("facts-status-total");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut svc = Service::open(&root).unwrap();
+        svc.facts_warmer_started.store(true, Ordering::SeqCst);
+        assert!(svc.handle(history_query(false)).ok);
+        let total = |svc: &mut Service| {
+            svc.handle(Request::Status {}).data()["facts"]["total_commits"].clone()
+        };
+
+        assert_eq!(total(&mut svc), 1);
+        assert_eq!(total(&mut svc), 1);
+        assert_eq!(svc.rev_list_runs, 1, "the refs did not move");
+
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        assert_eq!(total(&mut svc), 2);
+        assert_eq!(svc.rev_list_runs, 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 

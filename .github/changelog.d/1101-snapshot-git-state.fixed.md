@@ -1,0 +1,1 @@
+**daemon:** a request after an edit no longer re-reads HEAD and the branch: a watcher batch drops only the cached dirty list, and HEAD is dropped when the watch sees it move under `.git`. Edit-then-`search` on the daemon socket: 3 → 1 `git` spawn, median 63 → 31 ms.
