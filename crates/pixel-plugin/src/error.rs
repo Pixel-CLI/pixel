@@ -32,6 +32,12 @@ pub enum Error {
         run: String,
         why: String,
     },
+    #[error("plugin `{name}`: `skill` = \"{skill}\" {why}")]
+    BadSkill {
+        name: String,
+        skill: String,
+        why: String,
+    },
     #[error("plugin `{0}` is already installed: run `pixel uninstall {0}` first")]
     AlreadyInstalled(String),
     #[error(
