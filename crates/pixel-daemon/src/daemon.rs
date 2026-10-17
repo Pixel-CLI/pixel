@@ -900,30 +900,45 @@ fn read_capped_line(
     max_bytes: usize,
     deadline: Instant,
 ) -> ReadResult {
-    use std::io::Read;
+    read_capped_line_with(reader, buf, max_bytes, deadline, Instant::now)
+}
+
+/// [`read_capped_line`] over any buffered reader, with the clock passed in.
+/// The line is taken a buffered block at a time, and the deadline is
+/// checked once per block, not once per byte.
+fn read_capped_line_with(
+    reader: &mut impl BufRead,
+    buf: &mut String,
+    max_bytes: usize,
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+) -> ReadResult {
     let mut bytes = Vec::with_capacity(max_bytes.min(4096));
-    let mut byte = [0u8; 1];
     loop {
-        if Instant::now() >= deadline {
+        if now() >= deadline {
             return ReadResult::TimedOut;
         }
-        match reader.read(&mut byte) {
-            Ok(0) => {
-                if bytes.is_empty() {
-                    return ReadResult::Eof;
-                }
+        let Ok(block) = reader.fill_buf() else {
+            return ReadResult::Err;
+        };
+        if block.is_empty() {
+            if bytes.is_empty() {
+                return ReadResult::Eof;
+            }
+            break;
+        }
+        let newline = block.iter().position(|&b| b == b'\n');
+        let line_part = newline.unwrap_or(block.len());
+        if bytes.len() + line_part > max_bytes {
+            return ReadResult::TooLong;
+        }
+        bytes.extend_from_slice(&block[..line_part]);
+        match newline {
+            Some(at) => {
+                reader.consume(at + 1);
                 break;
             }
-            Ok(_) => {
-                if byte[0] == b'\n' {
-                    break;
-                }
-                bytes.push(byte[0]);
-                if bytes.len() > max_bytes {
-                    return ReadResult::TooLong;
-                }
-            }
-            Err(_) => return ReadResult::Err,
+            None => reader.consume(line_part),
         }
     }
     match String::from_utf8(bytes) {
@@ -2237,6 +2252,79 @@ mod tests {
             panic_message(other_payload.as_ref()),
             "non-string panic payload"
         );
+    }
+
+    /// The reader the old loop read one byte at a time: the clock was read
+    /// once per byte, 65 537 times for a 64 KiB request. Now it is read once
+    /// per buffered block (8 KiB for a default `BufReader`).
+    #[test]
+    fn a_64_kib_line_should_read_the_clock_once_per_block() {
+        let mut line = vec![b'x'; MAX_REQUEST_LINE];
+        line.push(b'\n');
+        let mut reader = BufReader::new(std::io::Cursor::new(line));
+        let mut clock_reads = 0_usize;
+        let mut out = String::new();
+        let result = read_capped_line_with(
+            &mut reader,
+            &mut out,
+            MAX_REQUEST_LINE,
+            Instant::now() + Duration::from_secs(5),
+            || {
+                clock_reads += 1;
+                Instant::now()
+            },
+        );
+        assert!(matches!(result, ReadResult::Ok));
+        assert_eq!(out.len(), MAX_REQUEST_LINE);
+        assert_eq!(clock_reads, 9, "eight 8 KiB blocks, then the newline");
+    }
+
+    /// The cap is exact across block boundaries: a line of `max_bytes` is
+    /// read, one more byte is refused.
+    #[test]
+    fn capped_line_should_admit_exactly_max_bytes_across_blocks() {
+        let read = |input: &[u8]| {
+            let mut reader = BufReader::with_capacity(2, std::io::Cursor::new(input.to_vec()));
+            let mut out = String::new();
+            let result = read_capped_line_with(
+                &mut reader,
+                &mut out,
+                4,
+                Instant::now() + Duration::from_secs(5),
+                Instant::now,
+            );
+            (result, out)
+        };
+        let (result, out) = read(b"0123\n");
+        assert!(matches!(result, ReadResult::Ok));
+        assert_eq!(out, "0123");
+        assert!(matches!(read(b"01234\n").0, ReadResult::TooLong));
+        let (result, out) = read(b"01");
+        assert!(
+            matches!(result, ReadResult::Ok),
+            "a last line without newline"
+        );
+        assert_eq!(out, "01");
+        assert!(matches!(read(b"").0, ReadResult::Eof));
+    }
+
+    /// A connection carries several requests: reading one line leaves the
+    /// next one in the buffer, even when both arrived in one block.
+    #[test]
+    fn capped_line_should_leave_the_next_request_in_the_buffer() {
+        let mut reader = BufReader::new(std::io::Cursor::new(b"ab\ncd\n".to_vec()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut first = String::new();
+        let mut second = String::new();
+        assert!(matches!(
+            read_capped_line_with(&mut reader, &mut first, 8, deadline, Instant::now),
+            ReadResult::Ok
+        ));
+        assert!(matches!(
+            read_capped_line_with(&mut reader, &mut second, 8, deadline, Instant::now),
+            ReadResult::Ok
+        ));
+        assert_eq!((first.as_str(), second.as_str()), ("ab", "cd"));
     }
 }
 
