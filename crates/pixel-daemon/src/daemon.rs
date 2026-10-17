@@ -485,6 +485,9 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
     let sweep_every = service.sweep_interval();
     let mut next_sweep = sweep_every.map(|every| Instant::now() + every);
 
+    // Compared on every pass: a directory swapped in at the same path must
+    // stop this daemon as surely as a deleted one.
+    let opened_root = root_identity(&root);
     while !shutdown {
         let now = Instant::now();
         let idle_left = IDLE_TIMEOUT
@@ -580,9 +583,9 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
             eprintln!("pixel daemon: idle timeout, exiting");
             break;
         }
-        if root_removed(&root) {
+        if root_replaced(&root, opened_root) {
             eprintln!(
-                "pixel daemon: root {} no longer exists, exiting",
+                "pixel daemon: root {} was removed or replaced, exiting",
                 root.display()
             );
             break;
@@ -676,11 +679,24 @@ fn stop_acceptor(
     acceptor.join().is_ok()
 }
 
-/// The served root has been deleted (or replaced by a non-directory): every
-/// answer the daemon could give from here on would describe a tree that no
-/// longer exists, so the loop exits and releases the socket, pid and lock.
-fn root_removed(root: &Path) -> bool {
-    !root.is_dir()
+/// The `(device, inode)` of the served root when it is a directory, `None`
+/// when it is gone or is no longer a directory.
+fn root_identity(root: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(root)
+        .ok()
+        .filter(std::fs::Metadata::is_dir)
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// The served root is no longer the directory the daemon opened (`opened`):
+/// deleted, replaced by a non-directory, or replaced in place by another
+/// directory (an atomic `mv new old`, or `rm -rf` and `git clone` with no
+/// gap between them). In every case the index and the watch describe a tree
+/// that no longer exists at that path, so the loop exits and releases the
+/// socket, pid and lock; the next hook starts a daemon on the new tree.
+fn root_replaced(root: &Path, opened: Option<(u64, u64)>) -> bool {
+    opened.is_none() || root_identity(root) != opened
 }
 
 /// Record one watcher event as a pending change, when it is one.
@@ -2063,6 +2079,40 @@ mod tests {
         assert_eq!(search_hits(&mut svc, "alphaNeedle"), 1);
         drop(svc);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A directory swapped in at the root's path (an atomic `mv`, a re-clone
+    /// with no gap) stops the daemon like a deletion does (#1107): it used to
+    /// keep serving the old index with a dead watch.
+    #[test]
+    fn daemon_exits_once_its_root_is_replaced_in_place() {
+        let root = scratch_root("root-replaced");
+        let sock = socket_path(&root);
+        let served = root.clone();
+        let daemon = std::thread::spawn(move || run_corpus(StubCorpus(served)));
+        wait_until("socket to answer", Duration::from_secs(10), || ping(&sock));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(ping(&sock), "daemon stopped serving while its root existed");
+
+        let staged = root.with_extension("staged");
+        let old = root.with_extension("old");
+        for dir in [&staged, &old] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::rename(&root, &old).unwrap();
+        std::fs::rename(&staged, &root).unwrap();
+        assert!(root.is_dir(), "a directory is at the path again");
+        wait_until(
+            "daemon to exit after the root was replaced",
+            ROOT_POLL + Duration::from_secs(10),
+            || daemon.is_finished(),
+        );
+        daemon.join().unwrap().unwrap();
+        assert!(!sock.exists(), "socket must be released on exit");
+        for dir in [&root, &old] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     /// A corpus whose first request panics and whose later ones answer.

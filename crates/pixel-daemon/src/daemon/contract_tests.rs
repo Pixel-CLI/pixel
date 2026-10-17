@@ -248,15 +248,34 @@ fn default_corpus_should_watch_its_root_and_do_nothing_on_sweep_or_ready() {
     assert!(corpus.applied.lock().unwrap().is_empty());
 }
 
+/// The root counts as replaced once it is no longer the directory the
+/// daemon opened: removed, turned into a file, or swapped for another
+/// directory at the same path (#1107), which `is_dir` alone never saw.
 #[test]
-fn root_removed_should_be_true_only_once_the_root_is_no_directory() {
-    let root = tempfile_root("root-removed");
-    assert!(!root_removed(&root));
+fn root_replaced_should_follow_the_opened_directory_not_the_path() {
+    let root = tempfile_root("root-replaced");
+    let opened = root_identity(&root);
+    assert!(opened.is_some());
+    assert!(!root_replaced(&root, opened), "the same directory");
+    assert!(
+        root_replaced(&root, None),
+        "a root never opened is not served"
+    );
+
     let file = root.join("plain");
     std::fs::write(&file, "x").unwrap();
-    assert!(root_removed(&file), "a file is not a servable root");
+    assert_eq!(root_identity(&file), None, "a file is not a servable root");
+
+    let old = root.with_extension("old");
+    let _ = std::fs::remove_dir_all(&old);
+    std::fs::rename(&root, &old).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    assert!(root.is_dir(), "a directory is back at the path");
+    assert!(root_replaced(&root, opened), "replaced in place");
+
     std::fs::remove_dir_all(&root).unwrap();
-    assert!(root_removed(&root));
+    assert!(root_replaced(&root, opened), "removed");
+    let _ = std::fs::remove_dir_all(&old);
 }
 
 #[test]

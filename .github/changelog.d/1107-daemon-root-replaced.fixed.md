@@ -1,0 +1,1 @@
+**daemon:** the daemon now exits when its root is replaced in place (an atomic `mv`, or a re-clone with no gap), not only when it is deleted. Before, it kept answering from the old index with a dead watch.
