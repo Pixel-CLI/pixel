@@ -1,0 +1,1 @@
+**install:** the OpenCode brief plugin is written in the V2 shape (a default `{ id, setup }` definition, `session.hook("prompt")` and `session.hook("context")`), so OpenCode 2.x loads it again; the V1 named export failed the loader schema and no brief reached the model. `pixel setup` replaces a managed V1 file in place.

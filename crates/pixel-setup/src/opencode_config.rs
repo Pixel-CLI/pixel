@@ -68,10 +68,11 @@ pub(crate) fn remove_opencode(config_dir: &Path, dry_run: bool) -> Result<Instal
 }
 
 /// The prompt-submission evidence brief for OpenCode: `plugins/` auto-loads
-/// `pixel-brief.js`, whose `chat.message` hook runs `pixel brief` and
-/// prepends the result as a synthetic part. Written only where the config
-/// directory already exists; a managed earlier copy is replaced, a foreign
-/// file under that name is never touched.
+/// `pixel-brief.js`, a V2 plugin whose `prompt` hook runs `pixel brief` and
+/// whose `context` hook adds the result to the turn's first request as a
+/// system part (the V1 `chat.message` export no longer loads). Written only
+/// where the config directory already exists; a managed earlier copy, V1
+/// included, is replaced, a foreign file under that name is never touched.
 pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let plugin = config_dir.join(BRIEF_PLUGIN_PATH);
     let step = |status, summary: String| InstallStep {
@@ -231,6 +232,60 @@ mod tests {
         assert_eq!(
             resolve_config_dir(home, false, Some(std::ffi::OsString::new())),
             home.join(".config/opencode")
+        );
+    }
+
+    /// The plugin asset must load in OpenCode V2: a default export with an
+    /// `id` and a `setup` that registers the prompt hook. V2 refuses a module
+    /// without that default ("Plugin must export a default definition with an
+    /// id and an effect or setup function"), which silently drops the brief,
+    /// so the shape is pinned here rather than only in the asset.
+    #[test]
+    fn brief_asset_is_a_v2_plugin_with_the_prompt_hook() {
+        let source = include_str!("../assets/opencode-brief.js");
+        assert!(
+            source.contains("export default {") && source.contains("async setup(ctx)"),
+            "the V2 loader accepts only a default {{ id, setup }} definition"
+        );
+        assert!(
+            source.contains(r#"ctx.session.hook("prompt""#),
+            "V2 replaced the V1 chat.message hook with session.hook(\"prompt\")"
+        );
+        // The V1 entrypoint and its Bun shell template: both are recognized by
+        // the V2 loader and by this test as dead legacy, and the two
+        // substrings are split so this test's own text cannot match them.
+        assert!(
+            !source.contains(&format!("export const {}{}", "Pixel", "Brief")),
+            "the V1 named export never runs in V2"
+        );
+        assert!(
+            !source.contains("$`"),
+            "V2 removed the Bun shell helper; the plugin spawns pixel itself"
+        );
+        assert!(
+            source.contains("__PIXEL_BIN__")
+                && source.contains("__MANAGED_BEGIN__")
+                && source.contains("__MANAGED_END__"),
+            "install replaces all three placeholders; without the managed \
+             marker uninstall would treat the file as the user's"
+        );
+        // The brief bounds its own window and printing at six seconds
+        // (`BRIEF_WINDOW_MAX_MS` plus slack); a shield below that bound kills
+        // briefs still inside their budget, and 1_500 ms did exactly that. It
+        // matches `BRIEF_TIMEOUT_MS` in `pi-brief.ts`, pinned the same way.
+        assert_eq!(source.matches("const BRIEF_TIMEOUT_MS = 6_500;").count(), 1);
+        assert!(
+            source.contains("}, BRIEF_TIMEOUT_MS);"),
+            "the timer must fire the named bound, not a literal"
+        );
+        // Ordering the in-flight briefs is per session. A process-wide counter
+        // (the first V2 asset's `seen`) let a prompt in one session discard
+        // another session's brief still in flight, so the sequence lives with
+        // the session key and the newest prompt's guard reads it back.
+        assert!(
+            !source.contains("let seen")
+                && source.contains("sessions.get(event.sessionID)?.seq === seq"),
+            "the newest-prompt guard must be per session, not process-wide"
         );
     }
 }
