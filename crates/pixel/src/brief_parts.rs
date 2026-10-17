@@ -286,6 +286,7 @@ pub(crate) fn store(path: &Path, text: &str, now: SystemTime) -> io::Result<()> 
 /// the middle of the brief ahead of its start. A part 1 that never marks
 /// itself done costs only the rest of the bound. `None` when the brief never
 /// comes, or is not readable.
+#[cfg(test)]
 pub(crate) fn wait_for(path: &Path, bound: Duration, poll: Duration) -> Option<String> {
     wait_for_with_status(path, bound, poll).map(|stored| stored.text)
 }
@@ -337,9 +338,9 @@ pub(crate) fn wait_for_with_status(
 }
 
 /// The brief stored at `path`, waiting at most `bound` for it to appear and
-/// looking every `poll`; unlike [`wait_for`] it does not wait for part 1's
-/// [`mark_done`], since it is part 1 that asks. `None` when none is stored in
-/// time or it is not readable.
+/// looking every `poll`; unlike [`wait_for_with_status`] it does not wait for
+/// part 1's [`mark_done`], since it is part 1 that asks. `None` when none is
+/// stored in time or it is not readable.
 pub(crate) fn wait_stored(path: &Path, bound: Duration, poll: Duration) -> Option<String> {
     let deadline = Instant::now() + bound;
     loop {

@@ -1531,10 +1531,6 @@ fn forget_first_part_cache(
     }
 }
 
-/// A part after the first: print the slice of the brief part 1 stores,
-/// waiting at most `bound` for it. `None` (print nothing) when the payload
-/// names no prompt or repository or the brief does not arrive in time; `{}`
-/// when it arrives and has nothing for this part.
 fn context_in_output(provider: TaskProvider, output: &Value) -> Option<&str> {
     match provider {
         TaskProvider::Pi => output.get("context")?.as_str(),
@@ -1575,6 +1571,9 @@ fn delivered_first_slice(
     context == brief_parts::slice(&text, part, part_limits(provider)) && !context.is_empty()
 }
 
+/// A part after the first prints its stored slice, or supplies the head when
+/// part 1 explicitly finished without delivering it. The boolean is true when
+/// the returned output contains that recovered head.
 fn follow_with_status(
     provider: TaskProvider,
     raw: &str,
@@ -1610,6 +1609,7 @@ fn follow_with_status(
 
 /// A part after the first: print its stored slice, or supply the head when
 /// part 1 explicitly finished without delivering it.
+#[cfg(test)]
 fn follow(provider: TaskProvider, raw: &str, part: BriefPart, bound: Duration) -> Option<Value> {
     follow_with_status(provider, raw, part, bound).map(|(output, _)| output)
 }
