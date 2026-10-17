@@ -11,12 +11,14 @@ use std::time::Duration;
 use pixel_git::{GitOptions, GitRunner};
 
 use crate::Error;
+use crate::directory::Directory;
 use crate::discover::{Found, Host, contained_program, find_in};
 use crate::fetch::{self, Downloaded};
 use crate::hash::dir_digest;
 use crate::manifest::{self, MANIFEST_FILE, Manifest};
 use crate::source::{GITHUB_PREFIX, GitHubSource, NPM_PREFIX, NPM_UNSUPPORTED};
 use crate::state::{Config, TrustStore};
+use rustix::fs::FileType;
 
 /// A shallow clone of a plugin repository may take a while on a slow link.
 const CLONE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -391,53 +393,73 @@ fn search(dir: &Path, depth: usize, found: &mut Vec<(PathBuf, Manifest)>) {
 /// socket or a device is refused: copying one would wait on it forever or
 /// read a device into the plugin.
 fn copy_tree(from: &Path, to: &Path) -> Result<(), Error> {
+    copy_tree_with(from, to, &mut |_| {})
+}
+
+fn copy_tree_with(from: &Path, to: &Path, before: &mut impl FnMut(&Path)) -> Result<(), Error> {
+    let source =
+        Directory::open(from).map_err(|e| Error::io(format!("open {}", from.display()), e))?;
+    copy_directory(&source, from, to, before)
+}
+
+fn copy_directory(
+    source: &Directory,
+    from: &Path,
+    to: &Path,
+    before: &mut impl FnMut(&Path),
+) -> Result<(), Error> {
     std::fs::create_dir_all(to).map_err(|e| Error::io(format!("create {}", to.display()), e))?;
-    let entries =
-        std::fs::read_dir(from).map_err(|e| Error::io(format!("read {}", from.display()), e))?;
+    let entries = source
+        .entries()
+        .map_err(|e| Error::io(format!("read {}", from.display()), e))?;
     for entry in entries {
-        let entry = entry.map_err(|e| Error::io(format!("read {}", from.display()), e))?;
-        if entry.file_name() == ".git" {
+        if entry.name == ".git" {
             continue;
         }
-        let (src, dst) = (entry.path(), to.join(entry.file_name()));
-        let kind = entry
-            .file_type()
-            .map_err(|e| Error::io(format!("stat {}", src.display()), e))?;
-        if kind.is_symlink() {
-            let target = std::fs::read_link(&src)
-                .map_err(|e| Error::io(format!("read link {}", src.display()), e))?;
-            symlink(&target, &dst).map_err(|e| Error::io(format!("link {}", dst.display()), e))?;
-        } else if kind.is_dir() {
-            copy_tree(&src, &dst)?;
-        } else if kind.is_file() {
-            let seen = entry
-                .metadata()
-                .map_err(|e| Error::io(format!("stat {}", src.display()), e))?;
-            copy_file(&src, &seen, &dst)
-                .map_err(|e| Error::io(format!("copy {}", src.display()), e))?;
-        } else {
-            return Err(Error::Source(format!(
-                "{} is not a file, a directory or a link; a plugin cannot hold it",
-                src.display()
-            )));
+        let (src, dst) = (from.join(&entry.name), to.join(&entry.name));
+        before(&src);
+        match entry.kind() {
+            FileType::Symlink => {
+                let target = source
+                    .read_link(&entry)
+                    .map_err(|e| Error::io(format!("read link {}", src.display()), e))?;
+                symlink(&target, &dst)
+                    .map_err(|e| Error::io(format!("link {}", dst.display()), e))?;
+            }
+            FileType::Directory => {
+                let child = source
+                    .descend(&entry)
+                    .map_err(|e| Error::io(format!("open {}", src.display()), e))?;
+                copy_directory(&child, &src, &dst, before)?;
+            }
+            FileType::RegularFile => {
+                let file = source
+                    .open_file(&entry)
+                    .map_err(|e| Error::io(format!("open {}", src.display()), e))?;
+                copy_file(file, entry.len(), &dst)
+                    .map_err(|e| Error::io(format!("copy {}", src.display()), e))?;
+            }
+            _ => {
+                return Err(Error::Source(format!(
+                    "{} is not a file, a directory or a link; a plugin cannot hold it",
+                    src.display()
+                )));
+            }
         }
     }
     Ok(())
 }
 
-/// Copy the regular file `seen` describes at `from` to the new file `to`,
-/// with its permissions: opened without following a link or blocking, the
-/// same inode the directory listed, and at most the size listed, so a file
-/// swapped or growing while it is copied is refused, not copied.
-fn copy_file(from: &Path, seen: &std::fs::Metadata, to: &Path) -> std::io::Result<()> {
-    let source = crate::file::open_regular(from, Some(seen))?;
+/// Copy an already verified regular file, with its permissions and at most
+/// the size listed; a growing source is refused rather than copied forever.
+fn copy_file(source: std::fs::File, listed_len: u64, to: &Path) -> std::io::Result<()> {
     let permissions = source.metadata()?.permissions();
     let mut target = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(to)?;
-    let copied = std::io::copy(&mut source.take(seen.len() + 1), &mut target)?;
-    if copied > seen.len() {
+    let copied = std::io::copy(&mut source.take(listed_len + 1), &mut target)?;
+    if copied > listed_len {
         return Err(std::io::Error::other("it grew while it was copied"));
     }
     target.set_permissions(permissions)
@@ -676,13 +698,74 @@ mod tests {
     }
 
     #[test]
+    fn copy_should_refuse_a_directory_replaced_after_listing() {
+        for linked in [true, false] {
+            let f = fixture();
+            let src = source_dir(&f, "tool", "");
+            fs::create_dir(src.join("bin")).unwrap();
+            fs::write(src.join("bin/data"), "original").unwrap();
+            let outside = f.tmp.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            fs::write(outside.join("foreign"), "outside secret").unwrap();
+            let dst = f.tmp.path().join("copied");
+            let mut swapped = false;
+            let result = copy_tree_with(&src, &dst, &mut |path| {
+                if path == src.join("bin") && !swapped {
+                    swapped = true;
+                    fs::rename(path, src.join("held")).unwrap();
+                    if linked {
+                        symlink(&outside, path).unwrap();
+                    } else {
+                        fs::create_dir(path).unwrap();
+                        fs::write(path.join("foreign"), "replacement").unwrap();
+                    }
+                }
+            });
+            assert!(swapped);
+            assert!(
+                result.is_err(),
+                "accepted a replaced directory (link={linked})"
+            );
+            assert!(!dst.join("bin/foreign").exists());
+        }
+    }
+
+    #[test]
+    fn copy_should_keep_reading_a_directory_pinned_before_its_ancestor_is_relinked() {
+        let f = fixture();
+        let src = source_dir(&f, "tool", "");
+        fs::create_dir(src.join("bin")).unwrap();
+        fs::write(src.join("bin/data"), "original").unwrap();
+        let outside = f.tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("data"), "outside secret").unwrap();
+        let dst = f.tmp.path().join("copied");
+        let mut swapped = false;
+        copy_tree_with(&src, &dst, &mut |path| {
+            if path == src.join("bin/data") && !swapped {
+                swapped = true;
+                fs::rename(src.join("bin"), src.join("held")).unwrap();
+                symlink(&outside, src.join("bin")).unwrap();
+            }
+        })
+        .unwrap();
+        assert!(swapped);
+        assert_eq!(fs::read(dst.join("bin/data")).unwrap(), b"original");
+    }
+
+    #[test]
     fn a_file_copies_with_its_mode_and_never_past_the_size_listed() {
         let dir = tempfile::tempdir().unwrap();
         let from = dir.path().join("from");
         fs::write(&from, "ab").unwrap();
         fs::set_permissions(&from, fs::Permissions::from_mode(0o750)).unwrap();
         let seen = fs::symlink_metadata(&from).unwrap();
-        copy_file(&from, &seen, &dir.path().join("same")).unwrap();
+        copy_file(
+            crate::file::open_regular(&from, Some(&seen)).unwrap(),
+            seen.len(),
+            &dir.path().join("same"),
+        )
+        .unwrap();
         assert_eq!(fs::read(dir.path().join("same")).unwrap(), b"ab");
         let mode = fs::metadata(dir.path().join("same"))
             .unwrap()
@@ -697,7 +780,12 @@ mod tests {
             .unwrap()
             .write_all(b"cd")
             .unwrap();
-        let err = copy_file(&from, &seen, &dir.path().join("grown")).unwrap_err();
+        let err = copy_file(
+            crate::file::open_regular(&from, Some(&seen)).unwrap(),
+            seen.len(),
+            &dir.path().join("grown"),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("grew while it was copied"),
             "{err}"

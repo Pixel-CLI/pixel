@@ -20,6 +20,7 @@
 //! scratch directory.
 
 mod available;
+mod directory;
 mod discover;
 mod error;
 mod fetch;

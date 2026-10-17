@@ -185,6 +185,10 @@ Machine-wide:
   network plugins the user allowed, and `[sources]`, where each plugin was
   installed from (a URL's userinfo removed). All three are written by
   `pixel-plugin` through a temporary file renamed into place.
+  Install copying pins the chosen source root and opens children relative
+  to directory descriptors through `pixel-plugin::directory` (rustix).
+  Directory and regular-file opens refuse links and compare device/inode
+  with the listing; link text is read relative to the same pinned parent.
 - `~/.local/share/pixel/flows/`: saved flows, written by the `pixel-flow`
   plugin (`$PIXEL_FLOW_DIR` overrides); the core only reads it (`plan_cmd::flow_dir`).
 - `~/.local/share/pixel/pi-package/`: the Pi package `pixel setup` writes
