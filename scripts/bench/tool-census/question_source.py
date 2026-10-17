@@ -109,7 +109,8 @@ class BenchSource:
 
     def sessions(self, only=None):
         return [{"id": r["id"], "repo": cache_name(r["repo"]), "label": r["repo"], "url": r["url"], "sha": r["sha"],
-                 "prompt": r["prompt"], "kind": r.get("kind"), "oracle": r.get("oracle") or []}
+                 "prompt": r["prompt"], "kind": r.get("kind"), "oracle": r.get("oracle") or [],
+                 "oracle_commits": r.get("oracle_commits") or []}
                 for r in self.rows if not only or r["id"] in only]
 
     def get(self, qid):

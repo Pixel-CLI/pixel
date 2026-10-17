@@ -36,6 +36,8 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 WORKTREE = HERE.parents[1]
@@ -96,6 +98,10 @@ def lint(questions, baselines, census_prompts=()):
             problems.append(f"{qid}: this prompt is a private census prompt")
         if repos.setdefault(q.get("repo"), q.get("sha")) != q.get("sha"):
             problems.append(f"{qid}: {q.get('repo')} is pinned at two different commits")
+        if not q.get("oracle") and not q.get("oracle_commits"):
+            problems.append(f"{qid}: empty oracle; add source evidence before measuring coverage")
+        if any(not re.fullmatch(r"[0-9a-f]{40}", str(c)) for c in q.get("oracle_commits", [])):
+            problems.append(f"{qid}: oracle_commits must contain full 40-hex commits")
         if q.get("oracle_lines") != sum(hi - lo + 1 for _p, lo, hi in q.get("oracle", [])):
             problems.append(f"{qid}: oracle_lines does not match oracle")
     if len(repos) < 7:
@@ -108,6 +114,37 @@ def lint(questions, baselines, census_prompts=()):
         for call in b.get("calls", []):
             if set(call) - {"tool", "reads", "commits"}:
                 problems.append(f"{b.get('id')}: a call holds more than tool, reads and commits (aggregates only)")
+    return problems
+
+
+def verify_oracles(questions, root):
+    """Check evidence against immutable Git objects in the shared pinned cache; never fetch or edit it."""
+    problems, blobs, pins = [], {}, set()
+    for q in questions:
+        repo = Path(root) / "cache" / q["repo"].replace("/", "__")
+        if not (repo / ".git").exists():
+            problems.append(f"{q['id']}: missing cache {repo}; prepare the shared bench cache first")
+            continue
+        pin = (str(repo), q["sha"])
+        if pin not in pins:
+            result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True)
+            if result.returncode or result.stdout.strip() != q["sha"]:
+                problems.append(f"{q['id']}: cache is not at pinned commit {q['sha']}")
+                continue
+            pins.add(pin)
+        for path, lo, hi in q.get("oracle", []):
+            key = (*pin, path)
+            if key not in blobs:
+                result = subprocess.run(["git", "show", f"{q['sha']}:{path}"], cwd=repo,
+                                        capture_output=True, text=True)
+                blobs[key] = len(result.stdout.splitlines()) if result.returncode == 0 else 0
+            if not 1 <= lo <= hi <= blobs[key]:
+                problems.append(f"{q['id']}: {path}:{lo}-{hi} absent or outside pinned file ({blobs[key]} lines)")
+        for commit in q.get("oracle_commits", []):
+            result = subprocess.run(["git", "merge-base", "--is-ancestor", commit, q["sha"]],
+                                    cwd=repo, capture_output=True)
+            if result.returncode:
+                problems.append(f"{q['id']}: oracle commit {commit} is not an ancestor of the pin")
     return problems
 
 
@@ -291,7 +328,10 @@ def baseline(args, questions):
         repo = sb.Repo(src_dir(q))
         summary, union = aggregate(sb, repo, pick["calls"])
         oracle = oracle_of(sb, repo, pick)
+        if not oracle and not q.get("oracle_commits"):
+            raise SystemExit(f"{q['id']}: empty oracle from baseline; no benchmark files were written")
         q["oracle"], q["oracle_lines"] = oracle, sum(h - l + 1 for _p, l, h in oracle)
+        q["oracle_source"] = "recorded-run; retained reviewed commits" if q.get("oracle_commits") else "recorded-run"
         base[q["id"]] = {"id": q["id"], "runs": len(runs), "n_calls": [rec["n_calls"] for _r, rec in runs],
                          "calls": summary}
     write_jsonl(BENCH / "questions.jsonl", all_q)
@@ -327,6 +367,8 @@ def main(argv=None):
     parser.add_argument("--root", default=None, help="state directory (default: $PIXEL_CENSUS_ROOT, else $TMPDIR/pixel-tool-census)")
     parser.add_argument("--census-db", default=None, help="check: a local census.db whose prompts the bench must not contain")
     parser.add_argument("--census-dir", default=None, help="scripts/tool-census (default: PIXEL_CENSUS_DIR, else beside this script)")
+    parser.add_argument("--verify-oracles", action="store_true",
+                        help="check source ranges and history commits in existing <root>/cache pinned clones (no network)")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
@@ -350,6 +392,8 @@ def main(argv=None):
             census = {r[0] for r in con.execute("SELECT prompt FROM sessions")}
             con.close()
         problems = lint(questions, read_jsonl(BENCH / "baselines.jsonl"), census)
+        if args.verify_oracles:
+            problems += verify_oracles(selected, args.root)
         for problem in problems:
             print(problem)
         print(f"{len(questions)} questions on {len({q['repo'] for q in questions})} repositories, "
@@ -390,6 +434,52 @@ class SelfTest(unittest.TestCase):
         for needle in ("at least 50", "40-hex", "kind `vibes`", "public https://github.com/", "too short",
                        "oracle_lines does not match", "unknown question ghost", "aggregates only", "at least 7"):
             self.assertIn(needle, text)
+
+    def test_empty_oracles_and_abbreviated_commit_evidence_are_not_coverage(self):
+        rows = [self.question(oracle=[], oracle_lines=0)]
+        self.assertTrue(any("empty oracle" in p for p in lint(rows, [])))
+        rows[0]["oracle_commits"] = ["a" * 40]
+        self.assertFalse(any("empty oracle" in p for p in lint(rows, [])))
+        rows[0]["oracle_commits"] = ["a" * 7]
+        self.assertTrue(any("40-hex commits" in p for p in lint(rows, [])))
+
+    def test_pin_verification_rejects_missing_files_out_of_bounds_and_unreachable_commits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sources = bc_module().sources()
+            questions_path, sha = sources.fixture_bench(tmp)
+            source = sources.BenchSource(questions_path)
+            root = Path(tmp) / "state"
+            source.prepare(root)
+            q = source.rows[0]
+            q["oracle_commits"] = [sha]
+            self.assertEqual(verify_oracles([q], root), [])
+            self.assertTrue(any("missing cache" in p for p in verify_oracles([q], root / "absent")))
+            q["oracle"] += [["gone.py", 1, 1], ["src/lib.py", 19, 22]]
+            q["oracle_commits"] = ["f" * 40]
+            errors = verify_oracles([q], root)
+            self.assertEqual(len(errors), 3)
+            self.assertTrue(any("gone.py" in p for p in errors))
+            self.assertTrue(any("19-22" in p for p in errors))
+            self.assertTrue(any("not an ancestor" in p for p in errors))
+            q["sha"] = "b" * 40
+            self.assertTrue(any("not at pinned commit" in p for p in verify_oracles([q], root)))
+
+    def test_memory_only_baseline_cannot_overwrite_benchmark_with_empty_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bench = Path(tmp)
+            original = json.dumps(self.question()) + "\n"
+            (bench / "questions.jsonl").write_text(original)
+            (bench / "baselines.jsonl").write_text("")
+            q = self.question()
+            rec = {"n_calls": 0, "calls": [], "answer": "An answer from memory"}
+            with patch.multiple(__name__, BENCH=bench, prepare=lambda _: None,
+                                load_score=lambda _: SimpleNamespace(Repo=lambda _: None),
+                                run_codex=lambda *args: [(q["id"], 0, rec)],
+                                aggregate=lambda *args: ([], []), oracle_of=lambda *args: []):
+                with self.assertRaisesRegex(SystemExit, "empty oracle"):
+                    baseline(SimpleNamespace(census_dir=None, runs=1), [q])
+            self.assertEqual((bench / "questions.jsonl").read_text(), original)
+            self.assertEqual((bench / "baselines.jsonl").read_text(), "")
 
     def test_a_private_census_prompt_is_refused(self):
         rows = [self.question()]

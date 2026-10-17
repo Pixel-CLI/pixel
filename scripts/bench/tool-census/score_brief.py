@@ -540,9 +540,10 @@ def bash_oracle(oracle, cmd, text, need=None):
         parse_listing(oracle, LIST_VERBS, text, tuple(dict.fromkeys(list_bases + cwds)))
 
 
-def oracle_from_ranges(repo, ranges):
-    """The oracle of a bench question: its recorded ``[path, lo, hi]`` lines (a span is a read, a single line a hit)."""
+def oracle_from_ranges(repo, ranges, commits=()):
+    """Public oracle ranges (spans are reads, singles are hits), plus explicit reviewed history commit IDs."""
     oracle = Oracle(repo)
+    oracle.commits.update(c[:7] for c in commits)
     for rel, lo, hi in ranges:
         if hi - lo >= 2:
             oracle.add_range(rel, lo, hi, "read", "read")
@@ -962,7 +963,8 @@ def load_sessions(db_path, which, only=None):
 def bench_sessions(source, only=None):
     """The sessions of a bench source in the shape of ``load_sessions``, with the recorded oracle ranges."""
     return [{"id": s["id"], "repo": s["repo"], "sha": s["sha"], "category": s["kind"], "mode": "answer",
-             "prompt": s["prompt"], "final_answer": "", "calls": [], "oracle": s["oracle"]}
+             "prompt": s["prompt"], "final_answer": "", "calls": [], "oracle": s["oracle"],
+             "oracle_commits": s.get("oracle_commits", [])}
             for s in source.sessions(only)]
 
 
@@ -1110,7 +1112,8 @@ def score_all(args, root, source):
         repo = repos[s["repo"]]
         text, meta, elapsed, code = run_brief(info, clones[key], s["prompt"])
         (out_dir / "briefs" / f"{s['id']}.txt").write_text(text, encoding="utf-8")
-        oracle = oracle_from_ranges(repo, s["oracle"]) if s.get("oracle") is not None else build_oracle(repo, s["calls"])
+        oracle = (oracle_from_ranges(repo, s["oracle"], s.get("oracle_commits", []))
+                  if s.get("oracle") is not None else build_oracle(repo, s["calls"]))
         regions = parse_brief(text, repo) if text.strip() else BriefRegions()
         metrics = score_session(oracle, regions, cited_lines(s["final_answer"], repo), text)
         metrics["elapsed_ms"] = elapsed
@@ -1430,12 +1433,13 @@ class SelfTest(unittest.TestCase):
         bench = Path(self.tmp.name) / "bench"
         bench.mkdir(exist_ok=True)
         question = {"id": "fx-01", "repo": "o/fx", "url": str(self.repo_dir), "sha": self.sha, "prompt": "full question",
-                    "kind": "lookup", "oracle": [["src/app.py", 5, 14], ["README.md", 2, 2]], "oracle_lines": 11}
+                    "kind": "lookup", "oracle": [["src/app.py", 5, 14], ["README.md", 2, 2]], "oracle_lines": 11,
+                    "oracle_commits": [self.sha]}
         (bench / "questions.jsonl").write_text(json.dumps(question) + "\n")
         binary = Path(self.tmp.name) / "fakepixel-bench"
         binary.write_text(FAKE_BIN)
         binary.chmod(0o755)
-        Path(str(binary) + ".brief").write_text("read: src/app.py:5-14 — merge\n")
+        Path(str(binary) + ".brief").write_text(f"read: src/app.py:5-14 — merge\ngit: {self.sha}\n")
         code = main(["--root", str(root), "--questions", str(bench / "questions.jsonl"), "--bin", str(binary),
                      "--label", "bench"])
         self.assertEqual(code, 0)
@@ -1444,6 +1448,8 @@ class SelfTest(unittest.TestCase):
         self.assertEqual((row["id"], row["category"], row["mode"]), ("fx-01", "lookup", "answer"))
         self.assertEqual(row["metrics"]["oracle_lines"], 11)
         self.assertEqual(row["metrics"]["covered_lines"], 10)    # the span is quoted, the single README hit is not
+        self.assertEqual(row["metrics"]["oracle_commits"], 1)
+        self.assertEqual(row["metrics"]["commit_recall"], 1.0)
         self.assertTrue((root / "cache" / "o__fx" / ".git").exists())
 
     def test_two_sources_at_once_are_refused(self):
