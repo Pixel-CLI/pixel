@@ -1249,6 +1249,12 @@ output bytes with a versioned native-workflow estimate. Existing logs remain
 readable. No additional retrieval, native comparison command, model request, or
 repository sweep is justified solely by metrics calculation.
 
+Search path failures include the effective process cwd in their diagnostic
+and action-log error. If a caller launches Pixel outside its intended repo,
+the failure record belongs to the root discovered from that effective cwd;
+an absent record in the intended repo does not establish that no call ran.
+The shell's `PWD` variable does not override the process working directory.
+
 The byte approximation is roughly one token per four UTF-8 bytes and includes
 reporting overhead. Measured output covers rendered CLI stdout, CLI-owned diagnostics and top-level
 errors, not lower-level library or subprocess streams. V1's fallback volume policies are 4 KiB per assumed distinct

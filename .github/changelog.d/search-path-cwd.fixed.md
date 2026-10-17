@@ -1,0 +1,1 @@
+**search:** Include the effective process working directory in bad-path errors so a relative search launched outside its intended repository can be diagnosed. Preserve failed-invocation logging at the actual location, with regression coverage for a misleading shell `PWD`.

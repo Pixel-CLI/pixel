@@ -1025,6 +1025,66 @@ fn graph_text_and_json_account_for_same_returned_files() {
     }
 }
 
+#[test]
+fn search_should_log_a_bad_relative_path_from_the_actual_repository_cwd() {
+    let fixture = Fixture::new();
+    let output = fixture.run(&[
+        "search-content",
+        "-F",
+        "start_brief",
+        "missing/src",
+        "--no-daemon",
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let cwd_note = format!("process cwd: {}", fixture.0.display());
+    assert!(stderr.contains(&cwd_note), "{stderr}");
+    let events = fixture.events("search-content");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["cwd"], fixture.0.to_str().unwrap());
+    assert_eq!(events[0]["outcome"], "error");
+    let error = events[0]["error"].as_str().unwrap();
+    assert!(error.starts_with("bad path missing/src:"), "{error}");
+    assert!(error.contains(&cwd_note), "{error}");
+    assert!(stderr.contains(error), "{stderr}");
+}
+
+#[test]
+fn search_should_log_in_the_effective_cwd_when_pwd_names_another_repository() {
+    let requested = Fixture::new();
+    fs::create_dir_all(requested.0.join("crates/pixel/src")).unwrap();
+    let actual = Fixture::new();
+    fs::remove_dir_all(actual.0.join(".git")).unwrap();
+    let output = actual
+        .command()
+        .env("PWD", &requested.0)
+        .args([
+            "search-content",
+            "-F",
+            "start_brief",
+            "crates/pixel/src",
+            "--no-daemon",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let cwd_note = format!("process cwd: {}", actual.0.display());
+    assert!(stderr.contains(&cwd_note), "{stderr}");
+    let events = actual.events("search-content");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["cwd"], actual.0.to_str().unwrap());
+    assert_eq!(events[0]["outcome"], "error");
+    let error = events[0]["error"].as_str().unwrap();
+    assert!(error.starts_with("bad path crates/pixel/src:"), "{error}");
+    assert!(error.contains(&cwd_note), "{error}");
+    assert!(!requested.0.join(".pixel/actions.jsonl").exists());
+    assert!(
+        !requested.0.join(".pixel").exists(),
+        "must not log to the requested PWD"
+    );
+}
+
 /// An agent reads a failed call through `2>&1 | tail -N`: when the metrics
 /// block is the last thing on stderr, the error scrolls out of that window and
 /// a failed operation (a commit, a push) reads as one that finished. The error

@@ -2779,9 +2779,13 @@ fn print_resolve_human(data: &Value) -> Result<(), String> {
 fn group_by_root(paths: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<String>)>, String> {
     let mut groups: Vec<(PathBuf, Vec<String>)> = Vec::new();
     for p in paths {
-        let abs = p
-            .canonicalize()
-            .map_err(|e| format!("bad path {}: {e}", p.display()))?;
+        let abs = p.canonicalize().map_err(|e| {
+            let cwd = std::env::current_dir().map_or_else(
+                |error| format!("unavailable: {error}"),
+                |cwd| cwd.display().to_string(),
+            );
+            format!("bad path {}: {e} (process cwd: {cwd})", p.display())
+        })?;
         let root = discover_root(&abs)?;
         let rel = abs
             .strip_prefix(&root)
