@@ -52,6 +52,10 @@ pub struct Added {
     pub dir: PathBuf,
     pub manifest: Manifest,
     pub binary: Binary,
+    /// The plugin's agent skill, read and validated before anything was
+    /// written; the caller (`pixel install`) delivers it to the harness
+    /// roots. `None` when the manifest declares no `skill`.
+    pub skill: Option<String>,
 }
 
 /// The state of the program a plugin's `run` names, once installed.
@@ -163,6 +167,9 @@ pub fn add_with(
         )));
     };
     let (from, manifest) = locate(&base, name, &shown)?;
+    // Read the declared skill before anything is created: a declaration that
+    // fails validation installs nothing anywhere, harness roots included.
+    let skill = manifest::read_skill(&from, &manifest)?;
     let unbuilt = github.is_some() && program_is_absent(&from, &manifest);
     if !unbuilt {
         contained_program(&from, &manifest)?;
@@ -194,6 +201,7 @@ pub fn add_with(
         dir: dest,
         manifest,
         binary,
+        skill,
     })
 }
 
@@ -482,6 +490,26 @@ fn copy_file(source: std::fs::File, listed_len: u64, to: &Path) -> std::io::Resu
         return Err(std::io::Error::other("it grew while it was copied"));
     }
     target.set_permissions(permissions)
+}
+
+/// The agent skill `pixel install` delivered for the user-tier plugin
+/// `name`: the text of the file its manifest declares. Only a match with it
+/// proves a harness copy is pixel's, so the caller sweeps only those; a
+/// plugin whose manifest or declared file cannot be read reads as
+/// `Ok(None)` — nothing to trust, nothing to remove.
+///
+/// # Errors
+///
+/// [`Error::InvalidName`].
+pub fn installed_skill(host: &Host, name: &str) -> Result<Option<String>, Error> {
+    if !manifest::valid_name(name) {
+        return Err(Error::InvalidName(name.to_owned()));
+    }
+    let dir = host.user_plugins().join(name);
+    match manifest::load(&dir, Some(name)) {
+        Ok(Some(manifest)) => Ok(manifest::read_skill(&dir, &manifest).ok().flatten()),
+        _ => Ok(None),
+    }
 }
 
 /// Delete `~/.pixel/plugins/<name>/` and forget its source and opt-in.

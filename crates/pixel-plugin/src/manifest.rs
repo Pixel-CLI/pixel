@@ -22,6 +22,12 @@ const MAX_NAME_LEN: usize = 64;
 /// repository ships (`probes/_template`) is 744 bytes.
 pub const MAX_MANIFEST_BYTES: u64 = 16_384;
 
+/// Largest skill file read, 64 KiB: one text file a plugin may ship for an
+/// agent to load on demand, which `pixel install` delivers. The core `pixel`
+/// skill is 2.6 KiB and the largest skill this repository ships
+/// (`pixel-classify`) is 8.9 KiB.
+pub const MAX_SKILL_BYTES: u64 = 65_536;
+
 /// What a plugin can be asked to do. API 1 knows two capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
@@ -111,6 +117,10 @@ pub struct Manifest {
     /// named like itself and is run as `<run> <args…>`. Non-empty: it serves
     /// exactly these and is run as `<run> <command> <args…>`.
     pub commands: Vec<String>,
+    /// The optional agent skill: one path inside the plugin directory whose
+    /// text `pixel install` delivers as `skills/<plugin>/SKILL.md` under
+    /// every configured harness root. Read, never written, by the host.
+    pub skill: Option<String>,
     /// The `[brief-probe]` table, present exactly when the plugin has the
     /// `brief-probe` capability.
     pub probe: Option<ProbeSpec>,
@@ -179,7 +189,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
     }
     let description = string("description")?;
     let run = string("run")?;
-    run_is_relative(&run)?;
+    path_is_relative("run", &run)?;
     let capabilities = parse_capabilities(&doc)?;
     let network = match doc.get("network") {
         None => false,
@@ -188,6 +198,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             .ok_or_else(|| "`network` must be true or false".to_owned())?,
     };
     let commands = parse_commands(&doc)?;
+    let skill = parse_skill(&doc)?;
     let probe = if capabilities.contains(&Capability::BriefProbe) {
         if network {
             return Err(
@@ -209,6 +220,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         capabilities,
         network,
         commands,
+        skill,
         probe,
     })
 }
@@ -332,6 +344,21 @@ fn parse_commands(doc: &DocumentMut) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// The optional `skill` key: one file, inside the plugin directory, whose
+/// text is delivered to the harness roots. Its shape is checked here; the
+/// file itself (regular, no link, at most [`MAX_SKILL_BYTES`], UTF-8) is
+/// read by [`read_skill`] when the plugin is installed.
+fn parse_skill(doc: &DocumentMut) -> Result<Option<String>, String> {
+    let Some(item) = doc.get("skill") else {
+        return Ok(None);
+    };
+    let skill = item
+        .as_str()
+        .ok_or_else(|| "`skill` must be a string".to_owned())?;
+    path_is_relative("skill", skill)?;
+    Ok(Some(skill.to_owned()))
+}
+
 fn parse_capabilities(doc: &DocumentMut) -> Result<Vec<Capability>, String> {
     let list = doc
         .get("capabilities")
@@ -354,14 +381,15 @@ fn parse_capabilities(doc: &DocumentMut) -> Result<Vec<Capability>, String> {
     Ok(out)
 }
 
-/// `run` is a path inside the plugin directory: never absolute, never `..`.
-/// The resolved path is checked again at run time (symlinks); this is the
-/// early, readable refusal.
-fn run_is_relative(run: &str) -> Result<(), String> {
-    if run.is_empty() {
-        return Err("`run` must not be empty".to_owned());
+/// A manifest key naming a path inside the plugin directory: never empty,
+/// never absolute, never `..`. `run`'s resolved path is checked again at run
+/// time and `skill`'s file when it is read; this is the early, readable
+/// refusal.
+fn path_is_relative(key: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("`{key}` must not be empty"));
     }
-    let path = Path::new(run);
+    let path = Path::new(value);
     let escapes = path.components().any(|c| {
         matches!(
             c,
@@ -370,7 +398,7 @@ fn run_is_relative(run: &str) -> Result<(), String> {
     });
     if escapes {
         return Err(format!(
-            "`run` = \"{run}\" must be a relative path inside the plugin directory"
+            "`{key}` = \"{value}\" must be a relative path inside the plugin directory"
         ));
     }
     Ok(())
@@ -433,6 +461,48 @@ pub fn load(dir: &Path, expected_name: Option<&str>) -> Result<Option<Manifest>,
     Ok(Some(manifest))
 }
 
+/// Read the file `manifest.skill` names, under `dir`: the text `pixel
+/// install` delivers to the harness roots. Opened like the manifest itself
+/// (`file::open_regular`: never a link, never blocking, a regular file), so
+/// a skill committed as a link to a file elsewhere or to `/dev/tty` cannot
+/// put that file's content, or an endless read, where the agent's skill is
+/// expected; at most [`MAX_SKILL_BYTES`] of it, UTF-8.
+///
+/// # Errors
+///
+/// [`Error::BadSkill`], naming the plugin, the key and why the file cannot
+/// be delivered. A manifest without the key reads as `Ok(None)`.
+pub fn read_skill(dir: &Path, manifest: &Manifest) -> Result<Option<String>, Error> {
+    let Some(skill) = &manifest.skill else {
+        return Ok(None);
+    };
+    let bad = |why: String| Error::BadSkill {
+        name: manifest.name.clone(),
+        skill: skill.clone(),
+        why,
+    };
+    let path = dir.join(skill);
+    let file = match crate::file::open_regular(&path, None) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(bad("does not exist".to_owned()));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => return Err(bad(e.to_string())),
+        Err(e) => return Err(Error::io(format!("read {}", path.display()), e)),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_SKILL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::io(format!("read {}", path.display()), e))?;
+    if bytes.len() as u64 > MAX_SKILL_BYTES {
+        return Err(bad(format!("is larger than {MAX_SKILL_BYTES} bytes")));
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Err(bad("is not UTF-8".to_owned()));
+    };
+    Ok(Some(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +531,7 @@ network = true
                 capabilities: vec![Capability::Command],
                 network: true,
                 commands: vec![],
+                skill: None,
                 probe: None,
             }
         );
@@ -798,5 +869,94 @@ mode = "lead"
         std::fs::write(&path, b"name = \"\xff\"").unwrap();
         let err = load(dir.path(), None).unwrap_err().to_string();
         assert!(err.contains("not UTF-8"), "{err}");
+    }
+
+    #[test]
+    fn a_manifest_may_declare_one_skill_and_defaults_to_none() {
+        let text = GOOD.replace(
+            "network = true",
+            "skill = \"skills/pixel-flow/SKILL.md\"\nnetwork = true",
+        );
+        assert_eq!(
+            parse(&text).unwrap().skill.as_deref(),
+            Some("skills/pixel-flow/SKILL.md")
+        );
+        assert_eq!(parse(GOOD).unwrap().skill, None, "the key is optional");
+    }
+
+    #[test]
+    fn a_skill_must_name_one_relative_file() {
+        for skill in ["/etc/SKILL.md", "../x", "a/../../x", "./ok/../../x"] {
+            let text = GOOD.replace("network = true", &format!("skill = \"{skill}\""));
+            let err = parse(&text).unwrap_err();
+            assert!(
+                err.contains(&format!("`skill` = \"{skill}\"")) && err.contains("relative path"),
+                "{skill}: {err}"
+            );
+        }
+        assert!(parse(&GOOD.replace("network = true", "skill = \"./SKILL.md\"")).is_ok());
+        for (value, expect) in [
+            ("1", "`skill` must be a string"),
+            ("\"\"", "`skill` must not be empty"),
+        ] {
+            let text = GOOD.replace("network = true", &format!("skill = {value}"));
+            let err = parse(&text).unwrap_err();
+            assert!(err.contains(expect), "{value}: {err}");
+        }
+    }
+
+    #[test]
+    fn read_skill_reads_the_declared_file_and_none_without_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_skill(dir.path(), &parse(GOOD).unwrap()).unwrap(),
+            None,
+            "a manifest without the key has nothing to read"
+        );
+
+        let manifest = parse(&GOOD.replace("network = true", "skill = \"SKILL.md\"")).unwrap();
+        std::fs::write(dir.path().join("SKILL.md"), "know-how\n").unwrap();
+        assert_eq!(
+            read_skill(dir.path(), &manifest).unwrap().as_deref(),
+            Some("know-how\n")
+        );
+    }
+
+    // A repository or a source directory holds whatever it holds: the file
+    // the key names may be absent, a link to a device or to a file elsewhere,
+    // not text, or larger than any skill needs to be.
+    #[test]
+    fn read_skill_refuses_an_undeclarable_file_naming_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        let manifest = parse(&GOOD.replace("network = true", "skill = \"SKILL.md\"")).unwrap();
+
+        let err = read_skill(dir.path(), &manifest).unwrap_err().to_string();
+        assert_eq!(err, "plugin `flow`: `skill` = \"SKILL.md\" does not exist");
+
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, "secret").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+        let err = read_skill(dir.path(), &manifest).unwrap_err().to_string();
+        assert!(err.contains("is a symbolic link"), "{err}");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"name = \"\xff\"").unwrap();
+        let err = read_skill(dir.path(), &manifest).unwrap_err().to_string();
+        assert!(err.contains("is not UTF-8"), "{err}");
+
+        let at = usize::try_from(MAX_SKILL_BYTES).unwrap();
+        std::fs::write(&path, "x".repeat(at)).unwrap();
+        assert_eq!(
+            read_skill(dir.path(), &manifest)
+                .unwrap()
+                .as_deref()
+                .map(str::len),
+            Some(at),
+            "a file exactly at the cap is read"
+        );
+        std::fs::write(&path, "x".repeat(at + 1)).unwrap();
+        let err = read_skill(dir.path(), &manifest).unwrap_err().to_string();
+        assert!(err.contains("is larger than 65536 bytes"), "{err}");
     }
 }
