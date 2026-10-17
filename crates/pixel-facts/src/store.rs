@@ -500,8 +500,16 @@ impl FactsStore {
 
     /// Snapshot of how much of history is indexed. Cheap: a few counts.
     pub fn index_state(&self) -> IndexState {
+        self.index_state_at(self.refs_hash().ok().as_deref())
+    }
+
+    /// [`FactsStore::index_state`] judged against `refs`, a
+    /// [`FactsStore::refs_hash`] the caller already holds: the refs are read
+    /// once (two `git` spawns) instead of once per freshness check. `None`
+    /// (the refs could not be read) is never fresh.
+    pub fn index_state_at(&self, refs: Option<&str>) -> IndexState {
         let (total, indexed, _skipped, pending_diff) = self.diff_counts();
-        let phase = self.current_phase();
+        let phase = self.current_phase(refs);
         // diff_indexed_pct = fraction of non-structurally-skipped commits that
         // have their diff text ingested (phase C progress).
         let diff_total = indexed + pending_diff;
@@ -515,7 +523,7 @@ impl FactsStore {
             commits_indexed: total as u64,
             total_commits: total as u64,
             diff_indexed_pct,
-            fresh: pending_diff == 0 && self.phase_a_fresh() && self.phase_b_done(),
+            fresh: pending_diff == 0 && self.phase_a_fresh(refs) && self.phase_b_done(),
             schema_version: FACTS_SCHEMA_VERSION,
             diffs_evicted: self.count_in_state(DIFF_STATE_EVICTED) as u64,
             diff_coverage_since: self
@@ -539,8 +547,8 @@ impl FactsStore {
             .unwrap_or(0)
     }
 
-    fn current_phase(&self) -> &'static str {
-        if !self.phase_a_fresh() {
+    fn current_phase(&self, refs: Option<&str>) -> &'static str {
+        if !self.phase_a_fresh(refs) {
             return "phase_a";
         }
         if !self.phase_b_done() {
@@ -573,12 +581,12 @@ impl FactsStore {
     /// refs. A ref move since the last phase-A run makes us stale (phase_a
     /// again) even though the ingest_jobs row says 'done' — this is what fixes
     /// the frozen-at-commit-11 class permanently.
-    fn phase_a_fresh(&self) -> bool {
+    fn phase_a_fresh(&self, refs: Option<&str>) -> bool {
         if !self.phase_a_done() {
             return false;
         }
-        match self.current_refs_hash() {
-            Ok(current) => {
+        match refs {
+            Some(current) => {
                 let stored: Option<String> = self
                     .conn
                     .query_row(
@@ -587,16 +595,21 @@ impl FactsStore {
                         |r| r.get(0),
                     )
                     .ok();
-                stored.as_deref() == Some(current.as_str())
+                stored.as_deref() == Some(current)
             }
-            Err(_) => false,
+            None => false,
         }
     }
 
     /// xxh3 hash of the current refs state (`for-each-ref` + HEAD). Stored at
     /// phase-A completion; a differing hash means refs moved and phase A must
-    /// re-run.
-    pub(crate) fn current_refs_hash(&self) -> Result<String> {
+    /// re-run. It changes exactly when a ref or HEAD moves, so a value
+    /// derived from the refs (a commit count) can be cached under it.
+    ///
+    /// # Errors
+    ///
+    /// Either `git` call failed.
+    pub fn refs_hash(&self) -> Result<String> {
         let mut buf = Vec::new();
         let refs = self
             .runner
@@ -799,15 +812,15 @@ mod tests {
     fn current_refs_hash_is_stable_until_a_ref_or_head_moves() {
         let (dir, _, _) = two_commit_repo();
         let store = FactsStore::open(dir.path()).unwrap();
-        let before = store.current_refs_hash().unwrap();
+        let before = store.refs_hash().unwrap();
         assert_eq!(before.len(), 16);
         assert!(before.chars().all(|c| c.is_ascii_hexdigit()), "{before}");
-        assert_eq!(store.current_refs_hash().unwrap(), before);
+        assert_eq!(store.refs_hash().unwrap(), before);
         commit(dir.path(), &[("b.txt", b"b\n")], "third");
-        let after_commit = store.current_refs_hash().unwrap();
+        let after_commit = store.refs_hash().unwrap();
         assert_ne!(after_commit, before);
         git(dir.path(), &["tag", "v1"]);
-        assert_ne!(store.current_refs_hash().unwrap(), after_commit);
+        assert_ne!(store.refs_hash().unwrap(), after_commit);
     }
 
     #[test]

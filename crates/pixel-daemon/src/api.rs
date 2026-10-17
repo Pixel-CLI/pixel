@@ -250,7 +250,17 @@ pub fn facts_visibility(root: &Path) -> Value {
         Ok(None) => return json!({"present": false}),
         Err(e) => return json!({"present": false, "error": e.to_string()}),
     };
-    let state = facts.index_state();
+    let refs = facts.refs_hash().ok();
+    let total = pixel_git::GitRunner::new(root)
+        .rev_list_count_all()
+        .unwrap_or(0);
+    visibility_of(&facts, refs.as_deref(), total)
+}
+
+/// [`facts_visibility`] of an open store, its freshness judged against
+/// `refs` and `rev_list_total` the repository's `rev-list --all` count.
+fn visibility_of(facts: &FactsStore, refs: Option<&str>, rev_list_total: u64) -> Value {
+    let state = facts.index_state_at(refs);
     let count = |sql: &str| -> i64 { facts.conn().query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
     let phase_a_done: bool = facts
         .conn()
@@ -264,10 +274,7 @@ pub fn facts_visibility(root: &Path) -> Value {
     // visible as commits_indexed < total_commits. The facts universe also
     // covers stash/reflog-only commits that `--all` doesn't count, so take
     // the max — indexed exceeding rev-list is healthy, not suspicious.
-    let total_commits = pixel_git::GitRunner::new(root)
-        .rev_list_count_all()
-        .unwrap_or(0)
-        .max(state.total_commits);
+    let total_commits = rev_list_total.max(state.total_commits);
     json!({
         "present": true,
         "schema_version": state.schema_version,
@@ -302,6 +309,20 @@ fn embedding_status(root: &Path, embedder_resident: bool) -> Value {
     })
 }
 
+/// An open history store and the identity of the db file it was opened on.
+struct OpenFacts {
+    store: FactsStore,
+    file: (u64, u64),
+}
+
+/// Device and inode of the history db, `None` when it does not exist.
+fn history_db_identity(root: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(pixel_facts::store::history_db_path(root))
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
 pub struct Service {
     root: PathBuf,
     index: Arc<RwLock<IndexSet>>,
@@ -327,6 +348,21 @@ pub struct Service {
     embedder_unavailable: bool,
     /// A background download has been spawned — prevents duplicate threads.
     embedder_download_started: bool,
+    /// The history store, kept open between facts and status requests:
+    /// opening it runs the `.pixel` trust check (a `git ls-files` spawn),
+    /// the DDL and the pragmas. Reopened, and so re-checked, whenever the
+    /// db file is another one than the store holds (a rebuild by another
+    /// process, a replaced or relinked `.pixel/`).
+    facts: Option<OpenFacts>,
+    /// `git rev-list --count --all` for `status`, under the refs hash it
+    /// was counted at: it can only change when a ref moves.
+    commit_total: Option<(String, u64)>,
+    /// History-store opens and `rev-list` counts run, for the tests that
+    /// pin them to the first request and to a moved db or ref.
+    #[cfg(test)]
+    facts_opens: usize,
+    #[cfg(test)]
+    rev_list_runs: usize,
     /// The facts/history warm loop is demand-driven: spawned on the first
     /// facts-consuming request, not at daemon start — users who never touch
     /// history commands never pay for the index.
@@ -450,6 +486,12 @@ impl Service {
             embedder: None,
             embedder_unavailable: false,
             embedder_download_started: false,
+            facts: None,
+            commit_total: None,
+            #[cfg(test)]
+            facts_opens: 0,
+            #[cfg(test)]
+            rev_list_runs: 0,
             facts_warmer_started: AtomicBool::new(false),
             snapshot_cache: None,
             activity_cache: None,
@@ -476,6 +518,12 @@ impl Service {
             embedder: None,
             embedder_unavailable: true,
             embedder_download_started: false,
+            facts: None,
+            commit_total: None,
+            #[cfg(test)]
+            facts_opens: 0,
+            #[cfg(test)]
+            rev_list_runs: 0,
             facts_warmer_started: AtomicBool::new(true),
             snapshot_cache: None,
             activity_cache: None,
@@ -2964,7 +3012,7 @@ impl Service {
                 "graph_update_failures": self.graph_failures.count(),
                 "notify_errors": self.watcher_failures.count(),
             },
-            "facts": facts_visibility(&self.root),
+            "facts": self.facts_status(),
             "embedding": embedding_status(&self.root, self.embedder.is_some()),
         }))
     }
@@ -3287,11 +3335,15 @@ impl Service {
     /// Budget: `PIXEL_FACTS_QUERY_BUDGET_MS` (default 3000ms) — a query is
     /// never blocked longer than that; the attached `index_state` tells the
     /// caller whether coverage is complete.
-    fn facts_open_and_catch_up(&self) -> Result<FactsStore, String> {
-        let mut facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
-        if !facts.index_state().fresh {
-            pixel_facts::ingest::lazy_ingest(&mut facts)
-                .map_err(|e| format!("facts lazy ingest failed: {e}"))?;
+    fn facts_open_and_catch_up(&mut self) -> Result<&mut FactsStore, String> {
+        {
+            let facts = self
+                .cached_facts(true)?
+                .ok_or("history db vanished on open")?;
+            if !facts.index_state().fresh {
+                pixel_facts::ingest::lazy_ingest(facts)
+                    .map_err(|e| format!("facts lazy ingest failed: {e}"))?;
+            }
         }
         // First facts use: start the keep-fresh warm loop. `lazy_ingest` above
         // serves this request within its budget; the warmer finishes the job
@@ -3299,7 +3351,72 @@ impl Service {
         if self.facts_warmer_needed() {
             crate::daemon::spawn_facts_ingest(&self.root);
         }
-        Ok(facts)
+        // A rebuild during the ingest replaced the file: this reopens it.
+        self.cached_facts(true)?
+            .ok_or_else(|| "history db vanished on open".to_string())
+    }
+
+    /// The kept history store, opened (`create`: built when absent) unless
+    /// the one held is still on the db file that exists now. `Ok(None)`
+    /// only without `create`, when there is no db.
+    fn cached_facts(&mut self, create: bool) -> Result<Option<&mut FactsStore>, String> {
+        let current = history_db_identity(&self.root);
+        let reusable =
+            matches!((&self.facts, current), (Some(open), Some(file)) if open.file == file);
+        if !reusable {
+            self.facts = None;
+            #[cfg(test)]
+            {
+                self.facts_opens += 1;
+            }
+            let store = if create {
+                FactsStore::open(&self.root).map_err(|e| e.to_string())?
+            } else {
+                match FactsStore::open_existing(&self.root).map_err(|e| e.to_string())? {
+                    Some(store) => store,
+                    None => return Ok(None),
+                }
+            };
+            let file = history_db_identity(&self.root)
+                .ok_or_else(|| "history db vanished on open".to_string())?;
+            self.facts = Some(OpenFacts { store, file });
+        }
+        Ok(self.facts.as_mut().map(|open| &mut open.store))
+    }
+
+    /// `git rev-list --count --all` for the `facts` block of `status`.
+    fn count_commits(&mut self) -> Option<u64> {
+        #[cfg(test)]
+        {
+            self.rev_list_runs += 1;
+        }
+        pixel_git::GitRunner::new(&self.root).rev_list_count_all()
+    }
+
+    /// The `facts` block of `status`, from the kept store: no trust-check
+    /// spawn once it is open, the refs read once, and `rev-list` run only
+    /// when they moved.
+    fn facts_status(&mut self) -> Value {
+        let refs = match self.cached_facts(false) {
+            Ok(Some(store)) => store.refs_hash().ok(),
+            Ok(None) => return json!({"present": false}),
+            Err(e) => return json!({"present": false, "error": e}),
+        };
+        let total = match (&self.commit_total, refs.as_deref()) {
+            (Some((at, total)), Some(refs)) if at == refs => *total,
+            _ => match self.count_commits() {
+                Some(total) => {
+                    self.commit_total = refs.clone().map(|refs| (refs, total));
+                    total
+                }
+                None => 0,
+            },
+        };
+        let open = self
+            .facts
+            .as_ref()
+            .expect("cached_facts just returned the open store");
+        visibility_of(&open.store, refs.as_deref(), total)
     }
 
     /// The facts db exactly as it stands, for a `read_only` history
@@ -3308,18 +3425,15 @@ impl Service {
     /// error because the read-only contract forbids the open-and-catch-up
     /// that would serve it. The answer's `index_state` says how stale the
     /// index it came from was.
-    fn facts_open_read_only(&self) -> Result<FactsStore, String> {
-        match FactsStore::open_existing(&self.root) {
-            Ok(Some(facts)) => Ok(facts),
-            Ok(None) => Err("facts index absent or not built".to_string()),
-            Err(e) => Err(e.to_string()),
-        }
+    fn facts_open_read_only(&mut self) -> Result<&mut FactsStore, String> {
+        self.cached_facts(false)?
+            .ok_or_else(|| "facts index absent or not built".to_string())
     }
 
     /// The facts store an op sees: `read_only` takes the index as it
     /// stands, otherwise the open-and-catch-up path that built today's
     /// behaviour.
-    fn facts_for(&self, read_only: bool) -> Result<FactsStore, String> {
+    fn facts_for(&mut self, read_only: bool) -> Result<&mut FactsStore, String> {
         if read_only {
             self.facts_open_read_only()
         } else {
@@ -3343,7 +3457,7 @@ impl Service {
     ) -> Result<Value, String> {
         let facts = self.facts_for(read_only)?;
         let result = pixel_facts::search::search(
-            &facts,
+            facts,
             query,
             facet.unwrap_or("all").into(),
             limit.unwrap_or(200),
@@ -8714,7 +8828,7 @@ mod tests {
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "init"]);
 
-        let svc = Service::open(&root).unwrap();
+        let mut svc = Service::open(&root).unwrap();
         std::fs::remove_dir_all(root.join(".git")).unwrap();
 
         let error = match svc.facts_open_and_catch_up() {
@@ -8723,6 +8837,98 @@ mod tests {
         };
         assert!(error.contains("facts lazy ingest failed"), "{error}");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn history_query(read_only: bool) -> Request {
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: Some(5),
+            read_only,
+        }
+    }
+
+    /// Every facts request after the first reads the store already open:
+    /// no `.pixel` trust check, no DDL. A db another process replaced (a
+    /// rebuild, a reset) is reopened, so its trust check runs again.
+    #[test]
+    fn facts_requests_should_reuse_the_open_store_until_the_db_file_changes() {
+        let root = tmpdir("facts-store-kept");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut svc = Service::open(&root).unwrap();
+        svc.facts_warmer_started.store(true, Ordering::SeqCst);
+
+        assert!(svc.handle(history_query(false)).ok);
+        assert!(svc.handle(history_query(true)).ok);
+        assert!(svc.handle(Request::Status {}).ok);
+        assert!(svc.handle(history_query(false)).ok);
+        assert_eq!(svc.facts_opens, 1, "one open serves every later request");
+
+        let db = pixel_facts::store::history_db_path(&root);
+        let moved = db.with_extension("moved");
+        std::fs::copy(&db, &moved).unwrap();
+        std::fs::remove_file(&db).unwrap();
+        std::fs::rename(&moved, &db).unwrap();
+        assert!(svc.handle(history_query(true)).ok);
+        assert_eq!(svc.facts_opens, 2, "a replaced db file is opened again");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The kept store does not keep the trust verdict past its file: a
+    /// `.pixel/` the repository now tracks is refused as soon as the db the
+    /// store was opened on is replaced, as a checkout of it would.
+    #[test]
+    fn a_replaced_db_should_be_refused_when_the_repository_tracks_pixel() {
+        let root = tmpdir("facts-store-tracked");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut svc = Service::open(&root).unwrap();
+        svc.facts_warmer_started.store(true, Ordering::SeqCst);
+        assert!(svc.handle(history_query(false)).ok);
+
+        let db = pixel_facts::store::history_db_path(&root);
+        let copy = db.with_extension("copy");
+        std::fs::copy(&db, &copy).unwrap();
+        std::fs::remove_file(&db).unwrap();
+        std::fs::rename(&copy, &db).unwrap();
+        git(&root, &["add", "-f", ".pixel/history.db"]);
+        let refused = svc.handle(history_query(true));
+        assert!(!refused.ok, "{refused:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `status` counts the repository's commits once per refs state: the
+    /// prompt hook asks for it on every prompt, and `rev-list --all` only
+    /// changes when a ref moves.
+    #[test]
+    fn status_should_count_commits_again_only_after_a_ref_moves() {
+        let root = tmpdir("facts-status-total");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut svc = Service::open(&root).unwrap();
+        svc.facts_warmer_started.store(true, Ordering::SeqCst);
+        assert!(svc.handle(history_query(false)).ok);
+        let total = |svc: &mut Service| {
+            svc.handle(Request::Status {}).data()["facts"]["total_commits"].clone()
+        };
+
+        assert_eq!(total(&mut svc), 1);
+        assert_eq!(total(&mut svc), 1);
+        assert_eq!(svc.rev_list_runs, 1, "the refs did not move");
+
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        assert_eq!(total(&mut svc), 2);
+        assert_eq!(svc.rev_list_runs, 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 
