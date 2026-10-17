@@ -723,15 +723,15 @@ fn phase_b(store: &mut FactsStore, deadline: &Instant) -> Result<(bool, u64)> {
     let mut poisoned = 0u64;
     let mut cursor: i64 = phase_b_cursor(store);
     loop {
-        let next = next_phase_b_commit(store, cursor);
-        let cid = match next {
-            Some(c) => c,
+        let batch = next_phase_b_commits(store, cursor)?;
+        let cid = match batch.last() {
+            Some(c) => *c,
             None => {
                 complete_phase_b(store)?;
                 return Ok((true, poisoned));
             }
         };
-        let poisoned_batch = measure_commit_blobs(store, cid)?;
+        let poisoned_batch = measure_commits_blobs(store, &batch)?;
         poisoned += poisoned_batch;
         // checkpoint cursor (upsert: the B row may not exist on first tick)
         store.conn().execute(
@@ -760,17 +760,105 @@ fn phase_b_cursor(store: &FactsStore) -> i64 {
         .unwrap_or(0)
 }
 
-fn next_phase_b_commit(store: &FactsStore, after_cursor: i64) -> Option<i64> {
-    store
+fn next_phase_b_commits(store: &FactsStore, after_cursor: i64) -> Result<Vec<i64>> {
+    let mut stmt = store
         .conn()
-        .query_row(
-            "SELECT id FROM commits
-             WHERE id > ?1 AND diff_state = ?2
-             ORDER BY id LIMIT 1",
-            params![after_cursor, DIFF_STATE_PENDING],
-            |r| r.get(0),
-        )
-        .ok()
+        .prepare("SELECT id FROM commits WHERE id > ?1 AND diff_state = ?2 ORDER BY id LIMIT ?3")?;
+    let rows = stmt.query_map(
+        params![after_cursor, DIFF_STATE_PENDING, PHASE_B_BATCH as i64],
+        |r| r.get(0),
+    )?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Measure several commits with one size-only Git protocol, before checkpointing
+/// any of them. Fall back to the bounded tree reader if the protocol fails or
+/// cannot represent a filename (newline or trailing carriage return).
+fn measure_commits_blobs(store: &mut FactsStore, commits: &[i64]) -> Result<u64> {
+    let mut pairs = Vec::new();
+    for cid in commits {
+        let oid: String =
+            store
+                .conn()
+                .query_row("SELECT oid FROM commits WHERE id = ?1", [cid], |r| r.get(0))?;
+        for path in changed_paths_for_commit(store, *cid)? {
+            let previous = old_path_for(store, &path).map(|old| format!("{oid}^:{old}"));
+            pairs.push((format!("{oid}:{path}"), previous, path));
+        }
+    }
+    let specs: Vec<&str> = pairs
+        .iter()
+        .flat_map(|(new, old, _)| std::iter::once(new.as_str()).chain(old.as_deref()))
+        .collect();
+    let runner = pixel_git::GitRunner::with_options(
+        store.root(),
+        GitOptions {
+            timeout: Some(Duration::from_secs(30)),
+            max_output_bytes: Some(1_048_576),
+        },
+    );
+    let Some(sizes) = batch_blob_sizes(&runner, &specs) else {
+        return commits.iter().try_fold(0, |total, cid| {
+            Ok(total + measure_commit_blobs(store, *cid)?)
+        });
+    };
+    let mut sizes = sizes.into_iter();
+    let mut poisoned = 0;
+    for (_, old, path) in pairs {
+        let added = sizes.next().expect("one answer per requested blob");
+        let removed = if old.is_some() {
+            sizes.next().expect("one answer per parent blob")
+        } else {
+            0
+        };
+        if added > BLOB_CAP_BYTES as u64 || removed > BLOB_CAP_BYTES as u64 {
+            store.learn_poison(&path, &format!("blob over {BLOB_CAP_BYTES}B cap"))?;
+            poisoned += 1;
+        }
+    }
+    Ok(poisoned)
+}
+
+/// Only metadata is requested: even a multi-gigabyte object is never inflated.
+fn batch_blob_sizes(runner: &pixel_git::GitRunner, specs: &[&str]) -> Option<Vec<u64>> {
+    if specs.iter().any(|s| s.contains('\n') || s.ends_with('\r')) {
+        return None;
+    }
+    let mut sizes = Vec::with_capacity(specs.len());
+    for batch in specs.chunks(TREE_BATCH_PATHS) {
+        let mut input = batch.join("\n");
+        input.push('\n');
+        let output = runner
+            .run_with_stdin(
+                &["cat-file", "--batch-check=%(objecttype) %(objectsize)"],
+                input.as_bytes(),
+            )
+            .ok()?;
+        if !output.success() {
+            return None;
+        }
+        let body = output.stdout.strip_suffix(b"\n")?;
+        let lines: Vec<&[u8]> = body.split(|b| *b == b'\n').collect();
+        if lines.len() != batch.len() {
+            return None;
+        }
+        for (line, spec) in lines.into_iter().zip(batch) {
+            let line = std::str::from_utf8(line).ok()?;
+            let size = if let Some(size) = line.strip_prefix("blob ") {
+                size.parse().ok()?
+            } else if line == format!("{spec} missing")
+                || ["tree ", "commit ", "tag "]
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
+            {
+                0
+            } else {
+                return None;
+            };
+            sizes.push(size);
+        }
+    }
+    Some(sizes)
 }
 
 fn complete_phase_b(store: &mut FactsStore) -> Result<()> {
@@ -1788,6 +1876,89 @@ body"
         assert_eq!(split_ref_record("refs/heads/a\0"), None);
         assert_eq!(split_ref_record("refs/heads/a"), None);
         assert_eq!(split_ref_record("\0abc"), None);
+    }
+
+    #[test]
+    fn size_only_batch_resolves_revisions_and_missing_paths_without_reading_content() {
+        let dir = init_repo();
+        let first = commit(dir.path(), &[("a", b"small")], "small");
+        let second = commit(
+            dir.path(),
+            &[("a", &vec![b'x'; BLOB_CAP_BYTES + 1]), ("dir/file", b"x")],
+            "large",
+        );
+        let specs = [
+            format!("{first}:a"),
+            format!("{second}:a"),
+            format!("{second}:missing"),
+            format!("{second}:dir"),
+            second,
+        ];
+        let refs: Vec<&str> = specs.iter().map(String::as_str).collect();
+        // The response fits in 512 bytes although the blob is over the cap.
+        let runner = pixel_git::GitRunner::with_options(
+            dir.path(),
+            GitOptions {
+                max_output_bytes: Some(512),
+                ..GitOptions::default()
+            },
+        );
+        assert_eq!(
+            batch_blob_sizes(&runner, &refs),
+            Some(vec![5, (BLOB_CAP_BYTES + 1) as u64, 0, 0, 0])
+        );
+        assert_eq!(batch_blob_sizes(&runner, &[]), Some(vec![]));
+        assert_eq!(batch_blob_sizes(&runner, &["HEAD:line\nname"]), None);
+        assert_eq!(batch_blob_sizes(&runner, &["HEAD:carriage\r"]), None);
+        let capped = pixel_git::GitRunner::with_options(
+            dir.path(),
+            GitOptions {
+                max_output_bytes: Some(1),
+                ..GitOptions::default()
+            },
+        );
+        assert_eq!(batch_blob_sizes(&capped, &refs), None);
+    }
+
+    #[test]
+    fn cross_commit_batch_keeps_poison_detection_for_unrepresentable_paths() {
+        let dir = init_repo();
+        let first = commit(
+            dir.path(),
+            &[("first", &vec![b'x'; BLOB_CAP_BYTES + 1])],
+            "large",
+        );
+        let second = commit(
+            dir.path(),
+            &[("line\nname", &vec![b'y'; BLOB_CAP_BYTES + 1])],
+            "unusual large",
+        );
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        assert!(phase_a(&mut store, &far()).unwrap());
+        let ids = [commit_id(&store, &first), commit_id(&store, &second)];
+        assert_eq!(measure_commits_blobs(&mut store, &ids).unwrap(), 2);
+        assert_eq!(store.poison_paths().unwrap(), vec!["first", "line\nname"]);
+    }
+
+    #[test]
+    fn phase_b_checkpoints_a_bounded_commit_batch_before_yielding() {
+        let dir = init_repo();
+        for i in 0..PHASE_B_BATCH + 1 {
+            commit(dir.path(), &[("a", i.to_string().as_bytes())], "change");
+        }
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        assert!(phase_a(&mut store, &far()).unwrap());
+        let batch = next_phase_b_commits(&store, 0).unwrap();
+        assert_eq!(batch.len(), PHASE_B_BATCH);
+        assert_eq!(phase_b(&mut store, &Instant::now()).unwrap(), (false, 0));
+        assert_eq!(phase_b_cursor(&store), *batch.last().unwrap());
+        assert_eq!(
+            next_phase_b_commits(&store, phase_b_cursor(&store))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(phase_b(&mut store, &far()).unwrap(), (true, 0));
     }
 
     #[test]

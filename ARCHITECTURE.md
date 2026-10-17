@@ -553,9 +553,10 @@ envelope talks to the daemon socket directly.
   moves both into `timings.graph`, beside `timings.index` (how each index
   layer was obtained) and `timings.total_ms`.
 - History facts are ingested by a dedicated low-priority thread. Before
-  fetching diffs, phase B measures changed blobs with bounded `ls-tree -l -z`
-  batches per commit (and parent tree for rename sources); failed batches
-  fall back to individual lookups so large blobs remain excluded. Queries
+  fetching diffs, phase B measures changed blobs across 25 commits with size-only
+  `cat-file --batch-check` requests (128 objects per process). Unsupported
+  filenames or failed batches fall back to bounded `ls-tree` lookups, so
+  large blobs remain excluded without reading their contents. Queries
   never wait on ingest; they answer from what is already in `history.db` and
   carry its `index_state` (`diffs_evicted`, `diff_coverage_since`). Diff text
   is bounded by an age window (`PIXEL_HISTORY_WINDOW_DAYS`, default 365) and
