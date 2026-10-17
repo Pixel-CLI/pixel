@@ -126,6 +126,8 @@ pub fn ingest_tick(store: &mut FactsStore, options: &IngestOptions) -> Result<Ti
             skipped_this_tick: 0,
         });
     }
+    // Apply retention before measuring blobs; expired metadata stays searchable.
+    apply_window(store, &options.limits, now_unix())?;
     let (b_done, p) = phase_b(store, &deadline)?;
     poisoned += p;
     if b_done {
@@ -133,8 +135,7 @@ pub fn ingest_tick(store: &mut FactsStore, options: &IngestOptions) -> Result<Ti
         // fresh deadline so diff text ingestion always gets time to run,
         // even on large repos where phase B eats the entire original budget.
         let c_deadline = Instant::now() + Duration::from_millis(options.tick_budget_ms);
-        // The window first, so a commit too old to keep is never fetched.
-        apply_window(store, &options.limits, now_unix())?;
+
         let (_c_done, p, s) = phase_c(store, &c_deadline)?;
         poisoned += p;
         skipped += s;
@@ -782,7 +783,8 @@ fn measure_commits_blobs(store: &mut FactsStore, commits: &[i64]) -> Result<u64>
                 .conn()
                 .query_row("SELECT oid FROM commits WHERE id = ?1", [cid], |r| r.get(0))?;
         for path in changed_paths_for_commit(store, *cid)? {
-            let previous = old_path_for(store, &path).map(|old| format!("{oid}^:{old}"));
+            let previous =
+                parent_path_for(store, &oid, &path).map(|(parent, old)| format!("{parent}:{old}"));
             pairs.push((format!("{oid}:{path}"), previous, path));
         }
     }
@@ -915,8 +917,10 @@ fn measure_blob_sizes(
     let cmd_runner = pixel_git::GitRunner::with_options(store.root(), opts);
     let current: Vec<&str> = paths.iter().map(String::as_str).collect();
     let new_sizes = blob_sizes(&cmd_runner, oid, &current);
-    let old_paths: Vec<Option<String>> =
-        paths.iter().map(|path| old_path_for(store, path)).collect();
+    let old_paths: Vec<Option<String>> = paths
+        .iter()
+        .map(|path| parent_path_for(store, oid, path).map(|(_, old)| old))
+        .collect();
     let renamed: Vec<&str> = old_paths.iter().filter_map(Option::as_deref).collect();
     let old_sizes = blob_sizes(&cmd_runner, &format!("{oid}^"), &renamed);
     Ok(paths
@@ -1015,15 +1019,20 @@ fn parse_ls_tree_size(line: &str) -> u64 {
     size.parse().unwrap_or(0)
 }
 
-fn old_path_for(store: &FactsStore, path: &str) -> Option<String> {
-    store
+/// Both sides of a retained diff must be checked, including modifications
+/// and deletions whose large parent belongs to an expired commit. Merge diffs
+/// are skipped in phase A; ordinary commits have at most one parent.
+fn parent_path_for(store: &FactsStore, oid: &str, path: &str) -> Option<(String, String)> {
+    let (parents, old): (String, String) = store
         .conn()
         .query_row(
-            "SELECT old_path FROM file_changes WHERE path = ?1 AND old_path IS NOT NULL LIMIT 1",
-            [path],
-            |r| r.get::<_, String>(0),
+            "SELECT c.parents, COALESCE(f.old_path, f.path) FROM file_changes f
+         JOIN commits c ON c.id = f.commit_id WHERE c.oid = ?1 AND f.path = ?2",
+            params![oid, path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .ok()
+        .ok()?;
+    Some((parents.split_whitespace().next()?.to_owned(), old))
 }
 
 // ---------------------------------------------------------------------------
@@ -1460,6 +1469,21 @@ pub fn apply_window(store: &mut FactsStore, limits: &HistoryLimits, now_unix: i6
     let cutoff = limits
         .window_days
         .map_or(i64::MIN, |days| window_cutoff(now_unix, days));
+    let restored: Option<i64> = store.conn().query_row(
+        "SELECT MIN(id) FROM commits WHERE diff_state = ?1 AND skip_note = ?2
+         AND unixepoch(committed_at) >= ?3",
+        params![DIFF_STATE_EVICTED, SKIP_NOTE_OUTSIDE_WINDOW, cutoff],
+        |r| r.get(0),
+    )?;
+    if let Some(first) = restored {
+        // A widened window can restore IDs behind the saved B cursor. They
+        // must pass blob checks before phase C is allowed to read their diffs.
+        let cursor = phase_b_cursor(store).min(first - 1).to_string();
+        store.conn().execute(
+            "UPDATE ingest_jobs SET cursor = ?1, status = 'running' WHERE phase = 'B'",
+            [cursor],
+        )?;
+    }
     store.conn().execute(
         "UPDATE commits SET diff_state = ?1, skip_note = NULL
          WHERE diff_state = ?2 AND skip_note = ?3 AND unixepoch(committed_at) >= ?4",
@@ -1962,6 +1986,104 @@ body"
     }
 
     #[test]
+    fn expired_history_skips_blob_checks_but_a_wider_window_rewinds_them() {
+        let dir = init_repo();
+        let old = commit_at(
+            dir.path(),
+            &[("big", &vec![b'x'; BLOB_CAP_BYTES + 1])],
+            "old large",
+            days_ago(400),
+        );
+        commit_at(dir.path(), &[("recent", b"small")], "recent", days_ago(1));
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_with(
+            &mut store,
+            HistoryLimits {
+                window_days: Some(365),
+                ..no_limits()
+            },
+        );
+        assert!(
+            store.poison_paths().unwrap().is_empty(),
+            "expired changes must not be measured"
+        );
+        assert_eq!(
+            state_of(&store, &old),
+            (
+                DIFF_STATE_EVICTED,
+                Some(SKIP_NOTE_OUTSIDE_WINDOW.to_owned())
+            )
+        );
+        let cursor = phase_b_cursor(&store);
+        assert!(cursor >= commit_id(&store, &old));
+        drop(store);
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_with(&mut store, no_limits());
+        assert_eq!(store.poison_paths().unwrap(), vec!["big"]);
+        assert_eq!(hunks_for(&store, &old), 0);
+        assert_eq!(state_of(&store, &old).0, DIFF_STATE_SKIPPED);
+    }
+
+    #[test]
+    fn retained_changes_check_large_parents_even_when_the_parent_commit_expired() {
+        for (path, operation) in [
+            ("large", "modify"),
+            ("large", "delete"),
+            ("line\nname", "modify"),
+            ("line\nname", "delete"),
+            ("large", "rename"),
+        ] {
+            let dir = init_repo();
+            let old = commit_at(
+                dir.path(),
+                &[(path, &vec![b'x'; BLOB_CAP_BYTES + 1])],
+                "old large",
+                days_ago(400),
+            );
+            let target = if operation == "rename" {
+                "renamed"
+            } else {
+                path
+            };
+            if operation == "delete" {
+                git(dir.path(), &["rm", "--", path]);
+            }
+            if operation == "rename" {
+                git(dir.path(), &["mv", "--", path, target]);
+            }
+            let recent = if operation == "delete" {
+                commit_at(dir.path(), &[], "delete", days_ago(1))
+            } else {
+                commit_at(
+                    dir.path(),
+                    &[(target, &vec![b'x'; BLOB_CAP_BYTES])],
+                    "trim below poison threshold",
+                    days_ago(1),
+                )
+            };
+            let mut store = FactsStore::open(dir.path()).unwrap();
+            ingest_with(
+                &mut store,
+                HistoryLimits {
+                    window_days: Some(365),
+                    ..no_limits()
+                },
+            );
+            assert_eq!(
+                store.poison_paths().unwrap(),
+                vec![target],
+                "{operation} {path:?}"
+            );
+            assert_eq!(
+                hunks_for(&store, &recent),
+                0,
+                "large removals must never reach the diff index"
+            );
+            assert_eq!(state_of(&store, &old).0, DIFF_STATE_EVICTED);
+        }
+    }
+
+    #[test]
     fn phase_b_should_count_the_paths_it_poisons() {
         let dir = init_repo();
         commit(
@@ -2245,7 +2367,9 @@ b
         let mut store = FactsStore::open(root).unwrap();
         assert!(phase_a(&mut store, &far()).unwrap());
         assert_eq!(
-            old_path_for(&store, "moved.bin").as_deref(),
+            parent_path_for(&store, &renamed, "moved.bin")
+                .map(|(_, old)| old)
+                .as_deref(),
             Some("big.bin"),
             "git must report the rename"
         );
@@ -2275,7 +2399,9 @@ b
         let mut store = FactsStore::open(root).unwrap();
         assert!(phase_a(&mut store, &far()).unwrap());
         assert_eq!(
-            old_path_for(&store, "edge2.bin").as_deref(),
+            parent_path_for(&store, &renamed, "edge2.bin")
+                .map(|(_, old)| old)
+                .as_deref(),
             Some("edge.bin")
         );
         let cid = commit_id(&store, &renamed);

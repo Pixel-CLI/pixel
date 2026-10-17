@@ -553,7 +553,10 @@ envelope talks to the daemon socket directly.
   moves both into `timings.graph`, beside `timings.index` (how each index
   layer was obtained) and `timings.total_ms`.
 - History facts are ingested by a dedicated low-priority thread. Before
-  fetching diffs, phase B measures changed blobs across 25 commits with size-only
+  fetching diffs, retention excludes expired commits from blob checks.
+  Widening the window rewinds the blob-check cursor before restored diffs
+  can be read. Both sides of retained changes are measured, including
+  deleted/modified blobs whose parent commit has expired. Phase B measures changed blobs across 25 commits with size-only
   `cat-file --batch-check` requests (128 objects per process). Unsupported
   filenames or failed batches fall back to bounded `ls-tree` lookups, so
   large blobs remain excluded without reading their contents. Queries
