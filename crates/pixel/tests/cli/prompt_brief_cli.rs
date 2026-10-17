@@ -556,7 +556,7 @@ fn a_session_start_should_start_no_daemon_when_any_switch_is_off_or_there_is_no_
 }
 
 #[test]
-fn a_prompt_that_finds_no_daemon_should_brief_locally_and_leave_a_daemon_for_the_next() {
+fn a_prompt_should_brief_and_start_a_daemon_without_assuming_startup_order() {
     let root = indexed("prompt-start");
     let cache = Scratch::for_test("prompt-brief-cache", "prompt-start");
     let payload = |prompt: &str| {
@@ -591,7 +591,7 @@ fn a_prompt_that_finds_no_daemon_should_brief_locally_and_leave_a_daemon_for_the
     stop_daemon(&root);
     assert!(
         context(&first).starts_with("[PIXEL:BRIEF]"),
-        "the first prompt is briefed without the daemon: {first}"
+        "the first prompt is briefed while the daemon starts: {first}"
     );
     assert!(up, "the prompt started no daemon");
     assert!(
@@ -600,9 +600,13 @@ fn a_prompt_that_finds_no_daemon_should_brief_locally_and_leave_a_daemon_for_the
     );
     let records = logged(&root);
     assert_eq!(records.len(), 2, "{records:?}");
-    assert_eq!(
-        (records[0]["route"].as_str(), records[0]["daemon"].as_str()),
-        (Some("local"), Some("launched")),
+    // Autostart and the evidence worker run concurrently. A fast daemon may
+    // answer the first worker's probe; neither route may be assumed from the
+    // launch outcome. The unit test with a blocked starter separately pins
+    // the contract that starting a daemon cannot hold up the brief.
+    assert_eq!(records[0]["daemon"], "launched", "{}", records[0]);
+    assert!(
+        matches!(records[0]["route"].as_str(), Some("local" | "daemon")),
         "{}",
         records[0]
     );
