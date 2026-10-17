@@ -1,0 +1,1 @@
+**brief:** the bundled `name-files` probe runs one ripgrep pass for every adjacent-word compound instead of one per compound, runs its file listing beside it, and searches Ruby too: an 18-compound prompt on this repository goes from 651 ms to 72 ms, so prompts that killed the probe at its 1500 ms budget get their blocks back.

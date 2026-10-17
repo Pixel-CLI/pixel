@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: MIT
 
 """name-files: two locators the brief lacks. (a) Adjacent prompt words joined into a code name ("smart case" ->
-SmartCase, smart_case, smart-case) located with rg, the definition shown. (b) Source files whose stem is a word of
-the prompt ("config" -> flags/config.rs), shown whole when short. Blocks of the brief that share no content word
-with the prompt are dropped. Read-only (rg, file reads), deterministic."""
+SmartCase, smart_case, smart-case) located with one ripgrep pass over every compound, the definition shown.
+(b) Source files whose stem is a word of the prompt ("config" -> flags/config.rs), shown whole when short.
+Blocks of the brief that share no content word with the prompt are dropped. Read-only (rg, file reads),
+deterministic."""
+import concurrent.futures
 import json
 import re
 import subprocess
@@ -16,7 +18,7 @@ STOP = {"what", "where", "which", "that", "this", "with", "from", "does", "the",
         "defined", "define", "number", "returns", "return", "set", "get", "use", "used", "make", "could", "there"}
 GENERIC = {"for", "to", "in", "on", "my", "its", "keep", "file", "line", "code", "thing", "error", "change", "nothing",
            "make", "read", "ignored", "get", "files", "lines", "work", "works", "happens", "nothing", "time"}
-SRC = ("*.rs", "*.ts", "*.tsx", "*.js", "*.py", "*.go")
+SRC = ("*.rs", "*.ts", "*.tsx", "*.js", "*.py", "*.go", "*.rb")
 FILE_LINES, DEFINITION_LINES, MAX_FILE_LINES = 180, 60, 220
 
 
@@ -36,7 +38,7 @@ def words(text):
 def rg(root, *args):
     """Lines of `rg`; without ripgrep (or past its time) the probe has nothing to say."""
     try:
-        return subprocess.run(["rg", "--sort", "path", "-j", "1", "--glob", "!.pixel", *args], cwd=root,
+        return subprocess.run(["rg", "--sort", "path", "--glob", "!.pixel", *args], cwd=root,
                               capture_output=True, text=True, timeout=10).stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
         return []
@@ -71,22 +73,53 @@ def compounds(prompt):
     return out
 
 
+def definitions(root, pairs, globs):
+    """One ripgrep pass for every compound's definition, grouped by pair index.
+
+    The old loop spawned one `rg` per compound, each scanning the whole tree: five compounds paid five
+    scans. Every camel and snake spelling joins one alternation here, and the hit is attributed to the
+    pair whose spelling it carries (longest spelling first, so `BookingAvailability` wins over a prefix).
+    """
+    spellings = [(index, word) for index, (camel, snake, _) in enumerate(pairs) for word in (camel, snake)]
+    if not spellings:
+        return {}
+    ordered = sorted({word for _, word in spellings}, key=len, reverse=True)
+    pattern = rf"(struct|class|fn|def|const|enum|interface|type)\s+({'|'.join(ordered)})\b"
+    found = {}
+    for hit in rg(root, "-n", "--no-heading", *globs, pattern, "."):
+        parts = hit.split(":", 2)
+        if len(parts) < 3:
+            continue
+        text = parts[2]
+        for word in ordered:
+            if re.search(rf"\b{re.escape(word)}\b", text):
+                for index, spelling in spellings:
+                    if spelling == word:
+                        found.setdefault(index, []).append((parts[0], parts[1]))
+                break
+    return found
+
+
 def main():
     req = json.load(sys.stdin)
     root, prompt, brief = req["repo_root"], req["prompt"], req.get("brief", "")
     globs = sum((["-g", g] for g in SRC), [])
+    pairs = compounds(prompt)
+    # The two searches are independent scans of one tree; run them together so their I/O overlaps
+    # instead of paying the second after the first. The file list is only read for its stems.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        files = pool.submit(rg, root, "--files", *globs, ".")
+        defs = definitions(root, pairs, globs)
+        listing = files.result()
     found = []
-    for camel, snake, kebab in compounds(prompt):
-        hits = rg(root, "-n", "--no-heading", *globs,
-                  rf"(struct|class|fn|def|const|enum|interface|type)\s+({camel}|{snake})\b", ".")
-        for hit in hits[:2]:
-            path, line = hit.split(":", 2)[:2]
+    for index, (camel, snake, kebab) in enumerate(pairs):
+        for path, line in defs.get(index, [])[:2]:
             found.append(f"### {path.lstrip('./')}:{line} — {camel} definition (named by the prompt: '{kebab.replace('-', ' ')}')")
             found += body(Path(root) / path, max(1, int(line) - 3), DEFINITION_LINES)
     stems = {w for w in re.findall(r"[a-z]{4,}", prompt.lower()) if w not in STOP and w not in GENERIC}
     near = [h.split(":")[0].split(" ")[0] for h in re.findall(r"^### (\S+)", brief, re.M)]
     candidates = []
-    for name in sorted(f.lstrip("./") for f in rg(root, "--files", *globs, ".")):
+    for name in sorted(f.lstrip("./") for f in listing):
         if Path(name).stem.lower() not in stems or "test" in name.lower():
             continue
         shared = max((common_dirs(name, other) for other in near), default=0)
