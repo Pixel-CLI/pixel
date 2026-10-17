@@ -355,9 +355,9 @@ fn query_never_blocks_on_in_progress_ingest() {
 
     // A single tick with a zero-millisecond budget: phase A still lands its
     // one guaranteed batch (all 3 commits' metadata, since 3 < the 200-commit
-    // batch size), but phase B's per-commit loop checks the deadline AFTER
-    // measuring one commit's blobs — with a budget of 0ms that deadline is
-    // already in the past, so phase B stops after exactly one commit. This
+    // batch size), but phase B checks the deadline AFTER measuring one batch's blobs — with a
+    // budget of 0ms that deadline is already in the past, so phase B yields
+    // before marking its phase complete. This
     // deterministically produces a genuine "ingest is still in progress"
     // state (phase_b, not fresh, zero diff text indexed) without any timing
     // race: everything here runs synchronously on one thread.

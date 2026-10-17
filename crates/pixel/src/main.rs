@@ -50,6 +50,7 @@ mod decide_remote;
 mod evaluate_cmd;
 mod execution_brief;
 mod graph_shadow_cmd;
+mod history_index;
 mod hook_input;
 mod hook_metrics;
 mod impact_read;
@@ -4203,18 +4204,7 @@ fn run_command(
                         .unwrap_or(0),
                 );
                 if history {
-                    let mut store =
-                        pixel_facts::FactsStore::open(&path).map_err(|e| e.to_string())?;
-                    let opts = pixel_facts::ingest::IngestOptions::default();
-                    let report = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts)
-                        .map_err(|e| e.to_string())?;
-                    eprintln!(
-                        "facts: phase={} commits={} diff_coverage={:.0}% fresh={}",
-                        report.phase,
-                        report.commits_indexed,
-                        report.diff_indexed_pct * 100.0,
-                        report.fresh
-                    );
+                    history_index::build(&path)?;
                 }
                 return Ok(());
             }
@@ -4229,17 +4219,7 @@ fn run_command(
                 stats.files, stats.bytes, stats.grams, stats.shard_bytes, stats.elapsed_ms
             );
             if history {
-                let mut store = pixel_facts::FactsStore::open(&path).map_err(|e| e.to_string())?;
-                let opts = pixel_facts::ingest::IngestOptions::default();
-                let report = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts)
-                    .map_err(|e| e.to_string())?;
-                eprintln!(
-                    "facts: phase={} commits={} diff_coverage={:.0}% fresh={}",
-                    report.phase,
-                    report.commits_indexed,
-                    report.diff_indexed_pct * 100.0,
-                    report.fresh
-                );
+                history_index::build(&path)?;
             }
             Ok(())
         }

@@ -631,6 +631,39 @@ fn review_gate_json_contract_is_an_enveloped_finding_list() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// History diagnostics belong on stderr and must survive redirected logs.
+#[test]
+fn history_build_reports_phase_timings_without_polluting_stdout() {
+    let dir = fixture("history-timings");
+    let output = pixel(&dir, &["build-index", "--history", "."]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("facts: starting history ingestion"),
+        "{stderr}"
+    );
+    let summary = stderr
+        .lines()
+        .find(|line| line.starts_with("facts: phase="))
+        .expect("final facts summary");
+    for key in [
+        "metadata_ms=",
+        "blobs_ms=",
+        "diffs_ms=",
+        "retention_ms=",
+        "total_ms=",
+    ] {
+        let value = summary
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(key))
+            .expect(key);
+        let duration: f64 = value.parse().unwrap();
+        assert!(duration.is_finite() && duration >= 0.0, "{key}{value}");
+    }
+    assert!(summary.contains("fresh=true"), "{summary}");
+}
+
 /// The statusline shows `indexed/total` commits only when the history index
 /// knows about commits: a repository without any must not print `0/0`.
 #[test]
