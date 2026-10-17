@@ -71,10 +71,11 @@ struct ReadJob {
     reply: mpsc::Sender<Response>,
 }
 
-/// The reader threads and the number of them waiting for work.
+/// The reader threads and their shared queue. At most `READERS` reads run
+/// at once; more wait in the queue for the first reader to finish, which
+/// takes milliseconds, rather than behind the writer's long job.
 pub(super) struct Readers {
     jobs: Option<mpsc::Sender<ReadJob>>,
-    idle: Arc<AtomicUsize>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -84,12 +85,10 @@ impl Readers {
     pub(super) fn spawn(replicas: Vec<Box<dyn ReadReplica>>, requeue: &mpsc::Sender<Msg>) -> Self {
         let (jobs, queue) = mpsc::channel::<ReadJob>();
         let queue = Arc::new(Mutex::new(queue));
-        let idle = Arc::new(AtomicUsize::new(replicas.len()));
         let threads = replicas
             .into_iter()
             .map(|mut replica| {
                 let queue = Arc::clone(&queue);
-                let idle = Arc::clone(&idle);
                 let requeue = requeue.clone();
                 std::thread::spawn(move || {
                     loop {
@@ -98,14 +97,12 @@ impl Readers {
                             return;
                         };
                         serve_read(replica.as_mut(), job, &requeue);
-                        idle.fetch_add(1, Ordering::AcqRel);
                     }
                 })
             })
             .collect();
         Readers {
             jobs: Some(jobs),
-            idle,
             threads,
         }
     }
@@ -114,36 +111,18 @@ impl Readers {
     pub(super) fn none() -> Self {
         Readers {
             jobs: None,
-            idle: Arc::new(AtomicUsize::new(0)),
             threads: Vec::new(),
         }
     }
 
-    /// Hand `req` to an idle reader; `Some` gives it back when none is idle.
+    /// Queue `req` for the readers; `Some` gives it back when there are none.
     pub(super) fn offer(&self, req: Request, reply: mpsc::Sender<Response>) -> Option<Returned> {
         let Some(jobs) = &self.jobs else {
             return Some((req, reply));
         };
-        if !self.take_idle() {
-            return Some((req, reply));
-        }
         jobs.send(ReadJob { req, reply })
             .err()
-            .map(|mpsc::SendError(job)| {
-                self.idle.fetch_add(1, Ordering::AcqRel);
-                (job.req, job.reply)
-            })
-    }
-
-    /// Claim an idle reader, `false` when none is. Only the loop thread
-    /// claims and readers only give back, so the count read here can only
-    /// grow before the decrement.
-    fn take_idle(&self) -> bool {
-        if self.idle.load(Ordering::Acquire) == 0 {
-            return false;
-        }
-        self.idle.fetch_sub(1, Ordering::AcqRel);
-        true
+            .map(|mpsc::SendError(job)| (job.req, job.reply))
     }
 }
 
@@ -246,14 +225,6 @@ mod tests {
         (Readers::spawn(replicas, &loop_tx), loop_rx)
     }
 
-    fn wait_idle(readers: &Readers, expected: usize) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while readers.idle.load(Ordering::Acquire) != expected {
-            assert!(std::time::Instant::now() < deadline, "readers never idled");
-            std::thread::yield_now();
-        }
-    }
-
     /// A reader answers; a panic fails only its own request and the reader
     /// keeps serving; a request it cannot answer goes back to the loop.
     #[test]
@@ -281,14 +252,12 @@ mod tests {
             failed.error.map(|e| e.message),
             Some("request panicked: replica panicked".to_string())
         );
-        wait_idle(&readers, READERS);
 
         for _ in 0..READERS + 1 {
             let (reply, answer) = mpsc::channel();
             assert!(readers.offer(search(), reply).is_none());
             let answered = answer.recv_timeout(Duration::from_secs(5)).unwrap();
             assert_eq!(answered.result.unwrap()["from"], "replica");
-            wait_idle(&readers, READERS);
         }
 
         let (reply, _answer) = mpsc::channel();
@@ -299,36 +268,36 @@ mod tests {
         assert_eq!(req, Request::Status {});
     }
 
-    /// Past `READERS` reads in progress, `offer` gives the request back for
-    /// the writer instead of queueing it behind a reader.
+    /// At most `READERS` reads run at once: one more waits for a reader to
+    /// finish, then is answered by it, never by the busy writer.
     #[test]
-    fn offer_should_give_back_a_read_when_every_reader_is_busy() {
+    fn a_read_past_the_reader_count_should_wait_for_a_free_reader() {
         let (release_tx, release_rx) = mpsc::channel();
         let release = Arc::new(Mutex::new(release_rx));
-        let (readers, _loop_rx) = pool(&release);
+        let (readers, loop_rx) = pool(&release);
         let mut held = Vec::new();
         for _ in 0..READERS {
             let (reply, answer) = mpsc::channel();
             assert!(readers.offer(targets(), reply).is_none());
             held.push(answer);
         }
-        let (reply, _answer) = mpsc::channel();
-        let Some((req, _reply)) = readers.offer(search(), reply) else {
-            panic!("a third read reached a reader with both busy");
-        };
-        assert_eq!(req, search());
-        for _ in 0..READERS {
-            release_tx.send(()).unwrap();
-        }
+        let (reply, answer) = mpsc::channel();
+        assert!(readers.offer(search(), reply).is_none());
+        assert!(
+            answer.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a third read ran with both readers busy"
+        );
+        release_tx.send(()).unwrap();
+        let answered = answer.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(answered.result.unwrap()["from"], "replica");
+        assert!(
+            loop_rx.try_recv().is_err(),
+            "nothing went back to the writer"
+        );
+        release_tx.send(()).unwrap();
         for answer in held {
             assert!(answer.recv_timeout(Duration::from_secs(5)).unwrap().ok);
         }
-        wait_idle(&readers, READERS);
-        let (reply, _answer) = mpsc::channel();
-        assert!(
-            readers.offer(search(), reply).is_none(),
-            "a freed reader takes work again"
-        );
     }
 
     #[test]
