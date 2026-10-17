@@ -79,6 +79,7 @@ fn hook_as(
     command
         .current_dir(root)
         .env("PIXEL_METRICS", "0")
+        .env("CODEX_THREAD_ID", "inherited-session-must-not-win")
         .env_remove("PIXEL_BRIEF")
         .env_remove("PIXEL_BRIEF_LOG")
         .env("PIXEL_BRIEF_PACK", "0")
@@ -180,6 +181,26 @@ fn a_turn_should_join_what_the_brief_injected_to_what_the_agent_read_before_answ
     let prompts = of_kind(&lines, "prompt");
     assert_eq!(prompts.len(), 1, "{lines:?}");
     let prompt = prompts[0];
+    for line in &lines {
+        assert_eq!(line["provenance"]["schema_version"], 1);
+        assert_eq!(line["provenance"]["source"], "hook");
+        assert_eq!(line["provenance"]["provider"], "codex");
+        assert_eq!(line["provenance"]["session"], line["session"]);
+        assert_eq!(
+            line["provenance"]["build_commit"],
+            env!("PIXEL_BUILD_COMMIT")
+        );
+        assert!(line["provenance"]["invocation_id"].as_str().is_some());
+    }
+    let decisions = std::fs::read_to_string(root.join(".pixel/brief-decisions.jsonl")).unwrap();
+    let decision: Value = decisions
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|line| line["provenance"]["invocation_id"] == prompt["provenance"]["invocation_id"])
+        .unwrap();
+    assert_eq!(decision["provenance"]["session"], prompt["session"]);
+    assert_eq!(decision["provenance"]["source"], "brief");
+    assert!(!decisions.contains(SESSION));
     assert!(prompt["bytes"].as_u64().unwrap() > 0, "{prompt}");
     assert_eq!(prompt["gate"], "unjudged");
     assert!(

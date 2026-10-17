@@ -61,6 +61,13 @@ impl Fixture {
         assert_output_eq(&native, &routed, &format!("{tool} {args:?}"));
         if backend == "pixel" {
             let log = std::fs::read_to_string(self.0.join(".pixel/actions.jsonl")).unwrap();
+            let record: serde_json::Value =
+                serde_json::from_str(log.lines().last().unwrap()).unwrap();
+            assert_eq!(record["provenance"]["source"], "cli");
+            assert_eq!(
+                record["provenance"]["invocation_id"],
+                record["invocation_id"]
+            );
             assert!(
                 log.contains("backend=pixel"),
                 "Pixel backend not observed: {log}"

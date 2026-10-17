@@ -83,6 +83,7 @@ pub(crate) struct Prompt<'a> {
 /// The `prompt` line.
 pub(crate) fn prompt_line(ts_ms: u64, prompt: &Prompt) -> String {
     json!({
+        "provenance": crate::usage_journal::provenance("hook"),
         "t": "prompt", "ts": ts_ms, "session": session_key(prompt.session),
         "provider": prompt.provider, "prompt": prompt.prompt,
         "decision": prompt.decision, "gate": prompt.gate, "kind": prompt.kind,
@@ -103,6 +104,7 @@ pub(crate) fn part_line(
     (bytes, late): (usize, bool),
 ) -> String {
     json!({
+        "provenance": crate::usage_journal::provenance("hook"),
         "t": "part", "ts": ts_ms, "session": session_key(session), "provider": provider,
         "prompt": prompt, "part": index, "of": count, "bytes": bytes, "late": late,
     })
@@ -119,6 +121,7 @@ pub(crate) fn tool_line(
     paths: &[String],
 ) -> String {
     json!({
+        "provenance": crate::usage_journal::provenance("hook"),
         "t": "tool", "ts": ts_ms, "session": session_key(session), "provider": provider,
         "tool": tool.chars().take(MAX_TOOL_CHARS).collect::<String>(),
         "write": write, "paths": paths.iter().take(MAX_PATHS).collect::<Vec<_>>(),
@@ -132,7 +135,7 @@ pub(crate) fn tool_line(
 pub(crate) fn stop_lines(existing: &str, ts_ms: u64, session: &str, provider: &str) -> Vec<String> {
     let key = session_key(session);
     let mut lines =
-        vec![json!({"t": "stop", "ts": ts_ms, "session": key, "provider": provider}).to_string()];
+        vec![json!({"provenance": crate::usage_journal::provenance("hook"), "t": "stop", "ts": ts_ms, "session": key, "provider": provider}).to_string()];
     if let Some(turn) = turn_summary(existing, &key, ts_ms) {
         lines.push(turn.to_string());
     }
@@ -205,6 +208,7 @@ pub(crate) fn turn_summary(existing: &str, key: &str, ts_ms: u64) -> Option<Valu
         .filter(|path| read.contains(path) || edited.contains(path))
         .collect();
     Some(json!({
+        "provenance": crate::usage_journal::provenance("hook"),
         "t": "turn", "ts": ts_ms, "session": key,
         "provider": prompt["provider"], "prompt": prompt["prompt"],
         "decision": prompt["decision"], "gate": prompt["gate"], "kind": prompt["kind"],

@@ -220,7 +220,9 @@ impl Record {
 
     /// The record as one line, without its newline.
     pub(crate) fn line(&self) -> String {
-        self.to_json().to_string()
+        let mut value = self.to_json();
+        value["provenance"] = serde_json::json!(crate::usage_journal::provenance("brief"));
+        value.to_string()
     }
 }
 
@@ -479,7 +481,11 @@ mod tests {
         let line = noisy.line();
         assert!(!line.contains('\n'), "{line}");
         let back: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(back, noisy.to_json());
+        assert_eq!(back["provenance"]["schema_version"], 1);
+        assert_eq!(back["provenance"]["source"], "brief");
+        let mut fields = back.clone();
+        fields.as_object_mut().unwrap().remove("provenance");
+        assert_eq!(fields, noisy.to_json());
         assert_eq!(back["typed"], "two\nlines \"quoted\"");
     }
 

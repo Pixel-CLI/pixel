@@ -228,6 +228,40 @@ Machine-wide:
   (else `~/.cache/pixel/sockets/`), named
   `pixel-<xxh3 of canonical repo path>.sock`, `.pid` and `.lock`.
 
+### Local usage journal provenance
+
+`actions.jsonl`, `brief-decisions.jsonl` and `brief-feedback.jsonl` carry an
+additive `provenance` object (`usage_journal.rs`): `schema_version: 1`,
+`pixel_version`, `build_commit`, `build_dirty` (null when unknown), `source`
+(`cli`, `plugin`, `brief`, `hook`) and `invocation_id`. The identity is shared
+by all records produced by one CLI process, including its brief worker
+threads; action records retain the same top-level `invocation_id` for existing
+readers. Feedback may have several event kinds per invocation: deduplicate
+those by invocation and `t`, not invocation alone. A turn summary's provenance
+identifies the Stop process; its existing `prompt` and `session` identify the
+turn it summarizes. Existing task/attempt/span correlations remain unchanged.
+
+Native hooks bind their explicit provider and SHA-256 session pseudonym
+(the same first 16 hex digits as feedback) before starting workers. Ordinary
+CLI and plugin invocations use `CODEX_THREAD_ID` when present, hashed identically;
+otherwise provider/session are absent. An explicit hook payload takes precedence
+over inherited Codex environment. No session is inferred from the latest task
+or log line. A decision can be joined to feedback by invocation even when no
+session is known. Older records without provenance remain readable and their
+build/context is unknown, never attributed to the current binary.
+
+This is partial usage observation, not an exhaustive audit: hooks exit through
+their own feedback path, native search fallback writes no action, and help,
+argument-parse errors or killed processes may have no record. Core, plugin and
+Pixel-backed compatibility-search actions use the existing bounded 300 ms
+`finish_flush` before exit; disk errors or a timeout may still lose records.
+Retention and opt-outs are unchanged. No raw host ID, new prompt/output content
+or network telemetry is added. Producers are the three CLI action paths, brief
+`Record::line`, and feedback's prompt/part/tool/stop/turn serializers. Consumers
+are the telemetry plugin, hook metrics, retrospective scripts and task analysis;
+all existing fields keep their meaning. The durable task journal has its own
+versioned contract and is not rewritten by this observational metadata.
+
 ## Daemon and wire contract
 
 `pixel-daemon` exposes one function that matters: `Service::handle(Op) ->

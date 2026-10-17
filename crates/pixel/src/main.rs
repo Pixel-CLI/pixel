@@ -78,6 +78,7 @@ mod task_prepare;
 mod task_route;
 mod task_runtime;
 mod task_verify;
+mod usage_journal;
 use task_commands::TaskCmd;
 
 mod select;
@@ -4036,7 +4037,7 @@ fn run() -> Result<(), String> {
         Some(code) if code != 0 => Err(format!("{command_label} exited {code}")),
         _ => result.clone(),
     };
-    let mut event = pixel_actionlog::ActionEvent::new(&command_label, logged_args(&argv[1..]))
+    let mut event = usage_journal::action(&command_label, logged_args(&argv[1..]), "cli")
         .with_result(&logged_result, elapsed);
     if let Ok(root) = &root
         && let Some(correlation) = task_commands::action_correlation(root)

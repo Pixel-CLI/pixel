@@ -556,6 +556,16 @@ fn a_plugin_run_is_in_the_action_log_like_a_core_command_with_its_outcome_and_ma
     assert_eq!(second["outcome"], "error");
     assert_eq!(second["error"], "plan-rollback exited 7");
     for record in &log {
+        assert_eq!(record["provenance"]["schema_version"], 1);
+        assert_eq!(record["provenance"]["source"], "plugin");
+        assert_eq!(
+            record["provenance"]["build_commit"],
+            env!("PIXEL_BUILD_COMMIT")
+        );
+        assert_eq!(
+            record["provenance"]["invocation_id"],
+            record["invocation_id"]
+        );
         assert_eq!(
             record["cwd"],
             world.repo().canonicalize().unwrap().display().to_string(),

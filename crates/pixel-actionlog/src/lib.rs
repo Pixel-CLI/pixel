@@ -26,7 +26,7 @@ mod metrics;
 mod serve;
 pub use metrics::{
     ComparisonGap, OperationMetrics, WorkflowEvidence, WorkflowTimeEstimate, format_metrics_line,
-    read_tokens, saved_percent, summarize_metrics,
+    invocation_id, read_tokens, saved_percent, summarize_metrics,
 };
 pub use serve::{InProcessReason, ServeRoute, ServeStep};
 
@@ -57,6 +57,9 @@ pub enum Outcome {
 /// One recorded pixel invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionEvent {
+    /// Producing binary and host context; absent in historical or external records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
     /// Correlates one invocation, never a global latest-operation pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
@@ -90,6 +93,22 @@ pub struct ActionEvent {
     pub serve: Vec<ServeStep>,
 }
 
+/// Shared provenance for local usage journals; missing context means unknown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Provenance {
+    pub schema_version: u32,
+    pub pixel_version: String,
+    pub build_commit: String,
+    pub build_dirty: Option<bool>,
+    pub source: String,
+    pub invocation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Same pseudonym as brief feedback, never the host's raw session ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
 /// Links an invocation to the durable task ledger without changing legacy records.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskCorrelation {
@@ -105,6 +124,7 @@ pub struct TaskCorrelation {
 impl ActionEvent {
     pub fn new(command: impl Into<String>, args: impl Into<String>) -> Self {
         ActionEvent {
+            provenance: None,
             invocation_id: Some(metrics::invocation_id()),
             task: None,
             metrics: None,

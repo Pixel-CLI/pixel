@@ -698,6 +698,14 @@ the later threats hold.
 
 ### T15. Secrets at rest on the machine (I)
 
+Local usage journals also carry build/source/invocation provenance. Native hook
+session IDs and `CODEX_THREAD_ID` are stored only as the existing feedback
+pseudonym (first 16 hex digits of SHA-256), never raw. These stable hashes allow
+local correlation and are pseudonyms, not anonymization; no network sink is
+introduced. Missing host context stays absent. File permissions, redaction and
+retention remain those described below.
+
+
 - **Scenario**: another local user, a backup, or a sync tool reads stored
   keys, flow fill values, transcripts or `.env` copies.
 - **Mitigation**: `~/.pixel/config.yaml` is written 0600

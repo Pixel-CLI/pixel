@@ -300,7 +300,7 @@ fn log_run(name: &str, argv: &[String], root: &Path, code: i32, elapsed: Duratio
     } else {
         Err(format!("{name} exited {code}"))
     };
-    let mut event = pixel_actionlog::ActionEvent::new(name, crate::logged_args(&argv[1..]))
+    let mut event = crate::usage_journal::action(name, crate::logged_args(&argv[1..]), "plugin")
         .with_result(&result, elapsed);
     if let Some(correlation) = crate::task_commands::action_correlation(root) {
         event = event.with_task(correlation);

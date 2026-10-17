@@ -66,7 +66,8 @@ impl ComparisonGap {
 
 static INVOCATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn invocation_id() -> String {
+/// Allocate a process/time/sequence identity for one invocation.
+pub fn invocation_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
