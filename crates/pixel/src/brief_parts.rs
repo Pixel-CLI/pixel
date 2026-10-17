@@ -238,6 +238,8 @@ pub(crate) fn mark_done_missing_head(path: &Path) {
 
 fn mark_done_with_status(path: &Path, status: &[u8]) {
     let _ = refuse_linked_dirs(path).and_then(|()| {
+        let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        fs::create_dir_all(dir)?;
         pixel_git::nofollow::write_replace(
             &done_path(path),
             status,

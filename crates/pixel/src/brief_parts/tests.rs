@@ -610,6 +610,10 @@ fn a_missing_head_marker_waits_for_a_brief_stored_after_the_marker() {
     let root = scratch("missing-head-late-brief");
     let path = cache_path(&root, Some("s"), "p");
     mark_done_missing_head(&path);
+    assert!(
+        done_missing_head(&path),
+        "marker is written before the brief"
+    );
 
     let writer_path = path.clone();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
