@@ -73,11 +73,12 @@ const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
 const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
 
 /// A prompt the harness submitted on the user's behalf: a background-task
-/// `<task-notification>`, a slash-command or local-command wrapper, or
-/// nothing but `<system-reminder>` blocks. It must neither rewrite the task
-/// packet nor open a boundary. Only the opening counts (after any leading
-/// reminders), so a human prompt that quotes an envelope mid-text is still a
-/// prompt; the prefixes are recall's, so both classifiers agree.
+/// `<task-notification>`, a slash-command or local-command wrapper, one of
+/// Codex's `<realtime_delegation>` and `<send_user_message_question_reply>`
+/// envelopes, or nothing but `<system-reminder>` blocks. It must neither
+/// rewrite the task packet nor open a boundary. Only the opening counts (after
+/// any leading reminders), so a human prompt that quotes an envelope mid-text
+/// is still a prompt; the prefixes are recall's, so both classifiers agree.
 fn is_harness_envelope(prompt: &str) -> bool {
     let mut rest = prompt.trim_start();
     while let Some(after) = rest.strip_prefix(SYSTEM_REMINDER_OPEN) {
@@ -135,8 +136,53 @@ mod tests {
             "<command-message>review</command-message>",
             "<local-command-caveat>Caveat: generated locally</local-command-caveat>",
             "<local-command-stdout>ok</local-command-stdout>",
+            "<realtime_delegation><input>where is x</input></realtime_delegation>",
+            "<send_user_message_question_reply>[]</send_user_message_question_reply>",
         ] {
             assert!(is_harness_envelope(prompt), "{prompt}");
+            assert!(is_trivial_continuation(prompt), "{prompt}");
+        }
+    }
+
+    /// Codex's two envelopes, with an identifier in the body that would make
+    /// either one a code-shaped prompt.
+    fn codex_envelopes() -> [String; 2] {
+        [
+            [
+                "<realtime_delegation>",
+                "  <input>where is fetchUser</input>",
+                "</realtime_delegation>",
+            ]
+            .join("\n"),
+            [
+                "<send_user_message_question_reply>",
+                "[{\"question\":\"where is fetchUser\",\"answer\":\"src/api.rs\"}]",
+                "</send_user_message_question_reply>",
+            ]
+            .join("\n"),
+        ]
+    }
+
+    #[test]
+    fn codex_envelopes_are_continuations_whatever_precedes_them() {
+        for envelope in codex_envelopes() {
+            for prompt in [
+                envelope.clone(),
+                format!("  \n{envelope}"),
+                format!("<system-reminder>ctx</system-reminder>\n{envelope}"),
+                format!(
+                    "<system-reminder>a</system-reminder>\n<system-reminder>b</system-reminder>{envelope}"
+                ),
+            ] {
+                assert!(is_harness_envelope(&prompt), "{prompt}");
+                assert!(is_trivial_continuation(&prompt), "{prompt}");
+            }
+        }
+        // A tag that carries an attribute is the same envelope.
+        for prompt in [
+            "<realtime_delegation id=\"rt-1\">x</realtime_delegation>",
+            "<send_user_message_question_reply id=\"q-1\">[]</send_user_message_question_reply>",
+        ] {
             assert!(is_trivial_continuation(prompt), "{prompt}");
         }
     }
@@ -149,6 +195,9 @@ mod tests {
             "<system-reminder>ctx</system-reminder>\nfix the login bug",
             "<system-reminder>ctx</system-reminder>fix auth",
             "implement <command-name> parsing",
+            "fix the hook: a <realtime_delegation> prompt starts a brief",
+            "why does send_user_message_question_reply reach the brief",
+            "<system-reminder>ctx</system-reminder>\nwhere is fetchUser, a <realtime_delegation> says",
         ] {
             assert!(!is_harness_envelope(prompt), "{prompt}");
             assert!(!is_trivial_continuation(prompt), "{prompt}");

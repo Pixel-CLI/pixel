@@ -2967,6 +2967,76 @@ mod tests {
     }
 
     #[test]
+    fn ruby_fuzz_references_should_stay_inside_their_enclosing_symbols() {
+        // Saved graph_extract crash from Actions run 38576137492 (#942).
+        let source = b"require_relative \"base\"\nmtruct Point\"base\"\nmodule Billing\n  class Invoice < ApplicanetionRecord\n   alias has_many :\x9a\xdfself.build(attrs) = newng\n la css Invoice < ApplicationReco]d\n   alias has_m;any :\x9a\xdfself.build(attrs) = new(attrs).tap(&>save!)\n  end\nend\n";
+        let extraction = extract_file("src/fuzz.rb", source).unwrap();
+        let references: Vec<_> = extraction
+            .references
+            .iter()
+            .map(|reference| {
+                (
+                    reference.name.as_str(),
+                    reference.site_line,
+                    reference
+                        .enclosing_index
+                        .map(|index| extraction.symbols[index].qualified.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            references,
+            [
+                ("��self", 5, Some("Billing::Invoice#has_many")),
+                ("attrs", 7, Some("Billing")),
+            ]
+        );
+        for reference in &extraction.references {
+            if let Some(index) = reference.enclosing_index {
+                let symbol = &extraction.symbols[index];
+                assert!(
+                    (symbol.start_line..=symbol.end_line).contains(&reference.site_line),
+                    "reference {reference:?} outside {symbol:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ruby_incomplete_alias_should_not_reassign_an_earlier_reference() {
+        let source = [
+            "class Model",
+            "  alias first :target",
+            "  alias second; nil",
+            "end",
+            "",
+        ]
+        .join("\n");
+        let extraction = extract_file("model.rb", source.as_bytes()).unwrap();
+        let methods: Vec<_> = extraction
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == SymbolKind::Method)
+            .map(|symbol| symbol.qualified.as_str())
+            .collect();
+        assert_eq!(methods, ["Model#first"]);
+        let references: Vec<_> = extraction
+            .references
+            .iter()
+            .map(|reference| {
+                (
+                    reference.name.as_str(),
+                    reference.site_line,
+                    reference
+                        .enclosing_index
+                        .map(|index| extraction.symbols[index].qualified.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(references, [("target", 2, Some("Model#first"))]);
+    }
+
+    #[test]
     fn typescript_arrow_and_function_expression_declarators_are_symbols() {
         let source =
             b"const arrow = () => 1;\nconst expr = function () { return 2; };\nconst value = 3;\n";

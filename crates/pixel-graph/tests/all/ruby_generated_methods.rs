@@ -248,6 +248,45 @@ fn assert_navigation(root: &Path) {
 }
 
 #[test]
+fn ruby_incomplete_alias_should_preserve_the_previous_edge_in_full_and_incremental_builds() {
+    let root = tempfile::tempdir().unwrap();
+    let path = "model.rb";
+    let source = [
+        "class Model",
+        "  def target; end",
+        "  alias first :target",
+        "  alias second; nil",
+        "end",
+        "",
+    ]
+    .join("\n");
+    fs::write(root.path().join(path), &source).unwrap();
+    let db = root.path().join("graph.db");
+    let assert_alias = || {
+        let store = GraphStore::open_read_only(&db).unwrap();
+        assert_eq!(
+            edges_into(&store, "model.rb#Model#target#method", EdgeKind::References),
+            [("Model#first".to_string(), Tier::Probable)]
+        );
+        assert_eq!(store.symbols_by_name("second", None, 10).unwrap().len(), 0);
+        let unresolved: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM unresolved_calls WHERE name = 'second'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved, 0, "the incomplete alias is not a call either");
+    };
+    build_graph(root.path(), &db).unwrap();
+    assert_alias();
+    fs::write(root.path().join(path), format!("# editing\n{source}")).unwrap();
+    update_file(root.path(), &db, path).unwrap();
+    assert_alias();
+}
+
+#[test]
 fn ruby_generated_methods_should_be_navigable_after_full_and_incremental_builds() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("app/models/admin")).unwrap();

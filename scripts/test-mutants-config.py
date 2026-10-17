@@ -531,14 +531,16 @@ class MutantsGateReport(unittest.TestCase):
         "Vec<(String, u64)> with vec![]\n"
     )
 
-    def test_a_diff_that_produced_mutants_is_reported_as_tested(self):
+    def test_a_listing_alone_should_not_claim_the_mutants_were_tested(self):
         result = self.run_gate(
             self.diff_touching("crates/pixel-graph/src/build.rs"),
             self.MUTANT_LINE * 10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("**mutants tested:** 10", result.stdout)
-        self.assertIn("`tested`", result.stdout)
+        self.assertIn("**mutants listed:** 10", result.stdout)
+        self.assertIn("`planned`", result.stdout)
+        self.assertNotIn("**mutants tested:**", result.stdout)
+        self.assertNotIn("`tested`", result.stdout)
         self.assertNotIn("::warning", result.stdout)
 
     def test_rust_changed_with_zero_mutants_is_reported_as_vacuous(self):
@@ -546,7 +548,7 @@ class MutantsGateReport(unittest.TestCase):
         result = self.run_gate(
             self.diff_touching("crates/pixel-graph/src/build.rs"), ""
         )
-        self.assertIn("**mutants tested:** 0", result.stdout)
+        self.assertIn("**mutants listed:** 0", result.stdout)
         self.assertIn("`vacuous`", result.stdout)
         self.assertIn("proves nothing", result.stdout)
         self.assertIn("crates/pixel-graph/src/build.rs", result.stdout)
@@ -808,8 +810,10 @@ class ShardedMutantsGate(unittest.TestCase):
             ],
         )
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("4 judged: 3 caught, 0 missed, 0 timeout, 1 unviable", result.stdout)
+        self.assertIn("4 recorded: 3 caught, 0 missed, 0 timeout, 1 unviable", result.stdout)
         self.assertIn("**gate:** passed", result.stdout)
+        self.assertIn("**verdict:** `tested`", result.stdout)
+        self.assertIn("All 4 listed mutants have complete outcomes.", result.stdout)
 
     def test_a_single_shard_extracted_at_the_root_is_totalled(self):
         """`download-artifact` puts a lone matching artifact straight into its path.
@@ -823,7 +827,7 @@ class ShardedMutantsGate(unittest.TestCase):
             self.write_shard(Path(tmp), "shards", "CaughtMutant", "Unviable")
             result, _ = self.run_gate(2, "--outcomes-root", f"{tmp}/shards")
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("2 judged: 1 caught, 0 missed, 0 timeout, 1 unviable", result.stdout)
+        self.assertIn("2 recorded: 1 caught, 0 missed, 0 timeout, 1 unviable", result.stdout)
 
     def test_a_survivor_in_any_shard_fails_the_gate_and_is_named(self):
         for summary, label in (("MissedMutant", "MISSED"), ("Timeout", "TIMEOUT")):
@@ -840,6 +844,7 @@ class ShardedMutantsGate(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(f"{label} crates/pixel/src/main.rs:2:5: mutants-out-1 #2", result.stdout)
                 self.assertIn("::error title=Mutation gate failed::", result.stdout)
+                self.assertIn("**verdict:** `tested`", result.stdout)
 
     def test_an_outcome_the_gate_does_not_know_fails_closed(self):
         """A summary a later cargo-mutants adds must not count as caught."""
@@ -853,6 +858,7 @@ class ShardedMutantsGate(unittest.TestCase):
         self.assertIn("1 mutant(s) ended with an outcome the gate does not know (Failure)", result.stdout)
         self.assertIn("FAILURE crates/pixel/src/main.rs:2:5: mutants-out-0 #2", result.stdout)
         self.assertIn("**gate:** failed", result.stdout)
+        self.assertIn("**verdict:** `incomplete`", result.stdout)
 
     def test_a_shard_that_left_no_outcomes_fails_the_gate(self):
         """Two shards caught everything they ran; the third never reported."""
@@ -867,6 +873,9 @@ class ShardedMutantsGate(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("6 mutant(s) listed, 4 reached a verdict", result.stdout)
+        self.assertIn("**mutants listed:** 6", result.stdout)
+        self.assertIn("**verdict:** `incomplete`", result.stdout)
+        self.assertNotIn("**mutants tested:**", result.stdout)
 
     def test_a_shard_whose_baseline_failed_counts_as_unjudged(self):
         result, _ = self.run_gate(
@@ -874,6 +883,16 @@ class ShardedMutantsGate(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("2 mutant(s) listed, 0 reached a verdict", result.stdout)
+        self.assertIn("**verdict:** `incomplete`", result.stdout)
+
+    def test_outcomes_for_an_empty_listing_are_incomplete_not_vacuous(self):
+        result, _ = self.run_gate(
+            0, "--outcomes-root", "{root}/shards",
+            shards=[("mutants-out-0", ("CaughtMutant",))],
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("**mutants listed:** 0", result.stdout)
+        self.assertIn("**verdict:** `incomplete`", result.stdout)
 
     def test_the_baseline_is_not_counted_as_a_mutant(self):
         """Counting it would turn every complete run into a mismatch."""
@@ -884,7 +903,7 @@ class ShardedMutantsGate(unittest.TestCase):
             shards=[("mutants-out-0", ("CaughtMutant",))],
         )
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("1 judged", result.stdout)
+        self.assertIn("1 recorded", result.stdout)
 
     def test_an_unviable_mutant_whose_build_ran_out_of_disk_was_never_judged(self):
         """PR #222's run filled the runner's disk at its 101st mutant.
@@ -909,10 +928,11 @@ class ShardedMutantsGate(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn(
-            "3 judged: 1 caught, 0 missed, 0 timeout, 1 unviable, 1 disk-full", result.stdout
+            "3 recorded: 1 caught, 0 missed, 0 timeout, 1 unviable, 1 disk-full", result.stdout
         )
         self.assertIn("1 mutant(s) reported unviable because the runner's disk filled up", result.stdout)
         self.assertIn("DISK-FULL crates/pixel/src/main.rs:3:5: mutants-out-0 #3", result.stdout)
+        self.assertIn("**verdict:** `incomplete`", result.stdout)
         self.assertNotIn("#2", result.stdout)
 
     def test_an_unviable_mutant_without_a_log_stays_unviable(self):
@@ -921,7 +941,7 @@ class ShardedMutantsGate(unittest.TestCase):
             1, "--outcomes-root", "{root}/shards", shards=[("mutants-out-0", ("Unviable",))]
         )
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("1 judged: 0 caught, 0 missed, 0 timeout, 1 unviable, 0 disk-full", result.stdout)
+        self.assertIn("1 recorded: 0 caught, 0 missed, 0 timeout, 1 unviable, 0 disk-full", result.stdout)
 
     @unittest.skipUnless(
         os.environ.get("MUTANTS_REPLAY_PR222"),
