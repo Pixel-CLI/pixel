@@ -250,6 +250,14 @@ edits made meanwhile raised no event. The daemon exits after
 thirty minutes idle; the brief's hooks start it again when they find none
 (see "Agent integration").
 
+A panic in a request handler is caught around `Corpus::handle` and becomes a
+failure envelope (`request panicked: <message>`) for that one request; the
+index and publication locks it may have poisoned recover on their next
+acquisition (`api::RecoverLock`). Both stay consistent through a panic:
+the index is swapped by one assignment and a publication is marked
+unhealthy before work that can fail. A panic outside a request still ends
+the loop, and `ReleaseOnExit` then removes the socket, pid and lock files.
+
 Two version numbers exist and must not be conflated:
 
 - `pixel_proto::ENVELOPE_PROTOCOL_VERSION`: the envelope schema (`protocol`

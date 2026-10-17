@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -203,6 +203,27 @@ fn classify_error(msg: &str) -> ErrorCode {
 fn code_named_in_prefix(msg: &str) -> Option<ErrorCode> {
     let (head, _) = msg.split_once(':')?;
     serde_json::from_str(&format!("\"{}\"", head.trim())).ok()
+}
+
+/// Lock acquisition that survives a poisoned lock. A request that panicked
+/// while holding the index or publication lock poisons it, and an `expect`
+/// on every later acquisition turned that one failed answer into a daemon
+/// that panics on every request. Both guarded values stay consistent across
+/// a panic: the index is replaced by a single assignment, and a publication
+/// is marked unhealthy before any work that can fail, so a recovered lock
+/// at worst answers "unhealthy; retry after refresh".
+pub(crate) trait RecoverLock<T> {
+    fn read_or_recover(&self) -> RwLockReadGuard<'_, T>;
+    fn write_or_recover(&self) -> RwLockWriteGuard<'_, T>;
+}
+
+impl<T> RecoverLock<T> for RwLock<T> {
+    fn read_or_recover(&self) -> RwLockReadGuard<'_, T> {
+        self.read().unwrap_or_else(PoisonError::into_inner)
+    }
+    fn write_or_recover(&self) -> RwLockWriteGuard<'_, T> {
+        self.write().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// Build a failure envelope from a plain error string (the shape `dispatch`
@@ -471,7 +492,7 @@ impl Service {
         limit: usize,
     ) -> (Publication, Result<Value, String>) {
         let publication = Arc::clone(&self.publication);
-        let state = publication.read().expect("publication lock poisoned");
+        let state = publication.read_or_recover();
         if !state.healthy {
             return (
                 *state,
@@ -524,7 +545,7 @@ impl Service {
     }
 
     pub(crate) fn admitted_paths(&self) -> Vec<String> {
-        self.index.read().expect("index lock poisoned").paths()
+        self.index.read_or_recover().paths()
     }
 
     pub fn graph_db_path(&self) -> PathBuf {
@@ -552,13 +573,9 @@ impl Service {
         // snapshot's dirty list is stale as of right now.
         self.snapshot_cache = None;
         let publication = Arc::clone(&self.publication);
-        let mut state = publication.write().expect("publication lock poisoned");
+        let mut state = publication.write_or_recover();
         state.healthy = false;
-        let graph_changes = self
-            .index
-            .write()
-            .expect("index lock poisoned")
-            .refresh_files(files);
+        let graph_changes = self.index.write_or_recover().refresh_files(files);
         let graph_files: Vec<(&str, bool)> = graph_changes
             .iter()
             .map(|(path, outcome)| (path.as_str(), *outcome == RefreshOutcome::Excluded))
@@ -597,7 +614,7 @@ impl Service {
     /// answers for: what a watch registered late must re-read besides
     /// `git status`.
     pub(crate) fn index_catch_up(&self) -> (Option<String>, BTreeSet<String>) {
-        let index = self.index.read().expect("index lock poisoned");
+        let index = self.index.read_or_recover();
         (
             index.opened_head().map(str::to_owned),
             index.overlay_paths(),
@@ -635,7 +652,7 @@ impl Service {
             );
         }
         let publication = Arc::clone(&self.publication);
-        let mut state = publication.write().expect("publication lock poisoned");
+        let mut state = publication.write_or_recover();
         state.healthy = false;
         let result = self.ensure_graph_inner();
         if result.is_ok() {
@@ -1310,8 +1327,7 @@ impl Service {
             const RANK_CANDIDATE_CAP: usize = SEARCH_MAX_ROWS;
             let (pool, pool_stats) = self
                 .index
-                .read()
-                .expect("index lock poisoned")
+                .read_or_recover()
                 .search_page_filtered(pattern, 0, Some(RANK_CANDIDATE_CAP), paths, filter)
                 .map_err(|e| e.to_string())?;
             if pool_stats.truncated {
@@ -1343,8 +1359,7 @@ impl Service {
             (ranked_pool[start..].to_vec(), stats)
         } else {
             self.index
-                .read()
-                .expect("index lock poisoned")
+                .read_or_recover()
                 .search_page_filtered(pattern, offset, Some(row_limit), paths, filter)
                 .map_err(|e| e.to_string())?
         };
@@ -1498,7 +1513,7 @@ impl Service {
     ) -> Result<Value, String> {
         let limit = limit.unwrap_or(pixel_rank::DEFAULT_LIMIT);
         let publication = Arc::clone(&self.publication);
-        let state = publication.read().expect("publication lock poisoned");
+        let state = publication.read_or_recover();
         let unavailable = |reason| {
             serde_json::to_value(TargetsFactsResult::Unavailable { reason })
                 .map_err(|error| error.to_string())
@@ -1555,7 +1570,7 @@ impl Service {
             // The same gate and inputs as the full answer; the ranking of
             // targets, the part of the work a gate on relevance does not read,
             // is skipped.
-            let index = self.index.read().expect("index lock poisoned");
+            let index = self.index.read_or_recover();
             relevance::facts_of_relevance_only(&index, self.graph.as_ref(), task)?
         } else {
             self.op_targets_mode(task, Some(limit), None, false, true, false)?
@@ -1608,10 +1623,7 @@ impl Service {
             &query.keywords,
             engine::expand_keywords(&query.keywords, query.language),
         );
-        let probes = probe_content(
-            &self.index.read().expect("index lock poisoned"),
-            &probe_keywords,
-        );
+        let probes = probe_content(&self.index.read_or_recover(), &probe_keywords);
         if profile {
             eprintln!("TGT probes {}us", last.elapsed().as_micros());
             last = Instant::now();
@@ -1689,7 +1701,7 @@ impl Service {
             } else {
                 None
             };
-            let index = self.index.read().expect("index lock poisoned");
+            let index = self.index.read_or_recover();
             Some(relevance::relevance_for(
                 &index,
                 graph,
@@ -1815,13 +1827,7 @@ impl Service {
             if !fact_mode {
                 stats["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
             }
-            stats["commit_oid"] = json!(
-                self.index
-                    .read()
-                    .expect("index lock poisoned")
-                    .status()
-                    .commit_oid
-            );
+            stats["commit_oid"] = json!(self.index.read_or_recover().status().commit_oid);
         }
         // The regular targets command owns an enforcement manifest and keeps
         // its legacy closed-list explanation. Fact packets never enforce a
@@ -2690,7 +2696,7 @@ impl Service {
             return self.op_graph_if_stale();
         }
         let publication = Arc::clone(&self.publication);
-        let mut state = publication.write().expect("publication lock poisoned");
+        let mut state = publication.write_or_recover();
         state.healthy = false;
         let rebuilt = self.rebuild_graph();
         if rebuilt.is_ok() {
@@ -2883,10 +2889,7 @@ impl Service {
     }
 
     fn publication_generation(&self) -> u64 {
-        self.publication
-            .read()
-            .expect("publication lock poisoned")
-            .generation
+        self.publication.read_or_recover().generation
     }
 
     /// Replace the `meaning` index, so a test never loads the real model.
@@ -2896,7 +2899,7 @@ impl Service {
     }
 
     fn op_status(&mut self) -> Result<Value, String> {
-        let s = self.index.read().expect("index lock poisoned").status();
+        let s = self.index.read_or_recover().status();
         let db = self.graph_db_path();
         let graph = if db.exists() {
             match GraphStore::open(&db) {
@@ -2925,7 +2928,7 @@ impl Service {
                 "overlay_files": s.overlay_files,
                 "tombstones": s.tombstones,
                 "open": open_timings_json(
-                    self.index.read().expect("index lock poisoned").open_timings(),
+                    self.index.read_or_recover().open_timings(),
                 ),
             },
             "graph": graph,
@@ -2944,7 +2947,7 @@ impl Service {
     /// no concurrent build races because the daemon serializes requests).
     fn op_reindex(&mut self) -> Result<Value, String> {
         let publication = Arc::clone(&self.publication);
-        let mut state = publication.write().expect("publication lock poisoned");
+        let mut state = publication.write_or_recover();
         state.healthy = false;
         // Remove the existing shard so open_or_build is forced to rebuild.
         let gpx = self.root.join(pixel_index::index::SHARD_DIR);
@@ -2967,8 +2970,8 @@ impl Service {
                 return Err(error.to_string());
             }
         };
-        *self.index.write().expect("index lock poisoned") = new_index;
-        let s = self.index.read().expect("index lock poisoned").status();
+        *self.index.write_or_recover() = new_index;
+        let s = self.index.read_or_recover().status();
         state.publish();
         Ok(json!({
             "root": self.root.display().to_string(),

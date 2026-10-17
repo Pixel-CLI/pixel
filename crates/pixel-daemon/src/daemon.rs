@@ -447,6 +447,9 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
     let bound = socket_identity(&sock);
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
     std::fs::write(pid_path(&root), std::process::id().to_string())?;
+    // From here every way out of this function, a panic included, releases
+    // the socket, pid and lock files.
+    let _release = ReleaseOnExit([sock.clone(), pid_path(&root), lock_path.clone()]);
 
     let (tx, rx) = mpsc::channel::<Msg>();
     let stop = Arc::new(AtomicBool::new(false));
@@ -587,10 +590,20 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
     }
 
     let _ = stop_acceptor(&sock, bound, &stop, acceptor);
-    let _ = std::fs::remove_file(&sock);
-    let _ = std::fs::remove_file(pid_path(&root));
-    let _ = std::fs::remove_file(&lock_path);
     Ok(())
+}
+
+/// The files a running daemon owns, removed when the serving function ends:
+/// by returning, or by a panic unwinding out of the loop, which used to
+/// leave a socket nobody answered and a pid file naming a dead process.
+struct ReleaseOnExit([PathBuf; 3]);
+
+impl Drop for ReleaseOnExit {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Take the registered watch: keep its guard and let the corpus catch up on
@@ -802,7 +815,7 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
         let (resp, is_shutdown) = match serde_json::from_str::<Request>(trimmed) {
             Ok(req) => {
                 let is_shutdown = matches!(req, Request::Shutdown);
-                (service.handle(req), is_shutdown)
+                (answer(service, req), is_shutdown)
             }
             Err(e) => (
                 failure_response("error", format!("bad request: {e}")),
@@ -825,6 +838,32 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
             break;
         }
     }
+}
+
+/// One request's answer. A panic in the handler becomes a failure envelope
+/// naming it, instead of unwinding out of the loop and taking the daemon
+/// down; the locks it held recover on their next acquisition
+/// ([`crate::api::RecoverLock`]).
+fn answer(service: &mut dyn Corpus, req: Request) -> Response {
+    let op = req.op_name();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| service.handle(req))).unwrap_or_else(
+        |payload| {
+            failure_response(
+                op,
+                format!("request panicked: {}", panic_message(payload.as_ref())),
+            )
+        },
+    )
+}
+
+/// The text a panic was raised with (`panic!("...")` carries a `&str`, a
+/// formatted one a `String`).
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 enum ReadResult {
@@ -2024,6 +2063,130 @@ mod tests {
         assert_eq!(search_hits(&mut svc, "alphaNeedle"), 1);
         drop(svc);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A corpus whose first request panics and whose later ones answer.
+    struct PanicOnceCorpus {
+        root: PathBuf,
+        panicked: AtomicBool,
+    }
+
+    impl Corpus for PanicOnceCorpus {
+        fn root(&self) -> &Path {
+            &self.root
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            assert!(
+                self.panicked.swap(true, Ordering::SeqCst),
+                "first request panics"
+            );
+            Response::success("ping", serde_json::json!({"pong": true}))
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn watch_paths(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
+    }
+
+    /// A corpus whose periodic sweep panics: a panic outside any request,
+    /// which unwinds out of the serving loop.
+    struct PanickingSweepCorpus(PathBuf);
+
+    impl Corpus for PanickingSweepCorpus {
+        fn root(&self) -> &Path {
+            &self.0
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            failure_response("stub", "stub corpus")
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn watch_paths(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
+        fn sweep_interval(&self) -> Option<Duration> {
+            Some(Duration::from_millis(50))
+        }
+        fn sweep(&mut self) {
+            panic!("sweep panicked");
+        }
+    }
+
+    /// One request on the socket and its decoded reply.
+    fn request(sock: &Path, req: &Request) -> serde_json::Value {
+        let mut stream = UnixStream::connect(sock).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(stream, "{}", serde_json::to_string(req).unwrap()).unwrap();
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).unwrap();
+        serde_json::from_str(&reply).unwrap_or_else(|e| panic!("{e}: {reply:?}"))
+    }
+
+    /// A panic in a request handler degrades that one answer to a failure
+    /// naming the panic (#1102); the daemon keeps serving the next request.
+    #[test]
+    fn a_panicking_request_should_fail_alone_and_the_next_ping_should_answer() {
+        let root = scratch_root("panic-once");
+        let sock = socket_path(&root);
+        let served = root.clone();
+        let daemon = std::thread::spawn(move || {
+            run_corpus(PanicOnceCorpus {
+                root: served,
+                panicked: AtomicBool::new(false),
+            })
+        });
+        wait_until("socket to bind", Duration::from_secs(10), || sock.exists());
+
+        let failed = request(&sock, &Request::Ping);
+        assert_eq!(failed["ok"], false, "{failed}");
+        assert_eq!(failed["op"], "ping", "{failed}");
+        assert_eq!(
+            failed["error"]["message"], "request panicked: first request panics",
+            "{failed}"
+        );
+        let answered = request(&sock, &Request::Ping);
+        assert_eq!(answered["ok"], true, "{answered}");
+        assert!(!daemon.is_finished(), "the panic took the daemon down");
+
+        shutdown(&sock).expect("shutdown after the panic");
+        wait_until("daemon to exit", Duration::from_secs(10), || {
+            daemon.is_finished()
+        });
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A panic that does unwind out of the loop still releases the socket,
+    /// pid and lock files, which a dead daemon used to leave behind.
+    #[test]
+    fn a_panic_out_of_the_loop_should_release_the_daemon_files() {
+        let root = scratch_root("panic-sweep");
+        let sock = socket_path(&root);
+        let lock = pid_path(&root).with_extension("lock");
+        let served = root.clone();
+        let daemon = std::thread::spawn(move || run_corpus(PanickingSweepCorpus(served)));
+        wait_until("the sweep to panic", Duration::from_secs(10), || {
+            daemon.is_finished()
+        });
+        assert!(daemon.join().is_err(), "the sweep panic unwinds the loop");
+        assert!(!sock.exists(), "socket left behind");
+        assert!(!pid_path(&root).exists(), "pid file left behind");
+        assert!(!lock.exists(), "lock file left behind");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn panic_message_should_read_str_and_string_payloads() {
+        let str_payload: Box<dyn std::any::Any + Send> = Box::new("plain");
+        let string_payload: Box<dyn std::any::Any + Send> = Box::new(String::from("formatted 7"));
+        let other_payload: Box<dyn std::any::Any + Send> = Box::new(7_u8);
+        assert_eq!(panic_message(str_payload.as_ref()), "plain");
+        assert_eq!(panic_message(string_payload.as_ref()), "formatted 7");
+        assert_eq!(
+            panic_message(other_payload.as_ref()),
+            "non-string panic payload"
+        );
     }
 }
 

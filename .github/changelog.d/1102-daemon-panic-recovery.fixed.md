@@ -1,0 +1,1 @@
+**daemon:** a panic in one request no longer takes the daemon down. The request gets a `request panicked` failure, the index and publication locks recover on their next use, and a panic outside a request still removes the socket, pid and lock files.

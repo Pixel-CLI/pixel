@@ -1521,3 +1521,31 @@ fn fan_in_counts_should_count_incoming_calls_per_candidate_file() {
     assert_eq!(counts.get("login.rs"), Some(&1), "`go` calls `login`");
     assert_eq!(counts.get("caller.rs"), None, "no call reaches caller.rs");
 }
+
+/// A request that panicked while holding the index or publication lock
+/// poisons it, and every later acquisition used to panic at its `expect`
+/// (#1102). With both locks poisoned, status reads them, a forced graph
+/// build writes both, and status reads them again.
+#[test]
+fn requests_should_still_answer_after_a_panic_poisoned_both_locks() {
+    let root = fixture("poisoned-locks");
+    let mut service = Service::open(&root).unwrap();
+    let publication = Arc::clone(&service.publication);
+    let index = Arc::clone(&service.index);
+    let _ = std::thread::spawn(move || {
+        let _publication = publication.write().unwrap();
+        let _index = index.write().unwrap();
+        panic!("poison both locks");
+    })
+    .join();
+    assert!(service.publication.is_poisoned() && service.index.is_poisoned());
+
+    let before = ok(&mut service, Request::Status {});
+    ok(&mut service, Request::Graph { if_stale: false });
+    let after = ok(&mut service, Request::Status {});
+    for status in [&before, &after] {
+        assert_eq!(status["index"]["base_files"], 2, "{status}");
+    }
+    assert_eq!(after["graph"]["present"], true, "{after}");
+    assert_eq!(after["graph"]["files"], 2, "{after}");
+}
