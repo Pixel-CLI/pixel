@@ -1417,8 +1417,9 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   - **Lint**: `cargo clippy --all-targets` with warnings denied, then
     `cargo check` of the two reduced feature lanes (`--no-default-features`,
     `model2vec` only);
-  - **MSRV**, **Ranking gates** (the NDCG@10 bench in test mode) and
-    **Dependency policy** (`cargo deny`, then
+  - **MSRV**, **Ranking gates** (the NDCG@10 relevance bench and the
+    `m1_latency` service-time bench, both in `--test` mode, so a red lane
+    fails the job) and **Dependency policy** (`cargo deny`, then
     `scripts/ci/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
     reads, accepts the same advisories as `deny.toml`).
 - `mvp-reference.yml` runs the imported index truth test on the pinned public
