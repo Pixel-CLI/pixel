@@ -1150,15 +1150,8 @@ fn process(
     let Ok(payload) = serde_json::from_str::<Value>(raw) else {
         return envelope(provider, event, &unavailable(event, None, true));
     };
-    // The first of several parts owns the brief: it forgets the last prompt's
-    // before the other parts look for this one's.
     let first_of_many = part
         .filter(|part| part.index == 1 && part.count > 1 && event == TaskHookEvent::PromptSubmit);
-    if first_of_many.is_some() {
-        part_path(provider, &payload)
-            .iter()
-            .for_each(|path| brief_parts::forget(path));
-    }
     // The brief runs beside the ledger: it needs neither, and a slow ledger
     // must not use up its window.
     let parts = brief_budget(provider, &payload, part);
@@ -1517,6 +1510,27 @@ fn late_first_part(
     })
 }
 
+/// Clear a prior identical prompt's split cache before starting part 1's
+/// bounded worker, so a timeout cannot recover stale context.
+fn forget_first_part_cache(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    raw: &str,
+    part: Option<BriefPart>,
+) {
+    if !part.is_some_and(|part| part.index == 1 && part.count > 1)
+        || event != TaskHookEvent::PromptSubmit
+    {
+        return;
+    }
+    let Ok(payload) = serde_json::from_str::<Value>(raw) else {
+        return;
+    };
+    if let Some(path) = part_path(provider, &payload) {
+        brief_parts::forget(&path);
+    }
+}
+
 /// A part after the first: print the slice of the brief part 1 stores,
 /// waiting at most `bound` for it. `None` (print nothing) when the payload
 /// names no prompt or repository or the brief does not arrive in time; `{}`
@@ -1786,6 +1800,7 @@ fn first_part_decision(
     evaluate: impl FnOnce() -> Value + Send + 'static,
     enforced: impl FnOnce(Option<&Value>) -> bool,
 ) -> Value {
+    forget_first_part_cache(provider, event, raw, part);
     decision_within(timeout, evaluate)
         .or_else(|| late_first_part(provider, event, raw, part))
         .unwrap_or_else(|| unavailable_envelope(provider, event, raw, enforced))
@@ -3733,6 +3748,39 @@ mod tests {
                 "{event:?} {part:?}"
             );
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_timed_out_first_part_does_not_recover_a_previous_identical_prompt_cache() {
+        let (root, raw) = parts_repo("stale-first-part");
+        let path = brief_path(&root, &raw);
+        brief_parts::store(&path, "stale cached brief\n", SystemTime::now()).unwrap();
+
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let output = first_part_decision(
+            TaskProvider::Claude,
+            TaskHookEvent::PromptSubmit,
+            &raw,
+            Some(part(1, 3)),
+            Duration::from_millis(20),
+            move || {
+                std::thread::sleep(Duration::from_millis(150));
+                let _ = finished_tx.send(());
+                json!({"decision": "observe", "context": "fresh worker finished"})
+            },
+            |_| false,
+        );
+
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            !output.to_string().contains("stale cached brief"),
+            "a timed-out hook must not serve the previous identical prompt's cache"
+        );
+        assert!(
+            !path.exists(),
+            "cache was invalidated before the worker started"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

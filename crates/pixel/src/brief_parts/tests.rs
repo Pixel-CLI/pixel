@@ -606,6 +606,28 @@ fn a_missing_head_marker_survives_a_late_store_but_a_new_prompt_clears_it() {
 }
 
 #[test]
+fn a_missing_head_marker_waits_for_a_brief_stored_after_the_marker() {
+    let root = scratch("missing-head-late-brief");
+    let path = cache_path(&root, Some("s"), "p");
+    mark_done_missing_head(&path);
+
+    let writer_path = path.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        store(&writer_path, "first\nsecond\n", SystemTime::now()).unwrap();
+    });
+    started_rx.recv().unwrap();
+
+    let stored = wait_for_with_status(&path, Duration::from_secs(2), POLL).unwrap();
+    writer.join().unwrap();
+    assert_eq!(stored.text, "first\nsecond\n");
+    assert!(stored.missing_head);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn the_done_marker_is_never_written_through_a_link() {
     use std::os::unix::fs::symlink;
     let root = scratch("done-links");

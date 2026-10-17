@@ -320,7 +320,7 @@ pub(crate) fn wait_for_with_status(
                 Err(_) => return None,
             }
         }
-        if fs::symlink_metadata(done_path(path)).is_ok() {
+        if text.is_some() && fs::symlink_metadata(done_path(path)).is_ok() {
             return Some(StoredBrief {
                 text: text.take()?,
                 missing_head: done_missing_head(path),
