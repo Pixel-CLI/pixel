@@ -116,3 +116,10 @@ pairs prevent acceptance. It exits 0 only when **every question in the selected 
 judge answer meaning. Quality verdicts still require the source review above.
 The output's call totals use only the full first pass, so selected repetitions
 do not bias the aggregate comparison.
+
+## Published campaign
+
+[2026-10-17 evaluation](../../docs/bench/brief-public-acceptance-2026-10-17/README.md):
+9/56 accepted after three paired repetitions; 78 brief versus 235 fresh control
+calls in the full first pass. The report carries the frozen inputs, per-question
+source reviews and aggregates to reproduce the failed full-set verdict offline.
