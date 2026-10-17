@@ -191,9 +191,15 @@ FRAMING = ("│", "⎿", "└", "┃", "|", "┆")
 # A narrow pane hard-wraps a header over two or three lines (Codex, Claude): the
 # flat pass joins every line break, with the framing that follows it, into one space.
 WRAP = re.compile(r"[ \t]*\n[ \t│┃⎿└├|┆]*")
+HYPHEN_WRAP = re.compile(r"-[ \t]*\n[ \t│┃⎿└├|┆]*")
 BOX_FLAT = re.compile(
     r"🟩 ?pixel (?P<op>[\w-]+) [^🟩]*?❀ ?(?P<ms>[0-9.]+) ?ms ?❀ ?#(?P<id>(?:[0-9A-Fa-f] ?){6})"
 )
+
+
+def flatten_wrapped(scrollback: str) -> str:
+    """Join pane wraps without inserting whitespace inside a visually split token."""
+    return WRAP.sub(" ", HYPHEN_WRAP.sub("-", scrollback))
 
 
 def parse_boxes(scrollback: str) -> list[dict]:
@@ -207,7 +213,7 @@ def parse_boxes(scrollback: str) -> list[dict]:
         if m:
             boxes.append({"op": m["op"], "ms": float(m["ms"]), "id": m["id"].lower(), "line": line.strip(), "framed": line.strip().startswith(FRAMING)})
     whole = {(b["op"], b["id"]) for b in boxes}
-    for m in BOX_FLAT.finditer(WRAP.sub(" ", scrollback)):
+    for m in BOX_FLAT.finditer(flatten_wrapped(scrollback)):
         key = (m["op"], m["id"].replace(" ", "").lower())
         if key not in whole:
             whole.add(key)
@@ -224,7 +230,7 @@ def prompt_submit_line(scrollback: str) -> str | None:
     for line in scrollback.splitlines():
         if SUBMIT_FLAT.search(line):
             return line.strip()
-    m = SUBMIT_FLAT.search(WRAP.sub(" ", scrollback))
+    m = SUBMIT_FLAT.search(flatten_wrapped(scrollback))
     return m[0] if m else None
 
 
@@ -483,8 +489,8 @@ def judge_relay(relay: dict, shell_calls: int) -> dict:
 
 def shell_call_count(scrollback: str) -> int:
     """Count this pane's displayed arena command; time-window action records overlap in parallel runs."""
-    command = re.escape(SHELL_CMD)
-    return len(re.findall(rf"(?m)^\s*(?:[$❯›]\s*)?{command}", scrollback))
+    command = r"\s+".join(re.escape(token) for token in SHELL_CMD.split())
+    return len(re.findall(rf"(?m)^\s*(?:[$❯›]\s*)?{command}", flatten_wrapped(scrollback)))
 
 
 # ---------------------------------------------------------------- herdr
@@ -808,6 +814,9 @@ class Arena:
             panes[key] = self.h.split(panes[parent], direction, ratio, str(self.cfg.repo))  # sequential: parallel splits race
             self.created.append({"pane_id": panes[key], "name": "pending"})
             self.save_state()
+            pane = next((p for p in self.h.panes() if p.get("pane_id") == panes[key]), {})
+            self.created[-1]["terminal_id"] = pane.get("terminal_id")
+            self.save_state()
         for cli_name, key in zip(order, cell_keys(len(order))):
             cell = Cell(CLIS[cli_name], key, panes[key])
             self.cells[cli_name] = cell
@@ -1057,7 +1066,7 @@ class Arena:
             cell.brief = {"verdict": "N/A"}
             cell.metrics = {"verdict": "N/A"}
             return
-        cell.scrollback = self.h.read(cell.name, "recent-unwrapped", SCROLLBACK_LINES)
+        cell.scrollback = self.h.read_pane(cell.pane, "recent-unwrapped", SCROLLBACK_LINES)
         actions = read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE)
         until = cell.t_done_ms or None
         preliminary_metrics = judge_metrics(cell.scrollback, actions, cell.t_prompt_ms, until)
@@ -1065,12 +1074,11 @@ class Arena:
             cell.cli.name == "codex"
             and cell.status in ("done", "evidence-complete")
             and preliminary_metrics["verdict"] != "PASS"
-            and shell_call_count(cell.scrollback) > 0
         ):
             self.h.keys(cell.name, "ctrl+t")
             cell.keys_sent.append("ctrl+t")
             cell.events.append("expanded Codex tool output once after the turn ended to inspect the metrics evidence")
-            cell.scrollback = self.h.read(cell.name, "recent-unwrapped", SCROLLBACK_LINES)
+            cell.scrollback = self.h.read_pane(cell.pane, "recent-unwrapped", SCROLLBACK_LINES)
         cell.submit_line = prompt_submit_line(cell.scrollback)
         logged = judge_brief(read_jsonl(self.cfg.repo / ".pixel" / FEEDBACK_FILE), cell.cli.provider, cell.t_prompt_ms)
         shown = brief_on_screen(cell.scrollback, cell.submit_line)
@@ -1341,7 +1349,7 @@ def write_run_index(results_root: pathlib.Path, runs: list[dict]) -> None:
 
 
 def abort_run(herdr: Herdr, sdir: pathlib.Path, say=print) -> int:
-    """Close only the panes the last run created: recorded id, `ultima-` name, still that pane."""
+    """Close panes still owned by the last run, including an identified crashed Pi shell."""
     try:
         doc = json.loads((sdir / "last-run.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1360,11 +1368,23 @@ def abort_run(herdr: Herdr, sdir: pathlib.Path, say=print) -> int:
             continue  # already gone
         label = str(pane.get("label") or pane.get("terminal_title_stripped") or "")
         agent_pane = herdr.get(name).get("pane_id")
-        if label.startswith(NAME_PREFIX) or agent_pane == pid:
+        expected_agent = name.removeprefix(NAME_PREFIX)
+        current_agent = pane.get("agent")
+        assigned_to_other = current_agent and current_agent != expected_agent
+        if not assigned_to_other and (label.startswith(NAME_PREFIX) or agent_pane == pid):
+            herdr.close(pid)
+            closed.append(pid)
+        elif (
+            not current_agent
+            and rec.get("terminal_id")
+            and pane.get("terminal_id") == rec["terminal_id"]
+            and re.search(r"pi exiting due to uncaughtException: Rendered line\d+ exceeds terminalwidth \(\d+>\d+\)", herdr.read_pane(pid, "recent-unwrapped", 80))
+        ):
             herdr.close(pid)
             closed.append(pid)
         else:
             kept.append(pid)
+            say(f"abort: kept recorded pane {pid}; its current label, agent or terminal no longer proves Ultima ownership")
     (sdir / "last-run.json").unlink(missing_ok=True)
     say(f"abort: closed {len(closed)} pane(s) {closed}; left {len([k for k in kept if k])} untouched")
     return 0

@@ -84,7 +84,7 @@ def agy_store(conversation, rows):
 if a[:2] == ["pane", "split"]:
     st["n"] += 1
     pid = "p%d" % st["n"]
-    st["panes"][pid] = {"label": "", "cwd": opt("--cwd")}
+    st["panes"][pid] = {"label": "", "cwd": opt("--cwd"), "terminal_id": "term-" + pid}
     st["log"].append(["split", a[2], opt("--direction"), opt("--ratio"), pid])
     out({"result": {"pane": {"pane_id": pid}}})
 elif a[:2] == ["pane", "close"]:
@@ -94,7 +94,8 @@ elif a[:2] == ["pane", "close"]:
     st["log"].append(["close", a[2]])
     out({"result": {}})
 elif a[:2] == ["pane", "list"]:
-    out({"result": {"panes": [{"pane_id": k, "label": v["label"], "tab_id": "t"} for k, v in st["panes"].items()]}})
+    agents = {g["pane"]: g["kind"] for g in st["agents"].values()}
+    out({"result": {"panes": [{"pane_id": k, "label": v["label"], "terminal_id": v.get("terminal_id"), "agent": agents.get(k), "tab_id": "t"} for k, v in st["panes"].items()]}})
 elif a[:2] == ["pane", "rename"]:
     st["panes"][a[2]]["label"] = a[3]
     out({"result": {}})
@@ -102,7 +103,8 @@ elif a[:2] == ["pane", "layout"]:
     out({"result": {"layout": {}}})
 elif a[:2] == ["pane", "read"]:
     g = next((agent for agent in st["agents"].values() if agent["pane"] == a[2]), None)
-    print("\n".join(g["screen"] + g["after"]) if g else "")
+    pane = st["panes"].get(a[2], {})
+    print("\n".join(g["screen"] + g["after"]) if g else pane.get("scrollback", ""))
 elif a[:2] == ["agent", "list"]:
     agents = list(st.get("external_agents", []))
     for name, g in st["agents"].items():
@@ -430,6 +432,8 @@ class PureTests(unittest.TestCase):
         self.assertEqual(ua.prompt_submit_line("↳ Hook · 🟩 pixel prompt-submit ❀ 680.0ms"), "↳ Hook · 🟩 pixel prompt-submit ❀ 680.0ms")
         self.assertIsNone(ua.prompt_submit_line("🟩 pixel search-content ❀ 1.0ms ❀ #abcdef"))
         self.assertIsNone(ua.prompt_submit_line("did the prompt-submit 🟩 pixel line show? yes"))
+        split_hyphen = "🟩 pixel prompt-\n  │ submit ❀ 657.9ms"
+        self.assertIn("prompt-submit", ua.prompt_submit_line(split_hyphen))
         logged = {"verdict": "PASS"}
         self.assertEqual(ua.judge_brief_shown(logged, ua.brief_on_screen(wrapped, ua.prompt_submit_line(wrapped)))["verdict"], "PASS")
 
@@ -450,6 +454,12 @@ class PureTests(unittest.TestCase):
         self.assertEqual((m["verdict"], m["occurrences"], m["outside_tool_framing"]), ("PASS", 1, None))
         self.assertEqual(ua.parse_boxes(wrapped)[0]["framed"], None)
         self.assertEqual(ua.judge_metrics(wrapped.replace("#b44", "#000"), [rec], 0)["verdict"], "FAIL")
+        split_operation = "🟩 pixel search-\n  │ content ❀ 109.1ms ❀ #b44c70"
+        self.assertEqual(ua.judge_metrics(split_operation, [rec], 0)["verdict"], "PASS")
+
+    def test_shell_command_is_counted_when_pane_wraps_inside_hyphenated_command(self):
+        wrapped = "› pixel search-\n  │ content -F start_brief crates/pixel/src"
+        self.assertEqual(ua.shell_call_count(wrapped), 1)
 
     def test_shell_calls_are_counted_from_their_own_pane_not_overlapping_log_windows(self):
         recs = [
@@ -514,6 +524,15 @@ class RunTests(unittest.TestCase):
         self.assertEqual([key for name, key in fx.read_state()["keylog"] if name == "ultima-codex"].count("ctrl+t"), 1)
         self.assertEqual([event[2] for event in fx.read_state()["log"] if event[0] == "expanded" and event[1] == "ultima-codex"], ["done"])
         self.assertIn("expanded Codex tool output once", " ".join(codex["events"]))
+
+    def test_codex_missing_call_stays_no_call_after_one_bounded_expand(self):
+        fx = Fixture(self)
+        fx.scenarios = {"codex": "no-call"}
+        rc, out, err = fx.run()
+        self.assertEqual(rc, 1, out + err)
+        codex = fx.receipt()["clis"]["codex"]
+        self.assertEqual(codex["metrics"]["verdict"], "NO-CALL")
+        self.assertEqual([key for name, key in fx.read_state()["keylog"] if name == "ultima-codex"].count("ctrl+t"), 1)
 
     def test_lost_agent_fails_prompt_early_and_saves_its_pane_output(self):
         fx = Fixture(self)
@@ -754,6 +773,24 @@ class RunTests(unittest.TestCase):
         (fx2.tmp / "state" / "last-run.json").write_text(json.dumps({"operator": "root", "panes": [{"pane_id": "foreign", "name": "ultima-claude"}]}))
         fx2.main(["abort"])
         self.assertIn("foreign", fx2.read_state()["panes"])
+
+    def test_abort_closes_only_recorded_pi_crash_shell_with_same_terminal_identity(self):
+        fx = Fixture(self)
+        self.assertEqual(fx.run()[0], 0)
+        state = fx.read_state()
+        record = next(row for row in json.loads((fx.tmp / "state" / "last-run.json").read_text())["panes"] if row["name"] == "ultima-pi")
+        del state["agents"]["ultima-pi"]
+        pi_pane = state["panes"][record["pane_id"]]
+        pi_pane["label"] = "pixel-pi-hooks"
+        pi_pane["scrollback"] = "pi exiting due to uncaughtException: Rendered line47 exceeds terminalwidth (104>102)"
+        state["panes"]["lookalike"] = {"label": "pixel-pi-hooks", "terminal_id": "different", "scrollback": pi_pane["scrollback"]}
+        fx.state = state
+        fx.write_state()
+        rc, out, _ = fx.main(["abort"])
+        self.assertEqual(rc, 0, out)
+        remaining = fx.read_state()["panes"]
+        self.assertNotIn(record["pane_id"], remaining)
+        self.assertIn("lookalike", remaining)
 
     def test_brief_log_switched_off_fails_fast_before_any_pane(self):
         fx = Fixture(self)

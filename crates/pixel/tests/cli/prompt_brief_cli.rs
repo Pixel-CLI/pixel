@@ -813,7 +813,8 @@ fn a_part_that_never_gets_the_first_one_prints_nothing_and_exits_cleanly() {
         waited >= Duration::from_millis(1_500),
         "it waited for part 1: {waited:?}"
     );
-    assert!(waited < Duration::from_secs(8), "and gave up: {waited:?}");
+    // The later-part bound plus stdin wait stays below the host's 10s hook deadline.
+    assert!(waited < Duration::from_secs(10), "and gave up: {waited:?}");
     // It ran no ledger and stored nothing.
     assert!(!root.join(".pixel/brief-parts").exists());
     assert!(!root.join(".pixel/tasks").exists());

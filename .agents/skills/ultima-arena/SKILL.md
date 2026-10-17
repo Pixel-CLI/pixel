@@ -84,13 +84,18 @@ usage or environment problem (no Herdr pane, `PIXEL_BRIEF_LOG` off, install fail
    `herdr agent prompt` runs without `--wait` (it reports `agent_prompt_stalled` for a prompt that ran), then poll
    `agent get` until the turn ended: `done` (Claude, Codex, agy, Devin) or `idle` (pi) after the state counter or the screen
    moved, then three polls of a still screen; Pi additionally needs its persisted completion event. 🟩 headers are also matched with line breaks
-   joined, since a narrow pane hard-wraps them. Scrollback is read with `agent read --source recent-unwrapped --lines 2000` because pi's notices scroll out of `visible`.
+   joined, since a narrow pane hard-wraps them. Final scrollback is read from the exact pane with `pane read --source recent-unwrapped --lines 2000`; agent-level output may contain only the final answer. Wrapped `prompt-submit` and `search-content` tokens are normalized before judging.
 7. **Receipt** in `--out`: `receipt.json` (identity, run number, seed, order, prompt, per CLI the evidence and verdicts, install steps),
    `receipt.md` (dated table), `<cli>.scrollback.txt`, and timestamped `run.log`. `eval/arena-results/README.md` indexes each dated run with its seed, order, counts, repository commit and dirty state; `eval/.gitignore` keeps these artifacts out of Git. The last line printed is `N/5 brief, M/5 metrics`. A process lock refuses overlapping arena runs before pane changes or installation; default output paths include microseconds so a repeat never overwrites a previous receipt.
 
 Statuses: `done`, `evidence-complete` (turn interrupted after both signals), `timeout`, `start-failed`, `blocked-dialog`, `needs-operator`. Per CLI the receipt also holds the
 `prompt-submit` relay line (Claude, Codex, pi), the shell call count, and for metrics `seen`, `occurrences` and
 `outside_tool_framing` (a box not inside `│ ⎿ └` framing; best effort, a heuristic on the screen text).
+
+Cleanup records each created pane's terminal identity. A Pi renderer crash may
+remove its agent binding and arena label; cleanup closes that shell only when
+the recorded terminal identity and specific renderer crash signature match,
+and preserves a pane assigned to another agent.
 
 ## What it proves, and what it does not
 
