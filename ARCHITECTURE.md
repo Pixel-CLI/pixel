@@ -711,8 +711,8 @@ its own extension point:
   `BeforeAgent` hook in `~/.gemini/settings.json`. OpenCode:
   `plugins/pixel-brief.js` in `~/.config/opencode` (`$XDG_CONFIG_HOME`
   honoured), whose V2 `session.hook("prompt")` handler runs `pixel brief`
-  and whose `context` hook adds the result to the next request's system
-  prompt. Devin: the task
+  and whose `context` hook adds the result to the turn's first request as a
+  system part. Devin: the task
   events in its hooks file, `prompt-submit` among them; that entry alone sets
   `show_output`, because Devin draws neither `systemMessage` nor a hook's
   stdout or stderr, and its `✱ Hook completed: <command>` line is the only
