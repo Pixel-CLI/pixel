@@ -685,7 +685,7 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(verdict("brief", 0, False, answered=True), NOT_DELIVERED)
         self.assertEqual(verdict("brief", 5, False, answered=True), NOT_DELIVERED)
         self.assertEqual(verdict("nobrief", 0, False, answered=True), BASELINE)
-        self.assertEqual(verdict("brief", 0, True, ["session:exit1"]), ERROR)
+        self.assertEqual(verdict("brief", 0, True, ["session:exit1"], answered=True), ERROR)
 
     def test_empty_answers_cannot_qualify_either_arm_even_with_successful_delivery(self):
         for arm in ("brief", "nobrief"):
