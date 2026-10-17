@@ -61,10 +61,33 @@ impl Default for IngestOptions {
     }
 }
 
+/// Time spent in each ingest stage; full-build loops accumulate all ticks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IngestTimings {
+    pub metadata: Duration,
+    pub blobs: Duration,
+    pub diffs: Duration,
+    pub retention: Duration,
+}
+
+impl IngestTimings {
+    fn add(&mut self, tick: &Self) {
+        self.metadata += tick.metadata;
+        self.blobs += tick.blobs;
+        self.diffs += tick.diffs;
+        self.retention += tick.retention;
+    }
+}
+
 /// Outcome of one tick, reported so the daemon can surface progress.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickReport {
     pub phase: String,
+    pub timings: IngestTimings,
+    pub blob_commits_done: u64,
+    pub blob_commits_total: u64,
+    pub diff_commits_done: u64,
+    pub diff_commits_total: u64,
     pub commits_indexed: u64,
     pub total_commits: u64,
     pub diff_indexed_pct: f64,
@@ -112,39 +135,62 @@ pub fn ingest_tick(store: &mut FactsStore, options: &IngestOptions) -> Result<Ti
     let mut poisoned = 0u64;
     let mut skipped = 0u64;
 
-    // Phase A: ensure metadata is complete first (always completes before B/C).
+    let mut timings = IngestTimings::default();
+    let start = Instant::now();
     let a_done = phase_a(store, &deadline)?;
+    timings.metadata = start.elapsed();
     if !a_done {
-        let state = store.index_state();
-        return Ok(TickReport {
-            phase: state.phase,
-            commits_indexed: state.commits_indexed,
-            total_commits: state.total_commits,
-            diff_indexed_pct: state.diff_indexed_pct,
-            fresh: state.fresh,
-            poisoned_this_tick: 0,
-            skipped_this_tick: 0,
-        });
+        return tick_report(store, timings, poisoned, skipped);
     }
-    // Apply retention before measuring blobs; expired metadata stays searchable.
+    let start = Instant::now();
     apply_window(store, &options.limits, now_unix())?;
+    timings.retention += start.elapsed();
+    let start = Instant::now();
     let (b_done, p) = phase_b(store, &deadline)?;
+    timings.blobs = start.elapsed();
     poisoned += p;
     if b_done {
-        // Phase B may have consumed most of the tick budget. Give phase C a
-        // fresh deadline so diff text ingestion always gets time to run,
-        // even on large repos where phase B eats the entire original budget.
-        let c_deadline = Instant::now() + Duration::from_millis(options.tick_budget_ms);
-
+        // Give diff ingestion its own yield budget after metadata/blob work.
+        let start = Instant::now();
+        let c_deadline = start + Duration::from_millis(options.tick_budget_ms);
         let (_c_done, p, s) = phase_c(store, &c_deadline)?;
+        timings.diffs = start.elapsed();
         poisoned += p;
         skipped += s;
+        let start = Instant::now();
         enforce_budget(store, options.limits.budget_bytes)?;
+        timings.retention += start.elapsed();
     }
+    tick_report(store, timings, poisoned, skipped)
+}
 
+fn tick_report(
+    store: &FactsStore,
+    timings: IngestTimings,
+    poisoned: u64,
+    skipped: u64,
+) -> Result<TickReport> {
     let state = store.index_state();
+    // Exclude merges and expired diffs from the active work denominator.
+    // Already indexed/skipped retained commits count as completed work.
+    let (blob_done, total, diff_done): (i64, i64, i64) = store.conn().query_row(
+        "SELECT COUNT(CASE WHEN id <= ?1 THEN 1 END), COUNT(*),
+                COUNT(CASE WHEN diff_state != ?2 THEN 1 END)
+         FROM commits WHERE diff_state != ?3 AND COALESCE(skip_note, '') != 'merge'",
+        params![
+            phase_b_cursor(store),
+            DIFF_STATE_PENDING,
+            DIFF_STATE_EVICTED
+        ],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
     Ok(TickReport {
         phase: state.phase,
+        timings,
+        blob_commits_done: blob_done as u64,
+        blob_commits_total: total as u64,
+        diff_commits_done: diff_done as u64,
+        diff_commits_total: total as u64,
         commits_indexed: state.commits_indexed,
         total_commits: state.total_commits,
         diff_indexed_pct: state.diff_indexed_pct,
@@ -178,12 +224,40 @@ pub fn ingest_until_fresh_within(
     options: &IngestOptions,
     wall_clock: Duration,
 ) -> Result<TickReport> {
+    ingest_until_fresh_reporting(store, options, wall_clock, |_| {})
+}
+
+/// Build history while reporting progress after each bounded tick.
+///
+/// Timings in each callback and the final report accumulate this invocation.
+/// Existing CLI and daemon callers without a callback remain silent.
+///
+/// # Errors
+/// Returns the same ingest, no-progress and deadline errors as a full build.
+pub fn ingest_until_fresh_with_progress(
+    store: &mut FactsStore,
+    options: &IngestOptions,
+    progress: impl FnMut(&TickReport),
+) -> Result<TickReport> {
+    ingest_until_fresh_reporting(store, options, MAX_INGEST_UNTIL_FRESH_WALL_CLOCK, progress)
+}
+
+fn ingest_until_fresh_reporting(
+    store: &mut FactsStore,
+    options: &IngestOptions,
+    wall_clock: Duration,
+    mut progress: impl FnMut(&TickReport),
+) -> Result<TickReport> {
+    let mut timings = IngestTimings::default();
     let mut n = 0u64;
     let start = Instant::now();
     let dbg = std::env::var("PIXEL_FACTS_DEBUG_TICKS").is_ok();
     let mut last_mark: Option<String> = None;
     loop {
-        let report = ingest_tick(store, options)?;
+        let mut report = ingest_tick(store, options)?;
+        timings.add(&report.timings);
+        report.timings = timings.clone();
+        progress(&report);
         n += 1;
         if dbg {
             eprintln!("tick {n}: {report:?}");
@@ -1686,6 +1760,41 @@ pub(crate) mod tests {
     /// A tick budget of zero still lands one batch per phase per tick, so
     /// the loop needs several ticks: the wall-clock cap must let them run
     /// and only fire once it is really exceeded.
+    #[test]
+    fn full_build_progress_accumulates_timings_and_reports_completed_work() {
+        let (dir, _, _) = two_commit_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        let options = IngestOptions {
+            tick_budget_ms: 0,
+            ..IngestOptions::default()
+        };
+        let mut reports = Vec::new();
+        let result =
+            ingest_until_fresh_reporting(&mut store, &options, TEST_WALL_CLOCK, |report| {
+                reports.push(report.clone()); // Keep owned snapshots after the callback returns.
+            })
+            .unwrap();
+        assert!(reports.len() >= 2, "zero-budget ingest must yield");
+        assert_eq!(reports.last(), Some(&result));
+        assert_eq!(
+            reports[0].timings.diffs,
+            Duration::ZERO,
+            "phase C has not run yet"
+        );
+        assert_eq!(reports[0].diff_commits_done, 0);
+        assert_eq!(result.blob_commits_done, 2);
+        assert_eq!(result.blob_commits_total, 2);
+        assert_eq!(result.diff_commits_done, 2);
+        assert_eq!(result.diff_commits_total, 2);
+        assert!(result.fresh);
+        for pair in reports.windows(2) {
+            assert!(pair[1].timings.metadata >= pair[0].timings.metadata);
+            assert!(pair[1].timings.blobs >= pair[0].timings.blobs);
+            assert!(pair[1].timings.diffs >= pair[0].timings.diffs);
+            assert!(pair[1].timings.retention >= pair[0].timings.retention);
+        }
+    }
+
     #[test]
     fn ingest_until_fresh_within_keeps_ticking_until_fresh_under_a_tiny_tick_budget() {
         let (dir, _, _) = two_commit_repo();

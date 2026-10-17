@@ -559,7 +559,10 @@ envelope talks to the daemon socket directly.
   deleted/modified blobs whose parent commit has expired. Phase B measures changed blobs across 25 commits with size-only
   `cat-file --batch-check` requests (128 objects per process). Unsupported
   filenames or failed batches fall back to bounded `ls-tree` lookups, so
-  large blobs remain excluded without reading their contents. Queries
+  large blobs remain excluded without reading their contents. Explicit
+  `build-index --history` runs print periodic commit progress on stderr and
+  cumulative metadata/blob/diff/retention timings, plus total wall time;
+  daemon background ingestion stays silent. Queries
   never wait on ingest; they answer from what is already in `history.db` and
   carry its `index_state` (`diffs_evicted`, `diff_coverage_since`). Diff text
   is bounded by an age window (`PIXEL_HISTORY_WINDOW_DAYS`, default 365) and
