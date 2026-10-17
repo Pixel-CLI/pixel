@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+# Weekly perf tripwire, beside the nightly mutants campaign: build the pinned
+# public corpus from nothing, then again after one file changed, and compare
+# each `prepare-repo --json` receipt with `.github/perf-baseline.json` at 3x
+# (a tripwire, not a benchmark; see `docs/bench/cold-index.md` for the
+# calibrated study). `scripts/ci/check-perf.py` also refuses a receipt that
+# looks fast because it measured nothing — a reused index on the cold run, or
+# no symbols — and writes the numbers to the job summary. Both receipts ride
+# the run as an artifact. `#1083` extends this beyond the cold/incremental
+# `prepare-repo` path.
+name: Perf
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CORPUS: excalidraw/excalidraw
+  CORPUS_SHA: 541653c7c9d587d463a47daacff9fb30e45a52e7
+
+jobs:
+  cold-graph:
+    name: Cold + incremental prepare-repo
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: linux-perf
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      # `dev-release` is the shipped optimisation without thin LTO: the
+      # measurement exercise is the index and graph, not the linker.
+      - name: Build the pixel under test
+        run: cargo build --profile dev-release --locked -p pixel-cli
+
+      - name: Check the checker
+        run: python3 -I scripts/ci/check-perf.py --self-test
+
+      # A shallow fetch of the one pinned commit: the lane measures the
+      # tree, not its history, and `--depth 1` keeps the job short.
+      - name: Clone the pinned corpus
+        run: |
+          git init -q "$RUNNER_TEMP/corpus"
+          git -C "$RUNNER_TEMP/corpus" remote add origin "https://github.com/$CORPUS.git"
+          git -C "$RUNNER_TEMP/corpus" fetch -q --depth 1 origin "$CORPUS_SHA"
+          git -C "$RUNNER_TEMP/corpus" checkout -q FETCH_HEAD
+
+      - name: Cold prepare-repo
+        run: |
+          rm -rf "$RUNNER_TEMP/perf-cache"
+          XDG_CACHE_HOME="$RUNNER_TEMP/perf-cache" \
+            target/dev-release/pixel prepare-repo --no-daemon --metrics off --json \
+            "$RUNNER_TEMP/corpus" > "$RUNNER_TEMP/cold.json"
+
+      - name: Cold ceilings
+        run: |
+          python3 -I scripts/ci/check-perf.py --label cold \
+            --timings "$RUNNER_TEMP/cold.json" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: One-file incremental update
+        run: |
+          file=$(git -C "$RUNNER_TEMP/corpus" ls-files '*.ts' | head -1)
+          echo "// perf $GITHUB_RUN_ID" >> "$RUNNER_TEMP/corpus/$file"
+          XDG_CACHE_HOME="$RUNNER_TEMP/perf-cache" \
+            target/dev-release/pixel prepare-repo --no-daemon --metrics off --json \
+            "$RUNNER_TEMP/corpus" > "$RUNNER_TEMP/incremental.json"
+
+      - name: Incremental ceilings
+        run: |
+          python3 -I scripts/ci/check-perf.py --label incremental \
+            --timings "$RUNNER_TEMP/incremental.json" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: perf-receipts
+          path: |
+            ${{ runner.temp }}/cold.json
+            ${{ runner.temp }}/incremental.json
+          if-no-files-found: warn

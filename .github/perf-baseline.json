@@ -1,0 +1,18 @@
+{
+  "corpus": "excalidraw/excalidraw@541653c7c9d587d463a47daacff9fb30e45a52e7",
+  "measured": "2026-10-17, Apple M-series dev machine, pixel dev-release; two runs (cold, then one appended comment line)",
+  "ceiling_multiplier": 3,
+  "cold": {
+    "total_ms": 1224,
+    "index_base_ms": 154,
+    "graph_elapsed_ms": 745,
+    "min_files": 700,
+    "min_symbols": 3900
+  },
+  "incremental": {
+    "total_ms": 151,
+    "graph_elapsed_ms": 32,
+    "min_files": 700,
+    "min_symbols": 3900
+  }
+}

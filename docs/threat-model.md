@@ -319,7 +319,11 @@ the diff. Only fully judged campaigns write checkpoint artifacts; only scheduled
 `coverage.yml` runs only at 02:47 UTC on main, with read-only contents and
 Actions access. Both instrumented jobs are skipped only after a successful
 scheduled measurement of the same SHA. Coverage is post-merge feedback;
-normal tests and lint still validate the PR head before merge. Local checks,
+normal tests and lint still validate the PR head before merge.
+`perf.yml` runs weekly and on manual dispatch, never on a pull request, with
+read-only contents and no secrets. It fetches one public corpus at the full
+commit ID in `CORPUS_SHA` with a plain `git fetch` (no credentials), and only indexes
+it: the corpus's code and build scripts never run. Local checks,
 including pre-push validation and reinstalling, are optional diagnostics.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.
