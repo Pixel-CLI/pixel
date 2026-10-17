@@ -7,14 +7,15 @@
 
 use std::fmt;
 use std::fs::Metadata;
-use std::io::{Read as _, Write};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::SystemTime;
 
 use mvp_model::hash::{Hash, Hasher};
 use mvp_model::{Diff, DiffFile, FileStat, Lang};
 
+use crate::bounded;
 use crate::guard::{GENERATED_MIN_BYTES, is_generated_blob};
 use crate::lang;
 
@@ -955,12 +956,15 @@ fn resolve(path: &Path, with_index: bool) -> Result<Repository, TreeError> {
     } else {
         &[]
     };
-    let output = git_in(path)
-        .arg("rev-parse")
-        .args(index_args)
-        .args(["--show-toplevel", "--verify", "--quiet", "HEAD"])
-        .output()
-        .map_err(|err| failed(err.to_string()))?;
+    let mut command = git_in(path);
+    command.arg("rev-parse").args(index_args).args([
+        "--show-toplevel",
+        "--verify",
+        "--quiet",
+        "HEAD",
+    ]);
+    let output =
+        bounded::run(command, &[]).map_err(|err| failed(format!("git rev-parse: {err}")))?;
     let detail = || String::from_utf8_lossy(&output.stderr).trim().to_owned();
     let Some(mut bytes) = output.stdout.strip_suffix(b"\n") else {
         return Err(failed(detail()));
@@ -1013,13 +1017,12 @@ fn path_of(bytes: &[u8]) -> PathBuf {
 
 /// The top level of the work tree that contains `path`.
 pub fn root(path: &Path) -> Result<PathBuf, TreeError> {
-    let output = git_in(path)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .map_err(|err| TreeError::NotAWorkTree {
-            path: path.to_path_buf(),
-            detail: err.to_string(),
-        })?;
+    let mut command = git_in(path);
+    command.args(["rev-parse", "--show-toplevel"]);
+    let output = bounded::run(command, &[]).map_err(|err| TreeError::NotAWorkTree {
+        path: path.to_path_buf(),
+        detail: format!("git rev-parse --show-toplevel: {err}"),
+    })?;
     if !output.status.success() {
         return Err(TreeError::NotAWorkTree {
             path: path.to_path_buf(),
@@ -1038,14 +1041,11 @@ pub fn root(path: &Path) -> Result<PathBuf, TreeError> {
 /// `./<path>`: a name that starts with `:` is pathspec magic otherwise
 /// (`:h` asks about `h`), and `check-ignore` refuses `--literal-pathspecs`.
 pub fn ignored(root: &Path, path: &Path) -> bool {
-    git_in(root)
+    let mut command = git_in(root);
+    command
         .args(["check-ignore", "-q", "--"])
-        .arg(Path::new(".").join(path))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .arg(Path::new(".").join(path));
+    bounded::run(command, &[]).is_ok_and(|done| done.status.success())
 }
 
 /// Runs git in `root` and returns its stdout as text, bytes that are not
@@ -1075,25 +1075,8 @@ fn git_with(
     if let Some(index) = index {
         command.env("GIT_INDEX_FILE", index);
     }
-    let mut child = command
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| failed(err.to_string()))?;
-    // Written from another thread, so that git never waits on a full
-    // stdout while this one waits on a full stdin.
-    let stdin = child.stdin.take().filter(|_| !input.is_empty());
-    let output = std::thread::scope(|scope| {
-        let writer = stdin.map(|mut stdin| scope.spawn(move || stdin.write_all(input)));
-        let output = child.wait_with_output()?;
-        if let Some(writer) = writer {
-            writer.join().expect("the stdin writer panicked")?;
-        }
-        Ok::<_, std::io::Error>(output)
-    })
-    .map_err(|err| failed(err.to_string()))?;
+    command.args(args);
+    let output = bounded::run(command, input).map_err(|err| failed(err.to_string()))?;
     if !output.status.success() {
         return Err(failed(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
@@ -1141,6 +1124,7 @@ pub(crate) fn git_in(dir: &Path) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
 
     #[test]
     fn c11_discovery_keeps_the_initial_head_until_the_scan_finishes() {

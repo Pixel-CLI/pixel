@@ -39,9 +39,10 @@ fn crates_dir() -> PathBuf {
         .unwrap()
 }
 
-/// Imported foundations retain their existing git execution boundary for
-/// now: mvp-index clears git's local environment but does not use GitRunner.
-/// Consolidating those subprocesses is tracked in docs/mvp-handover.md.
+/// The `mvp-*` foundations may not depend on any `pixel-*` crate, so the
+/// "only GitRunner spawns git" claim covers the `pixel-*` crates alone.
+/// mvp-index runs git through its own `bounded` module instead: git's local
+/// environment cleared, a timeout and an output cap (docs/mvp-handover.md).
 /// This exemption does not exempt them from ordinary tests or mutations.
 fn vendored(name: &str) -> bool {
     matches!(name, "mvp-model" | "mvp-store" | "mvp-index")

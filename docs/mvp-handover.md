@@ -40,9 +40,10 @@ are not copied into an unrelated CLI; Pixel keeps its own entry-point tests.
   #1012, #1013, #1014, #1015 and #1019, including byte-exact restoration,
   owned-file cleanup, retries and symlink preservation. #1043 carries
   staged-file synchronization from MVP #85 into Pixel's writers.
-- mvp-index still invokes git outside GitRunner. Its timeout/output bounds
-  and the imported lint baseline can be tightened here without reopening
-  the experimental repository.
+- mvp-index still invokes git outside GitRunner, through its own
+  `bounded` module (a timeout and an output cap on every command, #1085).
+  The imported lint baseline can be tightened here without reopening the
+  experimental repository.
 
 ## Deliberately retained product architecture
 
