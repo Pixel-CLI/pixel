@@ -513,6 +513,7 @@ fn rerank_never_lets_a_p2_candidate_outrank_any_p0_candidate() {
         session_reasons: vec![],
         error_reasons: vec![],
         activity_unavailable: None,
+        fan_in_unavailable: None,
     };
 
     let out = rerank(candidates, &signals, &plan_weights(), |_| 1.0);
@@ -571,6 +572,7 @@ fn rerank_reorders_within_a_tier_by_amplified_score() {
         session_reasons: vec![],
         error_reasons: vec![],
         activity_unavailable: None,
+        fan_in_unavailable: None,
     };
     let out = rerank(candidates, &signals, &plan_weights(), |_| 1.0);
     assert_eq!(
@@ -609,6 +611,7 @@ fn rerank_targets_preserves_tier_non_promotion_on_target_file_shape() {
         session_reasons: vec![],
         error_reasons: vec![],
         activity_unavailable: None,
+        fan_in_unavailable: None,
     };
     let out = rerank_targets(targets, &signals, &plan_weights(), |_| 1.0);
     assert_eq!(

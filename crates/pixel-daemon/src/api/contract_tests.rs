@@ -1513,13 +1513,105 @@ fn fan_in_counts_should_count_incoming_calls_per_candidate_file() {
     let mut service = Service::open(&root).unwrap();
     service.ensure_graph().unwrap();
     let store = service.graph.as_ref().unwrap();
-    assert!(fan_in_counts(store.conn(), &[]).is_empty());
+    assert!(fan_in_counts(store.conn(), &[]).unwrap().is_empty());
     let counts = fan_in_counts(
         store.conn(),
         &["login.rs".to_string(), "caller.rs".to_string()],
-    );
+    )
+    .unwrap();
     assert_eq!(counts.get("login.rs"), Some(&1), "`go` calls `login`");
     assert_eq!(counts.get("caller.rs"), None, "no call reaches caller.rs");
+}
+
+/// The graph tables `fan_in_counts` reads, with `files` files of which the
+/// ones in `called` receive `calls` edges (one per entry).
+fn fan_in_graph(files: i64, called: &[i64]) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);
+         CREATE TABLE symbols (id INTEGER PRIMARY KEY, file_id INTEGER);
+         CREATE TABLE edges (id INTEGER PRIMARY KEY, kind TEXT, dst_id INTEGER);",
+    )
+    .unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    for id in 0..files {
+        tx.execute(
+            "INSERT INTO files (id, path) VALUES (?1, ?2)",
+            rusqlite::params![id, format!("src/f{id}.rs")],
+        )
+        .unwrap();
+    }
+    for (symbol, file) in (0_i64..).zip(called) {
+        tx.execute(
+            "INSERT INTO symbols (id, file_id) VALUES (?1, ?2)",
+            rusqlite::params![symbol, file],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO edges (kind, dst_id) VALUES ('calls', ?1)",
+            rusqlite::params![symbol],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    conn
+}
+
+/// Past SQLite's parameter cap (32 766 in the bundled build) one IN-list
+/// for every candidate cannot be prepared, and fan-in came back empty with
+/// no word said. A file called from beyond the cap still gets its count.
+#[test]
+fn fan_in_counts_should_count_candidates_past_the_sqlite_parameter_cap() {
+    let conn = fan_in_graph(40_000, &[3, 39_999, 39_999]);
+    let candidates: Vec<String> = (0..40_000).map(|id| format!("src/f{id}.rs")).collect();
+    let counts = fan_in_counts(&conn, &candidates).unwrap();
+    assert_eq!(counts.len(), 2, "{counts:?}");
+    assert_eq!(counts.get("src/f3.rs"), Some(&1));
+    assert_eq!(counts.get("src/f39999.rs"), Some(&2));
+
+    let first_half: Vec<String> = (0..20_000).map(|id| format!("src/f{id}.rs")).collect();
+    let counts = fan_in_counts(&conn, &first_half).unwrap();
+    assert_eq!(
+        counts,
+        std::collections::HashMap::from([("src/f3.rs".to_string(), 1)]),
+        "a called file outside the candidates is left out"
+    );
+}
+
+#[test]
+fn fan_in_counts_should_name_a_query_that_failed() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let error = fan_in_counts(&conn, &["a.rs".to_string()]).unwrap_err();
+    assert!(error.starts_with("fan-in query: "), "{error}");
+    assert!(
+        !error.contains("SELECT"),
+        "the statement stays out: {error}"
+    );
+}
+
+/// `resolve` hands only activity and session to the concept resolver, so it
+/// counts no fan-in over its whole admitted universe; `targets` reranks with
+/// fan-in and still counts it.
+#[test]
+fn resolve_should_count_no_fan_in_and_targets_should() {
+    let root = fixture("fan-in-ops");
+    let mut service = Service::open(&root).unwrap();
+    service.ensure_graph().unwrap();
+    let resolved = service.handle(Request::Resolve {
+        phrase: "login".into(),
+        limit: Some(4),
+    });
+    assert!(resolved.ok, "{resolved:?}");
+    assert_eq!(service.fan_in_queries, 0);
+    let targets = service.handle(Request::Targets {
+        task: "change login".into(),
+        limit: Some(4),
+        max_tier: None,
+        precision: false,
+        regions: false,
+    });
+    assert!(targets.ok, "{targets:?}");
+    assert_eq!(service.fan_in_queries, 1);
 }
 
 /// A request that panicked while holding the index or publication lock

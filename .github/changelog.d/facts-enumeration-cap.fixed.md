@@ -1,0 +1,1 @@
+**facts:** history ingestion now indexes repositories past about 25 500 commits: the commit and ref listings used the 1 MiB output cap of single-value git calls, and a capped listing was read as "no commits", so phase A finished with an empty index.
