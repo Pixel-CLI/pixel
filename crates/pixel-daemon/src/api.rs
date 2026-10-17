@@ -394,6 +394,11 @@ pub struct Service {
     /// thread. Shared with every read replica, which ranks from it and never
     /// builds it.
     meaning: Arc<Meaning>,
+    /// The snapshot the writer last computed, with the generation it was
+    /// computed at; replicas attach it instead of running git (#1151).
+    published_snapshot: Arc<RwLock<Option<PublishedSnapshot>>>,
+    /// On a replica, the published snapshot the read in progress attaches.
+    reader_snapshot: Option<SnapshotInfo>,
 }
 
 /// How long a cached HEAD, branch or dirty list may be served. One
@@ -511,6 +516,15 @@ impl GitStateCache {
 /// only bounds how fast a just-landed commit starts counting.
 const ACTIVITY_CACHE_TTL: Duration = Duration::from_secs(60);
 
+/// A compact `SnapshotInfo` the writer computed while the published
+/// generation was `generation`: what a replica answering from that
+/// generation attaches.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PublishedSnapshot {
+    pub generation: u64,
+    pub snapshot: SnapshotInfo,
+}
+
 /// Version of a coherently published index/graph pair, not a filesystem snapshot.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Publication {
@@ -619,6 +633,8 @@ impl Service {
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
             meaning,
+            published_snapshot: Arc::new(RwLock::new(None)),
+            reader_snapshot: None,
         })
     }
 
@@ -664,6 +680,8 @@ impl Service {
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
             meaning: Arc::clone(&self.meaning),
+            published_snapshot: Arc::clone(&self.published_snapshot),
+            reader_snapshot: None,
         }
     }
 
@@ -716,9 +734,12 @@ impl Service {
     /// Answer a read-plane request on a replica, from the generation the
     /// writer last published, or `None` when the writer must: not a
     /// read-plane op, not a replica, an unhealthy or graph-lagging
-    /// publication, no graph on disk to read (the writer builds it), or a
-    /// generation that moved while the answer was computed. The graph is
-    /// read inside one transaction, so the answer sees one database state.
+    /// publication, no graph on disk to read (the writer builds it), no
+    /// snapshot published for this generation, or a generation that moved
+    /// while the answer was computed. The graph is read inside one
+    /// transaction, so the answer sees one database state, and the answer
+    /// carries the snapshot published with that generation: a replica runs
+    /// no git.
     pub(crate) fn read_answer(&mut self, req: &Request) -> Option<Response> {
         if !self.read_only || crate::plane::plane(req) != Plane::Read {
             return None;
@@ -734,8 +755,14 @@ impl Service {
         if self.graph.is_none() {
             self.graph = GraphStore::open_read_only(&self.graph_db_path()).ok();
         }
+        let published = self.published_snapshot.read_or_recover().clone()?;
+        if published.generation != before.generation {
+            return None;
+        }
         self.graph.as_ref()?.conn().execute_batch("BEGIN").ok()?;
+        self.reader_snapshot = Some(published.snapshot);
         let response = self.handle(req.clone());
+        self.reader_snapshot = None;
         if let Some(graph) = &self.graph {
             let _ = graph.conn().execute_batch("ROLLBACK");
         }
@@ -855,9 +882,11 @@ impl Service {
         }
     }
 
-    /// HEAD or a branch moved: the cached git state describes another commit.
+    /// HEAD or a branch moved: the cached git state describes another commit,
+    /// and so does the snapshot published for the replicas.
     pub(crate) fn note_git_moved(&mut self) {
         self.git_state.clear();
+        self.unpublish_snapshot();
     }
 
     /// Count a `notify` backend error reported by the transport loop.
@@ -1228,8 +1257,21 @@ impl Service {
         let full_dirty_list = matches!(op_name, "inspect" | "review");
         // Ops that write repo state (commit/push/branch/sync/rename/…) make
         // any cached HEAD/branch/dirty triple stale the moment they return.
-        let mutates_repo = crate::plane::plane(&req).mutates_repo();
-        match self.dispatch(req) {
+        let plane = crate::plane::plane(&req);
+        let mutates_repo = plane.mutates_repo();
+        // A repository write can run for minutes (a `sync` is several git
+        // calls of up to 120 s) while replicas answer reads: give them a
+        // snapshot of the generation they read before it starts. Other ops
+        // publish the snapshot they attach, at no extra git cost.
+        if !self.read_only && plane == Plane::RepoWrite {
+            self.ensure_snapshot_published();
+        }
+        let result = self.dispatch(req);
+        if mutates_repo {
+            // HEAD, a branch or the tree may have moved, failure or not.
+            self.unpublish_snapshot();
+        }
+        match result {
             Ok(v) => {
                 if mutates_repo {
                     self.git_state.clear();
@@ -1237,6 +1279,9 @@ impl Service {
                 let mut env = Envelope::success(op_name, v);
                 if attach_snapshot {
                     let snapshot = self.repo_snapshot();
+                    if !mutates_repo {
+                        self.publish_snapshot(&snapshot);
+                    }
                     env = env.with_snapshot(if full_dirty_list {
                         snapshot
                     } else {
@@ -1269,6 +1314,11 @@ impl Service {
     /// staged / untracked) repo-relative paths. `token` is left `None`
     /// here — pixel-ops computes the validated snapshot token separately.
     fn repo_snapshot(&mut self) -> SnapshotInfo {
+        // A replica never runs git: it attaches what the writer published
+        // for the generation it reads ([`Service::read_answer`]).
+        if self.read_only {
+            return self.reader_snapshot.clone().unwrap_or_default();
+        }
         SnapshotInfo {
             token: None,
             head: self.git_state.head(&self.root),
@@ -1276,6 +1326,34 @@ impl Service {
             dirty: self.git_state.dirty(&self.root),
             dirty_count: None,
         }
+    }
+
+    /// Publish `snapshot`, compact, for the current generation (writer only).
+    fn publish_snapshot(&self, snapshot: &SnapshotInfo) {
+        let generation = self.publication_generation();
+        *self.published_snapshot.write_or_recover() = Some(PublishedSnapshot {
+            generation,
+            snapshot: snapshot.clone().compact(),
+        });
+    }
+
+    /// Publish a snapshot unless one already describes the current
+    /// generation; the cached git state keeps this to one lookup.
+    fn ensure_snapshot_published(&mut self) {
+        let generation = self.publication_generation();
+        let current = self
+            .published_snapshot
+            .read_or_recover()
+            .as_ref()
+            .is_some_and(|published| published.generation == generation);
+        if !current {
+            let snapshot = self.repo_snapshot();
+            self.publish_snapshot(&snapshot);
+        }
+    }
+
+    fn unpublish_snapshot(&self) {
+        *self.published_snapshot.write_or_recover() = None;
     }
 
     fn dispatch(&mut self, req: Request) -> Result<Value, String> {
@@ -6173,6 +6251,8 @@ mod tests {
             "no graph on disk: the writer builds it"
         );
         writer.ensure_graph().unwrap();
+        // The writer's own answer publishes the snapshot replicas attach.
+        assert!(writer.handle(search_request("login")).ok);
         let mut reader = writer.read_replica();
 
         let found = reader
@@ -6188,6 +6268,7 @@ mod tests {
 
         std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
         writer.refresh_file("login.rs");
+        assert!(writer.handle(search_request("login_v2")).ok);
         let fresh = reader
             .read_answer(&search_request("login_v2"))
             .expect("next generation");
@@ -6197,6 +6278,86 @@ mod tests {
         assert!(
             reader.read_answer(&search_request("login_v2")).is_none(),
             "a lagging graph sends the read to the writer, which repairs it"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A replica's answer carries the snapshot the writer published with
+    /// the generation it read, and the replica runs no git for it; with no
+    /// snapshot for that generation (a new batch, a HEAD move, a repository
+    /// write) the read goes back to the writer (#1151).
+    #[test]
+    fn a_replica_should_attach_the_published_snapshot_and_run_no_git() {
+        let root = login_repo("published-snapshot");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        let mut reader = writer.read_replica();
+        assert!(
+            reader.read_answer(&search_request("login")).is_none(),
+            "nothing published yet"
+        );
+
+        let written = writer.handle(search_request("login"));
+        let published = writer.published_snapshot.read_or_recover().clone().unwrap();
+        assert_eq!(published.generation, writer.publication_generation());
+        assert_eq!(Some(&published.snapshot), written.snapshot.as_ref());
+        assert!(published.snapshot.head.is_some(), "{published:?}");
+
+        let read = reader.read_answer(&search_request("login")).unwrap();
+        assert_eq!(read.snapshot, Some(published.snapshot.clone()));
+        assert_eq!(reader.git_state.lookups, 0, "a replica spawned git");
+
+        // A watcher batch publishes a new generation: the old snapshot does
+        // not describe it.
+        std::fs::write(root.join("login.rs"), "pub fn login_v3() {}\n").unwrap();
+        writer.refresh_file("login.rs");
+        assert!(reader.read_answer(&search_request("login_v3")).is_none());
+        assert!(writer.handle(search_request("login_v3")).ok);
+        let next = reader.read_answer(&search_request("login_v3")).unwrap();
+        assert_eq!(next.snapshot.and_then(|s| s.dirty_count), Some(1));
+
+        // A HEAD move unpublishes it.
+        writer.note_git_moved();
+        assert!(writer.published_snapshot.read_or_recover().is_none());
+        assert!(reader.read_answer(&search_request("login_v3")).is_none());
+        assert_eq!(reader.git_state.lookups, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A repository write publishes the snapshot of the generation readers
+    /// see before it runs, and withdraws it afterwards, success or not.
+    #[test]
+    fn a_repo_write_should_publish_before_and_withdraw_after() {
+        let root = login_repo("repo-write-snapshot");
+        let mut writer = Service::open(&root).unwrap();
+        let generation = writer.publication_generation();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let shared = Arc::clone(&writer.published_snapshot);
+        let watcher = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if let Some(published) = shared.read_or_recover().clone() {
+                    let _ = seen_tx.send(published);
+                    return;
+                }
+                std::thread::yield_now();
+            }
+        });
+        // A remote that does not exist: the sync fails, after the snapshot
+        // the replicas would read while it ran was published.
+        let synced = writer.handle(Request::Sync {
+            remote: "nowhere".into(),
+            refspec: None,
+        });
+        watcher.join().unwrap();
+        let seen = seen_rx
+            .try_recv()
+            .expect("a snapshot was published before the sync");
+        assert_eq!(seen.generation, generation);
+        assert!(!synced.ok, "{synced:?}");
+        assert!(
+            writer.published_snapshot.read_or_recover().is_none(),
+            "withdrawn after the write"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

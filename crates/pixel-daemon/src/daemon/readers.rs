@@ -31,7 +31,8 @@ pub trait ReadReplica: Send {
 }
 
 /// How much the writer holds: every job queued or running, and among them
-/// the watcher batches.
+/// the ones that change what a read answers (a watcher batch, a HEAD move,
+/// the watch's catch-up), which no read may overtake.
 #[derive(Debug, Default)]
 pub(super) struct Busy {
     jobs: AtomicUsize,

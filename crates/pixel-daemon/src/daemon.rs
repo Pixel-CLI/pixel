@@ -211,12 +211,21 @@ enum Msg {
 /// runs one job at a time, so the order the loop sees (a watcher batch, then
 /// the request that followed it) is the order the corpus sees.
 enum Job {
+    /// A watcher batch.
     Apply(Vec<(PathBuf, bool)>),
     Serve(Request, mpsc::Sender<Response>),
     GitMoved,
     WatcherError(String),
     WatchReady(WatchReport),
     Sweep,
+}
+
+impl Job {
+    /// The job changes what a read answers (the index, or HEAD and the
+    /// branch a snapshot names): no read may overtake it.
+    fn refreshes(&self) -> bool {
+        matches!(self, Job::Apply(_) | Job::GitMoved | Job::WatchReady(_))
+    }
 }
 
 /// Git's empty tree (SHA-1): the base a first commit is diffed from.
@@ -779,7 +788,7 @@ struct Lane {
 /// ([`answer`]); a panic anywhere else unwinds out of here.
 fn run_writer(service: &mut dyn Corpus, jobs: &mpsc::Receiver<Job>, busy: &Busy) {
     for job in jobs {
-        let apply = matches!(job, Job::Apply(_));
+        let apply = job.refreshes();
         match job {
             Job::Apply(batch) => service.apply_changes(&batch),
             Job::Serve(req, reply) => {
@@ -826,7 +835,7 @@ impl Queued {
     }
 
     fn send(&mut self, job: Job) {
-        let apply = matches!(job, Job::Apply(_));
+        let apply = job.refreshes();
         self.busy.queued(apply);
         if self.jobs.send(job).is_err() {
             self.busy.done(apply);
