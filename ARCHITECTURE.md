@@ -489,6 +489,8 @@ envelope talks to the daemon socket directly.
   in the file replaces the generated one. An alias or delegator stores a
   `references` edge to its own owner's target (`arg_of` `:alias` /
   `:delegate`), never to the delegate's method, whose type is unknown.
+  A Ruby `alias` with a parser-inserted missing name is ignored: it defines
+  no method and cannot take ownership of an earlier declaration's reference.
 - Ruby ancestors are stored as declared, in the graph's `ruby_mixins` table
   (owner, `superclass`/`include`/`prepend`/`extend`, `included:`-prefixed
   inside a concern's `included do`, the constant as written, its line;
