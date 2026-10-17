@@ -388,8 +388,10 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   copy, and a file swapped for a link after the listing is not read through.
   Copying pins the chosen source directory and descends relative to open
   descriptors, without following links and with listed/opened inode checks.
-  Digest traversal still walks directories by path, so a concurrent writer
-  can redirect a subdirectory while trust is hashed (T25, #982). The clone runs with
+  Digest traversal pins directories the same way and retains their
+  descriptors through the globally sorted read, including link-text reads.
+  Replacing an ancestor after descent cannot redirect copying or hashing.
+  This does not make concurrently edited file contents an atomic snapshot. The clone runs with
   `GIT_ALLOW_PROTOCOL=https:ssh:file`, so git itself refuses any other
   transport wherever the URL comes from (an `insteadOf` rewrite, a redirect),
   and `GIT_TERMINAL_PROMPT=0`, so git does not ask for credentials on the
@@ -895,10 +897,11 @@ the later threats hold.
   is as strong as the review before it. The digest is checked immediately
   before the exec, not held open, so a process able to write the plugin
   directory in between can win that race (it could equally edit the
-  trusted file or the user's shell profile). Copy traversal pins directory
-  descriptors; digest traversal still walks directories by path, so a
-  process able to rewrite the source during hashing can redirect a
-  subdirectory to a link target (with the invoking user's reach; #982).
+  trusted file or the user's shell profile). Copy and digest traversal pin
+  directory descriptors and reject listed/opened inode substitutions;
+  neither traversal follows a replaced subdirectory into a symlink target.
+  File contents can still change in place while they are being read; the
+  traversal is not an atomic filesystem snapshot.
   A user plugin and a PATH plugin are the user's own code and are not
   gated. A plugin runs with the user's
   privileges and network once allowed; `network` is a declaration gated by

@@ -189,6 +189,9 @@ Machine-wide:
   to directory descriptors through `pixel-plugin::directory` (rustix).
   Directory and regular-file opens refuse links and compare device/inode
   with the listing; link text is read relative to the same pinned parent.
+  Trust hashing uses the same traversal and retains one descriptor per
+  source directory through its globally sorted read. The digest byte
+  encoding is unchanged, so unchanged plugins retain their trust records.
 - `~/.local/share/pixel/flows/`: saved flows, written by the `pixel-flow`
   plugin (`$PIXEL_FLOW_DIR` overrides); the core only reads it (`plan_cmd::flow_dir`).
 - `~/.local/share/pixel/pi-package/`: the Pi package `pixel setup` writes
