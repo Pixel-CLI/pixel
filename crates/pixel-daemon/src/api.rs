@@ -620,6 +620,16 @@ impl Service {
         &self.root
     }
 
+    /// What `ping` answers: constant for the life of the service, so the
+    /// daemon loop can answer it without the writer.
+    pub(crate) fn pong_value(&self) -> Value {
+        json!({
+            "pong": true,
+            "root": self.root.display().to_string(),
+            "protocol_version": PROTOCOL_VERSION,
+        })
+    }
+
     /// A persistent reader shares the warm text index, but never a SQLite connection.
     pub(crate) fn read_replica(&self) -> Self {
         Self {
@@ -1234,11 +1244,7 @@ impl Service {
 
     fn dispatch(&mut self, req: Request) -> Result<Value, String> {
         match req {
-            Request::Ping => Ok(json!({
-                "pong": true,
-                "root": self.root.display().to_string(),
-                "protocol_version": PROTOCOL_VERSION,
-            })),
+            Request::Ping => Ok(self.pong_value()),
             Request::Shutdown => Ok(json!({"shutting_down": true})),
             Request::Recall { .. } => Err(
                 "recall ops are served by the recall daemon (`pixel recall daemon start`), not a repository daemon"

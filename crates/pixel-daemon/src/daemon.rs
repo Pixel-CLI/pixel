@@ -268,6 +268,13 @@ pub trait Corpus {
     /// Root that keys the socket path and is watched by default.
     fn root(&self) -> &Path;
     fn handle(&mut self, req: Request) -> Response;
+    /// The answer to `ping`, when it is the same for the whole life of the
+    /// corpus: the loop then answers `ping` itself, ahead of the writer's
+    /// queue, so a liveness probe never waits behind a long request
+    /// (default: `None`, the writer answers it).
+    fn pong(&self) -> Option<Response> {
+        None
+    }
     /// Debounced watcher callback with the absolute changed path.
     fn apply_change(&mut self, abs: &Path, removed: bool);
     /// Debounced watcher callback with a batch of changed paths (default: loops apply_change).
@@ -313,6 +320,10 @@ impl Corpus for Service {
 
     fn handle(&mut self, req: Request) -> Response {
         Service::handle(self, req)
+    }
+
+    fn pong(&self) -> Option<Response> {
+        Some(Response::success("ping", self.pong_value()))
     }
 
     fn apply_change(&mut self, abs: &Path, removed: bool) {
@@ -706,6 +717,7 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
         register,
         watch_paths: service.watch_paths(),
         sweep_every: service.sweep_interval(),
+        pong: service.pong(),
         tx: tx.clone(),
         rx,
         writer: Queued::new(service.root().to_path_buf(), jobs_tx),
@@ -730,6 +742,8 @@ struct Lane {
     register: Registrar,
     watch_paths: Vec<PathBuf>,
     sweep_every: Option<Duration>,
+    /// The corpus's constant `ping` answer, given by the loop itself.
+    pong: Option<Response>,
     tx: mpsc::Sender<Msg>,
     rx: mpsc::Receiver<Msg>,
     writer: Queued,
@@ -846,6 +860,7 @@ fn run_loop(lane: Lane) {
         register,
         watch_paths,
         sweep_every,
+        pong,
         tx,
         rx,
         writer: mut service,
@@ -908,6 +923,12 @@ fn run_loop(lane: Lane) {
         };
 
         match rx.recv_timeout(timeout.max(Duration::from_millis(1))) {
+            Ok(Msg::Request(Request::Ping, reply)) if pong.is_some() => {
+                // A liveness probe: answered here, never queued behind the
+                // writer, and it neither drains nor flushes the watcher.
+                last_activity = Instant::now();
+                let _ = reply.send(pong.clone().expect("guarded by is_some"));
+            }
             Ok(Msg::Request(req, reply)) => {
                 last_activity = Instant::now();
                 // The watcher may have queued a mutation just before this
@@ -959,9 +980,17 @@ fn run_loop(lane: Lane) {
                 for (req, reply) in requests {
                     // Nothing after a shutdown is served; dropping `reply`
                     // tells its connection.
-                    if !shutdown {
-                        shutdown = matches!(req, Request::Shutdown);
-                        service.serve(req, reply);
+                    if shutdown {
+                        continue;
+                    }
+                    match (&req, &pong) {
+                        (Request::Ping, Some(pong)) => {
+                            let _ = reply.send(pong.clone());
+                        }
+                        _ => {
+                            shutdown = matches!(req, Request::Shutdown);
+                            service.serve(req, reply);
+                        }
                     }
                 }
                 if failed {
@@ -3247,11 +3276,17 @@ mod tests {
         root: PathBuf,
         started: mpsc::Sender<()>,
         release: mpsc::Receiver<()>,
+        /// Gives the loop a constant `ping` answer.
+        pong: bool,
     }
 
     impl Corpus for HeldCorpus {
         fn root(&self) -> &Path {
             &self.root
+        }
+        fn pong(&self) -> Option<Response> {
+            self.pong
+                .then(|| Response::success("ping", serde_json::json!({"pong": "loop"})))
         }
         fn handle(&mut self, req: Request) -> Response {
             if matches!(req, Request::Status {}) {
@@ -3283,6 +3318,7 @@ mod tests {
                 root: served,
                 started: started_tx,
                 release: release_rx,
+                pong: false,
             })
         });
         wait_until("socket to bind", Duration::from_secs(10), || sock.exists());
@@ -3461,6 +3497,69 @@ mod tests {
             .expect("a given-back slot is taken");
         drop(third.join().unwrap());
         assert_eq!(*slots.busy.lock().unwrap(), 1);
+    }
+
+    /// The hooks' liveness probe gives a daemon `PROBE_TIMEOUT` (1.5 s) to
+    /// answer `ping`, then restarts it. A corpus with a constant answer has
+    /// the loop give it while the writer runs a long request, so a busy
+    /// daemon is never taken for a dead one (#1152).
+    #[test]
+    fn ping_should_be_answered_while_the_writer_holds_a_request() {
+        let root = scratch_root("held-ping");
+        let sock = socket_path(&root);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let served = root.clone();
+        let daemon = std::thread::spawn(move || {
+            run_corpus(HeldCorpus {
+                root: served,
+                started: started_tx,
+                release: release_rx,
+                pong: true,
+            })
+        });
+        wait_until("socket to bind", Duration::from_secs(10), || sock.exists());
+
+        let held_sock = sock.clone();
+        let held = std::thread::spawn(move || request(&held_sock, &Request::Status {}));
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the writer takes the held request");
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        stream.set_read_timeout(Some(PROBE_TIMEOUT)).unwrap();
+        stream.set_write_timeout(Some(PROBE_TIMEOUT)).unwrap();
+        let started = Instant::now();
+        assert!(
+            probe_ping(&mut stream),
+            "ping went unanswered while the writer was busy"
+        );
+        assert!(started.elapsed() < PROBE_TIMEOUT);
+        let pong = request(&sock, &Request::Ping);
+        assert_eq!(pong["result"]["pong"], "loop", "the loop's answer: {pong}");
+        assert!(!held.is_finished(), "the held request is still running");
+
+        release_tx.send(()).unwrap();
+        assert_eq!(held.join().unwrap()["ok"], true);
+        assert_eq!(request(&sock, &Request::Shutdown)["ok"], true);
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The loop's `ping` is the one the writer would give: same envelope,
+    /// byte for byte, for the repository and the recall corpus.
+    #[test]
+    fn pong_should_equal_the_handled_ping() {
+        let root = scratch_root("pong-service");
+        let mut service = Service::open(&root).unwrap();
+        let pong = Corpus::pong(&service).expect("a service answers ping from the loop");
+        let handled = Corpus::handle(&mut service, Request::Ping);
+        assert_eq!(
+            serde_json::to_value(&pong).unwrap(),
+            serde_json::to_value(&handled).unwrap()
+        );
+        assert_eq!(pong.result.unwrap()["pong"], true);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
