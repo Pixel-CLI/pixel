@@ -287,8 +287,13 @@ it: a read never overtakes an `Apply`, so a request that follows an edit sees
 it. A replica answers from the generation last published (`read_answer`
 checks it before and after, inside one read transaction on the graph); it
 never builds the graph, adds no git churn signals and no semantic fallback,
-and hands the request back to the writer when the graph is missing or lags
-or the generation moved. The watcher debounces
+and runs no git: its `snapshot` is the compact `PublishedSnapshot` the
+writer published with that generation (from the snapshot it attached to an
+answer, or computed before a repository write starts). A watcher batch, a
+HEAD move or a repository write withdraws it, and `Job::refreshes` keeps
+reads from overtaking the batch or the HEAD move. The replica hands the
+request back to the writer when the graph is missing or lags, no snapshot
+describes its generation, or the generation moved. The watcher debounces
 filesystem events and refreshes the index and graph for changed files. Only
 events admitted by `record_event` extend the 500 ms quiet window; the first
 pending event caps queue wait at `MAX_PENDING_WAIT` (2 s), so ignored-tree
