@@ -34,7 +34,7 @@ model providers, and the website under `website/`.
 | Asset | Where | Why it matters |
 | --- | --- | --- |
 | Source and history of indexed repositories | the working tree, read through `pixel-git::GitRunner` and the walkers in `pixel-index`/`pixel-graph` | confidentiality of code the user did not mean to share; integrity of what the agent is told about it |
-| Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `brief-decisions.jsonl`, `brief-feedback.jsonl`, `brief-sessions/`, `config.yaml`, `tasks/` | what the agent reads as ground truth; `actions.jsonl` and `brief-decisions.jsonl` (the typed prompt) can hold secrets; `brief-feedback.jsonl` holds repository paths and counts only; `brief-sessions/` holds hashes of paths and line numbers; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
+| Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `brief-decisions.jsonl`, `brief-feedback.jsonl`, `brief-sessions/`, `config.yaml`, `tasks/` | what the agent reads as ground truth; `actions.jsonl` and `brief-decisions.jsonl` (the typed prompt, or a bounded excerpt from a paste-only prompt) can hold secrets; `brief-feedback.jsonl` holds repository paths and counts only; `brief-sessions/` holds hashes of paths and line numbers; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.pixel/setup-receipt.json` (original setup-edited configuration, potentially including keys), `~/.pixel/plugins/`, `~/.pixel/trusted.toml` and `~/.pixel/plugins.toml` (the plugin host's installs, trust records and network opt-ins), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
 | Agent configurations | what `pixel setup` writes: `~/.claude/settings.json`, `$CODEX_HOME/hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the `pixel` skill (`skills/pixel/SKILL.md`) under the agent config dirs, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); `--repo` writes only `.pixel/config.yaml`. The Antigravity IDE and CLI Pixel plugin dirs carry the `pixel` skill and the metrics hook | a hook command runs with the user's privileges on every agent tool call |
@@ -694,9 +694,10 @@ the later threats hold.
   line when an existing file cannot be brought to 0600, and is
   written without following a link at the file or at `.pixel` itself
   (`decision_log::append`, `nofollow::open_lock`), holds the last 500
-  lines, never a pasted block (`typed_text`) or more than the last
-  paragraph of a long untagged paste (`brief_task`), masks credential shapes
-  before it cuts the text at 600 characters (`decision_log::logged_typed`:
+  lines, the task text (`brief_task`), which for a prompt containing only a
+  pasted block can be the bounded head-and-tail excerpt of that block, masks
+  credential shapes before it cuts the text at 600 characters
+  (`decision_log::logged_typed`:
   `pixel_git::redact` and a key mask), and is off with
   `PIXEL_BRIEF_LOG=0|false|off`. `brief-feedback.jsonl`, the read feedback of
   the same hooks (`execution_brief::feedback`), is written through the same
