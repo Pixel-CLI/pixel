@@ -11,8 +11,8 @@ brief instead of the oracle and counts the tool calls of each. The default quest
 call counts of ``baselines.jsonl``); ``--census-db`` runs the 13 answer-only questions of the private census instead,
 compared with their vanilla Claude Code sessions:
 
-    pass                    0 calls: the brief carried everything the answer needed
-    fell back to tool calls >= 1 call: something was missing from the brief
+    zero calls; quality unreviewed   delivered brief, nonempty answer, 0 calls; correctness needs review
+    fell back to tool calls >= 1 call: the agent fetched more evidence
     brief not delivered     the hooks printed no byte to the agent: not a pass, whatever it did
 
 ``--agent`` picks the live agent: ``codex`` (the default) or ``claude``. A session is an
@@ -42,7 +42,9 @@ back from the clone's ``.pixel/brief-feedback.jsonl`` (written by the hooks them
     brief-zero-calls.py --self-test
 
 The answers and the transcripts are private: the raw streams stay under ``<root>/zero-calls/``, and the printed
-and recorded report holds aggregates only (counts, tool names, bytes, seconds). Census prompts are read from
+and recorded report holds counts, tool names, bytes, seconds and an answer hash, never answer text.
+A successful exit measures delivery and tool calls only; answer quality is always unreviewed.
+Compare paired answers with the pinned source before claiming correctness or equal answers. Census prompts are read from
 ``census.db`` at run time and never written anywhere.
 
 The runner (``scripts/bench/tool-census/run.py``: clone copies, env whitelist, shim, launch, quota guard) and the
@@ -65,6 +67,8 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 CENSUS_DIRS = tuple(Path(p) for p in (os.environ.get("PIXEL_CENSUS_DIR"), HERE / "tool-census") if p)
@@ -73,7 +77,7 @@ CODEX_AUTH = Path.home() / ".codex" / "auth.json"
 # The campaign defaults of eval/run.sh.
 CODEX_MODEL = "gpt-5.6-terra"
 CODEX_EFFORT = "medium"
-PASS = "pass"
+ZERO_CALLS = "zero calls; quality unreviewed"
 FELL_BACK = "fell back to tool calls"
 NOT_DELIVERED = "brief not delivered"
 BASELINE = "baseline"
@@ -214,7 +218,7 @@ def command_label(command):
 def parse_codex_stream(lines):
     """Tool calls (type and executable only: the arguments are private) and the outcome of one ``codex exec --json``
     session. Every item that is not a message, a reasoning step, a todo list or an error is a call, counted once."""
-    calls, seen, errors, completed, failed = [], set(), 0, False, False
+    calls, seen, errors, completed, failed, answer = [], set(), 0, False, False, ""
     for line in lines:
         try:
             rec = json.loads(line)
@@ -230,13 +234,16 @@ def parse_codex_stream(lines):
                 if label == "command_execution":
                     label = command_label(str(item.get("command") or ""))
                 calls.append({"id": ident, "tool": label})
+        elif kind == "item.completed" and item.get("type") == "agent_message":
+            if item.get("phase") in (None, "final_answer"):
+                answer = str(item.get("text") or "")
         elif kind == "item.completed" and item.get("type") == "error":
             errors += 1
         elif kind == "turn.completed":
             completed = True
         elif kind in ("turn.failed", "error"):
             failed = True
-    return {"calls": calls, "errors": errors, "completed": completed and not failed}
+    return {"calls": calls, "errors": errors, "completed": completed and not failed, "answer": answer}
 
 
 def parse_stream(lines):
@@ -257,7 +264,8 @@ def parse_stream(lines):
                           "chars": len(str(rec.get("stdout") or rec.get("output") or ""))})
         elif kind == "result":
             result = rec
-    return {"calls": calls, "hooks": hooks, "result": result}
+    return {"calls": calls, "hooks": hooks, "result": result,
+            "answer": str((result or {}).get("result") or "")}
 
 
 def feedback_of(ws):
@@ -302,16 +310,15 @@ def percentile(values, q):
     return values[min(len(values) - 1, max(0, int(q * len(values) + 0.999999) - 1))]
 
 
-def verdict(arm, n_calls, delivered, problems=()):
-    """One session's result. A brief that reached the agent with 0 calls is the only pass; a brief that did not
-    reach it is never one, whatever the agent did."""
-    if problems:
+def verdict(arm, n_calls, delivered, problems=(), *, answered=False):
+    """Measure delivery and calls only; a nonempty answer is necessary, not evidence of correctness."""
+    if problems or not answered:
         return ERROR
     if arm == "nobrief":
         return BASELINE
     if not delivered:
         return NOT_DELIVERED
-    return PASS if n_calls == 0 else FELL_BACK
+    return ZERO_CALLS if n_calls == 0 else FELL_BACK
 
 
 def is_promisor_clone(ws):
@@ -384,13 +391,15 @@ def render(rows, label, claude_census=None, source_kind="census"):
                          f"{row['verdict']} |")
     brief_rows = [r for r in rows if r.get("arm", "brief") == "brief"]
     base_rows = [r for r in rows if r.get("arm") == "nobrief"]
-    passed = sum(1 for r in brief_rows if r["verdict"] == PASS)
+    zero_calls = sum(1 for r in brief_rows if r["verdict"] == ZERO_CALLS)
     undelivered = sum(1 for r in brief_rows if r["verdict"] == NOT_DELIVERED)
     errors = sum(1 for r in rows if r["verdict"] == ERROR)
     if brief_rows:
-        lines += ["", f"**{passed} of {len(brief_rows)} brief sessions answered with 0 tool calls**; "
+        lines += ["", f"**{zero_calls} of {len(brief_rows)} brief sessions produced a nonempty answer with 0 tool calls**; "
                       f"{sum(1 for r in brief_rows if r['verdict'] == FELL_BACK)} {FELL_BACK}, "
                       f"{undelivered} {NOT_DELIVERED}, {errors} error."]
+        lines.append("Answer quality: unreviewed. Zero calls does not establish correctness or equal answers; "
+                     "review the paired private transcripts against the pinned source before claiming either.")
         lines.append(f"Brief sessions: {sum(r['n_calls'] for r in brief_rows if r['n_calls'] >= 0)} tool calls in total.")
     if base_rows:
         lines.append(f"No-brief sessions: {sum(r['n_calls'] for r in base_rows if r['n_calls'] >= 0)} tool calls in total, "
@@ -416,7 +425,7 @@ class Run:
         self.index_slots = threading.Semaphore(max(1, args.index_jobs))
 
     def session(self, sid, ws, arm, prompt, env):
-        """Run the agent on ``prompt`` in ``ws``: (tool calls, outcome problems, seconds, raw stream path)."""
+        """Run the agent on ``prompt`` in ``ws``: (tool calls, outcome problems, seconds, answer evidence)."""
         census, args = self.census, self.args
         settings = None
         home = None
@@ -450,7 +459,17 @@ class Run:
         problems = []
         if timed_out or code != 0 or not finished:
             problems.append(f"session:exit{code}{'+timeout' if timed_out else ''}")
-        return stream["calls"], problems, seconds
+        answer = stream["answer"].strip()
+        if not answer:
+            problems.append("answer:empty")
+        if args.agent == "claude" and ((stream["result"] or {}).get("is_error")
+                                      or (stream["result"] or {}).get("subtype") != "success"):
+            problems.append("session:unsuccessful-result")
+        # Text stays in the private raw stream; public rows carry identity for later review only.
+        evidence = {"answer_bytes": len(answer.encode("utf-8")),
+                    "answer_sha256": hashlib.sha256(answer.encode("utf-8")).hexdigest() if answer else None,
+                    "answer_quality": "unreviewed"}
+        return stream["calls"], problems, seconds, evidence
 
     def unit(self, sid, repo, sha, prompt, arm, total):
         census, args = self.census, self.args
@@ -463,7 +482,7 @@ class Run:
             if arm == "brief":
                 with self.index_slots:
                     activate(args.brief_bin, ws, env, not args.no_history)
-            calls, problems, seconds = self.session(sid, ws, arm, prompt, census.agent_env(os.environ, self.shim))
+            calls, problems, seconds, evidence = self.session(sid, ws, arm, prompt, census.agent_env(os.environ, self.shim))
             tools = {}
             for call in calls:
                 tools[call["tool"]] = tools.get(call["tool"], 0) + 1
@@ -479,10 +498,12 @@ class Run:
             delivered = fb["part_bytes"] > 0
             if arm == "brief" and delivered and fb["parts_ran"] != args.parts:
                 problems.append(f"hooks:{fb['parts_ran']}/{args.parts}")
+            row.update(evidence)
             row.update({"n_calls": len(calls), "tools": tools, "brief_bytes": fb["part_bytes"],
                         "parts_ran": fb["parts_ran"], "parts_late": fb["late"],
                         "brief_ms": brief_ms_of(ws) if arm == "brief" else None, "seconds": round(seconds, 1),
-                        "problems": problems, "verdict": verdict(arm, len(calls), delivered, problems)})
+                        "problems": problems, "verdict": verdict(arm, len(calls), delivered, problems,
+                                                                answered=evidence["answer_bytes"] > 0)})
         except (OSError, subprocess.SubprocessError) as error:
             row["problems"].append(type(error).__name__)
         finally:
@@ -560,7 +581,7 @@ def main(argv=None):
     (run.out / "report.json").write_text(json.dumps({"binary": label, "rows": rows}, indent=1), encoding="utf-8")
     print("\n" + report)
     print(f"report {run.out / 'report.md'}")
-    return 0 if all(r["verdict"] in (PASS, BASELINE) for r in rows) else 1
+    return 0 if all(r["verdict"] in (ZERO_CALLS, BASELINE) for r in rows) else 1
 
 
 class SelfTest(unittest.TestCase):
@@ -659,12 +680,68 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(stream["result"]["subtype"], "success")
 
     def test_a_brief_that_did_not_reach_the_agent_is_never_a_zero_call_pass(self):
-        self.assertEqual(verdict("brief", 0, True), PASS)
-        self.assertEqual(verdict("brief", 3, True), FELL_BACK)
-        self.assertEqual(verdict("brief", 0, False), NOT_DELIVERED)
-        self.assertEqual(verdict("brief", 5, False), NOT_DELIVERED)
-        self.assertEqual(verdict("nobrief", 0, False), BASELINE)
+        self.assertEqual(verdict("brief", 0, True, answered=True), ZERO_CALLS)
+        self.assertEqual(verdict("brief", 3, True, answered=True), FELL_BACK)
+        self.assertEqual(verdict("brief", 0, False, answered=True), NOT_DELIVERED)
+        self.assertEqual(verdict("brief", 5, False, answered=True), NOT_DELIVERED)
+        self.assertEqual(verdict("nobrief", 0, False, answered=True), BASELINE)
         self.assertEqual(verdict("brief", 0, True, ["session:exit1"]), ERROR)
+
+    def test_empty_answers_cannot_qualify_either_arm_even_with_successful_delivery(self):
+        for arm in ("brief", "nobrief"):
+            self.assertEqual(verdict(arm, 0, True), ERROR)
+            self.assertEqual(verdict(arm, 0, True, answered=False), ERROR)
+
+    def test_session_requires_an_answer_and_keeps_its_text_out_of_public_evidence(self):
+        for agent in ("codex", "claude"):
+            for answer in ("", "   ", "A private answer é"):
+                with self.subTest(agent=agent, answer=answer), tempfile.TemporaryDirectory() as tmp:
+                    if agent == "codex":
+                        records = [{"type": "item.completed", "item": {"type": "agent_message", "text": answer,
+                                                                        "phase": "final_answer"}},
+                                   {"type": "turn.completed"}]
+                    else:
+                        records = [{"type": "result", "subtype": "success", "result": answer}]
+                    run = Run.__new__(Run)
+                    run.root = run.out = Path(tmp)
+                    (run.root / "work").mkdir()
+                    run.args = SimpleNamespace(agent=agent, brief_bin="/pixel", parts=3, codex_model="m",
+                                               codex_effort="medium", model=None, effort=None, budget=1, timeout=1)
+                    run.census = SimpleNamespace(CLAUDE="/claude", claude_argv=lambda *args: [],
+                                                 run_claude=lambda *args: ([(0, json.dumps(r)) for r in records],
+                                                                          "", 0, False, 1))
+                    with patch(__name__ + ".make_codex_home"):
+                        calls, problems, _, evidence = run.session("q", tmp, "brief", "prompt", {})
+                    self.assertEqual(calls, [])
+                    self.assertEqual(problems, [] if answer.strip() else ["answer:empty"])
+                    self.assertEqual(evidence, {"answer_bytes": len(answer.strip().encode("utf-8")),
+                                               "answer_sha256": hashlib.sha256(answer.strip().encode("utf-8")).hexdigest()
+                                               if answer.strip() else None, "answer_quality": "unreviewed"})
+                    self.assertNotIn("A private answer", json.dumps(evidence))
+
+    def test_claude_error_result_cannot_be_a_zero_call_success_even_if_it_has_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Run.__new__(Run)
+            run.root = run.out = Path(tmp)
+            run.args = SimpleNamespace(agent="claude", brief_bin="/pixel", parts=3,
+                                       model=None, effort=None, budget=1, timeout=1)
+            record = {"type": "result", "subtype": "error_max_budget_usd", "is_error": True,
+                      "result": "Budget exhausted"}
+            run.census = SimpleNamespace(CLAUDE="/claude", claude_argv=lambda *args: [],
+                                         run_claude=lambda *args: ([(0, json.dumps(record))], "", 0, False, 1))
+            _, problems, _, evidence = run.session("q", tmp, "brief", "prompt", {})
+            self.assertEqual(problems, ["session:unsuccessful-result"])
+            self.assertEqual(verdict("brief", 0, True, problems, answered=evidence["answer_bytes"] > 0), ERROR)
+
+    def test_codex_commentary_is_not_an_answer_and_only_completed_messages_count(self):
+        records = [{"type": "item.completed", "item": {"type": "agent_message", "text": "Looking now",
+                                                        "phase": "commentary"}},
+                   {"type": "item.started", "item": {"type": "agent_message", "text": "unfinished"}},
+                   {"type": "turn.completed"}]
+        self.assertEqual(parse_codex_stream(map(json.dumps, records))["answer"], "")
+        records.insert(-1, {"type": "item.completed", "item": {"type": "agent_message", "text": "Final",
+                                                               "phase": "final_answer"}})
+        self.assertEqual(parse_codex_stream(map(json.dumps, records))["answer"], "Final")
 
     def test_feedback_reads_back_the_bytes_each_part_printed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -683,15 +760,16 @@ class SelfTest(unittest.TestCase):
         def row(qid, arm, calls, brief_bytes, result):
             return {"id": qid, "repo": "a", "agent": "codex", "arm": arm, "n_calls": calls, "tools": {},
                     "brief_bytes": brief_bytes, "verdict": result}
-        rows = [row("a-1", "nobrief", 4, 0, BASELINE), row("a-1", "brief", 0, 900, PASS),
+        rows = [row("a-1", "nobrief", 4, 0, BASELINE), row("a-1", "brief", 0, 900, ZERO_CALLS),
                 row("a-2", "nobrief", 2, 0, BASELINE), row("a-2", "brief", 1, 90, FELL_BACK),
                 row("a-3", "nobrief", 0, 0, BASELINE), row("a-3", "brief", 0, 0, NOT_DELIVERED)]
         text = render(rows, "t", {"a-1": 7, "a-2": 3, "a-3": 5})
-        self.assertIn("| a-1 | a | 7 | 4 | 0 | 900 | pass |", text)
+        self.assertIn("| a-1 | a | 7 | 4 | 0 | 900 | zero calls; quality unreviewed |", text)
         self.assertIn("| a-2 | a | 3 | 2 | 1 | 90 | fell back to tool calls |", text)
         self.assertIn("| a-3 | a | 5 | 0 | 0 | 0 | brief not delivered |", text)
-        self.assertIn("**1 of 3 brief sessions answered with 0 tool calls**; 1 fell back to tool calls, "
+        self.assertIn("**1 of 3 brief sessions produced a nonempty answer with 0 tool calls**; 1 fell back to tool calls, "
                       "1 brief not delivered, 0 error.", text)
+        self.assertIn("Answer quality: unreviewed. Zero calls does not establish correctness or equal answers", text)
         self.assertIn("No-brief sessions: 6 tool calls in total, 1 with none.", text)
         self.assertIn("Census (vanilla Claude Code): 15 tool calls over these 3 questions.", text)
 
@@ -710,7 +788,7 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(percentile([7], 0.95), 7)
         self.assertIsNone(percentile([None], 0.95))
         rows = [{"id": f"a-{n}", "repo": "a", "arm": "brief", "n_calls": 0, "tools": {}, "brief_bytes": 10,
-                 "verdict": PASS, "brief_ms": ms} for n, ms in enumerate([100, 200, 300, 700])]
+                 "verdict": ZERO_CALLS, "brief_ms": ms} for n, ms in enumerate([100, 200, 300, 700])]
         self.assertIn("Brief latency over 4 sessions: p50 200 ms, p95 700 ms, max 700 ms", render(rows, "t"))
 
     def test_single_arm_report_lists_tools(self):
@@ -720,10 +798,10 @@ class SelfTest(unittest.TestCase):
 
     def test_the_bench_report_names_the_baseline_column_and_the_census_one_the_census(self):
         rows = [{"id": "b-1", "repo": "o__r", "agent": "codex", "arm": arm, "n_calls": n, "tools": {},
-                 "brief_bytes": 5, "verdict": v} for arm, n, v in (("nobrief", 6, BASELINE), ("brief", 0, PASS))]
+                 "brief_bytes": 5, "verdict": v} for arm, n, v in (("nobrief", 6, BASELINE), ("brief", 0, ZERO_CALLS))]
         bench = render(rows, "t", {"b-1": 5}, "bench")
         self.assertIn("| question | repo | bench baseline calls | no brief calls |", bench)
-        self.assertIn("| b-1 | o__r | 5 | 6 | 0 | 5 | pass |", bench)
+        self.assertIn("| b-1 | o__r | 5 | 6 | 0 | 5 | zero calls; quality unreviewed |", bench)
         self.assertIn("Bench baseline (plain Codex): 5 tool calls over these 1 questions.", bench)
         self.assertIn("census Claude calls", render(rows, "t", {"b-1": 5}))
 

@@ -1,5 +1,9 @@
 # Brief vs oracle coverage (issue #906)
 
+Historical private-census measurements below. For the pinned 2026-10-17 public
+benchmark, see [the current baseline](brief-906-baseline-2026-10-17.md); the two
+datasets and protocols are distinct.
+
 How much of the context a vanilla agent actually looked at does a Pixel brief reproduce? `scripts/bench/tool-census/score_brief.py`
 scores any `pixel` binary offline against the 20 census sessions of issue #905 (13 answer, 7 edit). No model runs: the
 oracle is read off the census `calls`, the brief is parsed from `pixel brief`.

@@ -47,3 +47,9 @@ seconds and would have caught the case beside it.
   changelog entry that explains a trap wrongly is worse than one that says
   nothing: the next reader goes looking for the wrong cause. When a
   measurement corrects a merged claim, correct the merged text too.
+
+- **Pin the probes as well as the binary for a brief baseline.** The brief runs
+  installed programs from `~/.pixel/plugins/`; a binary at a known commit
+  can still execute older probes. Freeze the bundled manifests and programs
+  from that commit in a separate home, record their hashes, and use it for
+  every arm. Verified 2026-10-17: two installed probes differed from main.
