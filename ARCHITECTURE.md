@@ -239,11 +239,22 @@ events admitted by `record_event` extend the 500 ms quiet window; the first
 pending event caps queue wait at `MAX_PENDING_WAIT` (2 s), so ignored-tree
 traffic and continuous edits cannot postpone the timer forever. Applying the
 batch can take additional time. Both a timer flush and a pre-request flush
-clear the first-event timestamp. It is
-registered on its own thread so the daemon answers from its first request: a
-recursive watch walks every directory under the root, ignored ones included,
-and took 11 to 28 s over a repository's 11 515 `node_modules` directories.
-Once it is live, `Corpus::watch_ready` re-reads every path `git status`
+clear the first-event timestamp. The watch is
+registered on its own thread so the daemon answers from its first request.
+On macOS it is one recursive FSEvents watch per root, which walks nothing.
+Elsewhere (`register_pruned_watch`) it is one non-recursive watch per
+directory whose name is not in `IGNORED_DIRS`, plus `<root>/.git`, `.git/info`
+(its `exclude` file) and `.git/logs` (the `HEAD` reflog): a recursive inotify
+watch walks and watches every ignored directory too (15 825 watches where
+2 216 suffice) and fails past `max_user_watches`. A directory created or moved
+in later is added to the watch by the loop, and the files already inside it
+join the pending batch. A write to `.git/HEAD`, its reflog, `packed-refs` or a
+branch ref reaches `Corpus::git_moved`, which drops the `Service`'s cached
+HEAD and branch; while the watch covers `.git` those live up to
+`WATCHED_REF_TTL` (60 s) instead of `SNAPSHOT_CACHE_TTL` (1 s), and a watcher
+batch drops only the cached dirty list. `status` reports the watch under
+`watcher` (`ready`, `watched_dirs`, `recursive`, `registration_ms`,
+`git_dir`). Once it is live, `Corpus::watch_ready` re-reads every path `git status`
 lists, every path the index overlay held (an edit discarded meanwhile leaves
 `git status` clean) and every path a HEAD move since the open changed, since
 edits made meanwhile raised no event. The daemon exits after
@@ -392,7 +403,12 @@ envelope talks to the daemon socket directly.
 
 - The text index is git-anchored: base shards correspond to a commit, delta
   shards to changes since, and an overlay covers the dirty working tree.
-  `pixel status` reports whether each layer is fresh.
+  `pixel status` reports whether each layer is fresh. A watcher batch
+  decides which paths the overlay admits from the walk policy's verdict
+  kept on `IndexSet`: the first batch and any batch that touches an
+  ignore-control file (`.gitignore`, `.ignore`, `.git/info/exclude`) run the
+  full `policy_walk`; any other batch judges a new path by a walk from its
+  nearest admitted ancestor (`index::policy_admits_from`).
 - The graph is built lazily on the first graph command and updated per file
   by the daemon watcher. Its quiet debounce extends only for recorded content
   events and is capped from the first pending edit (see Daemon and wire contract).
