@@ -10,9 +10,9 @@
 //! 120 s on this same thread) was answered from the index built before the
 //! change: the caller that wrote the file and immediately asked about it got
 //! a stale answer. The pending batch is now drained before the connection is
-//! served. The single thread remains the known limit for *latency* (a long
-//! mutation still delays every other request, see `daemon.rs`'s module
-//! comment); this test pins the ordering, not a concurrency guarantee.
+//! served. Since #1150 a read-plane request (`search`, `targets`, …) that
+//! arrives while the writer is busy is answered by a read replica, unless a
+//! watcher batch is queued ahead of it: the last two tests pin both halves.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use pixel_daemon::daemon::{Corpus, WatchReport, run_corpus, socket_path};
+use pixel_daemon::daemon::{Corpus, ReadReplica, WatchReport, run_corpus, socket_path};
 use pixel_daemon::{Request, Response, Service};
 
 use crate::support::git;
@@ -138,6 +138,14 @@ impl Corpus for GatedCorpus {
         self.service.apply_change(abs, removed);
     }
 
+    fn pong(&self) -> Option<Response> {
+        self.service.pong()
+    }
+
+    fn read_replica(&self) -> Option<Box<dyn ReadReplica>> {
+        self.service.read_replica()
+    }
+
     fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
         self.service.apply_changes(changes);
     }
@@ -236,4 +244,142 @@ fn a_file_changed_during_a_held_request_is_visible_to_the_next_request() {
     assert!(bye_reply.ok, "{bye_reply:?}");
     daemon.join().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A daemon over `fixture(tag)` serving a `GatedCorpus`, its watch live and
+/// its graph built (a replica reads the graph, it never builds it).
+struct Gated {
+    dir: PathBuf,
+    sock: PathBuf,
+    started: mpsc::Receiver<()>,
+    release: mpsc::Sender<()>,
+    daemon: std::thread::JoinHandle<Result<(), pixel_daemon::ServeError>>,
+}
+
+impl Gated {
+    fn start(tag: &str) -> Self {
+        let dir = fixture(tag);
+        let sock = socket_path(&dir);
+        let (started_tx, started) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let served = dir.clone();
+        let daemon = std::thread::spawn(move || {
+            let service = Service::open(&served).expect("service opens");
+            run_corpus(GatedCorpus {
+                service,
+                started: started_tx,
+                release: release_rx,
+                ready: ready_tx,
+            })
+        });
+        match ready_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("watcher failed before becoming ready: {error}"),
+            Err(error) => panic!("watcher did not become ready: {error}"),
+        }
+        let built = Client::connect(&sock).request(&Request::Symbol {
+            name: "helper".into(),
+        });
+        assert!(built.ok, "{built:?}");
+        Gated {
+            dir,
+            sock,
+            started,
+            release,
+            daemon,
+        }
+    }
+
+    /// Send a `status` the writer holds until [`Gated::finish`].
+    fn hold(&self) -> Client {
+        let mut held = Client::connect(&self.sock);
+        held.send(&Request::Status {});
+        self.started
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the writer takes the held request");
+        held
+    }
+
+    fn finish(self, mut held: Client) {
+        self.release.send(()).unwrap();
+        let held_reply = held.receive();
+        assert!(held_reply.ok, "{held_reply:?}");
+        let bye = Client::connect(&self.sock).request(&Request::Shutdown);
+        assert!(bye.ok, "{bye:?}");
+        self.daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn search(pattern: &str) -> Request {
+    Request::Search {
+        pattern: pattern.into(),
+        json: false,
+        limit: None,
+        offset: None,
+        paths: None,
+        scope: None,
+        globs: Vec::new(),
+        types: Vec::new(),
+    }
+}
+
+/// A `ping` and a `search` sent while the writer holds a long request are
+/// answered before it ends: the search by a read replica, from the
+/// published index (#1150).
+#[test]
+fn reads_should_be_answered_while_the_writer_holds_a_request() {
+    let gated = Gated::start("replica-read");
+    let held = gated.hold();
+
+    let pong = Client::connect(&gated.sock).request(&Request::Ping);
+    assert!(pong.ok, "{pong:?}");
+    let started = Instant::now();
+    let found = Client::connect(&gated.sock).request(&search("helper"));
+    assert!(found.ok, "{found:?}");
+    assert!(
+        found.data().to_string().contains("src/util.ts"),
+        "the replica answers from the published index: {found:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the search waited for the held request"
+    );
+    gated.finish(held);
+}
+
+/// A file changed while the writer holds a request is visible to the next
+/// read: the watcher batch is queued ahead of the read, so the read waits
+/// for the writer instead of taking a replica's older index.
+#[test]
+fn a_read_after_an_edit_should_wait_for_the_batch_not_take_a_replica() {
+    let gated = Gated::start("replica-batch");
+    let held = gated.hold();
+    std::fs::write(
+        gated.dir.join("src/util.ts"),
+        "export function helper(x: number): number { return x + 1 }\n\
+         export function fresh_probe(): number { return 42 }\n",
+    )
+    .unwrap();
+    std::thread::sleep(WATCHER_SETTLE);
+    let mut probe = Client::connect(&gated.sock);
+    probe.send(&search("fresh_probe"));
+    std::thread::sleep(Duration::from_millis(300));
+    gated.release.send(()).unwrap();
+    let found = probe.receive();
+    assert!(found.ok, "{found:?}");
+    assert!(
+        found.data().to_string().contains("fresh_probe"),
+        "the edit made during the held request is visible: {found:?}"
+    );
+    // `finish` releases once more; the second `status` is never sent, so
+    // hand it the held client after its answer is in.
+    let mut held = held;
+    let held_reply = held.receive();
+    assert!(held_reply.ok, "{held_reply:?}");
+    let bye = Client::connect(&gated.sock).request(&Request::Shutdown);
+    assert!(bye.ok, "{bye:?}");
+    gated.daemon.join().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&gated.dir);
 }

@@ -575,6 +575,12 @@ fn note_failure(log: &mut FailureLog, what: &str) {
     }
 }
 
+impl crate::daemon::ReadReplica for Service {
+    fn read(&mut self, req: &Request) -> Option<Response> {
+        self.read_answer(req)
+    }
+}
+
 impl Service {
     /// Open (building layers if needed) the text index; graph db is lazy.
     pub fn open(root: &Path) -> Result<Self, ServeError> {
@@ -705,6 +711,36 @@ impl Service {
             let _ = graph.conn().execute_batch("ROLLBACK");
         }
         (*state, result)
+    }
+
+    /// Answer a read-plane request on a replica, from the generation the
+    /// writer last published, or `None` when the writer must: not a
+    /// read-plane op, not a replica, an unhealthy or graph-lagging
+    /// publication, no graph on disk to read (the writer builds it), or a
+    /// generation that moved while the answer was computed. The graph is
+    /// read inside one transaction, so the answer sees one database state.
+    pub(crate) fn read_answer(&mut self, req: &Request) -> Option<Response> {
+        if !self.read_only || crate::plane::plane(req) != Plane::Read {
+            return None;
+        }
+        let before = *self.publication.read_or_recover();
+        if !before.healthy || before.graph_lagging {
+            return None;
+        }
+        if self.reader_generation != before.generation {
+            self.graph = None;
+            self.reader_generation = before.generation;
+        }
+        if self.graph.is_none() {
+            self.graph = GraphStore::open_read_only(&self.graph_db_path()).ok();
+        }
+        self.graph.as_ref()?.conn().execute_batch("BEGIN").ok()?;
+        let response = self.handle(req.clone());
+        if let Some(graph) = &self.graph {
+            let _ = graph.conn().execute_batch("ROLLBACK");
+        }
+        let after = *self.publication.read_or_recover();
+        (after.healthy && after.generation == before.generation).then_some(response)
     }
 
     /// Semantic leads for a lexical miss. The read plane never embeds: a
@@ -6108,6 +6144,61 @@ mod tests {
             (state.generation, state.healthy, state.graph_lagging),
             (10, true, false)
         );
+    }
+
+    fn search_request(pattern: &str) -> Request {
+        Request::Search {
+            pattern: pattern.into(),
+            json: false,
+            limit: None,
+            offset: None,
+            paths: None,
+            scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
+        }
+    }
+
+    /// A replica answers a read-plane op from the published generation and
+    /// gives back everything else to the writer: a write-plane op, a read on
+    /// the writer itself, a repository whose graph is not built yet, and a
+    /// graph that lags the index (#1150).
+    #[test]
+    fn read_answer_should_serve_only_read_ops_from_a_published_graph() {
+        let root = login_repo("read-answer");
+        let mut writer = Service::open(&root).unwrap();
+        let mut cold = writer.read_replica();
+        assert!(
+            cold.read_answer(&search_request("login")).is_none(),
+            "no graph on disk: the writer builds it"
+        );
+        writer.ensure_graph().unwrap();
+        let mut reader = writer.read_replica();
+
+        let found = reader
+            .read_answer(&search_request("login"))
+            .expect("a read-plane op");
+        assert!(found.ok, "{found:?}");
+        assert!(found.data().to_string().contains("login.rs"), "{found:?}");
+        assert!(reader.read_answer(&Request::Status {}).is_none());
+        assert!(
+            writer.read_answer(&search_request("login")).is_none(),
+            "only a replica answers on the read plane"
+        );
+
+        std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
+        writer.refresh_file("login.rs");
+        let fresh = reader
+            .read_answer(&search_request("login_v2"))
+            .expect("next generation");
+        assert!(fresh.data().to_string().contains("login_v2"), "{fresh:?}");
+
+        writer.publication.write_or_recover().graph_lagging = true;
+        assert!(
+            reader.read_answer(&search_request("login_v2")).is_none(),
+            "a lagging graph sends the read to the writer, which repairs it"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn login_repo(tag: &str) -> PathBuf {

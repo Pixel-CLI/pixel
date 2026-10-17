@@ -27,6 +27,12 @@ use fs2::FileExt;
 use notify::{RecursiveMode, Watcher};
 
 use crate::api::{Request, Response, ServeError, Service, failure_response};
+use crate::plane::{Plane, plane};
+
+mod readers;
+
+pub use readers::ReadReplica;
+use readers::{Busy, READERS, Readers};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -197,6 +203,8 @@ enum Msg {
     /// The writer stopped (a panic outside any request): nothing will
     /// answer, so the loop exits.
     WriterGone,
+    /// A read a replica could not answer: the writer serves it.
+    Requeue(Request, mpsc::Sender<Response>),
 }
 
 /// What the loop hands the writer, in the order it decided it. The writer
@@ -275,6 +283,12 @@ pub trait Corpus {
     fn pong(&self) -> Option<Response> {
         None
     }
+    /// A copy that answers read-plane requests on its own thread from what
+    /// the writer last published, used while the writer is busy (default:
+    /// `None`, the writer answers everything).
+    fn read_replica(&self) -> Option<Box<dyn ReadReplica>> {
+        None
+    }
     /// Debounced watcher callback with the absolute changed path.
     fn apply_change(&mut self, abs: &Path, removed: bool);
     /// Debounced watcher callback with a batch of changed paths (default: loops apply_change).
@@ -324,6 +338,10 @@ impl Corpus for Service {
 
     fn pong(&self) -> Option<Response> {
         Some(Response::success("ping", self.pong_value()))
+    }
+
+    fn read_replica(&self) -> Option<Box<dyn ReadReplica>> {
+        Some(Box::new(Service::read_replica(self)))
     }
 
     fn apply_change(&mut self, abs: &Path, removed: bool) {
@@ -710,6 +728,10 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
 
     let (tx, rx) = mpsc::channel::<Msg>();
     let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
+    let busy = Arc::new(Busy::default());
+    let replicas: Option<Vec<Box<dyn ReadReplica>>> =
+        (0..READERS).map(|_| service.read_replica()).collect();
+    let readers = replicas.map_or_else(Readers::none, |replicas| Readers::spawn(replicas, &tx));
     let lane = Lane {
         root,
         sock,
@@ -720,13 +742,14 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
         pong: service.pong(),
         tx: tx.clone(),
         rx,
-        writer: Queued::new(service.root().to_path_buf(), jobs_tx),
+        writer: Queued::new(service.root().to_path_buf(), jobs_tx, Arc::clone(&busy)),
+        readers,
     };
     let dispatcher = std::thread::spawn(move || run_loop(lane));
     // Declared after the queue's receiver, so a panic unwinding out of the
     // writer wakes the loop before the receiver goes.
     let wake = WakeOnDrop(tx);
-    run_writer(&mut service, &jobs_rx);
+    run_writer(&mut service, &jobs_rx, &busy);
     drop(wake);
     if let Err(payload) = dispatcher.join() {
         std::panic::resume_unwind(payload);
@@ -747,13 +770,16 @@ struct Lane {
     tx: mpsc::Sender<Msg>,
     rx: mpsc::Receiver<Msg>,
     writer: Queued,
+    /// Answer reads while the writer is busy.
+    readers: Readers,
 }
 
 /// The writer: run every job on the corpus, in order, until the loop drops
 /// the queue. A panic in a request answers that request with a failure
 /// ([`answer`]); a panic anywhere else unwinds out of here.
-fn run_writer(service: &mut dyn Corpus, jobs: &mpsc::Receiver<Job>) {
+fn run_writer(service: &mut dyn Corpus, jobs: &mpsc::Receiver<Job>, busy: &Busy) {
     for job in jobs {
+        let apply = matches!(job, Job::Apply(_));
         match job {
             Job::Apply(batch) => service.apply_changes(&batch),
             Job::Serve(req, reply) => {
@@ -765,6 +791,7 @@ fn run_writer(service: &mut dyn Corpus, jobs: &mpsc::Receiver<Job>) {
             Job::WatchReady(report) => service.watch_ready(&report),
             Job::Sweep => service.sweep(),
         }
+        busy.done(apply);
     }
 }
 
@@ -782,22 +809,40 @@ impl Drop for WakeOnDrop {
 struct Queued {
     root: PathBuf,
     jobs: mpsc::Sender<Job>,
+    /// What the writer holds, so the loop knows when a read may skip it.
+    busy: Arc<Busy>,
     /// A send failed: the writer is gone and nothing will answer.
     gone: bool,
 }
 
 impl Queued {
-    fn new(root: PathBuf, jobs: mpsc::Sender<Job>) -> Self {
+    fn new(root: PathBuf, jobs: mpsc::Sender<Job>, busy: Arc<Busy>) -> Self {
         Queued {
             root,
             jobs,
+            busy,
             gone: false,
         }
     }
 
     fn send(&mut self, job: Job) {
+        let apply = matches!(job, Job::Apply(_));
+        self.busy.queued(apply);
         if self.jobs.send(job).is_err() {
+            self.busy.done(apply);
             self.gone = true;
+        }
+    }
+
+    /// Serve `req`: on a reader when it is a read the writer's queue may be
+    /// skipped for, on the writer otherwise.
+    fn route(&mut self, readers: &Readers, req: Request, reply: mpsc::Sender<Response>) {
+        if plane(&req) == Plane::Read && self.busy.read_may_bypass() {
+            if let Some((req, reply)) = readers.offer(req, reply) {
+                self.serve(req, reply);
+            }
+        } else {
+            self.serve(req, reply);
         }
     }
 
@@ -864,6 +909,7 @@ fn run_loop(lane: Lane) {
         tx,
         rx,
         writer: mut service,
+        readers,
     } = lane;
     let bound = socket_identity(&sock);
     let stop = Arc::new(AtomicBool::new(false));
@@ -940,6 +986,7 @@ fn run_loop(lane: Lane) {
                 while let Ok(message) = rx.try_recv() {
                     match message {
                         Msg::Request(req, reply) => requests.push((req, reply)),
+                        Msg::Requeue(req, reply) => service.serve(req, reply),
                         Msg::AcceptFailed | Msg::WriterGone => failed = true,
                         Msg::Fs(ev) => {
                             if moves_head(&root, &ev) {
@@ -989,7 +1036,7 @@ fn run_loop(lane: Lane) {
                         }
                         _ => {
                             shutdown = matches!(req, Request::Shutdown);
-                            service.serve(req, reply);
+                            service.route(&readers, req, reply);
                         }
                     }
                 }
@@ -1001,6 +1048,7 @@ fn run_loop(lane: Lane) {
             Ok(Msg::AcceptFailed | Msg::WriterGone) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 break;
             }
+            Ok(Msg::Requeue(req, reply)) => service.serve(req, reply),
             Ok(Msg::Fs(ev)) => {
                 if moves_head(&root, &ev) {
                     service.git_moved();
@@ -1062,6 +1110,7 @@ fn run_loop(lane: Lane) {
     // request in flight included, then return. Requests still in `rx` are
     // dropped with it: their connections learn nothing will answer.
     drop(service);
+    drop(readers);
     drop(rx);
     let _ = stop_acceptor(&sock, bound, &stop, acceptor);
 }
@@ -3355,7 +3404,7 @@ mod tests {
     #[test]
     fn queued_callbacks_should_reach_the_writer_in_order() {
         let (jobs_tx, jobs_rx) = mpsc::channel();
-        let mut queued = Queued::new(PathBuf::from("/repo"), jobs_tx);
+        let mut queued = Queued::new(PathBuf::from("/repo"), jobs_tx, Arc::default());
         let (reply, answer) = mpsc::channel();
         queued.git_moved();
         queued.apply_changes(&[(PathBuf::from("/repo/a.rs"), false)]);
@@ -3368,7 +3417,7 @@ mod tests {
 
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut writer = LogCorpus(Arc::clone(&log));
-        run_writer(&mut writer, &jobs_rx);
+        run_writer(&mut writer, &jobs_rx, &Busy::default());
         assert_eq!(
             *log.lock().unwrap(),
             [
@@ -3429,7 +3478,7 @@ mod tests {
     #[test]
     fn queued_should_notice_a_writer_that_is_gone() {
         let (jobs_tx, jobs_rx) = mpsc::channel();
-        let mut queued = Queued::new(PathBuf::from("/repo"), jobs_tx);
+        let mut queued = Queued::new(PathBuf::from("/repo"), jobs_tx, Arc::default());
         queued.sweep();
         assert!(!queued.gone, "a live writer is not gone");
         drop(jobs_rx);
