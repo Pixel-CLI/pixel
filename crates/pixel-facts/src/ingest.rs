@@ -357,8 +357,8 @@ fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
     }
     refresh_refs(store)?;
     // Enumerate every commit reachable from any ref, plus stash and reflog.
-    let oids = enumerate_all_commits(store)?;
     let known = known_oids(store);
+    let oids = enumerate_all_commits(store, &known)?;
     let pending: Vec<String> = oids
         .iter()
         .filter(|o| !known.contains(*o))
@@ -444,13 +444,13 @@ fn needs_phase_a(store: &FactsStore) -> Result<bool> {
             |r| r.get(0),
         )
         .ok();
-    let current = store.current_refs_hash()?;
+    let current = store.refs_hash()?;
     Ok(stored.as_deref() != Some(current.as_str()))
 }
 
 fn complete_phase_a(store: &mut FactsStore) -> Result<()> {
     // Record the refs hash at completion so a later ref move is detectable.
-    let hash = store.current_refs_hash()?;
+    let hash = store.refs_hash()?;
     store.conn().execute(
         "UPDATE ingest_jobs SET status = 'done', ref_hash = ?1, updated_at = ?2 WHERE phase = 'A'",
         params![hash, now_iso()],
@@ -574,35 +574,37 @@ fn listed(result: std::result::Result<Vec<u8>, pixel_git::GitError>) -> Result<O
 
 /// Enumerate every commit that should be indexed: all reachable from refs,
 /// plus stash, plus reflog-only commits. Returns oids in reverse (oldest-first)
-/// order and computes the reach bitmask per oid.
-fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
-    let _ = store.conn().execute("DELETE FROM reach_map", []);
+/// order and records the reach bitmask of each one not in `known` in
+/// `reach_map`, which only the insert of a new commit reads.
+fn enumerate_all_commits(
+    store: &mut FactsStore,
+    known: &std::collections::HashSet<String>,
+) -> Result<Vec<String>> {
     let runner = enumeration_runner(store);
     let mut all: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut reach: Vec<(String, i64)> = Vec::new();
+    let mut take = |out: &[u8], bits: i64| {
+        for oid in split_nul_lines(out) {
+            if !oid.is_empty() && seen.insert(oid.clone()) {
+                if !known.contains(&oid) {
+                    reach.push((oid.clone(), bits));
+                }
+                all.push(oid);
+            }
+        }
+    };
 
     // Branches + remotes + tags via a single rev-list of all heads/remotes/tags.
-    let args = vec!["rev-list", "--reverse", "--branches", "--remotes", "--tags"];
-    if let Some(out) = listed(runner.run(&args))? {
-        let reach = REACH_LISTED_REFS;
-        for oid in split_nul_lines(&out) {
-            if !oid.is_empty() && seen.insert(oid.clone()) {
-                all.push(oid.clone());
-                set_reach(store, &oid, reach)?;
-            }
-        }
+    if let Some(out) =
+        listed(runner.run(&["rev-list", "--reverse", "--branches", "--remotes", "--tags"]))?
+    {
+        take(&out, REACH_LISTED_REFS);
     }
-
     // Stash.
     if let Some(out) = listed(runner.run(&["rev-list", "--reverse", "refs/stash"]))? {
-        for oid in split_nul_lines(&out) {
-            if !oid.is_empty() && seen.insert(oid.clone()) {
-                all.push(oid.clone());
-                set_reach(store, &oid, REACH_STASH)?;
-            }
-        }
+        take(&out, REACH_STASH);
     }
-
     // Reflog-only commits (reachable via reflogs but not any branch/remote/tag).
     if let Some(out) = listed(runner.run(&[
         "rev-list",
@@ -613,24 +615,27 @@ fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
         "--remotes",
         "--tags",
     ]))? {
-        for oid in split_nul_lines(&out) {
-            if !oid.is_empty() && seen.insert(oid.clone()) {
-                all.push(oid.clone());
-                set_reach(store, &oid, REACH_REFLOG_ONLY)?;
-            }
-        }
+        take(&out, REACH_REFLOG_ONLY);
     }
+    write_reach_map(store, &reach)?;
     Ok(all)
 }
 
-fn set_reach(store: &FactsStore, oid: &str, bits: i64) -> Result<()> {
-    // If the commit row already exists, OR the bits; else defer (phase A insert
-    // will set them). We store the reach map in a temp table keyed by oid.
-    store.conn().execute(
-        "INSERT INTO reach_map (oid, bits) VALUES (?1, ?2)
-         ON CONFLICT (oid) DO UPDATE SET bits = bits | excluded.bits",
-        params![oid, bits],
-    )?;
+/// Replace `reach_map` with `entries` in one transaction: one commit per
+/// enumeration, not one per oid.
+fn write_reach_map(store: &mut FactsStore, entries: &[(String, i64)]) -> Result<()> {
+    let tx = store.conn_mut().transaction()?;
+    tx.execute("DELETE FROM reach_map", [])?;
+    {
+        let mut insert = tx.prepare(
+            "INSERT INTO reach_map (oid, bits) VALUES (?1, ?2)
+             ON CONFLICT (oid) DO UPDATE SET bits = bits | excluded.bits",
+        )?;
+        for (oid, bits) in entries {
+            insert.execute(params![oid, bits])?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1855,6 +1860,78 @@ pub(crate) mod tests {
         store
     }
 
+    /// A repository of `n` commits on one branch, oldest first.
+    fn linear_repo(n: usize) -> (tempfile::TempDir, Vec<String>) {
+        let dir = init_repo();
+        let oids = (0..n)
+            .map(|i| {
+                let body = format!("fn step_{i}() {{}}\n");
+                commit(
+                    dir.path(),
+                    &[("lib.rs", body.as_bytes())],
+                    &format!("step {i}"),
+                )
+            })
+            .collect();
+        (dir, oids)
+    }
+
+    fn reach_rows(store: &FactsStore) -> Vec<(String, i64)> {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT oid, bits FROM reach_map ORDER BY oid")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    /// A ref move re-enumerates every commit, but only a commit not yet in
+    /// the store gets a `reach_map` row: the insert of a new commit is its
+    /// only reader, so a row for a known one is a write for nothing.
+    #[test]
+    fn enumeration_should_record_reach_only_for_commits_not_yet_indexed() {
+        let (dir, oids) = linear_repo(5);
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_within(&mut store);
+        let new = commit(dir.path(), &[("lib.rs", b"fn moved() {}\n")], "move");
+
+        let known = known_oids(&store);
+        let all = enumerate_all_commits(&mut store, &known).unwrap();
+        let mut expected = oids;
+        expected.push(new.clone());
+        assert_eq!(
+            all, expected,
+            "every commit is still enumerated, oldest first"
+        );
+        assert_eq!(reach_rows(&store), [(new, REACH_LISTED_REFS)]);
+    }
+
+    /// The reach rows of one enumeration land in one transaction: the WAL
+    /// grows by a few page frames, not by one commit frame per oid.
+    #[test]
+    fn enumeration_should_write_reach_map_in_one_transaction() {
+        let (dir, oids) = linear_repo(40);
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        let wal_frames = |store: &FactsStore, mode: &str| -> i64 {
+            store
+                .conn()
+                .query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| r.get(1))
+                .unwrap()
+        };
+        assert_eq!(wal_frames(&store, "TRUNCATE"), 0);
+
+        enumerate_all_commits(&mut store, &std::collections::HashSet::new()).unwrap();
+        assert_eq!(reach_rows(&store).len(), oids.len());
+        let frames = wal_frames(&store, "PASSIVE");
+        assert!(
+            frames < 10,
+            "{frames} WAL frames for {} rows: one commit per row",
+            oids.len()
+        );
+    }
+
     /// A repository of `n` commits on `main`, written by one `git fast-import`
     /// (tens of thousands of commits in about a second).
     fn imported_repo(n: usize) -> tempfile::TempDir {
@@ -1903,8 +1980,8 @@ pub(crate) mod tests {
     fn enumeration_should_list_every_commit_past_the_default_output_cap() {
         const COMMITS: usize = 26_000;
         let dir = imported_repo(COMMITS);
-        let store = FactsStore::open(dir.path()).unwrap();
-        let oids = enumerate_all_commits(&store).unwrap();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        let oids = enumerate_all_commits(&mut store, &std::collections::HashSet::new()).unwrap();
         let listing = git(dir.path(), &["rev-list", "--branches"]);
         assert!(
             listing.len() > pixel_git::DEFAULT_MAX_OUTPUT_BYTES,

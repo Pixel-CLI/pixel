@@ -133,6 +133,67 @@ pub struct IndexSet {
     /// HEAD when the set was opened: the commit base ∪ delta covers. The
     /// overlay follows the working tree from there, HEAD moves included.
     head: Option<String>,
+    /// The walk policy's verdict between watcher batches, built by the
+    /// first batch's full walk and rebuilt only when a batch touches an
+    /// ignore-control file: a batch of one edit does not walk the tree.
+    admitted: Option<Admitted>,
+    /// Full policy walks the watcher batches ran, for the tests that pin
+    /// them to the first batch and the ignore-control edits.
+    #[cfg(test)]
+    full_walks: usize,
+}
+
+/// Files the walk policy admits, and the directories that hold them, as of
+/// the last full walk plus the paths admitted one by one since.
+struct Admitted {
+    files: HashSet<String>,
+    /// `""` for the root, then every parent of an admitted file: a walk
+    /// started from one of them sees the same ignore rules as the full walk.
+    dirs: HashSet<String>,
+}
+
+impl Admitted {
+    fn new(files: HashSet<String>) -> Self {
+        let mut admitted = Self {
+            files: HashSet::new(),
+            dirs: HashSet::from([String::new()]),
+        };
+        for file in files {
+            admitted.insert(file);
+        }
+        admitted
+    }
+
+    fn insert(&mut self, file: String) {
+        let mut parent = Path::new(&file).parent();
+        while let Some(dir) = parent.filter(|dir| !dir.as_os_str().is_empty()) {
+            if !self.dirs.insert(dir.to_string_lossy().into_owned()) {
+                break;
+            }
+            parent = dir.parent();
+        }
+        self.files.insert(file);
+    }
+
+    /// Whether the walk policy admits `rel` as a regular file: known paths
+    /// answer at once (a file that became a link is not one), a new one by
+    /// a walk from its nearest admitted ancestor.
+    fn admits(&mut self, root: &Path, rel: &str) -> bool {
+        if self.files.contains(rel) {
+            return std::fs::symlink_metadata(root.join(rel)).is_ok_and(|meta| meta.is_file());
+        }
+        let start = Path::new(rel)
+            .ancestors()
+            .skip(1)
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .find(|dir| self.dirs.contains(dir))
+            .unwrap_or_default();
+        let admitted = index::policy_admits_from(root, &start, rel);
+        if admitted {
+            self.insert(rel.to_string());
+        }
+        admitted
+    }
 }
 
 /// Whole milliseconds in `elapsed`, saturating rather than wrapping on a
@@ -701,6 +762,9 @@ impl IndexSet {
             delta_tombstones: HashSet::new(),
             overlay: Overlay::new(),
             head: head.clone(),
+            admitted: None,
+            #[cfg(test)]
+            full_walks: 0,
             open_timings: OpenTimings {
                 base: base_source,
                 base_ms,
@@ -851,17 +915,45 @@ impl IndexSet {
             .unwrap_or(RefreshOutcome::Excluded)
     }
 
-    /// Refresh a watcher batch from one ignore-policy snapshot.
+    /// Refresh a watcher batch from one ignore-policy snapshot. Only the
+    /// first batch and a batch that touches an ignore-control file walk the
+    /// tree; any other batch decides admission path by path.
     pub fn refresh_files(&mut self, files: &[(&str, bool)]) -> Vec<(String, RefreshOutcome)> {
         let policy_changed = files.iter().any(|(path, _)| is_ignore_control_path(path));
-        let admitted = if policy_changed {
-            index::policy_indexable_paths(&self.root)
-        } else {
-            index::policy_file_paths(&self.root)
-        };
-        let before: HashSet<String> = self.paths().into_iter().collect();
         let mut outcomes = BTreeMap::new();
+        if !policy_changed {
+            let root = self.root.clone();
+            let admitted = self.admitted.get_or_insert_with(|| {
+                #[cfg(test)]
+                {
+                    self.full_walks += 1;
+                }
+                Admitted::new(index::policy_file_paths(&root))
+            });
+            for &(path, removed) in files {
+                if removed {
+                    admitted.files.remove(path);
+                }
+                if removed || !admitted.admits(&root, path) {
+                    self.overlay.remove_file(path);
+                    outcomes.insert(path.to_string(), RefreshOutcome::Excluded);
+                } else {
+                    self.overlay
+                        .refresh_file(&root, path, self.extractor.as_ref());
+                    outcomes.insert(path.to_string(), RefreshOutcome::Indexed);
+                }
+            }
+            return outcomes.into_iter().collect();
+        }
 
+        #[cfg(test)]
+        {
+            self.full_walks += 1;
+        }
+        let policy_files = index::policy_file_paths(&self.root);
+        let admitted = index::indexable_subset(&self.root, &policy_files);
+        self.admitted = Some(Admitted::new(policy_files));
+        let before: HashSet<String> = self.paths().into_iter().collect();
         for &(path, removed) in files {
             if removed || !admitted.contains(path) {
                 self.overlay.remove_file(path);
@@ -873,18 +965,15 @@ impl IndexSet {
             }
         }
 
-        if policy_changed {
-            for path in before.difference(&admitted) {
-                self.overlay.remove_file(path);
-                outcomes.insert(path.clone(), RefreshOutcome::Excluded);
-            }
-            for path in admitted.difference(&before) {
-                self.overlay
-                    .refresh_file(&self.root, path, self.extractor.as_ref());
-                outcomes.insert(path.clone(), RefreshOutcome::Indexed);
-            }
+        for path in before.difference(&admitted) {
+            self.overlay.remove_file(path);
+            outcomes.insert(path.clone(), RefreshOutcome::Excluded);
         }
-
+        for path in admitted.difference(&before) {
+            self.overlay
+                .refresh_file(&self.root, path, self.extractor.as_ref());
+            outcomes.insert(path.clone(), RefreshOutcome::Indexed);
+        }
         outcomes.into_iter().collect()
     }
 
@@ -2574,5 +2663,136 @@ mod tests {
         let rebuilt = IndexSet::open_or_build(&dir, ex()).unwrap();
         assert_eq!(rebuilt.open_timings().base, BaseSource::BuiltFromWalk);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A git fixture with ignore rules at every level the walk policy
+    /// reads: a root `.gitignore` naming a directory, a nested `.gitignore`,
+    /// and `.git/info/exclude`.
+    fn ruled_repo(tag: &str) -> PathBuf {
+        let dir = scratch(tag);
+        git(&dir, &["init", "-q"]);
+        std::fs::create_dir_all(dir.join("src/sub")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "logs/\n").unwrap();
+        std::fs::write(dir.join("src/sub/.gitignore"), "*.tmp\n").unwrap();
+        std::fs::write(dir.join(".git/info/exclude"), "*.secret\n").unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn alpha_known() {}\n").unwrap();
+        std::fs::write(dir.join("src/sub/b.rs"), "fn beta_known() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        dir
+    }
+
+    /// The editing rhythm: one walk for the first batch, then batches of
+    /// one edit judge the path alone, until an ignore-control file moves.
+    #[test]
+    fn a_one_file_batch_should_not_walk_the_tree_again() {
+        let _cache = IsolatedCache::new("a_one_file_batch_should_not_walk_the_tree_again");
+        let dir = ruled_repo("refresh-no-walk");
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+
+        std::fs::write(dir.join("src/a.rs"), "fn alpha_edited() {}\n").unwrap();
+        assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
+        assert_eq!(set.full_walks, 1, "the first batch builds the verdict");
+        std::fs::write(dir.join("src/c.rs"), "fn gamma_added() {}\n").unwrap();
+        assert_eq!(set.refresh_file("src/c.rs"), RefreshOutcome::Indexed);
+        std::fs::write(dir.join("src/a.rs"), "fn alpha_again() {}\n").unwrap();
+        assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
+        assert_eq!(set.full_walks, 1, "an edit batch walked the whole tree");
+        assert_eq!(set.search("gamma_added", None).unwrap().0.len(), 1);
+        assert_eq!(set.search("alpha_again", None).unwrap().0.len(), 1);
+
+        std::fs::write(dir.join(".gitignore"), "logs/\nsrc/c.rs\n").unwrap();
+        let outcomes = set.refresh_files(&[(".gitignore", false)]);
+        assert_eq!(
+            set.full_walks, 2,
+            "an ignore-control edit rebuilds the verdict"
+        );
+        assert!(
+            outcomes.contains(&("src/c.rs".to_string(), RefreshOutcome::Excluded)),
+            "{outcomes:?}"
+        );
+        assert!(set.search("gamma_added", None).unwrap().0.is_empty());
+        std::fs::write(dir.join("src/c.rs"), "fn gamma_edited() {}\n").unwrap();
+        assert_eq!(set.refresh_file("src/c.rs"), RefreshOutcome::Excluded);
+        assert_eq!(set.full_walks, 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A path the cache has never seen gets the full walk's verdict, whichever
+    /// rule decides it: a parent directory a root rule ignores, a nested
+    /// `.gitignore`, `.git/info/exclude`, a default-pruned directory, or
+    /// nothing at all several new directories deep.
+    #[test]
+    fn a_new_path_should_get_the_verdict_of_the_full_walk() {
+        let _cache = IsolatedCache::new("a_new_path_should_get_the_verdict_of_the_full_walk");
+        let dir = ruled_repo("refresh-new-path");
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
+        let cases = [
+            ("logs/deep/run.txt", RefreshOutcome::Excluded),
+            ("src/sub/inner/t.tmp", RefreshOutcome::Excluded),
+            ("src/k.secret", RefreshOutcome::Excluded),
+            ("src/node_modules/pkg/m.js", RefreshOutcome::Excluded),
+            ("src/new/deeper/n.rs", RefreshOutcome::Indexed),
+            ("src/sub/inner/kept.rs", RefreshOutcome::Indexed),
+        ];
+        for (path, _) in cases {
+            let file = dir.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "fn written_later() {}\n").unwrap();
+        }
+        let full = index::policy_file_paths(&dir);
+        for (path, expected) in cases {
+            assert_eq!(set.refresh_file(path), expected, "{path}");
+            assert_eq!(
+                expected == RefreshOutcome::Indexed,
+                full.contains(path),
+                "{path}: the full walk disagrees"
+            );
+        }
+        assert_eq!(set.full_walks, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A known file that turned into a link is no longer a regular file the
+    /// walk lists, and a removed one leaves the cache.
+    #[test]
+    fn a_known_path_should_be_rejudged_when_it_stops_being_a_regular_file() {
+        let _cache = IsolatedCache::new(
+            "a_known_path_should_be_rejudged_when_it_stops_being_a_regular_file",
+        );
+        let dir = ruled_repo("refresh-known-link");
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
+        std::fs::remove_file(dir.join("src/a.rs")).unwrap();
+        std::os::unix::fs::symlink(dir.join("src/sub/b.rs"), dir.join("src/a.rs")).unwrap();
+        assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Excluded);
+        std::fs::remove_file(dir.join("src/sub/b.rs")).unwrap();
+        let removed = set.refresh_files(&[("src/sub/b.rs", true)]);
+        assert_eq!(
+            removed,
+            [("src/sub/b.rs".to_string(), RefreshOutcome::Excluded)]
+        );
+        assert!(
+            !set.admitted
+                .as_ref()
+                .unwrap()
+                .files
+                .contains("src/sub/b.rs")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn admitted_should_hold_the_root_and_every_parent_of_a_file() {
+        let admitted = Admitted::new(HashSet::from([
+            "a/b/c.rs".to_string(),
+            "a/d.rs".to_string(),
+            "top.rs".to_string(),
+        ]));
+        let mut dirs: Vec<&str> = admitted.dirs.iter().map(String::as_str).collect();
+        dirs.sort_unstable();
+        assert_eq!(dirs, ["", "a", "a/b"]);
+        assert_eq!(admitted.files.len(), 3);
     }
 }

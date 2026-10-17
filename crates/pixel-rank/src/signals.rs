@@ -141,6 +141,10 @@ pub struct SignalBundle {
     /// "Unavailable" is not "clean repository": the caller must not read an
     /// empty `activity` map as "no recent churn" without checking this.
     pub activity_unavailable: Option<String>,
+    /// Named reason the graph's fan-in query produced no map, `None` when it
+    /// ran or was not asked for. As for activity, an empty `fan_in` map is
+    /// not "nothing calls these files" without checking this.
+    pub fan_in_unavailable: Option<String>,
 }
 
 /// Errors from gathering signals.
@@ -298,6 +302,7 @@ pub fn score_signals(
         // `score_signals` is pure and runs no scan: only `compute_signals`
         // can report an unavailable activity channel.
         activity_unavailable: None,
+        fan_in_unavailable: None,
     }
 }
 

@@ -1,0 +1,1 @@
+**daemon:** `resolve` no longer counts graph fan-in over every indexed file, which it never used, and `targets` keeps its fan-in past SQLite's 32 766-parameter cap instead of an empty signal; a failed fan-in query is now named in the answer's caps.
