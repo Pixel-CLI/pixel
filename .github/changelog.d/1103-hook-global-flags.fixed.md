@@ -1,0 +1,1 @@
+**hooks:** a `run-hook` invocation that clap cannot parse now exits 0 even when a global flag comes before the verb (`pixel --metrics=off run-hook …`). Such a hook used to exit 2, which Claude Code treats as a blocking error.

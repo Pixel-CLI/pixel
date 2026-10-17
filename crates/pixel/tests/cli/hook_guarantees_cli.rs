@@ -695,6 +695,11 @@ fn run_hook_argument_errors_should_exit_0_and_print_nothing() {
             "--newer-flag",
         ],
         &["run-hook", "metrics", "--provider", "newer-host"],
+        // A global flag before the verb (#1103): `run-hook` is no longer
+        // `argv[1]`, and the hook exited 2 before.
+        &["--metrics=off", "run-hook", "--bogus"],
+        &["--metrics", "off", "run-hook", "task-event"],
+        &["-v", "run-hook", "task-event"],
     ] {
         let hook = run(&root, args, b"{}", Duration::ZERO, &[]);
         assert_eq!(hook.code, Some(0), "{args:?}: {}", hook.stderr);
@@ -709,8 +714,13 @@ fn run_hook_argument_errors_should_exit_0_and_print_nothing() {
             hook.stderr
         );
     }
-    let status = run(&root, &["status", "--newer-flag"], b"", Duration::ZERO, &[]);
-    assert_eq!(status.code, Some(2), "{}", status.stderr);
+    for args in [
+        &["status", "--newer-flag"][..],
+        &["--metrics", "off", "status", "--newer-flag", "run-hook"],
+    ] {
+        let status = run(&root, args, b"", Duration::ZERO, &[]);
+        assert_eq!(status.code, Some(2), "{args:?}: {}", status.stderr);
+    }
 }
 
 /// A host that writes its payload and never closes stdin gets the same

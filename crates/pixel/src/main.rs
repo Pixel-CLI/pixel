@@ -5990,9 +5990,25 @@ fn run_ask(
 
 /// Whether a parse error belongs to a `run-hook` invocation and is a real
 /// error (help and version requests are not): a host hook never fails with
-/// clap's exit code 2.
+/// clap's exit code 2. `hook` is the verb old installs registered.
 fn fails_open(argv: &[String], error: &clap::Error) -> bool {
-    matches!(argv.get(1).map(String::as_str), Some("run-hook" | "hook")) && error.use_stderr()
+    matches!(subcommand_token(argv), Some("run-hook" | "hook")) && error.use_stderr()
+}
+
+/// The subcommand a raw argv names: its first token that is neither an
+/// option nor the value of a global option taking one (`--metrics off`). An
+/// option this binary does not know (a newer install's global flag) is
+/// skipped as a switch, so `pixel -v run-hook …` still names `run-hook`.
+fn subcommand_token(argv: &[String]) -> Option<&str> {
+    let mut args = argv.iter().skip(1).map(String::as_str);
+    while let Some(arg) = args.next() {
+        if arg == "--metrics" {
+            args.next();
+        } else if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
 }
 
 fn main() -> ExitCode {
@@ -7151,3 +7167,7 @@ mod review_gate_pretty_tests;
 #[cfg(test)]
 #[path = "main_tests/search_fallback_gate_tests.rs"]
 mod search_fallback_gate_tests;
+
+#[cfg(test)]
+#[path = "main_tests/hook_fail_open_tests.rs"]
+mod hook_fail_open_tests;
