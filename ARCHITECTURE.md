@@ -1403,6 +1403,9 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   A checkpoint is uploaded after every listed mutant has a recognized
   outcome; survivors keep the run red, while missing outcomes and disk-full
   failures leave the prior checkpoint. Unchanged main starts no Rust jobs.
+  The report labels listing-only results `planned`, complete recognized
+  outcomes `tested`, and missing/invalid outcomes `incomplete`; it reports
+  the listed count separately from the outcomes recorded across shards.
   `.cargo/mutants.toml` leaves out benches and crate-root build scripts;
   the owned `mvp-*` libraries participate. `scripts/test-mutants-config.py`
   refuses any other exclusion. The existing plan/shards/report share that file and distribute
