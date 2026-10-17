@@ -1381,7 +1381,6 @@ fn list_signatures_compares_the_measured_file_with_its_stdout_answer() {
 /// after exit, including short commands and runs outside a known agent session.
 #[test]
 fn actions_should_record_build_and_pseudonymous_session_at_process_exit() {
-    use sha2::{Digest, Sha256};
     let fixture = Fixture::new();
     for session in [Some("journal-session"), None, Some("journal-session")] {
         let mut command = fixture.command();
@@ -1411,9 +1410,9 @@ fn actions_should_record_build_and_pseudonymous_session_at_process_exit() {
         assert_eq!(p["source"], "cli");
         assert_eq!(p["invocation_id"], record["invocation_id"]);
     }
-    let hashed = format!("{:x}", Sha256::digest(b"journal-session"));
-    assert_eq!(records[0]["provenance"]["session"], &hashed[..16]);
-    assert_eq!(records[2]["provenance"]["session"], &hashed[..16]);
+    let hashed = "02ff21efad4899bf";
+    assert_eq!(records[0]["provenance"]["session"], hashed);
+    assert_eq!(records[2]["provenance"]["session"], hashed);
     assert_eq!(records[0]["provenance"]["provider"], "codex");
     assert!(records[1]["provenance"].get("session").is_none());
     assert!(records[1]["provenance"].get("provider").is_none());

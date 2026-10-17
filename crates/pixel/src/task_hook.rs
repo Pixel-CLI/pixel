@@ -1873,7 +1873,13 @@ fn respond(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
         return;
     }
     let raw = crate::hook_input::read_hook_payload();
-    crate::usage_journal::bind_hook(provider.as_str(), raw.as_ref().and_then(brief_session));
+    let journal_payload = raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    crate::usage_journal::bind_hook(
+        provider.as_str(),
+        journal_payload.as_ref().and_then(brief_session),
+    );
     crate::hook_input::test_panic("before-response");
     let mut recovered_head = false;
     let mut output = if let Some(raw) = &raw {
