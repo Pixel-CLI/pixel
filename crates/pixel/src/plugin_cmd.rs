@@ -121,6 +121,19 @@ fn render_installed(added: &pixel_plugin::Added) -> String {
             };
             out.push_str(&format!("downloaded {} ({checked})\n", got.url));
         }
+        Binary::Shipped {
+            git_url,
+            reference,
+            download_error,
+        } => {
+            let build =
+                pixel_plugin::cargo_install_command(git_url, reference.as_deref(), &added.dir);
+            out.push_str(&format!(
+                "{name} runs the repository's own `{run}`: no release asset replaced it ({download_error})\nif `{name}` then reports a missing program, build it into the plugin with: {build} --force\n",
+                name = added.name,
+                run = added.manifest.run,
+            ));
+        }
         Binary::Missing {
             git_url,
             reference,
@@ -190,13 +203,21 @@ enum Plan {
     Unknown,
 }
 
-/// Decide what `pixel <name> <args…>` does when the core has no such command.
+/// Decide what `pixel <name> <args…>` does when the core has no such command:
+/// a plugin of that name runs; otherwise a moved command gets its plugin
+/// hint and a name 0.8.0 removed gets its replacement.
 fn plan(host: &Host, name: &str, args: &[OsString], env: Env<'_>, moved: &[(&str, &str)]) -> Plan {
     match pixel_plugin::resolve(host, name) {
         Ok(Some(plugin)) => Plan::Run(pixel_plugin::command(&plugin, args, env)),
-        Ok(None) => pixel_plugin::moved_hint(moved, name).map_or(Plan::Unknown, |hint| {
-            Plan::Stop(hint, pixel_plugin::HINT_EXIT)
-        }),
+        Ok(None) => pixel_plugin::moved_hint(moved, name)
+            .or_else(|| {
+                crate::removed_commands::removed_hint(name, moved, |current| {
+                    matches!(pixel_plugin::resolve(host, current), Ok(Some(_)))
+                })
+            })
+            .map_or(Plan::Unknown, |hint| {
+                Plan::Stop(hint, pixel_plugin::HINT_EXIT)
+            }),
         Err(error) => Plan::Stop(error.to_string(), 1),
     }
 }
@@ -334,6 +355,39 @@ mod tests {
         assert_eq!(
             message,
             "\"made-up-cmd\" moved to a plugin: pixel install github:Pixel-CLI/pixel-made-up"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_removed_name_names_its_replacement_and_drops_the_install_once_the_plugin_runs() {
+        let dir = scratch("removed");
+        let host = host_at(&dir);
+        let table = [("commit-history", "pixel-git")];
+        let Plan::Stop(message, code) = plan(&host, "ready", &[], env(), &table) else {
+            panic!("expected the removed-command hint");
+        };
+        assert_eq!(code, 2);
+        assert_eq!(
+            message,
+            "'ready' was removed in 0.8.0; use `pixel prepare-repo`"
+        );
+        let Plan::Stop(message, _) = plan(&host, "history", &[], env(), &table) else {
+            panic!("expected the removed-command hint");
+        };
+        assert_eq!(
+            message,
+            "'history' was removed in 0.8.0; use `pixel commit-history`, a plugin command: pixel install github:Pixel-CLI/pixel-git"
+        );
+        let exe = dir.join("bin/pixel-commit-history");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Plan::Stop(message, _) = plan(&host, "history", &[], env(), &table) else {
+            panic!("expected the removed-command hint");
+        };
+        assert_eq!(
+            message,
+            "'history' was removed in 0.8.0; use `pixel commit-history`"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -528,6 +582,25 @@ mod tests {
         assert!(
             text.contains("build it with: cargo install --git https://github.com/acme/tool.git --rev v2 --root /h/.pixel/plugins/tool\n"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_shipped_program_without_a_release_asset_names_the_build_that_replaces_it() {
+        // The Pixel-CLI plugins ship a launcher at `run` that only finds a
+        // separately built binary: "installed" alone sent the user to a first
+        // run that failed (2026-10 retro).
+        let shipped = Binary::Shipped {
+            git_url: "https://github.com/acme/tool.git".to_owned(),
+            reference: None,
+            download_error: "cannot download u: HTTP 404".to_owned(),
+        };
+        assert_eq!(
+            render_installed(&installed(Path::new("/h/.pixel/plugins"), "tool", shipped)),
+            "installed plugin tool 1.4.2 in /h/.pixel/plugins/tool\n\
+             tool runs the repository's own `bin/tool`: no release asset replaced it (cannot download u: HTTP 404)\n\
+             if `tool` then reports a missing program, build it into the plugin with: \
+             cargo install --git https://github.com/acme/tool.git --root /h/.pixel/plugins/tool --force\n"
         );
     }
 

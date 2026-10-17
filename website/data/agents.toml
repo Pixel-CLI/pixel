@@ -4,6 +4,7 @@
 # wires" table of /docs/ (layouts/shortcodes/agents-install.html). One entry
 # per agent; its mark is assets/logos/<logo>.svg.
 #
+# Changed existing configs also get timestamped `.pixel-bak.*` recovery copies.
 # Every fact here restates crates/pixel-setup. A pull
 # request that changes what `pixel setup` writes changes this file too:
 # crates/pixel/tests/cli/docs_drift.rs runs a real `pixel setup` into an
@@ -39,6 +40,7 @@
 # Written by every `pixel setup`, whichever agents are present. No agent
 # prompt is deployed.
 shared = [
+  "~/.pixel/setup-receipt.json",
   "~/.pixel/config.yaml",
   # The retrieval workflow as a skill, in every configured harness's skills dir.
   "~/.claude/skills/pixel/SKILL.md",
@@ -90,10 +92,10 @@ slug = "pi"
 name = "Pi"
 logo = "pi"
 wiring = "install"
-lede = "`pixel setup` adds a local Pi package: the explicit `/pixel-impact <symbol>` command and a hook that adds a source-cited evidence brief to each prompt, plus the `pixel` skill for follow-ups. Pi keeps its native tools."
+lede = "`pixel setup` adds a local Pi package: the explicit `/pixel-impact <symbol>` command, a hook that adds a source-cited evidence brief to each prompt and a relay of the metrics line, plus the `pixel` skill for follow-ups. Pi keeps its native tools."
 global = ["~/.local/share/pixel/pi-package/package.json", "~/.local/share/pixel/pi-package/extensions/pixel-impact.ts", "~/.local/share/pixel/pi-package/extensions/pixel-brief.ts", "~/.pi/agent/settings.json", "~/.pi/agent/skills/pixel/SKILL.md"]
 when = "when Pi's agent directory (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) exists or `pi` is on PATH"
-wires = "the local package provides `/pixel-impact` and a `before_agent_start` hook that runs `pixel brief` on the submitted prompt and prepends its bounded evidence brief; the `pixel` skill sits in `~/.pi/agent/skills/pixel/`; Pi's native tools remain unchanged"
+wires = "the local package provides `/pixel-impact` and a `before_agent_start` hook that runs Pixel's prompt-submit hook on the submitted prompt and prepends its bounded evidence brief, and a `tool_result` hook that shows the metrics line after a `pixel` bash call; the `pixel` skill sits in `~/.pi/agent/skills/pixel/`; Pi's native tools remain unchanged"
 note = "Your other Pi settings and packages stay: Pixel adds only its package path to `packages`, and `pixel setup --remove` takes it out again."
 checks = ["install.pi-impact"]
 
@@ -126,7 +128,7 @@ lede = "Gemini CLI keeps its native tools; `pixel setup` registers a `BeforeAgen
 global = ["~/.gemini/settings.json", "~/.gemini/skills/pixel/SKILL.md"]
 when = "when `~/.gemini` exists; the hook only where `~/.gemini/settings.json` already exists"
 wires = "a per-prompt evidence brief through a `BeforeAgent` hook in `~/.gemini/settings.json`, and the `pixel` skill in `~/.gemini/skills/pixel/`; native tools stay unchanged"
-note = "Your own hooks and keys in `settings.json` stay: a re-run replaces only Pixel's earlier entry, and `pixel setup --remove` takes it out."
+note = "A changed `settings.json` is backed up to a timestamped `.pixel-bak.*` sibling. Your own formatting, hooks and keys stay: a re-run replaces only Pixel's earlier entry, and `pixel setup --remove` takes it out."
 
 [[agent]]
 slug = "antigravity"

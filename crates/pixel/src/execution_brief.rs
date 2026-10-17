@@ -514,6 +514,14 @@ pub fn retrieval_request(prompt: &str) -> Option<String> {
 /// the question: only its last paragraph is the task.
 const PASTE_TAIL_CHARS: usize = 600;
 const PASTE_TAIL_LINES: usize = 4;
+/// Characters of the first paragraph's head that a prompt made only of a
+/// pasted block keeps (see [`pasted_task`]).
+const PASTED_HEAD_CHARS: usize = 300;
+/// Characters of the last paragraph's tail kept beside that head: a character
+/// short of it, so that the line break joining the two leaves the whole within
+/// [`PASTE_TAIL_CHARS`], which [`brief_task`] and the decision log do not cut.
+const PASTED_TAIL_CHARS: usize = 299;
+const _: () = assert!(PASTED_HEAD_CHARS + 1 + PASTED_TAIL_CHARS <= PASTE_TAIL_CHARS);
 /// Content words a plain-language prompt needs before the relevance gate is
 /// asked: one word is a reply, not a task.
 const MIN_PROSE_KEYWORDS: usize = 2;
@@ -647,6 +655,82 @@ fn last_paragraph(text: &str) -> &str {
     text[start..].trim()
 }
 
+/// The text before the first blank line.
+fn first_paragraph(text: &str) -> &str {
+    let text = text.trim();
+    let mut end = text.len();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+    text[..end].trim()
+}
+
+/// The first `max` characters of `text`.
+fn head_chars(text: &str, max: usize) -> &str {
+    text.char_indices()
+        .nth(max)
+        .map_or(text, |(end, _)| &text[..end])
+}
+
+/// The last `max` characters of `text`.
+fn tail_chars(text: &str, max: usize) -> &str {
+    let skip = text.chars().count().saturating_sub(max);
+    text.char_indices()
+        .nth(skip)
+        .map_or("", |(start, _)| &text[start..])
+}
+
+/// The text inside every pasted block of `prompt`, in order: what
+/// [`typed_text`] leaves out, between the same tags. A block that never closes
+/// runs to the end of the prompt, and an opening tag cut off by the end of the
+/// prompt holds nothing.
+fn pasted_bodies(prompt: &str) -> Vec<&str> {
+    let mut bodies = Vec::new();
+    let mut rest = prompt;
+    while let Some(start) = find_tag(rest, PASTE_OPEN) {
+        let after = &rest[start + PASTE_OPEN.len()..];
+        let close = find_tag(after, PASTE_CLOSE);
+        // The body starts after the `>` that ends the opening tag.
+        if let Some(from) = after.find('>').map(|end| end + 1) {
+            let to = close.unwrap_or(after.len());
+            if from <= to {
+                bodies.push(&after[from..to]);
+            }
+        }
+        let Some(close) = close else {
+            break;
+        };
+        let tail = &after[close + PASTE_CLOSE.len()..];
+        rest = tail.find('>').map_or("", |end| &tail[end + 1..]);
+    }
+    bodies
+}
+
+/// What a prompt made only of pasted blocks asks: the head of the first
+/// paragraph of the paste and, when it has more than one paragraph, the tail
+/// of the last, links dropped. A thread or a log opens with what it is about
+/// and closes on what is wanted of it; the middle is the bulk that would swamp
+/// the words of the task. `None` when the paste holds no text.
+fn pasted_task(prompt: &str) -> Option<String> {
+    let pasted = strip_urls(&pasted_bodies(prompt).join("\n\n"));
+    let pasted = pasted.trim();
+    let (first, last) = (first_paragraph(pasted), last_paragraph(pasted));
+    let head = head_chars(first, PASTED_HEAD_CHARS).trim_end();
+    if head.is_empty() {
+        return None;
+    }
+    if first == last {
+        return Some(head.to_string());
+    }
+    let tail = tail_chars(last, PASTED_TAIL_CHARS).trim_start();
+    Some(format!("{head}\n{tail}"))
+}
+
 /// The content words of a task: the tokenizer's keywords without the
 /// acknowledgements and greetings of a conversation.
 fn brief_keywords(task: &str) -> Vec<String> {
@@ -675,12 +759,20 @@ fn is_ops_request(keywords: &[String]) -> bool {
 /// cannot: [`code_signal`] first, and failing that [`Signal::Prose`] for
 /// plain language with at least [`MIN_PROSE_KEYWORDS`] content words that is
 /// not a repository operation. Only the typed text counts, and of a long
-/// text with a paste in front only its last paragraph.
+/// text with a paste in front only its last paragraph. A prompt with nothing
+/// typed at all but a pasted block is judged on [`pasted_task`] instead, and
+/// only ever as plain language: the identifiers of someone else's log do not
+/// make it code-shaped, so the relevance gate decides it.
 pub fn brief_signal(prompt: &str) -> Option<(String, Signal)> {
     if let Some(found) = code_signal(prompt) {
         return Some(found);
     }
     let typed = strip_urls(&typed_text(prompt));
+    let typed = if typed.trim().is_empty() {
+        pasted_task(prompt)?
+    } else {
+        typed
+    };
     let task = brief_task(&typed);
     let keywords = brief_keywords(task);
     (keywords.len() >= MIN_PROSE_KEYWORDS && !is_ops_request(&keywords))
@@ -1607,6 +1699,295 @@ mod tests {
                 Signal::Prose
             ))
         );
+    }
+
+    /// A prompt that is only a pasted block holding `lines`.
+    fn paste_only(lines: &[&str]) -> String {
+        let mut all = vec!["<pasted_content id=\"1\">"];
+        all.extend_from_slice(lines);
+        all.push("</pasted_content id=\"1\">");
+        all.join("\n")
+    }
+
+    #[test]
+    fn brief_signal_should_judge_a_paste_only_prompt_on_its_first_and_last_paragraphs() {
+        let prompt = paste_only(&[
+            "the daemon misses changes made during startup",
+            "after a rebase the index looks stale",
+            "",
+            "logs from the second run follow below",
+            "",
+            "so can we make the watcher wait for the first scan",
+        ]);
+        // Nothing is typed, and the code-shaped signal never reads the paste.
+        assert_eq!(typed_text(&prompt), "");
+        assert_eq!(code_signal(&prompt), None);
+        assert_eq!(retrieval_request(&prompt), None);
+        assert_eq!(
+            brief_signal(&prompt),
+            Some((
+                [
+                    "the daemon misses changes made during startup",
+                    "after a rebase the index looks stale",
+                    "so can we make the watcher wait for the first scan",
+                ]
+                .join("\n"),
+                Signal::Prose
+            ))
+        );
+    }
+
+    #[test]
+    fn brief_signal_should_keep_a_one_paragraph_paste_to_its_head_and_not_repeat_it() {
+        let one = paste_only(&["the daemon misses changes", "made during startup"]);
+        assert_eq!(
+            brief_signal(&one),
+            Some((
+                "the daemon misses changes\nmade during startup".to_string(),
+                Signal::Prose
+            ))
+        );
+        // The same text opening and closing the paste is read once.
+        let twice = [
+            "<pasted_content>the daemon startup race</pasted_content>",
+            "<pasted_content>the daemon startup race</pasted_content>",
+        ]
+        .join("\n");
+        assert_eq!(
+            brief_signal(&twice),
+            Some(("the daemon startup race".to_string(), Signal::Prose))
+        );
+    }
+
+    #[test]
+    fn brief_signal_should_join_the_first_block_head_to_the_last_block_tail() {
+        let two = [
+            "<pasted_content id=\"1\">",
+            "the daemon misses changes made during startup",
+            "</pasted_content id=\"1\">",
+            "<pasted_content id=\"2\">",
+            "so make the watcher wait for the first scan",
+            "</pasted_content id=\"2\">",
+        ]
+        .join("\n");
+        assert_eq!(
+            brief_signal(&two),
+            Some((
+                [
+                    "the daemon misses changes made during startup",
+                    "so make the watcher wait for the first scan",
+                ]
+                .join("\n"),
+                Signal::Prose
+            ))
+        );
+    }
+
+    /// The task of a prompt that is a pasted block of two paragraphs.
+    fn pasted_two(first: &str, last: &str) -> String {
+        brief_signal(&paste_only(&[first, "", last]))
+            .expect("a paste with a task")
+            .0
+    }
+
+    #[test]
+    fn brief_signal_should_cap_a_paste_to_a_head_and_a_tail_the_task_bound_leaves_whole() {
+        // 15 and 13 characters of words, then a filler to the length asked.
+        let head = |len: usize| format!("daemon startup {}", "x".repeat(len - 15));
+        let tail = |len: usize| format!("{} watcher scan", "y".repeat(len - 13));
+        let kept = format!("{}\n{}", head(PASTED_HEAD_CHARS), tail(PASTED_TAIL_CHARS));
+        assert_eq!(kept.chars().count(), PASTE_TAIL_CHARS);
+        // At the bound, one character over it, and far over it.
+        for (first, last) in [(300, 299), (301, 300), (5_000, 5_000)] {
+            assert_eq!(
+                pasted_two(&head(first), &tail(last)),
+                kept,
+                "{first} {last}"
+            );
+        }
+        // One character under the bound loses nothing.
+        assert_eq!(
+            pasted_two(&head(299), &tail(298)),
+            format!("{}\n{}", head(299), tail(298))
+        );
+        // What the brief judges is what the later stages keep whole.
+        assert_eq!(brief_task(&kept), kept);
+    }
+
+    #[test]
+    fn brief_signal_should_not_leave_a_blank_at_either_end_of_a_cut_paste() {
+        // The head's 300th character is a space, and so is the first of the
+        // 299 the tail keeps.
+        let head = format!("daemon startup {} {}", "x".repeat(284), "z".repeat(40));
+        assert_eq!(head.chars().nth(PASTED_HEAD_CHARS - 1), Some(' '));
+        let tail = format!("{} {}", "y".repeat(50), "z".repeat(298));
+        let skipped = tail.chars().count() - PASTED_TAIL_CHARS;
+        assert_eq!(tail.chars().nth(skipped), Some(' '));
+        assert_eq!(
+            pasted_two(&head, &tail),
+            format!("{}\n{}", &head[..PASTED_HEAD_CHARS - 1], "z".repeat(298))
+        );
+    }
+
+    #[test]
+    fn brief_signal_should_read_an_unclosed_paste_to_the_end_of_the_prompt() {
+        let unclosed = [
+            "<pasted_content id=\"2\">",
+            "the daemon misses changes made during startup",
+            "",
+            "so can we make the watcher wait",
+        ]
+        .join("\n");
+        assert_eq!(typed_text(&unclosed), "");
+        assert_eq!(
+            brief_signal(&unclosed),
+            Some((
+                [
+                    "the daemon misses changes made during startup",
+                    "so can we make the watcher wait",
+                ]
+                .join("\n"),
+                Signal::Prose
+            ))
+        );
+        // An opening tag cut off by the end of the prompt holds nothing to read.
+        assert_eq!(brief_signal("<pasted_content"), None);
+        assert_eq!(brief_signal("<pasted_content id=\"2\""), None);
+        // Typed words beside the paste keep the paste out of the task.
+        assert_eq!(
+            brief_signal("<pasted_content>the daemon startup race</pasted_content> ok"),
+            None
+        );
+    }
+
+    #[test]
+    fn brief_signal_should_still_decline_a_paste_that_asks_for_no_task() {
+        for lines in [
+            &["git commit and push", "", "release 0.6.2"][..],
+            &["daemon"][..],
+            &["thanks, that works"][..],
+            &["https://example.com/a?utm_source=newsletter"][..],
+            &["   ", ""][..],
+            &[][..],
+        ] {
+            let prompt = paste_only(lines);
+            assert_eq!(brief_signal(&prompt), None, "{prompt}");
+        }
+        assert_eq!(brief_signal("<pasted_content></pasted_content>"), None);
+        assert_eq!(brief_signal(""), None);
+        assert_eq!(brief_signal("  \n "), None);
+    }
+
+    #[test]
+    fn brief_signal_should_never_take_a_pasted_log_for_code_shaped() {
+        let prompt = paste_only(&[
+            "thread 'main' panicked at src/fetch_user.rs:42 on `Option::unwrap()`",
+            "",
+            "why does fetchUser fail on an empty cache",
+        ]);
+        assert_eq!(code_signal(&prompt), None);
+        assert_eq!(
+            brief_signal(&prompt),
+            Some((
+                [
+                    "thread 'main' panicked at src/fetch_user.rs:42 on `Option::unwrap()`",
+                    "why does fetchUser fail on an empty cache",
+                ]
+                .join("\n"),
+                Signal::Prose
+            ))
+        );
+    }
+
+    #[test]
+    fn brief_signal_should_drop_the_links_of_a_paste_before_it_cuts_it() {
+        let prompt = paste_only(&[
+            "https://example.com/a?utm_source=x the daemon misses changes",
+            "",
+            "see https://x.io/b then make the watcher wait",
+        ]);
+        assert_eq!(
+            brief_signal(&prompt),
+            Some((
+                "the daemon misses changes\nsee  then make the watcher wait".to_string(),
+                Signal::Prose
+            ))
+        );
+    }
+
+    #[test]
+    fn pasted_bodies_should_return_what_typed_text_leaves_out() {
+        let none: Vec<&str> = Vec::new();
+        assert_eq!(pasted_bodies("plain"), none);
+        assert_eq!(
+            pasted_bodies(
+                "a<pasted_content id=\"1\">x</pasted_content id=\"1\">b<pasted_content>y</pasted_content>c"
+            ),
+            ["x", "y"]
+        );
+        // A longer tag name neither opens nor closes a block.
+        assert_eq!(
+            pasted_bodies(
+                "<pasted_content>q </pasted_contentious>check guard.rs</pasted_content>x"
+            ),
+            ["q </pasted_contentious>check guard.rs"]
+        );
+        assert_eq!(pasted_bodies("see <pasted_contents> here"), none);
+        // A tag cut off by the end of the prompt holds nothing; a block that
+        // never closes runs to the end; a closing tag may be cut off too.
+        assert_eq!(pasted_bodies("a <pasted_content"), none);
+        assert_eq!(pasted_bodies("a <pasted_content id=\"2\""), none);
+        assert_eq!(
+            pasted_bodies("keep<pasted_content id=\"2\">never closed"),
+            ["never closed"]
+        );
+        assert_eq!(pasted_bodies("x<pasted_content>y</pasted_content"), ["y"]);
+        assert_eq!(pasted_bodies("<pasted_content></pasted_content>"), [""]);
+        // A `>` that only comes with the closing tag ends no opening tag.
+        assert_eq!(pasted_bodies("<pasted_content </pasted_content>z"), none);
+    }
+
+    #[test]
+    fn pasted_task_should_be_none_when_the_paste_holds_no_text() {
+        for prompt in [
+            "",
+            "plain",
+            "<pasted_content",
+            "<pasted_content></pasted_content>",
+            "<pasted_content>  \n </pasted_content>",
+            "<pasted_content>https://example.com/a?utm_source=x</pasted_content>",
+        ] {
+            assert_eq!(pasted_task(prompt), None, "{prompt:?}");
+        }
+        assert_eq!(
+            pasted_task("<pasted_content>one two</pasted_content>").as_deref(),
+            Some("one two")
+        );
+    }
+
+    #[test]
+    fn first_paragraph_should_stop_at_the_first_blank_line_of_any_kind() {
+        assert_eq!(first_paragraph("a\n\nb"), "a");
+        assert_eq!(first_paragraph("a\nb\n   \nc"), "a\nb");
+        assert_eq!(first_paragraph("a\r\nb\r\n\r\nc"), "a\r\nb");
+        assert_eq!(first_paragraph("\n\n  a\n\nb\n\n"), "a");
+        assert_eq!(first_paragraph("a\nb"), "a\nb");
+        assert_eq!(first_paragraph(""), "");
+    }
+
+    #[test]
+    fn head_chars_and_tail_chars_should_count_characters_and_keep_a_short_text_whole() {
+        assert_eq!(head_chars("héllo", 2), "hé");
+        assert_eq!(tail_chars("héllo", 2), "lo");
+        assert_eq!(tail_chars("héllo", 4), "éllo");
+        for max in [5, 6, 100] {
+            assert_eq!(head_chars("héllo", max), "héllo");
+            assert_eq!(tail_chars("héllo", max), "héllo");
+        }
+        assert_eq!(head_chars("héllo", 0), "");
+        assert_eq!(tail_chars("héllo", 0), "");
+        assert_eq!(head_chars("", 3), "");
+        assert_eq!(tail_chars("", 3), "");
     }
 
     #[test]

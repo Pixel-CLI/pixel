@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Lead time of the pixel repository's own pull requests, from Claude Code transcripts.
+"""Lead time of the pixel repository's own pull requests, from agent transcripts.
 
-Usage: python3 lead_time.py <window> [--projects DIR]... [--no-gh] [--json]
+Usage: python3 lead_time.py <window> [--projects DIR]... [--codex DIR]... [--no-gh] [--json]
        (window: 12h, 7d, 3w, or an ISO date, as for roots.py)
 
 CONTRIBUTING.md ("Agent validation workflow") asks that the development loop
@@ -25,21 +25,44 @@ that for every pull request an agent opened in the window:
   task notification (idle on a background task). The same gaps, keyed by
   the Bash command that preceded them, give the most blocking commands.
 
-Transcripts are read from `~/.claude/projects/<repo path with every
-non-alphanumeric character turned into ->*`, which also matches the
-worktrees under `<repo>/.claude/worktrees/`. Subagent transcripts are not
-read: their time is already the parent's wait. Only pixel commands, PR
-numbers and durations are printed; no prompt or file content.
+A PR belongs to this repository by its URL, never by where the session
+ran: an agent in a sibling checkout opens PRs here too, and one started in
+`pixel-mvp` must not lend its own `#33` to this repository's `#33`. So
+every top-level session written to in the window is read, Claude Code's
+from `~/.claude/projects/*/` and Codex rollouts from `~/.codex/sessions/**`
+and `~/.codex/archived_sessions/` (where a finished one is moved). Only
+`gh pr create` results naming the `origin` slug count, and `gh pr view` is
+asked about that slug. Subagent transcripts are read for the PRs they open;
+the parent's time while it waits on one stays the parent's idle. Only pixel commands, PR numbers and durations are
+printed; no prompt or file content.
 """
 import collections, datetime, json, pathlib, re, statistics, subprocess, sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+import adherence  # noqa: E402  (its Codex `exec` script parsing)
+
 UTC = datetime.timezone.utc
 EDIT_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
-PR_URL = re.compile(r"github\.com/[^/\s]+/[^/\s]+/pull/(\d+)")
-PR_CREATE = re.compile(r"\bgh\s+pr\s+create\b")
+PR_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
+# `gh pr create` where a shell runs it (a line, `&&`, `;`, `|`, a subshell),
+# not quoted inside another command (`grep 'gh pr create'`).
+PR_CREATE = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*gh\s+pr\s+create\b")
+# A Codex command still running when its call returned: its later output
+# comes back through `write_stdin` polls naming the same session.
+CODEX_SESSION = re.compile(r'\\?"session_id\\?"\s*:\s*(\d+)')
+CODEX_POLL = re.compile(r"write_stdin\(\{\s*session_id\s*:\s*(\d+)")
 GIT_PUSH = re.compile(r"\bgit\s+push\b")
 # Injected user-role text that no human typed.
 NOT_HUMAN = re.compile(r"^\s*<(task-notification|system-reminder|local-command|command-name|command-message|user-prompt-submit-hook)")
+# Codex injects its context, automation heartbeats and environment as user
+# messages; each opens on a tag or on the AGENTS.md header.
+CODEX_NOT_HUMAN = re.compile(r"^\s*(<[A-Za-z_-]+[ >]|# AGENTS\.md instructions)")
+# Codex calls that only wait on something already running.
+CODEX_WAITS = {"wait", "sleep"}
+# Codex edits files from the shell as often as with apply_patch: an in-place
+# sed or perl, a heredoc script writing a file, a redirection into a source.
+EDIT_COMMAND = re.compile(r"\bsed\s+-i|\bperl\s+-[a-z]*i|\.write_text\(|\bopen\([^)]*,\s*['\"][wa]|"
+                          r"(?<![0-9&>])>{1,2}\s*\S+\.(?:rs|py|md|toml|sh|ts|js|json|ya?ml)\b")
 BUCKETS = ("tool", "model", "idle", "human")
 
 
@@ -72,9 +95,10 @@ def text_of(content):
     return ""
 
 
-def load_events(lines):
+def load_events(lines, subagent=False):
     """The session's user and assistant events, in time order, each reduced to
-    what the classification needs."""
+    what the classification needs. A subagent's user text is its parent's
+    prompt, never a human's."""
     events = []
     for line in lines:
         try:
@@ -91,17 +115,102 @@ def load_events(lines):
                 event["uses"].append({"id": item.get("id"), "name": item.get("name"), "input": item.get("input") or {}})
             elif kind == "tool_result":
                 event["results"][item.get("tool_use_id")] = text_of(item.get("content"))
-            elif kind == "text":
+            elif kind == "text" and not (subagent and raw["type"] == "user"):
                 event["text"] += item.get("text", "")
         events.append(event)
     events.sort(key=lambda e: e["ts"])
     return events
 
 
+def codex_uses(call_id, script):
+    """The uses of one Codex `exec` script: each `tools.exec_command` as a Bash
+    use, each `tools.apply_patch` as an Edit, all under the script's call id,
+    whose single output answers them. A script that only polls running
+    commands (`write_stdin`) is a wait."""
+    uses = []
+    for call in adherence.CODEX_TOOL.finditer(script):
+        if call.group(1) == "apply_patch":
+            uses.append({"id": call_id, "name": "Edit", "input": {}})
+            continue
+        cmd = adherence.CODEX_CMD.search(adherence.call_arguments(script, call.end()))
+        if not cmd:
+            continue
+        command = json.loads(f'"{cmd.group(1)}"')
+        uses.append({"id": call_id, "name": "Bash", "input": {"command": command}})
+        if EDIT_COMMAND.search(command):
+            uses.append({"id": call_id, "name": "Edit", "input": {}})
+    if "write_stdin" in script:
+        uses.append({"id": call_id, "name": "wait", "input": {"polls": CODEX_POLL.findall(script)}})
+    return uses
+
+
+def load_codex(lines):
+    """(session id, cwd, events) of one Codex rollout, its events shaped as
+    `load_events` shapes Claude's."""
+    session, cwd, events, waits = None, None, [], set()
+    for line in lines:
+        try:
+            raw = json.loads(line)
+        except ValueError:
+            continue
+        payload = raw.get("payload")
+        if not isinstance(payload, dict) or "timestamp" not in raw:
+            continue
+        if raw.get("type") == "session_meta":
+            session, cwd = payload.get("id"), payload.get("cwd")
+            continue
+        if raw.get("type") != "response_item":
+            continue
+        event = {"ts": parse_ts(raw["timestamp"]), "role": "user", "uses": [], "results": {}, "text": ""}
+        kind, call_id = payload.get("type"), payload.get("call_id")
+        if kind == "message" and payload.get("role") in ("user", "assistant"):
+            text = "\n".join(part.get("text", "") for part in payload.get("content") or [] if isinstance(part, dict))
+            if payload["role"] == "assistant":
+                event.update(role="assistant", text=text)
+            elif not CODEX_NOT_HUMAN.match(text):
+                event["text"] = text
+        elif kind == "custom_tool_call":
+            event["role"] = "assistant"
+            if payload.get("name") == "apply_patch":
+                event["uses"] = [{"id": call_id, "name": "Edit", "input": {}}]
+            else:
+                event["uses"] = codex_uses(call_id, str(payload.get("input", "")))
+        elif kind == "function_call":
+            event["role"] = "assistant"
+            name = payload.get("name", "")
+            if name in CODEX_WAITS:
+                event["uses"] = [{"id": call_id, "name": "wait", "input": {}}]
+            elif name == "apply_patch":
+                event["uses"] = [{"id": call_id, "name": "Edit", "input": {}}]
+            else:
+                try:
+                    args = json.loads(payload.get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                cmd = args.get("cmd") or args.get("command") or ""
+                cmd = cmd[-1] if isinstance(cmd, list) and cmd else cmd
+                event["uses"] = [{"id": call_id, "name": "Bash", "input": {"command": str(cmd)}}]
+        elif kind in ("custom_tool_call_output", "function_call_output"):
+            output = payload.get("output")
+            if isinstance(output, list):
+                output = "\n".join(part.get("text", "") for part in output if isinstance(part, dict))
+            event["results"][call_id] = str(output or "")
+            event["idle"] = call_id in waits
+        else:
+            continue
+        if event["uses"] and all(use["name"] == "wait" for use in event["uses"]):
+            waits.add(call_id)
+        events.append(event)
+    events.sort(key=lambda e: e["ts"])
+    return session, cwd, events
+
+
 def next_kind(event):
     """What a gap ending at `event` was spent on."""
     if event["role"] == "assistant":
         return "model"
+    if event.get("idle"):
+        return "idle"
     if event["results"]:
         return "tool"
     if event["text"].strip() and not NOT_HUMAN.match(event["text"]):
@@ -142,8 +251,9 @@ def bash_key(command):
     return " ".join(keep) or "?"
 
 
-def units(events):
-    """One unit per `gh pr create` whose result names a PR."""
+def units(events, repo=None):
+    """One unit per `gh pr create` whose result names a PR of `repo`
+    (`owner/name`, any case; every repository when None)."""
     found, start = [], None
     for index, event in enumerate(events):
         for use in event["uses"]:
@@ -152,12 +262,29 @@ def units(events):
         for use in event["uses"]:
             if use["name"] != "Bash" or not PR_CREATE.search(use["input"].get("command", "")):
                 continue
-            result = next((later["results"][use["id"]] for later in events[index + 1:] if use["id"] in later["results"]), "")
-            match = PR_URL.search(result)
+            match = next((m for m in PR_URL.finditer(output_of(events, index, use["id"]))
+                          if repo is None or m.group(1).lower() == repo.lower()), None)
             if match:
-                found.append({"pr": int(match.group(1)), "start": start or event["ts"], "opened": event["ts"]})
+                found.append({"pr": int(match.group(2)), "start": start or event["ts"], "opened": event["ts"]})
                 start = None
     return found
+
+
+def output_of(events, index, use_id):
+    """What the call `use_id` made at `events[index]` printed: its result,
+    and for a Codex command still running then, the output of the polls of
+    its session that follow."""
+    later = events[index + 1:]
+    position, result = next(((i, e["results"][use_id]) for i, e in enumerate(later) if use_id in e["results"]), (0, ""))
+    running = CODEX_SESSION.search(result)
+    if not running:
+        return result
+    parts = [result]
+    for i, event in enumerate(later[position + 1:], start=position + 1):
+        for use in event["uses"]:
+            if running.group(1) in use["input"].get("polls", ()):
+                parts.append(next((e["results"][use["id"]] for e in later[i + 1:] if use["id"] in e["results"]), ""))
+    return "\n".join(parts)
 
 
 def breakdown(events, start, end):
@@ -182,6 +309,9 @@ def breakdown(events, start, end):
                     background = bash_key(command) + " (background)"
                     continue
                 names.append(bash_key(command))
+            elif use["name"] == "wait":
+                # A Codex wait on a command already running: what follows is idle.
+                background = background or "wait (background)"
             else:
                 names.append(use["name"])
         if kind == "tool" and names:
@@ -214,21 +344,25 @@ def validated_at(view):
     return max(times) if times else None
 
 
-def gh_view(pr):
-    out = subprocess.run(["gh", "pr", "view", str(pr), "--json", "headRefOid,statusCheckRollup,mergedAt"],
+def gh_view(pr, repo=None):
+    out = subprocess.run(["gh", "pr", "view", str(pr), "--json", "headRefOid,statusCheckRollup,mergedAt",
+                          *(["--repo", repo] if repo else [])],
                          capture_output=True, text=True, timeout=30)
     return json.loads(out.stdout) if out.returncode == 0 else None
 
 
-def project_dirs(root):
-    name = re.sub(r"[^A-Za-z0-9]", "-", str(root))
-    return sorted(pathlib.Path.home().joinpath(".claude/projects").glob(name + "*"))
+def recent(paths, since):
+    """The transcript files among `paths` written to since `since`: one that
+    was not cannot hold a PR opened in the window."""
+    cutoff = since.timestamp()
+    return sorted(p for p in paths if p.stat().st_mtime >= cutoff)
 
 
-def repo_root():
-    common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                            capture_output=True, text=True, check=True).stdout.strip()
-    return pathlib.Path(common).parent
+def repo_slug():
+    """`owner/name` of the `origin` remote, or None."""
+    out = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True)
+    match = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", out.stdout.strip())
+    return match.group(1) if match else None
 
 
 def fmt(seconds):
@@ -243,22 +377,38 @@ def main(argv):
     if not args or args[0].startswith("-"):
         sys.exit(__doc__)
     since = parse_window(args[0], datetime.datetime.now(UTC))
-    dirs = [pathlib.Path(a) for flag, a in zip(args, args[1:]) if flag == "--projects"] or project_dirs(repo_root())
+    repo = repo_slug()
+    dirs = [pathlib.Path(a) for flag, a in zip(args, args[1:]) if flag == "--projects"] or sorted(
+        p for p in (pathlib.Path.home() / ".claude" / "projects").glob("*") if p.is_dir())
+    codex_dirs = [pathlib.Path(a).expanduser() for flag, a in zip(args, args[1:]) if flag == "--codex"] or [
+        pathlib.Path.home() / ".codex" / "sessions", pathlib.Path.home() / ".codex" / "archived_sessions"]
     use_gh, as_json = "--no-gh" not in args, "--json" in args
+    # A subagent opens PRs too (`<session>/subagents/agent-*.jsonl`); its unit
+    # is split with its own events, the parent's wait staying the parent's.
+    claude = recent([p for d in dirs for pattern in ("*.jsonl", "*/subagents/*.jsonl") for p in d.glob(pattern)], since)
+    sessions = [(path.stem.removeprefix("agent-")[:8],
+                 load_events(path.read_text(errors="replace").splitlines(), subagent=path.parent.name == "subagents"))
+                for path in claude]
+    seen = set()
+    for path in recent([p for d in codex_dirs if d.is_dir() for p in d.glob("**/*.jsonl")], since):
+        session, _cwd, events = load_codex(path.read_text(errors="replace").splitlines())
+        # A finished rollout is moved to archived_sessions; never count one twice.
+        if session not in seen:
+            seen.add(session)
+            sessions.append(((session or path.stem)[:8], events))
     rows, totals, blocking = [], dict.fromkeys(BUCKETS, 0.0), collections.Counter()
-    for path in sorted(p for d in dirs for p in d.glob("*.jsonl")):
-        events = load_events(path.read_text(errors="replace").splitlines())
-        for unit in units(events):
+    for name, events in sessions:
+        for unit in units(events, repo):
             if unit["opened"] < since:
                 continue
-            view = gh_view(unit["pr"]) if use_gh else None
+            view = gh_view(unit["pr"], repo) if use_gh else None
             done = validated_at(view) if view else None
             end = done or unit["opened"]
             buckets, blocked, pushes = breakdown(events, unit["start"], end)
             for key in BUCKETS:
                 totals[key] += buckets[key]
             blocking.update(blocked)
-            rows.append({"pr": unit["pr"], "session": path.stem[:8], "start": unit["start"].isoformat(),
+            rows.append({"pr": unit["pr"], "session": name, "start": unit["start"].isoformat(),
                          "edit_to_open_s": (unit["opened"] - unit["start"]).total_seconds(),
                          "open_to_green_s": (done - unit["opened"]).total_seconds() if done else None,
                          "pushes_in_session": pushes, **{f"{k}_s": v for k, v in buckets.items()}})
@@ -266,7 +416,8 @@ def main(argv):
         print(json.dumps({"since": since.isoformat(), "units": rows, "totals_s": totals,
                           "blocking_s": dict(blocking.most_common(15))}, indent=2))
         return
-    print(f"{len(rows)} PRs opened since {since:%Y-%m-%d %H:%M}Z, from {len(dirs)} project dirs")
+    print(f"{len(rows)} PRs of {repo or 'any repository'} opened since {since:%Y-%m-%d %H:%M}Z, "
+          f"read from {len(claude)} Claude and {len(seen)} Codex sessions")
     print(f"{'PR':>5} {'session':8} {'edit→open':>9} {'open→green':>10} {'push':>4} {'tool':>7} {'model':>7} {'idle':>7} {'human':>7}")
     for r in sorted(rows, key=lambda r: r["pr"]):
         print(f"{r['pr']:>5} {r['session']:8} {fmt(r['edit_to_open_s']):>9} {fmt(r['open_to_green_s']):>10} "

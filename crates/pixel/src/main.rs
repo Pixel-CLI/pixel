@@ -50,6 +50,7 @@ mod decide_remote;
 mod evaluate_cmd;
 mod execution_brief;
 mod graph_shadow_cmd;
+mod history_index;
 mod hook_input;
 mod hook_metrics;
 mod impact_read;
@@ -64,6 +65,7 @@ mod prompt_continuation;
 mod prompt_intent;
 mod prompt_key;
 mod reference_cmd;
+mod removed_commands;
 mod search_compat;
 mod search_filter;
 mod serve_trace;
@@ -353,8 +355,8 @@ enum Command {
     },
     /// `pixel brief "<prompt>"` — the evidence brief a prompt-submit hook
     /// injects for Claude and Codex, on stdout. Harnesses without a
-    /// prompt-submit context channel (Pi's `before_agent_start` extension)
-    /// call this directly. Empty output means no brief (a non-code prompt,
+    /// prompt-submit hook (OpenCode's `pixel-brief` plugin) call this
+    /// directly. Empty output means no brief (a non-code prompt,
     /// an unindexed repository, or `PIXEL_BRIEF=0`).
     Brief {
         /// The user's prompt, verbatim.
@@ -4129,17 +4131,21 @@ fn setup_install(json: bool, repo: Option<PathBuf>) -> Result<(), String> {
         // (logo over version line) is the whole preamble now.
         write_stdout(&pixel_setup::banner::render_start(color))?;
     }
-    let report = pixel_setup::install::install(&pixel_setup::install::InstallOptions {
+    let install = pixel_setup::install::InstallOptions {
         repo,
         ..Default::default()
-    })
-    .map_err(|e| e.to_string())?;
+    };
+    let receipt = pixel_setup::receipt::Snapshot::begin(&install).map_err(|e| e.to_string())?;
+    let report = pixel_setup::install::install(&install).map_err(|e| e.to_string())?;
     config_cmd::ensure_template(config_root.as_deref())?;
     // Interactive UX goes to stderr so `--json` stdout stays pure.
     let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
     let stderr_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     if should_offer_classify_setup(is_global_install, json, stdin_tty, stderr_tty) {
         config_cmd::setup()?;
+    }
+    if let Some(receipt) = receipt {
+        receipt.finish().map_err(|e| e.to_string())?;
     }
     let report_value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
     // A person at a terminal reads the banner; `--json` and a piped
@@ -4198,18 +4204,7 @@ fn run_command(
                         .unwrap_or(0),
                 );
                 if history {
-                    let mut store =
-                        pixel_facts::FactsStore::open(&path).map_err(|e| e.to_string())?;
-                    let opts = pixel_facts::ingest::IngestOptions::default();
-                    let report = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts)
-                        .map_err(|e| e.to_string())?;
-                    eprintln!(
-                        "facts: phase={} commits={} diff_coverage={:.0}% fresh={}",
-                        report.phase,
-                        report.commits_indexed,
-                        report.diff_indexed_pct * 100.0,
-                        report.fresh
-                    );
+                    history_index::build(&path)?;
                 }
                 return Ok(());
             }
@@ -4224,17 +4219,7 @@ fn run_command(
                 stats.files, stats.bytes, stats.grams, stats.shard_bytes, stats.elapsed_ms
             );
             if history {
-                let mut store = pixel_facts::FactsStore::open(&path).map_err(|e| e.to_string())?;
-                let opts = pixel_facts::ingest::IngestOptions::default();
-                let report = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts)
-                    .map_err(|e| e.to_string())?;
-                eprintln!(
-                    "facts: phase={} commits={} diff_coverage={:.0}% fresh={}",
-                    report.phase,
-                    report.commits_indexed,
-                    report.diff_indexed_pct * 100.0,
-                    report.fresh
-                );
+                history_index::build(&path)?;
             }
             Ok(())
         }

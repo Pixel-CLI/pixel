@@ -854,6 +854,44 @@ mod tests {
         assert_eq!(store.path(), db.as_path());
     }
 
+    #[test]
+    fn open_should_preserve_history_when_the_repository_parent_is_a_symlink() {
+        let (dir, first, _) = two_commit_repo();
+        let alias = tempfile::tempdir().unwrap();
+        let linked_parent = alias.path().join("projects");
+        std::os::unix::fs::symlink(
+            dir.path().parent().unwrap().canonicalize().unwrap(),
+            &linked_parent,
+        )
+        .unwrap();
+        // Use a repository below the linked component, as with /var/folders
+        // on macOS, so SQLite must not see a link in any parent component.
+        let root = linked_parent.join(dir.path().file_name().unwrap());
+        let store = FactsStore::open(&root).unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO commits (oid, message) VALUES (?1, 'retained history')",
+                [&first],
+            )
+            .unwrap();
+        drop(store);
+
+        let canonical_root = root.canonicalize().unwrap();
+        for path in [&root, &canonical_root] {
+            let reopened = FactsStore::open_existing(path).unwrap().unwrap();
+            let row: (String, String) = reopened
+                .conn()
+                .query_row("SELECT oid, message FROM commits", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(row.0, first);
+            assert_eq!(row.1, "retained history");
+            assert_eq!(reopened.index_state().total_commits, 1);
+        }
+    }
+
     /// Freed pages must be reclaimable, or an eviction never shrinks the
     /// file; and the budget measures used pages, not the free list.
     #[test]
@@ -1096,7 +1134,8 @@ mod tests {
     #[test]
     fn needs_rebuild_should_follow_the_marker_and_the_schema_version() {
         let dir = tempfile::TempDir::new().unwrap();
-        let db = dir.path().join("h.db");
+        // NOFOLLOW rejects symlinks in parent components too (/var on macOS).
+        let db = dir.path().canonicalize().unwrap().join("h.db");
         assert!(!FactsStore::needs_rebuild(&db).unwrap(), "absent");
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(

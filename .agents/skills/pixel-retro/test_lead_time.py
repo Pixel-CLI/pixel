@@ -79,6 +79,99 @@ class Units(unittest.TestCase):
         self.assertEqual([(u["pr"], u["start"]) for u in found], [(9, T0 + datetime.timedelta(minutes=1))])
 
 
+class Repository(unittest.TestCase):
+    """The 2026-10-16 retro measured pixel-mvp's #33 and #36 as this
+    repository's #33 and #36 (the project-directory glob took the sibling
+    `pixel-mvp` for a worktree) and read their month-old checks: a lead time
+    of -48 269 min. A PR is this repository's by its URL, nothing else."""
+
+    def session(self, url, command="gh pr create --fill"):
+        return lt.load_events([
+            assistant(1, ("e1", "Edit", {})),
+            result(2, "e1"),
+            assistant(5, ("p1", "Bash", bash(command))),
+            result(6, "p1", url),
+        ])
+
+    def test_a_pr_of_another_repository_with_the_same_number_is_not_this_ones(self):
+        events = self.session("https://github.com/Pixel-CLI/pixel-mvp/pull/33")
+        self.assertEqual(lt.units(events, "Pixel-CLI/pixel"), [])
+        self.assertEqual([u["pr"] for u in lt.units(self.session("https://github.com/pixel-cli/PIXEL/pull/33"),
+                                                    "Pixel-CLI/pixel")], [33])
+
+    def test_gh_pr_create_quoted_inside_another_command_opens_nothing(self):
+        # The retro's own `grep 'gh pr create'` over a rollout printed PR URLs.
+        events = self.session("https://github.com/Pixel-CLI/pixel/pull/1012", "grep -o 'gh pr create' rollout.jsonl")
+        self.assertEqual(lt.units(events, "Pixel-CLI/pixel"), [])
+        for command in ("cd /x && gh pr create --fill", "git push -u origin b\ngh pr create --base main",
+                        "GH_PAGER= gh pr create --fill"):
+            events = self.session("https://github.com/Pixel-CLI/pixel/pull/7", command)
+            self.assertEqual([u["pr"] for u in lt.units(events, "Pixel-CLI/pixel")], [7], command)
+
+    def test_a_subagents_prompt_is_not_the_human(self):
+        lines = [user(0, "open the PR for #12"), assistant(1, text="on it")]
+        self.assertEqual([lt.next_kind(e) for e in lt.load_events(lines)], ["human", "model"])
+        self.assertEqual([lt.next_kind(e) for e in lt.load_events(lines, subagent=True)], ["idle", "model"])
+
+
+def codex(minutes, kind, **payload):
+    return json.dumps({"timestamp": at(minutes), "type": "response_item", "payload": {"type": kind, **payload}})
+
+
+def codex_exec(minutes, call_id, *calls):
+    script = "\n".join(f"text(await tools.{call});" for call in calls)
+    return codex(minutes, "custom_tool_call", name="exec", call_id=call_id, input=script)
+
+
+def codex_output(minutes, call_id, text):
+    return codex(minutes, "custom_tool_call_output", call_id=call_id, output=[{"type": "input_text", "text": text}])
+
+
+class Codex(unittest.TestCase):
+    """Every PR of the 2026-10-16 window came from Codex, and lead_time.py
+    measured none: it read Claude Code transcripts only."""
+
+    def rollout(self):
+        return [
+            json.dumps({"timestamp": at(0), "type": "session_meta", "payload": {"id": "01a14247-x", "cwd": "/r"}}),
+            codex(0, "message", role="user", content=[{"type": "input_text", "text": "# AGENTS.md instructions for /r"}]),
+            codex(0, "message", role="user", content=[{"type": "input_text", "text": "<heartbeat>tick</heartbeat>"}]),
+            codex(1, "message", role="user", content=[{"type": "input_text", "text": "fix #1011"}]),
+            codex_exec(2, "c1", 'exec_command({cmd:"rg -n write_settings crates"})'),
+            codex_output(3, "c1", "crates/a.rs:1"),
+            # Codex edits from a heredoc script as often as with apply_patch.
+            codex_exec(4, "c2", 'exec_command({cmd:"python3 - <<\'PY\'\\np=Path(\'a.rs\');p.write_text(s)\\nPY"})'),
+            codex_output(5, "c2", "ok"),
+            # gh pr create still runs when the call returns: the URL comes back
+            # through the poll of the same session.
+            codex_exec(10, "c3", 'exec_command({cmd:"git push -u origin b\\ngh pr create --base main --body-file /tmp/b.md",yield_time_ms:1000})'),
+            codex_output(11, "c3", '{"session_id":16372,"output":"[b 79f657ca] fix"}'),
+            codex(12, "function_call", name="wait", call_id="w1", arguments='{"cell_id":"3"}'),
+            codex(20, "function_call_output", call_id="w1", output="Wall time: 8 min"),
+            codex_exec(21, "c4", 'write_stdin({session_id:16372,chars:"",yield_time_ms:1000})'),
+            codex_output(22, "c4", '{"output":"https://github.com/Pixel-CLI/pixel/pull/1012\\n"}'),
+        ]
+
+    def test_a_codex_pr_starts_at_its_first_shell_edit_and_ends_at_the_poll_that_names_it(self):
+        session, cwd, events = lt.load_codex(self.rollout())
+        self.assertEqual((session, cwd), ("01a14247-x", "/r"))
+        found = lt.units(events, "Pixel-CLI/pixel")
+        self.assertEqual([(u["pr"], u["start"], u["opened"]) for u in found],
+                         [(1012, T0 + datetime.timedelta(minutes=4), T0 + datetime.timedelta(minutes=10))])
+
+    def test_codex_context_is_not_the_human_and_a_wait_is_idle(self):
+        _, _, events = lt.load_codex(self.rollout())
+        buckets, blocking, pushes = lt.breakdown(events, T0, T0 + datetime.timedelta(minutes=22))
+        # Only "fix #1011" (minute 0 → 1) is a human gap; the injected
+        # AGENTS.md and heartbeat messages are not.
+        self.assertEqual(buckets["human"], 60.0)
+        # The wait (minute 12 → 20) and the poll that only reads a running
+        # command (21 → 22) are idle, charged to the wait.
+        self.assertEqual(buckets["idle"], 9 * 60.0)
+        self.assertEqual(blocking["wait (background)"], 9 * 60.0)
+        self.assertEqual(pushes, 1)
+
+
 class Gaps(unittest.TestCase):
     def test_injected_user_text_is_never_the_human(self):
         kinds = [lt.next_kind(e) for e in lt.load_events([

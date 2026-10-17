@@ -239,8 +239,13 @@ fn literal_name(w: &Walker, node: Node) -> Option<String> {
 }
 
 /// A method name as the `alias` keyword spells it: an identifier, a constant,
-/// an operator, a setter or a symbol; `None` for a global variable.
+/// an operator, a setter or a symbol; `None` for a missing name or global variable.
 fn method_name(w: &Walker, node: Node) -> Option<String> {
+    // Error recovery inserts zero-width names in an unfinished alias.
+    // Such a declaration cannot generate a method or a forwarding reference.
+    if node.is_missing() {
+        return None;
+    }
     match node.kind() {
         "simple_symbol" | "string" | "delimited_symbol" => literal_name(w, node),
         "global_variable" => None,

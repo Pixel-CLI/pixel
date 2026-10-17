@@ -294,6 +294,12 @@ pub(crate) fn merge_task_hooks(
             } else {
                 10
             });
+            if provider == Provider::Devin && name == "prompt-submit" {
+                // Devin draws neither `systemMessage` nor a hook's stdout or
+                // stderr; `show_output` makes it print `✱ Hook completed:
+                // <command>`, the only on-screen trace that the brief ran.
+                group["hooks"][0]["show_output"] = json!(true);
+            }
             groups.push(group);
         }
     }
@@ -874,6 +880,20 @@ mod tests {
             prompt_commands(&devin),
             vec!["'/tmp/pixel' run-hook task-event --provider devin --event prompt-submit || true"],
             "a host with no known cap keeps one hook"
+        );
+        // Only the brief hook asks Devin to show its run on screen; every
+        // other Devin event, and every other host, stays silent.
+        for (event, groups) in devin["hooks"].as_object().unwrap() {
+            assert_eq!(
+                groups[0]["hooks"][0].get("show_output"),
+                (event == "UserPromptSubmit").then_some(&json!(true)),
+                "{event}"
+            );
+        }
+        let claude = merged(Provider::Claude, exe, 1);
+        assert_eq!(
+            claude["hooks"]["UserPromptSubmit"][0]["hooks"][0].get("show_output"),
+            None
         );
         // Devin accepts only these hook events and rejects a `hooks` object
         // that names any other — no Subagent*/Interrupt/PostToolUseFailure key.

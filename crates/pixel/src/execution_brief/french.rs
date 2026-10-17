@@ -6,12 +6,12 @@
 //! moved into this brief under ADR-0036 of the pixel-mvp research
 //! repository.
 //!
-//! The rules are pixel-mvp's, read from its vendored copy (`mvp-model`,
+//! The rules are pixel-mvp's, read from its imported copy (`mvp-model`,
 //! never edited here) and not restated: `mvp_model::language` says whether
 //! the typed text is French, `mvp_model::sub_words` splits it into words,
 //! and `mvp_model::prompt_terms` says which words carry nothing (a French
 //! function word, or a filler the lexicon maps to `-`). The lexicon is its
-//! data, vendored byte for byte (`crates/mvp-lexicon/fr-en.tsv`).
+//! data, imported byte for byte (`crates/mvp-lexicon/fr-en.tsv`).
 //!
 //! What is this brief's own, and why:
 //!
@@ -40,7 +40,7 @@ use mvp_model::{Language, Lexicon, fold, language, prompt_terms, sub_words};
 /// (`docs/bench/brief-gate.md`, "French prompts through the lexicon").
 pub(crate) const FRENCH_ENV: &str = "PIXEL_BRIEF_FRENCH";
 
-/// pixel-mvp's lexicon, vendored (`crates/mvp-lexicon/VENDORED.md`).
+/// pixel-mvp's lexicon, imported (`crates/mvp-lexicon/ORIGIN.md`).
 const LEXICON: &str = include_str!("../../../mvp-lexicon/fr-en.tsv");
 
 /// The French question words that open a question, and the English opener

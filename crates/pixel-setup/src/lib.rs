@@ -4,8 +4,9 @@
 //! pixel-setup — idempotent `pixel setup`, `pixel setup --remove` and
 //! `pixel doctor`. pixel is a CLI + lifecycle integration tool: install keeps
 //! Claude and Codex task lifecycle hooks, the `pixel` skill, the prompt-brief
-//! hooks of Devin, Gemini CLI, Antigravity and OpenCode, and gives Pi the
-//! explicit impact command as a local package. It deploys no prompt and
+//! hooks of Devin, Gemini CLI, Antigravity and OpenCode, and gives Pi a
+//! local package: the explicit impact command, the prompt-submit brief and
+//! the metrics relay. It deploys no prompt and
 //! wires no retrieval guard.
 
 use std::io;
@@ -20,9 +21,11 @@ pub mod codex_config;
 pub mod config;
 pub mod doctor;
 pub mod install;
+mod json_edit;
 pub mod opencode_config;
 mod pi_global;
 pub use pi_global::{CLASSIFY_PACKAGE_DIR, ClassifyPiPackage};
+pub mod receipt;
 mod routing;
 pub mod setup;
 pub mod skill;

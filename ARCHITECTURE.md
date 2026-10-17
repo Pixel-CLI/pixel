@@ -38,29 +38,30 @@ MCP server. `pixel setup` registers no MCP server with any agent.
 
 | Crate | Role | Depends on (pixel crates) |
 | --- | --- | --- |
-| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry point under `run-hook` (`task-event`, `metrics`). | every library crate except `pixel-context` (reached through the daemon), `pixel-ultraflow`, `pixel-session` (reached through the daemon and the ranker), `pixel-bench` and the vendored `mvp-store` and `mvp-index` (of the vendored crates it reads mvp-model only, for the brief's French prompts: see the dependency rule below) |
+| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry point under `run-hook` (`task-event`, `metrics`). | every library crate except `pixel-context` (reached through the daemon), `pixel-ultraflow`, `pixel-session` (reached through the daemon and the ranker), `pixel-bench` and the imported `mvp-store` and `mvp-index` (of the imported crates it reads mvp-model only, for the brief's French prompts: see the dependency rule below) |
 | `pixel-proto` | The shared contract crate: `Envelope`, `PixelError` and `ErrorCode`, `Epistemics`, `SnapshotInfo`, `Budget`, `Warning`, and the `Op` request enum. No I/O, no business logic. Every other crate that speaks the wire format depends on it, and it depends on nothing internal. | none |
 | `pixel-daemon` | Transport-agnostic `Service` (`api.rs`) and the Unix-socket NDJSON daemon with filesystem watching (`daemon.rs`). Dispatches each `Op` to the right library, attaches snapshot and epistemics metadata, and is the one place a retrieval envelope is built. Also hosts the recall daemon service. | index, graph, context, rank, proto, ops, facts, session, recall, git |
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
-| `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. `mvp_adapter` reads the vendored pixel-mvp index (`refresh` brings it up to date under a state directory, through git) and returns what its rules decide at each Rust site in this graph's rows: proven calls as `exact` edges, references as `probable`, the rest as `unresolved_calls` rows, and each Rust import's resolved file, on this graph's own symbols (rows with no symbol here, Rust test code, are dropped and counted); the Rust source switch, on by default for a Cargo crate, writes them in ("Indexes and freshness"). `mvp_adapter::ruby` pairs pixel-mvp's Ruby sites with this graph's (kind, file, line and the name written; then, within one enclosing symbol, in line order) and plans the hybrid of ADR-0037 there: pixel-mvp's targets where it resolves a site, this graph's own edge where it abstains or has no such site. `shadow` builds this graph and the adapter's rows in a scratch directory and counts what each links alone (`pixel graph-shadow`); `shadow::ruby` counts the Ruby merge instead: the edges both hold, this graph's kept and replaced, pixel-mvp's added, for calls, routes, associations and other references (`pixel graph-shadow --lang ruby`). | git, index, mvp-index, mvp-model, mvp-store |
+| `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. `mvp_adapter` reads the imported pixel-mvp index (`refresh` brings it up to date under a state directory, through git) and returns what its rules decide at each Rust site in this graph's rows: proven calls as `exact` edges, references as `probable`, the rest as `unresolved_calls` rows, and each Rust import's resolved file, on this graph's own symbols (rows with no symbol here, Rust test code, are dropped and counted); the Rust source switch, on by default for a Cargo crate, writes them in ("Indexes and freshness"). `mvp_adapter::ruby` pairs pixel-mvp's Ruby sites with this graph's (kind, file, line and the name written; then, within one enclosing symbol, in line order) and plans the hybrid of ADR-0037 there: pixel-mvp's targets where it resolves a site, this graph's own edge where it abstains or has no such site. `shadow` builds this graph and the adapter's rows in a scratch directory and counts what each links alone (`pixel graph-shadow`); `shadow::ruby` counts the Ruby merge instead: the edges both hold, this graph's kept and replaced, pixel-mvp's added, for calls, routes, associations and other references (`pixel graph-shadow --lang ruby`). | git, index, mvp-index, mvp-model, mvp-store |
 | `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db`: commit metadata, diff text, and contentless FTS5 trigram indexes over the diffs and paths. Demand-driven: the daemon never ingests at startup, and `status` and `doctor` never create the db — the first history query runs a bounded catch-up (`PIXEL_FACTS_QUERY_BUDGET_MS`, default 3 s) and spawns the low-priority keep-fresh loop that never blocks queries. The daemon `history`, `dig-history` and `lifecycle` ops take `read_only: true` (protocol 15), under which an absent db answers `unavailable` and a stale one answers from existing rows — ingest and catch-up are skipped; the prompt hook sends only this form. Bounded: diff text is kept for the last 365 days (`PIXEL_HISTORY_WINDOW_DAYS`, `0` for all) within 256 MiB of used pages (`PIXEL_HISTORY_BUDGET_MB`), newest first; older diffs are evicted, metadata never is. `build-index --history` remains the explicit full build. Backs `excavate`, `lifecycle`, `history-search` and `rescue` discovery (`resolve` is the graph's concept index). | git |
 | `pixel-rank` | Fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. The scoring is pure; `compute_signals` gathers the activity channel itself (git log churn when facts have none, and a failed or capped scan is reported as unavailable rather than as an empty map) and takes the session and error-sink channels from its caller — the daemon feeds neither of those. Also hosts `regions`: the pure symbol-level regions analysis for `scope-task --regions` (P0 symbols + call/import edges in, regions manifest out — line ranges, conservative conflict pairs, merge-order layers, shared files). | graph, git, session |
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
 | `pixel-ops` | Safe git mutation infrastructure ported from usable-git: snapshot store, repository lock, operation journal, recovery keys. Implements `inspect`, `review`, `history`, `diff`, `publish`, `push`, `ship`, `branch`, `update`, `sync`, `reconcile`, `rewrite`, `branches`. | git |
-| `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through `GitRunner` (timeout, output cap, redacted stderr); `crates/pixel-git/tests/boundary.rs` fails the build on a `Command::new("git")` in any other crate's non-test code. Also owns the trust boundary of `.pixel/`: `sidecar` refuses a `.pixel` that is a link or that git tracks and creates owner-only directories without following a link, `nofollow` opens files without following a link at their name, and `repo_path` confines a stored path to the repository root. | none |
+| `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through `GitRunner` (timeout, output cap, redacted stderr). The runner waits on completion notifications from its pipe workers and an exit observer (`waitid` with `WNOWAIT` on Linux/macOS), keeping one deadline across child exit and every pipe; `crates/pixel-git/tests/boundary.rs` fails the build on a `Command::new("git")` in any other crate's non-test code. Also owns the trust boundary of `.pixel/`: `sidecar` refuses a `.pixel` that is a link or that git tracks and creates owner-only directories without following a link, `nofollow` opens files without following a link at their name, and `repo_path` confines a stored path to the repository root. | none |
 | `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, pi, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features) and the `search-meaning` code chunker, which reuses the graph's tree-sitter extraction. | git, graph, index, rank |
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | git |
 | `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` reporting, and `summarize_metrics`, which the `token-savings` plugin prints. | git |
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
-| `pixel-setup` | Idempotent `pixel setup`, `pixel setup --remove`, `pixel doctor`. The guided run at a terminal is the `setup/` module (agent detection and targets, the four-feature catalog (Token super savior, command timing and savings, on-demand daemon, AI classification), the plan) in front of the same installer, which `install_selected` limits to the agents and hook groups the plan picked. Global install: Claude and Codex task lifecycle hooks, the `pixel` skill (`skills/pixel/SKILL.md`) deployed into every configured harness's skills dir — a guided run writes only the selected agents' roots — and the explicit Pi `/pixel-impact` package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`) when Pi is present. No always-on prompt, rules file or instruction block is deployed: guidance reaches the wired harnesses as the `pixel` skill only (Copilot CLI and the generic `AGENTS.md` target get none), and the install cleans up nothing earlier releases wrote. Where a host's configuration already exists, Gemini CLI, OpenCode, Devin and Antigravity get their brief and metrics hooks (see "Agent integration"). An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo` skips every global step and writes only the repository's `.pixel/config.yaml` template. Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `banner` logo card (a short logo pulse, not an animation) and ends on the `banner` summary. `pixel doctor` reports `web-search.provider` green, and says so, when `pixel-utilities` is not installed (`pixel_plugin::Available`). | proto, daemon, index, facts, git, plugin |
-| `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`, and an optional `commands` list so one binary serves several `pixel <command>` words, run as `<run> <command> <args…>`; two plugins of a tier answering to one command are an error naming both, in `resolve`, `list` and `install`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (the library behind `pixel install`: a local directory, a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL, or `github:<owner>/<repo>[@<ref>]`, whose unshipped program is fetched as a release asset with `curl`), `remove` (`pixel uninstall`), `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. `Available` is the set of moved commands (`MOVED_COMMANDS`) that a plugin runs on this host, with the host's own reason for one that is installed but blocked (untrusted, not enabled): text that would name a plugin command asks it first. `read_only_invocation` says which moved commands and modes only read, for the task gate: `repo-state`, `review-changes` and the history reads always; `recall` and `list-errors` only when their first argument is a read mode (an option first makes it not a read, so an option value is never taken for the mode); `list-branches` unless `--fetch`. Home, repo root, PATH and the GitHub base URL are fields of `Host`, never read from the process. | git |
+| `pixel-setup` | Idempotent `pixel setup`, `pixel setup --remove`, `pixel doctor`. The guided run at a terminal is the `setup/` module (agent detection and targets, the four-feature catalog (Token super savior, command timing and savings, on-demand daemon, AI classification), the plan) in front of the same installer, which `install_selected` limits to the agents and hook groups the plan picked. Global install: Claude and Codex task lifecycle hooks, the `pixel` skill (`skills/pixel/SKILL.md`) deployed into every configured harness's skills dir — a guided run writes only the selected agents' roots — and, when Pi is present, the Pi package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`): the explicit `/pixel-impact` command, the prompt-submit brief and the metrics relay. No always-on prompt, rules file or instruction block is deployed: guidance reaches the wired harnesses as the `pixel` skill only (Copilot CLI and the generic `AGENTS.md` target get none), and the install cleans up nothing earlier releases wrote. Where a host's configuration already exists, Gemini CLI, OpenCode, Devin and Antigravity get their brief and metrics hooks (see "Agent integration"). An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo` skips every global step and writes only the repository's `.pixel/config.yaml` template. Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `banner` logo card (a short logo pulse, not an animation) and ends on the `banner` summary. `pixel doctor` reports `web-search.provider` green, and says so, when `pixel-utilities` is not installed (`pixel_plugin::Available`). | proto, daemon, index, facts, git, plugin |
+| `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`, and an optional `commands` list so one binary serves several `pixel <command>` words, run as `<run> <command> <args…>`; two plugins of a tier answering to one command are an error naming both, in `resolve`, `list` and `install`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (the library behind `pixel install`: a local directory, a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL, or `github:<owner>/<repo>[@<ref>]`, whose program is fetched as a release asset with `curl`, over the file the repository ships at `run` when there is one, a launcher say), `remove` (`pixel uninstall`), `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. `Available` is the set of moved commands (`MOVED_COMMANDS`) that a plugin runs on this host, with the host's own reason for one that is installed but blocked (untrusted, not enabled): text that would name a plugin command asks it first. `read_only_invocation` says which moved commands and modes only read, for the task gate: `repo-state`, `review-changes` and the history reads always; `recall` and `list-errors` only when their first argument is a read mode (an option first makes it not a read, so an option value is never taken for the mode); `list-branches` unless `--fetch`. Home, repo root, PATH and the GitHub base URL are fields of `Host`, never read from the process. | git |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
-| `mvp-model` | Vendored from pixel-mvp at a pinned commit (`crates/mvp-model/VENDORED.md`, ADR-0035 there): the row types of pixel-mvp's index (files, symbols, edges with a target or none, provenance) and the `Graph` read trait. Pure: no I/O, enforced by its own `clippy.toml`. `src/` is a copy, synced by `scripts/dev/vendor-mvp.sh`, never edited here. | none |
-| `mvp-store` | Vendored from pixel-mvp like `mvp-model`: pixel-mvp's graph store, one SQLite file (`graph.db`) in a `.pixel-mvp/` state directory under the root it is given, with one writer behind a lock, one generation published per transaction, and a damaged or foreign file refused and rebuilt. `pixel-graph`'s `mvp_adapter` refreshes and reads it. | mvp-model |
-| `mvp-index` | Vendored from pixel-mvp like `mvp-model`: pixel-mvp's indexer for Ruby and Rust. `tree` scans the work tree through git (tracked and untracked files, the commit and the dirty flag a generation names), `link::plan` diffs it against the stored generation, `extract` parses the planned files with tree-sitter into symbols and edges, and `link::link` decides every site of the generation again under each language's rules: an edge only where the rule proves its target, every other site kept unresolved. It writes nothing; its caller hands the rows to `mvp-store`. Its `git_index` (pixel-mvp's copy of git's index, ADR-0039 there) is placed by `mvp_adapter`'s refresh under `.pixel/.pixel-mvp/` (`base` `.pixel`, as `Writer::open` gets it), and the scan reads its stat cache (`scan_discovered_in`); git's own index is never written. It spawns `git` itself (`tree.rs`), outside `pixel-git`'s `GitRunner`: no timeout and no output cap. `pixel-graph`'s `mvp_adapter` runs it. | mvp-model |
+| `mvp-model` | Owned here, originally copied from pixel-mvp at a recorded commit (`crates/mvp-model/ORIGIN.md`, ADR-0035 there): the row types of pixel-mvp's index (files, symbols, edges with a target or none, provenance) and the `Graph` read trait. Pure: no I/O, enforced by its own `clippy.toml`. Sources and tests are maintained here; see `docs/mvp-handover.md`. | none |
+| `mvp-store` | Owned here like `mvp-model`: pixel-mvp's graph store, one SQLite file (`graph.db`) in a `.pixel-mvp/` state directory under the root it is given, with one writer behind a lock, one generation published per transaction, and a damaged or foreign file refused and rebuilt. `pixel-graph`'s `mvp_adapter` refreshes and reads it. | mvp-model |
+| `mvp-index` | Owned here like `mvp-model`: pixel-mvp's indexer for Ruby and Rust. `tree` scans the work tree through git (tracked and untracked files, the commit and the dirty flag a generation names), `link::plan` diffs it against the stored generation, `extract` parses the planned files with tree-sitter into symbols and edges, and `link::link` decides every site of the generation again under each language's rules: an edge only where the rule proves its target, every other site kept unresolved. It writes nothing; its caller hands the rows to `mvp-store`. Its `git_index` (pixel-mvp's copy of git's index, ADR-0039 there) is placed by `mvp_adapter`'s refresh under `.pixel/.pixel-mvp/` (`base` `.pixel`, as `Writer::open` gets it), and the scan reads its stat cache (`scan_discovered_in`); git's own index is never written. It spawns `git` itself (`tree.rs`), outside `pixel-git`'s `GitRunner`: no timeout and no output cap. `pixel-graph`'s `mvp_adapter` runs it. | mvp-model |
 
-Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context` and `pixel-release`; `pixel-session`, `pixel-actionlog` and `pixel-plugin` depend on `pixel-git` only). The vendored `mvp-*` crates depend on each other and on third-party crates only, never on a `pixel-*` crate, so that each sync stays a copy; `pixel-graph` depends on them for the index (through `mvp_adapter`), and `pixel-cli` on `mvp-model` alone for the French-prompt rules and the plain-word terms of the brief (through `execution_brief/french.rs` and `execution_brief/words.rs`); `crates/pixel/tests/cli/vendored_boundary.rs` names both readers and what each may read. `crates/mvp-lexicon/` is data, not a crate: pixel-mvp's French lexicon (`fr-en.tsv`), vendored byte for byte with its `VENDORED.md`, compiled into the brief. `pixel-daemon` is
+Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context` and `pixel-release`; `pixel-session`, `pixel-actionlog` and `pixel-plugin` depend on `pixel-git` only). The owned `mvp-*` foundations depend on each other and on third-party crates only, never on a `pixel-*` crate, preserving an independent index boundary; `pixel-graph` depends on them for the index (through `mvp_adapter`), and `pixel-cli` on `mvp-model` alone for the French-prompt rules and the plain-word terms of the brief (through `execution_brief/french.rs` and `execution_brief/words.rs`); `crates/pixel/tests/cli/vendored_boundary.rs` names both readers and what each may read. `crates/mvp-lexicon/` is data, not a crate: pixel-mvp's French lexicon (`fr-en.tsv`), owned here with its provenance in `ORIGIN.md`, compiled into the brief. Its `generate.py` maintains the lemma data; CI
+reproduces the TSV with `test_generate.py` without the experimental checkout. `pixel-daemon` is
 the integration point and is the only library crate allowed to depend on
 almost everything. The CLI depends on the daemon plus whatever it needs for
 commands that never touch the daemon (install, check-release).
@@ -114,7 +115,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel review-gate` | Deterministic pre-review: `what-changed` plus the mechanical rules — credential-shaped added lines, and changed symbols whose callers were not themselves changed — each finding carrying its witness; the caps it fired ride the epistemics envelope |
 | `pixel find-code` | Engine 1: resolve a phrase to code via the concept index |
 | `pixel setup` | Set pixel up for the agent CLIs on this machine (or in one repository with `--repo`). In a terminal (stdin and stdout, no `CI`, none of `--yes`/`--json`/`--print`) it is the guided setup: detect the agents, ask which to write for and which features to switch on, review every skill file, hook step, setting and note, and write nothing until one confirmation; cancelling writes nothing. Otherwise it deploys without asking: the `pixel` skill, Claude and Codex task lifecycle hooks, Pi's package when configured, the brief hooks of the other configured hosts. `--print` renders the skill the default answers deploy and changes nothing; `--remove` removes everything either path wrote: the skills, the hook entries from the settings files, the Pi package, the brief probes, and the pixel binary itself |
-| `pixel install` | Install a plugin into `~/.pixel/plugins/<name>/` from `github:<owner>/<repo>[@<ref>]` (a shallow clone; a program the repository does not ship comes from the release asset `pixel-<name>-<target-triple>`, checked against `<asset>.sha256` when one is published, else the `cargo install --git` command is printed and the plugin stays not runnable), a git URL or a local directory; `npm:<package>` exits 2 with a "not supported yet" reason |
+| `pixel install` | Install a plugin into `~/.pixel/plugins/<name>/` from `github:<owner>/<repo>[@<ref>]` (a shallow clone; the program `run` names comes from the release asset `pixel-<name>-<target-triple>`, checked against `<asset>.sha256` when one is published and written beside `run` before it replaces what the repository ships there; without a usable asset a shipped program stays and the `cargo install --git … --force` command that replaces it is printed, and an unshipped one leaves the plugin not runnable with the `cargo install --git` command printed), a git URL or a local directory; `npm:<package>` exits 2 with a "not supported yet" reason |
 | `pixel uninstall` | Delete an installed plugin and forget its source and network opt-in |
 | `pixel check-release` | Check that a release tag is consistent with the tree before anything is built or published: crates/pixel/Cargo.toml carries the version, Cargo.lock is fresh for every workspace member, CHANGELOG.md has the `## [x.y.z]` heading and an empty Unreleased section. |
 | `pixel self-update` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
@@ -138,7 +139,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
-| `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes (and whether it carried the search receipt and answer excerpts, with the excerpt bytes, and for a region pack its bytes, hook parts, symbols, located blocks and whether the text search stood in for a stale graph) and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the typed text (never a pasted block, credential shapes masked, cut at 600 characters) and its SHA-256. The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
+| `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes (and whether it carried the search receipt and answer excerpts, with the excerpt bytes, and for a region pack its bytes, hook parts, symbols, located blocks and whether the text search stood in for a stale graph) and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the task text and its SHA-256 (credential shapes masked and cut at 600 characters; when the prompt contains only a pasted block, this can include the bounded excerpt used as its plain-language task). The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
 | `brief-feedback.jsonl` | CLI `run-hook task-event` (`execution_brief/feedback.rs`) | What the agent read after the brief, per host session (the id is stored as 16 hex digits of its SHA-256). `prompt`: one line per prompt the brief saw, with the brief's bytes, gate and kind, the repository paths it injected (best first, at most 32) and the SHA-256 of the typed text that joins it to `brief-decisions.jsonl`. `part`: the bytes each prompt-submit hook part printed to the host, and whether the part gave up waiting for the brief (`late`), so a brief that never arrived is told from an empty one. `tool`: one line per `PostToolUse` or `PostToolUseFailure` with the tool name, whether it changed a file, and the repository files it named (the `file_path`, `path` or `notebook_path` of its input and the existing files among the words of its shell command; a file outside the repository, a link out of it or a credential-shaped path is never named). `stop`, and with it a `turn` line that closes the prompt: injected, read and edited paths, their overlap and the tool calls before the first answer. Paths and counts only, never prompt, command or output text. The last 1,500 lines, mode 0600, written through `decision_log::append_with` (never through a link, never creates `.pixel/`); `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `scripts/bench/brief-feedback-summary.py` turns the `turn` lines into the zero-call rate and the injected-versus-read precision and recall. |
 | `brief-sessions/<session>.json` | CLI `run-hook task-event` (`execution_brief/sent.rs`) | The line ranges the region packs already sent to one host session, so the next pack leaves them out and spends its room on source the session has not got. The name is the first 16 hex digits of the SHA-256 of the host's session id; the file holds keys only: per range the first 16 hex digits of the SHA-256 of the path, its first and last line and when it was sent. A key older than 24 hours is forgotten (every write also deletes session files nobody has written for a day), at most 1,000 are kept, and `SessionStart` with source `compact` or `clear` deletes the file (a `resume` keeps it: the context is the same). Written atomically with mode 0600 in a 0700 directory, never through a link (`.pixel` or `brief-sessions` as a symbolic link is refused), and never creates `.pixel/`. `PIXEL_BRIEF_DEDUPE=0\|false\|off` sends everything again. |
 | `brief-parts/<session>-<prompt>.txt` | CLI `run-hook task-event --part` (`brief_parts.rs`) | The whole prompt-submit brief of one prompt, stored by part 1 of a brief split over several hooks and read by parts 2 to N (see "Agent integration"). The name is the first 16 hex digits of the SHA-256 of the host's session id, a dash and the SHA-256 of the prompt, so no host text reaches a file name. Written atomically with mode 0600 (`pixel_git::nofollow::write_replace`), never through a link (`.pixel` or `brief-parts` as a symbolic link is refused); an empty file means the prompt got no brief, so the other parts do not wait. Part 1 deletes the entry before it computes the brief, leaves an empty `.done` file with the same stem once its own output is written, and every part-1 write deletes the entries older than one hour. |
@@ -167,6 +168,16 @@ are used only when `pixel_git::repo_path` finds them inside the root.
 
 Machine-wide:
 
+- `~/.pixel/setup-receipt.json`: global CLI setup’s private (0600), atomically
+  replaced ownership receipt. It stores original bytes/modes of rewritten files,
+  fingerprints of installed files and which output directories setup created.
+  It covers the guided and unattended paths, including global YAML settings;
+  previews and repository installs write no receipt. Removal verifies every receipt
+  path against setup's output paths before changing anything, restores/deletes
+  unchanged files and prunes only created empty directories. Edited files stay
+  in place with a yellow report step; older installs without a receipt use the
+  legacy marker-based removers.
+
 - `~/.pixel/plugins/<name>/`: the user's plugins (`pixel install` copies
   one here; `pixel uninstall` deletes it). `~/.pixel/trusted.toml`: one `[[trusted]]`
   record (`name`, `sha256` of the plugin directory) per trusted repo plugin,
@@ -177,7 +188,8 @@ Machine-wide:
 - `~/.local/share/pixel/flows/`: saved flows, written by the `pixel-flow`
   plugin (`$PIXEL_FLOW_DIR` overrides); the core only reads it (`plan_cmd::flow_dir`).
 - `~/.local/share/pixel/pi-package/`: the Pi package `pixel setup` writes
-  (`package.json`, `extensions/pixel-impact.ts`, `extensions/pixel-brief.ts`) and declares in the
+  (`package.json`, `extensions/pixel-impact.ts`, and `extensions/pixel-brief.ts`, which carries the
+  prompt-submit brief and the metrics relay) and declares in the
   `packages` list of Pi's `settings.json`; `pixel setup --remove` removes both.
 - `<harness root>/skills/pixel/SKILL.md`: the `pixel` skill (`crate::skill::PIXEL_SKILL`),
   under `~/.claude` and each of `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`,
@@ -215,7 +227,12 @@ Machine-wide:
 Envelope<Value>`. The Unix-socket daemon reads one JSON `Op` per line and
 writes one JSON `Envelope` line back. Request handling is single-threaded; an
 accept thread and a `notify` watcher feed one channel. The watcher debounces
-filesystem events and refreshes the index and graph for changed files. It is
+filesystem events and refreshes the index and graph for changed files. Only
+events admitted by `record_event` extend the 500 ms quiet window; the first
+pending event caps queue wait at `MAX_PENDING_WAIT` (2 s), so ignored-tree
+traffic and continuous edits cannot postpone the timer forever. Applying the
+batch can take additional time. Both a timer flush and a pre-request flush
+clear the first-event timestamp. It is
 registered on its own thread so the daemon answers from its first request: a
 recursive watch walks every directory under the root, ignored ones included,
 and took 11 to 28 s over a repository's 11 515 `node_modules` directories.
@@ -338,8 +355,11 @@ core does not see the plugin's output), and exits with the plugin's own code
 plugin, a network plugin not enabled, or a `run` that leaves its directory
 stops with exit 1 and the command that fixes it; a name in
 `pixel_plugin::MOVED_COMMANDS` that no plugin provides prints the
-`pixel install github:Pixel-CLI/<repo>` hint and exits 2; any other name keeps
-clap's error. That table maps the 30 commands (#878) that live in the plugin
+`pixel install github:Pixel-CLI/<repo>` hint and exits 2; a name in
+`removed_commands::REMOVED_COMMANDS` (the 41 pre-rename aliases 0.8.0
+removed) prints ``'<old>' was removed in 0.8.0; use `pixel <new>` `` (with the
+install command when `<new>` is a plugin command no plugin provides) and
+exits 2, without running anything; any other name keeps clap's error. That table maps the 30 commands (#878) that live in the plugin
 repositories `pixel-git`, `pixel-flow`, `pixel-recall`, `pixel-telemetry` and
 `pixel-utilities` to their repository. The core builds in none of them but
 `check-release` (the release workflow runs it before any plugin could be
@@ -359,7 +379,9 @@ envelope talks to the daemon socket directly.
   shards to changes since, and an overlay covers the dirty working tree.
   `pixel status` reports whether each layer is fresh.
 - The graph is built lazily on the first graph command and updated per file
-  by the daemon watcher. Without a daemon (CI, `PIXEL_DAEMON_AUTO_START=0`,
+  by the daemon watcher. Its quiet debounce extends only for recorded content
+  events and is capped from the first pending edit (see Daemon and wire contract).
+  Without a daemon (CI, `PIXEL_DAEMON_AUTO_START=0`,
   a copied `.pixel/`), the first graph command after an edit compares the
   tree's per-file content hashes with the stored ones in one walk and
   re-extracts only the added/edited files, drops the removed ones and
@@ -390,7 +412,7 @@ envelope talks to the daemon socket directly.
   Rust source in the `graph_source` meta key (`rust=mvp <commit>
   <extractor>`; absent with `v1`, so that graph is the one built before
   the switch existed), and a graph whose source differs from the
-  switch's, or from the vendored commit and extractor, is not current: the
+  switch's, or from the imported commit and extractor, is not current: the
   next read rebuilds it whole. Where pixel-mvp cannot index (no
   `Cargo.toml` at the root, the root is not the top level of a git work
   tree, a tracked `.pixel/`), the graph keeps this resolver's Rust edges
@@ -467,6 +489,8 @@ envelope talks to the daemon socket directly.
   in the file replaces the generated one. An alias or delegator stores a
   `references` edge to its own owner's target (`arg_of` `:alias` /
   `:delegate`), never to the delegate's method, whose type is unknown.
+  A Ruby `alias` with a parser-inserted missing name is ignored: it defines
+  no method and cannot take ownership of an earlier declaration's reference.
 - Ruby ancestors are stored as declared, in the graph's `ruby_mixins` table
   (owner, `superclass`/`include`/`prepend`/`extend`, `included:`-prefixed
   inside a concern's `included do`, the constant as written, its line;
@@ -530,7 +554,17 @@ envelope talks to the daemon socket directly.
   a kept or updated graph. `prepare-repo --json`
   moves both into `timings.graph`, beside `timings.index` (how each index
   layer was obtained) and `timings.total_ms`.
-- History facts are ingested by a dedicated low-priority thread. Queries
+- History facts are ingested by a dedicated low-priority thread. Before
+  fetching diffs, retention excludes expired commits from blob checks.
+  Widening the window rewinds the blob-check cursor before restored diffs
+  can be read. Both sides of retained changes are measured, including
+  deleted/modified blobs whose parent commit has expired. Phase B measures changed blobs across 25 commits with size-only
+  `cat-file --batch-check` requests (128 objects per process). Unsupported
+  filenames or failed batches fall back to bounded `ls-tree` lookups, so
+  large blobs remain excluded without reading their contents. Explicit
+  `build-index --history` runs print periodic commit progress on stderr and
+  cumulative metadata/blob/diff/retention timings, plus total wall time;
+  daemon background ingestion stays silent. Queries
   never wait on ingest; they answer from what is already in `history.db` and
   carry its `index_state` (`diffs_evicted`, `diff_coverage_since`). Diff text
   is bounded by an age window (`PIXEL_HISTORY_WINDOW_DAYS`, default 365) and
@@ -548,6 +582,29 @@ envelope talks to the daemon socket directly.
   block.
 
 ## Agent integration
+
+Setup and removal edit JSON settings by key, retaining untouched values and their
+formatting. Codex hook writes use the shared atomic settings writer; setup reads
+Codex TOML review state without rewriting it. Gemini and Antigravity use this
+writer too, taking a `.pixel-bak.*` copy before every changed configuration write.
+Global CLI setup records its output paths in the private ownership receipt;
+reinstalls retain the original ownership of unchanged outputs. If a user edited
+an output before reinstalling, that edit becomes its restore baseline.
+Removal takes back unchanged writes, including the global YAML template and newly
+created hook files, while reporting and preserving files edited after setup.
+Recovery copies stay in place and the report lists them, including nested skill
+backups; preexisting empty directories are kept. When removal preserves edits,
+the remaining receipt stays private so repeated removal cannot delete those edits
+through the legacy removers. Symlinked output directories are followed without
+cycles; a retargeted link preserves files at its new destination. Generated-file
+writes follow complete file-symlink chains and preserve target permissions.
+Snapshotting rejects directory links to ancestors and non-regular files before
+setup writes, preventing a scan of the whole home or a blocking read of a FIFO.
+
+Setup and removal edit JSON settings by key, retaining untouched values and their
+formatting. Codex hook writes use the shared atomic settings writer; setup reads
+Codex TOML review state without rewriting it. Gemini and Antigravity use this
+writer too, taking a `.pixel-bak.*` copy before every changed configuration write.
 
 `pixel setup` has two ways to run, and one installer behind both. At a terminal
 (stdin and stdout, `CI` unset, no `--yes`, `--json` or `--print`) it is the
@@ -567,7 +624,9 @@ installer owns every write, so the two paths cannot disagree on a file.
 The provider-neutral task layer lives above retrieval. `run-hook task-event`
 normalizes Claude, Codex and Pi events into `task_bridge`; it never changes
 the retrieval daemon's wire protocol. Global Claude/Codex installation owns
-one native lifecycle registration; Pi's project extension owns its lifecycle.
+one native lifecycle registration; a Pi host that drives the task lifecycle
+sends its own events, and Pixel's Pi package sends only brief-only ones (see
+"Agent integration").
 A project-only native install still relies on the global lifecycle layer.
 Foreign hooks and trust settings are preserved. Doctor distinguishes registered
 hooks from actual observations; neither establishes complete host coverage.
@@ -626,8 +685,11 @@ its own extension point:
   `~/.pi/agent`) exists or `pi` is on `PATH`, a local Pi package under
   `~/.local/share/pixel/pi-package/` (`package.json`,
   `extensions/pixel-impact.ts`, which registers the explicit
-  `/pixel-impact <symbol>` command, and `extensions/pixel-brief.ts`, whose
-  `before_agent_start` hook runs `pixel brief`) and its absolute path in the
+  `/pixel-impact <symbol>` command, and `extensions/pixel-brief.ts`, which
+  runs `pixel run-hook task-event --provider pi` on `before_agent_start`
+  (the prompt-submit brief), on `session_start` and `session_compact`, and
+  `pixel run-hook metrics --provider pi` on the `tool_result` of a bash call
+  that ran `pixel`; see the hook table) and its absolute path in the
   `packages` list of Pi's `settings.json`, which keeps every other key and
   package. A settings file that does not parse, or an agent path that is not a
   directory, is left untouched and reported yellow.
@@ -642,7 +704,10 @@ its own extension point:
   `BeforeAgent` hook in `~/.gemini/settings.json`. OpenCode:
   `plugins/pixel-brief.js` in `~/.config/opencode` (`$XDG_CONFIG_HOME`
   honoured), whose `chat.message` hook runs `pixel brief`. Devin: the task
-  events in its hooks file, `prompt-submit` among them. Antigravity: a
+  events in its hooks file, `prompt-submit` among them; that entry alone sets
+  `show_output`, because Devin draws neither `systemMessage` nor a hook's
+  stdout or stderr, and its `✱ Hook completed: <command>` line is the only
+  on-screen trace that the brief ran. Antigravity: a
   `pixel-brief` entry in `~/.gemini/config/hooks.json` running on
   `PreInvocation`, plus the IDE (`plugin_dir`) and CLI (`cli_plugin_dir`) Pixel plugins, each
   carrying `skills/pixel/SKILL.md` (exactly `crate::skill::PIXEL_SKILL`) and a `pixel-guard`
@@ -682,6 +747,12 @@ filesystem writes. It never creates, migrates or refreshes graph data.
 Results retain graph truncation markers and an open-world epistemic envelope;
 no callers found does not establish that none exist.
 
+The shared setup writers sync staged file bytes before renaming them over
+user configuration. Gemini brief settings and Antigravity hooks and plugin
+registration use the shared settings writer, including backups, symlink-target
+preservation and private file permissions. Parent directories are not fsynced;
+this is not a claim of complete power-loss durability.
+
 `pixel setup --repo <path>` skips every global step and writes the repository's
 `.pixel/config.yaml` template, the one file Pixel puts under a repository: it
 registers no hook or guard there, and `crates/pixel/tests/cli/docs_drift.rs`
@@ -692,14 +763,18 @@ doctor`.
 `pixel run-hook` exposes task lifecycle and metrics entry
 points. `task-event` is registered for Claude Code, Codex, Devin, Gemini CLI
 and Antigravity; the metrics relay is registered for Claude Code, Codex and
-Antigravity:
+Antigravity. Pi has no hook registration: its package (`extensions/pixel-brief.ts`)
+runs both entry points from Pi's extension events:
 
 | Hook event | Command | Effect |
 | --- | --- | --- |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`, `SubagentStart`, `SubagentStop`, plus `PostToolUseFailure` (Claude) or `Interrupt` (Codex) | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks. Once enforced, a task retains its gates if runtime settings change. On `prompt-submit` it also returns the `[PIXEL:BRIEF]` evidence brief as `additionalContext` (see below). On `SessionStart` and a briefed `UserPromptSubmit` it may start the repository's daemon in the background (see "Keeping a daemon behind the brief"). Every hook of the table also leaves its line in `.pixel/brief-feedback.jsonl` after it has answered the host (`prompt-submit` parts, `post-tool-use`, `tool-failure`, `stop`): the read feedback of the brief, best effort and silent, so it adds no registration and cannot fail a host. |
 | `UserPromptSubmit` (Claude Code and Codex, `brief_parts` entries; default 3) | `pixel run-hook task-event --provider <host> --event prompt-submit --part K/N` | The brief split over `N` hooks (see "A brief larger than one hook"). Part 1 is the entry above with the ledger and the brief; parts 2 to `N` only print their slice. |
+| `before_agent_start` (Pi, `pixel-brief.ts`) | `pixel run-hook task-event --provider pi --event prompt-submit` | Payload `{session_id, cwd, prompt, brief_only: true}` on stdin. `brief_only` (`BRIEF_ONLY` in `task_hook.rs`) keeps the ledger out: no task is bound, nothing is gated or enforced, and the answer is the bare decision `{"decision":"observe","context":<brief>}`. The brief gets the configured `brief_parts` budget (3 by default) as one message, the 3 s hook window, and leaves its line in `.pixel/brief-feedback.jsonl` and the per-session dedupe. A delivered brief adds the `🟩 pixel prompt-submit` `systemMessage` under the same `metrics` rules as the other hosts. The package injects `context` as the `pixel-brief` custom message with the untrusted-data trailer, and shows `systemMessage` to the user only (`ctx.ui.notify`, never part of the model's context). A Pi payload without `brief_only` keeps `TaskProvider::Pi`'s ledger-only behaviour and gets no brief. |
+| `session_start`, `session_compact` (Pi, `pixel-brief.ts`) | `pixel run-hook task-event --provider pi --event session-start` | Payload `{session_id, cwd, source, brief_only: true}`; `source` is `clear` for a new session, `compact` after a compaction and `startup` otherwise. It may start the repository's daemon and, for `clear` and `compact`, forgets what the brief already sent. |
+| `tool_result` of a bash call that ran `pixel` (Pi, `pixel-brief.ts`) | `pixel run-hook metrics --provider pi` | Claude-shaped payload (`tool_name`, `tool_input.command`, `tool_response`, `cwd`, `session_id`). Relays the finalized Pixel metrics line as `systemMessage`, whether or not the bash result already holds the box, as Codex does; the package shows it to the user only and never rewrites the tool result. |
 | `PostToolUse` (Claude Code, matching `Bash`) | `pixel run-hook metrics --provider claude` | Relays the finalized Pixel metrics line to Claude's `systemMessage` after a shell call. |
-| `PostToolUse` (Codex) | `pixel run-hook metrics --provider codex` | Relays the finalized Pixel metrics line through Codex's documented `systemMessage`, including when the tool result already contains the box. |
+| `PostToolUse` (Codex) | `pixel run-hook metrics --provider codex` | Relays the finalized Pixel metrics line through Codex's documented `systemMessage` only when its exact identity header appears in this tool result and uniquely matches a command/cwd record. Missing or ambiguous evidence stays silent. |
 | `PostToolUse` (Antigravity, `pixel-guard` in the IDE and CLI Pixel plugins) | `pixel run-hook metrics --provider antigravity` | Matches a finalized metric to the tool call, stores it in that conversation's artifact directory keyed by `stepIdx`, and returns `{}` as required by Antigravity. |
 | `PostInvocation` (Antigravity, `pixel-guard` in the IDE and CLI Pixel plugins) | `pixel run-hook metrics --provider antigravity --event post-invocation` | Consumes matching pending metrics for the same `conversationId` and `artifactDirectoryPath`, injects each as one `ephemeralMessage`, and clears the stored record. |
 
@@ -737,16 +812,24 @@ keep one hook too.
   soon as the brief is finished (not after the ledger) it stores the whole
   text under `.pixel/brief-parts/` keyed by the session id and the prompt
   (`cache_path`, see "On-disk state"), an empty one for a prompt with no
-  brief, and prints slice 1. It says nothing about parts.
+  brief, and prints slice 1. Native hooks have an eight-second decision limit;
+  Pi keeps six seconds to stay within its shorter subprocess deadline. If
+  split part 1 reaches its limit just as the brief is stored, it prints the
+  stored first slice after a short grace period, so the head and its notice
+  survive a late decision. Later parts leave another 250 ms for that response
+  to flush and release its done marker. It says nothing about parts.
 - **Parts 2 to N** read the same payload, derive the same key, wait for the
-  file (`WAIT`, 2 s, polling every 15 ms) and then for part 1's `.done`
+  file (polling every 15 ms) and then for part 1's `.done`
   marker, and print their slice in the same hook envelope: `{}` for a brief
   too short to reach them, nothing at all when the file does not come in
   time, the payload names no prompt or repository, or the file is not
   readable. The marker matters because the host orders what concurrent hooks
   print by when each finishes (measured: with parts 2 and 3 free to print as
   soon as the brief was stored, Claude Code put them ahead of part 1); a
-  part 1 that never marks itself done costs only the rest of the 2 s. They
+  part 1 that never marks itself done costs only the remaining bound
+  (`decision_timeout` plus 750 ms). A marker explicitly recording a missing
+  head shifts later slices down by one: part 2 sends the first slice and its
+  notice, preserving the head if part 1 gave up before a late store. They
   run no ledger, so one prompt is one ledger event.
 - **Fails open.** Claude Code blocks the user's prompt when a
   `UserPromptSubmit` hook exits 2, which is what an older `pixel` does on the
@@ -773,9 +856,10 @@ The brief (`execution_brief/chain.rs`, `evidence.rs`, `relevance.rs`,
 `decision_log.rs`, `routes.rs`) is built on every prompt-submit event of a
 host that has a prompt hook: Claude Code, Codex and Devin through
 `task-event`, Gemini through `BeforeAgent`, Antigravity through
-`PreInvocation`. Pi (`extensions/pixel-brief.ts`) and OpenCode
-(`plugins/pixel-brief.js`) run `pixel brief` instead, and `start_brief` in
-`task_hook.rs` skips `TaskProvider::Pi` for that reason. A prompt starts one
+`PreInvocation`, and Pi through its package (`extensions/pixel-brief.ts`),
+which sends a `brief_only` `task-event` (`start_brief` serves
+`TaskProvider::Pi` only for that marker). OpenCode (`plugins/pixel-brief.js`)
+runs `pixel brief` instead. A prompt starts one
 by its shape (`brief_signal`), the typed text only, the last paragraph of a
 long untagged paste:
 
@@ -792,12 +876,31 @@ long untagged paste:
   relevance probe and the meaning search run at once on the deadline, and
   only the gate decides whether the repository is the subject.
 
+A prompt with nothing typed but a `<pasted_content>` block has no shape of its
+own, and the paste is someone else's text. It is judged on the head of the
+paste's first paragraph and the tail of its last (`pasted_task`: 300 and 299
+characters joined by a line break, so the whole stays within `PASTE_TAIL_CHARS`
+and neither `brief_task` nor the decision log cuts it; links dropped), and only
+ever as plain language, whatever identifiers the paste holds, so the gate above
+always decides it. The plain-language rule applies to that excerpt, so a paste
+that comes down to operations, one content word or a link stays declined. The
+decision log's `typed` is the excerpt, credential shapes masked like any typed
+text; a declined paste logs nothing of it.
+
+An acknowledgement, a greeting and a harness envelope start no brief
+(`prompt_continuation.rs`). A prompt is an envelope when it opens, after any
+leading `<system-reminder>` block, with one of recall's `ORCHESTRATOR_PREFIXES`
+(`pixel_recall::intent`): `<task-notification>`, a command wrapper, Codex's
+`<realtime_delegation>` and `<send_user_message_question_reply>`. The same list
+keeps those turns out of recall's embeddings and session titles, so a new
+envelope is added there, once.
+
 Unless `PIXEL_BRIEF_FRENCH=0`, a prompt that pixel-mvp's
 rule reads as French (`mvp_model::language`: two French function words or
 more, outnumbering its English ones) is searched, judged and gated on the
 English words code uses (`execution_brief/french.rs`, ADR-0032 of pixel-mvp,
 moved under its ADR-0036): each word is dropped when it carries nothing,
-replaced by the English words of the vendored lexicon
+replaced by the English words of the imported lexicon
 (`crates/mvp-lexicon/fr-en.tsv`), or kept with its accents folded; a
 code-shaped token is kept as typed, and a French question word among the
 first three becomes its English opener for the gate's `question`. The
@@ -845,7 +948,7 @@ vectors still building), plain-word leads take its leads' place in that fusion
 unless `PIXEL_BRIEF_BM25=0|false|off` (`execution_brief/words.rs`, ADR-0030
 and ADR-0031 of pixel-mvp, moved under its ADR-0036): BM25 (k1 1.2, b 0.75)
 over each graph file's path and its symbols' names and signatures, split and
-stemmed by the vendored `mvp_model::terms`, a test file at half its score, and
+stemmed by the imported `mvp_model::terms`, a test file at half its score, and
 none unless the best file holds two of the prompt's terms. The corpus is read
 from the graph on each call, read-only; the leads never reach the gate, the
 excerpts or the kind's seed, and a brief whose `meaning` op answered is
@@ -853,7 +956,7 @@ unchanged.
 
 The chain runs at most six ops under one deadline, 3 s for a hook (`brief_window_ms` in
 `.pixel/config.yaml` or `PIXEL_BRIEF_WINDOW_MS`, clamped to 250 ms to 4.5 s so it ends before the 6 s hook
-decision and the host's 10 s kill; 750 ms for the `brief` command, never more than 1 s since Pi cuts it off at 1.2 s). Parts 2 to N
+decision and the host's 10 s kill; 750 ms for the `brief` command, never more than 1 s since OpenCode's plugin cuts it off at 1.2 s). Parts 2 to N
 wait for part 1 as long as part 1 may take (the 6 s hook decision bound). A kind-admitted brief whose window ended before its pack
 renders the best files as a `confidence: low` lead instead of nothing. The ops are the two probes of
 a Weak or Prose prompt, `search-content -F -l` on the first anchor,
@@ -922,7 +1025,7 @@ credential-shaped path.
 ZERO precision and the share of gold spans inside the `read:` ranges. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
 explicit cue (config, setting, env, flag, option, default), not `install` or
 `hook`. That
-block's cap is `PROSE_BRIEF_BYTES` (3584, under Pi's 4000-byte extension
+block's cap is `PROSE_BRIEF_BYTES` (3584, under OpenCode's 4000-byte plugin
 cap; `PLAIN_PROSE_BRIEF_BYTES`, 2 KiB, without answer evidence); over the
 cap the last excerpt block's lines go first, then the block before it, the
 first block last, never the receipt. Strong and low-tier briefs carry
@@ -960,9 +1063,11 @@ characters, at most `MAX_PARTS` (8). The count is the `brief_parts`
 setting (1 to 8, default 3: the hooks `pixel install` registers), overridden
 by `PIXEL_BRIEF_PARTS`; the `brief` command prints at most `CLI_CHARS`
 (3 900) unless that variable is set or its caller passes `--parts N`, which
-gives it the budget of an N-part hook (pack and probes) as one text. The Pi
-and OpenCode extensions pass `--parts 3` and accept up to 30 000 bytes, so
-they get what the three Claude and Codex hooks carry. `PIXEL_BRIEF_PACK=0|false|off`
+gives it the budget of an N-part hook (pack and probes) as one text. The
+OpenCode plugin passes `--parts 3` and accepts up to 30 000 bytes, and Pi's
+`brief_only` `task-event` takes the configured `brief_parts` (`brief_budget` in
+`task_hook.rs`) and the same 30 000 bytes, so both get what the three Claude and
+Codex hooks carry. `PIXEL_BRIEF_PACK=0|false|off`
 brings the packet back. A low-tier ("maybe") prompt gets at most one part of it, always as a lead.
 A pack of regions alone, with no symbol or passage behind it, ends on
 a lead ("not a verified answer") instead of the directive, and one the window
@@ -1023,9 +1128,14 @@ short follow-up (`is_follow_up`: at most ten words that ask for a change or
 lean on what came before) that the gate would have closed is let through
 instead, when the session has files: the files are the brief
 (`Admission::Context`, gate `open`, reason `context: …`, rendered as a low-tier
-maybe) and the off-topic leads of its words are dropped. A source that has not
-answered inside its window adds nothing. `PIXEL_BRIEF_CONTEXT=0|false|off`
-turns it off, and the `brief` command, which has no session, never uses it.
+maybe) and the off-topic leads of its words are dropped. The lift is checked
+before the relevance probe's outcome (`refusal_lifting`), so a probe that
+failed (`relevance: facts: index_stale`) or did not answer in time no more
+closes the follow-up than an off-topic score does, and a lifted brief counts as
+answered when neither probe could be asked: the session's files alone make it.
+A source that has not answered inside its window adds nothing.
+`PIXEL_BRIEF_CONTEXT=0|false|off` turns it off, and the `brief` command, which
+has no session, never uses it.
 
 **Evidence sent once** (`execution_brief/sent.rs`). A session that asks again
 about code it was just sent would get the same lines again, and they would fill
@@ -1209,6 +1319,14 @@ prove command output and stream/exit preservation, not actual model adherence or
 live-host duplicate suppression. Chat relay remains a separately verifiable
 boundary.
 
+Codex's metrics hook requires the finalized record's exact identity header
+(command, duration and short invocation ID) as a complete string line in the
+current `tool_response`, together with the command-argument and effective-cwd
+match. It rejects legacy records without an ID, colliding headers and results
+with several matching footers. Without that evidence it emits nothing: an
+earlier same-command record cannot establish that this call ran. Other hosts
+retain their command/cwd lookup and overlapping-invocation suppression.
+
 
 ### Brief probes
 
@@ -1246,6 +1364,14 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
 
 ## Testing and gates
 
+- `just ultima-arena` (or `scripts/dev/ultima-arena.sh`) runs the five-CLI
+  brief/metrics smoke in the current Herdr operator tab. A fixed seed controls
+  start order; all ready panes receive the same prompt before monitoring starts.
+  Each turn is interrupted once its brief and matching invocation metrics are
+  evidenced. One process lock protects the arena grid. Dated receipts, session
+  evidence and timestamped logs stay under gitignored `eval/arena-results/`;
+  its Markdown index records run numbers, repository commits and dirty state.
+  `--self-test` exercises the orchestration and verdicts with fixture CLIs.
 - The public `.github/actions/setup-pixel` composite action installs a checksum-verified
   release into runner temporary storage and optionally prepares indexes without a
   daemon. `setup-pixel.yml` smoke-tests real releases on Linux x64/ARM64 and
@@ -1282,6 +1408,10 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
     **Dependency policy** (`cargo deny`, then
     `scripts/ci/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
     reads, accepts the same advisories as `deny.toml`).
+- `mvp-reference.yml` runs the imported index truth test on the pinned public
+  once-campfire and Pixel repositories when its sources change. The ordinary
+  pixel-graph suite also exercises corruption recovery, incremental/full
+  equivalence and provenance through the production refresh adapter.
 - Other workflows: `mutants.yml` (01:17 UTC on `main`, only the cumulative
   diff since the latest completed campaign; no pull-request trigger).
   `scripts/ci/mutants-nightly-range.py` selects a checkpoint from trusted
@@ -1289,10 +1419,12 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   A checkpoint is uploaded after every listed mutant has a recognized
   outcome; survivors keep the run red, while missing outcomes and disk-full
   failures leave the prior checkpoint. Unchanged main starts no Rust jobs.
-  `.cargo/mutants.toml` leaves out benches, crate-root build scripts and
-  the crates vendored from pixel-mvp (`crates/mvp-*`, each with its
-  `VENDORED.md`), and `scripts/test-mutants-config.py` refuses any other
-  exclusion. The existing plan/shards/report share that file and distribute
+  The report labels listing-only results `planned`, complete recognized
+  outcomes `tested`, and missing/invalid outcomes `incomplete`; it reports
+  the listed count separately from the outcomes recorded across shards.
+  `.cargo/mutants.toml` leaves out benches and crate-root build scripts;
+  the owned `mvp-*` libraries participate. `scripts/test-mutants-config.py`
+  refuses any other exclusion. The existing plan/shards/report share that file and distribute
   shards over `PIXEL_MUTANTS_SHARD_RUNNERS` (GitHub-hosted `ubuntu-26.04`
   by default). Only scheduled CI executes mutations; there is no manual,
   local or pull-request campaign. The pre-push hook is a no-op; local validation is optional.

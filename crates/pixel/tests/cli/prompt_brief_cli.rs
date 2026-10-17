@@ -327,7 +327,7 @@ fn a_missing_graph_should_leave_the_text_evidence_and_build_nothing() {
 }
 
 /// `pixel brief "<prompt>"` is the same chain, on stdout, for harnesses
-/// without a prompt-submit context channel (Pi's extension calls it).
+/// without a prompt-submit context channel (OpenCode's plugin calls it).
 #[test]
 fn the_brief_command_should_print_the_brief_or_stay_silent() {
     let root = indexed("brief-cmd");
@@ -556,7 +556,7 @@ fn a_session_start_should_start_no_daemon_when_any_switch_is_off_or_there_is_no_
 }
 
 #[test]
-fn a_prompt_that_finds_no_daemon_should_brief_locally_and_leave_a_daemon_for_the_next() {
+fn a_prompt_should_brief_and_start_a_daemon_without_assuming_startup_order() {
     let root = indexed("prompt-start");
     let cache = Scratch::for_test("prompt-brief-cache", "prompt-start");
     let payload = |prompt: &str| {
@@ -591,7 +591,7 @@ fn a_prompt_that_finds_no_daemon_should_brief_locally_and_leave_a_daemon_for_the
     stop_daemon(&root);
     assert!(
         context(&first).starts_with("[PIXEL:BRIEF]"),
-        "the first prompt is briefed without the daemon: {first}"
+        "the first prompt is briefed while the daemon starts: {first}"
     );
     assert!(up, "the prompt started no daemon");
     assert!(
@@ -600,9 +600,13 @@ fn a_prompt_that_finds_no_daemon_should_brief_locally_and_leave_a_daemon_for_the
     );
     let records = logged(&root);
     assert_eq!(records.len(), 2, "{records:?}");
-    assert_eq!(
-        (records[0]["route"].as_str(), records[0]["daemon"].as_str()),
-        (Some("local"), Some("launched")),
+    // Autostart and the evidence worker run concurrently. A fast daemon may
+    // answer the first worker's probe; neither route may be assumed from the
+    // launch outcome. The unit test with a blocked starter separately pins
+    // the contract that starting a daemon cannot hold up the brief.
+    assert_eq!(records[0]["daemon"], "launched", "{}", records[0]);
+    assert!(
+        matches!(records[0]["route"].as_str(), Some("local" | "daemon")),
         "{}",
         records[0]
     );
@@ -813,7 +817,8 @@ fn a_part_that_never_gets_the_first_one_prints_nothing_and_exits_cleanly() {
         waited >= Duration::from_millis(1_500),
         "it waited for part 1: {waited:?}"
     );
-    assert!(waited < Duration::from_secs(8), "and gave up: {waited:?}");
+    // The later-part bound plus stdin wait stays below the host's 10s hook deadline.
+    assert!(waited < Duration::from_secs(10), "and gave up: {waited:?}");
     // It ran no ledger and stored nothing.
     assert!(!root.join(".pixel/brief-parts").exists());
     assert!(!root.join(".pixel/tasks").exists());

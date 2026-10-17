@@ -38,6 +38,7 @@ pub(crate) const PART_BYTES: usize = 9_800;
 /// What a part after the first waits beyond the bound part 1 is given: part 1
 /// stores the brief and marks it done once its own bound has passed.
 pub(crate) const WAIT_SLACK: Duration = Duration::from_millis(1_000);
+const MISSING_HEAD_STATUS: &[u8] = b"missing-head";
 /// How often a waiting part looks for the stored brief.
 pub(crate) const POLL: Duration = Duration::from_millis(15);
 /// Directory under `.pixel/` holding the stored briefs.
@@ -210,8 +211,7 @@ pub(crate) fn prune(dir: &Path, now: SystemTime, max_age: Duration) -> usize {
         .count()
 }
 
-/// The marker beside the stored brief that part 1 leaves once its own output
-/// is on the way to the host.
+/// The marker beside the stored brief that records part 1's delivery status.
 fn done_path(path: &Path) -> PathBuf {
     path.with_extension("done")
 }
@@ -226,13 +226,39 @@ pub(crate) fn forget(path: &Path) {
     });
 }
 
-/// Part 1 is finished: its slice is written to the host. A later part waits
-/// for this before it prints (see [`wait_for`]), so the host receives the
-/// parts in order rather than in the order the processes happen to finish.
+/// Part 1 delivered its slice; an empty marker preserves the original format.
 pub(crate) fn mark_done(path: &Path) {
+    mark_done_with_status(path, b"");
+}
+
+/// Part 1 finished without delivering its slice, so a later part may supply it.
+pub(crate) fn mark_done_missing_head(path: &Path) {
+    mark_done_with_status(path, MISSING_HEAD_STATUS);
+}
+
+fn mark_done_with_status(path: &Path, status: &[u8]) {
     let _ = refuse_linked_dirs(path).and_then(|()| {
-        pixel_git::nofollow::write_replace(&done_path(path), b"", pixel_git::nofollow::PRIVATE_MODE)
+        let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        fs::create_dir_all(dir)?;
+        pixel_git::nofollow::write_replace(
+            &done_path(path),
+            status,
+            pixel_git::nofollow::PRIVATE_MODE,
+        )
     });
+}
+
+fn done_missing_head(path: &Path) -> bool {
+    if refuse_linked_dirs(path).is_err() {
+        return false;
+    }
+    let Ok(file) = pixel_git::nofollow::open_read(&done_path(path)) else {
+        return false;
+    };
+    let mut status = Vec::with_capacity(MISSING_HEAD_STATUS.len() + 1);
+    file.take((MISSING_HEAD_STATUS.len() + 1) as u64)
+        .read_to_end(&mut status)
+        .is_ok_and(|_| status == MISSING_HEAD_STATUS)
 }
 
 /// Store `text` (the empty string for a prompt that got no brief, so the
@@ -247,9 +273,11 @@ pub(crate) fn store(path: &Path, text: &str, now: SystemTime) -> io::Result<()> 
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     fs::create_dir_all(dir)?;
     prune(dir, now, MAX_AGE);
-    // A marker left by the last identical prompt must not release the parts
-    // of this one.
-    let _ = fs::remove_file(done_path(path));
+    // A new prompt forgets old data before its worker starts. Preserve an
+    // explicit missing-head status if that worker finishes after part 1 exits.
+    if !done_missing_head(path) {
+        let _ = fs::remove_file(done_path(path));
+    }
     pixel_git::nofollow::write_replace(path, text.as_bytes(), pixel_git::nofollow::PRIVATE_MODE)
 }
 
@@ -260,7 +288,25 @@ pub(crate) fn store(path: &Path, text: &str, now: SystemTime) -> io::Result<()> 
 /// the middle of the brief ahead of its start. A part 1 that never marks
 /// itself done costs only the rest of the bound. `None` when the brief never
 /// comes, or is not readable.
+#[cfg(test)]
 pub(crate) fn wait_for(path: &Path, bound: Duration, poll: Duration) -> Option<String> {
+    wait_for_with_status(path, bound, poll).map(|stored| stored.text)
+}
+
+/// The stored brief and whether part 1 explicitly finished without its head.
+pub(crate) struct StoredBrief {
+    pub(crate) text: String,
+    pub(crate) missing_head: bool,
+}
+
+/// Wait for a brief and retain the explicit done-marker status for its first part.
+/// Only the exact `missing-head` marker shifts later slices; empty legacy markers
+/// retain the old part mapping.
+pub(crate) fn wait_for_with_status(
+    path: &Path,
+    bound: Duration,
+    poll: Duration,
+) -> Option<StoredBrief> {
     let deadline = Instant::now() + bound;
     let mut text = None;
     loop {
@@ -278,10 +324,41 @@ pub(crate) fn wait_for(path: &Path, bound: Duration, poll: Duration) -> Option<S
             }
         }
         if text.is_some() && fs::symlink_metadata(done_path(path)).is_ok() {
-            return text;
+            return Some(StoredBrief {
+                text: text.take()?,
+                missing_head: done_missing_head(path),
+            });
         }
         if Instant::now() >= deadline {
-            return text;
+            return text.map(|text| StoredBrief {
+                text,
+                missing_head: false,
+            });
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// The brief stored at `path`, waiting at most `bound` for it to appear and
+/// looking every `poll`; unlike [`wait_for_with_status`] it does not wait for
+/// part 1's [`mark_done`], since it is part 1 that asks. `None` when none is
+/// stored in time or it is not readable.
+pub(crate) fn wait_stored(path: &Path, bound: Duration, poll: Duration) -> Option<String> {
+    let deadline = Instant::now() + bound;
+    loop {
+        match refuse_linked_dirs(path).and_then(|()| pixel_git::nofollow::open_read(path)) {
+            Ok(file) => {
+                let mut stored = String::new();
+                file.take(MAX_STORED_BYTES)
+                    .read_to_string(&mut stored)
+                    .ok()?;
+                return Some(stored);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+        if Instant::now() >= deadline {
+            return None;
         }
         std::thread::sleep(poll);
     }

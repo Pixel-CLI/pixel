@@ -282,13 +282,13 @@ def outcome_failure(listed: int, counts: Counter[str]) -> str | None:
 def verdict(mutants: int, mutable: list[str]) -> tuple[str, str]:
     """`(status, message)` for a run that produced `mutants` over `mutable` files.
 
-    - `tested`: mutants were generated, so the job's pass or fail means something.
+    - `planned`: mutants were listed; no execution evidence is implied.
     - `not-applicable`: the diff holds no mutable Rust; nothing was owed.
     - `vacuous`: mutable Rust changed and no mutant came out of it. The gate
       reports nothing about this diff and must not be read as coverage.
     """
     if mutants > 0:
-        return "tested", f"{mutants} mutant(s) tested from the diff."
+        return "planned", f"{mutants} mutant(s) listed from the diff; no outcomes supplied."
     if not mutable:
         return (
             "not-applicable",
@@ -307,11 +307,11 @@ def verdict(mutants: int, mutable: list[str]) -> tuple[str, str]:
 
 
 def render(status: str, message: str, mutants: int, mutable: list[str]) -> str:
-    """The job-summary block. The tested count is always stated outright."""
+    """The job-summary block distinguishes the listing from execution evidence."""
     lines = [
         "### Mutation gate outcome",
         "",
-        f"- **mutants tested:** {mutants}",
+        f"- **mutants listed:** {mutants}",
         f"- **mutable Rust files in the diff:** {len(mutable)}",
         f"- **verdict:** `{status}`",
         "",
@@ -331,7 +331,7 @@ def render_outcomes(
     other = [f"{n} {name}" for name, n in sorted(counts.items()) if name not in named]
     lines = [
         "",
-        f"- **outcomes across shards:** {sum(counts.values())} judged: "
+        f"- **outcomes across shards:** {sum(counts.values())} recorded: "
         + ", ".join(known + other),
         f"- **gate:** {'failed' if failure else 'passed'}",
     ]
@@ -405,12 +405,20 @@ def main(argv: list[str] | None = None) -> int:
             fh.write(f"shards={json.dumps(shard_matrix(mutants))}\n")
             fh.write(f"matrix={json.dumps({'include': shard_include(mutants, runners)})}\n")
 
-    report = render(status, message, mutants, mutable)
     failure = None
+    outcome_report = ""
     if args.outcomes_root:
         counts, survivors = tally(args.outcomes_root)
         failure = outcome_failure(mutants, counts)
-        report += render_outcomes(counts, survivors, failure)
+        if mutants or counts:
+            complete = sum(counts.values()) == mutants and set(counts) <= set(OUTCOME_NAMES.values())
+            status = "tested" if complete else "incomplete"
+            message = (
+                f"All {mutants} listed mutants have complete outcomes."
+                if complete else "Campaign incomplete; see the recorded outcomes below."
+            )
+        outcome_report = render_outcomes(counts, survivors, failure)
+    report = render(status, message, mutants, mutable) + outcome_report
     print(report, end="")
     if args.summary:
         with args.summary.open("a") as fh:

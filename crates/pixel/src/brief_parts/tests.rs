@@ -555,12 +555,80 @@ fn the_done_marker_is_owner_only_and_belongs_to_one_stored_brief() {
     );
     assert_eq!(done_path(&path), done);
     assert_eq!(fs::metadata(&done).unwrap().len(), 0);
+    assert!(
+        !done_missing_head(&path),
+        "legacy empty marker means delivered"
+    );
+    fs::write(&done, b"missing-head-extra").unwrap();
+    assert!(
+        !done_missing_head(&path),
+        "only the exact missing-head marker shifts later slices"
+    );
     // A new brief for the same prompt starts without the last one's marker.
     store(&path, "two", SystemTime::now()).unwrap();
     assert!(!done.exists());
     mark_done(&path);
     forget(&path);
     assert!(!path.exists() && !done.exists(), "forgetting takes both");
+}
+
+#[test]
+fn a_missing_head_marker_survives_a_late_store_but_a_new_prompt_clears_it() {
+    let root = scratch("missing-head");
+    let path = cache_path(&root, Some("s"), "p");
+    store(&path, "first\nsecond\n", SystemTime::now()).unwrap();
+    mark_done_missing_head(&path);
+    let before_late_store = wait_for_with_status(&path, Duration::ZERO, POLL).unwrap();
+    assert_eq!(before_late_store.text, "first\nsecond\n");
+    assert!(before_late_store.missing_head);
+
+    store(&path, "first\nsecond\n", SystemTime::now()).unwrap();
+    let after_late_store = wait_for_with_status(&path, Duration::ZERO, POLL).unwrap();
+    assert_eq!(after_late_store.text, "first\nsecond\n");
+    assert!(
+        after_late_store.missing_head,
+        "late storage keeps the release status"
+    );
+
+    forget(&path);
+    store(&path, "next prompt\n", SystemTime::now()).unwrap();
+    assert_eq!(
+        wait_for_with_status(&path, Duration::ZERO, POLL)
+            .unwrap()
+            .text,
+        "next prompt\n"
+    );
+    assert!(
+        !done_missing_head(&path),
+        "fresh prompts do not inherit status"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_missing_head_marker_waits_for_a_brief_stored_after_the_marker() {
+    let root = scratch("missing-head-late-brief");
+    let path = cache_path(&root, Some("s"), "p");
+    mark_done_missing_head(&path);
+    assert!(
+        done_missing_head(&path),
+        "marker is written before the brief"
+    );
+
+    let writer_path = path.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        store(&writer_path, "first\nsecond\n", SystemTime::now()).unwrap();
+    });
+    started_rx.recv().unwrap();
+
+    let stored = wait_for_with_status(&path, Duration::from_secs(2), POLL).unwrap();
+    writer.join().unwrap();
+    assert_eq!(stored.text, "first\nsecond\n");
+    assert!(stored.missing_head);
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -572,5 +640,54 @@ fn the_done_marker_is_never_written_through_a_link() {
     fs::create_dir_all(root.join(".pixel")).unwrap();
     symlink(&outside, root.join(".pixel/brief-parts")).unwrap();
     mark_done(&cache_path(&root, Some("s"), "p"));
+    mark_done_missing_head(&cache_path(&root, Some("s"), "p"));
     assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+}
+
+#[test]
+fn a_stored_brief_is_returned_without_waiting_for_part_ones_marker() {
+    let dir = scratch("wait-stored");
+    let path = dir.join("brief.txt");
+    assert_eq!(
+        wait_stored(&path, Duration::from_millis(30), POLL),
+        None,
+        "nothing stored within the bound"
+    );
+    store(&path, "head\nrest\n", SystemTime::now()).unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        wait_stored(&path, Duration::from_secs(5), POLL).as_deref(),
+        Some("head\nrest\n")
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "no marker was written, and none was waited for"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn wait_stored_finds_a_brief_written_after_it_starts_waiting() {
+    let dir = scratch("wait-stored-late");
+    let path = dir.join("brief.txt");
+    let writer_path = path.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        store(&writer_path, "head\n", SystemTime::now()).unwrap();
+    });
+    started_rx.recv().unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        wait_stored(&path, Duration::from_secs(3), POLL).as_deref(),
+        Some("head\n")
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(50),
+        "the read must wait for the concurrent store"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    writer.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
 }

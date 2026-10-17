@@ -57,12 +57,12 @@ corpus and `~/.local/state/pixel` are never touched by any of them.
 | Script | Run | What |
 | --- | --- | --- |
 | `pr-swarm.sh` | `scripts/dev/pr-swarm.sh reconcile [--wait N\|--no-wait] [--dry-run] \| status \| up <PR> [--worktree] \| down <PR> [--force] \| watch \| hook-session-start` | one rmux pane per open-PR worktree, each a `claude -n pr-<N>-<slug>` session sitting in that PR's tree; `reconcile` diffs the open PRs against panes titled `PR#<N>` and creates, retitles or tears down (`status` is read-only). Wired to SessionStart by `.claude/settings.json`; rails in `.agents/rules/pr-swarm.md` |
+| `ultima-arena.sh` | `scripts/dev/ultima-arena.sh [--skip-install] [--seed 42]` (or `just ultima-arena`) | starts Claude, Codex, pi, agy and Devin beside the current Herdr operator pane, dispatches the same prompt to all five, and stops each turn once brief delivery and matching Pixel metrics are evidenced. Saves dated JSON/Markdown receipts, transcripts and `run.log` in gitignored `eval/arena-results/`; `README.md` there indexes run numbers, dates and commits. `--self-test` runs offline without models; `abort` closes only this workflow's panes. |
 
 ## Vendored code
 
 | Script | Run | What |
 | --- | --- | --- |
-| `vendor-mvp.sh` | `scripts/dev/vendor-mvp.sh <pixel-mvp checkout> <commit> model store index lexicon` | copies pixel-mvp's `crates/pixel-<name>/` at `<commit>` (read with `git archive`, never the working tree) over `crates/mvp-<name>/`, keeping the workspace's `Cargo.toml`; renames the crates, adds the SPDX headers, runs `cargo fmt` and rewrites each `VENDORED.md` with the commit. `lexicon` copies the French lexicon (`crates/pixel-adapter/lexicon/fr-en.tsv`) byte for byte into `crates/mvp-lexicon/`. A sync is a pull request that names the commit |
 
 ## Optional local smoke and audits
 

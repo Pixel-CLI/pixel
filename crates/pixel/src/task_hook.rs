@@ -13,19 +13,49 @@ use serde_json::{Value, json};
 
 use crate::brief_parts::{self, BriefPart, Limits};
 
-// Return a decision before the managed native hooks' ten-second host deadline
-// and Pi's eight-second subprocess deadline; a stalled worker dies with run().
-const DECISION_TIMEOUT: Duration = Duration::from_secs(6);
+// Native hooks have a ten-second host deadline; leave time for stdin, late
+// first-part recovery, and later parts to observe its done marker.
+const DECISION_TIMEOUT: Duration = Duration::from_secs(8);
+const PI_DECISION_TIMEOUT: Duration = Duration::from_secs(6);
+const fn decision_timeout(provider: TaskProvider) -> Duration {
+    if matches!(provider, TaskProvider::Pi) {
+        PI_DECISION_TIMEOUT
+    } else {
+        DECISION_TIMEOUT
+    }
+}
 // The brief's longest window plus the time to print it stays inside that decision.
 const _: () = assert!(
-    pixel_setup::config::BRIEF_WINDOW_MAX_MS + 1_500 <= DECISION_TIMEOUT.as_millis() as u64
+    pixel_setup::config::BRIEF_WINDOW_MAX_MS + 1_500 <= PI_DECISION_TIMEOUT.as_millis() as u64
 );
 // The probes' ceiling (5 s after the prompt) leaves a second of the decision to print the merged brief.
-const _: () = assert!(5_000 + 1_000 <= DECISION_TIMEOUT.as_millis() as u64);
+const _: () = assert!(5_000 + 1_000 <= PI_DECISION_TIMEOUT.as_millis() as u64);
 // A stdin its host leaves open is waited on before the decision starts: both
 // together stay inside Pi's eight-second deadline, the tighter of the two.
 const _: () =
-    assert!(crate::hook_input::STDIN_WAIT.as_millis() + DECISION_TIMEOUT.as_millis() < 8_000);
+    assert!(crate::hook_input::STDIN_WAIT.as_millis() + PI_DECISION_TIMEOUT.as_millis() < 8_000);
+// Native hooks keep the decision and late-first-part fallback under ten seconds.
+const _: () = assert!(
+    crate::hook_input::STDIN_WAIT.as_millis()
+        + DECISION_TIMEOUT.as_millis()
+        + LATE_GRACE.as_millis()
+        + ORDERING_SLACK.as_millis()
+        < (pixel_setup::config::HOOK_TIMEOUT * 1_000) as u128
+);
+const _: () = assert!(
+    crate::hook_input::STDIN_WAIT.as_millis()
+        + PI_DECISION_TIMEOUT.as_millis()
+        + LATE_GRACE.as_millis()
+        + ORDERING_SLACK.as_millis()
+        < 8_000
+);
+/// Payload field of Pixel's own Pi package (`extensions/pixel-brief.ts`): the
+/// event carries a prompt or a session start for the evidence brief alone. The
+/// ledger stays out of it (no task is bound, no gate or enforcement applies),
+/// so only the brief, its read-feedback line, the daemon warm-start and the
+/// metrics `systemMessage` run. A Pi host that drives the task lifecycle
+/// itself does not send it and keeps `TaskProvider::Pi`'s ledger-only events.
+const BRIEF_ONLY: &str = "brief_only";
 const UNAVAILABLE: &str = "Pixel task state is unavailable. Reads and recovery remain available; edits and completion require a working task ledger.";
 
 /// Hosts with a verified task lifecycle adapter.
@@ -120,6 +150,19 @@ fn string<'a>(payload: &'a Value, names: &[&str]) -> Option<&'a str> {
     names
         .iter()
         .find_map(|name| payload.get(name)?.as_str().filter(|s| !s.is_empty()))
+}
+
+/// The keys a host names its session by, for the brief's own state: Claude,
+/// Codex, Devin and Pi's package send `session_id`; Antigravity sends only
+/// `conversationId`, so without it the read feedback, the part cache and the
+/// region dedupe of an Antigravity brief had no session at all.
+const BRIEF_SESSION_KEYS: &[&str] = &["session_id", "sessionId", "conversationId"];
+
+/// The session a brief belongs to (see [`BRIEF_SESSION_KEYS`]). The task
+/// ledger keeps `session_id` / `sessionId` only: Antigravity registers no
+/// lifecycle hook, and binding its conversations is not this lookup's call.
+fn brief_session(payload: &Value) -> Option<&str> {
+    string(payload, BRIEF_SESSION_KEYS)
 }
 
 fn basename(path: &str) -> &str {
@@ -1107,24 +1150,23 @@ fn process(
     let Ok(payload) = serde_json::from_str::<Value>(raw) else {
         return envelope(provider, event, &unavailable(event, None, true));
     };
-    // The first of several parts owns the brief: it forgets the last prompt's
-    // before the other parts look for this one's.
     let first_of_many = part
         .filter(|part| part.index == 1 && part.count > 1 && event == TaskHookEvent::PromptSubmit);
-    if first_of_many.is_some() {
-        part_path(provider, &payload)
-            .iter()
-            .for_each(|path| brief_parts::forget(path));
-    }
     // The brief runs beside the ledger: it needs neither, and a slow ledger
     // must not use up its window.
-    let brief = start_brief(provider, event, &payload, part.map_or(1, |part| part.count));
+    let parts = brief_budget(provider, &payload, part);
+    let brief = start_brief(provider, event, &payload, parts);
     forget_sent(provider, event, &payload);
     if let Some(root) = session_start_root(provider, event, &payload) {
         // A start is a nicety: whatever it came to, the hook goes on.
         let _ = crate::execution_brief::autostart::warm(&root);
     }
     let ledger = || {
+        // Pixel's Pi package asked for the brief alone: no task is bound and
+        // nothing is gated, so the ledger has nothing to answer.
+        if brief_only(provider, &payload) {
+            return json!({"decision": "observe"});
+        }
         handle_at(&payload_cwd(provider, &payload), provider, event, &payload).unwrap_or_else(
             |_| {
                 unavailable(
@@ -1150,6 +1192,49 @@ fn process(
     envelope(provider, event, &with_context(decision, text))
 }
 
+/// Hook-sized parts the brief of this event may fill. A hook serving slice
+/// K of N gets N. Without `--part` the one hook prints the whole brief: one
+/// part, except for Pixel's Pi package ([`BRIEF_ONLY`]), which has no per-hook
+/// cap on a message and gets the configured `brief_parts` (repository layer,
+/// then global, 3 by default), as `pixel brief --parts 3` gave it before.
+fn brief_budget(provider: TaskProvider, payload: &Value, part: Option<BriefPart>) -> u8 {
+    if let Some(part) = part {
+        return part.count;
+    }
+    if !brief_only(provider, payload) {
+        return 1;
+    }
+    let root = crate::discover_root(&payload_cwd(provider, payload)).ok();
+    crate::config_cmd::brief_parts(root.as_deref())
+}
+
+/// Whether a prompt-submit `output` carries a brief, the condition for the
+/// 🟩 `systemMessage`. Pi's envelope is the bare decision, so its brief is the
+/// `context`, and only a [`BRIEF_ONLY`] payload counts: a ledger note of a Pi
+/// host that drives the lifecycle itself is not a brief.
+fn delivered_brief(provider: TaskProvider, raw: Option<&str>, output: &Value) -> bool {
+    if provider != TaskProvider::Pi {
+        return output.get("hookSpecificOutput").is_some();
+    }
+    output.get("context").is_some_and(Value::is_string)
+        && raw
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .is_some_and(|payload| brief_only(provider, &payload))
+}
+
+fn should_relay_metrics(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    part: Option<BriefPart>,
+    recovered_head: bool,
+    raw: Option<&str>,
+    output: &Value,
+) -> bool {
+    event == TaskHookEvent::PromptSubmit
+        && (part.is_none_or(|part| part.index == 1) || recovered_head)
+        && delivered_brief(provider, raw, output)
+}
+
 /// Where the first part stores the brief of this prompt and the others read
 /// it, when the payload names a prompt and a repository.
 fn part_path(provider: TaskProvider, payload: &Value) -> Option<std::path::PathBuf> {
@@ -1157,7 +1242,7 @@ fn part_path(provider: TaskProvider, payload: &Value) -> Option<std::path::PathB
     let root = crate::discover_root(&payload_cwd(provider, payload)).ok()?;
     Some(brief_parts::cache_path(
         &root,
-        string(payload, &["session_id", "sessionId"]),
+        brief_session(payload),
         &prompt,
     ))
 }
@@ -1231,7 +1316,7 @@ fn note_prompt(
     finished: Option<&crate::execution_brief::chain::Finished>,
 ) {
     use crate::execution_brief::{decision_log, feedback};
-    let Some(session) = string(payload, &["session_id", "sessionId"]) else {
+    let Some(session) = brief_session(payload) else {
         return;
     };
     let Some(path) = crate::discover_root(&payload_cwd(provider, payload))
@@ -1258,11 +1343,19 @@ fn note_prompt(
     let _ = decision_log::append(&path, &line, feedback::MAX_LINES);
 }
 
-/// The bytes of additional context a hook response carries.
-fn context_bytes(output: &Value) -> usize {
-    output["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .map_or(0, str::len)
+/// The bytes of brief a prompt-submit response carries: the
+/// `hookSpecificOutput.additionalContext` of the wrapped envelopes, the
+/// `ephemeralMessage` Antigravity's `injectSteps` carries, or the bare
+/// decision's `context` Pi's package reads ([`BRIEF_ONLY`] payloads only, as
+/// in [`delivered_brief`]: a ledger note is not a brief).
+fn context_bytes(provider: TaskProvider, payload: &Value, output: &Value) -> usize {
+    let text = match provider {
+        TaskProvider::Pi if !brief_only(provider, payload) => return 0,
+        TaskProvider::Pi => output["context"].as_str(),
+        TaskProvider::Antigravity => output["injectSteps"][0]["ephemeralMessage"].as_str(),
+        _ => output["hookSpecificOutput"]["additionalContext"].as_str(),
+    };
+    text.map_or(0, str::len)
 }
 
 /// Write the read-feedback line of a hook that has already answered the host:
@@ -1290,7 +1383,7 @@ fn note_event(
     let Some(payload) = raw.and_then(|raw| serde_json::from_str::<Value>(raw).ok()) else {
         return;
     };
-    let Some(session) = string(&payload, &["session_id", "sessionId"]) else {
+    let Some(session) = brief_session(&payload) else {
         return;
     };
     let cwd = payload_cwd(provider, &payload);
@@ -1314,7 +1407,10 @@ fn note_event(
                 provider_name,
                 &decision_log::sha256_hex(&prompt),
                 (index, count),
-                (output.map_or(0, context_bytes), output.is_none()),
+                (
+                    output.map_or(0, |output| context_bytes(provider, &payload, output)),
+                    output.is_none(),
+                ),
             );
             decision_log::append(&path, &line, feedback::MAX_LINES)
         }
@@ -1372,24 +1468,134 @@ fn publish_first_part(
         .filter(|slice| !slice.is_empty())
 }
 
+/// How long part 1 waits, once its bound has passed, for the brief its worker
+/// is storing. It is half the shared part wait slack.
+const LATE_GRACE: Duration = Duration::from_millis(brief_parts::WAIT_SLACK.as_millis() as u64 / 2);
+/// A quarter of the one-second part wait slack remains after late recovery so
+/// later parts can observe the first part's done marker.
+const ORDERING_SLACK: Duration =
+    Duration::from_millis((brief_parts::WAIT_SLACK.as_millis() / 4) as u64);
+
 /// How long a part after the first waits for the first part's brief: the
-/// bound part 1 itself is given ([`DECISION_TIMEOUT`]) and a little more to
-/// store and release it, so a part never prints before part 1 has finished or
-/// given up. It stays under the ten seconds the host allows a hook.
-fn follow_bound() -> Duration {
-    DECISION_TIMEOUT + brief_parts::WAIT_SLACK / 2
+/// bound part 1 itself is given ([`decision_timeout`]) and a little more to
+/// store, print and release it, so a part never prints before part 1 has
+/// finished or given up. It stays under the host's deadline.
+fn follow_bound(provider: TaskProvider) -> Duration {
+    decision_timeout(provider) + LATE_GRACE + ORDERING_SLACK
 }
 
-/// A part after the first: print the slice of the brief part 1 stores,
-/// waiting at most `bound` for it. `None` (print nothing) when the payload
-/// names no prompt or repository or the brief does not arrive in time; `{}`
-/// when it arrives and has nothing for this part.
-fn follow(provider: TaskProvider, raw: &str, part: BriefPart, bound: Duration) -> Option<Value> {
+/// Part 1 of a split brief whose worker missed the bound: the first slice of
+/// the brief the worker stored meanwhile, waiting at most [`LATE_GRACE`] for it.
+/// `None` for any other hook, or when no brief is stored in time.
+fn late_first_part(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    raw: &str,
+    part: Option<BriefPart>,
+) -> Option<Value> {
+    let part = part.filter(|part| part.index == 1 && part.count > 1)?;
+    if event != TaskHookEvent::PromptSubmit {
+        return None;
+    }
     let payload = serde_json::from_str::<Value>(raw).ok()?;
     let path = part_path(provider, &payload)?;
-    let text = brief_parts::wait_for(&path, bound, brief_parts::POLL)?;
+    let text = brief_parts::wait_stored(&path, LATE_GRACE, brief_parts::POLL)?;
     let slice = brief_parts::slice(&text, part, part_limits(provider));
-    Some(if slice.is_empty() {
+    (!slice.is_empty()).then(|| {
+        envelope(
+            provider,
+            event,
+            &json!({"decision": "observe", "context": slice}),
+        )
+    })
+}
+
+/// Clear a prior identical prompt's split cache before starting part 1's
+/// bounded worker, so a timeout cannot recover stale context.
+fn forget_first_part_cache(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    raw: &str,
+    part: Option<BriefPart>,
+) {
+    if !part.is_some_and(|part| part.index == 1 && part.count > 1)
+        || event != TaskHookEvent::PromptSubmit
+    {
+        return;
+    }
+    let Ok(payload) = serde_json::from_str::<Value>(raw) else {
+        return;
+    };
+    if let Some(path) = part_path(provider, &payload) {
+        brief_parts::forget(&path);
+    }
+}
+
+fn context_in_output(provider: TaskProvider, output: &Value) -> Option<&str> {
+    match provider {
+        TaskProvider::Pi => output.get("context")?.as_str(),
+        TaskProvider::Antigravity => output
+            .get("injectSteps")?
+            .as_array()?
+            .first()?
+            .get("ephemeralMessage")?
+            .as_str(),
+        _ => output
+            .get("hookSpecificOutput")?
+            .get("additionalContext")?
+            .as_str(),
+    }
+}
+
+fn delivered_first_slice(
+    provider: TaskProvider,
+    raw: &str,
+    part: BriefPart,
+    output: &Value,
+) -> bool {
+    if part.index != 1 || part.count < 2 {
+        return false;
+    }
+    let Some(context) = context_in_output(provider, output) else {
+        return false;
+    };
+    let Some(payload) = serde_json::from_str::<Value>(raw).ok() else {
+        return false;
+    };
+    let Some(path) = part_path(provider, &payload) else {
+        return false;
+    };
+    let Some(text) = brief_parts::wait_stored(&path, Duration::ZERO, brief_parts::POLL) else {
+        return false;
+    };
+    context == brief_parts::slice(&text, part, part_limits(provider)) && !context.is_empty()
+}
+
+/// A part after the first prints its stored slice, or supplies the head when
+/// part 1 explicitly finished without delivering it. The boolean is true when
+/// the returned output contains that recovered head.
+fn follow_with_status(
+    provider: TaskProvider,
+    raw: &str,
+    part: BriefPart,
+    bound: Duration,
+) -> Option<(Value, bool)> {
+    let payload = serde_json::from_str::<Value>(raw).ok()?;
+    let path = part_path(provider, &payload)?;
+    let stored = brief_parts::wait_for_with_status(&path, bound, brief_parts::POLL)?;
+    let recovered_head = stored.missing_head;
+    let index = if recovered_head {
+        part.index.checked_sub(1)?
+    } else {
+        part.index
+    };
+    let slice_part = BriefPart {
+        index,
+        count: part.count,
+    };
+    let slice = brief_parts::slice(&stored.text, slice_part, part_limits(provider));
+    let delivered_head = recovered_head && index == 1 && !slice.is_empty();
+    let output = if slice.is_empty() {
         json!({})
     } else {
         envelope(
@@ -1397,11 +1603,31 @@ fn follow(provider: TaskProvider, raw: &str, part: BriefPart, bound: Duration) -
             TaskHookEvent::PromptSubmit,
             &json!({"decision": "observe", "context": slice}),
         )
-    })
+    };
+    Some((output, delivered_head))
+}
+
+/// A part after the first: print its stored slice, or supply the head when
+/// part 1 explicitly finished without delivering it.
+#[cfg(test)]
+fn follow(provider: TaskProvider, raw: &str, part: BriefPart, bound: Duration) -> Option<Value> {
+    follow_with_status(provider, raw, part, bound).map(|(output, _)| output)
+}
+
+/// Whether `payload` is Pixel's Pi package asking for the brief alone
+/// ([`BRIEF_ONLY`]). Never true for another provider.
+fn brief_only(provider: TaskProvider, payload: &Value) -> bool {
+    provider == TaskProvider::Pi && payload.get(BRIEF_ONLY).and_then(Value::as_bool) == Some(true)
+}
+
+/// Whether `provider` takes the evidence brief from this payload: every
+/// prompt-hook host, and Pi only when its package asked for the brief alone.
+fn briefed(provider: TaskProvider, payload: &Value) -> bool {
+    provider != TaskProvider::Pi || brief_only(provider, payload)
 }
 
 fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -> Option<String> {
-    if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {
+    if !briefed(provider, payload) || event != TaskHookEvent::PromptSubmit {
         return None;
     }
     match provider {
@@ -1425,7 +1651,7 @@ fn forget_sent(provider: TaskProvider, event: TaskHookEvent, payload: &Value) {
     {
         return;
     }
-    let Some(session) = string(payload, &["session_id", "sessionId"]) else {
+    let Some(session) = brief_session(payload) else {
         return;
     };
     if let Ok(root) = crate::discover_root(&payload_cwd(provider, payload)) {
@@ -1440,14 +1666,15 @@ fn session_start_root(
     event: TaskHookEvent,
     payload: &Value,
 ) -> Option<std::path::PathBuf> {
-    if provider == TaskProvider::Pi || event != TaskHookEvent::SessionStart {
+    if !briefed(provider, payload) || event != TaskHookEvent::SessionStart {
         return None;
     }
     crate::discover_root(&payload_cwd(provider, payload)).ok()
 }
 
-/// Start the evidence brief for a Claude or Codex prompt; Pi, every other
-/// event and a prompt outside a repository start none.
+/// Start the evidence brief for a prompt of a briefed host (Pi only when its
+/// package sent [`BRIEF_ONLY`]); every other event and a prompt outside a
+/// repository start none.
 fn start_brief(
     provider: TaskProvider,
     event: TaskHookEvent,
@@ -1460,7 +1687,7 @@ fn start_brief(
     // calls and the dirty files of the tree. Only the path is taken here; the
     // transcript is read, for paths alone, inside the brief's own window.
     let session = crate::execution_brief::chain::Session {
-        id: string(payload, &["session_id", "sessionId"]).map(str::to_string),
+        id: brief_session(payload).map(str::to_string),
         transcript: string(payload, &["transcript_path", "transcriptPath"])
             .map(std::path::PathBuf::from),
     };
@@ -1546,6 +1773,59 @@ fn handle_at(
     )
 }
 
+/// The decision `evaluate` returns within `timeout`, or `None` when the worker
+/// could not start or did not answer in time (it keeps running until `run()`
+/// exits).
+fn decision_within(
+    timeout: Duration,
+    evaluate: impl FnOnce() -> Value + Send + 'static,
+) -> Option<Value> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("pixel-task-gate".into())
+        .spawn(move || {
+            let _ = sender.send(evaluate());
+        })
+        .ok()?;
+    receiver.recv_timeout(timeout).ok()
+}
+
+/// Part 1's decision, falling back to the stored first slice after a timeout.
+fn first_part_decision(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    raw: &str,
+    part: Option<BriefPart>,
+    timeout: Duration,
+    evaluate: impl FnOnce() -> Value + Send + 'static,
+    enforced: impl FnOnce(Option<&Value>) -> bool,
+) -> Value {
+    forget_first_part_cache(provider, event, raw, part);
+    decision_within(timeout, evaluate)
+        .or_else(|| late_first_part(provider, event, raw, part))
+        .unwrap_or_else(|| unavailable_envelope(provider, event, raw, enforced))
+}
+
+/// Write part 1's response before releasing the later parts waiting on it.
+fn emit_first_part<W: Write>(
+    writer: &mut W,
+    output: Option<&Value>,
+    path: Option<&Path>,
+    delivered_head: bool,
+) {
+    if let Some(output) = output {
+        let _ = writeln!(writer, "{output}");
+        let _ = writer.flush();
+    }
+    if let Some(path) = path {
+        if delivered_head {
+            brief_parts::mark_done(path);
+        } else {
+            brief_parts::mark_done_missing_head(path);
+        }
+    }
+}
+
 fn bounded_decision(
     provider: TaskProvider,
     event: TaskHookEvent,
@@ -1554,17 +1834,19 @@ fn bounded_decision(
     evaluate: impl FnOnce() -> Value + Send + 'static,
     enforced: impl FnOnce(Option<&Value>) -> bool,
 ) -> Value {
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    if std::thread::Builder::new()
-        .name("pixel-task-gate".into())
-        .spawn(move || {
-            let _ = sender.send(evaluate());
-        })
-        .is_ok()
-        && let Ok(decision) = receiver.recv_timeout(timeout)
-    {
+    if let Some(decision) = decision_within(timeout, evaluate) {
         return decision;
     }
+    unavailable_envelope(provider, event, raw, enforced)
+}
+
+/// The envelope of a decision that did not arrive in time.
+fn unavailable_envelope(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    raw: &str,
+    enforced: impl FnOnce(Option<&Value>) -> bool,
+) -> Value {
     let payload = serde_json::from_str(raw).ok();
     let enforced = enforced(payload.as_ref());
     envelope(
@@ -1584,22 +1866,48 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
         std::process::exit(0);
     }
     let raw = crate::hook_input::read_hook_payload();
+    let mut recovered_head = false;
     let mut output = if let Some(raw) = &raw {
         let later = part.filter(|part| part.index > 1 && event == TaskHookEvent::PromptSubmit);
         if let Some(part) = later {
             // Nothing to say is nothing printed: a hook that cannot get its
             // slice in time never holds the prompt.
-            follow(provider, raw, part, follow_bound())
+            follow_with_status(provider, raw, part, follow_bound(provider)).map(
+                |(output, recovered)| {
+                    recovered_head = recovered;
+                    output
+                },
+            )
         } else {
             let input = raw.clone();
-            Some(bounded_decision(
-                provider,
-                event,
-                raw,
-                DECISION_TIMEOUT,
-                move || process(provider, event, &input, part),
-                |payload| enforcement_applies(provider, payload),
-            ))
+            let evaluate = move || process(provider, event, &input, part);
+            let enforced = |payload: Option<&Value>| enforcement_applies(provider, payload);
+            if part.is_some_and(|part| part.index == 1 && part.count > 1)
+                && event == TaskHookEvent::PromptSubmit
+            {
+                // Part 1 of a split brief that reached its bound just as the
+                // worker stored the brief prints the first slice rather than
+                // nothing, or the head of the brief and the 🟩 notice are
+                // lost while parts 2 and 3 print the tail.
+                Some(first_part_decision(
+                    provider,
+                    event,
+                    raw,
+                    part,
+                    decision_timeout(provider),
+                    evaluate,
+                    enforced,
+                ))
+            } else {
+                Some(bounded_decision(
+                    provider,
+                    event,
+                    raw,
+                    decision_timeout(provider),
+                    evaluate,
+                    enforced,
+                ))
+            }
         }
     } else {
         Some(envelope(provider, event, &unavailable(event, None, true)))
@@ -1609,9 +1917,15 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
     // warning next to the prompt. Only a delivered brief earns one — a `{}`
     // abstention should not light up every prompt.
     if event == TaskHookEvent::PromptSubmit
-        && part.is_none_or(|part| part.index == 1)
         && let Some(output) = &mut output
-        && output.get("hookSpecificOutput").is_some()
+        && should_relay_metrics(
+            provider,
+            event,
+            part,
+            recovered_head,
+            raw.as_deref(),
+            output,
+        )
         && metrics_on(provider, raw.as_deref())
     {
         output["systemMessage"] = json!(format!(
@@ -1619,23 +1933,33 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
             started.elapsed().as_secs_f64() * 1000.0
         ));
     }
-    // Flush the only response before exit terminates any stalled evaluator.
-    if let Some(output) = &output {
-        let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "{output}");
-        let _ = stdout.flush();
-    }
-    // The first of several parts has said its piece: the others may now.
     let first_of_many = part.is_some_and(|part| {
         part.index == 1 && part.count > 1 && event == TaskHookEvent::PromptSubmit
     });
-    if first_of_many
-        && let Some(payload) = raw
+    if first_of_many {
+        let path = raw
             .as_deref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        && let Some(path) = part_path(provider, &payload)
-    {
-        brief_parts::mark_done(&path);
+            .and_then(|payload| part_path(provider, &payload));
+        let mut stdout = std::io::stdout().lock();
+        let delivered_head =
+            raw.as_deref()
+                .zip(output.as_ref())
+                .zip(part)
+                .is_some_and(|((raw, output), part)| {
+                    delivered_first_slice(provider, raw, part, output)
+                });
+        emit_first_part(
+            &mut stdout,
+            output.as_ref(),
+            path.as_deref(),
+            delivered_head,
+        );
+    } else if let Some(output) = &output {
+        // Flush the only response before exit terminates any stalled evaluator.
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{output}");
+        let _ = stdout.flush();
     }
     note_event(provider, event, part, raw.as_deref(), output.as_ref());
     std::process::exit(0);
@@ -2631,6 +2955,202 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    fn indexed_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("pixel-hook-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let shard_dir = root.join(pixel_index::index::SHARD_DIR);
+        std::fs::create_dir_all(&shard_dir).unwrap();
+        std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b"x").unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn pi_should_be_briefed_only_when_its_package_asks_for_the_brief_alone() {
+        let prompt = "callers of `fetchUser`";
+        let marked = json!({"prompt": prompt, "brief_only": true});
+        let plain = json!({"prompt": prompt});
+        assert!(brief_only(TaskProvider::Pi, &marked));
+        assert!(!brief_only(TaskProvider::Pi, &plain));
+        assert_eq!(
+            brief_prompt(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &marked).as_deref(),
+            Some(prompt)
+        );
+        assert_eq!(
+            brief_prompt(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &plain),
+            None
+        );
+        for marker in [json!(false), json!("true"), json!(1), Value::Null] {
+            let payload = json!({"prompt": prompt, "brief_only": marker});
+            assert!(!brief_only(TaskProvider::Pi, &payload), "{marker}");
+            assert_eq!(
+                brief_prompt(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &payload),
+                None,
+                "{marker}"
+            );
+        }
+        for event in [TaskHookEvent::PreToolUse, TaskHookEvent::Stop] {
+            assert_eq!(brief_prompt(TaskProvider::Pi, event, &marked), None);
+        }
+        // The marker is Pi's: no other provider turns its ledger off with it.
+        for provider in [
+            TaskProvider::Claude,
+            TaskProvider::Codex,
+            TaskProvider::Devin,
+            TaskProvider::Gemini,
+            TaskProvider::Antigravity,
+        ] {
+            assert!(!brief_only(provider, &marked), "{provider:?}");
+        }
+    }
+
+    #[test]
+    fn a_pi_brief_should_start_and_a_pi_session_should_warm_only_on_the_brief_only_marker() {
+        let root = indexed_root("pi-brief-only");
+        let marked = json!({"prompt": "callers of `fetchUser`", "cwd": root, "brief_only": true});
+        let plain = json!({"prompt": "callers of `fetchUser`", "cwd": root});
+        assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &marked, 1).is_some());
+        assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &plain, 1).is_none());
+        assert_eq!(
+            session_start_root(TaskProvider::Pi, TaskHookEvent::SessionStart, &marked),
+            Some(root.clone())
+        );
+        assert_eq!(
+            session_start_root(TaskProvider::Pi, TaskHookEvent::SessionStart, &plain),
+            None
+        );
+        assert_eq!(
+            session_start_root(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &marked),
+            None
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_brief_only_pi_event_should_bind_no_task_and_answer_observe() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let root = indexed_root("pi-no-ledger");
+        for (event, extra) in [
+            (
+                TaskHookEvent::PromptSubmit,
+                json!({"prompt": "where is `fetchUser` used"}),
+            ),
+            (TaskHookEvent::SessionStart, json!({"source": "startup"})),
+        ] {
+            let mut payload = json!({
+                "session_id": "pi-session", "cwd": root, "brief_only": true,
+            });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let output = process(TaskProvider::Pi, event, &payload.to_string(), None);
+            assert_eq!(output["decision"], "observe", "{event:?}: {output}");
+            assert!(output.get("coverage").is_none(), "{event:?}: {output}");
+            assert!(output.get("hookSpecificOutput").is_none(), "{event:?}");
+        }
+        assert!(
+            !root.join(".pixel/tasks").exists(),
+            "the ledger bound or recorded something for a brief-only event"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_brief_budget_should_be_one_part_unless_a_hook_part_or_the_pi_package_says_more() {
+        let root = indexed_root("pi-budget");
+        let marked = json!({"cwd": root, "brief_only": true});
+        let plain = json!({"cwd": root});
+        std::fs::write(root.join(".pixel/config.yaml"), "brief_parts: 4\n").unwrap();
+        assert_eq!(brief_budget(TaskProvider::Pi, &marked, None), 4);
+        assert_eq!(brief_budget(TaskProvider::Pi, &plain, None), 1);
+        assert_eq!(brief_budget(TaskProvider::Claude, &marked, None), 1);
+        assert_eq!(brief_budget(TaskProvider::Claude, &plain, None), 1);
+        for provider in [TaskProvider::Pi, TaskProvider::Claude] {
+            assert_eq!(brief_budget(provider, &marked, Some(part(2, 3))), 3);
+            assert_eq!(brief_budget(provider, &plain, Some(part(1, 2))), 2);
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_metrics_line_should_follow_a_delivered_brief_only() {
+        let marked = json!({"brief_only": true}).to_string();
+        let plain = json!({}).to_string();
+        let pi_brief = json!({"decision": "observe", "context": "[PIXEL:BRIEF]"});
+        assert!(delivered_brief(TaskProvider::Pi, Some(&marked), &pi_brief));
+        // Not Pi's package: a ledger note of a host driving the lifecycle.
+        assert!(!delivered_brief(TaskProvider::Pi, Some(&plain), &pi_brief));
+        assert!(!delivered_brief(TaskProvider::Pi, None, &pi_brief));
+        assert!(!delivered_brief(
+            TaskProvider::Pi,
+            Some("not json"),
+            &pi_brief
+        ));
+        for output in [
+            json!({"decision": "observe"}),
+            json!({"decision": "observe", "context": 42}),
+            json!({"hookSpecificOutput": {"additionalContext": "x"}}),
+        ] {
+            assert!(!delivered_brief(TaskProvider::Pi, Some(&marked), &output));
+        }
+        let claude_brief = envelope(
+            TaskProvider::Claude,
+            TaskHookEvent::PromptSubmit,
+            &json!({"decision": "observe", "context": "[PIXEL:BRIEF]"}),
+        );
+        assert!(delivered_brief(
+            TaskProvider::Claude,
+            Some(&plain),
+            &claude_brief
+        ));
+        assert!(!delivered_brief(
+            TaskProvider::Claude,
+            Some(&plain),
+            &json!({})
+        ));
+        assert!(!delivered_brief(
+            TaskProvider::Claude,
+            Some(&marked),
+            &json!({"decision": "observe", "context": "bare"})
+        ));
+    }
+
+    #[test]
+    fn the_feedback_part_should_count_the_brief_bytes_each_envelope_carries() {
+        let marked = json!({"brief_only": true});
+        let plain = json!({});
+        let pi_brief = json!({"decision": "observe", "context": "[PIXEL:BRIEF]"});
+        let wrapped = json!({"hookSpecificOutput": {"additionalContext": "abc"}});
+        assert_eq!(context_bytes(TaskProvider::Pi, &marked, &pi_brief), 13);
+        // A ledger note of a Pi host that drives the lifecycle is not a brief.
+        assert_eq!(context_bytes(TaskProvider::Pi, &plain, &pi_brief), 0);
+        assert_eq!(context_bytes(TaskProvider::Pi, &marked, &wrapped), 0);
+        assert_eq!(context_bytes(TaskProvider::Claude, &plain, &wrapped), 3);
+        assert_eq!(context_bytes(TaskProvider::Codex, &marked, &wrapped), 3);
+        assert_eq!(context_bytes(TaskProvider::Claude, &marked, &pi_brief), 0);
+        let injected = json!({"injectSteps": [{"ephemeralMessage": "[PIXEL:BRIEF]x"}]});
+        assert_eq!(
+            context_bytes(TaskProvider::Antigravity, &plain, &injected),
+            14
+        );
+        assert_eq!(
+            context_bytes(TaskProvider::Antigravity, &plain, &wrapped),
+            0
+        );
+        assert_eq!(context_bytes(TaskProvider::Claude, &plain, &injected), 0);
+    }
+
+    #[test]
+    fn the_brief_session_should_be_antigravity_s_conversation_when_no_session_id_is_sent() {
+        let conversation = json!({"conversationId": "c-1", "workspacePaths": ["/r"]});
+        assert_eq!(brief_session(&conversation), Some("c-1"));
+        let both = json!({"session_id": "s-1", "conversationId": "c-1"});
+        assert_eq!(brief_session(&both), Some("s-1"));
+        assert_eq!(brief_session(&json!({"sessionId": "s-2"})), Some("s-2"));
+        assert_eq!(brief_session(&json!({"conversationId": ""})), None);
+        assert_eq!(brief_session(&json!({})), None);
+    }
+
     #[test]
     fn a_session_start_should_name_its_repository_for_the_briefed_providers_only() {
         let root = std::env::temp_dir().join(format!("pixel-hook-warm-{}", std::process::id()));
@@ -3059,6 +3579,32 @@ mod tests {
     }
 
     #[test]
+    fn native_hooks_get_more_decision_time_while_pi_stays_inside_its_host_deadline() {
+        assert_eq!(decision_timeout(TaskProvider::Pi), Duration::from_secs(6));
+        for provider in [
+            TaskProvider::Claude,
+            TaskProvider::Codex,
+            TaskProvider::Devin,
+            TaskProvider::Gemini,
+            TaskProvider::Antigravity,
+        ] {
+            assert_eq!(
+                decision_timeout(provider),
+                Duration::from_secs(8),
+                "{provider:?}"
+            );
+            assert!(follow_bound(provider) < Duration::from_secs(9));
+        }
+        assert!(
+            crate::hook_input::STDIN_WAIT + follow_bound(TaskProvider::Pi) < Duration::from_secs(8)
+        );
+        assert!(
+            crate::hook_input::STDIN_WAIT + follow_bound(TaskProvider::Claude)
+                < Duration::from_secs(10)
+        );
+    }
+
+    #[test]
     fn a_later_part_with_no_slice_prints_an_empty_object_and_with_no_prompt_nothing() {
         let (root, raw) = parts_repo("empty");
         let path = brief_path(&root, &raw);
@@ -3129,6 +3675,154 @@ mod tests {
             );
         }
         assert!(follow(TaskProvider::Claude, &raw, part(2, 3), Duration::ZERO).is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_timed_out_first_part_should_emit_its_late_slice_before_releasing_later_parts() {
+        let (root, raw) = parts_repo("late-first");
+        let path = brief_path(&root, &raw);
+        let brief = format!("{}\n", "a".repeat(9_000)).repeat(2);
+        let later_raw = raw.clone();
+        let (later_tx, later_rx) = std::sync::mpsc::channel();
+        let later = std::thread::spawn(move || {
+            let result = follow(
+                TaskProvider::Claude,
+                &later_raw,
+                part(2, 3),
+                Duration::from_secs(2),
+            );
+            let _ = later_tx.send(result);
+        });
+        let worker_path = path.clone();
+        let worker_brief = brief.clone();
+        let late = first_part_decision(
+            TaskProvider::Claude,
+            TaskHookEvent::PromptSubmit,
+            &raw,
+            Some(part(1, 3)),
+            Duration::from_millis(20),
+            move || {
+                std::thread::sleep(Duration::from_millis(150));
+                brief_parts::store(&worker_path, &worker_brief, SystemTime::now()).unwrap();
+                json!({"decision": "observe", "context": "worker finished after timeout"})
+            },
+            |_| false,
+        );
+        assert_eq!(context_of(&late), format!("{}\n", "a".repeat(9_000)));
+        let delivered_head = delivered_first_slice(TaskProvider::Claude, &raw, part(1, 3), &late);
+        assert!(delivered_head);
+        // The later hook has the stored brief but cannot pass part 1 until
+        // part 1's response is flushed and its done marker appears.
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(
+            matches!(
+                later_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
+            "later part escaped before part 1"
+        );
+        let mut response = Vec::new();
+        emit_first_part(&mut response, Some(&late), Some(&path), delivered_head);
+        assert_eq!(response, format!("{late}\n").as_bytes());
+        assert!(path.with_extension("done").is_file());
+        assert_eq!(
+            context_of(
+                &later_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap()
+                    .unwrap()
+            ),
+            format!("{}\n", "a".repeat(9_000))
+        );
+        later.join().unwrap();
+        // Only split prompt-submit part 1 uses the fallback.
+        for (event, part) in [
+            (TaskHookEvent::PromptSubmit, Some(part(2, 3))),
+            (TaskHookEvent::PromptSubmit, Some(part(1, 1))),
+            (TaskHookEvent::PromptSubmit, None),
+            (TaskHookEvent::Stop, Some(part(1, 3))),
+        ] {
+            assert!(
+                late_first_part(TaskProvider::Claude, event, &raw, part).is_none(),
+                "{event:?} {part:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_timed_out_first_part_does_not_recover_a_previous_identical_prompt_cache() {
+        let (root, raw) = parts_repo("stale-first-part");
+        let path = brief_path(&root, &raw);
+        brief_parts::store(&path, "stale cached brief\n", SystemTime::now()).unwrap();
+
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let output = first_part_decision(
+            TaskProvider::Claude,
+            TaskHookEvent::PromptSubmit,
+            &raw,
+            Some(part(1, 3)),
+            Duration::from_millis(20),
+            move || {
+                std::thread::sleep(Duration::from_millis(150));
+                let _ = finished_tx.send(());
+                json!({"decision": "observe", "context": "fresh worker finished"})
+            },
+            |_| false,
+        );
+
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            !output.to_string().contains("stale cached brief"),
+            "a timed-out hook must not serve the previous identical prompt's cache"
+        );
+        assert!(
+            !path.exists(),
+            "cache was invalidated before the worker started"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_later_part_should_supply_the_head_only_after_an_explicit_missing_head_marker() {
+        let (root, raw) = parts_repo("missing-head-fallback");
+        let path = brief_path(&root, &raw);
+        let brief = format!("{}\n", "a".repeat(9_000)).repeat(2);
+        brief_parts::mark_done_missing_head(&path);
+        brief_parts::store(&path, &brief, SystemTime::now()).unwrap();
+
+        let (part_two, recovered_head) =
+            follow_with_status(TaskProvider::Claude, &raw, part(2, 3), Duration::ZERO).unwrap();
+        assert_eq!(context_of(&part_two), format!("{}\n", "a".repeat(9_000)));
+        assert!(recovered_head);
+        assert!(should_relay_metrics(
+            TaskProvider::Claude,
+            TaskHookEvent::PromptSubmit,
+            Some(part(2, 3)),
+            recovered_head,
+            Some(&raw),
+            &part_two,
+        ));
+
+        let (part_three, recovered_head) =
+            follow_with_status(TaskProvider::Claude, &raw, part(3, 3), Duration::ZERO).unwrap();
+        assert_eq!(context_of(&part_three), format!("{}\n", "a".repeat(9_000)));
+        assert!(
+            !recovered_head,
+            "part 3 carries the second slice, not the head"
+        );
+
+        brief_parts::forget(&path);
+        brief_parts::store(&path, &brief, SystemTime::now()).unwrap();
+        brief_parts::mark_done(&path);
+        let (part_two, recovered_head) =
+            follow_with_status(TaskProvider::Claude, &raw, part(2, 3), Duration::ZERO).unwrap();
+        assert_eq!(context_of(&part_two), format!("{}\n", "a".repeat(9_000)));
+        assert!(
+            !recovered_head,
+            "the legacy empty marker keeps the old slice map"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
