@@ -170,7 +170,8 @@ keeps Pixel's own files out of commits but does not stop a repository from
 shipping a tracked `.pixel/`. Since 0.7.0 (GHSA-c9f5-vxc4-wjph), the stores
 refuse such a directory before reading it (`pixel_git::sidecar::check`), files
 under it are written without following links (`pixel_git::nofollow`,
-`SQLITE_OPEN_NOFOLLOW`), and a path read from a shard or the graph is used only
+`SQLITE_OPEN_NOFOLLOW`; the `build.lock` and `graph.lock` lock files through
+`nofollow::open_lock`), and a path read from a shard or the graph is used only
 inside the repository (`pixel_git::repo_path::confine`); see T6.
 With the Rust source switch on (the default unless
 `PIXEL_GRAPH_SOURCE_RUST=v1`) and a `Cargo.toml` at the root, or with
