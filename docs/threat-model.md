@@ -577,7 +577,11 @@ boundary it crosses.
 - **Mitigation**: none; Pixel never passes `--no-verify`, by design.
 - **Status**: Accepted: the same hooks run on the user's own `git commit`.
 - **Residual**: `GitRunner` kills git on timeout, not its process group, so a
-  hook's children can outlive the 120 s timeout.
+  hook's children can outlive the 120 s timeout. Completion waits cover
+  stdin, stdout and stderr under the same deadline, so a descendant holding
+  a pipe cannot keep the caller blocked after that timeout. The exit observer
+  uses `WNOWAIT`; only the runner owner reaps the child, preventing PID reuse
+  before its kill/wait decision.
 
 ### T10. A crafted hook payload abuses a hook (T, E, B2)
 
