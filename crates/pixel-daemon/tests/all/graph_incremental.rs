@@ -18,19 +18,7 @@ use std::process::Command;
 
 use pixel_daemon::{Request, Service};
 
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {args:?}: {out:?}");
-}
+use crate::support::git;
 
 /// Five source files, one committed baseline. `worker.ts` calls `helper`
 /// from `util.ts`; the other three are independent filler so a threshold
@@ -221,7 +209,7 @@ fn copied_pixel_dir_is_updated_not_rebuilt() {
         dir.file_name().unwrap().to_string_lossy()
     ));
     std::fs::remove_dir_all(&copy).ok();
-    let out = Command::new("git")
+    let out = crate::support::git_command()
         .args(["clone", "-q"])
         .arg(&dir)
         .arg(&copy)

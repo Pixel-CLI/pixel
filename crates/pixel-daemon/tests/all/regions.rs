@@ -6,23 +6,10 @@
 //! computed from the actual call and import edges.
 
 use std::path::Path;
-use std::process::Command;
 
 use pixel_daemon::{Request, Service};
 
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {args:?}: {out:?}");
-}
+use crate::support::git;
 
 /// A fixture whose P0 set and call graph are fully determined by the
 /// backticked exact tokens in the task below:

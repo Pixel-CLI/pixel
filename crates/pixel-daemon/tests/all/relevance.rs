@@ -6,7 +6,6 @@
 //! (`relevance_on`) that a hook without a daemon uses.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use pixel_daemon::relevance::relevance_on;
 use pixel_daemon::{Request, Response, Service};
@@ -16,20 +15,7 @@ use pixel_index::indexset::IndexSet;
 use pixel_proto::Relevance;
 use serde_json::Value;
 
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {args:?}: {out:?}");
-}
+use crate::support::git;
 
 /// Files about nothing: they make a word in a few files rare, not ubiquitous.
 const FILLER: usize = 40;

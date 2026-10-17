@@ -17,31 +17,18 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use pixel_daemon::daemon::{Corpus, run_corpus, socket_path};
 use pixel_daemon::{Request, Response, Service};
 
+use crate::support::git;
+
 /// Time the watcher backend gets to deliver the file event before the probe
 /// connects. FSEvents is created with zero latency and inotify is immediate,
 /// so this is a margin, not a poll interval.
 const WATCHER_SETTLE: Duration = Duration::from_millis(1500);
-
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {args:?}: {out:?}");
-}
 
 /// One committed source file defining `helper`.
 fn fixture(tag: &str) -> PathBuf {
