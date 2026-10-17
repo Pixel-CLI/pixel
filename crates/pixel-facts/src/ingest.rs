@@ -444,13 +444,13 @@ fn needs_phase_a(store: &FactsStore) -> Result<bool> {
             |r| r.get(0),
         )
         .ok();
-    let current = store.current_refs_hash()?;
+    let current = store.refs_hash()?;
     Ok(stored.as_deref() != Some(current.as_str()))
 }
 
 fn complete_phase_a(store: &mut FactsStore) -> Result<()> {
     // Record the refs hash at completion so a later ref move is detectable.
-    let hash = store.current_refs_hash()?;
+    let hash = store.refs_hash()?;
     store.conn().execute(
         "UPDATE ingest_jobs SET status = 'done', ref_hash = ?1, updated_at = ?2 WHERE phase = 'A'",
         params![hash, now_iso()],
