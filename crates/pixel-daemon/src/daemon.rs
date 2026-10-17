@@ -214,6 +214,7 @@ struct Registered {
     /// Directories holding a watch: one per root for a recursive watch.
     dirs: usize,
     recursive: bool,
+    git_dir: bool,
 }
 
 /// What the watch registration covered and how long it took, shown by
@@ -227,6 +228,9 @@ pub struct WatchReport {
     pub recursive: bool,
     /// From the start of the registration to the watch being live.
     pub elapsed: Duration,
+    /// The root's `.git` directory is under the watch, so a commit, a
+    /// checkout or a reset reaches `Corpus::git_moved`.
+    pub git_dir: bool,
 }
 
 /// Registers the watch on `paths`, forwarding its events into the loop's
@@ -269,6 +273,9 @@ pub trait Corpus {
     /// made while it was being set up were not observed, so a corpus that can
     /// list its changed files re-reads them here (default: nothing).
     fn watch_ready(&mut self, _report: &WatchReport) {}
+    /// HEAD or a branch moved under the root's `.git` (a commit, a checkout,
+    /// a reset): drop what was derived from them (default: nothing).
+    fn git_moved(&mut self) {}
     /// The watcher backend reported an error: changes may have been missed,
     /// so answers can be stale until the next event. The default logs it; a
     /// corpus that reports health counts it too.
@@ -305,6 +312,10 @@ impl Corpus for Service {
 
     fn watcher_error(&mut self, error: &str) {
         self.note_watcher_error(error);
+    }
+
+    fn git_moved(&mut self) {
+        self.note_git_moved();
     }
 
     /// Re-read every path that may have changed while the watch was still
@@ -471,10 +482,12 @@ fn register_recursive_watch(
             .watch(path, RecursiveMode::Recursive)
             .map_err(|e| format!("watch {}: {e}", path.display()))?;
     }
+    let git_dir = paths.iter().any(|root| root.join(".git").is_dir());
     Ok(Registered {
         guard: Box::new(RecursiveWatch(watcher)),
         dirs: paths.len(),
         recursive: true,
+        git_dir,
     })
 }
 
@@ -503,13 +516,14 @@ impl Watch for PrunedWatch {
 /// non-recursive watch each: the registration everywhere but macOS. A
 /// recursive inotify watch walks and watches every ignored directory too
 /// (15 825 watches where 2 216 suffice), and past `max_user_watches` it
-/// fails, leaving the daemon without live updates. `<root>/.git/info` is
-/// watched as well: its `exclude` is an ignore-control file.
+/// fails, leaving the daemon without live updates. The `.git` directories
+/// of `GIT_WATCHED_DIRS` are watched as well.
 #[cfg_attr(test, mutants::skip)] // the walk and the extension are tested; this joins them to the backend
 fn register_pruned_watch(paths: Vec<PathBuf>, tx: mpsc::Sender<Msg>) -> Result<Registered, String> {
     let mut watcher = forwarding_watcher(tx)?;
     let dirs = pruned_watch_dirs(&paths);
     let watched = watch_each(&mut watcher, &dirs)?;
+    let git_dir = paths.iter().any(|root| dirs.contains(&root.join(".git")));
     Ok(Registered {
         guard: Box::new(PrunedWatch {
             watcher,
@@ -517,6 +531,7 @@ fn register_pruned_watch(paths: Vec<PathBuf>, tx: mpsc::Sender<Msg>) -> Result<R
         }),
         dirs: watched,
         recursive: false,
+        git_dir,
     })
 }
 
@@ -525,13 +540,20 @@ fn pruned_watch_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for root in roots {
         dirs.extend(unignored_tree(root, false).dirs);
-        let git_info = root.join(".git").join("info");
-        if git_info.is_dir() {
-            dirs.push(git_info);
+        for sub in GIT_WATCHED_DIRS {
+            let dir = root.join(".git").join(sub);
+            if dir.is_dir() {
+                dirs.push(dir);
+            }
         }
     }
     dirs
 }
+
+/// The directories of `<root>/.git` a pruned watch keeps: `info` for its
+/// `exclude` file, the directory itself for `HEAD` and `packed-refs`, and
+/// `logs` for the `HEAD` reflog every commit, checkout and reset appends to.
+const GIT_WATCHED_DIRS: [&str; 3] = ["", "info", "logs"];
 
 /// Add one non-recursive watch per directory in a single backend commit;
 /// return how many hold one. A directory removed since the walk is skipped.
@@ -672,6 +694,7 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
                     dirs: registered.dirs,
                     recursive: registered.recursive,
                     elapsed: started.elapsed(),
+                    git_dir: registered.git_dir,
                 };
                 (registered.guard, report)
             });
@@ -726,6 +749,9 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
                         Msg::Conn(stream) => streams.push(stream),
                         Msg::AcceptFailed => failed = true,
                         Msg::Fs(ev) => {
+                            if moves_head(&root, &ev) {
+                                service.git_moved();
+                            }
                             note_event(
                                 &root,
                                 &ev,
@@ -770,6 +796,9 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
             }
             Ok(Msg::AcceptFailed) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(Msg::Fs(ev)) => {
+                if moves_head(&root, &ev) {
+                    service.git_moved();
+                }
                 note_event(
                     &root,
                     &ev,
@@ -987,6 +1016,29 @@ fn note_event(
     if record_event(root, ev, pending) {
         arm_flush(flush_at, first_pending_at);
     }
+}
+
+/// An event that moved HEAD or a branch of the repository at `root`: a
+/// write to `.git/HEAD`, its reflog, `packed-refs` or a branch ref. Reads
+/// are not (every `git` run opens `HEAD`), and neither is `.git/index`,
+/// which `git status` itself rewrites.
+fn moves_head(root: &Path, ev: &notify::Event) -> bool {
+    if matches!(
+        ev.kind,
+        notify::EventKind::Access(_)
+            | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+    ) {
+        return false;
+    }
+    let git_dir = root.join(".git");
+    ev.paths.iter().any(|path| {
+        path.strip_prefix(&git_dir).is_ok_and(|rel| {
+            rel == Path::new("HEAD")
+                || rel == Path::new("logs/HEAD")
+                || rel == Path::new("packed-refs")
+                || rel.starts_with("refs/heads")
+        })
+    })
 }
 
 /// Push the quiet deadline a `DEBOUNCE` away, capped at `MAX_PENDING_WAIT`
@@ -1349,6 +1401,7 @@ mod tests {
         dirs: 1,
         recursive: true,
         elapsed: Duration::ZERO,
+        git_dir: false,
     };
 
     fn stub_watch() -> Registered {
@@ -1356,6 +1409,7 @@ mod tests {
             guard: Box::new(()),
             dirs: 1,
             recursive: true,
+            git_dir: false,
         }
     }
 
@@ -2596,7 +2650,7 @@ mod tests {
         let root = mixed_tree("pruned-dirs");
         assert_eq!(
             relative(&root, &pruned_watch_dirs(std::slice::from_ref(&root))),
-            [".", ".git/info", "src", "src/a", "src/a/b"]
+            [".", ".git", ".git/info", "src", "src/a", "src/a/b"]
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2643,6 +2697,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn moves_head_should_take_only_writes_to_the_head_and_branch_refs() {
+        let root = Path::new("/repo");
+        let event = |kind, path: &str| notify::Event::new(kind).add_path(root.join(path));
+        let write = || {
+            notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Any,
+            ))
+        };
+        for path in [
+            ".git/HEAD",
+            ".git/logs/HEAD",
+            ".git/packed-refs",
+            ".git/refs/heads/main",
+        ] {
+            assert!(moves_head(root, &event(write(), path)), "{path}");
+        }
+        let created = notify::EventKind::Create(notify::event::CreateKind::File);
+        assert!(moves_head(root, &event(created, ".git/refs/heads/topic/x")));
+        for path in [
+            ".git/index",
+            ".git/refs/remotes/origin/main",
+            ".git/logs/refs/heads/main",
+            "HEAD",
+            "src/HEAD",
+        ] {
+            assert!(!moves_head(root, &event(write(), path)), "{path}");
+        }
+        let read = notify::EventKind::Access(notify::event::AccessKind::Open(
+            notify::event::AccessMode::Read,
+        ));
+        assert!(
+            !moves_head(root, &event(read, ".git/HEAD")),
+            "a read moves nothing"
+        );
+    }
+
     /// Records the directories the loop extends the watch to, and answers
     /// with the files it was told are inside.
     struct ExtendingWatch {
@@ -2684,6 +2775,7 @@ mod tests {
                 guard: Box::new(ExtendingWatch { extended, files }),
                 dirs: 1,
                 recursive: false,
+                git_dir: false,
             })
         });
         let daemon = std::thread::spawn(move || run_corpus_with(corpus, register));
@@ -2705,6 +2797,7 @@ mod tests {
         root: PathBuf,
         reports: mpsc::Sender<WatchReport>,
         applied: mpsc::Sender<Vec<(PathBuf, bool)>>,
+        moved: mpsc::Sender<()>,
     }
 
     impl Corpus for ObservedCorpus {
@@ -2721,6 +2814,9 @@ mod tests {
         fn watch_ready(&mut self, report: &WatchReport) {
             let _ = self.reports.send(*report);
         }
+        fn git_moved(&mut self) {
+            let _ = self.moved.send(());
+        }
     }
 
     /// The pruned registration on the real backend: it watches exactly the
@@ -2732,10 +2828,12 @@ mod tests {
         let root = mixed_tree("pruned-live");
         let (reports, report) = mpsc::channel();
         let (applied, batches) = mpsc::channel();
+        let (moved, head_moves) = mpsc::channel();
         let corpus = ObservedCorpus {
             root: root.clone(),
             reports,
             applied,
+            moved,
         };
         let daemon =
             std::thread::spawn(move || run_corpus_with(corpus, Box::new(register_pruned_watch)));
@@ -2753,11 +2851,18 @@ mod tests {
                     .any(|(path, removed)| path == &file && !removed);
             }
         }
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/topic\n").unwrap();
+        let head_moved = head_moves.recv_timeout(Duration::from_secs(10));
         shutdown(&socket_path(&root)).expect("shutdown");
         daemon.join().unwrap().unwrap();
         let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            head_moved.is_ok(),
+            "a write to .git/HEAD never reached git_moved"
+        );
         let report = report.expect("the watch registers");
-        assert_eq!(report.dirs, 5, "root, .git/info, src, src/a, src/a/b");
+        assert_eq!(report.dirs, 6, "root, .git, .git/info, src, src/a, src/a/b");
+        assert!(report.git_dir);
         assert!(!report.recursive);
         assert!(
             seen,

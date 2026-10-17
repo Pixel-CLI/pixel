@@ -248,6 +248,7 @@ fn default_corpus_should_watch_its_root_and_do_nothing_on_sweep_or_ready() {
         dirs: 1,
         recursive: true,
         elapsed: Duration::ZERO,
+        git_dir: false,
     });
     assert!(corpus.applied.lock().unwrap().is_empty());
 }
@@ -438,12 +439,14 @@ fn service_status_should_report_the_watch_once_it_is_live() {
         dirs: 2216,
         recursive: false,
         elapsed: Duration::from_millis(131),
+        git_dir: true,
     });
     let after = status(&mut service);
     assert_eq!(after["ready"], true, "{after}");
     assert_eq!(after["watched_dirs"], 2216, "{after}");
     assert_eq!(after["recursive"], false, "{after}");
     assert_eq!(after["registration_ms"], 131, "{after}");
+    assert_eq!(after["git_dir"], true, "{after}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

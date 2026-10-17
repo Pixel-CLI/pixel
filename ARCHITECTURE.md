@@ -243,13 +243,18 @@ clear the first-event timestamp. The watch is
 registered on its own thread so the daemon answers from its first request.
 On macOS it is one recursive FSEvents watch per root, which walks nothing.
 Elsewhere (`register_pruned_watch`) it is one non-recursive watch per
-directory whose name is not in `IGNORED_DIRS`, plus `<root>/.git/info` for
-its `exclude` file: a recursive inotify watch walks and watches every ignored
-directory too (15 825 watches where 2 216 suffice) and fails past
-`max_user_watches`. A directory created or moved in later is added to the
-watch by the loop, and the files already inside it join the pending batch.
-`status` reports the watch under `watcher` (`ready`, `watched_dirs`,
-`recursive`, `registration_ms`). Once it is live, `Corpus::watch_ready` re-reads every path `git status`
+directory whose name is not in `IGNORED_DIRS`, plus `<root>/.git`, `.git/info`
+(its `exclude` file) and `.git/logs` (the `HEAD` reflog): a recursive inotify
+watch walks and watches every ignored directory too (15 825 watches where
+2 216 suffice) and fails past `max_user_watches`. A directory created or moved
+in later is added to the watch by the loop, and the files already inside it
+join the pending batch. A write to `.git/HEAD`, its reflog, `packed-refs` or a
+branch ref reaches `Corpus::git_moved`, which drops the `Service`'s cached
+HEAD and branch; while the watch covers `.git` those live up to
+`WATCHED_REF_TTL` (60 s) instead of `SNAPSHOT_CACHE_TTL` (1 s), and a watcher
+batch drops only the cached dirty list. `status` reports the watch under
+`watcher` (`ready`, `watched_dirs`, `recursive`, `registration_ms`,
+`git_dir`). Once it is live, `Corpus::watch_ready` re-reads every path `git status`
 lists, every path the index overlay held (an edit discarded meanwhile leaves
 `git status` clean) and every path a HEAD move since the open changed, since
 edits made meanwhile raised no event. The daemon exits after

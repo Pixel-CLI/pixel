@@ -335,11 +335,12 @@ pub struct Service {
     /// facts-consuming request, not at daemon start — users who never touch
     /// history commands never pay for the index.
     facts_warmer_started: AtomicBool,
-    /// Short-TTL cache of the `repo_snapshot` triple (HEAD, branch, dirty
-    /// list). Every snapshot-carrying op used to pay 3 git subprocesses;
-    /// a burst of scope-task+impact+find-code now costs one round-trip.
-    /// Invalidated by watcher batches and every writing op.
-    snapshot_cache: Option<(Instant, SnapshotInfo)>,
+    /// Caches of what `repo_snapshot` reports, one git subprocess each: a
+    /// burst of scope-task+impact+find-code costs one round-trip. A writing
+    /// op or a HEAD move seen under `.git` drops all three; a watcher batch
+    /// drops only the dirty list, since a working-tree edit moves neither
+    /// HEAD nor the branch. HEAD is also the one the graph check reads.
+    git_state: GitStateCache,
     /// Short-TTL cache of the `git log --since=90.days` activity map behind
     /// `engine_signals`. The decay weights shift negligibly over the TTL;
     /// only successful scans are cached so a transient git failure still
@@ -355,11 +356,115 @@ pub struct Service {
     meaning: Arc<Meaning>,
 }
 
-/// How long a cached [`SnapshotInfo`] may be served. One concurrent burst
-/// of retrieval ops (scope-task + impact + find-code back to back) shares
-/// one git round-trip; dirty-state staleness inside the window is the
-/// accepted trade, and writing ops + watcher batches invalidate anyway.
+/// How long a cached HEAD, branch or dirty list may be served. One
+/// concurrent burst of retrieval ops (scope-task + impact + find-code back
+/// to back) shares one git round-trip; staleness inside the window (a
+/// commit made outside pixel) is the accepted trade, and writing ops and
+/// watcher batches invalidate anyway.
 const SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(1000);
+
+/// How long HEAD and the branch may be served once the watch covers
+/// `.git`: a commit, a checkout or a reset drops them through
+/// `Corpus::git_moved`, so the TTL only bounds an event the backend lost.
+const WATCHED_REF_TTL: Duration = Duration::from_secs(60);
+
+/// The git state a snapshot reports, each value cached on its own.
+struct GitStateCache {
+    /// For the dirty list: a tracked file under an ignored directory
+    /// (`vendor/`, `build/`) changes without a watcher event.
+    ttl: Duration,
+    /// For HEAD and the branch: `SNAPSHOT_CACHE_TTL` until the watch
+    /// covers `.git`, then `WATCHED_REF_TTL`.
+    ref_ttl: Duration,
+    head: Option<(Instant, Option<String>)>,
+    branch: Option<(Instant, Option<String>)>,
+    dirty: Option<(Instant, Vec<String>)>,
+    /// Git lookups actually run, for the tests that count them.
+    #[cfg(test)]
+    lookups: usize,
+}
+
+impl GitStateCache {
+    fn new() -> Self {
+        Self {
+            ttl: SNAPSHOT_CACHE_TTL,
+            ref_ttl: SNAPSHOT_CACHE_TTL,
+            head: None,
+            branch: None,
+            dirty: None,
+            #[cfg(test)]
+            lookups: 0,
+        }
+    }
+
+    /// Forget everything: a writing op may have moved any of it.
+    fn clear(&mut self) {
+        self.head = None;
+        self.branch = None;
+        self.dirty = None;
+    }
+
+    fn head(&mut self, root: &Path) -> Option<String> {
+        let ttl = self.ref_ttl;
+        self.lookup(
+            |cache| &mut cache.head,
+            ttl,
+            || pixel_index::gitsync::rev_parse_head(root),
+        )
+    }
+
+    /// HEAD read now, whatever the cache holds, and kept for the rest of
+    /// the request: the answer to a freshness gate, which a commit made
+    /// outside pixel a moment ago must not pass.
+    fn fresh_head(&mut self, root: &Path) -> Option<String> {
+        self.head = None;
+        self.head(root)
+    }
+
+    fn branch(&mut self, root: &Path) -> Option<String> {
+        let ttl = self.ref_ttl;
+        self.lookup(
+            |cache| &mut cache.branch,
+            ttl,
+            || pixel_index::gitsync::current_branch(root),
+        )
+    }
+
+    fn dirty(&mut self, root: &Path) -> Vec<String> {
+        let ttl = self.ttl;
+        self.lookup(
+            |cache| &mut cache.dirty,
+            ttl,
+            || {
+                pixel_index::gitsync::status_porcelain(root)
+                    .into_iter()
+                    .map(|(_xy, path)| path)
+                    .collect()
+            },
+        )
+    }
+
+    /// The value in `slot` while younger than `ttl`, else a fresh `run`.
+    fn lookup<T: Clone>(
+        &mut self,
+        slot: impl Fn(&mut Self) -> &mut Option<(Instant, T)>,
+        ttl: Duration,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        if let Some((at, value)) = slot(self)
+            && at.elapsed() < ttl
+        {
+            return value.clone();
+        }
+        #[cfg(test)]
+        {
+            self.lookups += 1;
+        }
+        let value = run();
+        *slot(self) = Some((Instant::now(), value.clone()));
+        value
+    }
+}
 
 /// How long the `git log` activity map may be served. Churn decays on a
 /// 14-day half-life, so a minute of reuse never moves a ranking; the TTL
@@ -456,7 +561,7 @@ impl Service {
             embedder_unavailable: false,
             embedder_download_started: false,
             facts_warmer_started: AtomicBool::new(false),
-            snapshot_cache: None,
+            git_state: GitStateCache::new(),
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
             meaning,
@@ -483,7 +588,7 @@ impl Service {
             embedder_unavailable: true,
             embedder_download_started: false,
             facts_warmer_started: AtomicBool::new(true),
-            snapshot_cache: None,
+            git_state: GitStateCache::new(),
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
             meaning: Arc::clone(&self.meaning),
@@ -575,9 +680,9 @@ impl Service {
         if files.is_empty() {
             return;
         }
-        // A watcher batch means the working tree changed: the cached
-        // snapshot's dirty list is stale as of right now.
-        self.snapshot_cache = None;
+        // A watcher batch means the working tree changed: the cached dirty
+        // list is stale as of right now. HEAD and the branch are not.
+        self.git_state.dirty = None;
         let publication = Arc::clone(&self.publication);
         let mut state = publication.write_or_recover();
         state.healthy = false;
@@ -636,13 +741,25 @@ impl Service {
         )
     }
 
-    /// Record the watch the transport loop registered, for `status`.
+    /// Record the watch the transport loop registered, for `status`. Once
+    /// it covers `.git`, HEAD and the branch are cached until they move.
     pub(crate) fn note_watch_ready(&mut self, report: WatchReport) {
         self.watch = Some(report);
+        if report.git_dir {
+            self.git_state.ref_ttl = WATCHED_REF_TTL;
+        }
+    }
+
+    /// HEAD or a branch moved: the cached git state describes another commit.
+    pub(crate) fn note_git_moved(&mut self) {
+        self.git_state.clear();
     }
 
     /// Count a `notify` backend error reported by the transport loop.
     pub(crate) fn note_watcher_error(&mut self, error: &str) {
+        // A lost event may have been a HEAD move: stop trusting the watch
+        // for it.
+        self.git_state.ref_ttl = SNAPSHOT_CACHE_TTL;
         note_failure(
             &mut self.watcher_failures,
             &format!("watcher error: {error}"),
@@ -685,7 +802,7 @@ impl Service {
 
     fn ensure_graph_inner(&mut self) -> Result<Option<Value>, String> {
         let db = self.graph_db_path();
-        let gitless = pixel_index::gitsync::rev_parse_head(&self.root).is_none();
+        let gitless = self.git_state.head(&self.root).is_none();
         let mut built = None;
         if !db.exists() {
             built = Some(self.full_rebuild_info("missing")?);
@@ -1013,7 +1130,7 @@ impl Service {
         match self.dispatch(req) {
             Ok(v) => {
                 if mutates_repo {
-                    self.snapshot_cache = None;
+                    self.git_state.clear();
                 }
                 let mut env = Envelope::success(op_name, v);
                 if attach_snapshot {
@@ -1050,26 +1167,13 @@ impl Service {
     /// staged / untracked) repo-relative paths. `token` is left `None`
     /// here — pixel-ops computes the validated snapshot token separately.
     fn repo_snapshot(&mut self) -> SnapshotInfo {
-        if let Some((at, snapshot)) = &self.snapshot_cache
-            && at.elapsed() < SNAPSHOT_CACHE_TTL
-        {
-            return snapshot.clone();
-        }
-        let head = pixel_index::gitsync::rev_parse_head(&self.root);
-        let branch = pixel_index::gitsync::current_branch(&self.root);
-        let dirty: Vec<String> = pixel_index::gitsync::status_porcelain(&self.root)
-            .into_iter()
-            .map(|(_xy, path)| path)
-            .collect();
-        let snapshot = SnapshotInfo {
+        SnapshotInfo {
             token: None,
-            head,
-            branch,
-            dirty,
+            head: self.git_state.head(&self.root),
+            branch: self.git_state.branch(&self.root),
+            dirty: self.git_state.dirty(&self.root),
             dirty_count: None,
-        };
-        self.snapshot_cache = Some((Instant::now(), snapshot.clone()));
-        snapshot
+        }
     }
 
     fn dispatch(&mut self, req: Request) -> Result<Value, String> {
@@ -1566,7 +1670,7 @@ impl Service {
             Ok(index) => index.status(),
             Err(_) => return unavailable(TargetsFactsUnavailableReason::IndexUnavailable),
         };
-        if index_status.commit_oid != pixel_index::gitsync::rev_parse_head(&self.root) {
+        if index_status.commit_oid != self.git_state.fresh_head(&self.root) {
             return unavailable(TargetsFactsUnavailableReason::IndexStale);
         }
 
@@ -2978,6 +3082,7 @@ impl Service {
                 "recursive": self.watch.map(|w| w.recursive),
                 "watched_dirs": self.watch.map(|w| w.dirs),
                 "registration_ms": self.watch.map(|w| w.elapsed.as_millis()),
+                "git_dir": self.watch.map(|w| w.git_dir),
             },
             "facts": facts_visibility(&self.root),
             "embedding": embedding_status(&self.root, self.embedder.is_some()),
@@ -7867,6 +7972,146 @@ mod tests {
             graph_before,
             "a fact request must not refresh a stale graph"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A committed `login.rs` in a git fixture, served by a service whose
+    /// git-state cache outlives the test (no TTL expiry mid-assertion).
+    fn cached_git_service(tag: &str) -> (PathBuf, Service) {
+        let root = tmpdir(tag);
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut service = Service::open(&root).unwrap();
+        service.git_state.ttl = Duration::from_secs(600);
+        service.git_state.ref_ttl = Duration::from_secs(600);
+        (root, service)
+    }
+
+    /// The agent rhythm is edit, then ask: the watcher batch in between
+    /// leaves HEAD and the branch cached, and only `git status` runs again,
+    /// so the snapshot still lists the edited file.
+    #[test]
+    fn an_edit_should_refresh_only_the_dirty_list_of_the_snapshot() {
+        let (root, mut service) = cached_git_service("snapshot-after-edit");
+        let before = service.repo_snapshot();
+        assert_eq!(service.git_state.lookups, 3, "head, branch, dirty");
+        assert!(before.dirty.is_empty(), "{before:?}");
+
+        std::fs::write(root.join("login.rs"), "pub fn login_edited() {}\n").unwrap();
+        service.refresh_files(&[("login.rs", false)]);
+        let after = service.repo_snapshot();
+        assert_eq!(
+            service.git_state.lookups, 4,
+            "only the dirty list is looked up again"
+        );
+        assert_eq!(after.dirty, ["login.rs"]);
+        assert_eq!(after.head, before.head);
+        assert_eq!(after.branch, before.branch);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A writing op may move HEAD, the branch and the tree: all three are
+    /// looked up again. Within the TTL nothing is.
+    #[test]
+    fn git_state_cache_should_serve_within_its_ttl_until_cleared() {
+        let (root, mut service) = cached_git_service("snapshot-clear");
+        let first = service.repo_snapshot();
+        let again = service.repo_snapshot();
+        assert_eq!(service.git_state.lookups, 3);
+        assert_eq!(first, again);
+        service.git_state.clear();
+        let _ = service.repo_snapshot();
+        assert_eq!(service.git_state.lookups, 6);
+        service.git_state.ttl = Duration::ZERO;
+        service.git_state.ref_ttl = Duration::ZERO;
+        let _ = service.repo_snapshot();
+        assert_eq!(
+            service.git_state.lookups, 9,
+            "an expired value is looked up again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A commit the watcher saw under `.git` drops HEAD and the branch, so
+    /// the next snapshot names the new commit at once, whatever the TTL.
+    #[test]
+    fn a_head_move_should_drop_the_cached_head() {
+        let (root, mut service) = cached_git_service("snapshot-head-moved");
+        let primed = service.repo_snapshot();
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        assert_eq!(
+            service.repo_snapshot().head,
+            primed.head,
+            "cached until told"
+        );
+        crate::daemon::Corpus::git_moved(&mut service);
+        let moved = service.repo_snapshot();
+        assert_ne!(moved.head, primed.head);
+        assert_eq!(service.git_state.lookups, 6, "head, branch and dirty again");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// HEAD outlives the one-second TTL only while the watch covers `.git`,
+    /// and stops as soon as the watcher may have lost an event.
+    #[test]
+    fn head_should_be_cached_longer_only_while_the_watch_covers_git() {
+        let (root, mut service) = cached_git_service("snapshot-ref-ttl");
+        let report = |git_dir| crate::daemon::WatchReport {
+            dirs: 1,
+            recursive: true,
+            elapsed: Duration::ZERO,
+            git_dir,
+        };
+        service.git_state.ref_ttl = SNAPSHOT_CACHE_TTL;
+        service.note_watch_ready(report(false));
+        assert_eq!(service.git_state.ref_ttl, SNAPSHOT_CACHE_TTL);
+        service.note_watch_ready(report(true));
+        assert_eq!(service.git_state.ref_ttl, WATCHED_REF_TTL);
+        assert_eq!(
+            service.git_state.ttl,
+            Duration::from_secs(600),
+            "the dirty list keeps its own"
+        );
+        service.note_watcher_error("queue overflow");
+        assert_eq!(service.git_state.ref_ttl, SNAPSHOT_CACHE_TTL);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The targets-facts gate reads HEAD fresh, so a commit made outside
+    /// pixel stales the index at once, and the snapshot of that same answer
+    /// carries the HEAD the gate judged, not the one cached before the
+    /// commit: one read per request, shared.
+    #[test]
+    fn targets_facts_should_share_its_fresh_head_with_the_snapshot() {
+        let (root, mut service) = cached_git_service("targets-facts-one-head");
+        let primed = service.repo_snapshot();
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        let moved = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let moved = String::from_utf8(moved.stdout).unwrap().trim().to_string();
+        assert_ne!(primed.head.as_deref(), Some(moved.as_str()));
+
+        let response = service.handle(Request::TargetsFacts {
+            task: "change session".into(),
+            limit: Some(8),
+            relevance_only: false,
+        });
+        assert_eq!(response.data()["reason"], "index_stale", "{response:?}");
+        assert_eq!(
+            response.snapshot.as_ref().and_then(|s| s.head.as_deref()),
+            Some(moved.as_str()),
+            "the snapshot must describe the HEAD the gate judged"
+        );
+        assert_eq!(service.git_state.lookups, 4, "primed 3, then one HEAD read");
         let _ = std::fs::remove_dir_all(&root);
     }
 
