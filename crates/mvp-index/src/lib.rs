@@ -11,6 +11,7 @@
 //! `extract::extract` of the planned files within an optional deadline, and
 //! `link::link`, which decides every site of the generation again.
 
+mod bounded;
 pub mod codec;
 pub mod extract;
 pub mod git_index;
