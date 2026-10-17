@@ -44,10 +44,9 @@ impl Directory {
             if matches!(entry.file_name().to_bytes(), b"." | b"..") {
                 continue;
             }
+            // A mount point's readdir inode can differ from its mounted root.
+            // Snapshot with nofollow statat; open_entry compares it to fstat.
             let stat = fs::statat(&self.0, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)?;
-            if entry.ino() != stat.st_ino {
-                return Err(replaced());
-            }
             entries.push(Entry {
                 name: OsString::from_vec(entry.file_name().to_bytes().to_vec()),
                 stat,
