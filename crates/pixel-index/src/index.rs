@@ -132,11 +132,21 @@ pub fn credential_path(path: &Path) -> bool {
 /// go through this — a divergent walk policy makes freshness signatures
 /// disagree with shard contents.
 pub fn policy_walk(root: &Path) -> ignore::Walk {
+    policy_builder(root, |_| true).build()
+}
+
+/// The [`policy_walk`] builder rooted at `start`, also skipping every entry
+/// `keep` refuses.
+fn policy_builder(
+    start: &Path,
+    keep: impl Fn(&ignore::DirEntry) -> bool + Send + Sync + 'static,
+) -> ignore::WalkBuilder {
     let prune_default = !matches!(
         std::env::var("PIXEL_INDEX_NO_DEFAULT_IGNORES").as_deref(),
         Ok("1") | Ok("true")
     );
-    ignore::WalkBuilder::new(root)
+    let mut builder = ignore::WalkBuilder::new(start);
+    builder
         .hidden(false)
         .require_git(false)
         .git_global(false)
@@ -145,9 +155,25 @@ pub fn policy_walk(root: &Path) -> ignore::Walk {
             if name == ".git" || name == SHARD_DIR {
                 return false;
             }
-            !(prune_default && is_ignored_dir_name(&name))
-        })
-        .build()
+            !(prune_default && is_ignored_dir_name(&name)) && keep(e)
+        });
+    builder
+}
+
+/// Whether [`policy_file_paths`] would list `rel`, decided by walking only
+/// from `start` (a directory below `root` the full walk enters, `""` for
+/// the root) down the components of `rel`. The walk reads the ignore files
+/// of `start`'s parents, so it applies the rules the full walk would have
+/// gathered on its way down.
+pub fn policy_admits_from(root: &Path, start: &str, rel: &str) -> bool {
+    let target = root.join(rel);
+    let chain = target.clone();
+    policy_builder(&root.join(start), move |entry| {
+        chain.starts_with(entry.path())
+    })
+    .build()
+    .filter_map(Result::ok)
+    .any(|entry| entry.path() == target && entry.file_type().is_some_and(|kind| kind.is_file()))
 }
 
 /// Collect repository-relative regular files admitted by the indexing walk policy.
@@ -167,12 +193,18 @@ pub fn policy_file_paths(root: &Path) -> HashSet<String> {
 
 /// Collect admitted files whose bytes are eligible for the text index.
 pub fn policy_indexable_paths(root: &Path) -> HashSet<String> {
-    policy_file_paths(root)
-        .into_iter()
+    indexable_subset(root, &policy_file_paths(root))
+}
+
+/// The admitted `files` whose bytes are eligible for the text index.
+pub fn indexable_subset(root: &Path, files: &HashSet<String>) -> HashSet<String> {
+    files
+        .iter()
         .filter(|relative| {
             read_regular_bounded(&root.join(relative), MAX_FILE_BYTES)
                 .is_ok_and(|content| !content[..content.len().min(8192)].contains(&0))
         })
+        .cloned()
         .collect()
 }
 

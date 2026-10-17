@@ -173,6 +173,11 @@ under it are written without following links (`pixel_git::nofollow`,
 `SQLITE_OPEN_NOFOLLOW`; the `build.lock` and `graph.lock` lock files through
 `nofollow::open_lock`), and a path read from a shard or the graph is used only
 inside the repository (`pixel_git::repo_path::confine`); see T6.
+The daemon keeps the history store it opened (`Service::cached_facts`) and
+checks the device and inode of `history.db` before every facts or status
+request: the store, and the trust verdict that came with it, are reused only
+on that same file. A db written by a checkout, another process or a relinked
+`.pixel/` is another file, so it is opened again, `sidecar::check` included.
 With the Rust source switch on (the default unless
 `PIXEL_GRAPH_SOURCE_RUST=v1`) and a `Cargo.toml` at the root, or with
 `PIXEL_GRAPH_SOURCE_RUBY=hybrid`, the
