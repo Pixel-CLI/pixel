@@ -1549,3 +1549,51 @@ fn requests_should_still_answer_after_a_panic_poisoned_both_locks() {
     assert_eq!(after["graph"]["present"], true, "{after}");
     assert_eq!(after["graph"]["files"], 2, "{after}");
 }
+
+/// Two writers rebuilding one root's graph at once (a daemon and a
+/// `--no-daemon` run, here two services) used to share the temporary file
+/// and rename over each other's database (#1104). With the graph lock they
+/// take turns: every rebuild succeeds and one clean database remains.
+#[test]
+fn two_builders_on_one_root_should_take_turns_and_leave_one_clean_graph() {
+    let root = fixture("two-builders");
+    let builders: Vec<_> = (0..2)
+        .map(|_| {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let mut service = Service::open(&root).unwrap();
+                for _ in 0..3 {
+                    ok(&mut service, Request::Graph { if_stale: false });
+                }
+            })
+        })
+        .collect();
+    for builder in builders {
+        builder.join().expect("every rebuild succeeds");
+    }
+    let state = root.join(pixel_index::index::SHARD_DIR);
+    let store = GraphStore::open(&state.join(GRAPH_DB_FILE)).unwrap();
+    let integrity: String = store
+        .conn()
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    assert_eq!(store.counts().unwrap().0, 2, "both fixture files");
+    let leftovers: Vec<String> = std::fs::read_dir(&state)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".graph-rebuild-"))
+        .collect();
+    assert_eq!(leftovers, Vec::<String>::new());
+}
+
+/// A watcher batch never waits on the graph lock; a graph op does.
+#[test]
+fn graph_lock_try_acquire_should_be_refused_while_another_holds_it() {
+    let root = tmpdir("graph-lock");
+    let db = root.join(GRAPH_DB_FILE);
+    let held = GraphLock::acquire(&db).unwrap();
+    assert!(GraphLock::try_acquire(&db).is_none(), "held elsewhere");
+    drop(held);
+    assert!(GraphLock::try_acquire(&db).is_some(), "free again");
+}

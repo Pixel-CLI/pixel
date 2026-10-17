@@ -581,7 +581,16 @@ impl Service {
             .map(|(path, outcome)| (path.as_str(), *outcome == RefreshOutcome::Excluded))
             .collect();
         let db = self.graph_db_path();
-        if db.exists() {
+        let lock = if db.exists() {
+            GraphLock::try_acquire(&db)
+        } else {
+            None
+        };
+        if db.exists() && lock.is_none() {
+            // Another process holds the graph (a rebuild that will swap the
+            // file): leave it to the next graph op, which sees the drift.
+            self.graph = None;
+        } else if db.exists() {
             if let Err(error) =
                 bridge::update_files_cached(&self.root, &db, &graph_files, &mut self.hash_cache)
             {
@@ -722,7 +731,12 @@ impl Service {
         let db = self.graph_db_path();
         self.graph.take();
         let started = Instant::now();
-        if let Err(error) = bridge::apply_tree_delta(&self.root, &db, delta) {
+        // Released before a fallback rebuild, which takes it again.
+        let applied = {
+            let _lock = GraphLock::acquire(&db)?;
+            bridge::apply_tree_delta(&self.root, &db, delta)
+        };
+        if let Err(error) = applied {
             let mut info = self.full_rebuild_info("incremental_failed")?;
             info["incremental_error"] = json!(error);
             return Ok(info);
@@ -750,6 +764,10 @@ impl Service {
     fn rebuild_graph(&mut self) -> Result<(Value, u64), String> {
         let db = self.graph_db_path();
         let tmp = db.with_file_name(format!(".graph-rebuild-{}.db", std::process::id()));
+        // Held through the swap: no other writer, in this process or
+        // another, builds into the same temporary file or renames over the
+        // database while this one does.
+        let _lock = GraphLock::acquire(&db)?;
         self.graph.take();
         remove_sqlite_files(&tmp)?;
         let started = Instant::now();
@@ -761,6 +779,14 @@ impl Service {
                 .conn()
                 .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
                 .map_err(|error| error.to_string())?;
+        }
+        // Fold the live database's WAL into it and empty it before the
+        // sidecars go: a reader still on the old file loses no committed
+        // page, and the new file never meets a WAL that is not its own.
+        if db.exists()
+            && let Ok(live) = GraphStore::open(&db)
+        {
+            let _ = live.conn().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
         }
         remove_sqlite_sidecars(&db)?;
         std::fs::rename(&tmp, &db).map_err(|error| {
@@ -5007,6 +5033,48 @@ fn graph_build_outcome(built: Option<&Value>, elapsed_ms: u64) -> (Value, Value)
 fn merge_build_info(out: &mut Value, built: Option<Value>) {
     if let (Some(info), Some(obj)) = (built, out.as_object_mut()) {
         obj.insert("graph_build".into(), info);
+    }
+}
+
+/// The file beside the graph database whose `flock` serializes every
+/// write to the graph across processes.
+const GRAPH_LOCK_FILE: &str = "graph.lock";
+
+/// An exclusive hold on [`GRAPH_LOCK_FILE`] for one graph write: a full
+/// rebuild and its swap, an incremental update, a watcher batch. The text
+/// index has had `pixel_index::BuildLock` for this; the graph had none, so
+/// a `--no-daemon` run beside a live daemon could unlink the daemon's
+/// `-wal`/`-shm` and rename a database over the file it was writing
+/// (#1104). Released on drop, or by the kernel when the process dies.
+struct GraphLock(std::fs::File);
+
+impl GraphLock {
+    fn open(db: &Path) -> Result<std::fs::File, String> {
+        let path = db.with_file_name(GRAPH_LOCK_FILE);
+        pixel_git::nofollow::open_lock(&path)
+            .map_err(|error| format!("open graph lock {}: {error}", path.display()))
+    }
+
+    /// Wait for the lock: what a graph op does, since it owes a fresh graph.
+    fn acquire(db: &Path) -> Result<Self, String> {
+        let file = Self::open(db)?;
+        fs2::FileExt::lock_exclusive(&file).map_err(|error| format!("lock graph: {error}"))?;
+        Ok(Self(file))
+    }
+
+    /// Take the lock only if it is free: what a watcher batch does, since
+    /// the loop must not wait out another process's rebuild. `None` when it
+    /// is held; the next graph op walks the tree and repairs the drift.
+    fn try_acquire(db: &Path) -> Option<Self> {
+        let file = Self::open(db).ok()?;
+        fs2::FileExt::try_lock_exclusive(&file).ok()?;
+        Some(Self(file))
+    }
+}
+
+impl Drop for GraphLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
     }
 }
 
