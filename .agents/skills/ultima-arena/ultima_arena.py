@@ -552,6 +552,14 @@ class Herdr:
             return max(strings, key=len) if strings else ""
         return res["out"]
 
+    def read_pane(self, pane: str, source: str, lines: int) -> str:
+        res = self.run("pane", "read", pane, "--source", source, "--lines", str(lines))
+        data = res["json"]
+        if isinstance(data, dict):
+            strings = [v for v in _walk_strings(data) if len(v) > 20]
+            return max(strings, key=len) if strings else ""
+        return res["out"]
+
     def keys(self, name: str, *keys: str) -> None:
         self.run("agent", "send-keys", name, *keys)
 
@@ -860,7 +868,9 @@ class Arena:
         if cell.cli.name == "pi":
             self.cfg.out.mkdir(parents=True, exist_ok=True)
             cell.pi_session_dir = pathlib.Path(tempfile.mkdtemp(prefix="pi-session-", dir=self.cfg.out))
-            agent_args = ["--tui-mode", "regular", "--session-dir", str(cell.pi_session_dir)]
+            agent_args = ["--tui-mode", "fullscreen", "--session-dir", str(cell.pi_session_dir)]
+        elif cell.cli.name == "claude":
+            agent_args = ["--verbose"]
         for attempt in range(4):
             res = self.h.start(cell.name, cell.cli.kind, cell.pane, *agent_args)
             if res["rc"] == 0:
@@ -885,6 +895,9 @@ class Arena:
                 time.sleep(self.cfg.poll_s)
                 continue
             agent = self.h.get(cell.name)
+            if not agent:
+                self.fail_lost_agent(cell, "after start")
+                return False
             if agent.get("agent_status") == "idle" and agent.get("interactive_ready", True):
                 stable += 1
                 if stable >= 2:
@@ -903,6 +916,9 @@ class Arena:
 
     def send_prompt(self, cell: Cell) -> bool:
         agent = self.h.get(cell.name)
+        if not agent:
+            self.fail_lost_agent(cell, "before prompt dispatch")
+            return False
         cell.seq0 = int(agent.get("state_change_seq", cell.seq0))
         cell.screen0 = cell.last_screen = self.h.read(cell.name, "visible", 60)
         cell.t_prompt_ms = now_ms()
@@ -916,6 +932,15 @@ class Arena:
 
     def record_since(self, cell: Cell) -> bool:
         return bool(turn_records(read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE), cell.t_prompt_ms))
+
+    def fail_lost_agent(self, cell: Cell, phase: str) -> None:
+        cell.status = "start-failed"
+        cell.note = f"Herdr no longer reports the agent {phase}"
+        cell.scrollback = self.h.read_pane(cell.pane, "recent-unwrapped", SCROLLBACK_LINES)
+        if not cell.scrollback:
+            cell.scrollback = self.h.read(cell.name, "recent-unwrapped", SCROLLBACK_LINES)
+        cell.excerpt = "\n".join(cell.scrollback.splitlines()[-25:])
+        self.say(f"{cell.name}: agent disappeared {phase}; saved the pane output")
 
     def evidence_ready(self, cell: Cell, screen: str) -> bool:
         """Whether this turn has submitted its brief and displayed its own metrics relay."""
@@ -978,6 +1003,12 @@ class Arena:
                 cell.stable = cell.stable + 1 if screen == cell.last_screen else 0
                 cell.last_screen = screen
                 agent = self.h.get(cell.name)
+                if not agent:
+                    self.fail_lost_agent(cell, "after prompt dispatch")
+                    cell.elapsed_s = round(time.time() - cell.sent_at, 1)
+                    cell.t_done_ms = now_ms()
+                    pending.remove(cell)
+                    continue
                 moved = int(agent.get("state_change_seq", cell.seq0)) != cell.seq0 or screen != cell.screen0
                 finished = agent.get("agent_status") in FINISHED and moved and cell.stable >= STABLE_POLLS
                 if cell.cli.name == "pi" and cell.pi_session_dir:
@@ -1027,6 +1058,19 @@ class Arena:
             cell.metrics = {"verdict": "N/A"}
             return
         cell.scrollback = self.h.read(cell.name, "recent-unwrapped", SCROLLBACK_LINES)
+        actions = read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE)
+        until = cell.t_done_ms or None
+        preliminary_metrics = judge_metrics(cell.scrollback, actions, cell.t_prompt_ms, until)
+        if (
+            cell.cli.name == "codex"
+            and cell.status in ("done", "evidence-complete")
+            and preliminary_metrics["verdict"] != "PASS"
+            and shell_call_count(cell.scrollback) > 0
+        ):
+            self.h.keys(cell.name, "ctrl+t")
+            cell.keys_sent.append("ctrl+t")
+            cell.events.append("expanded Codex tool output once after the turn ended to inspect the metrics evidence")
+            cell.scrollback = self.h.read(cell.name, "recent-unwrapped", SCROLLBACK_LINES)
         cell.submit_line = prompt_submit_line(cell.scrollback)
         logged = judge_brief(read_jsonl(self.cfg.repo / ".pixel" / FEEDBACK_FILE), cell.cli.provider, cell.t_prompt_ms)
         shown = brief_on_screen(cell.scrollback, cell.submit_line)
@@ -1053,8 +1097,6 @@ class Arena:
                 evidence_source = "agy conversation store"
             evidence += "\n" + injected
         cell.brief = judge_brief_delivery(logged, shown, evidence_source)
-        actions = read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE)
-        until = cell.t_done_ms or None
         relay = pi_metrics if pi_metrics is not None else judge_metrics(evidence, actions, cell.t_prompt_ms, until)
         cell.shell_calls = max(
             cell.pi_transcript.get("shell_calls", 0) if cell.cli.name == "pi" else 0,

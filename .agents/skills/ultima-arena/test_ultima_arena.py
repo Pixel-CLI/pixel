@@ -100,6 +100,9 @@ elif a[:2] == ["pane", "rename"]:
     out({"result": {}})
 elif a[:2] == ["pane", "layout"]:
     out({"result": {"layout": {}}})
+elif a[:2] == ["pane", "read"]:
+    g = next((agent for agent in st["agents"].values() if agent["pane"] == a[2]), None)
+    print("\n".join(g["screen"] + g["after"]) if g else "")
 elif a[:2] == ["agent", "list"]:
     agents = list(st.get("external_agents", []))
     for name, g in st["agents"].items():
@@ -132,6 +135,11 @@ elif a[:2] == ["agent", "get"]:
     if not g:
         print(json.dumps({"error": {"code": "agent_not_found"}}))
         sys.exit(1)
+    if g.get("lost_after_prompt"):
+        g["lost_after_prompt"] = False
+        g["screen"].append("pi exiting due to uncaughtException: Rendered line47 exceeds terminalwidth (104>102)")
+        out({"result": {}})
+        sys.exit(0)
     if (g["status"] == "working" or g.get("silent")) and g["after"] and time.time() >= g["ready_at"]:
         if not g.get("silent"):  # a silent agent's state never moves, as live Herdr shows pi
             # As live Herdr reports it: a finished turn is `idle` for pi, `done` for the others.
@@ -157,6 +165,9 @@ elif a[:2] == ["agent", "send-keys"]:
             g["dialog"] = ""
         elif g["dialog"] and g["kind"] == "agy" and k == "esc":
             g["dialog"] = ""
+        elif k == "ctrl+t" and g["kind"] == "codex" and g.get("status") == "done" and g.get("collapsed_box"):
+            g["screen"].append(g["collapsed_box"])
+            st["log"].append(["expanded", a[2], g["status"]])
     out({"result": {}})
 elif a[:2] == ["agent", "prompt"]:
     name, text = a[2], a[3]
@@ -170,7 +181,7 @@ elif a[:2] == ["agent", "prompt"]:
     if scen != "no-brief":
         append(REPO + "/.pixel/brief-feedback.jsonl", {"t": "prompt", "ts": t, "session": sess, "provider": pr, "bytes": 900, "kind": "strong", "injected": ["crates/pixel/src/task_hook.rs"]})
         append(REPO + "/.pixel/brief-feedback.jsonl", {"t": "part", "ts": t, "session": sess, "provider": pr, "bytes": 900, "late": False})
-    if scen != "no-call":
+    if scen not in ("no-call", "agent-lost"):
         append(REPO + "/.pixel/actions.jsonl", {"invocation_id": "123-18df019d6%s-0" % i6, "ts_ms": t + 1, "pid": 1,
                "command": "search-content", "args": "-F start_brief crates/pixel/src", "cwd": REPO, "outcome": "ok", "duration_ms": 12})
     if cli == "pi":
@@ -183,7 +194,7 @@ elif a[:2] == ["agent", "prompt"]:
         ]
         if scen != "pi-stale-transcript":
             pi_rows.append({"type": "custom_message", "customType": "pixel-brief", "timestamp": iso(t + 1), "content": "[PIXEL:BRIEF] kind: flow"})
-        if scen not in ("no-call", "pi-stale-transcript"):
+        if scen not in ("no-call", "agent-lost", "pi-stale-transcript"):
             command = "pixel search-content -F start_brief crates/pixel/src"
             if scen == "pi-wrong-command":
                 command = "pixel impact start_brief"
@@ -196,7 +207,7 @@ elif a[:2] == ["agent", "prompt"]:
             pi_rows.append({"type": "message", "timestamp": iso(t + 4), "message": {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "answer"}]}})
         with open(session_dir + "/session.jsonl", "w") as transcript:
             transcript.writelines(json.dumps(row) + "\n" for row in pi_rows)
-    after = [] if scen == "no-call" else ["$ pixel search-content -F start_brief crates/pixel/src", "crates/pixel/src/task_hook.rs:228:pub fn start_brief"]
+    after = [] if scen in ("no-call", "agent-lost") else ["$ pixel search-content -F start_brief crates/pixel/src", "crates/pixel/src/task_hook.rs:228:pub fn start_brief"]
     box = None if scen in ("no-call", "claim-only") else "🟩 pixel search-content ❀ 12.3ms ❀ #%s" % ("ffffff" if scen == "orphan-box" else i6)
     if cli in ("claude", "codex", "pi"):
         after.append("🟩 pixel prompt-submit ❀ 41ms")
@@ -209,8 +220,10 @@ elif a[:2] == ["agent", "prompt"]:
         if box:
             rows.append((90, box))
         agy_store(sess, rows)
-    elif box and not (cli == "pi" and scen in ("pi-stale-screen", "pi-wrong-command", "pi-no-result", "pi-stale-transcript")):
+    elif box and not (cli == "codex" and scen == "codex-collapsed") and not (cli == "pi" and scen in ("pi-stale-screen", "pi-wrong-command", "pi-no-result", "pi-stale-transcript")):
         after.append(box)
+    if cli == "codex" and scen == "codex-collapsed":
+        g["collapsed_box"] = box
     if cli == "pi" and scen in ("pi-stale-screen", "pi-wrong-command", "pi-no-result", "pi-stale-transcript"):
         after = [line for line in after if not line.startswith("$ pixel") and not line.startswith("🟩 pixel search-content")]
     if scen == "claim-only":
@@ -222,6 +235,7 @@ elif a[:2] == ["agent", "prompt"]:
         g["silent"] = True
     else:
         g["status"] = "working"
+    g["lost_after_prompt"] = scen == "agent-lost"
     g["ready_at"] = time.time() + 0.15
     out({"result": {}})
 else:
@@ -487,8 +501,40 @@ class RunTests(unittest.TestCase):
         self.assertTrue(pathlib.Path(transcript["transcript_path"]).is_file())
         self.assertTrue((fx.tmp / "out" / "pi.evidence.json").is_file())
         starts = [event for event in fx.read_state()["log"] if event[0] == "start" and event[1] == "ultima-pi"]
-        self.assertEqual(starts[0][3][0:2], ["--tui-mode", "regular"])
+        self.assertEqual(starts[0][3][0:2], ["--tui-mode", "fullscreen"])
         self.assertIn("--session-dir", starts[0][3])
+
+    def test_codex_collapsed_tool_output_is_expanded_once_after_its_turn_finishes(self):
+        fx = Fixture(self)
+        fx.scenarios = {"codex": "codex-collapsed"}
+        rc, out, err = fx.run()
+        self.assertEqual(rc, 0, out + err)
+        codex = fx.receipt()["clis"]["codex"]
+        self.assertEqual((codex["status"], codex["metrics"]["verdict"]), ("done", "PASS"))
+        self.assertEqual([key for name, key in fx.read_state()["keylog"] if name == "ultima-codex"].count("ctrl+t"), 1)
+        self.assertEqual([event[2] for event in fx.read_state()["log"] if event[0] == "expanded" and event[1] == "ultima-codex"], ["done"])
+        self.assertIn("expanded Codex tool output once", " ".join(codex["events"]))
+
+    def test_lost_agent_fails_prompt_early_and_saves_its_pane_output(self):
+        fx = Fixture(self)
+        fx.scenarios = {"pi": "agent-lost"}
+        rc, out, err = fx.run(("--timeout", "60"))
+        self.assertEqual(rc, 1, out + err)
+        pi = fx.receipt()["clis"]["pi"]
+        self.assertEqual(pi["status"], "start-failed")
+        self.assertEqual(pi["brief"]["verdict"], "PASS")
+        self.assertEqual(pi["metrics"]["verdict"], "NO-CALL")
+        self.assertIn("pi exiting due to uncaughtException", pi["screen_excerpt"])
+        self.assertIn("no longer reports the agent after prompt dispatch", pi["note"])
+        self.assertNotIn("ctrl+c", pi["keys_sent"])
+        self.assertLess(pi["elapsed_s"], 3)
+
+    def test_claude_starts_with_verbose_delivery_output(self):
+        fx = Fixture(self)
+        rc, out, err = fx.run()
+        self.assertEqual(rc, 0, out + err)
+        claude = [event for event in fx.read_state()["log"] if event[0] == "start" and event[1] == "ultima-claude"][0]
+        self.assertEqual(claude[3], ["--verbose"])
 
     def test_pi_transcript_rejects_stale_calls_and_unpaired_results(self):
         for scenario in ("pi-stale-transcript", "pi-wrong-command", "pi-no-result"):
