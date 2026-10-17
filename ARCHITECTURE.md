@@ -552,7 +552,10 @@ envelope talks to the daemon socket directly.
   a kept or updated graph. `prepare-repo --json`
   moves both into `timings.graph`, beside `timings.index` (how each index
   layer was obtained) and `timings.total_ms`.
-- History facts are ingested by a dedicated low-priority thread. Queries
+- History facts are ingested by a dedicated low-priority thread. Before
+  fetching diffs, phase B measures changed blobs with bounded `ls-tree -l -z`
+  batches per commit (and parent tree for rename sources); failed batches
+  fall back to individual lookups so large blobs remain excluded. Queries
   never wait on ingest; they answer from what is already in `history.db` and
   carry its `index_state` (`diffs_evicted`, `diff_coverage_since`). Diff text
   is bounded by an age window (`PIXEL_HISTORY_WINDOW_DAYS`, default 365) and

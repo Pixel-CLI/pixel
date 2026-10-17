@@ -18,6 +18,7 @@
 //! every tick so queries are never blocked: each tick processes a bounded
 //! batch then returns; a ref move just enqueues another tick.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use rusqlite::params;
@@ -781,7 +782,7 @@ fn complete_phase_b(store: &mut FactsStore) -> Result<()> {
 }
 
 /// For one commit, gather its changed paths, measure blob sizes via
-/// `cat-file --batch-check`, and learn any over-cap paths as poison forever.
+/// bounded `ls-tree` batches, and learn any over-cap paths as poison forever.
 /// Returns the number of newly-poisoned paths.
 fn measure_commit_blobs(store: &mut FactsStore, cid: i64) -> Result<u64> {
     let paths = changed_paths_for_commit(store, cid)?;
@@ -812,9 +813,8 @@ fn changed_paths_for_commit(store: &FactsStore, cid: i64) -> Result<Vec<String>>
     Ok(v)
 }
 
-/// Measure (added_size, removed_size) for each changed path of a commit using
-/// `git cat-file --batch-check` on the blob OIDs at the commit's tree. Since
-/// the runner's stdin is null, we pass OIDs as positional args.
+/// Measure changed paths in bounded batches, including rename sources in the
+/// parent tree. Keep the result in input order; deleted/non-blob entries are 0.
 fn measure_blob_sizes(
     store: &FactsStore,
     oid: &str,
@@ -825,26 +825,88 @@ fn measure_blob_sizes(
         max_output_bytes: Some(1_048_576),
     };
     let cmd_runner = pixel_git::GitRunner::with_options(store.root(), opts);
-    let mut out = Vec::new();
-    for path in paths {
-        let size_new = blob_size(&cmd_runner, oid, path);
-        // The old name of a rename only exists in the parent tree.
-        let size_old = if let Some(old) = old_path_for(store, path) {
-            blob_size(&cmd_runner, &format!("{oid}^"), &old)
+    let current: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let new_sizes = blob_sizes(&cmd_runner, oid, &current);
+    let old_paths: Vec<Option<String>> =
+        paths.iter().map(|path| old_path_for(store, path)).collect();
+    let renamed: Vec<&str> = old_paths.iter().filter_map(Option::as_deref).collect();
+    let old_sizes = blob_sizes(&cmd_runner, &format!("{oid}^"), &renamed);
+    Ok(paths
+        .iter()
+        .zip(old_paths)
+        .map(|(path, old)| {
+            let added = new_sizes.get(path.as_str()).copied().unwrap_or(0);
+            let removed = old
+                .as_deref()
+                .and_then(|p| old_sizes.get(p))
+                .copied()
+                .unwrap_or(0);
+            (path.to_owned(), (added, removed))
+        })
+        .collect())
+}
+
+/// Bound argv below platform limits and output below the runner's 1 MiB cap.
+const TREE_BATCH_PATHS: usize = 128;
+const TREE_BATCH_PATH_BYTES: usize = 32 * 1024;
+
+fn blob_sizes(runner: &pixel_git::GitRunner, rev: &str, paths: &[&str]) -> HashMap<String, u64> {
+    let mut sizes = HashMap::with_capacity(paths.len());
+    let mut remaining = paths;
+    while !remaining.is_empty() {
+        let mut bytes = 0;
+        let count = remaining
+            .iter()
+            .take(TREE_BATCH_PATHS)
+            .take_while(|path| {
+                bytes += path.len() + 1;
+                bytes <= TREE_BATCH_PATH_BYTES
+            })
+            .count()
+            .max(1);
+        let (batch, rest) = remaining.split_at(count);
+        let mut args = vec![
+            "--literal-pathspecs",
+            "ls-tree",
+            "-l",
+            "-z",
+            "--end-of-options",
+            rev,
+            "--",
+        ];
+        args.extend_from_slice(batch);
+        if let Ok(output) = runner.run(&args) {
+            for record in output.split(|b| *b == 0) {
+                if let Some(tab) = record.iter().position(|b| *b == b'\t') {
+                    let path = String::from_utf8_lossy(&record[tab + 1..]).into_owned();
+                    let size = parse_ls_tree_size(&String::from_utf8_lossy(&record[..tab]));
+                    sizes.insert(path, size);
+                }
+            }
         } else {
-            0
-        };
-        out.push((path.clone(), (size_new, size_old)));
+            // A failed/capped batch must not hide a large blob that a single
+            // bounded lookup can still measure.
+            for path in batch {
+                sizes.insert((*path).to_owned(), blob_size(runner, rev, path));
+            }
+        }
+        remaining = rest;
     }
-    Ok(out)
+    sizes
 }
 
 /// Size of the blob at `path` in `rev`'s tree; 0 when the entry is missing
-/// or is not a blob (a directory, a submodule). One `ls-tree -l` per path:
-/// `cat-file --batch-check` only reads objects from stdin and rejected the
-/// argument, so every size read as 0 and no blob was ever learned as poison.
+/// or is not a blob (a directory, a submodule). Fallback for a failed batch.
 fn blob_size(runner: &pixel_git::GitRunner, rev: &str, path: &str) -> u64 {
-    match runner.run(&["ls-tree", "-l", "--end-of-options", rev, "--", path]) {
+    match runner.run(&[
+        "--literal-pathspecs",
+        "ls-tree",
+        "-l",
+        "--end-of-options",
+        rev,
+        "--",
+        path,
+    ]) {
         Ok(bytes) => parse_ls_tree_size(&String::from_utf8_lossy(&bytes)),
         Err(_) => 0,
     }
@@ -1890,6 +1952,78 @@ b
         );
         assert_eq!(blob_size(&runner, &first, "missing.txt"), 0);
         assert_eq!(blob_size(&runner, "not-a-rev", "a.txt"), 0);
+    }
+
+    #[test]
+    fn batched_blob_sizes_preserve_exact_paths_across_batches_and_revisions() {
+        let dir = init_repo();
+        let root = dir.path();
+        let mut names: Vec<String> = (0..TREE_BATCH_PATHS + 1)
+            .map(|i| format!("dir/file-{i}"))
+            .collect();
+        names.extend(
+            [
+                "space name",
+                "tab\tname",
+                "line\nname",
+                "literal*",
+                "literal-other",
+                "-dash",
+            ]
+            .map(str::to_owned),
+        );
+        let contents: Vec<Vec<u8>> = names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| vec![b'x'; i + 1])
+            .collect();
+        let files: Vec<(&str, &[u8])> = names
+            .iter()
+            .zip(&contents)
+            .map(|(p, bytes)| (p.as_str(), bytes.as_slice()))
+            .collect();
+        let first = commit(root, &files, "distinct sizes including unusual paths");
+        git(root, &["rm", "--", "space name"]);
+        let second = commit(root, &[("literal*", b"updated")], "delete and change");
+        let mut paths: Vec<&str> = names.iter().map(String::as_str).collect();
+        paths.extend(["missing", "dir"]);
+        let runner = pixel_git::GitRunner::with_options(root, GitOptions::default());
+        let before = blob_sizes(&runner, &first, &paths);
+        let after = blob_sizes(&runner, &second, &paths);
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(before.get(name).copied(), Some((i + 1) as u64), "{name:?}");
+            let expected = match name.as_str() {
+                "space name" => None,
+                "literal*" => Some(7),
+                _ => Some((i + 1) as u64),
+            };
+            assert_eq!(after.get(name).copied(), expected, "{name:?}");
+        }
+        assert_eq!(before.get("dir").copied().unwrap_or(0), 0);
+        assert_eq!(before.get("missing"), None);
+        assert!(blob_sizes(&runner, &first, &[]).is_empty());
+        assert_eq!(
+            blob_sizes(&runner, "missing-rev", &["literal*"]).get("literal*"),
+            Some(&0)
+        );
+    }
+
+    #[test]
+    fn capped_tree_batch_falls_back_without_losing_blob_sizes() {
+        let dir = init_repo();
+        let root = dir.path();
+        let oid = commit(root, &[("a", b"short"), ("b", b"longer")], "two blobs");
+        // Each record fits separately, but their combined output exceeds 90B.
+        let runner = pixel_git::GitRunner::with_options(
+            root,
+            GitOptions {
+                max_output_bytes: Some(90),
+                ..GitOptions::default()
+            },
+        );
+        let sizes = blob_sizes(&runner, &oid, &["a", "b"]);
+        assert_eq!(sizes.get("a"), Some(&5));
+        assert_eq!(sizes.get("b"), Some(&6));
     }
 
     #[test]
