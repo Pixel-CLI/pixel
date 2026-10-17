@@ -400,10 +400,20 @@ fn the_brief_command_should_print_its_decision_as_json_beside_the_brief() {
     assert_eq!(decision["bytes"].as_u64().unwrap(), text.len() as u64);
     assert_eq!(decision["answered"], 4);
     assert_eq!(decision["sha256"].as_str().unwrap().len(), 64);
-    // The decision is also the one line the log kept, minus the brief.
+    // The decision fields match exactly; only the log adds provenance.
     let mut kept = decision.clone();
     kept.as_object_mut().unwrap().remove("brief");
-    assert_eq!(logged(&root), [kept]);
+    let mut records = logged(&root);
+    assert_eq!(records.len(), 1);
+    let provenance = records[0]
+        .as_object_mut()
+        .unwrap()
+        .remove("provenance")
+        .unwrap();
+    assert_eq!(provenance["schema_version"], 1);
+    assert_eq!(provenance["source"], "brief");
+    assert_eq!(provenance["build_commit"], env!("PIXEL_BUILD_COMMIT"));
+    assert_eq!(records, [kept]);
 }
 
 #[test]

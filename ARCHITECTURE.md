@@ -251,7 +251,8 @@ session is known. Older records without provenance remain readable and their
 build/context is unknown, never attributed to the current binary.
 
 This is partial usage observation, not an exhaustive audit: hooks exit through
-their own feedback path, native search fallback writes no action, and help,
+their own feedback path, standalone `brief` writes only its decision log,
+native search fallback writes no action, and help,
 argument-parse errors or killed processes may have no record. Core, plugin and
 Pixel-backed compatibility-search actions use the existing bounded 300 ms
 `finish_flush` before exit; disk errors or a timeout may still lose records.

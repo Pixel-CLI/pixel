@@ -7169,10 +7169,15 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(lines[0]).unwrap(),
-            finished.record.to_json()
-        );
+        let mut logged = serde_json::from_str::<serde_json::Value>(lines[0]).unwrap();
+        let provenance = logged
+            .as_object_mut()
+            .unwrap()
+            .remove("provenance")
+            .unwrap();
+        assert_eq!(provenance["schema_version"], 1);
+        assert_eq!(provenance["source"], "brief");
+        assert_eq!(logged, finished.record.to_json());
         // The same decision with no log leaves nothing behind.
         let quiet = scratch_dir("absent");
         let mut other = Fake::new();
