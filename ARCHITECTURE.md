@@ -710,7 +710,9 @@ its own extension point:
   only where each host's configuration already exists. Gemini: a
   `BeforeAgent` hook in `~/.gemini/settings.json`. OpenCode:
   `plugins/pixel-brief.js` in `~/.config/opencode` (`$XDG_CONFIG_HOME`
-  honoured), whose `chat.message` hook runs `pixel brief`. Devin: the task
+  honoured), whose V2 `session.hook("prompt")` handler runs `pixel brief`
+  and whose `context` hook adds the result to the next request's system
+  prompt. Devin: the task
   events in its hooks file, `prompt-submit` among them; that entry alone sets
   `show_output`, because Devin draws neither `systemMessage` nor a hook's
   stdout or stderr, and its `✱ Hook completed: <command>` line is the only
@@ -865,8 +867,8 @@ host that has a prompt hook: Claude Code, Codex and Devin through
 `task-event`, Gemini through `BeforeAgent`, Antigravity through
 `PreInvocation`, and Pi through its package (`extensions/pixel-brief.ts`),
 which sends a `brief_only` `task-event` (`start_brief` serves
-`TaskProvider::Pi` only for that marker). OpenCode (`plugins/pixel-brief.js`)
-runs `pixel brief` instead. A prompt starts one
+`TaskProvider::Pi` only for that marker). OpenCode (`plugins/pixel-brief.js`,
+V2 `prompt` hook) runs `pixel brief` instead. A prompt starts one
 by its shape (`brief_signal`), the typed text only, the last paragraph of a
 long untagged paste:
 
