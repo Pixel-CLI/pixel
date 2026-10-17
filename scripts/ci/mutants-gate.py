@@ -410,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.outcomes_root:
         counts, survivors = tally(args.outcomes_root)
         failure = outcome_failure(mutants, counts)
-        if mutants:
+        if mutants or counts:
             complete = sum(counts.values()) == mutants and set(counts) <= set(OUTCOME_NAMES.values())
             status = "tested" if complete else "incomplete"
             message = (

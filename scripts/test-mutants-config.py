@@ -885,6 +885,15 @@ class ShardedMutantsGate(unittest.TestCase):
         self.assertIn("2 mutant(s) listed, 0 reached a verdict", result.stdout)
         self.assertIn("**verdict:** `incomplete`", result.stdout)
 
+    def test_outcomes_for_an_empty_listing_are_incomplete_not_vacuous(self):
+        result, _ = self.run_gate(
+            0, "--outcomes-root", "{root}/shards",
+            shards=[("mutants-out-0", ("CaughtMutant",))],
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("**mutants listed:** 0", result.stdout)
+        self.assertIn("**verdict:** `incomplete`", result.stdout)
+
     def test_the_baseline_is_not_counted_as_a_mutant(self):
         """Counting it would turn every complete run into a mismatch."""
         result, _ = self.run_gate(
