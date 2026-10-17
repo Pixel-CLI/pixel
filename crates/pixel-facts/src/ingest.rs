@@ -485,7 +485,7 @@ fn store_phase_a_cursor(store: &mut FactsStore, rest: &[String]) -> Result<()> {
 }
 
 fn refresh_refs(store: &mut FactsStore) -> Result<()> {
-    let runner = store.runner();
+    let runner = enumeration_runner(store);
     // heads / remotes / tags
     let refs = runner.run(&["for-each-ref", "--format=%(refname)%00%(objectname)"])?;
     let lines = split_nul_lines(&refs);
@@ -550,18 +550,40 @@ fn split_ref_record(line: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// The store's runner with the cap of a repository-wide enumeration: one
+/// 41-byte line per commit puts `rev-list --branches` past the default 1 MiB
+/// at about 25 500 commits, and one line per ref does the same to
+/// `for-each-ref` on a repository with thousands of tags.
+pub(crate) fn enumeration_runner(store: &FactsStore) -> pixel_git::GitRunner {
+    store
+        .runner()
+        .with_max_output_bytes(Some(pixel_git::ENUMERATION_MAX_OUTPUT_BYTES))
+}
+
+/// The output of an enumeration, `None` when git refused the revision itself
+/// (no `refs/stash`, no reflog): there is nothing to list. Any other failure
+/// (a timeout, an output cap, git missing) is an error, never an empty list:
+/// an empty enumeration completes phase A with no commit at all.
+fn listed(result: std::result::Result<Vec<u8>, pixel_git::GitError>) -> Result<Option<Vec<u8>>> {
+    match result {
+        Ok(out) => Ok(Some(out)),
+        Err(pixel_git::GitError::NonZeroExit { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Enumerate every commit that should be indexed: all reachable from refs,
 /// plus stash, plus reflog-only commits. Returns oids in reverse (oldest-first)
 /// order and computes the reach bitmask per oid.
 fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
     let _ = store.conn().execute("DELETE FROM reach_map", []);
-    let runner = store.runner();
+    let runner = enumeration_runner(store);
     let mut all: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Branches + remotes + tags via a single rev-list of all heads/remotes/tags.
     let args = vec!["rev-list", "--reverse", "--branches", "--remotes", "--tags"];
-    if let Ok(out) = runner.run(&args) {
+    if let Some(out) = listed(runner.run(&args))? {
         let reach = REACH_LISTED_REFS;
         for oid in split_nul_lines(&out) {
             if !oid.is_empty() && seen.insert(oid.clone()) {
@@ -572,7 +594,7 @@ fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
     }
 
     // Stash.
-    if let Ok(out) = runner.run(&["rev-list", "--reverse", "refs/stash"]) {
+    if let Some(out) = listed(runner.run(&["rev-list", "--reverse", "refs/stash"]))? {
         for oid in split_nul_lines(&out) {
             if !oid.is_empty() && seen.insert(oid.clone()) {
                 all.push(oid.clone());
@@ -582,7 +604,7 @@ fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
     }
 
     // Reflog-only commits (reachable via reflogs but not any branch/remote/tag).
-    if let Ok(out) = runner.run(&[
+    if let Some(out) = listed(runner.run(&[
         "rev-list",
         "--reverse",
         "--reflog",
@@ -590,7 +612,7 @@ fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
         "--branches",
         "--remotes",
         "--tags",
-    ]) {
+    ]))? {
         for oid in split_nul_lines(&out) {
             if !oid.is_empty() && seen.insert(oid.clone()) {
                 all.push(oid.clone());
@@ -598,7 +620,6 @@ fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
             }
         }
     }
-
     Ok(all)
 }
 
@@ -1832,6 +1853,96 @@ pub(crate) mod tests {
         assert!(phase_a(&mut store, &far()).unwrap());
         assert!(phase_b(&mut store, &far()).unwrap().0);
         store
+    }
+
+    /// A repository of `n` commits on `main`, written by one `git fast-import`
+    /// (tens of thousands of commits in about a second).
+    fn imported_repo(n: usize) -> tempfile::TempDir {
+        use std::io::Write as _;
+        let dir = init_repo();
+        let mut stream = String::new();
+        for i in 0..n {
+            let body = format!("fn step_{i}() {{}}\n");
+            let message = format!("step {i}\n");
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{}\ncommitter t <t@example.com> {} +0000\ndata {}\n{message}",
+                i + 1,
+                1_700_000_000 + i,
+                message.len()
+            ));
+            if i > 0 {
+                stream.push_str(&format!("from :{i}\n"));
+            }
+            stream.push_str(&format!(
+                "M 644 inline lib.rs\ndata {}\n{body}\n",
+                body.len()
+            ));
+        }
+        let mut child = std::process::Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stream.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "fast-import");
+        git(dir.path(), &["reset", "-q", "--hard", "main"]);
+        dir
+    }
+
+    /// One 41-byte line per commit put `rev-list --branches` past the
+    /// runner's default 1 MiB at about 25 500 commits; the error was taken
+    /// for an empty list, and phase A completed with no commit at all.
+    #[test]
+    fn enumeration_should_list_every_commit_past_the_default_output_cap() {
+        const COMMITS: usize = 26_000;
+        let dir = imported_repo(COMMITS);
+        let store = FactsStore::open(dir.path()).unwrap();
+        let oids = enumerate_all_commits(&store).unwrap();
+        let listing = git(dir.path(), &["rev-list", "--branches"]);
+        assert!(
+            listing.len() > pixel_git::DEFAULT_MAX_OUTPUT_BYTES,
+            "the fixture must cross the default cap: {} bytes",
+            listing.len()
+        );
+        assert_eq!(oids.len(), COMMITS);
+        assert_eq!(
+            oids.first(),
+            Some(
+                &git(dir.path(), &["rev-list", "--max-parents=0", "main"])
+                    .trim()
+                    .to_string()
+            )
+        );
+    }
+
+    /// A revision git refuses (no `refs/stash`, no reflog) lists nothing; a
+    /// capped, timed-out or failed run is an error, never an empty list.
+    #[test]
+    fn listed_should_tolerate_a_refused_revision_and_report_any_other_failure() {
+        let args = vec!["rev-list".to_string()];
+        let refused = pixel_git::GitError::NonZeroExit {
+            args: args.clone(),
+            code: Some(128),
+            stderr: "fatal: bad revision 'refs/stash'".into(),
+        };
+        assert!(listed(Err(refused)).unwrap().is_none());
+        assert_eq!(
+            listed(Ok(b"abc\n".to_vec())).unwrap(),
+            Some(b"abc\n".to_vec())
+        );
+        let capped = pixel_git::GitError::OutputTooLarge {
+            args: args.clone(),
+            cap: 1_048_576,
+        };
+        assert!(listed(Err(capped)).is_err());
+        assert!(listed(Err(pixel_git::GitError::Timeout { args })).is_err());
     }
 
     #[test]
