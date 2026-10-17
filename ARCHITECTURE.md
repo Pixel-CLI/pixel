@@ -279,7 +279,16 @@ still serves everything in arrival order. Shutdown and idle exit close the
 queue and wait for the writer to finish what it holds. A corpus whose `ping`
 answer never changes gives it through `Corpus::pong` (the repository and
 recall services do): the loop answers `ping` itself, so a liveness probe
-never waits behind a long request. The watcher debounces
+never waits behind a long request. While the writer is busy, a read-plane
+request (`plane::plane`: `search`, `targets`, `resolve`, `impact`, `meaning`)
+goes to one of `READERS` (2) reader threads, each holding a
+`Service::read_replica`, unless a watcher batch is queued or running ahead of
+it: a read never overtakes an `Apply`, so a request that follows an edit sees
+it. A replica answers from the generation last published (`read_answer`
+checks it before and after, inside one read transaction on the graph); it
+never builds the graph, adds no git churn signals and no semantic fallback,
+and hands the request back to the writer when the graph is missing or lags
+or the generation moved. The watcher debounces
 filesystem events and refreshes the index and graph for changed files. Only
 events admitted by `record_event` extend the 500 ms quiet window; the first
 pending event caps queue wait at `MAX_PENDING_WAIT` (2 s), so ignored-tree
