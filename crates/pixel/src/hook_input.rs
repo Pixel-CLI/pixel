@@ -100,6 +100,40 @@ pub(crate) fn read_within<R: Read + Send + 'static>(
     Some(raw)
 }
 
+/// Runs a hook's work, then exits 0 whatever happened in it, a panic
+/// included: a host blocks the prompt or the tool call on any other exit,
+/// and an unwinding panic exits 101. The panic message still reaches stderr
+/// through the default panic hook. What the work printed before panicking
+/// stays and nothing is added: a hook prints one JSON object or nothing, so
+/// a fallback object after the response would make two.
+///
+/// Panics on the hook's worker threads never reach here; the decision
+/// window already turns them into its unavailable envelope.
+#[cfg_attr(test, mutants::skip)] // process::exit boundary; the CLI hook guarantee tests drive it
+pub(crate) fn exit_0_after(work: impl FnOnce()) -> ! {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+    std::process::exit(0)
+}
+
+/// Debug builds only: `PIXEL_HOOK_TEST_PANIC=<stage>` makes a hook panic at
+/// that stage, so the CLI tests can prove [`exit_0_after`] on the real
+/// binary. A release build has no such variable.
+#[cfg(debug_assertions)]
+pub(crate) const TEST_PANIC_ENV: &str = "PIXEL_HOOK_TEST_PANIC";
+
+/// Panics when [`TEST_PANIC_ENV`] names `stage` in a debug build; does
+/// nothing otherwise.
+#[cfg_attr(test, mutants::skip)] // test seam: only the CLI tests set the variable
+pub(crate) fn test_panic(stage: &str) {
+    #[cfg(debug_assertions)]
+    assert!(
+        !std::env::var(TEST_PANIC_ENV).is_ok_and(|value| value == stage),
+        "{TEST_PANIC_ENV}={stage}"
+    );
+    #[cfg(not(debug_assertions))]
+    let _ = stage;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

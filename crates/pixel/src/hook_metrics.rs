@@ -224,22 +224,28 @@ const METRICS_SHELL_TOOLS: &[&str] = &[
 /// hook contracts without turning a tool call into a failure.
 #[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; every decision lives in `metrics_hook_line`
 pub fn run_metrics_hook(provider: Option<Provider>, event: MetricsEvent) -> ! {
+    crate::hook_input::exit_0_after(|| relay_metrics(provider, event))
+}
+
+/// The body of [`run_metrics_hook`]: at most one response on stdout.
+#[cfg_attr(test, mutants::skip)] // stdin boundary; every decision lives in `metrics_hook_line`
+fn relay_metrics(provider: Option<Provider>, event: MetricsEvent) {
     // An imported Claude entry running beside Devin's own relay would emit
     // the Claude contract (`systemMessage`) into a host that never asked for
     // it and double the native `--provider devin` relay's output.
     if imported_claude_entry(provider) {
-        std::process::exit(0);
+        return;
     }
     let Some(input) = crate::hook_input::read_hook_payload() else {
-        std::process::exit(0);
+        return;
     };
+    crate::hook_input::test_panic("before-response");
     let Ok(payload) = serde_json::from_str::<Value>(&input) else {
-        std::process::exit(0);
+        return;
     };
     if let Some(response) = metrics_hook_event_response(provider, event, &payload) {
         print!("{response}");
     }
-    std::process::exit(0);
 }
 
 fn metrics_hook_event_response(

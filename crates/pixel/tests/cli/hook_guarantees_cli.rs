@@ -723,6 +723,59 @@ fn run_hook_argument_errors_should_exit_0_and_print_nothing() {
     }
 }
 
+/// A panic in a hook's own work (#1096) exits 0 instead of unwinding to 101:
+/// before the response there is nothing on stdout, after it the one response
+/// stays alone, and the panic is said on stderr. The debug-only
+/// `PIXEL_HOOK_TEST_PANIC` (`hook_input::TEST_PANIC_ENV`) picks the stage.
+#[test]
+fn a_hook_that_panics_should_still_exit_0_with_one_json_line_or_nothing() {
+    let root = fixture("panic");
+    let payload = json!({
+        "session_id": "panic", "prompt": RENAME, "cwd": &*root,
+        "hook_event_name": "UserPromptSubmit",
+    })
+    .to_string();
+    let task_event = [
+        "run-hook",
+        "task-event",
+        "--provider",
+        "claude",
+        "--event",
+        "prompt-submit",
+    ];
+    for (args, stage, answers) in [
+        (&task_event[..], "before-response", false),
+        (&task_event[..], "after-response", true),
+        (
+            &["run-hook", "metrics", "--event", "post-tool-use"][..],
+            "before-response",
+            false,
+        ),
+    ] {
+        let what = format!("{} at {stage}", args.join(" "));
+        let hook = run(
+            &root,
+            args,
+            payload.as_bytes(),
+            Duration::ZERO,
+            &[("PIXEL_HOOK_TEST_PANIC", stage)],
+        );
+        let answer = assert_hook_contract(&hook, &what);
+        assert_eq!(
+            answer.is_some(),
+            answers,
+            "{what}: stdout {:?}",
+            hook.stdout
+        );
+        assert!(
+            hook.stderr
+                .contains(&format!("PIXEL_HOOK_TEST_PANIC={stage}")),
+            "{what}: the panic is said on stderr: {:?}",
+            hook.stderr
+        );
+    }
+}
+
 /// A host that writes its payload and never closes stdin gets the same
 /// answer as one that closes it, in about a second instead of at its own
 /// timeout; one that writes nothing gets the unavailable envelope, and the

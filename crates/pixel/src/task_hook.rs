@@ -1859,13 +1859,21 @@ fn unavailable_envelope(
 /// Read one bounded host event, dispatch it, and emit only the host's schema.
 ///
 /// `part` is the slice of a split prompt-submit brief this hook serves (see
-/// [`brief_parts`]); on another event it means nothing and is ignored.
+/// [`brief_parts`]); on another event it means nothing and is ignored. The
+/// process exits 0 afterwards, after a panic too
+/// ([`crate::hook_input::exit_0_after`]).
 pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>) -> ! {
+    crate::hook_input::exit_0_after(|| respond(provider, event, part))
+}
+
+/// The body of [`run`]: read, decide, print the one response, log the event.
+fn respond(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>) {
     let started = std::time::Instant::now();
     if provider == TaskProvider::Claude && imported_config_host().is_some() {
-        std::process::exit(0);
+        return;
     }
     let raw = crate::hook_input::read_hook_payload();
+    crate::hook_input::test_panic("before-response");
     let mut recovered_head = false;
     let mut output = if let Some(raw) = &raw {
         let later = part.filter(|part| part.index > 1 && event == TaskHookEvent::PromptSubmit);
@@ -1961,8 +1969,8 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
         let _ = writeln!(stdout, "{output}");
         let _ = stdout.flush();
     }
+    crate::hook_input::test_panic("after-response");
     note_event(provider, event, part, raw.as_deref(), output.as_ref());
-    std::process::exit(0);
 }
 
 #[cfg(test)]

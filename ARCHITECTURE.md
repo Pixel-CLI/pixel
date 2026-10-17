@@ -793,7 +793,11 @@ shell wrapper, the `guard`, `composed-guard`, `session-start`,
 `APPEND_SYSTEM.md` block and project guard, OpenCode's `AGENTS.md` block and
 guard plugin, and the zcode, Cursor, Copilot CLI and Warp artifacts. A hook
 verb `pixel run-hook` does not know prints an error on stderr and exits 0, so
-a registration left in an agent's settings cannot block or fail a host.
+a registration left in an agent's settings cannot block or fail a host. A
+panic in a hook's own work exits 0 as well: `task-event` and `metrics` run
+inside `hook_input::exit_0_after`, which catches the unwind, keeps whatever
+response was already printed and adds nothing, so the panic message goes to
+stderr and never turns into exit 101.
 
 ### A brief larger than one hook
 
