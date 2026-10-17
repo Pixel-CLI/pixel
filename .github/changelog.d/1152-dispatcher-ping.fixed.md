@@ -1,0 +1,1 @@
+**daemon:** `ping` is answered by the daemon loop instead of waiting behind the request in progress: during a 30 s `sync` a probe answered in 0.6 ms instead of 29 s, so a busy daemon is no longer taken for a dead one.

@@ -276,7 +276,10 @@ root checks; an accept thread gives each connection a thread (at most
 the loop through the same channel as the `notify` events. The loop queues
 the debounced batch ahead of the requests that follow it, so the writer
 still serves everything in arrival order. Shutdown and idle exit close the
-queue and wait for the writer to finish what it holds. The watcher debounces
+queue and wait for the writer to finish what it holds. A corpus whose `ping`
+answer never changes gives it through `Corpus::pong` (the repository and
+recall services do): the loop answers `ping` itself, so a liveness probe
+never waits behind a long request. The watcher debounces
 filesystem events and refreshes the index and graph for changed files. Only
 events admitted by `record_event` extend the 500 ms quiet window; the first
 pending event caps queue wait at `MAX_PENDING_WAIT` (2 s), so ignored-tree
