@@ -331,6 +331,9 @@ pub struct Service {
     /// facts-consuming request, not at daemon start — users who never touch
     /// history commands never pay for the index.
     facts_warmer_started: AtomicBool,
+    /// Fan-in queries run, for the tests that pin which ops count fan-in.
+    #[cfg(test)]
+    fan_in_queries: usize,
     /// Short-TTL cache of the `repo_snapshot` triple (HEAD, branch, dirty
     /// list). Every snapshot-carrying op used to pay 3 git subprocesses;
     /// a burst of scope-task+impact+find-code now costs one round-trip.
@@ -451,6 +454,8 @@ impl Service {
             embedder_unavailable: false,
             embedder_download_started: false,
             facts_warmer_started: AtomicBool::new(false),
+            #[cfg(test)]
+            fan_in_queries: 0,
             snapshot_cache: None,
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
@@ -477,6 +482,8 @@ impl Service {
             embedder_unavailable: true,
             embedder_download_started: false,
             facts_warmer_started: AtomicBool::new(true),
+            #[cfg(test)]
+            fan_in_queries: 0,
             snapshot_cache: None,
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
@@ -1775,9 +1782,11 @@ impl Service {
         // error-sink channels are not wired here). The per-path test penalty
         // demotes test files only when the task does NOT mention tests/specs
         // (a test file is a worse target for a non-test task).
+        let mut fan_in_gap = None;
         if !fact_mode {
             let target_paths: Vec<String> = report.targets.iter().map(|t| t.path.clone()).collect();
             let signals = self.engine_signals(&target_paths);
+            fan_in_gap.clone_from(&signals.fan_in_unavailable);
             // Per-path test penalty: demote a test file only when the task does
             // NOT mention tests/specs (a test file is a *worse* target for a
             // non-test task, but a *better* one for a test task).
@@ -1798,6 +1807,15 @@ impl Service {
             }
         }
         let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+        if let Some(gap) = fan_in_gap {
+            // Named as a cap so the envelope's epistemics and warnings carry
+            // it: the ranking ran without fan-in.
+            let cap = format!("fan-in signal unavailable: {gap}");
+            match out.get_mut("caps").and_then(Value::as_array_mut) {
+                Some(caps) => caps.push(json!(cap)),
+                None => out["caps"] = json!([cap]),
+            }
+        }
         if profile {
             eprintln!("TGT signals+serialize {}us", last.elapsed().as_micros());
             last = Instant::now();
@@ -3117,7 +3135,7 @@ impl Service {
         // Computed BEFORE borrowing `self.graph`: `engine_signals` needs
         // `&mut self` for its snapshot/activity caches.
         let all_paths = self.admitted_paths();
-        let signals = self.engine_signals(&all_paths);
+        let signals = self.signals_for(&all_paths, FanIn::Skip);
         let store = match self.graph.as_ref() {
             Some(s) => s,
             None => {
@@ -3653,6 +3671,17 @@ impl Service {
     /// is named in `SignalBundle::activity_unavailable` (the reranker then
     /// applies only the per-path test penalty).
     fn engine_signals(&mut self, candidates: &[String]) -> pixel_rank::signals::SignalBundle {
+        self.signals_for(candidates, FanIn::Count)
+    }
+
+    /// [`Service::engine_signals`], with the graph's fan-in counted or not:
+    /// `resolve` hands only activity and session to the concept resolver, so
+    /// counting fan-in over its whole admitted universe was work for nothing.
+    fn signals_for(
+        &mut self,
+        candidates: &[String],
+        fan_in: FanIn,
+    ) -> pixel_rank::signals::SignalBundle {
         use pixel_rank::signals::{SignalOptions, compute_signals};
         if self.read_only {
             return pixel_rank::signals::SignalBundle {
@@ -3712,11 +3741,20 @@ impl Service {
             eprintln!("TGTSIG activity {}us", siglast.elapsed().as_micros());
             siglast = Instant::now();
         }
-        let fan_in_raw: std::collections::HashMap<String, u64> = self
-            .graph
-            .as_ref()
-            .map(|store| fan_in_counts(store.conn(), candidates))
-            .unwrap_or_default();
+        let counted = match (fan_in, self.graph.as_ref()) {
+            (FanIn::Count, Some(store)) => {
+                #[cfg(test)]
+                {
+                    self.fan_in_queries += 1;
+                }
+                fan_in_counts(store.conn(), candidates)
+            }
+            _ => Ok(std::collections::HashMap::new()),
+        };
+        let (fan_in_raw, fan_in_error) = match counted {
+            Ok(counts) => (counts, None),
+            Err(error) => (std::collections::HashMap::new(), Some(error)),
+        };
         if profile {
             eprintln!("TGTSIG fan_in {}us", siglast.elapsed().as_micros());
             siglast = Instant::now();
@@ -3738,6 +3776,7 @@ impl Service {
         .unwrap_or_default();
         let mut out = out;
         out.activity_unavailable = activity_error;
+        out.fan_in_unavailable = fan_in_error;
         self.profile_end("compute_signals", siglast);
         out
     }
@@ -3751,52 +3790,84 @@ impl Service {
     }
 }
 
+/// A failed fan-in query, named without its SQL: the statement carries one
+/// placeholder per candidate, thousands of them, and this lands in a cap.
+fn fan_in_error(error: rusqlite::Error) -> String {
+    match error {
+        rusqlite::Error::SqlInputError { msg, .. } => format!("fan-in query: {msg}"),
+        other => format!("fan-in query: {other}"),
+    }
+}
+
+/// Whether [`Service::signals_for`] counts the graph's fan-in.
+#[derive(Clone, Copy)]
+enum FanIn {
+    Count,
+    Skip,
+}
+
+/// Most candidates `fan_in_counts` binds into one IN-list. Above it, one
+/// aggregate over every file, filtered in memory, costs no more (40 000-file
+/// graph, 20 000 candidates: 44 ms as an IN-list, 31 ms as the aggregate),
+/// and an IN-list past SQLite's `SQLITE_MAX_VARIABLE_NUMBER` (32 766 in the
+/// bundled build) cannot even be prepared.
+const FAN_IN_IN_LIST_MAX: usize = 8_192;
+
+/// The fan-in aggregate: incoming `calls` edges per file path.
+const FAN_IN_SQL: &str = "SELECT f.path, COUNT(*) AS fan_in \
+     FROM edges e \
+     JOIN symbols s ON e.dst_id = s.id \
+     JOIN files f ON s.file_id = f.id \
+     WHERE e.kind = 'calls'";
+
 /// Count incoming `calls` edges per candidate file from the graph.db.
 /// `conn` is the `GraphStore::conn()` escape hatch. Returns a path → count
 /// map; paths with no incoming calls edges are absent (treated as 0 by the
-/// scorer). Any SQL failure degrades to an empty map (the reranker then
-/// ignores fan-in).
+/// scorer). Up to `FAN_IN_IN_LIST_MAX` candidates are bound in the query;
+/// more are kept from one aggregate over every file.
+///
+/// # Errors
+///
+/// The query failed: the caller names the gap instead of reading an empty
+/// map as "nothing calls these files".
 fn fan_in_counts(
     conn: &rusqlite::Connection,
     candidates: &[String],
-) -> std::collections::HashMap<String, u64> {
-    use std::collections::HashMap;
-    let mut out: HashMap<String, u64> = HashMap::new();
-    if candidates.is_empty() {
-        return out;
-    }
-    // Build a positional IN-list of placeholders matching the candidate
-    // count; rusqlite's `params!` macro handles the binding.
-    let placeholders: Vec<&str> = (0..candidates.len()).map(|_| "?").collect();
-    let sql = format!(
-        "SELECT f.path, COUNT(*) AS fan_in \
-         FROM edges e \
-         JOIN symbols s ON e.dst_id = s.id \
-         JOIN files f ON s.file_id = f.id \
-         WHERE e.kind = 'calls' AND f.path IN ({}) \
-         GROUP BY f.path",
-        placeholders.join(", ")
-    );
-    let params: Vec<&dyn rusqlite::ToSql> = candidates
-        .iter()
-        .map(|c| c as &dyn rusqlite::ToSql)
-        .collect();
-    let Ok(mut rows) = conn.prepare(&sql) else {
-        return out;
+) -> Result<std::collections::HashMap<String, u64>, String> {
+    let read = |r: &rusqlite::Row<'_>| {
+        // COUNT(*) is an integer; rusqlite has no `FromSql` for `u64`, so
+        // read it as `i64` and cast (counts are non-negative).
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
     };
-    let queried = rows
-        .query_map(params.as_slice(), |r| {
-            // COUNT(*) is an integer; rusqlite has no `FromSql` for `u64`,
-            // so read it as `i64` and cast (counts are non-negative).
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
-        })
-        .ok();
-    if let Some(iter) = queried {
-        for row in iter.flatten() {
-            out.insert(row.0, row.1);
+    let mut out = std::collections::HashMap::new();
+    if candidates.is_empty() {
+        return Ok(out);
+    }
+    if candidates.len() <= FAN_IN_IN_LIST_MAX {
+        let placeholders = vec!["?"; candidates.len()].join(", ");
+        let sql = format!("{FAN_IN_SQL} AND f.path IN ({placeholders}) GROUP BY f.path");
+        let mut statement = conn.prepare(&sql).map_err(fan_in_error)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(candidates), read)
+            .map_err(fan_in_error)?;
+        for row in rows {
+            let (path, count) = row.map_err(fan_in_error)?;
+            out.insert(path, count);
+        }
+        return Ok(out);
+    }
+    let wanted: std::collections::HashSet<&str> = candidates.iter().map(String::as_str).collect();
+    let mut statement = conn
+        .prepare(&format!("{FAN_IN_SQL} GROUP BY f.path"))
+        .map_err(fan_in_error)?;
+    let rows = statement.query_map([], read).map_err(fan_in_error)?;
+    for row in rows {
+        let (path, count) = row.map_err(fan_in_error)?;
+        if wanted.contains(path.as_str()) {
+            out.insert(path, count);
         }
     }
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -4421,6 +4492,7 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
             // `engine_signals` returned; pixel-graph's own bundle has no field
             // for the git-log scan's availability, so it is not carried here.
             activity_unavailable: None,
+            fan_in_unavailable: None,
         };
         // Per-candidate test penalty: demote a test/spec file only when the
         // phrase itself is NOT about tests (per-path, via `is_test_path`).
