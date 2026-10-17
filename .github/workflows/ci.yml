@@ -725,14 +725,15 @@ jobs:
       # `[[bench]]` targets are `harness = false`: criterion owns `main`, so
       # nextest never runs them and the ranking assertions inside would gate
       # nothing. `-- --test` runs the bench bodies once, without criterion's
-      # statistical sampling. Only the NDCG bench is gated here: m1_latency's
-      # `search_service_time` assertion is red today (median 78.6ms in the
-      # bench profile, 65.1ms in debug, against the M1 <1ms budget, while
-      # `ping_service_time` passes), so the step would fail on every pull
-      # request -- search latency is a perf fix of its own, not a CI-hygiene
-      # one.
+      # statistical sampling. Both bench lanes run here: NDCG asserts
+      # relevance floors, and m1_latency asserts each op's median against the
+      # <1ms service-time budget and prints it, so a failure states the
+      # number. The m1 fixture pins its own git identity and config, so the
+      # measurement does not depend on the runner's.
       - name: Ranking gates (NDCG@10, bench test mode)
         run: cargo bench -p pixel-bench --bench ndcg_relevance --locked -- --test
+      - name: M1 service-time gates (bench test mode)
+        run: cargo bench -p pixel-bench --bench m1_latency --locked -- --test
 
   deny:
     name: Dependency policy (cargo-deny)

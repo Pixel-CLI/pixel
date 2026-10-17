@@ -1575,6 +1575,11 @@ impl Service {
         use pixel_rank as engine;
 
         let started = Instant::now();
+        // `PIXEL_TARGETS_PROFILE=1` prints one line per stage to stderr; the
+        // m1 bench header names it. Warm-stage numbers here are how a
+        // regression gets attributed before it is fixed.
+        let profile = std::env::var_os("PIXEL_TARGETS_PROFILE").is_some();
+        let mut last = Instant::now();
         let query = engine::tokenize_task(task)?;
 
         let (graph_available, build_info) = if fact_mode {
@@ -1588,6 +1593,10 @@ impl Service {
         // S6: explicit file paths named in the task, matched against the
         // live tree before any lexical probe runs.
         let path_hits = engine::path_rank(&all_paths, &query.path_tokens);
+        if profile {
+            eprintln!("TGT setup {}us", last.elapsed().as_micros());
+            last = Instant::now();
+        }
 
         // S3: per-keyword content match counts (capped probes keep this
         // ms-scale). Every probe cap that fires is NAMED in the report
@@ -1601,6 +1610,10 @@ impl Service {
             &self.index.read().expect("index lock poisoned"),
             &probe_keywords,
         );
+        if profile {
+            eprintln!("TGT probes {}us", last.elapsed().as_micros());
+            last = Instant::now();
+        }
 
         let mut symbol_hits = Vec::new();
         let mut graph_neighbors: Vec<(String, String)> = Vec::new();
@@ -1664,6 +1677,10 @@ impl Service {
 
         // Fact packets also say how widely the task's words occur here; the
         // probes above are reused, only what they did not run is probed.
+        if profile {
+            eprintln!("TGT graph {}us", last.elapsed().as_micros());
+            last = Instant::now();
+        }
         let relevance = if fact_mode {
             let graph = if graph_available {
                 self.graph.as_ref()
@@ -1709,6 +1726,10 @@ impl Service {
             },
             &opts,
         );
+        if profile {
+            eprintln!("TGT compute {}us", last.elapsed().as_micros());
+            last = Instant::now();
+        }
         // Phase 1c: rerank within tiers via the Engine-3 reranker (first
         // production call site). v1 = activity-only signals (the session and
         // error-sink channels are not wired here). The per-path test penalty
@@ -1737,6 +1758,10 @@ impl Service {
             }
         }
         let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+        if profile {
+            eprintln!("TGT signals+serialize {}us", last.elapsed().as_micros());
+            last = Instant::now();
+        }
         // Phase 3 item 1: attach per-file content evidence to each target so
         // the caller can trust a content match without re-searching (S2).
         //
@@ -1820,6 +1845,9 @@ impl Service {
             }
         }
         merge_build_info(&mut out, build_info);
+        if profile {
+            eprintln!("TGT tail {}us", last.elapsed().as_micros());
+        }
         Ok(out)
     }
 
@@ -3604,10 +3632,16 @@ impl Service {
             };
         }
         let runner = pixel_git::GitRunner::new(&self.root);
+        let profile = std::env::var_os("PIXEL_TARGETS_PROFILE").is_some();
+        let mut siglast = Instant::now();
         // The dirty set is the same `status_porcelain` walk `repo_snapshot`
         // already pays for on this request path — reuse its cache instead
         // of spawning a second git subprocess per op.
         let dirty: Vec<String> = self.repo_snapshot().dirty;
+        if profile {
+            eprintln!("TGTSIG snapshot {}us", siglast.elapsed().as_micros());
+            siglast = Instant::now();
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
@@ -3616,47 +3650,73 @@ impl Service {
         // reuse window changes nothing observable while saving a
         // subprocess per find-code/scope-task. Only a successful scan is
         // cached — a failed one keeps reporting `activity_unavailable`
-        // instead of latching.
-        let activity = match &self.activity_cache {
-            Some((at, map)) if at.elapsed() < ACTIVITY_CACHE_TTL => Some(map.clone()),
-            _ => {
-                let scanned = pixel_rank::signals::activity_from_git_log(
-                    &runner,
-                    now_ms,
-                    SignalOptions::default().activity_half_life_days,
-                )
-                .ok();
-                if let Some(map) = &scanned {
+        // instead of latching. The scan runs at most once per call either
+        // way: a failure is handed on as an empty map so `compute_signals`
+        // does not spawn the same `git log` a second time.
+        let (activity, activity_error) = match &self.activity_cache {
+            Some((at, map)) if at.elapsed() < ACTIVITY_CACHE_TTL => (map.clone(), None),
+            _ => match pixel_rank::signals::activity_from_git_log(
+                &runner,
+                now_ms,
+                SignalOptions::default().activity_half_life_days,
+            ) {
+                Ok(map) => {
                     self.activity_cache = Some((Instant::now(), map.clone()));
+                    (map, None)
                 }
-                scanned
-            }
+                Err(e) => {
+                    if profile {
+                        eprintln!("TGTSIG activity_err {e}");
+                    }
+                    (std::collections::HashMap::new(), Some(e.to_string()))
+                }
+            },
         };
         // Fan-in (in-degree): count incoming `calls` edges per candidate
         // file via the graph.db escape hatch (`GraphStore::conn`). The graph
         // is lazily built by `ensure_graph` earlier in the request; if it is
         // unavailable, fan-in degrades to empty (the reranker then applies
         // only activity + session + test penalty).
+        if profile {
+            eprintln!("TGTSIG activity {}us", siglast.elapsed().as_micros());
+            siglast = Instant::now();
+        }
         let fan_in_raw: std::collections::HashMap<String, u64> = self
             .graph
             .as_ref()
             .map(|store| fan_in_counts(store.conn(), candidates))
             .unwrap_or_default();
+        if profile {
+            eprintln!("TGTSIG fan_in {}us", siglast.elapsed().as_micros());
+            siglast = Instant::now();
+        }
         let opts = SignalOptions {
             now_ms,
             ..Default::default()
         };
-        compute_signals(
+        let out = compute_signals(
             &runner,
             None,
             &[],
-            activity.as_ref(),
+            Some(&activity),
             &dirty,
             &fan_in_raw,
             candidates,
             &opts,
         )
-        .unwrap_or_default()
+        .unwrap_or_default();
+        let mut out = out;
+        out.activity_unavailable = activity_error;
+        self.profile_end("compute_signals", siglast);
+        out
+    }
+
+    /// TEMP (#1081) note: `PIXEL_TARGETS_PROFILE=1` prints `TGTSIG` stage
+    /// lines to stderr.
+    fn profile_end(&self, label: &str, since: Instant) {
+        if std::env::var_os("PIXEL_TARGETS_PROFILE").is_some() {
+            eprintln!("TGTSIG {label} {}us", since.elapsed().as_micros());
+        }
     }
 }
 
@@ -3830,56 +3890,100 @@ pub(crate) fn probe_cap(keyword: &str) -> String {
 /// Word-bounded so "auth" cannot count every "author" as signal. A probe the
 /// index cannot run is skipped: it is not recorded in `probed`.
 pub(crate) fn probe_content(index: &IndexSet, keywords: &[String]) -> ContentProbes {
-    // One thread per keyword: a ubiquitous word's whole-index probe costs as
-    // much as the brief's window, and the words pay it in series otherwise.
-    let results: Vec<_> = std::thread::scope(|scope| {
-        let workers: Vec<_> = keywords
-            .iter()
-            .map(|keyword| {
-                scope.spawn(move || {
-                    // Keywords are [a-z0-9_]+ by construction (tokenize_task),
-                    // but escape defensively anyway.
-                    let pattern = format!(r"(?i)\b{}\b", regex_escape_keyword(keyword));
-                    index
-                        .search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
-                        .ok()
-                        .map(|(matches, stats)| (keyword, matches, stats))
-                })
-            })
-            .collect();
-        workers
-            .into_iter()
-            .filter_map(|w| w.join().ok().flatten())
-            .collect()
-    });
     let mut probes = ContentProbes::default();
-    for (keyword, matches, stats) in results {
+    for keyword in keywords {
         probes.probed.insert(keyword.clone());
-        if stats.truncated {
-            probes.truncated.insert(keyword.clone());
-        }
-        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-        for m in matches {
-            *counts.entry(m.path.clone()).or_default() += 1;
+    }
+    if keywords.is_empty() {
+        return probes;
+    }
+    // One alternation for every keyword. The old loop gave each keyword its
+    // own index scan and regex compile: a six-word task paid six scans of the
+    // same candidate set, and the four parallel probes of one brief paid that
+    // again. One scan returns the union and each line is attributed to the
+    // keyword it carries below. The retention cap grows with the keyword
+    // count so each keyword can still keep `CONTENT_PROBE_LIMIT` matches.
+    let alternation = keywords
+        .iter()
+        .map(|k| regex_escape_keyword(k))
+        .collect::<Vec<_>>()
+        .join("|");
+    let pattern = format!(r"(?i)\b({alternation})\b");
+    let cap = CONTENT_PROBE_LIMIT.saturating_mul(keywords.len());
+    let Ok((matches, stats)) = index.search_page_in(&pattern, 0, Some(cap), None) else {
+        return probes;
+    };
+    let mut counts: BTreeMap<&str, BTreeMap<String, u32>> = BTreeMap::new();
+    let mut retained: BTreeMap<&str, usize> = BTreeMap::new();
+    // Keyword-major, so each keyword's evidence fills its first two lines per
+    // path before the next keyword's does (the order the per-keyword scans
+    // produced) even though one page now carries every keyword's matches.
+    for keyword in keywords {
+        let mut per_file: BTreeMap<String, u32> = BTreeMap::new();
+        for m in &matches {
+            let kept = retained.get(keyword.as_str()).copied().unwrap_or(0);
+            if kept >= CONTENT_PROBE_LIMIT {
+                break;
+            }
+            if !line_has_keyword(&m.line, keyword) {
+                continue;
+            }
+            *per_file.entry(m.path.clone()).or_default() += 1;
+            *retained.entry(keyword.as_str()).or_default() += 1;
             // Phase 3 item 1 (targets evidence): keep the first ~2 match
             // lines per file so the caller can verify a content match without
             // re-searching. Near-zero cost: the lines are already fetched.
-            let lines = probes.lines.entry(m.path).or_default();
+            let lines = probes.lines.entry(m.path.clone()).or_default();
             if lines.len() < EVIDENCE_MAX_LINES_PER_TARGET {
                 lines.push(ProbeLine {
                     line: m.line_number,
-                    text: m.line,
+                    text: m.line.clone(),
                     keyword: keyword.clone(),
                 });
             }
         }
-        if !counts.is_empty() {
-            probes
-                .hits
-                .insert(keyword.clone(), counts.into_iter().collect());
+        if per_file.is_empty() {
+            continue;
         }
+        // A retained cap, or a page that stopped before the candidates ran
+        // out, means this keyword may have matches the caller cannot see:
+        // name it so the op reports a lower bound instead of completeness.
+        // A page-wide stop flags every keyword that matched, which is
+        // conservative where only one of them filled the page.
+        if stats.truncated
+            || retained.get(keyword.as_str()).copied().unwrap_or(0) >= CONTENT_PROBE_LIMIT
+        {
+            probes.truncated.insert(keyword.clone());
+        }
+        counts.insert(keyword, per_file);
+    }
+    for (keyword, per_file) in counts {
+        probes
+            .hits
+            .insert(keyword.to_string(), per_file.into_iter().collect());
     }
     probes
+}
+
+/// Whether `line` contains `keyword` as a whole word, ASCII
+/// case-insensitively — the attribution the combined probe cannot get from
+/// the shared `MatchLine`. `[a-z0-9_]` keywords make ASCII folding exact for
+/// the characters that can differ.
+fn line_has_keyword(line: &str, keyword: &str) -> bool {
+    let needle = keyword.as_bytes();
+    let hay = line.as_bytes();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    (0..=hay.len() - needle.len()).any(|start| {
+        hay[start..start + needle.len()].eq_ignore_ascii_case(needle)
+            && line[..start].chars().next_back().is_none_or(|c| !word(c))
+            && line[start + needle.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !word(c))
+    })
 }
 
 /// Whether a task names tests or specs as a word: the per-path test
@@ -5723,6 +5827,12 @@ mod tests {
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@t")
+            // The machine's global config can sign (`commit.gpgsign`), which
+            // makes every fixture commit depend on an SSH agent: a locked
+            // one failed the whole suite. The test-hygiene pin makes the
+            // fixture's commits deterministic.
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
@@ -8564,6 +8674,8 @@ mod tests {
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .env("GIT_AUTHOR_DATE", &old_date)
             .env("GIT_COMMITTER_DATE", &old_date)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
@@ -8800,6 +8912,24 @@ mod tests {
         let caller = bundle.activity.get("caller.rs").copied().unwrap_or(0.0);
         assert!(login > 0.0, "{:?}", bundle.activity);
         assert!(login >= caller, "{:?}", bundle.activity);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repository with no commits has no `git log`: the failure is handed
+    /// on as an empty map and still named, so the caller reports
+    /// `activity_unavailable` instead of "this repository has no history".
+    /// Before the hand-on, `compute_signals` re-ran the same failing scan.
+    #[test]
+    fn engine_signals_names_the_activity_failure_instead_of_rescanning() {
+        let root = tmpdir("engine-signals-commitless");
+        git(&root, &["init", "-q"]);
+        std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        let mut svc = Service::open(&root).unwrap();
+        let bundle = svc.engine_signals(&["a.rs".to_string()]);
+        assert!(
+            bundle.activity_unavailable.is_some(),
+            "a commitless repo must name the failed scan: {bundle:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

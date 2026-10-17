@@ -13,8 +13,9 @@
 //!
 //! Outside a git repo the set degrades to a plain single-shard index.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use pixel_git::BatchObject;
@@ -31,6 +32,36 @@ use crate::posting::{GramQuery, resolve_query};
 use crate::shard::{Shard, ShardBuilder, ShardError};
 use crate::verify::{MatchLine, Verifier, VerifyError};
 use crate::{gitsync, index};
+
+/// Compiled verifiers, keyed by pattern.
+///
+/// `Verifier::new` builds the regex automaton and that build dominates a
+/// one-shot probe: `targets` re-probes the same keyword patterns on every
+/// call, and a repeated `search`/`find-code` reuses them too. The cache is
+/// bounded and never load-bearing — a miss compiles as before, and a full
+/// cache clears wholesale instead of evicting one entry.
+static VERIFIERS: OnceLock<Mutex<HashMap<String, Arc<Verifier>>>> = OnceLock::new();
+
+/// Max compiled verifiers kept; each is a regex automaton, so the count is
+/// the memory bound.
+const MAX_VERIFIERS: usize = 128;
+
+/// [`Verifier`] for `pattern`, compiled once and shared.
+fn verifier_for(pattern: &str) -> Result<Arc<Verifier>, VerifyError> {
+    let cache = VERIFIERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(verifier) = cache.get(pattern) {
+        return Ok(Arc::clone(verifier));
+    }
+    let verifier = Arc::new(Verifier::new(pattern)?);
+    if cache.len() >= MAX_VERIFIERS {
+        cache.clear();
+    }
+    cache.insert(pattern.to_string(), Arc::clone(&verifier));
+    Ok(verifier)
+}
 
 #[derive(Debug)]
 pub enum IndexSetError {
@@ -917,6 +948,7 @@ impl IndexSet {
         filter: Option<&crate::path_filter::PathFilter>,
     ) -> Result<(Vec<MatchLine>, SearchStats), IndexSetError> {
         let started = std::time::Instant::now();
+        let probe = std::env::var_os("PIXEL_TARGETS_PROFILE").is_some();
         let query = plan_pattern(pattern, self.extractor.as_ref())
             .map_err(|e| IndexSetError::Pattern(e.to_string()))?;
         let scanned_all = matches!(query, GramQuery::All);
@@ -962,27 +994,44 @@ impl IndexSet {
         }
         let mut contained = Containment::new(&self.root);
         candidates.retain(|rel| contained.admits(rel));
-        let verifier = Verifier::new(pattern)?;
+        if probe {
+            eprintln!(
+                "IDX cand {} pattern={:?} {}us",
+                candidates.len(),
+                &pattern[..pattern.len().min(24)],
+                started.elapsed().as_micros()
+            );
+        }
+        let verifier = verifier_for(pattern)?;
 
-        // Limited verification searches sorted files until one match beyond
-        // the requested limit is observed. That bounds retained matches and
-        // makes `truncated` exact: remaining candidates alone are not proof
-        // that another match exists.
         let mut matches: Vec<MatchLine> = Vec::new();
         let mut truncated = false;
         if let Some(limit) = limit {
+            // Limited verification searches sorted files until one match
+            // beyond the requested limit is observed. That bounds retained
+            // matches and makes `truncated` exact: remaining candidates alone
+            // are not proof that another match exists. One searcher (and its
+            // line buffers) serves the whole set; `open_regular_bounded` is
+            // the regular-file check, so no extra stat precedes it.
+            let mut searcher = Verifier::searcher();
             let probe_target = limit.saturating_add(1);
             let mut skip = offset;
             for rel in &candidates {
-                let abs = self.root.join(rel);
-                if !is_regular_file(&abs) {
-                    continue;
-                }
                 let remaining = probe_target.saturating_sub(matches.len());
                 if remaining == 0 {
                     break;
                 }
-                verifier.search_file_page(&abs, rel, &mut matches, &mut skip, Some(remaining))?;
+                let abs = self.root.join(rel);
+                let Ok(()) = verifier.search_file_page_with(
+                    &mut searcher,
+                    &abs,
+                    rel,
+                    &mut matches,
+                    &mut skip,
+                    Some(remaining),
+                ) else {
+                    continue;
+                };
                 if matches.len() > limit {
                     truncated = true;
                     matches.truncate(limit);
@@ -1013,6 +1062,14 @@ impl IndexSet {
             elapsed_us: started.elapsed().as_micros(),
             truncated,
         };
+        if probe {
+            eprintln!(
+                "IDX done cand={} matches={} {}us",
+                stats.candidates,
+                stats.matches,
+                started.elapsed().as_micros()
+            );
+        }
         Ok((matches, stats))
     }
 
@@ -2125,6 +2182,25 @@ mod tests {
         assert!(!stats.truncated);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn verifier_cache_reuses_one_compiled_pattern_and_surfaces_a_bad_one() {
+        // `targets` re-probes the same keyword patterns on every call; the
+        // compiled matcher must be shared, and a distinct pattern must not
+        // alias it. The test names one pattern per assertion, so a full
+        // cache cannot make two spellings collide.
+        let first = verifier_for("cacheNeedleAlpha\\b").unwrap();
+        let again = verifier_for("cacheNeedleAlpha\\b").unwrap();
+        let other = verifier_for("cacheNeedleBeta\\b").unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "an identical pattern must reuse the compiled verifier"
+        );
+        assert!(!Arc::ptr_eq(&first, &other));
+        // A pattern that does not compile is reported, not silently cached.
+        assert!(verifier_for("(").is_err());
+        assert!(verifier_for("(").is_err());
     }
 
     /// A test holding the guard builds and publishes its shard in its own

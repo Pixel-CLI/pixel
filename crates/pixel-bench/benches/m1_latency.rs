@@ -53,6 +53,10 @@
 //! Run with: cargo bench -p pixel-bench --bench m1_latency
 //! Fast gate-only run: cargo test -p pixel-bench --bench m1_latency
 //!
+//! While diagnosing, `PIXEL_TARGETS_PROFILE=1` makes `targets` (and the
+//! index search under it) print a per-stage microsecond line to stderr, so
+//! the failing stage is named before the median is.
+//!
 //! ## Latency is a COST gate, NOT a correctness claim (per P0·1)
 //!
 //! Nothing in this file asserts that pixel *answers* anything correctly — it only
@@ -83,49 +87,45 @@ const SERVICE_TIME_BUDGET: Duration = Duration::from_millis(1);
 const FAST_GATE_ITERS: usize = 200;
 
 /// Build a fixture repo with N files containing a known needle, then open
-/// the daemon Service against it (index auto-built on first search).
+/// the daemon Service against it (index auto-builds on first search).
 fn fixture_with_needle(n_files: usize, needle: &str) -> (PathBuf, Service) {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();
     std::fs::write(root.join(".gitignore"), ".pixel/\n").unwrap();
 
-    // Init a git repo so the index layer can discover the root.
-    std::process::Command::new("git")
-        .arg("init")
-        .arg("-q")
-        .arg(&root)
-        .status()
-        .unwrap();
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["config", "user.email", "b@b"])
-        .status()
-        .unwrap();
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["config", "user.name", "b"])
-        .status()
-        .unwrap();
+    // A fixture's `git` must not read the machine's global config: a
+    // developer with `commit.gpgsign = true` had every fixture commit sign
+    // (or fail/hang on a locked agent), which silently left the repo with
+    // no commits and made the activity scan error twice on every request
+    // instead of being cached. `GIT_CONFIG_GLOBAL=/dev/null` is the test
+    // hygiene rule; asserting the status turns a silent no-commit fixture
+    // into a loud failure.
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    git(&["init", "-q", "."]);
+    git(&["config", "user.email", "b@b"]);
+    git(&["config", "user.name", "b"]);
 
     for i in 0..n_files {
         let path = root.join(format!("file_{i}.rs"));
         let content = format!("// file {i}\npub fn item_{i}() {{ \"{needle}\" }}\n");
         std::fs::write(&path, content).unwrap();
     }
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["add", "."])
-        .status()
-        .unwrap();
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["commit", "-qm", "bench fixture"])
-        .status()
-        .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "bench fixture"]);
 
     // Leak the tempdir so it persists for the benchmark/test. Each
     // invocation of this helper leaks exactly one tempdir (not one per
@@ -172,6 +172,9 @@ fn assert_service_time_budget(
         "{name}: median service time {median:?} exceeds the M1 <{budget:?} gate \
          (p95 {p95:?}, n={iters}) -- this is a real regression, not measurement noise"
     );
+    // The lane runs `cargo bench -- --test` in CI, where criterion prints no
+    // number: put each median in the log so a green step still carries it.
+    eprintln!("{name}: median {median:?}, p95 {p95:?}, n={iters}");
 }
 
 /// M1 gate: daemon search service time must be <1ms for a typical repo.
