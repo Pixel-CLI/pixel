@@ -490,7 +490,14 @@ def judge_relay(relay: dict, shell_calls: int) -> dict:
 def shell_call_count(scrollback: str) -> int:
     """Count this pane's displayed arena command; time-window action records overlap in parallel runs."""
     command = r"\s+".join(re.escape(token) for token in SHELL_CMD.split())
-    return len(re.findall(rf"(?m)^\s*(?:[$❯›]\s*)?{command}", flatten_wrapped(scrollback)))
+    starts = list(re.finditer(r"(?m)^[ \t]*(?:[$❯›][ \t]*)?pixel(?=[ \t]|$)", scrollback))
+    count = 0
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(scrollback)
+        command_block = flatten_wrapped(scrollback[start.start():end])
+        if re.search(command, command_block):
+            count += 1
+    return count
 
 
 # ---------------------------------------------------------------- herdr
