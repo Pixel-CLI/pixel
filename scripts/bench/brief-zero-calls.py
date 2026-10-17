@@ -43,7 +43,8 @@ back from the clone's ``.pixel/brief-feedback.jsonl`` (written by the hooks them
 
 The answers and the transcripts are private: the raw streams stay under ``<root>/zero-calls/``, and the printed
 and recorded report holds counts, tool names, bytes, seconds and an answer hash, never answer text.
-A successful exit measures delivery and tool calls only; answer quality is always unreviewed.
+In live-run mode a successful exit measures delivery and tool calls only; answer quality is unreviewed.
+``--acceptance-run`` verifies frozen aggregate reports against source reviews and requires the full set to pass.
 Compare paired answers with the pinned source before claiming correctness or equal answers. Census prompts are read from
 ``census.db`` at run time and never written anywhere.
 
@@ -58,6 +59,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -521,6 +523,95 @@ class Run:
         return row
 
 
+def acceptance(questions, question_hash, runs, reviews):
+    """Verify reviewed paired runs. Call counts alone, stale reviews and changed experiments cannot pass."""
+    expected = {q["id"]: q for q in questions}
+    if not expected or len(expected) != len(questions) or not runs:
+        raise ValueError("acceptance needs nonempty unique questions and runs")
+    review_by = {(r["run"], r["id"]): r for r in reviews}
+    if len(review_by) != len(reviews):
+        raise ValueError("duplicate quality review")
+    experiment_keys = ("native_sha256", "wrapper_sha256", "probe_files", "harness_source_sha", "agent", "model",
+                       "effort", "parts", "jobs", "index_jobs", "timeout_s", "history")
+    experiment = {k: runs[0]["identity"][k] for k in experiment_keys}
+    if not experiment["probe_files"] or experiment["parts"] < 1:
+        raise ValueError("acceptance needs frozen probes and positive hook parts")
+    by_id, names, initial = {qid: [] for qid in expected}, set(), None
+    for run in runs:
+        name, identity = run["name"], run["identity"]
+        if name in names or identity["run"] != name:
+            raise ValueError("duplicate or mismatched run identity")
+        names.add(name)
+        if identity["questions_sha256"] != question_hash or any(identity[k] != experiment[k] for k in experiment_keys):
+            raise ValueError("question set or frozen experiment changed between runs")
+        selected = set(identity.get("selected_ids", expected))
+        if not selected or not selected <= expected.keys():
+            raise ValueError("run contains unknown or empty question selection")
+        rows = {(r["id"], r["arm"]): r for r in run["rows"]}
+        if len(rows) != len(run["rows"]) or set(rows) != {(qid, arm) for qid in selected for arm in ("brief", "nobrief")}:
+            raise ValueError("run must contain one complete pair per selected question")
+        if initial is None:
+            if selected != expected.keys():
+                raise ValueError("first run must cover the entire acceptance set")
+            initial = rows
+        for qid in selected:
+            q, review = expected[qid], review_by.get((name, qid))
+            pair = [rows[qid, arm] for arm in ("brief", "nobrief")]
+            if any(row["sha"] not in (q["sha"], q["sha"][:8])
+                   or row["repo"] != q["repo"].replace("/", "__") for row in pair):
+                raise ValueError(f"{name}/{qid}: repository pin mismatch")
+            if review:
+                if review["source_sha"] != q["sha"]:
+                    raise ValueError(f"{name}/{qid}: stale source review")
+                for arm, row in zip(("brief", "nobrief"), pair):
+                    if review[arm]["answer_sha256"] != row.get("answer_sha256"):
+                        raise ValueError(f"{name}/{qid}/{arm}: stale answer review")
+                    if review[arm]["quality"] not in ("pass", "fail", "inconclusive"):
+                        raise ValueError("unknown quality verdict")
+            brief, base = pair
+            protocol = all(not r["problems"] and r["n_calls"] >= 0 and r.get("answer_bytes", 0) > 0
+                           and re.fullmatch(r"[0-9a-f]{64}", str(r.get("answer_sha256", ""))) for r in pair)
+            delivered = (brief["brief_bytes"] > 0 and brief["parts_ran"] == identity["parts"]
+                         and brief["parts_late"] == 0)
+            quality = bool(review and all(review[a]["quality"] == "pass" for a in ("brief", "nobrief")))
+            by_id[qid].append({"run": name, "brief_calls": brief["n_calls"], "control_calls": base["n_calls"],
+                               "protocol": bool(protocol), "delivered": delivered, "quality": quality,
+                               "reviewed": bool(review)})
+    if any(run not in names or qid not in expected for run, qid in review_by):
+        raise ValueError("quality review refers to an unloaded run or unknown question")
+    cases = []
+    for qid, pairs in sorted(by_id.items()):
+        reasons = []
+        if not all(p["protocol"] for p in pairs): reasons.append("protocol")
+        if not all(p["delivered"] for p in pairs): reasons.append("delivery")
+        if not all(p["reviewed"] for p in pairs): reasons.append("unreviewed")
+        if not all(p["quality"] for p in pairs): reasons.append("quality")
+        if any(p["brief_calls"] != 0 for p in pairs): reasons.append("nonzero")
+        if len(pairs) < 3: reasons.append("fewer than three pairs")
+        cases.append({"id": qid, "accepted": not reasons, "reasons": reasons, "pairs": pairs})
+    accepted = sum(c["accepted"] for c in cases)
+    return {"questions": len(expected), "accepted": accepted, "full_set_pass": accepted == len(expected),
+            "first_run_brief_calls": sum(initial[qid, "brief"]["n_calls"] for qid in expected),
+            "first_run_control_calls": sum(initial[qid, "nobrief"]["n_calls"] for qid in expected),
+            "cases": cases}
+
+
+def acceptance_report(args):
+    """Read only aggregate reports and hash-bound source reviews; no model is run and no answer text is needed."""
+    source = load_sources().open_source(args)
+    if source.kind != "bench" or not args.quality_reviews:
+        raise ValueError("acceptance requires public questions and --quality-reviews")
+    runs = []
+    for directory in args.acceptance_run:
+        path = Path(directory)
+        runs.append({"name": path.name, "identity": json.loads((path / "identity.json").read_text()),
+                     "rows": json.loads((path / "report.json").read_text())["rows"]})
+    reviews = [json.loads(line) for line in Path(args.quality_reviews).read_text().splitlines() if line.strip()]
+    result = acceptance(source.rows, hashlib.sha256(source.path.read_bytes()).hexdigest(), runs, reviews)
+    print(json.dumps(result, indent=2))
+    return 0 if result["full_set_pass"] else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--brief-bin", help="the pixel binary under test")
@@ -543,11 +634,19 @@ def main(argv=None):
     parser.add_argument("--codex-effort", default=CODEX_EFFORT)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--no-history", action="store_true", help="skip build-index --history")
+    parser.add_argument("--acceptance-run", action="append", default=[], metavar="DIR",
+                        help="verify aggregate paired runs and source reviews, without running an agent; repeat per run")
+    parser.add_argument("--quality-reviews", help="JSONL source reviews bound to run, question, source SHA and answer hashes")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(SelfTest)
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
+    if args.acceptance_run:
+        try:
+            return acceptance_report(args)
+        except (OSError, ValueError, KeyError) as error:
+            parser.error(str(error))
     if not args.brief_bin:
         parser.error("--brief-bin is required")
     args.brief_bin = str(Path(args.brief_bin).resolve())
@@ -813,6 +912,86 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(source.kind, "bench")
         self.assertGreaterEqual(len(source.sessions()), 50)
         self.assertEqual(len(source.sessions({"pixel-01"})), 1)
+
+    def acceptance_fixture(self):
+        questions = [{"id": "q", "repo": "o/r", "sha": "a" * 40}]
+        experiment = {k: "fixed" for k in ("native_sha256", "wrapper_sha256", "harness_source_sha", "agent",
+                                           "model", "effort", "jobs", "index_jobs", "timeout_s", "history")}
+        experiment.update(probe_files={"probe": "hash"}, parts=3, questions_sha256="questions")
+        runs, reviews = [], []
+        for n in range(3):
+            name = f"r{n}"
+            rows = [{"id": "q", "arm": arm, "repo": "o__r", "sha": "a" * 8, "problems": [], "n_calls": 0,
+                     "answer_bytes": 10, "answer_sha256": ("1" if arm == "brief" else "2") * 64, "brief_bytes": 100, "parts_ran": 3, "parts_late": 0}
+                    for arm in ("brief", "nobrief")]
+            runs.append({"name": name, "identity": dict(experiment, run=name), "rows": rows})
+            reviews.append({"id": "q", "run": name, "source_sha": "a" * 40,
+                            **{a: {"quality": "pass", "answer_sha256": ("1" if a == "brief" else "2") * 64}
+                               for a in ("brief", "nobrief")}})
+        return questions, runs, reviews
+
+    def test_acceptance_needs_three_complete_quality_passing_pairs(self):
+        q, runs, reviews = self.acceptance_fixture()
+        self.assertTrue(acceptance(q, "questions", runs, reviews)["full_set_pass"])
+        self.assertFalse(acceptance(q, "questions", runs[:1], reviews[:1])["full_set_pass"])
+        for arm in ("brief", "nobrief"):
+            q, runs, reviews = self.acceptance_fixture()
+            reviews[0][arm]["quality"] = "fail"
+            self.assertEqual(acceptance(q, "questions", runs, reviews)["accepted"], 0)
+        self.assertEqual(acceptance(q, "questions", runs, [])["accepted"], 0)
+
+    def test_acceptance_rejects_stale_reviews_and_changed_experiments(self):
+        for field, value in (("source_sha", "b" * 40), ("answer_sha256", "stale")):
+            q, runs, reviews = self.acceptance_fixture()
+            if field == "source_sha": reviews[0][field] = value
+            else: reviews[0]["brief"][field] = value
+            with self.assertRaisesRegex(ValueError, "stale"):
+                acceptance(q, "questions", runs, reviews)
+        q, runs, reviews = self.acceptance_fixture()
+        runs[1]["identity"]["probe_files"] = {"changed": "hash"}
+        with self.assertRaisesRegex(ValueError, "experiment changed"):
+            acceptance(q, "questions", runs, reviews)
+        with self.assertRaisesRegex(ValueError, "question set"):
+            acceptance(q, "different questions", runs[:1], reviews[:1])
+
+    def test_acceptance_counts_delivery_protocol_and_nonzero_failures(self):
+        for field, value in (("parts_ran", 2), ("parts_late", 1), ("brief_bytes", 0),
+                             ("n_calls", 1), ("problems", ["session:exit1"]), ("answer_bytes", 0)):
+            q, runs, reviews = self.acceptance_fixture()
+            runs[1]["rows"][0][field] = value
+            with self.subTest(field=field):
+                self.assertEqual(acceptance(q, "questions", runs, reviews)["accepted"], 0)
+
+    def test_acceptance_requires_a_successful_control_and_real_answer_identity(self):
+        for arm_index in (0, 1):
+            for field, value in (("problems", ["session:exit1"]), ("answer_bytes", 0)):
+                q, runs, reviews = self.acceptance_fixture()
+                runs[1]["rows"][arm_index][field] = value
+                self.assertEqual(acceptance(q, "questions", runs, reviews)["accepted"], 0)
+        q, runs, reviews = self.acceptance_fixture()
+        runs[0]["rows"][0]["answer_sha256"] = "not-a-digest"
+        reviews[0]["brief"]["answer_sha256"] = "not-a-digest"
+        self.assertEqual(acceptance(q, "questions", runs, reviews)["accepted"], 0)
+
+    def test_acceptance_checks_the_row_pin_and_does_not_reuse_a_review_twice(self):
+        q, runs, reviews = self.acceptance_fixture()
+        runs[1]["rows"][0]["sha"] = "a"
+        with self.assertRaisesRegex(ValueError, "pin mismatch"):
+            acceptance(q, "questions", runs, reviews)
+        q, runs, reviews = self.acceptance_fixture()
+        reviews.append(dict(reviews[0]))
+        with self.assertRaisesRegex(ValueError, "duplicate quality review"):
+            acceptance(q, "questions", runs, reviews)
+
+    def test_acceptance_cannot_pass_an_empty_partial_or_duplicate_campaign(self):
+        q, runs, reviews = self.acceptance_fixture()
+        with self.assertRaises(ValueError): acceptance([], "questions", runs, reviews)
+        for mutate in (lambda rs: rs[0]["rows"].pop(),
+                       lambda rs: rs[0]["rows"].append(dict(rs[0]["rows"][0])),
+                       lambda rs: rs.append(dict(rs[0]))):
+            q, runs, reviews = self.acceptance_fixture()
+            mutate(runs)
+            with self.assertRaises(ValueError): acceptance(q, "questions", runs, reviews)
 
     def test_a_blobless_clone_is_recognised_by_its_promisor_remote(self):
         with tempfile.TemporaryDirectory() as tmp:

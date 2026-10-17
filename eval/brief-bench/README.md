@@ -81,3 +81,38 @@ Raw answers, commands and streams stay in the local run directory. Committed
 reports contain aggregates, answer hashes, source references and review
 findings, never a copied private transcript. A zero-call runner exit code
 checks delivery and calls only; the reviewed campaign is the acceptance result.
+
+## Reproduce the acceptance verdict
+
+`brief-zero-calls.py` can verify the aggregates without another model run:
+
+```sh
+python3 -I scripts/bench/brief-zero-calls.py \
+  --acceptance-run /path/to/full-first-run \
+  --acceptance-run /path/to/candidate-repeat-2 \
+  --acceptance-run /path/to/candidate-repeat-3 \
+  --quality-reviews /path/to/reviews.jsonl > acceptance.json
+```
+
+Each directory supplies `report.json` from the live runner and an `identity.json`
+from the freeze/campaign launcher. The manifest contains `run` (directory name),
+`questions_sha256`, `native_sha256`, `wrapper_sha256`, `probe_files` (relative
+program/manifest names to hashes), `harness_source_sha`, `agent`, `model`,
+`effort`, `parts`, `jobs`, `index_jobs`, `timeout_s`, and `history`. Repeats
+also declare `selected_ids`; the first run must cover the complete dataset.
+These manifests record actual frozen inputs; supplying matching labels is not
+a substitute for collecting their hashes before running the experiment.
+
+Each review JSONL row identifies `run`, `id`, full `source_sha`, and `brief` /
+`nobrief` objects with `quality` (`pass`, `fail`, `inconclusive`) and the
+`answer_sha256` copied from that run's aggregate report. Hashes identify the
+UTF-8 final answer after stripping surrounding whitespace. Include `reason`
+and pinned `sources` so a maintainer can assess the source review.
+
+The verifier rejects stale hashes, wrong pins, changed experiments, duplicate
+or incomplete pairs and an incomplete first run. Missing reviews, errors,
+empty answers, missing/late parts, nonzero brief calls or fewer than three
+pairs prevent acceptance. It exits 0 only when **every question in the selected dataset** passes (56 by default); it does not
+judge answer meaning. Quality verdicts still require the source review above.
+The output's call totals use only the full first pass, so selected repetitions
+do not bias the aggregate comparison.
