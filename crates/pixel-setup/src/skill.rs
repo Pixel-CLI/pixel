@@ -406,7 +406,7 @@ mod tests {
 
         let sweep = remove_plugin_skill(home, "flow", "know-how\n").unwrap();
         assert_eq!(sweep.removed, [home.join(".claude/skills/flow/SKILL.md")]);
-        assert_eq!(sweep.kept, [edited]);
+        assert_eq!(sweep.kept, [home.join(".codex/skills/flow/SKILL.md")]);
         assert_eq!(fs::read_to_string(&edited).unwrap(), "mine now\n");
         assert!(
             !home.join(".claude/skills/flow").exists(),
