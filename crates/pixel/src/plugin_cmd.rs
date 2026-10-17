@@ -98,6 +98,7 @@ pub fn install(
         }
         Ok(added) => {
             print!("{}", render_installed(&added));
+            deliver_skill(&host, &added)?;
             Ok(())
         }
         Err(error @ Error::Unsupported(_)) => {
@@ -209,11 +210,48 @@ fn installed_json(added: &pixel_plugin::Added) -> serde_json::Value {
     })
 }
 
+/// Deliver a plugin's declared skill to the harness roots once the plugin
+/// is in place, printing each destination: the roots rule and the backup
+/// semantics are `pixel setup`'s, one spelling, in `pixel-setup`.
+fn deliver_skill(host: &Host, added: &pixel_plugin::Added) -> Result<(), String> {
+    let Some(skill) = &added.skill else {
+        return Ok(());
+    };
+    let destinations = pixel_setup::skill::deploy_plugin_skill(&host.home, &added.name, skill)
+        .map_err(|error| {
+            format!(
+                "plugin `{name}` is installed, but its skill was not delivered: {error}\n`pixel uninstall {name}` removes the plugin; fix the cause and install it again",
+                name = added.name
+            )
+        })?;
+    for destination in destinations {
+        println!("delivered skill {}", destination.display());
+    }
+    Ok(())
+}
+
+
 /// `pixel uninstall <plugin>`.
 pub fn uninstall(name: &str) -> Result<(), String> {
     let host = host()?;
+    // What the install delivered, read before the plugin directory goes: a
+    // harness copy no longer matching it is the user's and is kept.
+    let delivered = pixel_plugin::installed_skill(&host, name).map_err(|e| e.to_string())?;
     pixel_plugin::remove(&host, name).map_err(|e| e.to_string())?;
     println!("removed plugin {name}");
+    if let Some(content) = &delivered {
+        let sweep = pixel_setup::skill::remove_plugin_skill(&host.home, name, content)
+            .map_err(|e| e.to_string())?;
+        for file in &sweep.removed {
+            println!("removed skill {}", file.display());
+        }
+        for file in &sweep.kept {
+            println!(
+                "kept skill {} (differs from what was delivered)",
+                file.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -587,9 +625,11 @@ mod tests {
                 capabilities: vec![pixel_plugin::Capability::Command],
                 network: false,
                 commands: vec![],
+                skill: None,
                 probe: None,
             },
             binary,
+            skill: None,
         }
     }
 

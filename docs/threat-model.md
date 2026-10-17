@@ -37,7 +37,7 @@ model providers, and the website under `website/`.
 | Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `brief-decisions.jsonl`, `brief-feedback.jsonl`, `brief-sessions/`, `config.yaml`, `tasks/` | what the agent reads as ground truth; `actions.jsonl` and `brief-decisions.jsonl` (the typed prompt, or a bounded excerpt from a paste-only prompt) can hold secrets; `brief-feedback.jsonl` holds repository paths and counts only; `brief-sessions/` holds hashes of paths and line numbers; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.pixel/setup-receipt.json` (original setup-edited configuration, potentially including keys), `~/.pixel/plugins/`, `~/.pixel/trusted.toml` and `~/.pixel/plugins.toml` (the plugin host's installs, trust records and network opt-ins), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
-| Agent configurations | what `pixel setup` writes: `~/.claude/settings.json`, `$CODEX_HOME/hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the `pixel` skill (`skills/pixel/SKILL.md`) under the agent config dirs, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); `--repo` writes only `.pixel/config.yaml`. The Antigravity IDE and CLI Pixel plugin dirs carry the `pixel` skill and the metrics hook | a hook command runs with the user's privileges on every agent tool call |
+| Agent configurations | what `pixel setup` writes: `~/.claude/settings.json`, `$CODEX_HOME/hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the `pixel` skill (`skills/pixel/SKILL.md`) under the agent config dirs, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); `--repo` writes only `.pixel/config.yaml`. `pixel install` adds a plugin's delivered `skill` file (`skills/<plugin>/SKILL.md`) into the same agent config dirs, user tier only. The Antigravity IDE and CLI Pixel plugin dirs carry the `pixel` skill and the metrics hook | a hook command runs with the user's privileges on every agent tool call |
 | User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project) | credential theft, billing abuse |
 | Benchmark credentials | OAuth storage or an explicitly selected Claude gateway settings file read by `eval/claude_skill_pair.py` | credentials must reach only the selected model connection and stay out of benchmark receipts |
 | Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/release/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
@@ -393,6 +393,14 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   canonicalises `<dir>/<run>` and requires it to be a file under the
   canonical directory, so a symlink pointing out of it is refused; the
   manifest parser also refuses an absolute `run` or a `..` component.
+- **A `skill` copy is delivered once, user tier only.** `add` reads the file
+  a manifest's `skill` names — a regular file, without following a link, at
+  most 65_536 bytes, UTF-8 — before anything is installed, and `pixel
+  install` copies it into the same skills dirs `pixel setup` writes, each
+  destination printed. A repo plugin's `skill` is never delivered, a plugin
+  named like a core-managed skill is refused, and the uninstall sweep
+  removes a copy only while it still matches what was delivered, never
+  following a link at the skill's dir name.
 - **Network opt-in.** A manifest with `network = true` runs only after
   `pixel plugin enable <name>` (`~/.pixel/plugins.toml`), for every tier.
 - **`install` takes data, not code from the URL.** A git source must start
@@ -931,7 +939,9 @@ retention remain those described below.
   needs an explicit opt-in; `add` accepts only fixed git URL schemes and
   copies a plugin directory, not history or hooks, each file opened without
   following a link or blocking and copied up to the size listed (a FIFO,
-  socket or device refused), and `dir_digest` reads files the same way.
+  socket or device refused), and `dir_digest` reads files the same way. A
+  manifest's `skill` is read the same way before anything is installed and
+  delivered only by `pixel install`, never from the repo tier.
 - **Status**: Partial.
 - **Residual**: trust is bound to content, not to an author, and the user
   (or an agent acting for them) decides what to trust: `pixel plugin trust`

@@ -1038,3 +1038,148 @@ fn install_refuses_a_plugin_that_shares_a_command_with_an_installed_one() {
     );
     assert!(!world.user_plugins().join("other").exists());
 }
+
+/// A fixture plugin whose manifest declares `skill`, with the file in
+/// place: `name`'s skill is `skills/<name>/SKILL.md` inside the plugin.
+fn skill_plugin(world: &World, name: &str, body: &str) -> PathBuf {
+    let dir = world.source(name, &format!("skill = \"skills/{name}/SKILL.md\""));
+    let file = dir.join("skills").join(name).join("SKILL.md");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, body).unwrap();
+    dir
+}
+
+#[test]
+fn an_install_delivers_a_declared_skill_and_an_uninstall_sweeps_it() {
+    let world = World::new("skill");
+    let body = "Replay a saved flow before exploring a UI by hand.\n";
+    let source = skill_plugin(&world, "flow", body);
+    std::fs::create_dir_all(world.home().join(".codex")).unwrap();
+
+    let claude = world.home().join(".claude/skills/flow/SKILL.md");
+    let codex = world.home().join(".codex/skills/flow/SKILL.md");
+    let added = world.pixel(&["install", source.to_str().unwrap()]);
+    let text = ok(&added);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text:?}");
+    assert!(
+        lines[0].starts_with("installed plugin flow 1.4.2 in "),
+        "{text:?}"
+    );
+    // One line per destination: the exact paths the smoke lane asserts.
+    assert_eq!(
+        &lines[1..],
+        &[
+            format!("delivered skill {}", claude.display()),
+            format!("delivered skill {}", codex.display()),
+        ]
+    );
+    assert_eq!(std::fs::read_to_string(&claude).unwrap(), body);
+    assert_eq!(std::fs::read_to_string(&codex).unwrap(), body);
+
+    // Uninstalling the plugin sweeps the copies it delivered, in the same
+    // root order; the reinstalled plugin's skill is gone with it.
+    assert_eq!(
+        ok(&world.pixel(&["uninstall", "flow"])),
+        format!(
+            "removed plugin flow\nremoved skill {}\nremoved skill {}\n",
+            claude.display(),
+            codex.display(),
+        )
+    );
+    assert!(!claude.exists());
+    assert!(!codex.exists());
+    assert!(!world.user_plugins().join("flow").exists());
+}
+
+#[test]
+fn an_uninstall_keeps_a_user_edited_skill_copy_and_says_so() {
+    let world = World::new("skill-kept");
+    let source = skill_plugin(&world, "tool", "the delivered text\n");
+    ok(&world.pixel(&["install", source.to_str().unwrap()]));
+    let claude = world.home().join(".claude/skills/tool/SKILL.md");
+    std::fs::write(&claude, "my own edits\n").unwrap();
+
+    assert_eq!(
+        ok(&world.pixel(&["uninstall", "tool"])),
+        format!(
+            "removed plugin tool\nkept skill {} (differs from what was delivered)\n",
+            claude.display()
+        )
+    );
+    assert_eq!(std::fs::read_to_string(&claude).unwrap(), "my own edits\n");
+}
+
+#[test]
+fn an_install_without_a_declared_skill_writes_into_no_harness() {
+    let world = World::new("skill-absent");
+    let source = world.source("tool", "");
+    let text = ok(&world.pixel(&["install", source.to_str().unwrap()]));
+    assert!(
+        text.starts_with("installed plugin tool 1.4.2 in "),
+        "{text:?}"
+    );
+    assert!(!text.contains("delivered skill"), "{text:?}");
+    assert!(
+        !world.home().join(".claude").exists(),
+        "no key, no harness write"
+    );
+}
+
+#[test]
+fn an_install_with_a_broken_skill_declaration_installs_nothing_anywhere() {
+    for (name, extra, expect) in [
+        (
+            "escapee",
+            "skill = \"../SKILL.md\"",
+            "relative path inside the plugin directory",
+        ),
+        (
+            "absentee",
+            "skill = \"skills/absentee/SKILL.md\"",
+            "does not exist",
+        ),
+    ] {
+        let world = World::new(&format!("skill-bad-{name}"));
+        let source = world.source(name, extra);
+        let out = world.pixel(&["install", source.to_str().unwrap()]);
+        assert_ne!(out.status.code(), Some(0), "{name}: {out:?}");
+        assert!(stderr(&out).contains(expect), "{name}: {}", stderr(&out));
+        assert!(
+            !world.user_plugins().join(name).exists(),
+            "{name}: the plugin itself is not installed either"
+        );
+        assert!(
+            !world.home().join(".claude").exists(),
+            "{name}: nothing written into any harness root"
+        );
+    }
+}
+
+#[test]
+fn a_repo_plugin_declaring_a_skill_writes_only_inside_the_repository() {
+    let world = World::new("skill-repo");
+    let dir = plugin_dir(
+        &world.repo_plugins(),
+        "tool",
+        "skill = \"skills/tool/SKILL.md\"",
+    );
+    let skill = dir.join("skills/tool/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(&skill, "repo-scoped know-how\n").unwrap();
+
+    let refused = world.pixel(&["tool", "x"]);
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    let trusted = ok(&world.pixel(&["plugin", "trust", "tool"]));
+    assert!(
+        trusted.starts_with("trusted repo plugin tool (sha256 "),
+        "{trusted:?}"
+    );
+
+    let out = ok(&world.pixel(&["tool", "x"]));
+    assert!(out.contains("args=x"), "{out:?}");
+    assert!(
+        !world.home().join(".claude").exists(),
+        "a repo tier's `skill` never reaches a harness root"
+    );
+}
