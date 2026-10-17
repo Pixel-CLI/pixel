@@ -565,7 +565,9 @@ impl Service {
             .collect();
         let db = self.graph_db_path();
         if db.exists() {
-            if let Err(error) = bridge::update_files(&self.root, &db, &graph_files) {
+            if let Err(error) =
+                bridge::update_files_cached(&self.root, &db, &graph_files, &mut self.hash_cache)
+            {
                 self.note_graph_update_failure(
                     &format!("batch of {} file(s) from {}", files.len(), files[0].0),
                     &error,
@@ -5011,9 +5013,16 @@ mod bridge {
         pixel_graph::build::apply_tree_delta(root, db, delta).map_err(es)
     }
 
-    /// The same for a debounced batch of watcher events.
-    pub fn update_files(root: &Path, db: &Path, files: &[(&str, bool)]) -> Result<(), String> {
-        pixel_graph::build::update_files(root, db, files)
+    /// The same for a debounced batch of watcher events, reusing the
+    /// caller's stat memo: a batch re-reads only the files whose stat moved
+    /// since the last walk.
+    pub fn update_files_cached(
+        root: &Path,
+        db: &Path,
+        files: &[(&str, bool)],
+        cache: &mut pixel_graph::build::TreeHashCache,
+    ) -> Result<(), String> {
+        pixel_graph::build::update_files_cached(root, db, files, cache)
             .map(|_| ())
             .map_err(es)
     }

@@ -1257,7 +1257,25 @@ pub fn update_files(
     db_path: &Path,
     files: &[(&str, bool)],
 ) -> Result<Publication, BoxErr> {
-    update_files_probed(root, db_path, files, &mut || {})
+    let mut cache = TreeHashCache::default();
+    update_files_cached(root, db_path, files, &mut cache)
+}
+
+/// [`update_files`] reusing the caller's stat memo: the tree walk the
+/// signature needs is stat-only for every file whose `(mtime, len)` the last
+/// walk already hashed, so a one-file watcher batch no longer reads and
+/// hashes the whole tree inside the write transaction.
+///
+/// The memo is a hint, never a source of truth: a stat-changed or vanished
+/// file is re-read, and a file that changed content without moving its
+/// `(mtime, len)` is as invisible here as git's own index makes it.
+pub fn update_files_cached(
+    root: &Path,
+    db_path: &Path,
+    files: &[(&str, bool)],
+    cache: &mut TreeHashCache,
+) -> Result<Publication, BoxErr> {
+    update_files_probed(root, db_path, files, cache, &mut || {})
 }
 
 /// [`update_files`] with a seam for tests: `probe` runs after the rows are
@@ -1267,6 +1285,7 @@ fn update_files_probed(
     root: &Path,
     db_path: &Path,
     files: &[(&str, bool)],
+    cache: &mut TreeHashCache,
     probe: &mut dyn FnMut(),
 ) -> Result<Publication, BoxErr> {
     update_files_in_one_transaction(
@@ -1274,7 +1293,7 @@ fn update_files_probed(
         db_path,
         files,
         |store, batch| {
-            let walk = tree_hashes(root);
+            let walk = tree_hashes_cached(root, cache);
             let known = known_hashes(store)?;
             Ok(rows_match_tree(&known, &walk, batch).then(|| signature_of(&walk)))
         },
@@ -2284,21 +2303,27 @@ mod tests {
         let new_signature = freshness_signature(&root);
         assert_ne!(old_signature, new_signature);
         let mut probed = false;
-        let published = update_files_probed(&root, &db, &[("a.ts", false)], &mut || {
-            probed = true;
-            // In flight: rows are written on the writer's connection and not
-            // committed, so the reader still sees the previous generation.
-            assert_eq!(
-                stored_hash(&reader, "a.ts"),
-                hash_of(v1),
-                "rows became visible before the commit"
-            );
-            assert_eq!(
-                stored_signature(&reader),
-                old_signature,
-                "signature became visible before the commit"
-            );
-        })
+        let published = update_files_probed(
+            &root,
+            &db,
+            &[("a.ts", false)],
+            &mut TreeHashCache::default(),
+            &mut || {
+                probed = true;
+                // In flight: rows are written on the writer's connection and not
+                // committed, so the reader still sees the previous generation.
+                assert_eq!(
+                    stored_hash(&reader, "a.ts"),
+                    hash_of(v1),
+                    "rows became visible before the commit"
+                );
+                assert_eq!(
+                    stored_signature(&reader),
+                    old_signature,
+                    "signature became visible before the commit"
+                );
+            },
+        )
         .unwrap();
         assert!(probed, "the seam must run inside the transaction");
         assert_eq!(published, Publication::Signed);
@@ -2327,10 +2352,16 @@ mod tests {
         let old_signature = stored_signature(&GraphStore::open(&db).unwrap());
 
         std::fs::write(root.join("a.ts"), v2).unwrap();
-        let published = update_files_probed(&root, &db, &[("a.ts", false)], &mut || {
-            // The "concurrent" edit: the file moves on after extraction.
-            std::fs::write(root.join("a.ts"), v3).unwrap();
-        })
+        let published = update_files_probed(
+            &root,
+            &db,
+            &[("a.ts", false)],
+            &mut TreeHashCache::default(),
+            &mut || {
+                // The "concurrent" edit: the file moves on after extraction.
+                std::fs::write(root.join("a.ts"), v3).unwrap();
+            },
+        )
         .unwrap();
         assert_eq!(published, Publication::Withheld);
         let store = GraphStore::open(&db).unwrap();
@@ -2388,6 +2419,32 @@ mod tests {
         let second = update_files(&root, &db, &[("b.ts", false)]).unwrap();
         assert_eq!(second, Publication::Signed);
         assert!(is_fresh(&root, &db));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A one-file watcher batch re-reads only that file: the walk the
+    /// signature needs takes every other file's hash from the memo the
+    /// previous walk left, and the counters are the proof.
+    #[test]
+    fn cached_update_rehashes_only_the_batched_file() {
+        let root = tmpdir("watcher-cached");
+        for (name, body) in [
+            ("a.ts", "export function alpha() { return 1 }\n"),
+            ("b.ts", "export function beta() { return 1 }\n"),
+            ("c.ts", "export function gamma() { return 1 }\n"),
+        ] {
+            std::fs::write(root.join(name), body).unwrap();
+        }
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let mut cache = TreeHashCache::default();
+        tree_delta_cached(&root, &db, &mut cache).unwrap();
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
+        let published = update_files_cached(&root, &db, &[("a.ts", false)], &mut cache).unwrap();
+        assert_eq!(published, Publication::Signed);
+        assert_eq!(cache.rehashed, 1, "only the edited file is read and hashed");
+        assert_eq!(cache.stat_hits, 2, "the untouched files come from the memo");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2577,10 +2634,16 @@ mod tests {
         let signature_a = stored_signature(&GraphStore::open(&db).unwrap());
 
         std::fs::write(root.join("a.ts"), b).unwrap();
-        let published = update_files_probed(&root, &db, &[("a.ts", false)], &mut || {
-            // Back to A before the walk that would sign.
-            std::fs::write(root.join("a.ts"), a).unwrap();
-        })
+        let published = update_files_probed(
+            &root,
+            &db,
+            &[("a.ts", false)],
+            &mut TreeHashCache::default(),
+            &mut || {
+                // Back to A before the walk that would sign.
+                std::fs::write(root.join("a.ts"), a).unwrap();
+            },
+        )
         .unwrap();
         assert_eq!(published, Publication::Withheld);
         let store = GraphStore::open(&db).unwrap();

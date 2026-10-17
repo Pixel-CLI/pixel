@@ -289,7 +289,15 @@ pub fn refresh_changes(repo: &Path, state: &Path) -> Result<(mvp_store::Store, C
     std::fs::create_dir_all(state)?;
     let mut writer = mvp_store::Writer::open(state, Some(WAIT))?;
     settle(&root, state);
-    let tree = mvp_index::scan_discovered_in(mvp_index::discover(&root)?, &|_| None, state)?;
+    // The stat the last generation kept lets the scan reuse its own hash for
+    // every file whose metadata did not move (ADR-0022 §2); without it the
+    // scan read and hashed every tracked file on every watcher batch.
+    let known = writer.known()?;
+    let tree = mvp_index::scan_discovered_in(
+        mvp_index::discover(&root)?,
+        &|path| known.get(path).copied(),
+        state,
+    )?;
     let changes = writer.retried(|writer| -> Result<Changes, BoxErr> {
         let indexed = writer.indexed()?;
         // The id the published generation carries: its files, extractor

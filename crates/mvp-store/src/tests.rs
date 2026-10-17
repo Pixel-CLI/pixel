@@ -102,6 +102,43 @@ fn published(root: &Path) {
         .expect("publish");
 }
 
+/// The stat the generation keeps beside a file's hash is what a later scan
+/// takes the hash from; a file whose stat was not kept is absent, never a
+/// zeroed stat, so the scan re-reads it.
+#[test]
+fn writer_known_exposes_only_stat_kept_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let stat = FileStat {
+        len: 12,
+        mtime_ns: 34,
+        ctime_ns: 56,
+        ino: 78,
+    };
+    let mut delta = delta(
+        "gen-known",
+        vec![
+            file("a.rs", vec![symbol("a.rs", "a", 1)], Vec::new()),
+            file("b.rs", vec![symbol("b.rs", "b", 1)], Vec::new()),
+        ],
+        &[],
+        &["a.rs", "b.rs"],
+    );
+    delta.stats = vec![("a.rs".to_owned(), Some(stat)), ("b.rs".to_owned(), None)];
+    let mut writer = Writer::open(dir.path(), None).unwrap();
+    writer.publish(&delta).unwrap();
+
+    let known = writer.known().unwrap();
+    assert_eq!(
+        known.get("a.rs"),
+        Some(&(Hash::of(b"a.rs"), stat)),
+        "the kept stat and hash come back together"
+    );
+    assert!(
+        !known.contains_key("b.rs"),
+        "no stat on the file row means no reusable hash"
+    );
+}
+
 fn generation(root: &Path) -> String {
     Store::open(root)
         .expect("readable")

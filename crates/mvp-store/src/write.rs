@@ -10,7 +10,8 @@ use std::fs::{File, TryLockError};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use mvp_model::{Delta, FileRow, Kept};
+use mvp_model::hash::Hash;
+use mvp_model::{Delta, FileRow, FileStat, Kept};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -97,6 +98,13 @@ impl Writer {
     /// Why the index was rebuilt from nothing, if it was.
     pub fn rebuilt(&self) -> Option<&str> {
         self.rebuilt.as_deref()
+    }
+
+    /// Every file whose stat the generation keeps, by path: what
+    /// [`crate::Store::known`] returns, read through the already-open writer
+    /// so a scan can take hashes from the index without a second open.
+    pub fn known(&self) -> Result<HashMap<String, (Hash, FileStat)>, StoreError> {
+        rows::known(&self.conn)
     }
 
     /// The current generation, as the next run plans against it; empty

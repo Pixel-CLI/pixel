@@ -1,0 +1,1 @@
+**graph, daemon:** a watcher batch reuses the previous tree walk's stat memo instead of reading and hashing every file inside the graph write transaction, and the pixel-mvp refresh takes a tracked file's hash from its stored stat. A one-file save re-hashes one file, not the tree twice.
