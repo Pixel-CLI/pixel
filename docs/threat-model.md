@@ -491,9 +491,13 @@ boundary it crosses.
 
 ### T3. Daemon denial of service (D, B4)
 
-- **Scenario**: a client stalls the single-threaded request loop.
+- **Scenario**: a client stalls the daemon's single writer, or holds its
+  connection threads.
 - **Mitigation**: `MAX_REQUEST_LINE`, `CONNECTION_DEADLINE`, the read
   timeout and `MAX_REQUESTS_PER_CONN` bound what one connection can send;
+  a slow client holds only its own connection thread, and
+  `MAX_CONN_THREADS` (32) bounds those, further connections waiting in the
+  listener's backlog;
   `IDLE_TIMEOUT` ends an unused daemon; the CLI falls back to in-process
   execution when the daemon does not answer.
 - **Status**: Partial.

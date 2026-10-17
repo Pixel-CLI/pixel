@@ -267,8 +267,16 @@ versioned contract and is not rewritten by this observational metadata.
 
 `pixel-daemon` exposes one function that matters: `Service::handle(Op) ->
 Envelope<Value>`. The Unix-socket daemon reads one JSON `Op` per line and
-writes one JSON `Envelope` line back. Request handling is single-threaded; an
-accept thread and a `notify` watcher feed one channel. The watcher debounces
+writes one JSON `Envelope` line back. The thread that calls `run_corpus` is
+the writer: it owns the `Service` and runs one `Job` at a time (`Apply` a
+watcher batch, `Serve` a request, the watch callbacks, a sweep). The loop runs
+on its own thread with the socket, the watcher, the debounce and the idle and
+root checks; an accept thread gives each connection a thread (at most
+`MAX_CONN_THREADS`, 32) that reads its request lines and passes each one to
+the loop through the same channel as the `notify` events. The loop queues
+the debounced batch ahead of the requests that follow it, so the writer
+still serves everything in arrival order. Shutdown and idle exit close the
+queue and wait for the writer to finish what it holds. The watcher debounces
 filesystem events and refreshes the index and graph for changed files. Only
 events admitted by `record_event` extend the 500 ms quiet window; the first
 pending event caps queue wait at `MAX_PENDING_WAIT` (2 s), so ignored-tree
