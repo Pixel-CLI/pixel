@@ -24,7 +24,6 @@
 //! copies it again.
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use mvp_model::hash::Hash;
 
@@ -100,20 +99,15 @@ impl Copy {
 /// was when it fails. Split index is turned off so that git writes no
 /// shared index into `.git/`. Whether git ran to its end.
 pub fn refresh(root: &Path, file: &Path) -> bool {
-    git_in(root)
-        .env("GIT_INDEX_FILE", file)
-        .args([
-            "-c",
-            "core.splitIndex=false",
-            "update-index",
-            "-q",
-            "--refresh",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.code().is_some())
+    let mut command = git_in(root);
+    command.env("GIT_INDEX_FILE", file).args([
+        "-c",
+        "core.splitIndex=false",
+        "update-index",
+        "-q",
+        "--refresh",
+    ]);
+    crate::bounded::run(command, &[]).is_ok_and(|done| done.status.code().is_some())
 }
 
 /// The key of the version of git's index file at `source`: its path,
@@ -154,6 +148,7 @@ fn key(_: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::tree::{discover, scan_discovered, scan_discovered_in};
+    use std::process::Stdio;
 
     /// Runs git in `dir`, as a test sets a repository up.
     fn run_git(dir: &Path, args: &[&str]) {
