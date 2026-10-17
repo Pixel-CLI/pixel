@@ -398,7 +398,12 @@ envelope talks to the daemon socket directly.
 
 - The text index is git-anchored: base shards correspond to a commit, delta
   shards to changes since, and an overlay covers the dirty working tree.
-  `pixel status` reports whether each layer is fresh.
+  `pixel status` reports whether each layer is fresh. A watcher batch
+  decides which paths the overlay admits from the walk policy's verdict
+  kept on `IndexSet`: the first batch and any batch that touches an
+  ignore-control file (`.gitignore`, `.ignore`, `.git/info/exclude`) run the
+  full `policy_walk`; any other batch judges a new path by a walk from its
+  nearest admitted ancestor (`index::policy_admits_from`).
 - The graph is built lazily on the first graph command and updated per file
   by the daemon watcher. Its quiet debounce extends only for recorded content
   events and is capped from the first pending edit (see Daemon and wire contract).
