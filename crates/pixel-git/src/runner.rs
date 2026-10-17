@@ -367,7 +367,7 @@ fn read_capped<R: Read>(mut r: R, cap: Option<usize>) -> Result<Vec<u8>, ReadOut
 /// already-configured `Command` (program + args already set) plus the args
 /// for error messages, so the timeout/cap machinery can be exercised
 /// directly against non-git commands in tests (see `mod tests` below) —
-/// proving the exact poll/kill logic `run()` uses, without depending on a
+/// proving the exact completion/kill logic `run()` uses, without depending on a
 /// git hook or a slow git operation to create a deterministic hang.
 fn execute(
     cmd: Command,
@@ -386,7 +386,7 @@ fn execute(
 }
 
 /// The primitive under `execute` and `GitRunner::run_output`: spawn, read
-/// stdout and stderr under the byte cap, poll for the timeout, and return
+/// stdout and stderr under the byte cap, wait for completion events, and return
 /// the exit code as data. Only a timeout, an overflow or an I/O failure is
 /// an `Err` here; `execute` is the layer that makes a non-zero exit one.
 fn execute_output(
@@ -418,111 +418,127 @@ fn execute_output_with_stdin(
 
     let mut child = cmd.spawn()?;
 
-    let writer_thread = input.map(|bytes| {
+    let start = Instant::now();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut input_done = input.is_none();
+    if let Some(bytes) = input {
         let mut stdin = child.stdin.take().expect("piped stdin");
+        let sender = tx.clone(); // Each worker owns its completion sender.
         std::thread::spawn(move || {
             use std::io::Write;
             let _ = stdin.write_all(&bytes);
-            // Dropping `stdin` closes the pipe: EOF for the child.
-        })
-    });
-
+            drop(stdin);
+            let _ = sender.send(ProcessEvent::InputDone);
+        });
+    }
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let max_out = options.max_output_bytes;
+    let sender = tx.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(ProcessEvent::Stdout(read_capped(stdout, max_out)));
+    });
+    let sender = tx.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(ProcessEvent::Stderr(
+            read_capped(stderr, max_out).unwrap_or_default(),
+        ));
+    });
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = tx.send(ProcessEvent::Exited(wait_for_child_exit(pid)));
+    });
 
-    let stdout_thread = std::thread::spawn(move || read_capped(stdout, max_out));
-    let stderr_thread =
-        std::thread::spawn(move || read_capped(stderr, max_out).unwrap_or_default());
-
-    let start = Instant::now();
-    let mut timed_out = false;
-    loop {
-        if stdout_thread.is_finished() {
-            break;
-        }
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                // Process exited; give the reader thread a moment to drain
-                // the now-closing pipe (EOF should arrive promptly).
-                if stdout_thread.is_finished() {
-                    break;
+    // All completions share one deadline, including inherited stderr/stdin
+    // pipes. No join can wait past it. The exit watcher does NOT reap the
+    // child: until this owner calls wait(), its PID cannot be recycled.
+    let result = (|| {
+        let mut stdout = None;
+        let mut stderr = None;
+        let mut exited = false;
+        while stdout.is_none() || stderr.is_none() || !input_done || !exited {
+            let event = match options.timeout {
+                Some(timeout) => rx.recv_timeout(timeout.saturating_sub(start.elapsed())),
+                None => rx
+                    .recv()
+                    .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+            };
+            match event {
+                Ok(ProcessEvent::Stdout(result)) => {
+                    stdout =
+                        Some(result.map_err(|e| e.into_git_error(args_for_err.clone(), max_out))?)
+                }
+                Ok(ProcessEvent::Stderr(bytes)) => stderr = Some(bytes),
+                Ok(ProcessEvent::InputDone) => input_done = true,
+                Ok(ProcessEvent::Exited(result)) => {
+                    result?;
+                    exited = true;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(GitError::Timeout {
+                        args: args_for_err.clone(),
+                    });
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(GitError::Io(std::io::Error::other(
+                        "process completion worker stopped",
+                    )));
                 }
             }
-            Ok(None) => {}
-            Err(e) => return Err(GitError::Io(e)),
         }
-        if let Some(timeout) = options.timeout
-            && start.elapsed() >= timeout
-        {
-            timed_out = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-
-    if timed_out {
-        let _ = child.kill();
-        let _ = child.wait();
-        // The reader and writer threads are left to end on their own
-        // (dropping a `JoinHandle` detaches it). They see EOF when the last
-        // write end of their pipe closes, and a grandchild that inherited a
-        // pipe — a hook that backgrounds a process — can hold it open far
-        // past the deadline; joining them here would hand it the power to
-        // block the caller, the very hang this deadline exists for.
-        return Err(GitError::Timeout { args: args_for_err });
-    }
-
-    let stdout_result = stdout_thread
-        .join()
-        .map_err(|_| GitError::Io(std::io::Error::other("stdout reader thread panicked")))?;
-    let stdout_bytes = match stdout_result {
-        Ok(bytes) => bytes,
-        Err(outcome) => {
+        Ok((
+            stdout.expect("stdout completed"),
+            stderr.expect("stderr completed"),
+        ))
+    })();
+    let (stdout, stderr) = match result {
+        Ok(output) => output,
+        Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            // Detached for the same reason as the timeout above.
-            return Err(outcome.into_git_error(args_for_err, max_out));
+            // Readers/writer detach: a descendant may still hold a pipe.
+            return Err(error);
         }
     };
-
-    // The reader reaching EOF is not the same as the child exiting. A git
-    // that closes its own fd 1 (a pager, a hook, a merge driver) leaves the
-    // reader at EOF while the process keeps running, and the `child.wait()`
-    // below would then block the caller with no deadline at all — the
-    // opposite of this crate's contract. Wait for the exit under the same
-    // deadline as the read above; `wait()` then returns the status `try_wait`
-    // already collected.
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {}
-            Err(e) => return Err(GitError::Io(e)),
-        }
-        if let Some(timeout) = options.timeout
-            && start.elapsed() >= timeout
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            // Detached for the same reason as the timeout above.
-            return Err(GitError::Timeout { args: args_for_err });
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-
     let status = child.wait()?;
-    if let Some(writer) = writer_thread {
-        let _ = writer.join();
-    }
-    let stderr_bytes = stderr_thread
-        .join()
-        .map_err(|_| GitError::Io(std::io::Error::other("stderr reader thread panicked")))?;
-
     Ok(GitOutput {
         code: status.code(),
-        stdout: stdout_bytes,
-        stderr: redact(String::from_utf8_lossy(&stderr_bytes).trim()),
+        stdout,
+        stderr: redact(String::from_utf8_lossy(&stderr).trim()),
     })
+}
+
+enum ProcessEvent {
+    Stdout(Result<Vec<u8>, ReadOutcome>),
+    Stderr(Vec<u8>),
+    InputDone,
+    Exited(std::io::Result<()>),
+}
+
+/// Observe exit without reaping, so the owner retains a safe kill/wait handle.
+/// Supported release platforms (Linux and macOS) both provide WNOWAIT.
+fn wait_for_child_exit(pid: u32) -> std::io::Result<()> {
+    loop {
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+        // SAFETY: info points to writable siginfo_t storage. pid is this
+        // invocation's child; WNOWAIT leaves it unreaped for Child::wait.
+        // No field of info is read, including on an interrupted/error return.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -646,6 +662,67 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "timeout enforcement took too long: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn inherited_stderr_cannot_hold_the_caller_past_its_deadline() {
+        let mut cmd = Command::new("sh");
+        // The direct child exits; only its background child holds stderr.
+        cmd.args(["-c", "(sleep 5) >/dev/null & exit 0"]);
+        let start = Instant::now();
+        let result = execute(
+            cmd,
+            vec!["sh".into()],
+            &GitOptions {
+                timeout: Some(Duration::from_millis(100)),
+                max_output_bytes: None,
+            },
+        );
+        assert!(
+            matches!(result, Err(GitError::Timeout { .. })),
+            "{result:?}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn inherited_stdin_cannot_hold_a_blocked_writer_past_its_deadline() {
+        let mut cmd = Command::new("sh");
+        // The descendant keeps the input pipe open without consuming it.
+        cmd.args(["-c", "exec 3<&0; (sleep 5) <&3 >/dev/null 2>&1 & exit 0"]);
+        let start = Instant::now();
+        let result = execute_output_with_stdin(
+            cmd,
+            vec!["sh".into()],
+            &GitOptions {
+                timeout: Some(Duration::from_millis(100)),
+                max_output_bytes: None,
+            },
+            Some(vec![b'x'; 1024 * 1024]),
+        );
+        assert!(
+            matches!(result, Err(GitError::Timeout { .. })),
+            "{result:?}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn completion_events_preserve_outputs_and_status_without_a_timeout() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf out; printf err >&2; exit 23"]);
+        let result = execute_output(
+            cmd,
+            vec!["sh".into()],
+            &GitOptions {
+                timeout: None,
+                max_output_bytes: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(23));
+        assert_eq!(result.stdout, b"out");
+        assert_eq!(result.stderr, "err");
     }
 
     #[test]
