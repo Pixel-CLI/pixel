@@ -57,6 +57,7 @@ corpus and `~/.local/state/pixel` are never touched by any of them.
 | Script | Run | What |
 | --- | --- | --- |
 | `pr-swarm.sh` | `scripts/dev/pr-swarm.sh reconcile [--wait N\|--no-wait] [--dry-run] \| status \| up <PR> [--worktree] \| down <PR> [--force] \| watch \| hook-session-start` | one rmux pane per open-PR worktree, each a `claude -n pr-<N>-<slug>` session sitting in that PR's tree; `reconcile` diffs the open PRs against panes titled `PR#<N>` and creates, retitles or tears down (`status` is read-only). Wired to SessionStart by `.claude/settings.json`; rails in `.agents/rules/pr-swarm.md` |
+| `ultima-arena.sh` | `scripts/dev/ultima-arena.sh [--skip-install] [--seed 42]` (or `just ultima-arena`) | starts Claude, Codex, pi, agy and Devin beside the current Herdr operator pane, dispatches the same prompt to all five, and stops each turn once brief delivery and matching Pixel metrics are evidenced. Saves dated JSON/Markdown receipts, transcripts and `run.log` in gitignored `eval/arena-results/`; `README.md` there indexes run numbers, dates and commits. `--self-test` runs offline without models; `abort` closes only this workflow's panes. |
 
 ## Vendored code
 

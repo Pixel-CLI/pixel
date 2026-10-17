@@ -29,11 +29,13 @@ import argparse
 import contextlib
 import dataclasses
 import datetime
+import fcntl
 import json
 import os
 import pathlib
 import random
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -52,8 +54,11 @@ SHELL_CMD = f"pixel search-content -F {SEARCH_TERM} {SEARCH_PATH}"
 # The shell command comes first: a model handed a brief that says "answer from
 # this context" skipped a command asked for after the question (pi, run 1).
 PROMPT = (
-    f"Before answering, run exactly this shell command once and keep its full output: `{SHELL_CMD}`. "
-    f"Then answer in two lines with file:line: where is `{SEARCH_TERM}` defined and what calls it? "
+    "This request tests a tool invocation, not whether you can answer from context. "
+    "Even if the brief or prior context already contains the answer, you must run the exact command below once "
+    f"with your shell tool and wait for its full output: `{SHELL_CMD}`. Do not use Git history or existing context "
+    f"as a substitute. Only after the command returns, answer in two lines with file:line: where is `{SEARCH_TERM}` "
+    "defined and what calls it? If you cannot run the command, say `NOT RUN`; do not answer from memory. "
     "Do not edit any file."
 )
 # The prompt must never lead the model toward the thing being measured.
@@ -71,6 +76,7 @@ FEEDBACK_FILE = "brief-feedback.jsonl"
 ACTIONS_FILE = "actions.jsonl"
 BRIEF_LOG_OFF = ("0", "false", "off")  # decision_log::enabled
 SCROLLBACK_LINES = 2000
+DEFAULT_SEED = 42
 
 
 @dataclasses.dataclass(frozen=True)
@@ -94,6 +100,21 @@ CLIS = {
 
 class UltimaError(Exception):
     """A usage or environment problem: the run cannot start (exit 2)."""
+
+
+@contextlib.contextmanager
+def arena_lock(directory: pathlib.Path):
+    """Only one runner may change the arena grid or judge its shared logs."""
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "run.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise UltimaError("another Ultima Arena run is active; wait for it to finish or interrupt that command") from error
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------- the prompt
@@ -209,7 +230,8 @@ def prompt_submit_line(scrollback: str) -> str | None:
 
 def turn_records(actions: list[dict], since_ms: int, until_ms: int | None = None) -> list[dict]:
     """The `search-content` records of one turn: written at or after `since_ms` and, when the turn
-    ended, by `until_ms`. Turns run one at a time, so the window belongs to one CLI."""
+    ended, by `until_ms`. Concurrent turns may share this time window; the pane's displayed
+    invocation id, not the time window alone, attributes a relay to a CLI."""
     return [
         r for r in actions
         if r.get("command") == "search-content" and isinstance(r.get("ts_ms"), (int, float))
@@ -235,6 +257,137 @@ def judge_metrics(scrollback: str, actions: list[dict], since_ms: int, until_ms:
         "box_ids_without_record": sorted({b["id"] for b in boxes if b["id"] not in records}),
         "record_ids": sorted(records),
         "record_found": bool(records),
+    }
+
+
+def _pi_timestamp_ms(value) -> int | None:
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            return None
+    return None
+
+
+def _is_arena_search_call(command: str) -> bool:
+    """Accept only the exact search command, optionally prefixed with RTK."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if argv[:1] == ["rtk"]:
+        argv = argv[1:]
+    return argv == ["pixel", "search-content", "-F", SEARCH_TERM, SEARCH_PATH]
+
+
+def _is_arena_search_args(args: str) -> bool:
+    """Accept the exact command arguments as stored by either action-log version."""
+    try:
+        argv = shlex.split(args)
+    except ValueError:
+        return False
+    return argv in (
+        ["-F", SEARCH_TERM, SEARCH_PATH],
+        ["search-content", "-F", SEARCH_TERM, SEARCH_PATH],
+    )
+
+
+def pi_transcript_evidence(
+    session_dir: pathlib.Path,
+    actions: list[dict],
+    since_ms: int,
+    until_ms: int | None,
+    repo: pathlib.Path,
+) -> dict:
+    """Judge Pi from its run-owned session transcript, not its terminal viewport."""
+    files = sorted(session_dir.glob("*.jsonl")) if session_dir.is_dir() else []
+    rows = [row for path in files for row in read_jsonl(path)]
+    session_id = next((r.get("id") for r in rows if r.get("type") == "session"), None)
+    in_turn = [
+        row for row in rows
+        if (timestamp := _pi_timestamp_ms(row.get("timestamp"))) is not None
+        and timestamp >= since_ms and (until_ms is None or timestamp <= until_ms)
+    ]
+    brief = next(
+        (
+            row for row in in_turn
+            if row.get("type") == "custom_message"
+            and row.get("customType") == "pixel-brief"
+            and isinstance(row.get("content"), str)
+            and any(marker in row["content"] for marker in BRIEF_TEXT_MARKERS)
+        ),
+        None,
+    )
+    calls = {}
+    for row in in_turn:
+        message = row.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        for part in message.get("content", []):
+            if not isinstance(part, dict) or part.get("type") != "toolCall" or part.get("name") != "bash":
+                continue
+            args = part.get("arguments")
+            call_id = part.get("id")
+            if (
+                isinstance(call_id, str)
+                and isinstance(args, dict)
+                and isinstance(args.get("command"), str)
+                and _is_arena_search_call(args["command"])
+            ):
+                calls[call_id] = row
+
+    matching_actions = []
+    for record in turn_records(actions, since_ms, until_ms):
+        cwd = record.get("cwd")
+        if (
+            isinstance(record.get("args"), str)
+            and _is_arena_search_args(record["args"])
+            and isinstance(cwd, str)
+            and cwd
+            and pathlib.Path(cwd).resolve() == repo.resolve()
+        ):
+            matching_actions.append(record)
+    action_ids = {short_id(r["invocation_id"]).lower(): r for r in matching_actions}
+    result_lines = []
+    for row in in_turn:
+        message = row.get("message")
+        if not isinstance(message, dict) or message.get("role") != "toolResult" or message.get("isError"):
+            continue
+        call_id = message.get("toolCallId")
+        call = calls.get(call_id)
+        if call is None or message.get("toolName") != "bash":
+            continue
+        output = "\n".join(
+            part.get("text", "") for part in message.get("content", [])
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        )
+        boxes = [box for box in parse_boxes(output) if box["op"] == "search-content" and box["id"] in action_ids]
+        if boxes:
+            result_lines.append(output)
+    metrics = judge_metrics("\n".join(result_lines), matching_actions, since_ms, until_ms)
+    latest_model = next(
+        (row for row in reversed(rows) if row.get("type") == "model_change"),
+        {},
+    )
+    stop_reasons = [
+        row.get("message", {}).get("stopReason")
+        for row in in_turn
+        if isinstance(row.get("message"), dict) and row["message"].get("role") == "assistant"
+    ]
+    stop_reason = next((reason for reason in reversed(stop_reasons) if reason in {"stop", "length", "error", "aborted"}), None)
+    return {
+        "session_dir": str(session_dir),
+        "transcript_path": str(files[0]) if len(files) == 1 else [str(path) for path in files],
+        "session_id": session_id,
+        "provider": latest_model.get("provider"),
+        "model": latest_model.get("modelId"),
+        "turn_complete": stop_reason is not None,
+        "stop_reason": stop_reason,
+        "brief_evidence": "custom_message: [PIXEL:BRIEF]" if brief else None,
+        "shell_calls": len(calls),
+        "metrics": metrics,
     }
 
 
@@ -298,10 +451,25 @@ def agy_injected(sessions: list[str], since_ms: int, store: pathlib.Path | None 
 
 
 def judge_brief_shown(logged: dict, shown: str | None) -> dict:
-    """Brief PASS when the hook logged it for that provider *and* the pane shows it."""
+    """Brief PASS when the hook logged it for that provider and delivery is evidenced."""
     ok = logged.get("verdict") == "PASS" and shown is not None
-    return {**logged, "verdict": "PASS" if ok else "FAIL", "logged": logged.get("verdict") == "PASS",
-            "on_screen": shown is not None, "screen_evidence": shown}
+    return {
+        **logged,
+        "verdict": "PASS" if ok else "FAIL",
+        "logged": logged.get("verdict") == "PASS",
+        "on_screen": shown is not None,
+        "screen_evidence": shown,
+        "delivery_evidence": shown,
+        "evidence_source": "screen" if shown is not None else None,
+    }
+
+
+def judge_brief_delivery(logged: dict, shown: str | None, source: str) -> dict:
+    """Keep transcript and store evidence distinct from what appeared on screen."""
+    result = judge_brief_shown(logged, shown)
+    if shown is not None and source != "screen":
+        result.update(on_screen=False, screen_evidence=None, evidence_source=source)
+    return result
 
 
 def judge_relay(relay: dict, shell_calls: int) -> dict:
@@ -313,10 +481,10 @@ def judge_relay(relay: dict, shell_calls: int) -> dict:
     return relay
 
 
-def shell_call_count(actions: list[dict], since_ms: int, until_ms: int | None = None) -> int:
-    """The arena's own Pixel calls in one turn, from the action log: a narrow pane wraps the
-    command on screen and a compact UI (agy) hides it, the log does neither."""
-    return sum(1 for r in turn_records(actions, since_ms, until_ms) if SEARCH_TERM in str(r.get("args", "")))
+def shell_call_count(scrollback: str) -> int:
+    """Count this pane's displayed arena command; time-window action records overlap in parallel runs."""
+    command = re.escape(SHELL_CMD)
+    return len(re.findall(rf"(?m)^\s*(?:[$❯›]\s*)?{command}", scrollback))
 
 
 # ---------------------------------------------------------------- herdr
@@ -356,8 +524,11 @@ class Herdr:
             raise UltimaError(f"pane split failed: {(res['err'] or res['out']).strip()[:300]}")
         return pid
 
-    def start(self, name: str, kind: str, pane: str) -> dict:
-        return self.run("agent", "start", name, "--kind", kind, "--pane", pane, timeout=120)
+    def start(self, name: str, kind: str, pane: str, *agent_args: str) -> dict:
+        args = ["agent", "start", name, "--kind", kind, "--pane", pane]
+        if agent_args:
+            args.extend(("--", *agent_args))
+        return self.run(*args, timeout=120)
 
     def prompt(self, name: str, text: str) -> dict:
         return self.run("agent", "prompt", name, text)  # never --wait: it reports a stall for a prompt that ran
@@ -366,6 +537,12 @@ class Herdr:
         res = self.run("agent", "get", name)
         agent = self._dig(res, "result", "agent")
         return agent if isinstance(agent, dict) else {}
+
+    def agents(self) -> list[dict]:
+        """Agents Herdr currently sees, including their status and working directory."""
+        res = self.run("agent", "list")
+        agents = self._dig(res, "result", "agents")
+        return agents if isinstance(agents, list) else []
 
     def read(self, name: str, source: str, lines: int) -> str:
         res = self.run("agent", "read", name, "--source", source, "--lines", str(lines))
@@ -437,6 +614,7 @@ def cell_keys(n: int) -> list[str]:
 CODEX_PANEL = re.compile(r"hooks? need review", re.IGNORECASE)
 CODEX_PANEL_KEY = re.compile(r"t trust all")
 CODEX_MODAL = re.compile(r"Hooks need review")
+AGY_VERBOSITY_BANNER = re.compile(r"Verbosity.*?esc to dismiss", re.IGNORECASE | re.DOTALL)
 TRUST_OPTION = re.compile(r"(\d)\.\s*(Yes,? (?:I )?trust[^\n]*|Trust[^\n]*)", re.IGNORECASE)
 TRUST_HINT = re.compile(r"trust this (?:folder|workspace|directory|project)|Yes, I trust", re.IGNORECASE)
 PERMISSION_Q = re.compile(r"Do you want to proceed\?|Allow (?:this|once)|Run this command\?|Would you like to run", re.IGNORECASE)
@@ -508,6 +686,8 @@ class Cell:
     last_screen: str = ""
     stable: int = 0
     store: dict = dataclasses.field(default_factory=dict)  # agy only: `agy_injected`
+    pi_session_dir: pathlib.Path | None = None
+    pi_transcript: dict = dataclasses.field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -515,7 +695,11 @@ class Cell:
 
     @property
     def ok(self) -> bool:
-        return self.brief.get("verdict") == "PASS" and self.metrics.get("verdict") == "PASS"
+        return (
+            self.status in ("done", "evidence-complete")
+            and self.brief.get("verdict") == "PASS"
+            and self.metrics.get("verdict") == "PASS"
+        )
 
 
 @dataclasses.dataclass
@@ -545,7 +729,13 @@ class Arena:
     def __init__(self, cfg: Settings, herdr: Herdr, say=print):
         self.cfg = cfg
         self.h = herdr
-        self.say = say
+        def logged_say(message: str) -> None:
+            say(message)
+            cfg.out.mkdir(parents=True, exist_ok=True)
+            with (cfg.out / "run.log").open("a", encoding="utf-8") as log:
+                log.write(f"{datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')} {message}\n")
+
+        self.say = logged_say
         self.cells: dict[str, Cell] = {}
         self.created: list[dict] = []  # {"pane_id", "name"}: what abort may close
         self.operator = os.environ.get("HERDR_PANE_ID", "")
@@ -596,6 +786,8 @@ class Arena:
             "pixel_version": out(["pixel", "--version"]),
             "repo": str(self.cfg.repo),
             "repo_head": out(["git", "rev-parse", "HEAD"]),
+            "repo_branch": out(["git", "branch", "--show-current"]),
+            "repo_dirty": bool(out(["git", "status", "--porcelain"])),
         }
 
     # -- grid -------------------------------------------------------------
@@ -622,6 +814,10 @@ class Arena:
     def dialog(self, cell: Cell, screen: str) -> str | None:
         """Act on a known startup/approval dialog. Returns a note when one was handled or blocks."""
         tail = "\n".join(screen.splitlines()[-30:])
+        if cell.cli.name == "agy" and AGY_VERBOSITY_BANNER.search(tail):
+            self.press(cell, "esc")
+            cell.events.append("dismissed agy verbosity banner")
+            return "handled"
         if cell.cli.name == "codex" and CODEX_PANEL.search(tail):
             foreign = foreign_codex_hooks(self.cfg.repo)
             if foreign:
@@ -660,8 +856,13 @@ class Arena:
 
     def start_agent(self, cell: Cell) -> bool:
         res = None
+        agent_args = []
+        if cell.cli.name == "pi":
+            self.cfg.out.mkdir(parents=True, exist_ok=True)
+            cell.pi_session_dir = pathlib.Path(tempfile.mkdtemp(prefix="pi-session-", dir=self.cfg.out))
+            agent_args = ["--tui-mode", "regular", "--session-dir", str(cell.pi_session_dir)]
         for attempt in range(4):
-            res = self.h.start(cell.name, cell.cli.kind, cell.pane)
+            res = self.h.start(cell.name, cell.cli.kind, cell.pane, *agent_args)
             if res["rc"] == 0:
                 break
             if "agent_pane_busy" not in res["out"] + res["err"]:
@@ -716,12 +917,55 @@ class Arena:
     def record_since(self, cell: Cell) -> bool:
         return bool(turn_records(read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE), cell.t_prompt_ms))
 
+    def evidence_ready(self, cell: Cell, screen: str) -> bool:
+        """Whether this turn has submitted its brief and displayed its own metrics relay."""
+        logged = judge_brief(read_jsonl(self.cfg.repo / ".pixel" / FEEDBACK_FILE), cell.cli.provider, cell.t_prompt_ms)
+        submit_line = prompt_submit_line(screen)
+        shown = brief_on_screen(screen, submit_line)
+        evidence = screen
+        evidence_source = "screen"
+        metrics = None
+        if cell.cli.name == "pi" and cell.pi_session_dir:
+            cell.pi_transcript = pi_transcript_evidence(
+                cell.pi_session_dir,
+                read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE),
+                cell.t_prompt_ms,
+                None,
+                self.cfg.repo,
+            )
+            shown = cell.pi_transcript["brief_evidence"]
+            evidence_source = "pi session transcript"
+            metrics = cell.pi_transcript["metrics"]
+        if cell.cli.provider == AGY_PROVIDER:
+            cell.store = agy_injected(logged["sessions"], cell.t_prompt_ms)
+            injected = "\n".join(cell.store["steps"])
+            store_shown = next((f"agy store: {m}" for m in BRIEF_TEXT_MARKERS if m in injected), None)
+            if shown is None and store_shown:
+                shown = store_shown
+                evidence_source = "agy conversation store"
+            evidence += "\n" + injected
+        brief = judge_brief_delivery(logged, shown, evidence_source)
+        actions = read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE)
+        if metrics is None:
+            metrics = judge_metrics(evidence, actions, cell.t_prompt_ms)
+            shell_calls = shell_call_count(evidence)
+        else:
+            shell_calls = cell.pi_transcript["shell_calls"]
+        metrics = judge_relay(metrics, shell_calls)
+        cell.brief = brief
+        cell.metrics = metrics
+        cell.shell_calls = shell_calls
+        cell.submit_line = submit_line
+        return brief["verdict"] == "PASS" and metrics["verdict"] == "PASS"
+
     def settle(self, cells: list[Cell]) -> None:
-        """Poll until each prompted cell's turn ended, or its own deadline passes.
+        """Poll until each prompted cell's evidence is complete or its turn ends.
 
         A turn ended when Herdr reports `idle` or `done` after the cell moved (its
         state counter changed, or its screen did: Herdr sees no state change on pi)
-        and the screen then held still for `STABLE_POLLS` polls."""
+        and the screen then held still for `STABLE_POLLS` polls. When both evidence
+        signals arrive first, interrupt the model turn to avoid spending tokens on
+        an answer the arena does not score, then wait for the pane to become idle."""
         pending = [c for c in cells if c.status == "waiting"]
         while pending:
             for cell in list(pending):
@@ -736,13 +980,39 @@ class Arena:
                 agent = self.h.get(cell.name)
                 moved = int(agent.get("state_change_seq", cell.seq0)) != cell.seq0 or screen != cell.screen0
                 finished = agent.get("agent_status") in FINISHED and moved and cell.stable >= STABLE_POLLS
+                if cell.cli.name == "pi" and cell.pi_session_dir:
+                    cell.pi_transcript = pi_transcript_evidence(
+                        cell.pi_session_dir,
+                        read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE),
+                        cell.t_prompt_ms,
+                        None,
+                        self.cfg.repo,
+                    )
+                    finished = finished and cell.pi_transcript["turn_complete"]
+                if cell.status == "waiting" and not finished and self.evidence_ready(
+                    cell, self.h.read(cell.name, "recent-unwrapped", SCROLLBACK_LINES)
+                ):
+                    self.say(f"{cell.name}: brief and matching metrics are visible; interrupting the turn")
+                    self.h.keys(cell.name, "ctrl+c")
+                    cell.keys_sent.append("ctrl+c")
+                    cell.events.append("interrupted after brief and metrics evidence; answer is not scored")
+                    cell.status = "stopping"
+                if cell.status == "stopping" and finished:
+                    cell.status = "evidence-complete"
+                    cell.note = "stopped after both evidence signals"
                 if finished and waited >= 3 * self.cfg.poll_s and self.record_since(cell):
-                    cell.status = "done"
+                    if cell.status != "evidence-complete":
+                        cell.status = "done"
                 elif finished and waited >= 10 * self.cfg.poll_s:
-                    cell.status = "done"  # ended with no record: judged below on its evidence
+                    if cell.status != "evidence-complete":
+                        cell.status = "done"  # ended with no record: judged below on its evidence
                 elif waited >= self.cfg.timeout:
+                    if "ctrl+c" not in cell.keys_sent:
+                        self.h.keys(cell.name, "ctrl+c")
+                        cell.keys_sent.append("ctrl+c")
+                        cell.events.append("interrupted after the turn deadline")
                     cell.status, cell.note = "timeout", f"turn not ended after {self.cfg.timeout:g}s"
-                if cell.status != "waiting":
+                if cell.status not in ("waiting", "stopping"):
                     pending.remove(cell)
                     cell.elapsed_s = round(time.time() - cell.sent_at, 1)
                     cell.t_done_ms = now_ms()
@@ -761,16 +1031,36 @@ class Arena:
         logged = judge_brief(read_jsonl(self.cfg.repo / ".pixel" / FEEDBACK_FILE), cell.cli.provider, cell.t_prompt_ms)
         shown = brief_on_screen(cell.scrollback, cell.submit_line)
         evidence = cell.scrollback
-        if cell.cli.provider == AGY_PROVIDER:  # agy shows nothing: what it stored stands in for its screen
+        evidence_source = "screen"
+        pi_metrics = None
+        if cell.cli.name == "pi" and cell.pi_session_dir:
+            cell.pi_transcript = pi_transcript_evidence(
+                cell.pi_session_dir,
+                read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE),
+                cell.t_prompt_ms,
+                cell.t_done_ms or None,
+                self.cfg.repo,
+            )
+            shown = cell.pi_transcript["brief_evidence"]
+            evidence_source = "pi session transcript"
+            pi_metrics = cell.pi_transcript["metrics"]
+        if cell.cli.provider == AGY_PROVIDER:  # agy may draw nothing: its store records injected context
             cell.store = agy_injected(logged["sessions"], cell.t_prompt_ms)
             injected = "\n".join(cell.store["steps"])
-            shown = shown or next((f"agy store: {m}" for m in BRIEF_TEXT_MARKERS if m in injected), None)
+            store_shown = next((f"agy store: {m}" for m in BRIEF_TEXT_MARKERS if m in injected), None)
+            if shown is None and store_shown:
+                shown = store_shown
+                evidence_source = "agy conversation store"
             evidence += "\n" + injected
-        cell.brief = judge_brief_shown(logged, shown)
+        cell.brief = judge_brief_delivery(logged, shown, evidence_source)
         actions = read_jsonl(self.cfg.repo / ".pixel" / ACTIONS_FILE)
         until = cell.t_done_ms or None
-        cell.shell_calls = shell_call_count(actions, cell.t_prompt_ms, until)
-        relay = judge_metrics(evidence, actions, cell.t_prompt_ms, until)
+        relay = pi_metrics if pi_metrics is not None else judge_metrics(evidence, actions, cell.t_prompt_ms, until)
+        cell.shell_calls = max(
+            cell.pi_transcript.get("shell_calls", 0) if cell.cli.name == "pi" else 0,
+            shell_call_count(evidence),
+            relay["occurrences"],
+        )
         cell.metrics = judge_relay(relay, cell.shell_calls)
         if cell.metrics["verdict"] == "NO-CALL":
             cell.events.append("no Pixel shell call on this pane: the model answered without running the command, so nothing could be relayed")
@@ -786,6 +1076,10 @@ class Arena:
     def run(self, order: list[str]) -> int:
         cfg = self.cfg
         cfg.out.mkdir(parents=True, exist_ok=True)
+        overlap = active_agents_in_repo(self.h.agents(), cfg.repo, self.operator)
+        if overlap:
+            details = "; ".join(f"{a['agent']} ({a['agent_status']}) at {a['path']}" for a in overlap)
+            self.say(f"WARNING: other active agent session(s) may write to {cfg.repo} during this run: {details}")
         install = [] if cfg.skip_install else self.install()
         ident = self.identity()
         self.say(f"pixel: {ident['pixel_version']} at {ident['pixel_path']}; repo head {ident['repo_head'][:12]}")
@@ -797,15 +1091,14 @@ class Arena:
             self.say(f"{cell.name}: starting in {cell.pane}")
             if self.start_agent(cell):
                 started.append(cell)
-        # One turn at a time, in the random order: Pixel calls that overlap in one
-        # repository silence the metrics relay (run 2 lost Claude's that way), and
-        # an exclusive window ties every record to one CLI.
+        # Dispatch every turn before monitoring any of them. The evidence judge
+        # matches each pane's displayed invocation id to the shared action log.
         for cell in started:
             if self.send_prompt(cell):
                 self.say(f"{cell.name}: prompted")
-                self.settle([cell])
-                self.say(f"{cell.name}: {cell.status} after {cell.elapsed_s:g}s")
-                time.sleep(cfg.gap_s)
+        self.settle([cell for cell in started if cell.status == "waiting"])
+        for cell in started:
+            self.say(f"{cell.name}: {cell.status} after {cell.elapsed_s:g}s")
         for name in order:
             self.judge(self.cells[name])
         write_receipt(cfg, order, ident, install, self.cells)
@@ -830,6 +1123,56 @@ def report(cells: dict[str, Cell], order: list[str], out: pathlib.Path, say=prin
     return 0 if all(c.ok for c in cells.values()) else 1
 
 
+def git_common_dir(path: pathlib.Path) -> pathlib.Path | None:
+    """Resolve a worktree's shared Git directory, returning None outside a repository."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    common = pathlib.Path(result.stdout.strip())
+    return (common if common.is_absolute() else path / common).resolve()
+
+
+def active_agents_in_repo(agents: list[dict], repo: pathlib.Path, operator_pane: str = "") -> list[dict]:
+    """Active Herdr agents in the target repo or another worktree sharing its Git directory."""
+    target = repo.resolve()
+    target_common = git_common_dir(target)
+    common_cache: dict[pathlib.Path, pathlib.Path | None] = {target: target_common}
+
+    def common_dir(path: pathlib.Path) -> pathlib.Path | None:
+        if path not in common_cache:
+            common_cache[path] = git_common_dir(path)
+        return common_cache[path]
+
+    found = []
+    for agent in agents:
+        if agent.get("pane_id") == operator_pane or agent.get("agent_status") != "working":
+            continue
+        paths = []
+        for key in ("foreground_cwd", "cwd"):
+            value = agent.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            try:
+                path = pathlib.Path(value).resolve()
+            except OSError:
+                continue
+            same_path = path == target or target in path.parents
+            same_worktree_family = not same_path and target_common is not None and common_dir(path) == target_common
+            if same_path or same_worktree_family:
+                paths.append(path)
+        if paths:
+            found.append({**agent, "path": str(paths[0])})
+    return found
+
+
 def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[dict], cells: dict[str, Cell]) -> None:
     per_cli = {}
     for name in order:
@@ -837,6 +1180,8 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
         (cfg.out / f"{name}.scrollback.txt").write_text(c.scrollback, encoding="utf-8")
         if c.store:
             (cfg.out / f"{name}.injected.txt").write_text("\n\f\n".join(c.store["steps"]), encoding="utf-8")
+        if c.pi_transcript:
+            (cfg.out / "pi.evidence.json").write_text(json.dumps(c.pi_transcript, indent=2, ensure_ascii=False), encoding="utf-8")
         per_cli[name] = {
             "provider": c.cli.provider,
             "pane": c.pane,
@@ -852,6 +1197,7 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
             "keys_sent": c.keys_sent,
             "events": c.events,
             "screen_excerpt": c.excerpt,
+            **({"pi_transcript": c.pi_transcript} if c.pi_transcript else {}),
             **({"agy_store": {"conversations": c.store["conversations"], "ephemeral_steps": len(c.store["steps"])}} if c.store else {}),
             "ok": c.ok,
         }
@@ -869,24 +1215,39 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
             "of": len(order),
         },
     }
+    results_root = cfg.repo / "eval" / "arena-results"
+    history = []
+    for path in sorted(results_root.glob("ultima-*/receipt.json")):
+        if path.parent == cfg.out:
+            continue
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            previous.setdefault("receipt_dir", path.parent.name)
+            history.append(previous)
+        except (OSError, ValueError):
+            continue
+    history.sort(key=lambda run: str(run.get("when_utc", "")))
+    doc["run_number"] = len(history) + 1
+    doc["receipt_dir"] = cfg.out.name
     (cfg.out / "receipt.json").write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
     rows = [
-        "| order | CLI | status | brief | logged | on screen | metrics | Pixel shell call | elapsed |",
+        "| order | CLI | status | brief | logged | delivery evidence | metrics | Pixel shell call | elapsed |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for i, name in enumerate(order, 1):
         c = cells[name]
-        shown = c.brief.get("screen_evidence")
+        shown = c.brief.get("delivery_evidence")
         rows.append(
-            f"| {i} | {name} | {c.status} | {c.brief.get('verdict', 'N/A')} | {'yes' if c.brief.get('logged') else 'no'} "
-            f"| {('`' + shown + '`') if shown else 'no'} | {c.metrics.get('verdict', 'N/A')} "
+            f"| {i} | {name} | {c.status} | {verdict_label(c.brief.get('verdict', 'N/A'))} | {'yes' if c.brief.get('logged') else 'no'} "
+            f"| {('`' + shown + '` (' + str(c.brief.get('evidence_source')) + ')') if shown else 'no'} | {verdict_label(c.metrics.get('verdict', 'N/A'))} "
             f"| {'yes' if c.shell_calls >= 1 else 'no'} | {c.elapsed_s}s |"
         )
     s = doc["summary"]
     md = [
-        f"# Ultima Arena {doc['when_utc']}",
+        f"# Ultima Arena — Run #{doc['run_number']} — {doc['when_utc']}",
         "",
-        f"pixel `{ident['pixel_version']}` at `{ident['pixel_path']}`; repo `{ident['repo']}` at `{ident['repo_head']}`; seed {cfg.seed}.",
+        f"Pixel at `{ident['pixel_path']}`:\n\n```text\n{ident['pixel_version']}\n```",
+        f"Repository `{ident['repo']}` at `{ident['repo_head']}`; dirty: {ident.get('repo_dirty', 'unknown')}; seed {cfg.seed}.",
         "",
         *rows,
         "",
@@ -895,6 +1256,43 @@ def write_receipt(cfg: Settings, order: list[str], ident: dict, install: list[di
         "Verdicts come from `.pixel/brief-feedback.jsonl`, `.pixel/actions.jsonl`, each CLI's scrollback and, for agy, which draws no hook output, the `ephemeralMessage` steps of its conversation store; the model's answer is not scored.",
     ]
     (cfg.out / "receipt.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+    write_run_index(results_root, [*history, doc])
+
+
+def verdict_label(verdict: str) -> str:
+    return f"{'🟩' if verdict == 'PASS' else '⬜' if verdict == 'NO-CALL' else '🟥'} {verdict}"
+
+
+def write_run_index(results_root: pathlib.Path, runs: list[dict]) -> None:
+    """Refresh the gitignored Markdown history from the run receipts."""
+    results_root.mkdir(parents=True, exist_ok=True)
+    rows = [
+        "| Run | Date (UTC) | Seed / order | Brief | Metrics | Commit | Receipt |",
+        "| ---: | --- | --- | ---: | ---: | --- | --- |",
+    ]
+    for number, run in enumerate(runs, start=1):
+        identity = run.get("identity", {})
+        summary = run.get("summary", {})
+        commit = str(identity.get("repo_head", "unknown"))[:12]
+        if identity.get("repo_dirty", "-dirty" in str(identity.get("pixel_version", ""))):
+            commit += " (dirty)"
+        order = ", ".join(run.get("order", []))
+        dirname = str(run.get("receipt_dir", ""))
+        link = f"[{dirname}](./{dirname}/receipt.md)" if dirname else "receipt"
+        rows.append(
+            f"| {number} | {run.get('when_utc', 'unknown')} | seed {run.get('seed', '?')}: {order} "
+            f"| {summary.get('brief', '?')}/{summary.get('of', '?')} "
+            f"| {summary.get('metrics', '?')}/{summary.get('of', '?')} | `{commit}` | {link} |"
+        )
+    contents = [
+        "# Ultima Arena run history",
+        "",
+        "Each row links to the per-run receipt. Runs are ordered by receipt date; seed fixes CLI start order.",
+        "",
+        *rows,
+        "",
+    ]
+    (results_root / "README.md").write_text("\n".join(contents), encoding="utf-8")
 
 
 # ---------------------------------------------------------------- abort
@@ -945,7 +1343,7 @@ def parse(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("command", nargs="?", choices=["run", "abort"], default="run")
     ap.add_argument("--repo", help="repository the agents work in (default: git toplevel of the cwd)")
     ap.add_argument("--skip-install", action="store_true", help="use the pixel already on PATH")
-    ap.add_argument("--seed", type=int, help="shuffle seed (default: time-based, printed and stored)")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED, help=f"shuffle seed (default: {DEFAULT_SEED})")
     ap.add_argument("--clis", default=",".join(CLIS), help="comma-separated subset of: " + ",".join(CLIS))
     ap.add_argument("--timeout", type=float, default=300.0, help="seconds per CLI after its prompt (default 300)")
     ap.add_argument("--out", help="receipt directory (default: <repo>/eval/arena-results/ultima-<UTC>)")
@@ -971,7 +1369,8 @@ def main(argv: list[str] | None = None) -> int:
         if shutil.which("herdr") is None:
             raise UltimaError("herdr is not on PATH")
         if args.command == "abort":
-            return abort_run(herdr, state_dir())
+            with arena_lock(state_dir()):
+                return abort_run(herdr, state_dir())
         names = [n.strip() for n in args.clis.split(",") if n.strip()]
         unknown = [n for n in names if n not in CLIS]
         if unknown or not names:
@@ -982,8 +1381,8 @@ def main(argv: list[str] | None = None) -> int:
         repo = pathlib.Path(args.repo).resolve() if args.repo else git_toplevel(pathlib.Path.cwd())
         if not (repo / SEARCH_PATH).is_dir():
             raise UltimaError(f"{repo / SEARCH_PATH} does not exist: the prompt's search needs a pixel checkout")
-        seed = args.seed if args.seed is not None else int(time.time())
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        seed = args.seed
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         cfg = Settings(
             repo=repo,
             out=pathlib.Path(args.out).resolve() if args.out else repo / "eval" / "arena-results" / f"ultima-{stamp}",
@@ -996,8 +1395,11 @@ def main(argv: list[str] | None = None) -> int:
             skip_install=args.skip_install,
         )
         arena = Arena(cfg, herdr)
-        abort_run(herdr, cfg.state_dir, lambda m: None)  # panes of an earlier run of this tool
-        return arena.run(shuffled(names, seed))
+        with arena_lock(cfg.state_dir):
+            if not arena.operator or not any(p.get("pane_id") == arena.operator for p in herdr.panes()):
+                raise UltimaError("HERDR_PANE_ID must identify an existing operator pane; no panes or installation were changed")
+            abort_run(herdr, cfg.state_dir, lambda m: None)  # panes of an earlier run of this tool
+            return arena.run(shuffled(names, seed))
     except UltimaError as e:
         print(f"ultima-arena: {e}", file=sys.stderr)
         return 2

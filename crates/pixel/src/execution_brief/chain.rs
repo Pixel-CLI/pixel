@@ -2675,9 +2675,9 @@ impl Around {
 /// the chain used the window up: a loaded machine slows the chain and the
 /// probes alike, and a probe that never gets to run is a brief without it.
 const PROBE_FLOOR: Duration = Duration::from_millis(1_200);
-/// No probe outlives this after the prompt arrived: under the six seconds the
-/// hook decision is given (`DECISION_TIMEOUT` in `task_hook.rs`) with room to
-/// print, and under what the parts after the first wait for part 1.
+/// No probe outlives this after the prompt arrived: under Pi's six-second hook
+/// decision limit, with room to print, and under what the parts after the first
+/// wait for part 1.
 const PROBE_CEILING: Duration = Duration::from_millis(5_000);
 /// What the one-part `brief` command may print once probes added to it: a
 /// caller that did not ask for more parts (`--parts`) takes one 4 000-byte

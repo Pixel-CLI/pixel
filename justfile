@@ -38,3 +38,8 @@ clean-bench:
 # Remove all of the above. The recall corpus and ~/.local/state/pixel are never touched.
 clean-all:
     @scripts/dev/clean.sh all
+
+# Run the five-CLI brief and metrics arena from a Herdr operator pane.
+# Pass harness flags as recipe arguments, e.g. `just ultima-arena --seed 42`.
+ultima-arena *args:
+    @scripts/dev/ultima-arena.sh {{args}}

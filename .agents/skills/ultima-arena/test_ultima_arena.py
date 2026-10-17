@@ -26,6 +26,7 @@ import ultima_arena as ua  # noqa: E402
 
 FAKE_HERDR = r'''#!/usr/bin/env python3
 import json, os, sys, time
+from datetime import datetime, timezone
 D = os.environ["FAKE_DIR"]
 SP = D + "/state.json"
 st = json.load(open(SP))
@@ -53,6 +54,10 @@ def opt(n, d=None):
 
 def ms():
     return int(time.time() * 1000)
+
+
+def iso(value):
+    return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def append(path, row):
@@ -95,6 +100,12 @@ elif a[:2] == ["pane", "rename"]:
     out({"result": {}})
 elif a[:2] == ["pane", "layout"]:
     out({"result": {"layout": {}}})
+elif a[:2] == ["agent", "list"]:
+    agents = list(st.get("external_agents", []))
+    for name, g in st["agents"].items():
+        agents.append({"agent": g["kind"], "agent_status": g["status"], "cwd": REPO,
+                       "foreground_cwd": REPO, "pane_id": g["pane"]})
+    out({"result": {"agents": agents}})
 elif a[:2] == ["agent", "start"]:
     name = a[2]
     if name in st.get("busy_once", []):
@@ -103,11 +114,14 @@ elif a[:2] == ["agent", "start"]:
         print(json.dumps({"error": {"code": "agent_pane_busy"}}))
         sys.exit(1)
     kind = opt("--kind")
+    extra = a[a.index("--") + 1:] if "--" in a else []
     cli = name[len("ultima-"):]
     dialog = CODEX_DIALOG if kind == "codex" else CLAUDE_DIALOG if kind == "claude" else ""
+    if kind == "agy" and SCEN.get(cli) == "verbosity-banner":
+        dialog = ".../config > Verbosity · esc to dismiss"
     st["agents"][name] = {"pane": opt("--pane"), "kind": kind, "status": "idle", "seq": 1, "ready_at": 0,
-                          "dialog": dialog, "sel": "", "screen": [], "after": []}
-    st["log"].append(["start", name, kind])
+                          "dialog": dialog, "sel": "", "screen": [], "after": [], "extra": extra}
+    st["log"].append(["start", name, kind, extra])
     if SCEN.get(cli) == "no-brief":  # stale lines of this provider, from before any prompt
         old = ms() - 600000
         append(REPO + "/.pixel/brief-feedback.jsonl", {"t": "prompt", "ts": old, "session": "old", "provider": PROV[cli], "bytes": 800})
@@ -132,6 +146,7 @@ elif a[:2] == ["agent", "read"]:
     print(g["dialog"] if g and g["dialog"] else "\n".join(g["screen"]) if g else "")
 elif a[:2] == ["agent", "send-keys"]:
     g = agent_of(a[2])
+    st["log"].append(["keys", a[2], *a[3:]])
     for k in a[3:]:
         st["keylog"].append([a[2], k])
         if g["dialog"] and g["kind"] == "claude":
@@ -139,6 +154,8 @@ elif a[:2] == ["agent", "send-keys"]:
             if k == "enter" and g["sel"] == "1":
                 g["dialog"] = ""
         elif g["dialog"] and g["kind"] == "codex" and k == "t":
+            g["dialog"] = ""
+        elif g["dialog"] and g["kind"] == "agy" and k == "esc":
             g["dialog"] = ""
     out({"result": {}})
 elif a[:2] == ["agent", "prompt"]:
@@ -156,6 +173,29 @@ elif a[:2] == ["agent", "prompt"]:
     if scen != "no-call":
         append(REPO + "/.pixel/actions.jsonl", {"invocation_id": "123-18df019d6%s-0" % i6, "ts_ms": t + 1, "pid": 1,
                "command": "search-content", "args": "-F start_brief crates/pixel/src", "cwd": REPO, "outcome": "ok", "duration_ms": 12})
+    if cli == "pi":
+        args = g["extra"]
+        session_dir = args[args.index("--session-dir") + 1]
+        os.makedirs(session_dir, exist_ok=True)
+        pi_rows = [
+            {"type": "session", "id": "session-pi", "timestamp": iso(t - 1000)},
+            {"type": "model_change", "timestamp": iso(t - 900), "provider": "wafer", "modelId": "GLM-5.3-Flash"},
+        ]
+        if scen != "pi-stale-transcript":
+            pi_rows.append({"type": "custom_message", "customType": "pixel-brief", "timestamp": iso(t + 1), "content": "[PIXEL:BRIEF] kind: flow"})
+        if scen not in ("no-call", "pi-stale-transcript"):
+            command = "pixel search-content -F start_brief crates/pixel/src"
+            if scen == "pi-wrong-command":
+                command = "pixel impact start_brief"
+            pi_rows.append({"type": "message", "timestamp": iso(t + 2), "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "call-pi", "name": "bash", "arguments": {"command": command}}]}})
+            output = "🟩 pixel search-content ❀ 12.3ms ❀ #" + i6
+            if scen == "pi-no-result":
+                output = "Command failed"
+            pi_rows.append({"type": "message", "timestamp": iso(t + 3), "message": {"role": "toolResult", "toolCallId": "call-pi", "toolName": "bash", "isError": False, "content": [{"type": "text", "text": output}]}})
+        if scen != "pi-unfinished":
+            pi_rows.append({"type": "message", "timestamp": iso(t + 4), "message": {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "answer"}]}})
+        with open(session_dir + "/session.jsonl", "w") as transcript:
+            transcript.writelines(json.dumps(row) + "\n" for row in pi_rows)
     after = [] if scen == "no-call" else ["$ pixel search-content -F start_brief crates/pixel/src", "crates/pixel/src/task_hook.rs:228:pub fn start_brief"]
     box = None if scen in ("no-call", "claim-only") else "🟩 pixel search-content ❀ 12.3ms ❀ #%s" % ("ffffff" if scen == "orphan-box" else i6)
     if cli in ("claude", "codex", "pi"):
@@ -169,8 +209,10 @@ elif a[:2] == ["agent", "prompt"]:
         if box:
             rows.append((90, box))
         agy_store(sess, rows)
-    elif box:
+    elif box and not (cli == "pi" and scen in ("pi-stale-screen", "pi-wrong-command", "pi-no-result", "pi-stale-transcript")):
         after.append(box)
+    if cli == "pi" and scen in ("pi-stale-screen", "pi-wrong-command", "pi-no-result", "pi-stale-transcript"):
+        after = [line for line in after if not line.startswith("$ pixel") and not line.startswith("🟩 pixel search-content")]
     if scen == "claim-only":
         after.append("The pixel metrics line was displayed: search-content 12ms #%s" % i6)
     after.append("answer: crates/pixel/src/task_hook.rs:228")
@@ -227,7 +269,7 @@ class Fixture:
         self.elsewhere = self.tmp / "elsewhere"
         self.elsewhere.mkdir()
         self.state = {"n": 0, "panes": {"root": {"label": "operator", "cwd": "/"}, "foreign": {"label": "mine", "cwd": "/"}},
-                      "agents": {}, "log": [], "keylog": [], "busy_once": []}
+                      "agents": {}, "external_agents": [], "log": [], "keylog": [], "busy_once": []}
         self.scenarios = {}
         self.extra_env = {}
 
@@ -273,8 +315,19 @@ class Fixture:
 
 
 class PureTests(unittest.TestCase):
+    def test_arena_lock_rejects_a_second_runner(self):
+        with tempfile.TemporaryDirectory(prefix="ultima-lock-") as scratch:
+            directory = pathlib.Path(scratch)
+            with ua.arena_lock(directory):
+                with self.assertRaisesRegex(ua.UltimaError, "another Ultima Arena run is active"):
+                    with ua.arena_lock(directory):
+                        self.fail("the second runner entered the locked arena")
+
     def test_prompt_guard_refuses_the_measurement(self):
         self.assertEqual(ua.guard_prompt(ua.PROMPT), ua.PROMPT)
+        self.assertIn("Even if the brief or prior context already contains the answer", ua.PROMPT)
+        self.assertIn("you must run the exact command below once", ua.PROMPT)
+        self.assertIn("say `NOT RUN`", ua.PROMPT)
         for bad in ("Did you see the metrics?", "show METRIC lines", "look for 🟩", "a ❀ b"):
             with self.assertRaises(ua.UltimaError, msg=bad):
                 ua.guard_prompt(bad)
@@ -298,6 +351,39 @@ class PureTests(unittest.TestCase):
             [("t0", "root", "right", ua.OPERATOR_SHARE), ("b0", "t0", "down", 0.5), ("t1", "t0", "right", 1 / 3), ("t2", "t1", "right", 0.5), ("b1", "b0", "right", 0.5)],
         )
         self.assertEqual(ua.cell_keys(5), ["t0", "t1", "t2", "b0", "b1"])
+
+    def test_active_agent_overlap_matches_repo_paths_and_excludes_operator(self):
+        repo = pathlib.Path("/tmp/arena-repo")
+        agents = [
+            {"agent": "claude", "agent_status": "working", "cwd": str(repo), "pane_id": "p1"},
+            {"agent": "devin", "agent_status": "working", "foreground_cwd": str(repo / "crates"), "pane_id": "p2"},
+            {"agent": "codex", "agent_status": "working", "cwd": str(repo), "pane_id": "operator"},
+            {"agent": "pi", "agent_status": "idle", "cwd": str(repo), "pane_id": "p3"},
+            {"agent": "codex", "agent_status": "working", "cwd": str(repo.parent / "other"), "pane_id": "p4"},
+        ]
+        found = ua.active_agents_in_repo(agents, repo, "operator")
+        self.assertEqual([agent["agent"] for agent in found], ["claude", "devin"])
+        self.assertEqual(found[1]["path"], str((repo / "crates").resolve()))
+
+    def test_active_agent_in_sibling_worktree_counts_as_overlap(self):
+        with tempfile.TemporaryDirectory(prefix="ultima-worktrees-") as scratch:
+            root = pathlib.Path(scratch)
+            repo, sibling = root / "repo", root / "repo-sibling"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("fixture\n")
+            git(repo, "init", "-q")
+            git(repo, "add", "tracked.txt")
+            git(repo, "commit", "-m", "fixture")
+            git(repo, "worktree", "add", "-q", "-b", "sibling", str(sibling))
+
+            found = ua.active_agents_in_repo(
+                [{"agent": "codex", "agent_status": "working", "cwd": str(sibling), "pane_id": "other"}],
+                repo,
+                "operator",
+            )
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0]["agent"], "codex")
+            self.assertEqual(found[0]["path"], str(sibling.resolve()))
 
     def test_brief_needs_prompt_and_part_of_that_provider_after_the_prompt(self):
         rows = [
@@ -351,13 +437,15 @@ class PureTests(unittest.TestCase):
         self.assertEqual(ua.parse_boxes(wrapped)[0]["framed"], None)
         self.assertEqual(ua.judge_metrics(wrapped.replace("#b44", "#000"), [rec], 0)["verdict"], "FAIL")
 
-    def test_records_count_only_inside_the_turn_window(self):
+    def test_shell_calls_are_counted_from_their_own_pane_not_overlapping_log_windows(self):
         recs = [
             {"command": "search-content", "invocation_id": f"9-18df019d61b4{i:04x}-0", "ts_ms": ts, "args": "-F start_brief crates/pixel/src"}
             for i, ts in enumerate((99, 100, 150, 200, 201))
         ] + [{"command": "impact", "invocation_id": "9-18df019d61b4ffff-0", "ts_ms": 150, "args": "start_brief"}]
-        self.assertEqual(ua.shell_call_count(recs, 100, 200), 3)
-        self.assertEqual(ua.shell_call_count(recs, 100), 4)
+        command = f"$ {ua.SHELL_CMD}"
+        self.assertEqual(ua.shell_call_count(command + "\n" + command), 2)
+        self.assertEqual(ua.shell_call_count("another CLI ran " + ua.SHELL_CMD), 0)
+        self.assertEqual(ua.shell_call_count("answer without a shell call"), 0)
         box = "🟩 pixel search-content ❀ 1.0ms ❀ #b40004"  # the record at 201, after the turn ended
         self.assertEqual(ua.judge_metrics(box, recs, 100, 200)["verdict"], "FAIL")
         self.assertEqual(ua.judge_metrics(box, recs, 100, 201)["verdict"], "PASS")
@@ -368,7 +456,8 @@ class PureTests(unittest.TestCase):
         rc, out, _ = fx.run()
         self.assertEqual(rc, 0, out)
         pi = fx.receipt()["clis"]["pi"]
-        self.assertEqual((pi["status"], pi["brief"]["verdict"], pi["metrics"]["verdict"]), ("done", "PASS", "PASS"))
+        self.assertIn(pi["status"], ("done", "evidence-complete"))
+        self.assertEqual((pi["brief"]["verdict"], pi["metrics"]["verdict"]), ("PASS", "PASS"))
 
     def test_codex_hooks_are_pixels_only_when_every_command_is(self):
         fx = Fixture(self)
@@ -383,6 +472,58 @@ class PureTests(unittest.TestCase):
 
 
 class RunTests(unittest.TestCase):
+    def test_pi_transcript_proves_delivery_when_terminal_viewport_is_stale(self):
+        fx = Fixture(self)
+        fx.scenarios = {"pi": "pi-stale-screen"}
+        rc, out, err = fx.run()
+        self.assertEqual(rc, 0, out + err)
+        pi = fx.receipt()["clis"]["pi"]
+        self.assertEqual((pi["brief"]["verdict"], pi["brief"]["on_screen"]), ("PASS", False))
+        self.assertEqual(pi["brief"]["evidence_source"], "pi session transcript")
+        self.assertEqual(pi["metrics"]["verdict"], "PASS")
+        transcript = pi["pi_transcript"]
+        self.assertEqual((transcript["provider"], transcript["model"]), ("wafer", "GLM-5.3-Flash"))
+        self.assertEqual(transcript["metrics"]["box_lines"], ["🟩 pixel search-content ❀ 12.3ms ❀ #aaaaa3"])
+        self.assertTrue(pathlib.Path(transcript["transcript_path"]).is_file())
+        self.assertTrue((fx.tmp / "out" / "pi.evidence.json").is_file())
+        starts = [event for event in fx.read_state()["log"] if event[0] == "start" and event[1] == "ultima-pi"]
+        self.assertEqual(starts[0][3][0:2], ["--tui-mode", "regular"])
+        self.assertIn("--session-dir", starts[0][3])
+
+    def test_pi_transcript_rejects_stale_calls_and_unpaired_results(self):
+        for scenario in ("pi-stale-transcript", "pi-wrong-command", "pi-no-result"):
+            with self.subTest(scenario=scenario):
+                fx = Fixture(self)
+                fx.scenarios = {"pi": scenario}
+                rc, out, err = fx.run()
+                self.assertEqual(rc, 1, out + err)
+                pi = fx.receipt()["clis"]["pi"]
+                self.assertEqual(pi["brief"]["verdict"], "FAIL" if scenario == "pi-stale-transcript" else "PASS")
+                self.assertEqual(pi["metrics"]["verdict"], "FAIL" if scenario == "pi-no-result" else "NO-CALL")
+
+    def test_pi_waits_for_its_own_stop_record_despite_other_cli_actions(self):
+        fx = Fixture(self)
+        fx.scenarios = {"pi": "pi-unfinished"}
+        rc, out, err = fx.run(("--timeout", "0.5"))
+        self.assertEqual(rc, 1, out + err)
+        pi = fx.receipt()["clis"]["pi"]
+        self.assertEqual(pi["status"], "timeout")
+        self.assertFalse(pi["pi_transcript"]["turn_complete"])
+        self.assertEqual(pi["brief"]["verdict"], "PASS")
+        self.assertEqual(pi["metrics"]["verdict"], "PASS")
+
+    def test_missing_operator_pane_stops_before_install_or_grid_changes(self):
+        for pane_id in ("", "not-a-pane"):
+            with self.subTest(pane_id=pane_id):
+                fx = Fixture(self)
+                fx.extra_env["HERDR_PANE_ID"] = pane_id
+                rc, out, err = fx.run()
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn("HERDR_PANE_ID must identify an existing operator pane", err)
+                state = fx.read_state()
+                self.assertFalse([event for event in state["log"] if event[0] in ("split", "start", "prompt", "close")])
+                self.assertFalse((fx.fake / "pixel.log").exists())
+
     def test_all_five_pass_from_another_directory(self):
         fx = Fixture(self)
         fx.hooks("/x/pixel run-hook task-event --provider codex --event prompt-submit || true")
@@ -404,16 +545,49 @@ class RunTests(unittest.TestCase):
                 self.assertEqual(e[2], ua.PROMPT)
         for name in r["order"]:
             c = r["clis"][name]
-            self.assertEqual((c["status"], c["brief"]["verdict"], c["metrics"]["verdict"]), ("done", "PASS", "PASS"), name)
+            self.assertIn(c["status"], ("done", "evidence-complete"), name)
+            self.assertEqual((c["brief"]["verdict"], c["metrics"]["verdict"]), ("PASS", "PASS"), name)
             self.assertTrue((fx.tmp / "out" / f"{name}.scrollback.txt").read_text())
         self.assertEqual(r["clis"]["agy"]["provider"], "antigravity")
         self.assertFalse(r["clis"]["agy"]["prompt_submit_line"]["seen"])
         self.assertTrue(r["clis"]["pi"]["prompt_submit_line"]["seen"])
-        self.assertEqual([k for n, k in st["keylog"] if n == "ultima-claude"], ["1", "enter"])
-        self.assertEqual([k for n, k in st["keylog"] if n == "ultima-codex"], ["t", "esc"])
+        self.assertEqual([k for n, k in st["keylog"] if n == "ultima-claude"], ["1", "enter", "ctrl+c"])
+        self.assertEqual([k for n, k in st["keylog"] if n == "ultima-codex"], ["t", "esc", "ctrl+c"])
         self.assertTrue((fx.tmp / "out" / "receipt.md").read_text().startswith("# Ultima Arena"))
         splits = [e for e in st["log"] if e[0] == "split"]
         self.assertEqual([e[2] for e in splits], ["right", "down", "right", "right", "right"])
+
+    def test_agy_verbosity_banner_is_dismissed_before_prompt(self):
+        fx = Fixture(self)
+        fx.scenarios = {"agy": "verbosity-banner"}
+        rc, out, err = fx.run()
+        self.assertEqual(rc, 0, out + err)
+        state = fx.read_state()
+        self.assertEqual([k for n, k in state["keylog"] if n == "ultima-agy"], ["esc", "ctrl+c"])
+        self.assertIn(["prompt", "ultima-agy", ua.PROMPT], state["log"])
+        self.assertIn("dismissed agy verbosity banner", fx.receipt()["clis"]["agy"]["events"])
+
+    def test_all_prompts_are_dispatched_before_the_monitor_waits_for_any_turn(self):
+        fx = Fixture(self)
+        rc, out, err = fx.run()
+        self.assertEqual(rc, 0, out + err)
+        log = fx.read_state()["log"]
+        prompt_indices = [i for i, event in enumerate(log) if event[0] == "prompt"]
+        interrupt_indices = [i for i, event in enumerate(log) if event[0] == "keys" and "ctrl+c" in event[2:]]
+        self.assertEqual(len(prompt_indices), 5)
+        self.assertTrue(interrupt_indices)
+        self.assertLess(max(prompt_indices), min(interrupt_indices), "monitor interrupted a turn before dispatching every prompt")
+
+    def test_run_warns_about_other_working_agents_in_the_target_repo(self):
+        fx = Fixture(self)
+        fx.state["external_agents"] = [
+            {"agent": "claude", "agent_status": "working", "cwd": str(fx.repo), "pane_id": "other"},
+            {"agent": "devin", "agent_status": "working", "cwd": str(fx.elsewhere), "pane_id": "unrelated"},
+        ]
+        rc, out, err = fx.run()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(f"WARNING: other active agent session(s) may write to {fx.repo} during this run: claude (working) at {fx.repo}", out)
+        self.assertLess(out.index("WARNING:"), out.index("pixel:"))
 
     def test_brief_fails_without_a_new_feedback_line(self):
         fx = Fixture(self)
@@ -445,7 +619,8 @@ class RunTests(unittest.TestCase):
             c = clis[name]
             self.assertEqual((c["metrics"]["verdict"], c["shell_call_seen"]), ("NO-CALL", False), name)
             self.assertTrue(any("no Pixel shell call" in e for e in c["events"]), c["events"])
-        self.assertEqual({c["status"] for c in clis.values()}, {"done"})
+        self.assertTrue({c["status"] for c in clis.values()} <= {"done", "evidence-complete"})
+        self.assertIn("done", {c["status"] for c in clis.values()})
 
     def test_a_brief_the_hook_logged_but_the_pane_never_shows_fails(self):
         fx = Fixture(self)
@@ -458,7 +633,8 @@ class RunTests(unittest.TestCase):
         shown = fx.receipt()["clis"]
         self.assertEqual(shown["claude"]["brief"]["screen_evidence"], "🟩 pixel prompt-submit ❀ 41ms")
         agy = shown["agy"]
-        self.assertEqual((agy["brief"]["screen_evidence"], agy["metrics"]["verdict"]), ("agy store: [PIXEL:BRIEF]", "PASS"))
+        self.assertEqual((agy["brief"]["delivery_evidence"], agy["metrics"]["verdict"]), ("agy store: [PIXEL:BRIEF]", "PASS"))
+        self.assertEqual((agy["brief"]["on_screen"], agy["brief"]["screen_evidence"]), (False, None))
         self.assertEqual(agy["agy_store"], {"conversations": ["s-agy"], "ephemeral_steps": 2})
         self.assertNotIn("🟩", (fx.tmp / "out" / "agy.scrollback.txt").read_text())
         self.assertIn("#aaaaa4", (fx.tmp / "out" / "agy.injected.txt").read_text())
@@ -528,7 +704,7 @@ class RunTests(unittest.TestCase):
         # A pane with our name but a foreign label that no ultima agent lives in survives too.
         fx2 = Fixture(self)
         fx2.main(["abort"])  # nothing recorded: no-op
-        (fx2.tmp / "state").mkdir()
+        (fx2.tmp / "state").mkdir(exist_ok=True)
         (fx2.tmp / "state" / "last-run.json").write_text(json.dumps({"operator": "root", "panes": [{"pane_id": "foreign", "name": "ultima-claude"}]}))
         fx2.main(["abort"])
         self.assertIn("foreign", fx2.read_state()["panes"])

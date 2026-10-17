@@ -803,16 +803,24 @@ keep one hook too.
   soon as the brief is finished (not after the ledger) it stores the whole
   text under `.pixel/brief-parts/` keyed by the session id and the prompt
   (`cache_path`, see "On-disk state"), an empty one for a prompt with no
-  brief, and prints slice 1. It says nothing about parts.
+  brief, and prints slice 1. Native hooks have an eight-second decision limit;
+  Pi keeps six seconds to stay within its shorter subprocess deadline. If
+  split part 1 reaches its limit just as the brief is stored, it prints the
+  stored first slice after a short grace period, so the head and its notice
+  survive a late decision. Later parts leave another 250 ms for that response
+  to flush and release its done marker. It says nothing about parts.
 - **Parts 2 to N** read the same payload, derive the same key, wait for the
-  file (`WAIT`, 2 s, polling every 15 ms) and then for part 1's `.done`
+  file (polling every 15 ms) and then for part 1's `.done`
   marker, and print their slice in the same hook envelope: `{}` for a brief
   too short to reach them, nothing at all when the file does not come in
   time, the payload names no prompt or repository, or the file is not
   readable. The marker matters because the host orders what concurrent hooks
   print by when each finishes (measured: with parts 2 and 3 free to print as
   soon as the brief was stored, Claude Code put them ahead of part 1); a
-  part 1 that never marks itself done costs only the rest of the 2 s. They
+  part 1 that never marks itself done costs only the remaining bound
+  (`decision_timeout` plus 750 ms). A marker explicitly recording a missing
+  head shifts later slices down by one: part 2 sends the first slice and its
+  notice, preserving the head if part 1 gave up before a late store. They
   run no ledger, so one prompt is one ledger event.
 - **Fails open.** Claude Code blocks the user's prompt when a
   `UserPromptSubmit` hook exits 2, which is what an older `pixel` does on the
@@ -1315,6 +1323,14 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
 
 ## Testing and gates
 
+- `just ultima-arena` (or `scripts/dev/ultima-arena.sh`) runs the five-CLI
+  brief/metrics smoke in the current Herdr operator tab. A fixed seed controls
+  start order; all ready panes receive the same prompt before monitoring starts.
+  Each turn is interrupted once its brief and matching invocation metrics are
+  evidenced. One process lock protects the arena grid. Dated receipts, session
+  evidence and timestamped logs stay under gitignored `eval/arena-results/`;
+  its Markdown index records run numbers, repository commits and dirty state.
+  `--self-test` exercises the orchestration and verdicts with fixture CLIs.
 - The public `.github/actions/setup-pixel` composite action installs a checksum-verified
   release into runner temporary storage and optionally prepares indexes without a
   daemon. `setup-pixel.yml` smoke-tests real releases on Linux x64/ARM64 and

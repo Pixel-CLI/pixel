@@ -86,9 +86,9 @@ pub const BRIEF_WINDOW_COMMAND_DEFAULT_MS: u64 = 750;
 pub const BRIEF_WINDOW_COMMAND_MAX_MS: u64 = 1_000;
 /// Shortest window a setting may ask for.
 pub const BRIEF_WINDOW_MIN_MS: u64 = 250;
-/// Longest window a setting may ask for: the hook decision is abandoned after six seconds
-/// (`DECISION_TIMEOUT` in `task_hook.rs`), itself under the [`HOOK_TIMEOUT`] the host enforces, and the window
-/// stays 1.5 s below that so the brief can still be printed.
+/// Longest window a setting may ask for: the shortest hook decision is six seconds
+/// (Pi; `PI_DECISION_TIMEOUT` in `task_hook.rs`), itself under the [`HOOK_TIMEOUT`] the host enforces, and the window
+/// stays 1.5 s below that so the brief can still be printed. Native hooks have an eight-second decision window.
 pub const BRIEF_WINDOW_MAX_MS: u64 = 4_500;
 const _: () = assert!(BRIEF_WINDOW_MAX_MS + 1_500 + 4_000 <= HOOK_TIMEOUT * 1_000);
 const _: () = assert!(BRIEF_WINDOW_MIN_MS <= BRIEF_WINDOW_COMMAND_DEFAULT_MS);
