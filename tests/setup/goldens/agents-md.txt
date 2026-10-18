@@ -3,9 +3,10 @@
 # Paths are relative to the fixture root; see the module doc to regenerate.
 
 ## after setup, twice
+--- home/.agents/skills/pixel/SKILL.md 0644 = tests/setup/.agents/skill.md
 --- home/.pixel/config.yaml 0600 = tests/setup/goldens/shared/config.yaml
 --- home/.pixel/setup-receipt.json 0600
-{"{HOME}/.pixel":{"original":null,"installed":"directory"},"{HOME}/.pixel/config.yaml":{"original":null,"installed":"600:{SHA256:home/.pixel/config.yaml}"}}
+{"{HOME}/.agents":{"original":null,"installed":"directory"},"{HOME}/.agents/skills":{"original":null,"installed":"directory"},"{HOME}/.agents/skills/pixel":{"original":null,"installed":"directory"},"{HOME}/.agents/skills/pixel/SKILL.md":{"original":null,"installed":"644:{SHA256:home/.agents/skills/pixel/SKILL.md}"},"{HOME}/.pixel":{"original":null,"installed":"directory"},"{HOME}/.pixel/config.yaml":{"original":null,"installed":"600:{SHA256:home/.pixel/config.yaml}"}}
 \ no newline at end of file
 
 ## after setup --remove

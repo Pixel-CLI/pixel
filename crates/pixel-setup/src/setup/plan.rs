@@ -88,9 +88,15 @@ impl SetupPlan {
                      ~/.pi/agent.",
                     agent.name()
                 )),
+                AgentTarget::AgentMd if scope == Scope::Global => notes.push(format!(
+                    "{} gets the pixel skill under ~/.agents/skills, which \
+                     GitHub Copilot CLI and Amp read; an agent that reads \
+                     only AGENTS.md gets nothing.",
+                    agent.name()
+                )),
                 AgentTarget::AgentMd => notes.push(format!(
-                    "{} names no harness directory of its own; nothing is \
-                     written for it.",
+                    "{} names no harness directory in a repository; nothing \
+                     is written for it.",
                     agent.name()
                 )),
                 _ => {}
@@ -185,11 +191,21 @@ mod tests {
         );
 
         let plan = make_plan(Scope::Global, &[AgentTarget::AgentMd], &[]);
+        assert_eq!(
+            plan.notes,
+            vec![
+                "AGENTS.md gets the pixel skill under ~/.agents/skills, which GitHub Copilot \
+                 CLI and Amp read; an agent that reads only AGENTS.md gets nothing."
+                    .to_string()
+            ],
+            "the generic target names where its skill goes"
+        );
+        let plan = make_plan(Scope::Repository, &[AgentTarget::AgentMd], &[]);
         assert!(
             plan.notes
                 .iter()
-                .any(|note| note.contains("no harness directory")),
-            "the generic target says nothing is written: {:?}",
+                .any(|note| note.contains("nothing is written")),
+            "a repository run writes no skill: {:?}",
             plan.notes
         );
     }

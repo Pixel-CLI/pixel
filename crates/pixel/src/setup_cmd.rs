@@ -2072,8 +2072,8 @@ mod tests {
         assert!(written.contains("metrics: \"on\""), "{written}");
         assert!(written.contains("brief: true"), "{written}");
         assert!(
-            written.contains("no harness directory"),
-            "the agent with nothing to write is named: {written}"
+            written.contains("~/.agents/skills"),
+            "the generic target's skill destination is named: {written}"
         );
         assert!(
             written.contains("The skill's text"),

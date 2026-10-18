@@ -7,9 +7,10 @@ wire (Copilot CLI, ...)? You don't need `pixel setup`.
 
 1. **Install the `pixel` skill**, `skills/pixel/SKILL.md`, in `~/.claude` and in
    each of `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini` (Gemini CLI and
-   Antigravity), `~/.pi/agent` and `~/.config/opencode` that exists. Pi's
-   package writes the same file itself, and Antigravity's plugins carry their
-   own copy. Copilot CLI and a generic `AGENTS.md` agent get no skill.
+   Antigravity), `~/.pi/agent`, `~/.config/opencode` and `~/.agents` (the
+   cross-harness skills directory GitHub Copilot CLI and Amp read; the guided
+   setup's `AGENTS.md` row) that exists. Pi's package writes the same file
+   itself, and Antigravity's plugins carry their own copy.
 2. **Register hooks, preserving foreign ones.** Claude Code, Codex and Devin
    get the `task-event` hooks, whose prompt-submit entry adds the
    `[PIXEL:BRIEF]`, and Claude Code, Codex and Antigravity a metrics relay.

@@ -137,8 +137,11 @@ pub const PI_CONFIG_DIR: &str = ".pi/agent";
 /// Harness config roots whose `skills/` dir a `pixel-classify` copy deploys
 /// into — the skill is harness-agnostic, so every configured harness gets it
 /// (`.claude` is a target unconditionally: install writes Claude's hooks
-/// before the helpers step runs).
+/// before the helpers step runs). `.agents` is the cross-harness personal
+/// skills directory: GitHub Copilot CLI and Amp read `~/.agents/skills`, and
+/// it is where the generic `AGENTS.md` target's skill goes.
 pub const SKILL_ROOTS: &[&str] = &[
+    ".agents",
     ".codex",
     ".cursor",
     ".devin",

@@ -43,7 +43,8 @@ pub enum AgentTarget {
     OpenCode,
     /// pi.
     Pi,
-    /// Every other agent that reads a repository `AGENTS.md`.
+    /// Every other agent that reads a repository `AGENTS.md`; its `pixel`
+    /// skill goes to the cross-harness `~/.agents/skills`.
     AgentMd,
 }
 
@@ -99,7 +100,9 @@ impl AgentTarget {
             Self::Antigravity => "Install the pixel skill under the shared ~/.gemini/skills.",
             Self::OpenCode => "Install the pixel skill under ~/.config/opencode/skills.",
             Self::Pi => "Install the pixel skill and the impact/brief package under ~/.pi/agent.",
-            Self::AgentMd => "No harness directory of its own; nothing is written for it.",
+            Self::AgentMd => {
+                "Install the pixel skill under ~/.agents/skills, which GitHub Copilot CLI and Amp read."
+            }
         }
     }
 

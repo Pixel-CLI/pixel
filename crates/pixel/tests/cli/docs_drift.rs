@@ -802,6 +802,7 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
 
     let home = crate::support::Scratch::for_test("docs-drift", "agents-global");
     for dir in [
+        ".agents",
         ".codex",
         ".cursor",
         ".devin",

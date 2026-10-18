@@ -474,3 +474,52 @@ fn remove_takes_out_the_skill_and_the_hooks_a_guided_run_wrote() {
         "the hooks go: {settings}"
     );
 }
+
+/// A machine whose only agent is Copilot CLI or Amp picks the `AGENTS.md`
+/// row (#1092): it must leave with the `pixel` skill where those harnesses
+/// read personal skills, and `--remove` must take it back.
+#[test]
+fn the_agents_md_row_should_write_the_skill_to_agents_skills_and_remove_should_take_it_back() {
+    let home = Scratch::for_test("setup", "agents-md-home");
+    let repo = Scratch::for_test("setup", "agents-md-repo");
+    let skill = home.join(".agents/skills/pixel/SKILL.md");
+
+    let out = run(
+        &home,
+        &repo,
+        &["setup", "--selected-agents=9", "--selected-features=1"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = fs::read_to_string(&skill).unwrap();
+    assert!(text.starts_with("---\nname: pixel\n"), "{text}");
+    assert!(
+        !home.join(".claude/skills").exists(),
+        "only the selected row is written"
+    );
+
+    let absent = home.join(".local/bin/pixel");
+    let removed = run(
+        &home,
+        &repo,
+        &[
+            "setup",
+            "--remove",
+            "--binary-path",
+            absent.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(
+        !skill.exists(),
+        "the managed copy under ~/.agents is removed"
+    );
+}

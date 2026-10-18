@@ -38,8 +38,10 @@ const STEP_ID: &str = "skills.pixel";
 const SKILL_REL: &str = "skills/pixel/SKILL.md";
 
 /// The harness configuration root a selected agent's skill copy lands in,
-/// relative to home. Pi's package step writes the identical file itself and
-/// the generic `AGENTS.md` target names no harness directory.
+/// relative to home. Pi's package step writes the identical file itself. The
+/// generic `AGENTS.md` target has no harness directory of its own, so it
+/// gets the cross-harness one, `~/.agents/skills`, which GitHub Copilot CLI
+/// and Amp read.
 fn skill_root(agent: AgentTarget) -> Option<&'static str> {
     Some(match agent {
         AgentTarget::ClaudeCode => ".claude",
@@ -48,7 +50,8 @@ fn skill_root(agent: AgentTarget) -> Option<&'static str> {
         AgentTarget::Cursor => ".cursor",
         AgentTarget::Gemini | AgentTarget::Antigravity => ".gemini",
         AgentTarget::OpenCode => ".config/opencode",
-        AgentTarget::Pi | AgentTarget::AgentMd => return None,
+        AgentTarget::AgentMd => ".agents",
+        AgentTarget::Pi => return None,
     })
 }
 
@@ -290,6 +293,40 @@ mod tests {
         assert!(!home.join(".claude/skills").exists());
         // Pi's copy is its package step's, not this one's.
         assert!(!home.join(".pi").exists());
+        assert!(!home.join(".agents").exists());
+    }
+
+    #[test]
+    fn the_generic_agents_md_target_should_get_the_skill_in_the_cross_harness_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let step = install(home, Some(&selection(&[AgentTarget::AgentMd])), false).unwrap();
+        // Copilot CLI and Amp read personal skills from ~/.agents/skills.
+        assert_eq!(
+            fs::read_to_string(home.join(".agents/skills/pixel/SKILL.md")).unwrap(),
+            PIXEL_SKILL
+        );
+        assert_eq!(step.summary, "pixel skill deployed to 1 harness dir(s)");
+        assert!(!home.join(".claude").exists(), "no other root is touched");
+        // Re-running changes nothing and leaves no backup beside it.
+        install(home, Some(&selection(&[AgentTarget::AgentMd])), false).unwrap();
+        let entries: Vec<_> = fs::read_dir(home.join(".agents/skills/pixel"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(entries, vec!["SKILL.md".to_string()]);
+    }
+
+    #[test]
+    fn the_unattended_install_should_write_the_cross_harness_dir_only_when_it_exists() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        install(home, None, false).unwrap();
+        assert!(!home.join(".agents").exists());
+        fs::create_dir_all(home.join(".agents")).unwrap();
+        install(home, None, false).unwrap();
+        assert!(home.join(".agents/skills/pixel/SKILL.md").is_file());
+        assert!(managed_skill_dirs(home).contains(&home.join(".agents/skills/pixel")));
     }
 
     #[test]

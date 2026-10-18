@@ -1,0 +1,1 @@
+**setup:** the guided setup's `AGENTS.md` row now installs the `pixel` skill under `~/.agents/skills`, the personal skills directory GitHub Copilot CLI and Amp read, instead of writing nothing; an unattended `pixel setup` writes it there when `~/.agents` exists, and `pixel setup --remove` takes it back.
