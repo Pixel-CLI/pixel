@@ -39,6 +39,18 @@ cargo build --release -p pixel-cli
 cp target/release/pixel ~/.local/bin/pixel
 ```
 
+Shell completions and the man page come from the binary itself, so they
+always match the commands it has:
+
+```bash
+pixel completions bash > ~/.local/share/bash-completion/completions/pixel
+pixel completions zsh > "${fpath[1]}/_pixel"   # any directory on $fpath
+pixel completions fish > ~/.config/fish/completions/pixel.fish
+pixel completions elvish > ~/.config/elvish/lib/pixel.elv   # then `use pixel` in rc.elv
+pixel completions powershell >> $PROFILE
+pixel man > ~/.local/share/man/man1/pixel.1    # then `man pixel`
+```
+
 To update an existing install later, prefer `pixel self-update` over a manual
 copy: it rebuilds, installs over the binary that is actually running (an
 install behind a shim, `~/.cargo/bin`, or `~/.local/bin/pixel`), uses an

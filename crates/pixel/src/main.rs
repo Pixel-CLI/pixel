@@ -1055,6 +1055,16 @@ enum Command {
         #[command(subcommand)]
         cmd: plugin_cmd::PluginCmd,
     },
+    /// Print a shell completion script for `pixel` to stdout, e.g.
+    /// `pixel completions fish > ~/.config/fish/completions/pixel.fish`.
+    Completions {
+        /// The shell to complete for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Print the `pixel(1)` man page (roff) to stdout, e.g.
+    /// `pixel man > ~/.local/share/man/man1/pixel.1`.
+    Man,
 }
 
 #[derive(Subcommand)]
@@ -5720,7 +5730,28 @@ fn run_command(
             Ok(())
         }
         Command::Plugin { cmd } => plugin_cmd::run(cmd),
+        Command::Completions { shell } => write_stdout(&completion_script(shell)),
+        Command::Man => write_stdout(&man_page()?),
     }
+}
+
+/// The completion script for `shell`, generated from the live clap tree so
+/// every subcommand and flag of this binary is in it. Rendered to memory
+/// first: clap_complete panics on a write error, and a reader that closes
+/// the pipe early (`| head`) is not one.
+fn completion_script(shell: clap_complete::Shell) -> String {
+    let mut out = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "pixel", &mut out);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The `pixel(1)` man page (roff), generated from the live clap tree.
+fn man_page() -> Result<String, String> {
+    let mut out = Vec::new();
+    clap_mangen::Man::new(Cli::command())
+        .render(&mut out)
+        .map_err(|e| format!("pixel man: {e}"))?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 fn should_offer_classify_setup(

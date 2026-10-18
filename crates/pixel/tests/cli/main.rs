@@ -12,6 +12,7 @@ mod brief_feedback_cli;
 mod bundled_brief_cli;
 mod classify_cli;
 mod classify_eval_cli;
+mod completions_cli;
 mod config_cli;
 mod core_commands_cli;
 mod cycles_cli;

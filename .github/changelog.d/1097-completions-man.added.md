@@ -1,0 +1,1 @@
+**cli:** `pixel completions bash|zsh|fish|elvish|powershell` prints a completion script and `pixel man` prints the `pixel(1)` roff page, both generated from the binary's own command tree; `docs/manual-setup.md` gives the install line for each shell.

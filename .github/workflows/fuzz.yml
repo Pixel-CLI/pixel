@@ -39,6 +39,9 @@ on:
       - "crates/pixel-git/**"
       - "Cargo.toml"
       - "deny.toml"
+      # Integration tests are never linked into a fuzz target (later
+      # patterns win, so this drops them from the three crates above).
+      - "!crates/*/tests/**"
   schedule:
     - cron: "23 3 * * 0"
   workflow_dispatch:
