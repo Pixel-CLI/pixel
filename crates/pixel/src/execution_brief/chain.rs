@@ -3545,8 +3545,8 @@ fn admitted_by_kind(kind: QuestionKind, scored: Option<&relevance::Verdict>) -> 
 /// an off-topic score. Two was the walkthrough's bar, and two words a
 /// repository uses (`replay` and `fini`, `merge` and `PRs`) are what a
 /// status question or a steer of the agent shares with it: on the #1222
-/// replay, three words refused 11 `other` prompts against 1 follow-up on the
-/// reference window and 6 against 1 on a window held out from it.
+/// replay, three words refused 10 `other` prompts against 1 follow-up on the
+/// reference window and 8 against 2 on a window held out from it.
 const COVERAGE_MIN_SHARED: usize = 3;
 
 /// A prompt the model read as off topic is still about the repository when
