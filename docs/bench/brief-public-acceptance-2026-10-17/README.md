@@ -244,3 +244,7 @@ with committed `acceptance.json`. This command uses no model, credentials or
 network. Live reruns are stochastic and need fresh review; identical answers
 or exact timings are not promised. Elapsed times under concurrent execution
 do not establish a causal speedup.
+
+### Error evidence qualification, #1231 (2026-10-19)
+
+[Current v4 comparison and semantic controls](../error-evidence-1231/README.md): error-origin region coverage 0.050879 → 0.069507, file recall unchanged at 0.254737. The proof labels are qualified; requests-07 gains conversion/import evidence, while ripgrep-07 loses second-level lexical context. This is separate from the historical pack measurements above and makes no zero-call claim.

@@ -107,7 +107,7 @@ class EvidenceQualification(unittest.TestCase):
                 out, _ = origin(repo({'engine.py': source}), 'where does the link disconnected error come from')
                 self.assertIn('conversion/rethrow candidate', out)
                 self.assertIn('if retry_allowed():', out)
-                self.assertIn(statement, out)
+                self.assertIn(f'9|         {statement}', out, 'quote the source raise, not only a role label')
                 self.assertIn('dependency boundary', out)
                 self.assertIn('external emission not inspected', out)
                 self.assertIn('message identity unverified', out)
