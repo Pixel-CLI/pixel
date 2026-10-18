@@ -720,8 +720,17 @@ fn install_github_clones_the_repo_and_the_plugin_runs() {
     );
 }
 
+/// The lowercase hex sha256 of `bytes`, as a release's `.sha256` holds it.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 #[test]
-fn install_github_downloads_the_release_asset_for_an_unbuilt_program() {
+fn install_github_refuses_an_unverifiable_asset_unless_allowed() {
     let world = World::new("github-asset");
     let base = github_base(&world, "built", "bin/built", false);
     let target = pixel_plugin::release_target().expect("a platform with release assets");
@@ -729,18 +738,47 @@ fn install_github_downloads_the_release_asset_for_an_unbuilt_program() {
     std::fs::create_dir_all(&dir).unwrap();
     let asset = dir.join(format!("pixel-built-{target}"));
     std::fs::write(&asset, RUN_SCRIPT).unwrap();
-    let out = world.pixel_with(
+    let url = format!(
+        "{}/acme/built/releases/latest/download/pixel-built-{target}",
+        base_url(&base)
+    );
+    let digest = sha256_hex(RUN_SCRIPT.as_bytes());
+
+    // No `.sha256` published: the bytes are not installed by default.
+    let refused = world.pixel_with(
         &["install", "github:acme/built"],
         &[("PIXEL_GITHUB_BASE_URL", &base_url(&base))],
     );
-    let text = ok(&out);
+    let text = ok(&refused);
     assert!(
-        text.starts_with("installed plugin built 2.0.0 in "),
+        text.contains(&format!(
+            "no release asset was usable ({url}.sha256 is not published, so the download cannot be verified (sha256 {digest}); pass --allow-unverified to install it anyway)"
+        )),
         "{text}"
     );
-    assert!(
-        text.contains(&format!("downloaded {}/acme/built/releases/latest/download/pixel-built-{target} (no .sha256 published: checksum not verified)", base_url(&base))),
-        "{text}"
+    assert!(!world.user_plugins().join("built/bin/built").exists());
+    ok(&world.pixel(&["uninstall", "built"]));
+
+    // With the opt-in, the JSON report says what was installed unverified.
+    let allowed = world.pixel_with(
+        &[
+            "install",
+            "github:acme/built",
+            "--allow-unverified",
+            "--json",
+        ],
+        &[("PIXEL_GITHUB_BASE_URL", &base_url(&base))],
+    );
+    let report: serde_json::Value = serde_json::from_str(&ok(&allowed)).unwrap();
+    assert_eq!(
+        report["binary"],
+        serde_json::json!({
+            "kind": "downloaded",
+            "url": url,
+            "sha256": digest,
+            "verified": false,
+        }),
+        "{report}"
     );
     assert!(ok(&world.pixel(&["built", "go"])).starts_with("args=go\napi=1\n"));
 }
@@ -754,9 +792,13 @@ fn install_github_runs_the_release_asset_over_a_shipped_launcher() {
     let target = pixel_plugin::release_target().expect("a platform with release assets");
     let dir = base.join("acme/launched/releases/latest/download");
     std::fs::create_dir_all(&dir).unwrap();
+    let program = "#!/bin/sh\necho from-asset\n";
+    let asset = dir.join(format!("pixel-launched-{target}"));
+    std::fs::write(&asset, program).unwrap();
+    let digest = sha256_hex(program.as_bytes());
     std::fs::write(
-        dir.join(format!("pixel-launched-{target}")),
-        "#!/bin/sh\necho from-asset\n",
+        format!("{}.sha256", asset.display()),
+        format!("{digest}  pixel-launched-{target}\n"),
     )
     .unwrap();
     let out = world.pixel_with(
@@ -766,7 +808,7 @@ fn install_github_runs_the_release_asset_over_a_shipped_launcher() {
     let text = ok(&out);
     assert!(
         text.contains(&format!(
-            "downloaded {}/acme/launched/releases/latest/download/pixel-launched-{target} ",
+            "downloaded {}/acme/launched/releases/latest/download/pixel-launched-{target} (sha256 {digest} verified)\n",
             base_url(&base)
         )),
         "{text}"
