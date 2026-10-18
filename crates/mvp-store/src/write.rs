@@ -5,10 +5,11 @@
 //! the rows a run keeps, and publishes the next generation in one
 //! transaction.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::{File, TryLockError};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use mvp_model::hash::Hash;
 use mvp_model::{Delta, FileRow, FileStat, Kept};
@@ -50,25 +51,32 @@ pub struct Writer {
     /// (`checked`); `None` when none could be recorded, or once something
     /// else may have written them.
     seen: Option<Stamp>,
+    /// When the last full check of what the files hold ran: the open
+    /// check, the one behind the stamp it trusted, or a rebuild.
+    full_at: SystemTime,
     _lock: File,
 }
 
 impl Writer {
     /// Takes the lock, waiting at most `wait` (`None`: as long as it takes),
     /// then opens the index, rebuilding it when it is damaged or of another
-    /// schema (C-19). The file is checked whole whatever its stamp says.
+    /// schema (C-19). The file is checked whole unless its stamp says a
+    /// full check of this version of it ran less than
+    /// [`checked::TRUSTED_FOR`] ago.
     pub fn open(root: &Path, wait: Option<Duration>) -> Result<Writer, StoreError> {
         ensure_dir(root)?;
         let lock = acquire(&dir(root).join(LOCK), wait)?;
-        let (conn, rebuilt, known) = open_or_rebuild(root)?;
+        let opened = open_or_rebuild(root)?;
         let mut writer = Writer {
-            conn,
+            conn: opened.conn,
             root: root.to_path_buf(),
-            rebuilt,
+            rebuilt: opened.rebuilt,
             emptied: false,
             seen: None,
+            full_at: opened.full_at,
             _lock: lock,
         };
+        let known = opened.known;
         if known {
             writer.stamp();
         } else {
@@ -82,17 +90,23 @@ impl Writer {
     /// did not see, done to the file after it, which rebuilds the index
     /// empty, it runs once more on the empty index and indexes every
     /// file: the run that meets the damage still succeeds, and never
-    /// loops (C-19).
+    /// loops (C-19). A run that fails all the same forgets the stamp, so
+    /// the next open checks the file whole: damage the stamp hid, in a page
+    /// no read here reports as corrupt, fails every run until then.
     pub fn retried<T, E>(
         &mut self,
         mut refresh: impl FnMut(&mut Writer) -> Result<T, E>,
     ) -> Result<T, E> {
         self.emptied = false;
-        let first = refresh(self);
-        if first.is_err() && std::mem::take(&mut self.emptied) {
-            return refresh(self);
+        let mut result = refresh(self);
+        if result.is_err() && std::mem::take(&mut self.emptied) {
+            result = refresh(self);
         }
-        first
+        if result.is_err() {
+            self.seen = None;
+            checked::forget(&self.root);
+        }
+        result
     }
 
     /// Why the index was rebuilt from nothing, if it was.
@@ -168,7 +182,7 @@ impl Writer {
         checkpoint(&self.conn);
         self.seen = Stamp::settled(&self.root);
         match &self.seen {
-            Some(stamp) => checked::record(&self.root, stamp),
+            Some(stamp) => checked::record(&self.root, stamp, self.full_at),
             None => checked::forget(&self.root),
         }
     }
@@ -199,6 +213,7 @@ impl Writer {
         self.conn = Connection::open_in_memory()?;
         self.conn = fresh(&self.root)?;
         self.rebuilt = Some(reason);
+        self.full_at = SystemTime::now();
         self.stamp();
         Ok(())
     }
@@ -407,21 +422,47 @@ fn acquire(path: &Path, wait: Option<Duration>) -> Result<File, StoreError> {
     }
 }
 
-/// Opens `graph.db` and checks it whole; an empty file or an unusable
-/// one is replaced by a new index, and the reason for an unusable one
-/// returned. The flag says whether the files hold only what the check
-/// passed or what this writer wrote: false when another process wrote
-/// them while the check read them.
-fn open_or_rebuild(root: &Path) -> Result<(Connection, Option<String>, bool), StoreError> {
+/// What [`open_or_rebuild`] opened.
+struct Opened {
+    conn: Connection,
+    /// Why the index was rebuilt from nothing, if it was.
+    rebuilt: Option<String>,
+    /// Whether the files hold only what the check passed or what this
+    /// writer wrote: false when another process wrote them while the check
+    /// read them.
+    known: bool,
+    /// When the full check of what the files hold ran.
+    full_at: SystemTime,
+}
+
+/// Opens `graph.db` and checks it whole, unless its stamp names a full
+/// check of this version of it recent enough ([`checked::recent`]); an
+/// empty file or an unusable one is replaced by a new index, and the
+/// reason for an unusable one returned.
+fn open_or_rebuild(root: &Path) -> Result<Opened, StoreError> {
+    let new = |rebuilt| -> Result<Opened, StoreError> {
+        Ok(Opened {
+            conn: fresh(root)?,
+            rebuilt,
+            known: true,
+            full_at: SystemTime::now(),
+        })
+    };
     match existing(&db_path(root)) {
-        Err(StoreError::Unusable(reason)) => return Ok((fresh(root)?, Some(reason), true)),
+        Err(StoreError::Unusable(reason)) => return new(Some(reason)),
         Err(err) => return Err(err),
         Ok(_) => {}
     }
     let before = Stamp::settled(root);
+    let started = SystemTime::now();
+    let trusted_at = Cell::new(None);
     let attempt = Connection::open(db_path(root)).map_err(StoreError::from);
     let shape = match &attempt {
-        Ok(conn) => schema::shape(conn, || false),
+        Ok(conn) => schema::shape(conn, || {
+            let at = checked::checked_at(root).filter(|at| checked::recent(*at, started));
+            trusted_at.set(at);
+            at.is_some()
+        }),
         Err(err) => Shape::Unusable(err.to_string()),
     };
     match (attempt, shape) {
@@ -429,15 +470,20 @@ fn open_or_rebuild(root: &Path) -> Result<(Connection, Option<String>, bool), St
             checked::meanwhile();
             let unchanged = before.is_some_and(|before| Stamp::of(root) == Some(before));
             configure(&conn)?;
-            Ok((conn, None, unchanged))
+            Ok(Opened {
+                conn,
+                rebuilt: None,
+                known: unchanged,
+                full_at: trusted_at.get().unwrap_or(started),
+            })
         }
         (attempt, Shape::Empty) => {
             drop(attempt);
-            Ok((fresh(root)?, None, true))
+            new(None)
         }
         (attempt, Shape::Unusable(reason)) => {
             drop(attempt);
-            Ok((fresh(root)?, Some(reason), true))
+            new(Some(reason))
         }
         (Err(err), _) => Err(err),
     }

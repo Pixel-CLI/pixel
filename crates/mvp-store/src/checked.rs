@@ -29,17 +29,31 @@
 //!   only), once its checkpoint has folded the WAL in. A write by another
 //!   process during that checkpoint is the one window left.
 //!
-//! The writer never trusts a stamp: it checks the file whole at each open,
-//! so damage a stamp hides is caught by the next index run.
+//! A stamp also names when the full check behind it ran: a writer's
+//! stamp after its own commits carries the time of the check it trusted.
+//! The writer trusts a stamp only while that check is less than
+//! [`TRUSTED_FOR`] old, and forgets it whenever a run fails
+//! (`Writer::retried`), so damage a stamp cannot show (a bad sector, a
+//! file system whose ctime does not move) is caught by the first index run
+//! after a day, or after the run it broke. Damage a run reads (every row of
+//! `files`, `symbols` and `edges`) is caught by that run
+//! (`Writer::retried`); damage in an index b-tree it does not read is not.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::schema::{CHECK_VERSION, SCHEMA_VERSION};
 use crate::{DB, JOURNALS, beside, db_path, dir};
 
 /// The stamp file inside `.pixel-mvp/`.
 pub const CHECKED: &str = "checked";
+
+/// How long the writer trusts a stamp after the full check behind it: at
+/// least one index run a day checks the file whole. A writer re-stamps the
+/// files after each of its commits, so without a bound a watched
+/// repository would never be checked whole again.
+pub const TRUSTED_FOR: Duration = Duration::from_secs(86_400);
 
 /// A time as the file system keeps it: seconds and nanoseconds.
 type Time = (i64, i64);
@@ -95,7 +109,8 @@ impl Stamp {
         self.db == other.db
     }
 
-    /// One line for the versions, then one per file.
+    /// One line for the versions, then one per file; [`record`] adds the
+    /// time of the full check.
     fn text(&self) -> String {
         let mut text = format!(
             "pixel-mvp {} check {CHECK_VERSION} schema {SCHEMA_VERSION}\n",
@@ -125,22 +140,43 @@ fn line(stat: Option<&Stat>) -> String {
 
 /// Whether the files are those a passed check last stamped.
 pub fn trusted(root: &Path) -> bool {
-    let Some(now) = Stamp::of(root) else {
-        return false;
-    };
-    // Never through a link the clone left at its name, nor held by a FIFO
-    // there (C-18).
-    crate::state_file::read_to_string(&path(root)).is_ok_and(|recorded| recorded == now.text())
+    checked_at(root).is_some()
 }
 
-/// Records `stamp` as checked, through a temporary file of this process
-/// and a rename, so a reader never reads half a stamp. The temporary is
-/// made where nothing is, so a link a clone committed at its name is
-/// removed, never written through, and the rename replaces a link at
-/// `checked` itself (C-18). Failing to record costs only the next open a
-/// full check.
-pub fn record(root: &Path, stamp: &Stamp) {
-    let _ = crate::state_file::replace(&path(root), &unique(root, "tmp"), stamp.text().as_bytes());
+/// When the full check ran whose stamp the files carry, if they carry
+/// one: the files are those a passed check, or the writer that trusted it,
+/// last stamped.
+pub fn checked_at(root: &Path) -> Option<SystemTime> {
+    let now = Stamp::of(root)?;
+    // Never through a link the clone left at its name, nor held by a FIFO
+    // there (C-18).
+    let recorded = crate::state_file::read_to_string(&path(root)).ok()?;
+    let secs = recorded
+        .strip_prefix(&now.text())?
+        .strip_prefix("full ")?
+        .strip_suffix('\n')?
+        .parse::<u64>()
+        .ok()?;
+    UNIX_EPOCH.checked_add(Duration::from_secs(secs))
+}
+
+/// Whether a full check that ran `at` is recent enough at `now` for the
+/// writer to trust its stamp: less than [`TRUSTED_FOR`] ago, and not after
+/// `now` (a clock set back since then proves nothing about the age).
+pub fn recent(at: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(at).is_ok_and(|age| age < TRUSTED_FOR)
+}
+
+/// Records `stamp` as checked by a full check that ran `at`, through a
+/// temporary file of this process and a rename, so a reader never reads
+/// half a stamp. The temporary is made where nothing is, so a link a clone
+/// committed at its name is removed, never written through, and the
+/// rename replaces a link at `checked` itself (C-18). Failing to record
+/// costs only the next open a full check.
+pub fn record(root: &Path, stamp: &Stamp, at: SystemTime) {
+    let secs = at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let text = format!("{}full {secs}\n", stamp.text());
+    let _ = crate::state_file::replace(&path(root), &unique(root, "tmp"), text.as_bytes());
 }
 
 /// Forgets the stamp: the files are no longer known to be checked.

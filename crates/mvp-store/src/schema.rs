@@ -123,7 +123,8 @@ pub enum Shape {
 /// (ADR-0022). A write after that read began changes the file's stamp,
 /// since a stamp is recorded only once the file system's clock is past
 /// every time in it, so it cannot make a damaged file look checked. The
-/// writer always answers no.
+/// writer answers yes only while that full check is less than a day old
+/// (`checked::TRUSTED_FOR`).
 pub fn shape(conn: &Connection, checked: impl FnOnce() -> bool) -> Shape {
     read_shape(conn, checked).unwrap_or_else(|err| Shape::Unusable(describe(&err)))
 }

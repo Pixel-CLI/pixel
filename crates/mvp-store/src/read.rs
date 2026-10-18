@@ -8,7 +8,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use mvp_model::hash::Hash;
 use mvp_model::{Corpus, Edge, FileRow, FileStat, Graph, GraphError, Posting, Provenance, Symbol};
@@ -69,6 +69,7 @@ impl Store {
         // same generation, the one checked here, whatever a writer
         // publishes meanwhile.
         conn.execute_batch("BEGIN DEFERRED")?;
+        let started = SystemTime::now();
         let full = Cell::new(false);
         let trusted = || {
             full.set(!checked::trusted(root));
@@ -87,7 +88,7 @@ impl Store {
             && let Some(before) = before
             && Stamp::of(root).as_ref() == Some(&before)
         {
-            checked::record(root, &before);
+            checked::record(root, &before, started);
         }
         Ok(Store { conn, published })
     }

@@ -4,7 +4,7 @@
 //! The store on a real SQLite file in a temporary directory.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use mvp_model::hash::Hash;
 use mvp_model::{
@@ -1208,18 +1208,139 @@ fn c19_damage_done_during_a_publish_is_never_stamped_as_checked() {
     }
 }
 
-// Review of #52: the writer never trusts a stamp. Damage that got stamped
-// as checked, by whatever way, is caught by the next writer.
+// #1204: the writer trusts a stamp while the full check behind it is less
+// than a day old, as the readers do: damage stamped as checked, by
+// whatever way, in pages no read of the run reports, is served until then.
+// The first writer after that checks the file whole and rebuilds it.
 #[test]
-fn c19_damage_stamped_as_checked_is_caught_by_the_next_writer() {
+fn c19_damage_stamped_as_checked_is_caught_by_the_writer_once_its_check_is_a_day_old() {
     let dir = tempfile::tempdir().unwrap();
     published(dir.path());
     let page = root_page(dir.path(), "symbols_file");
     assert!(rekey(dir.path(), page, "b.rs", "c.rs") > 0);
-    checked::record(dir.path(), &checked::Stamp::of(dir.path()).unwrap());
-    assert!(checked::trusted(dir.path()));
+    let now = SystemTime::now();
+    let stamp = |at| checked::record(dir.path(), &checked::Stamp::of(dir.path()).unwrap(), at);
+    stamp(now - checked::TRUSTED_FOR + Duration::from_secs(60));
     let writer = Writer::open(dir.path(), None).unwrap();
-    assert!(writer.rebuilt().is_some(), "stamped damage was trusted");
+    assert_eq!(
+        writer.rebuilt(),
+        None,
+        "a stamp checked a day ago less a minute was not trusted"
+    );
+    drop(writer);
+    stamp(now - checked::TRUSTED_FOR);
+    let writer = Writer::open(dir.path(), None).unwrap();
+    assert!(
+        writer.rebuilt().is_some(),
+        "stamped damage was trusted after a day"
+    );
+}
+
+// #1204: a stamp is recent while its check is less than `TRUSTED_FOR` old,
+// and never when the check reads as later than now (a clock set back).
+#[test]
+fn c19_a_check_is_recent_for_less_than_a_day_and_never_from_the_future() {
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let day = checked::TRUSTED_FOR;
+    assert_eq!(day, Duration::from_secs(24 * 60 * 60));
+    assert!(checked::recent(at, at));
+    assert!(checked::recent(at, at + day - Duration::from_nanos(1)));
+    assert!(!checked::recent(at, at + day));
+    assert!(!checked::recent(at, at - Duration::from_secs(1)));
+}
+
+// #1204: a writer that finds the files as a recent check stamped them
+// skips the full check, and keeps the time of that check in the stamp it
+// records; a file written since is checked whole.
+#[test]
+fn c19_a_writer_checks_whole_only_a_file_changed_since_its_stamp() {
+    let dir = tempfile::tempdir().unwrap();
+    published(dir.path());
+    settle(dir.path());
+    drop(Writer::open(dir.path(), None).unwrap());
+    settle(dir.path());
+    let hour_ago = SystemTime::now() - Duration::from_secs(3600);
+    checked::record(
+        dir.path(),
+        &checked::Stamp::of(dir.path()).unwrap(),
+        hour_ago,
+    );
+    let before = full_checks();
+    let writer = Writer::open(dir.path(), None).unwrap();
+    assert_eq!(full_checks(), before, "a stamped file was checked whole");
+    assert_eq!(writer.rebuilt(), None);
+    drop(writer);
+    assert_eq!(
+        checked::checked_at(dir.path()).map(seconds),
+        Some(seconds(hour_ago)),
+        "the writer's stamp moved the time of the check it trusted"
+    );
+    let db = db_path(dir.path());
+    let file = std::fs::File::options().write(true).open(&db).unwrap();
+    file.set_modified(std::fs::metadata(&db).unwrap().modified().unwrap())
+        .unwrap();
+    drop(file);
+    let started = SystemTime::now();
+    let writer = Writer::open(dir.path(), None).unwrap();
+    assert_eq!(
+        full_checks(),
+        before + 1,
+        "a changed file was not checked whole"
+    );
+    assert_eq!(writer.rebuilt(), None);
+    drop(writer);
+    let at = checked::checked_at(dir.path()).expect("stamped after its check");
+    assert!(seconds(at) >= seconds(started), "{at:?} before {started:?}");
+}
+
+// #1204: a run that fails forgets the stamp, so the next writer checks the
+// file whole; one that succeeds keeps it.
+#[test]
+fn c19_a_failed_run_forgets_the_stamp() {
+    let dir = tempfile::tempdir().unwrap();
+    published(dir.path());
+    settle(dir.path());
+    let mut writer = Writer::open(dir.path(), None).unwrap();
+    assert!(checked::trusted(dir.path()), "the writer stamped the file");
+    assert_eq!(writer.retried(|_| Ok::<_, ()>(1)), Ok(1));
+    assert!(
+        checked::trusted(dir.path()),
+        "a run that succeeded forgot the stamp"
+    );
+    assert_eq!(writer.retried(|_| Err::<(), _>("failed")), Err("failed"));
+    assert!(!checked::trusted(dir.path()), "a failed run kept the stamp");
+    drop(writer);
+    settle(dir.path());
+    let before = full_checks();
+    drop(Writer::open(dir.path(), None).unwrap());
+    assert_eq!(
+        full_checks(),
+        before + 1,
+        "checked whole after the failed run"
+    );
+}
+
+// #1204: a reader whose full check passed stamps the time that check
+// started, to the second.
+#[test]
+fn c19_a_readers_stamp_names_when_its_check_ran() {
+    let dir = tempfile::tempdir().unwrap();
+    published(dir.path());
+    checked::forget(dir.path());
+    settle(dir.path());
+    let started = SystemTime::now();
+    assert_eq!(generation(dir.path()), id("gen-1"));
+    let ended = SystemTime::now();
+    let at = checked::checked_at(dir.path()).expect("the reader stamped the file");
+    assert!(
+        (seconds(started)..=seconds(ended)).contains(&seconds(at)),
+        "{at:?} outside {started:?}..{ended:?}"
+    );
+}
+
+/// Whole seconds since the epoch: what a stamp keeps of a time.
+fn seconds(at: SystemTime) -> u64 {
+    at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
 }
 
 // Review of #52: the stamp never waits for a reader to end its read: a
