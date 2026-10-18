@@ -563,8 +563,13 @@ impl GraphStore {
         )?;
         // Before the first table exists, or it has no effect: freed pages are
         // then tracked so `reclaim` can hand them back after a rebuild,
-        // instead of the file keeping its largest size forever.
-        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        // instead of the file keeping its largest size forever. Only on an
+        // empty file: on an existing one the pragma writes the file even when
+        // it changes nothing, and opening a graph to read it must not.
+        let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        if pages == 0 {
+            conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         // WAL serializes writers: a second writer (the daemon's watcher
