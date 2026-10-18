@@ -190,6 +190,12 @@ pub struct ResolveIndex {
     rust_modules: HashMap<i64, (Vec<String>, Option<usize>)>,
     /// The graph's Rust edges are pixel-mvp's (`mvp_adapter::rust_is_walled`).
     walled: bool,
+    /// Every name some symbol carries, whatever its kind or language
+    /// ([`ResolveIndex::records_once`]).
+    carried: HashSet<String>,
+    /// (file_id, local name) of every import binding, resolved or not: a
+    /// call through one names its source, not itself.
+    bound: HashSet<(i64, String)>,
 }
 
 fn callable(kind: SymbolKind) -> bool {
@@ -242,6 +248,7 @@ impl ResolveIndex {
         let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::new();
         let mut qualified_of: HashMap<i64, String> = HashMap::new();
         let mut containers = HashSet::new();
+        let mut carried: HashSet<String> = HashSet::new();
         {
             let mut stmt = conn.prepare(
                 "SELECT name, file_id, id, kind, start_line, trait_impl, qualified FROM symbols",
@@ -266,7 +273,19 @@ impl ResolveIndex {
                 }
                 qualified_of.insert(cand.symbol_id, qualified);
                 if callable(cand.kind) && !(walled && rust_modules.contains_key(&cand.file_id)) {
-                    by_name.entry(name).or_default().push(cand);
+                    by_name.entry(name.clone()).or_default().push(cand);
+                }
+                carried.insert(name);
+            }
+        }
+        let mut bound: HashSet<(i64, String)> = HashSet::new();
+        {
+            let mut stmt = conn.prepare("SELECT file_id, bindings FROM imports")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (fid, bindings_csv) = row?;
+                for b in decode_bindings(&bindings_csv) {
+                    bound.insert((fid, b.local));
                 }
             }
         }
@@ -312,7 +331,24 @@ impl ResolveIndex {
             import_bindings,
             rust_modules,
             walled,
+            carried,
+            bound,
         })
+    }
+
+    /// True iff an unresolved call to `name` in `file_id` is recorded once
+    /// per file and name (`GraphStore::insert_unresolved_name`) instead of
+    /// per site: no symbol carries the name, of any kind or language, so
+    /// only a later definition of that very name can link it, and the
+    /// update that defines it reads the file again (`write_rows`). Not in a
+    /// Ruby file, whose rules reach a callee the call does not name
+    /// (`perform_later` reads `#perform`, `new` reads `#initialize`), nor
+    /// through an import binding (`push as ship`), whose source may be
+    /// defined later under another name.
+    pub fn records_once(&self, file_id: i64, name: &str) -> bool {
+        !self.carried.contains(name)
+            && !self.ruby_files.contains(&file_id)
+            && !self.bound.contains(&(file_id, name.to_string()))
     }
 
     /// True iff `file_id` is a Rust file of a graph whose Rust edges are
@@ -1034,6 +1070,11 @@ pub fn resolve_calls_in(
         for call in &fc.calls {
             let Some(src_id) = call.enclosing_symbol_id else {
                 // Top-level call site: no source symbol to hang an edge on.
+                if idx.records_once(fc.file_id, &call.callee_name) {
+                    store.insert_unresolved_name(fc.file_id, &call.callee_name)?;
+                    stats.unresolved += 1;
+                    continue;
+                }
                 store.insert_unresolved_call(
                     fc.file_id,
                     &call.callee_name,
@@ -1075,6 +1116,13 @@ pub fn resolve_calls_in(
                         callee: Some(call.callee_name.clone()),
                     })?;
                     stats.probable += 1;
+                }
+                Decision::Unresolved if idx.records_once(fc.file_id, &call.callee_name) => {
+                    // Counted on the caller: `uses … callees` still reports
+                    // it as a site its answer may miss.
+                    store.insert_unresolved_name(fc.file_id, &call.callee_name)?;
+                    store.add_unnamed_calls(src_id, 1)?;
+                    stats.unresolved += 1;
                 }
                 Decision::Unresolved => {
                     store.insert_unresolved_call(
@@ -1454,6 +1502,45 @@ pub fn resolve_affected_in(
     let mut rows: Vec<RetryRow> = rows.into_values().collect();
     rows.sort_by_key(|row| row.id);
     retry(store, idx, rows)
+}
+
+/// Moves the `calls` rows named by one of `names` that the batch left
+/// defined nowhere from `unresolved_calls` to `unresolved_names`, once per
+/// file and name, where [`ResolveIndex::records_once`] holds: what a full
+/// build records for such a call ([`resolve_calls_in`]). A row without an
+/// enclosing symbol moves too, though no retry reads it. pixel-mvp's Rust
+/// rows are left to the adapter, which drops them itself.
+pub fn shelve_unnamed_calls<'a>(
+    store: &GraphStore,
+    idx: &ResolveIndex,
+    names: impl IntoIterator<Item = &'a String>,
+) -> Result<(), StoreError> {
+    for name in names {
+        if idx.carried.contains(name.as_str()) {
+            continue;
+        }
+        let rows: Vec<(i64, i64, Option<i64>)> = {
+            let mut stmt = store.conn().prepare_cached(
+                "SELECT id, file_id, enclosing_symbol_id FROM unresolved_calls
+                  WHERE name = ?1 AND kind = 'calls'",
+            )?;
+            let rows = stmt.query_map(params![name], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for (id, file_id, enclosing) in rows {
+            if idx.walled_file(file_id) || !idx.records_once(file_id, name) {
+                continue;
+            }
+            store.insert_unresolved_name(file_id, name)?;
+            if let Some(symbol) = enclosing {
+                store.add_unnamed_calls(symbol, 1)?;
+            }
+            store
+                .conn()
+                .exec_cached("DELETE FROM unresolved_calls WHERE id = ?1", params![id])?;
+        }
+    }
+    Ok(())
 }
 
 /// The `unresolved_calls` rows a Ruby ancestor chain decides: calls on

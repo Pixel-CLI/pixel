@@ -26,6 +26,7 @@ use crate::mvp_adapter::{self, RustSource};
 use crate::resolve::{
     Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference, ResolveIndex,
     reconsider_resolved_calls, resolve_affected_in, resolve_calls_in, resolve_references_in,
+    shelve_unnamed_calls,
 };
 use crate::store::{ExecCached, GraphStore, StoreError, extract_crux};
 
@@ -173,7 +174,10 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    so it cannot reassign a preceding alias's reference to another symbol.
 /// 27: with the Rust source on, an unresolved Rust call whose name no symbol
 ///    carries is no longer stored, as an unresolved reference already was not.
-pub const EXTRACTOR_VERSION: &str = "27";
+/// 28: this resolver records an unresolved call whose name no symbol carries
+///    once per file and name (`unresolved_names`), not per site in
+///    `unresolved_calls` (outside Ruby files and import bindings).
+pub const EXTRACTOR_VERSION: &str = "28";
 
 /// True iff the graph's rows were written by the current extractor, from
 /// the Rust and Ruby sources the switches ask for now
@@ -1452,7 +1456,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     // The names the batch's files defined before it: whether one stopped or
     // started being defined anywhere decides how much of pixel-mvp's Rust
     // rows is written again (`mvp_adapter::merge_again`).
-    let names_before = if walled {
+    let mut names_before = if walled {
         mvp_adapter::names_in(store, files.iter().map(|&(rel, _)| rel))?
     } else {
         HashMap::new()
@@ -1471,116 +1475,49 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         (ruby_switch::Undo::default(), ruby_switch::Prints::new())
     };
     // What the batch changed, before and after, for the re-resolution below.
-    let mut affected = Affected::default();
-    let mut before: Vec<Definition> = Vec::new();
-    let mut after: Vec<Definition> = Vec::new();
-    let mut mixins_before: Vec<(String, usize, RawMixin)> = Vec::new();
-    let mut mixins_after: Vec<(String, usize, RawMixin)> = Vec::new();
     let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
-
-    let mut extracted: Vec<Extracted> = Vec::with_capacity(files.len());
+    let mut st = Staging::default();
     for &(rel, removed) in files {
-        let abs = root.join(rel);
-
-        // Demote incoming call+reference edges (from OTHER files) into
-        // unresolved rows so they can re-link after the rebuild instead of
-        // being silently dropped. The receiver and kind are preserved so
-        // re-resolution produces the correct edge type (Calls vs References).
-        if let Some(old) = store.file_by_path(rel)? {
-            before.extend(stored_definitions(store, old.id, rel)?);
-            mixins_before.extend(
-                store
-                    .ruby_mixins_in_file(old.id)?
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, mixin)| (rel.to_string(), i, mixin)),
-            );
-            affected.files.insert(old.id);
-            for import in store.imports_to_file(old.id)? {
-                affected.files.insert(import.file_id);
-            }
-            // One query for the file: each incoming edge with its site's
-            // file, which the edge row does not carry.
-            let demoted: Vec<(i64, String, i64, u32, Option<String>, String)> = {
-                let mut stmt = store.conn().prepare_cached(
-                    "SELECT src.file_id, COALESCE(e.callee, dst.name), e.src_id, e.site_line,
-                            e.receiver, e.kind
-                       FROM symbols dst
-                       JOIN edges e ON e.dst_id = dst.id
-                       JOIN symbols src ON src.id = e.src_id
-                      WHERE dst.file_id = ?1 AND e.kind IN ('calls', 'references')
-                        AND src.file_id != ?1
-                      ORDER BY dst.id, e.kind, e.id",
-                )?;
-                // Replay the name the site wrote: under an alias
-                // (`leased()` → `push`) the target's name is not in scope
-                // at the caller.
-                let rows = stmt.query_map(rusqlite::params![old.id], |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                })?;
-                rows.collect::<std::result::Result<_, _>>()?
-            };
-            for (src_file, name, src_id, site_line, receiver, kind) in demoted {
-                affected.replayed.insert(name.clone());
-                affected.rows_moved.insert(src_file);
-                store.insert_unresolved_call(
-                    src_file,
-                    &name,
-                    Some(src_id),
-                    site_line,
-                    receiver.as_deref(),
-                    &kind,
-                )?;
-            }
-        }
-
-        if removed {
-            store.remove_file(rel)?;
-            continue;
-        }
-
-        let Some(content) = read_source_file(&abs) else {
-            store.remove_file(rel)?;
-            continue;
-        };
-
-        let Some(fx) = extract_file(rel, &content) else {
-            store.remove_file(rel)?;
-            // The walks hash it as they hash the build's inputs (binaries
-            // excluded), so its hash is what the freshness checks compare.
-            if is_graph_candidate(rel) && !is_binary(&content) {
-                store.record_walked_file(rel, &content_oid(&content))?;
-            }
-            continue;
-        };
-
-        mixins_after.extend(
-            fx.mixins
-                .iter()
-                .enumerate()
-                .map(|(i, mixin)| (rel.to_string(), i, mixin.clone())),
-        );
-        after.extend(fx.symbols.iter().map(|s| Definition {
-            path: rel.to_string(),
-            name: s.name.clone(),
-            qualified: s.qualified.clone(),
-            kind: s.kind.as_str().to_string(),
-            trait_impl: s.trait_impl,
-        }));
-        extracted.push(Extracted {
-            rel: rel.to_string(),
-            blob_oid: content_oid(&content),
-            content,
-            fx,
-        });
+        stage_file(root, store, rel, removed, &mut st)?;
     }
+    // A name the batch defines that some file called while no symbol carried
+    // it: that file recorded the name once (`unresolved_names`), not its
+    // sites, so it is read again here, as if it were part of the batch, and
+    // its calls are decided as a full build decides them.
+    let staged: HashSet<&str> = files.iter().map(|&(rel, _)| rel).collect();
+    let mut callers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for name in st
+        .after
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect::<HashSet<_>>()
+    {
+        callers.extend(
+            store
+                .files_calling_unnamed(name)?
+                .into_iter()
+                .filter(|path| !staged.contains(path.as_str())),
+        );
+    }
+    if walled {
+        for (name, n) in mvp_adapter::names_in(store, callers.iter().map(String::as_str))? {
+            *names_before.entry(name).or_default() += n;
+        }
+    }
+    for rel in &callers {
+        stage_file(root, store, rel, false, &mut st)?;
+    }
+    let mut files: Vec<(&str, bool)> = files.to_vec();
+    files.extend(callers.iter().map(|rel| (rel.as_str(), false)));
+    let files = files.as_slice();
+    let Staging {
+        mut affected,
+        before,
+        after,
+        mixins_before,
+        mixins_after,
+        extracted,
+    } = st;
 
     // The file list as it stands once the batch is stored, in the order the
     // store lists it: kept files, then the batch's new ones as they are
@@ -1667,6 +1604,9 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     reconsider_resolved_calls(store, &mut affected)?;
     // Retry what the batch can have changed against the new candidate set.
     resolve_affected_in(store, &idx, &affected)?;
+    // A call whose name the batch left defined nowhere is recorded once per
+    // file, as the full build records it.
+    shelve_unnamed_calls(store, &idx, &affected.names)?;
     let moved = if hybrid {
         ruby_switch::moved(store, &prints)?
     } else {
@@ -1705,6 +1645,133 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         "DELETE FROM process_steps; DELETE FROM processes;
          DELETE FROM cluster_members; DELETE FROM clusters;",
     )?;
+    Ok(())
+}
+
+/// What staging the files of one update gathers ([`stage_file`]): the
+/// definitions and Ruby ancestor declarations before and after, what the
+/// demotions moved, and the extracted sources to store.
+#[derive(Default)]
+struct Staging {
+    affected: Affected,
+    before: Vec<Definition>,
+    after: Vec<Definition>,
+    mixins_before: Vec<(String, usize, RawMixin)>,
+    mixins_after: Vec<(String, usize, RawMixin)>,
+    extracted: Vec<Extracted>,
+}
+
+/// Stages one file of an update (`removed`, or read from `root`): demotes
+/// the edges other files had into it, records what it defined before,
+/// removes it when it is gone, unreadable or no source, and otherwise
+/// extracts it into `st`.
+fn stage_file(
+    root: &Path,
+    store: &mut GraphStore,
+    rel: &str,
+    removed: bool,
+    st: &mut Staging,
+) -> Result<(), BoxErr> {
+    let abs = root.join(rel);
+
+    // Demote incoming call+reference edges (from OTHER files) into
+    // unresolved rows so they can re-link after the rebuild instead of
+    // being silently dropped. The receiver and kind are preserved so
+    // re-resolution produces the correct edge type (Calls vs References).
+    if let Some(old) = store.file_by_path(rel)? {
+        st.before.extend(stored_definitions(store, old.id, rel)?);
+        st.mixins_before.extend(
+            store
+                .ruby_mixins_in_file(old.id)?
+                .into_iter()
+                .enumerate()
+                .map(|(i, mixin)| (rel.to_string(), i, mixin)),
+        );
+        st.affected.files.insert(old.id);
+        for import in store.imports_to_file(old.id)? {
+            st.affected.files.insert(import.file_id);
+        }
+        // One query for the file: each incoming edge with its site's
+        // file, which the edge row does not carry.
+        let demoted: Vec<(i64, String, i64, u32, Option<String>, String)> = {
+            let mut stmt = store.conn().prepare_cached(
+                "SELECT src.file_id, COALESCE(e.callee, dst.name), e.src_id, e.site_line,
+                        e.receiver, e.kind
+                   FROM symbols dst
+                   JOIN edges e ON e.dst_id = dst.id
+                   JOIN symbols src ON src.id = e.src_id
+                  WHERE dst.file_id = ?1 AND e.kind IN ('calls', 'references')
+                    AND src.file_id != ?1
+                  ORDER BY dst.id, e.kind, e.id",
+            )?;
+            // Replay the name the site wrote: under an alias
+            // (`leased()` → `push`) the target's name is not in scope
+            // at the caller.
+            let rows = stmt.query_map(rusqlite::params![old.id], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (src_file, name, src_id, site_line, receiver, kind) in demoted {
+            st.affected.replayed.insert(name.clone());
+            st.affected.rows_moved.insert(src_file);
+            store.insert_unresolved_call(
+                src_file,
+                &name,
+                Some(src_id),
+                site_line,
+                receiver.as_deref(),
+                &kind,
+            )?;
+        }
+    }
+
+    if removed {
+        store.remove_file(rel)?;
+        return Ok(());
+    }
+
+    let Some(content) = read_source_file(&abs) else {
+        store.remove_file(rel)?;
+        return Ok(());
+    };
+
+    let Some(fx) = extract_file(rel, &content) else {
+        store.remove_file(rel)?;
+        // The walks hash it as they hash the build's inputs (binaries
+        // excluded), so its hash is what the freshness checks compare.
+        if is_graph_candidate(rel) && !is_binary(&content) {
+            store.record_walked_file(rel, &content_oid(&content))?;
+        }
+        return Ok(());
+    };
+
+    st.mixins_after.extend(
+        fx.mixins
+            .iter()
+            .enumerate()
+            .map(|(i, mixin)| (rel.to_string(), i, mixin.clone())),
+    );
+    st.after.extend(fx.symbols.iter().map(|s| Definition {
+        path: rel.to_string(),
+        name: s.name.clone(),
+        qualified: s.qualified.clone(),
+        kind: s.kind.as_str().to_string(),
+        trait_impl: s.trait_impl,
+    }));
+    st.extracted.push(Extracted {
+        rel: rel.to_string(),
+        blob_oid: content_oid(&content),
+        content,
+        fx,
+    });
     Ok(())
 }
 
@@ -4273,7 +4340,8 @@ mod tests {
             (
                 "symbols",
                 "SELECT s.uid, f.path, s.name, s.qualified, s.kind, s.start_line, s.end_line, \
-                 s.sig, s.trait_impl, s.module_decl FROM symbols s JOIN files f ON f.id = s.file_id",
+                 s.sig, s.trait_impl, s.module_decl, s.unnamed_calls FROM symbols s \
+                 JOIN files f ON f.id = s.file_id",
             ),
             (
                 "symbol_crux",
@@ -4299,6 +4367,10 @@ mod tests {
                 "unresolved_calls",
                 "SELECT f.path, u.name, s.uid, u.site_line, u.receiver, u.kind FROM unresolved_calls u \
                  LEFT JOIN files f ON f.id = u.file_id LEFT JOIN symbols s ON s.id = u.enclosing_symbol_id",
+            ),
+            (
+                "unresolved_names",
+                "SELECT f.path, u.name FROM unresolved_names u LEFT JOIN files f ON f.id = u.file_id",
             ),
             (
                 "concepts",
@@ -4340,6 +4412,86 @@ mod tests {
                 (table, rows)
             })
             .collect()
+    }
+
+    #[test]
+    fn a_call_to_a_name_no_symbol_carries_is_recorded_once_and_read_again_when_defined() {
+        // `a.py` calls `later` from `main` and at its top level, and nothing
+        // defines it: one `unresolved_names` row stands for both sites,
+        // instead of one `unresolved_calls` row each (#1163). A save of
+        // `b.py` that defines `later` reads `a.py` again, which links `main`
+        // and gives the top-level site its row; a save that removes it puts
+        // the name back. After each save the graph is a full build's.
+        let dir = tmpdir("unnamed");
+        let a = "def main():\n    return later() + later()\n\n\nlater()\n";
+        let mut tree = std::collections::BTreeMap::from([
+            ("a.py", a),
+            ("b.py", "def other():\n    return 1\n"),
+        ]);
+        let files: Vec<(&str, &str)> = tree.iter().map(|(k, v)| (*k, *v)).collect();
+        write_tree(&dir, &files);
+        let db = dir.join(".pixel").join("graph.db");
+        build_graph(&dir, &db).unwrap();
+        let rows = |db: &Path, table: &str| -> Vec<String> {
+            graph_rows(db)
+                .into_iter()
+                .find(|(t, _)| *t == table)
+                .unwrap()
+                .1
+        };
+        assert_eq!(rows(&db, "unresolved_calls"), Vec::<String>::new());
+        assert_eq!(
+            rows(&db, "unresolved_names"),
+            vec!["Text(\"a.py\") | Text(\"later\")"]
+        );
+        // `uses main callees` still counts the two sites it may miss.
+        let outgoing = |db: &Path| {
+            let store = GraphStore::open(db).unwrap();
+            let main = store.symbols_by_name("main", None, 10).unwrap()[0].id;
+            store.unresolved_outgoing(main).unwrap()
+        };
+        assert_eq!(outgoing(&db), 2);
+        let steps: [(&str, &str); 3] = [
+            // A call to another unknown name grows no `unresolved_calls`.
+            ("ghost added", "def other():\n    return ghost()\n"),
+            (
+                "later defined",
+                "def other():\n    return ghost()\n\n\ndef later():\n    return 2\n",
+            ),
+            ("later removed", "def other():\n    return ghost()\n"),
+        ];
+        for (label, body) in steps {
+            write_tree(&dir, &[("b.py", body)]);
+            tree.insert("b.py", body);
+            update_file(&dir, &db, "b.py").unwrap();
+            let full = tmpdir("unnamed-full");
+            let files: Vec<(&str, &str)> = tree.iter().map(|(k, v)| (*k, *v)).collect();
+            write_tree(&full, &files);
+            let full_db = full.join(".pixel").join("graph.db");
+            build_graph(&full, &full_db).unwrap();
+            assert_same_graph(label, &graph_rows(&db), &graph_rows(&full_db));
+            let _ = std::fs::remove_dir_all(full);
+            let calls = rows(&db, "unresolved_calls");
+            let edges = rows(&db, "edges");
+            match label {
+                "later defined" => {
+                    assert_eq!(
+                        calls,
+                        vec![
+                            "Text(\"a.py\") | Text(\"later\") | Null | Integer(5) | Null | Text(\"calls\")"
+                        ]
+                    );
+                    assert_eq!(edges.len(), 2, "{edges:?}");
+                    assert_eq!(outgoing(&db), 0);
+                }
+                _ => {
+                    assert_eq!(calls, Vec::<String>::new(), "{label}");
+                    assert_eq!(edges, Vec::<String>::new(), "{label}");
+                    assert_eq!(outgoing(&db), 2, "{label}");
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn assert_same_graph(label: &str, got: &[(&str, Vec<String>)], want: &[(&str, Vec<String>)]) {

@@ -486,6 +486,14 @@ envelope talks to the daemon socket directly.
   graph.db on first use`, or `rebuilt graph.db: <reason>` (the file on disk
   is `graph.v2.db`). Call edges carry a resolution tier, and
   analyses report a lower bound when same-name call sites stay unresolved.
+  A call this resolver leaves unresolved to a name no symbol carries
+  (outside Ruby files and import bindings, whose rules reach a callee the
+  call does not name) is recorded once per file and name in
+  `unresolved_names` and counted on its enclosing symbol
+  (`symbols.unnamed_calls`, read by `uses … callees`), not per site in
+  `unresolved_calls`; an update whose batch defines such a name reads the
+  files listed for it again, as if they were in the batch, so it links
+  what a full build links.
 - The Rust source switch, `PIXEL_GRAPH_SOURCE_RUST` (`v1` off; unset or
   anything else on, the default; `pixel_graph::mvp_adapter::RustSource`),
   read by the process that builds the graph (the daemon, or the CLI

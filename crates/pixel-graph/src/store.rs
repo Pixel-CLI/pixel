@@ -495,6 +495,8 @@ pub struct GraphStore {
 /// The per-file delete [`GraphStore::replace_file`] and
 /// [`GraphStore::remove_file`] run once for every file of an incremental
 /// batch; `idx_unresolved_file` is what keeps it off a full-table scan.
+const DELETE_FILE_UNRESOLVED_NAMES: &str = "DELETE FROM unresolved_names WHERE file_id = ?1";
+
 /// `PRAGMA auto_vacuum`'s value for `INCREMENTAL`.
 const AUTO_VACUUM_INCREMENTAL: i64 = 2;
 
@@ -695,6 +697,7 @@ impl GraphStore {
             tx.exec_cached("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM imports WHERE file_id = ?1", params![id])?;
             tx.exec_cached(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
+            tx.exec_cached(DELETE_FILE_UNRESOLVED_NAMES, params![id])?;
             tx.exec_cached(
                 "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
                 params![id],
@@ -740,6 +743,7 @@ impl GraphStore {
             tx.exec_cached("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM imports WHERE file_id = ?1", params![id])?;
             tx.exec_cached(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
+            tx.exec_cached(DELETE_FILE_UNRESOLVED_NAMES, params![id])?;
             tx.exec_cached(
                 "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
                 params![id],
@@ -965,6 +969,27 @@ impl GraphStore {
             |r| r.get(0),
         )?;
         Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    /// Record that the file `file_id` calls `name`, which no symbol carries
+    /// (`unresolved_names`); once per file and name.
+    pub fn insert_unresolved_name(&self, file_id: i64, name: &str) -> Result<()> {
+        self.conn.exec_cached(
+            "INSERT OR IGNORE INTO unresolved_names (file_id, name) VALUES (?1, ?2)",
+            params![file_id, name],
+        )?;
+        Ok(())
+    }
+
+    /// The paths of the files that call `name` while no symbol carries it
+    /// (`unresolved_names`), sorted.
+    pub fn files_calling_unnamed(&self, name: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.path FROM unresolved_names u JOIN files f ON f.id = u.file_id
+              WHERE u.name = ?1 ORDER BY f.path",
+        )?;
+        let rows = stmt.query_map(params![name], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn insert_jsx_element(
@@ -1890,6 +1915,15 @@ CREATE INDEX IF NOT EXISTS idx_unresolved_name ON unresolved_calls(name);
 -- per file of an incremental batch; without this index each delete scans the
 -- whole table (552k rows on a 9.6k-file Ruby repository, ~20 ms a file).
 CREATE INDEX IF NOT EXISTS idx_unresolved_file ON unresolved_calls(file_id);
+-- A call whose name no symbol carries, once per file and name instead of
+-- once per site: it can be no symbol's caller, and only a later definition
+-- of the name makes its file worth reading again (`write_rows`).
+CREATE TABLE IF NOT EXISTS unresolved_names (
+  file_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  PRIMARY KEY (file_id, name)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_unresolved_names_name ON unresolved_names(name);
 CREATE TABLE IF NOT EXISTS processes (
   id INTEGER PRIMARY KEY,
   label TEXT NOT NULL,
