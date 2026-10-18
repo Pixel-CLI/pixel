@@ -870,7 +870,10 @@ def activate(info, clone, warm):
     A daemon stopped at the end of the previous run would make the next brief take the daemon-less route, which
     answers differently (no meaning search, no history probe), so every run starts it again. The first brief after
     a daemon start also builds what it needs lazily and comes back empty (installed 0.7.1 does, on a large repo),
-    so throwaway briefs run until the output settles, before any session is scored."""
+    so throwaway briefs run until the output settles, before any session is scored. A daemon already serving the
+    clone (left by an earlier run, or by a probe's own `pixel` calls outside the harness) is stopped first: a run on
+    such a daemon once answered 7 of 56 briefs differently from its replays (an op left unanswered, a probe empty)."""
+    sh([info["path"], "daemon", "stop", "."], cwd=clone, check=False, timeout=60, env=bin_env(info))
     sh([info["path"], "prepare-repo", "."], cwd=clone, timeout=1800, env=bin_env(info))
     if warm:
         if info["has_meaning"]:
@@ -1429,6 +1432,8 @@ elif a[:1] == ["brief"]:
 FAKE_HOME_BIN = '''#!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]
+with open(__file__ + ".calls", "a") as calls:
+    calls.write(" ".join(a[:2]) + "\\n")
 if a[:1] == ["--version"]:
     print("fakepixel 0.0.2\\ncommit: def456")
 elif a[:2] == ["brief", "--help"]:
@@ -1846,6 +1851,12 @@ class SelfTest(unittest.TestCase):
             self.assertEqual(main(["pinned", "--base", str(binary), "--head", str(binary), "--repo", str(repo),
                                    "--probe-commit", first, "--label", "same"] + common), 0)
         runs = base / "runs"
+        # Every activation stops the clone's daemon before it indexes: a leftover daemon never serves a run.
+        calls = [c for c in Path(str(binary) + ".calls").read_text().splitlines() if c in ("daemon stop", "prepare-repo .")]
+        indexed = [i for i, c in enumerate(calls) if c == "prepare-repo ."]
+        self.assertEqual(len(indexed), 3)                                    # three runs, one clone each
+        self.assertNotIn(0, indexed)                                         # even the first run stops one first
+        self.assertEqual([calls[i - 1] for i in indexed], ["daemon stop"] * 3)
         reports = {n: json.loads((runs / n / "report.json").read_text()) for n in ("installed", "same-base", "same-head")}
         # Only the frozen home has the fx probe, so only the pinned runs see its region.
         self.assertEqual(reports["installed"]["sessions"][0]["metrics"]["line_cov"], 0.0)
