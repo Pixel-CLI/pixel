@@ -8,7 +8,7 @@ The [dated v3 reference](../scorer-protocol-2026-10-18/README.md) and historical
 
 - Scorer code commit: `8c02189cc2d134d008b80ddc1672bd6d94e13f8a`; later evidence-only commits keep the same scorer bytes.
 - Scorer SHA-256: `95bf349407a86091b7627f0d7726697478408b743345b32d4ed919da36233106`.
-- Baseline: merged v3 `20670993b0f2ed778cd7226955e4582df91c37e0`, SHA-256 `febb6031075e4f20f3e2380451ce7b88cbb7613b89ae904252987dc756d3889e`.
+- Baseline: merged v3 `20670993b0f2ed778cd7226955e4582df91c37e0`, SHA-256 `febb6031075e4f20f3e2380451ce7b88cbb7613b89ae904252987dc756d3889e`. The actual replay checkout was `3027ea60f4c2692905828860218617e1d70f7f46`, whose complete tree is identical to that merged baseline; identity.json records both commits.
 - Binary source `a0d99d6268b770b49bf44effef415ac95b1252aa`, dev-release, SHA-256 `fcde2a41d4d0e7017acdba2ee58e4803afa9379b8b3995b68e24b71ec14d8e64`.
 - Same 14 programs + 14 manifests frozen at `a0d99d62`; all hashes and seven verified repository pins are in [identity.json](identity.json).
 - Same 56 questions, SHA-256 `984a632e96f5f32891279d58f872c3a891bfeabaee110b3993be313c63e17069`.
@@ -18,7 +18,7 @@ The [dated v3 reference](../scorer-protocol-2026-10-18/README.md) and historical
 
 Two new regression methods on v3 fail with six assertions: an unknown source borrows code, mixed fences invent an in-range coordinate, and valid mixed bare rows are lost. On v4 both methods pass; genuine headerless and wholly unnumbered excerpts retain their positive controls. The full scorer passes 40 tests; brief-check 16, probe-test 24, probe-translate 4. SPDX and whitespace checks pass.
 
-The transmitted external controls were replayed unchanged in a separate local output directory: **31/34 on v3 → 34/34 on v4**, including 22/22 process controls in both. This replay by the implementer is not an independent review; the published SHA is available for the original reviewer to retest.
+The transmitted external controls were replayed unchanged in a separate local output directory: **31/34 on v3 → 34/34 on v4**, including 22/22 process controls in both. That replay by the implementer is distinct from independent review. The original reviewer subsequently retested exact code SHA `8c02189c` independently: **34/34 controls, 3/3 minimal controls and all 40 scorer self-tests pass**; the 56-brief replay also has zero question/category deltas. A native optional-probe timeout preserves valid evidence, excludes expired evidence and leaves the brief/scorer `ok`. The frozen external control script SHA-256 and report SHA-256 are recorded in identity.json; full raw evidence is retained in the local audit bundle. This is external audit evidence, not a GitHub approval or merge authorization.
 
 The same 56 frozen briefs yield **0 changed questions and 0 changed categories**, exits 0/0. These corner cases are outside that corpus. Exact values and zero deltas: [per-question.jsonl](per-question.jsonl), [per-category.jsonl](per-category.jsonl).
 
