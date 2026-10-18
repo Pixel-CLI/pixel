@@ -3,6 +3,7 @@
 
 //! Deterministic, bounded projection of `scope-task` evidence for agents.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
@@ -361,12 +362,14 @@ const PASTE_OPEN: &str = "<pasted_content";
 const PASTE_CLOSE: &str = "</pasted_content";
 
 /// The part of a prompt the user typed: pasted blocks (`<pasted_content …>`
-/// to its closing tag) are someone else's text and never the task itself.
+/// to its closing tag) are someone else's text and never the task itself, nor
+/// is the file listing Codex writes above its request heading
+/// ([`crate::prompt_continuation::user_request`]).
 /// A removed block leaves a space, so the words on either side stay apart
 /// (`where is<block>the parser` keeps its `where is ` opening).
 pub(crate) fn typed_text(prompt: &str) -> String {
     let mut typed = String::new();
-    let mut rest = prompt;
+    let mut rest = crate::prompt_continuation::user_request(prompt);
     while let Some(start) = find_tag(rest, PASTE_OPEN) {
         typed.push_str(&rest[..start]);
         let after = &rest[start + PASTE_OPEN.len()..];
@@ -526,14 +529,24 @@ const _: () = assert!(PASTED_HEAD_CHARS + 1 + PASTED_TAIL_CHARS <= PASTE_TAIL_CH
 /// asked: one word is a reply, not a task.
 const MIN_PROSE_KEYWORDS: usize = 2;
 
-/// Words that name a repository operation (git, a release, a deploy, CI)
-/// in English and French, folded to ASCII as the tokenizer folds them, plus
-/// the few function words a short prompt leaves behind when its language is
-/// not detected. A prompt made only of these asks to operate the repository,
-/// not to read it. Deliberately short: anything it misses meets the
-/// relevance gate, which decides on evidence.
+/// Words that name a repository operation (git, a pull request or an issue,
+/// a release, a deploy, CI) in English and French, folded to ASCII as the
+/// tokenizer folds them; the words that steer the agent's own run rather
+/// than ask about code (`go next`, `stop`, `try again`); and the few function
+/// and address words a short prompt leaves behind when its language is not
+/// detected (`les`, `peux`, `you`). A prompt made only of these asks to
+/// operate the repository or the agent, not to read the code: the #1032
+/// replay briefed "Merge les PRs", "Tu peux les merger en --admin" and
+/// "go next". Deliberately short: anything it misses meets the relevance
+/// gate, which decides on evidence.
 const OPS_WORDS: &[&str] = &[
+    "actuel",
+    "admin",
+    "again",
+    "ahead",
+    "ai",
     "amend",
+    "avec",
     "back",
     "bascule",
     "basculer",
@@ -541,59 +554,105 @@ const OPS_WORDS: &[&str] = &[
     "branche",
     "branches",
     "bump",
+    "can",
     "checkout",
     "cherry",
     "ci",
     "clone",
+    "clore",
+    "close",
     "commit",
     "commite",
     "commiter",
     "commits",
+    "create",
+    "creer",
+    "current",
     "deploie",
-    "deployer",
     "deploy",
     "deployed",
+    "deployer",
+    "deux",
+    "dis",
+    "est",
+    "fais",
+    "ferme",
+    "fermer",
     "fetch",
+    "fini",
+    "finished",
     "fusionne",
     "fusionner",
     "git",
     "go",
+    "green",
+    "head",
+    "issue",
+    "issues",
+    "laisse",
+    "les",
     "main",
     "master",
     "merge",
     "merged",
+    "merger",
+    "moi",
+    "next",
+    "non",
+    "one",
+    "order",
+    "ordre",
     "origin",
+    "oui",
+    "pause",
+    "peux",
     "pick",
     "pousse",
     "pousser",
+    "pr",
     "prod",
     "production",
+    "prs",
     "publie",
     "publier",
     "publish",
     "pull",
     "push",
     "rebase",
-    "release",
-    "releases",
     "relance",
     "relancer",
+    "release",
+    "releases",
     "remote",
+    "rerun",
     "reset",
+    "retry",
     "revert",
     "ship",
     "squash",
-    "stash",
     "staging",
+    "stash",
+    "stop",
+    "suivant",
+    "suivante",
     "sur",
     "switch",
     "tag",
     "tags",
+    "termine",
     "tire",
+    "toi",
+    "try",
+    "two",
     "upstream",
+    "vas",
+    "vers",
     "version",
     "versions",
-    "vers",
+    "verte",
+    "worktree",
+    "worktrees",
+    "you",
 ];
 
 /// Words that acknowledge, greet or judge the last answer. They are content
@@ -732,14 +791,52 @@ fn pasted_task(prompt: &str) -> Option<String> {
 }
 
 /// The content words of a task: the tokenizer's keywords without the
-/// acknowledgements and greetings of a conversation.
+/// acknowledgements and greetings of a conversation. A plural acronym is one
+/// word (see [`fold_plural_acronyms`]).
 fn brief_keywords(task: &str) -> Vec<String> {
-    pixel_rank::tokenize_task(task)
+    pixel_rank::tokenize_task(&fold_plural_acronyms(task))
         .map(|query| query.keywords)
         .unwrap_or_default()
         .into_iter()
         .filter(|word| !CHATTER_WORDS.contains(&word.as_str()))
         .collect()
+}
+
+/// `task` with each plural acronym (`PRs`, `APIs`, `IDs`: two capitals or
+/// more and a final `s`) written in capitals, so the tokenizer keeps it whole.
+/// Split at its case change, `PRs` became the keywords `p` and `rs`, and `rs`
+/// is a short technical keyword (the Rust extension) that a merge request
+/// carried into the relevance gate.
+fn fold_plural_acronyms(task: &str) -> Cow<'_, str> {
+    let plural = |word: &str| {
+        word.len() >= 3
+            && word.ends_with('s')
+            && word[..word.len() - 1]
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase())
+    };
+    if !task
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(plural)
+    {
+        return Cow::Borrowed(task);
+    }
+    let mut folded = String::with_capacity(task.len());
+    let mut word = String::new();
+    for ch in task.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_alphanumeric() {
+            word.push(ch);
+            continue;
+        }
+        if plural(&word) {
+            word.make_ascii_uppercase();
+        }
+        folded.push_str(&word);
+        word.clear();
+        folded.push(ch);
+    }
+    folded.pop();
+    Cow::Owned(folded)
 }
 
 /// A version number as the tokenizer leaves one: digits, or `v` and digits.
@@ -2050,6 +2147,85 @@ mod tests {
         );
         assert!(brief_keywords("merci, parfait").is_empty());
         assert!(brief_keywords("").is_empty());
+    }
+
+    /// The briefed prompts of the #1032 replay that asked to operate a pull
+    /// request, an issue or the agent itself, in both languages: none of them
+    /// is about the code, and each costs the precision of the brief.
+    #[test]
+    fn brief_signal_should_refuse_a_pull_request_an_issue_or_a_steer_of_the_agent() {
+        for prompt in [
+            "Merge the PRs",
+            "Merge les PRs",
+            "Tu peux les merger en --admin",
+            "Oui, merge #1122 avec --admin si sa CI est verte sur le head actuel.",
+            "Merge mes PRs dans l'ordre avec --admin",
+            "Creer les issues et PRs",
+            "La CI de 1180 est termine",
+            "stop j'ai merge 1189",
+            "go next",
+            "Can you try again",
+            "Vas y je te laisse faire fais tout ca dans des worktrees",
+            "## My request:\nMerge les PRs en --admin",
+        ] {
+            assert_eq!(brief_signal(prompt), None, "{prompt:?}");
+        }
+    }
+
+    /// The same words beside one about the code leave the prompt to the
+    /// relevance gate: only a prompt made of nothing else is refused.
+    #[test]
+    fn brief_signal_should_keep_an_operation_word_beside_a_word_about_the_code() {
+        for prompt in [
+            "the PRs dashboard rejects drafts",
+            "close the socket when the daemon stops",
+            "merge the lexer into the grammar",
+            "Can you handle now https://github.com/o/r/issues/982 about the tokenizer cache",
+            "pourquoi le head du lexique est faux",
+            "## My request:\nhow the lexer grammar loads",
+        ] {
+            assert_eq!(
+                brief_signal(prompt).map(|found| found.1),
+                Some(Signal::Prose),
+                "{prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fold_plural_acronyms_should_capitalise_a_plural_acronym_and_nothing_else() {
+        assert_eq!(fold_plural_acronyms("Merge the PRs."), "Merge the PRS.");
+        assert_eq!(
+            fold_plural_acronyms("APIs, IDs and URLs"),
+            "APIS, IDS and URLS"
+        );
+        for text in [
+            "Is it macOS?",
+            "CSS is fine",
+            "Os",
+            "the PRS",
+            "fix PR 12",
+            "",
+        ] {
+            assert_eq!(fold_plural_acronyms(text), text, "{text:?}");
+            assert!(
+                matches!(fold_plural_acronyms(text), Cow::Borrowed(_)),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn brief_keywords_should_keep_a_plural_acronym_whole() {
+        // Split at its case change, `PRs` was `p` and the Rust extension `rs`.
+        assert_eq!(brief_keywords("Merge the PRs"), ["merge", "prs"]);
+        assert_eq!(brief_keywords("list the APIs"), ["list", "apis"]);
+    }
+
+    #[test]
+    fn typed_text_should_drop_the_file_listing_above_a_codex_request() {
+        let prompt = "# Files mentioned by the user:\n## shot.png: /tmp/shot.png\n## My request:\nwhere is the parser";
+        assert_eq!(typed_text(prompt), "where is the parser");
     }
 
     #[test]

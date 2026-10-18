@@ -1020,10 +1020,13 @@ long untagged paste:
   more), and the relevance gate below applied to it too
   (`ENFORCE_GATE_ON_WEAK`). The probes are its retriever, so the concept
   search runs only when they found no file.
-- **plain language** (`Prose`: two or more content words, not a git, release
-  or deploy request, not an acknowledgement): the intent judge, the
-  relevance probe and the meaning search run at once on the deadline, and
-  only the gate decides whether the repository is the subject.
+- **plain language** (`Prose`: two or more content words, not a request made
+  only of `OPS_WORDS` — git, a pull request or an issue, a release, a deploy,
+  a steer of the agent's run such as `go next` or `stop` — not an
+  acknowledgement): the intent judge, the relevance probe and the meaning
+  search run at once on the deadline, and only the gate decides whether the
+  repository is the subject. A plural acronym is one keyword (`PRs` is
+  `prs`, not the Rust extension `rs`).
 
 A prompt with nothing typed but a `<pasted_content>` block has no shape of its
 own, and the paste is someone else's text. It is judged on the head of the
@@ -1042,7 +1045,10 @@ leading `<system-reminder>` block, with one of recall's `ORCHESTRATOR_PREFIXES`
 (`pixel_recall::intent`): `<task-notification>`, a command wrapper, Codex's
 `<realtime_delegation>` and `<send_user_message_question_reply>`. The same list
 keeps those turns out of recall's embeddings and session titles, so a new
-envelope is added there, once.
+envelope is added there, once. Codex's IDE extension writes a listing of the
+attached files above a `## My request:` heading; only the text under the first
+such heading (`user_request`) is the user's, for the continuation check and the
+typed text alike.
 
 Unless `PIXEL_BRIEF_FRENCH=0`, a prompt that pixel-mvp's
 rule reads as French (`mvp_model::language`: two French function words or

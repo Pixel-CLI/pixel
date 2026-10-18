@@ -1,5 +1,12 @@
 # Brief recall replay (2026-10-18, #1032 unit 2)
 
+> **Correction (unit 3).** This run did not check which binary's daemon
+> answered the briefs, and installed 0.8.0 daemons were later found serving
+> two of the repositories. A rerun of the same binary and labels with each
+> daemon stopped first gives project recall 89 % (48/54), follow-up 80 %,
+> precision 53 % (80/152), hit@8 55 %:
+> [brief-recall-2026-10-18-unit3](../brief-recall-2026-10-18-unit3/README.md).
+
 **Labels are AI labels, not human ones.** The hand-labelled 14–16 October sample
 (648 prompts) behind the issue's 33 % recall is not available, so a new window
 was extracted and every prompt was labelled by Claude (Opus 5.5) from its text,

@@ -25,6 +25,11 @@ Two steps, the first local and private, the second the published measurement:
   the command; never a prompt. A row whose repository has no Pixel index is counted apart (``unindexed``), not as a
   miss: the replay measures the brief, not whether ``prepare-repo`` ran.
 
+  Before its first row, each repository's daemon is stopped, so the next brief starts one from ``<bin>``: a daemon an
+  installed release had started would otherwise answer the briefs, and the run would measure that release. The report
+  counts, at the end, the repositories a daemon of ``<bin>`` serves and those another binary's serves; one of another
+  binary marks the run invalid and makes ``score`` exit 1.
+
 The replay runs each prompt against the repository's current tree, not the one it was typed against, and with no
 session history, so a follow-up's session lift cannot apply: follow-up recall is a lower bound.
 
@@ -348,13 +353,55 @@ def metrics(results):
     }
 
 
-def replay_pass(rows, binary, replayer, warmed):
+def stop_daemon(binary, repo):
+    """Stop the daemon serving ``repo``, whichever binary started it: the next brief starts one from ``binary``."""
+    try:
+        subprocess.run([binary, "daemon", "stop", repo], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def daemon_binaries(ps_output):
+    """``{root: executable}`` of the daemons a ``ps -axo command`` listing shows (``<exe> daemon start <root> ...``)."""
+    found = {}
+    for line in ps_output.splitlines():
+        parts = line.split()
+        for k in range(len(parts) - 3):
+            if parts[k + 1:k + 3] == ["daemon", "start"]:
+                found[parts[k + 3]] = parts[k]
+                break
+    return found
+
+
+def list_daemons():
+    try:
+        out = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    return daemon_binaries(out)
+
+
+def daemon_census(binary, repos, daemons):
+    """How many repositories a daemon of ``binary`` serves (``own``), one of another binary (``foreign``: the brief
+    measured is that binary's, not the one under test), or none."""
+    real = os.path.realpath(binary)
+    census = {"own": 0, "foreign": 0, "none": 0}
+    for repo in sorted(repos):
+        exe = daemons.get(repo)
+        census["none" if exe is None else "own" if os.path.realpath(exe) == real else "foreign"] += 1
+    return census
+
+
+def replay_pass(rows, binary, replayer, warmed, stopper=stop_daemon):
     results, unindexed = [], 0
     for row in rows:
         if not indexed(row["repo"]):
             unindexed += 1
             continue
         if row["repo"] not in warmed:
+            # A daemon another binary started (an installed release) would answer the briefs of this replay: the
+            # #1216 run measured 0.8.0's facts check in two repositories instead of the binary under test.
+            stopper(binary, row["repo"])
             warm(binary, row["repo"], replayer)
             warmed.add(row["repo"])
         brief = replayer(binary, row)
@@ -365,7 +412,7 @@ def replay_pass(rows, binary, replayer, warmed):
     return results, unindexed
 
 
-def score(labels_path, binary, out_dir, name, replayer=replay, passes=3):
+def score(labels_path, binary, out_dir, name, replayer=replay, passes=3, stopper=stop_daemon, lister=list_daemons):
     """Replay every labelled row ``passes`` times and report the last pass. The gate's judge and the daemons warm up
     over the first prompts, so a cold first pass briefs fewer rows than the next ones (71 against 131 then 147 of 218
     on 2026-10-18; the third pass matched the second on every brief): the first pass is discarded when ``passes`` is
@@ -376,7 +423,8 @@ def score(labels_path, binary, out_dir, name, replayer=replay, passes=3):
         raise SystemExit(f"{len(bad)} rows have no label among {LABELS}: {bad[:5]}")
     warmed, runs = set(), []
     for _ in range(max(1, passes)):
-        runs.append(replay_pass(rows, binary, replayer, warmed))
+        runs.append(replay_pass(rows, binary, replayer, warmed, stopper))
+    daemons = daemon_census(binary, warmed, lister())
     results, unindexed = runs[-1]
     previous = runs[-2][0] if len(runs) > 1 else results
     unstable = sum(1 for a, b in zip(previous, results) if (a["briefed"], a["hit"]) != (b["briefed"], b["hit"]))
@@ -388,7 +436,7 @@ def score(labels_path, binary, out_dir, name, replayer=replay, passes=3):
               "window": [min((r["ts"] for r in rows if "ts" in r), default=None),
                          max((r["ts"] for r in rows if "ts" in r), default=None)],
               "command": " ".join(shlex.quote(a) for a in sys.argv), "unindexed": unindexed,
-              "passes": max(1, passes), "unstable": unstable,
+              "passes": max(1, passes), "unstable": unstable, "daemons": daemons,
               "means": metrics(results),
               "by_source": {s: metrics([r for r in results if r["source"] == s])
                             for s in sorted({r["source"] for r in results})},
@@ -413,9 +461,14 @@ def render(report):
              f"- labels: sha256 `{report['labels']['sha256'][:12]}`, {m['rows']} replayed rows, "
              f"{report['unindexed']} in unindexed repositories (left out)",
              f"- passes: {report.get('passes', 1)} (the last is reported); rows whose verdict changed between the last "
-             f"two: {report.get('unstable', 0)}", "",
-             "| group | rows | project | follow-up | other | briefed | project recall | follow-up recall | precision | "
-             "hit@8 (pool) |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+             f"two: {report.get('unstable', 0)}"]
+    if "daemons" in report:
+        d = report["daemons"]
+        lines.append(f"- daemons at the end: {d['own']} of the binary under test, {d['foreign']} of another binary, "
+                     f"{d['none']} none" + (" — **invalid run: another binary answered**" if d["foreign"] else ""))
+    lines += ["",
+              "| group | rows | project | follow-up | other | briefed | project recall | follow-up recall | precision | "
+              "hit@8 (pool) |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for name, g in [("all", m)] + list(report["by_source"].items()):
         lines.append(f"| {name} | {g['rows']} | {g['labels']['project']} | {g['labels']['follow-up']} | "
                      f"{g['labels']['other']} | {g['briefed']} | {pct(g['project_recall'])} | "
@@ -536,9 +589,11 @@ class SelfTest(unittest.TestCase):
             calls.append(row["prompt"])
             return briefs.get(row["prompt"], "")
 
-        report = score(labels, str(fake), Path(self.tmp.name) / "out", "t", replayer=replayer, passes=1)
-        # The indexed repository is warmed once, before its first scored prompt; the unindexed one never.
-        self.assertEqual(calls, [WARM_PROMPT] * 3 + ["p1", "p2", "p3", "p4", "p5"])
+        report = score(labels, str(fake), Path(self.tmp.name) / "out", "t", replayer=replayer, passes=1,
+                       stopper=lambda _b, repo: calls.append(f"stop {repo}"), lister=dict)
+        # The indexed repository's daemon is stopped and the repository warmed once, before its first scored prompt;
+        # the unindexed one is never touched.
+        self.assertEqual(calls, [f"stop {self.repo}"] + [WARM_PROMPT] * 3 + ["p1", "p2", "p3", "p4", "p5"])
         m = report["means"]
         self.assertEqual(report["unindexed"], 1)
         self.assertEqual((m["rows"], m["briefed"]), (5, 3))
@@ -567,10 +622,31 @@ class SelfTest(unittest.TestCase):
                 return "w"
             return "### src/gate.rs:1-1\n" if seen[row["prompt"]] >= (3 if row["prompt"] == "c" else 2) else ""
 
-        report = score(labels, str(fake), Path(self.tmp.name) / "out", "p", replayer=warming, passes=3)
+        report = score(labels, str(fake), Path(self.tmp.name) / "out", "p", replayer=warming, passes=3,
+                       stopper=lambda _b, _r: None, lister=dict)
         self.assertEqual((report["means"]["briefed"], report["passes"], report["unstable"]), (3, 3, 1))
         self.assertIn("rows whose verdict changed between the last two: 1",
                       (Path(self.tmp.name) / "out" / "p" / "report.md").read_text())
+
+    def test_a_daemon_another_binary_started_makes_the_run_invalid(self):
+        (self.repo / ".pixel").mkdir()
+        (self.repo / ".pixel" / "base.shard").write_text("")
+        labels = Path(self.tmp.name) / "labels.jsonl"
+        labels.write_text(json.dumps({"id": "a", "repo": str(self.repo), "prompt": "p", "label": "project"}) + "\n")
+        fake = Path(self.tmp.name) / "fakepixel"
+        fake.write_text("#!/bin/sh\necho fakepixel 0.0.1\n")
+        fake.chmod(0o755)
+        listing = (f"/opt/release/pixel daemon start {self.repo} --foreground\n"
+                   f"{fake} daemon start /elsewhere --foreground\n")
+        self.assertEqual(daemon_binaries(listing), {str(self.repo): "/opt/release/pixel", "/elsewhere": str(fake)})
+        foreign = score(labels, str(fake), Path(self.tmp.name) / "out", "f", replayer=lambda _b, _r: "", passes=1,
+                        stopper=lambda _b, _r: None, lister=lambda: daemon_binaries(listing))
+        self.assertEqual(foreign["daemons"], {"own": 0, "foreign": 1, "none": 0})
+        self.assertIn("invalid run", (Path(self.tmp.name) / "out" / "f" / "report.md").read_text())
+        own = score(labels, str(fake), Path(self.tmp.name) / "out", "o", replayer=lambda _b, _r: "", passes=1,
+                    stopper=lambda _b, _r: None, lister=lambda: {str(self.repo): str(fake)})
+        self.assertEqual(own["daemons"], {"own": 1, "foreign": 0, "none": 0})
+        self.assertNotIn("invalid run", (Path(self.tmp.name) / "out" / "o" / "report.md").read_text())
 
     def test_score_refuses_an_unlabelled_row(self):
         labels = Path(self.tmp.name) / "labels.jsonl"
@@ -602,8 +678,8 @@ def main(argv=None):
         Path(args.out).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
         print(f"{len(rows)} prompts written to {args.out}")
         return 0
-    score(args.labels, args.bin, args.out, args.label or Path(args.bin).name, passes=args.passes)
-    return 0
+    report = score(args.labels, args.bin, args.out, args.label or Path(args.bin).name, passes=args.passes)
+    return 1 if report["daemons"]["foreign"] else 0
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ pub(crate) fn is_trivial_continuation(prompt: &str) -> bool {
     if is_harness_envelope(prompt) {
         return true;
     }
-    let trimmed = prompt
+    let trimmed = user_request(prompt)
         .trim()
         .trim_end_matches(['.', '!', '?'])
         .to_lowercase();
@@ -67,6 +67,26 @@ pub(crate) fn is_trivial_continuation(prompt: &str) -> bool {
         }
     }
     false
+}
+
+/// The headings Codex's IDE extension writes above what the user typed,
+/// after its own listing of the attached files (`# Files mentioned by the
+/// user:`, one `## <name>: <path>` per image).
+const CODEX_REQUEST_HEADINGS: [&str; 2] = ["## My request:", "## My request for Codex:"];
+
+/// The part of `prompt` the user typed: what follows the first line that is a
+/// Codex request heading, the whole prompt when there is none. `## My
+/// request:\ngo next` is the acknowledgement `go next`, not a prompt about a
+/// request (#1032).
+pub(crate) fn user_request(prompt: &str) -> &str {
+    let mut offset = 0;
+    for line in prompt.split_inclusive('\n') {
+        offset += line.len();
+        if CODEX_REQUEST_HEADINGS.contains(&line.trim()) {
+            return &prompt[offset..];
+        }
+    }
+    prompt
 }
 
 const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
@@ -202,6 +222,44 @@ mod tests {
             assert!(!is_harness_envelope(prompt), "{prompt}");
             assert!(!is_trivial_continuation(prompt), "{prompt}");
         }
+    }
+
+    #[test]
+    fn user_request_should_be_the_text_under_the_first_codex_request_heading() {
+        assert_eq!(user_request("## My request:\ngo next"), "go next");
+        assert_eq!(
+            user_request(
+                "# Files mentioned by the user:\n## a.png: /tmp/a.png\n## My request for Codex:\nfix auth\n"
+            ),
+            "fix auth\n"
+        );
+        // Only the first heading counts: the user's text may quote one.
+        assert_eq!(
+            user_request("## My request:\nwhy does `## My request:`\nreach the brief"),
+            "why does `## My request:`\nreach the brief"
+        );
+        for prompt in [
+            "fix auth",
+            "see ## My request: inline",
+            "## My requests:\nx",
+            "",
+        ] {
+            assert_eq!(user_request(prompt), prompt, "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn an_acknowledgement_under_a_codex_request_heading_is_a_continuation() {
+        for prompt in [
+            "## My request:\nGo ahead",
+            "## My request:\nok",
+            "## My request:\n",
+        ] {
+            assert!(is_trivial_continuation(prompt), "{prompt:?}");
+        }
+        assert!(!is_trivial_continuation(
+            "## My request:\nfix the login bug"
+        ));
     }
 
     #[test]
