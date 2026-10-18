@@ -48,3 +48,5 @@ mutants = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# `trace`: a test counts the statements one update runs on its connection.
+rusqlite = { version = "0.40", features = ["bundled", "trace"] }
