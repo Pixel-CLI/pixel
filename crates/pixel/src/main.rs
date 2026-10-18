@@ -64,6 +64,7 @@ mod plugin_cmd;
 mod prompt_continuation;
 mod prompt_intent;
 mod prompt_key;
+mod prompts_cmd;
 mod reference_cmd;
 mod removed_commands;
 mod search_compat;
@@ -1033,7 +1034,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// List, enable and trust plugins: external commands that `pixel <name>
+    /// Read the central prompt decision store (`~/.local/share/pixel/prompts`)
+    /// grouped by project: the path, the record count and the last `--limit`
+    /// decisions as one line each.
+    Prompts {
+        /// Emit the grouped structure as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        /// How many of each project's newest records to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// List, enable and trust plugins: external commands that `pixel <name>`
     /// [args…]` runs when the core has no such command. `pixel install
     /// <source>` adds one and `pixel uninstall <name>` removes it. A repo
     /// plugin (`<repo>/.pixel/plugins/<name>/`) runs only after `pixel plugin
@@ -5632,6 +5644,10 @@ fn run_command(
                 prune,
                 json,
             })
+        }
+        Command::Prompts { json, limit } => {
+            prompts_cmd::run(json, limit);
+            Ok(())
         }
         Command::Plugin { cmd } => plugin_cmd::run(cmd),
     }

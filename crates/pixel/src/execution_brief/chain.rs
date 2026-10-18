@@ -2624,6 +2624,8 @@ pub(crate) struct Session {
 pub(crate) struct Around {
     /// Where the decision is recorded, when it is.
     pub(crate) log: Option<PathBuf>,
+    /// The repository a central mirror records for, when the central log is on.
+    pub(crate) central: Option<PathBuf>,
     /// How a daemon is started for the prompt, when one may be.
     pub(crate) starter: Option<Starter>,
     /// What the region pack may be; the default leaves the packet as it was.
@@ -2665,8 +2667,19 @@ impl Around {
     pub(crate) fn logging(path: PathBuf) -> Self {
         Self {
             log: Some(path),
+            central: None,
             starter: None,
             ..Self::default()
+        }
+    }
+
+    /// Record the decision at `path` and mirror it to the central store of
+    /// `central_root`, when both are given.
+    #[cfg(test)]
+    pub(crate) fn logging_with_central(path: PathBuf, central_root: Option<PathBuf>) -> Self {
+        Self {
+            central: central_root,
+            ..Self::logging(path)
         }
     }
 }
@@ -2698,6 +2711,9 @@ pub(crate) struct Pending {
     started: Instant,
     /// Where the decision is recorded, when it is.
     log: Option<PathBuf>,
+    /// The repository the decision is mirrored to the central store for,
+    /// when the central log is on: it gives the record its `root`.
+    central: Option<PathBuf>,
     /// The daemon start this prompt gave, when it gave one.
     kicked: Option<autostart::Kicked>,
     /// The text the brief judged: the typed prompt, its last paragraph, or the
@@ -2835,6 +2851,10 @@ impl Pending {
         if let Some(path) = &self.log {
             // Best effort: a log that cannot be written never costs the prompt.
             let _ = decision_log::append(path, &record.line(), decision_log::MAX_LINES);
+            if let Some(root) = &self.central {
+                // The same record, mirrored best effort to the per-user store.
+                let _ = decision_log::append_central(root, &record.line());
+            }
         }
         let paths = if text.is_some() {
             brief.injected_paths(stats.pack_bytes > 0)
@@ -2892,6 +2912,10 @@ fn try_start_as(
     session: Option<Session>,
 ) -> Result<Pending, Declined> {
     let log = decision_log::path_for(root);
+    let central = log
+        .is_some()
+        .then(|| decision_log::central_log_path(root).map(|_| root.to_path_buf()))
+        .flatten();
     let gate = Gate::read(root);
     let root = root.to_path_buf();
     let for_start = root.clone();
@@ -2935,6 +2959,7 @@ fn try_start_as(
         relevance::judge,
         Around {
             log,
+            central,
             starter: Some(Box::new(move || autostart::start_for_prompt(&for_start))),
             pack,
             context,
@@ -3031,6 +3056,7 @@ where
 {
     let Around {
         log,
+        central,
         starter,
         pack,
         context,
@@ -3053,6 +3079,9 @@ where
         if let Some(path) = &log {
             let record = declined_record(Declined::NotAboutCode, prompt);
             let _ = decision_log::append(path, &record.line(), decision_log::MAX_LINES);
+            if let Some(central) = &central {
+                let _ = decision_log::append_central(central, &record.line());
+            }
         }
         return Err(Declined::NotAboutCode);
     };
@@ -3114,6 +3143,7 @@ where
         deadline,
         started,
         log,
+        central,
         kicked,
         task,
         signal,
@@ -9929,6 +9959,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_judged_prompt_should_be_mirrored_to_the_central_store_with_the_root() {
+        let _g = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let root = scratch_dir("central-mirror");
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::set_var(decision_log::LOG_ENV, "1") };
+        // The central path derives from HOME, so point it at the scratch dir
+        // before the brief runs, or the mirror lands in the real home.
+        let home = std::env::var("HOME").unwrap_or_default();
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::set_var("HOME", root.as_os_str()) };
+        let finished = try_start_with(
+            PROSE,
+            OPEN,
+            SECOND,
+            move |_| Box::new(Fake::new()),
+            no_verdict,
+            model_high,
+            Around::logging_with_central(
+                root.join(".pixel/brief-decisions.jsonl"),
+                Some(root.clone()),
+            ),
+        )
+        .unwrap()
+        .finish_with_record();
+        // The path derives from HOME, so take it before HOME is restored.
+        let path = decision_log::central_log_path(&root).unwrap();
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::set_var("HOME", home.as_str()) };
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::remove_var(decision_log::LOG_ENV) };
+        let text = std::fs::read_to_string(&path).expect("central log written");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(!lines.is_empty(), "at least one central record");
+        let last: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+        let canon = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert_eq!(last["root"], serde_json::json!(canon));
+        assert_eq!(last["gate"], finished.record.gate);
+        assert_eq!(last["typed"], finished.record.typed);
+    }
+
     /// A pack for `PACK_PROMPT` in session `s` of `root`, with what the
     /// session was sent already.
     fn packed_in(root: &Path, seen: Seen) -> Finished {
@@ -10036,6 +10109,7 @@ mod tests {
                 deadline: started + SECOND,
                 started,
                 log: None,
+                central: None,
                 kicked: None,
                 task: "what does this crate expose".into(),
                 signal: Signal::Prose,

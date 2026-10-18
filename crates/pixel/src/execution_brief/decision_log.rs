@@ -11,16 +11,24 @@
 //! whole typed text to count repeats. It keeps the last [`MAX_LINES`] lines,
 //! is written with the owner-only mode, never through a symbolic link, and
 //! `PIXEL_BRIEF_LOG=0` switches it off. Writing is best effort: a failure
-//! never reaches the prompt.
+//! never reaches the prompt. A copy of every judged prompt also goes to one
+//! central per-user store under `~/.local/share/pixel/prompts`, one file per
+//! project, each line carrying the repository root it came from, so a
+//! retrospective over several repositories reads one directory; the same
+//! opt-out, masking, mode, lock and link refusal guard it.
 
 use std::fs::Permissions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::sync::PoisonError;
+
 use fs2::FileExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use xxhash_rust::xxh3::xxh3_64;
 
 use super::relevance;
 
@@ -32,6 +40,12 @@ pub(crate) const LOG_ENV: &str = "PIXEL_BRIEF_LOG";
 pub(crate) const MAX_LINES: usize = 500;
 /// Characters of the typed text a line carries.
 pub(crate) const LOGGED_TYPED_CHARS: usize = 600;
+
+/// Name of the central per-user store's directory under
+/// `~/.local/share/pixel`.
+pub(crate) const CENTRAL_DIR: &str = "prompts";
+/// Lines a central per-user store keeps; the oldest go first.
+pub(crate) const CENTRAL_MAX_LINES: usize = 2000;
 
 /// What the brief decided about one prompt, as the log and `pixel brief
 /// --json` show it.
@@ -236,6 +250,66 @@ pub(crate) fn enabled(value: Option<&str>) -> bool {
 pub(crate) fn path_for(root: &Path) -> Option<PathBuf> {
     enabled(std::env::var(LOG_ENV).ok().as_deref())
         .then(|| root.join(pixel_index::index::SHARD_DIR).join(LOG_FILE))
+}
+
+/// The project id of `root`: xxh3 of its canonical path, as lowercase hex,
+/// the same scheme the daemon's socket name uses.
+pub(crate) fn project_id(root: &Path) -> String {
+    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    format!("{:016x}", xxh3_64(canon.to_string_lossy().as_bytes()))
+}
+
+/// The central per-user store of `root`, under `~/.local/share/pixel/prompts`,
+/// or `None` when `PIXEL_BRIEF_LOG` switches it off or there is no home.
+pub(crate) fn central_log_path(root: &Path) -> Option<PathBuf> {
+    if !enabled(std::env::var(LOG_ENV).ok().as_deref()) {
+        return None;
+    }
+    let home = std::env::var("HOME").ok().filter(|home| !home.is_empty())?;
+    Some(
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("pixel")
+            .join(CENTRAL_DIR)
+            .join(format!("{}.jsonl", project_id(root))),
+    )
+}
+
+/// Append one record line to the central per-user store of `root`, wrapped so
+/// the line carries the canonical repository root it came from. Reuses the
+/// repo-local append machinery: same trim, owner-only mode, lock and link
+/// refusal; best effort, the caller decides what a failure means.
+pub(crate) fn append_central(root: &Path, record_line: &str) -> io::Result<()> {
+    let Some(path) = central_log_path(root) else {
+        return Ok(());
+    };
+    // The store is the one log the brief may create directories for: it lives
+    // under the user's home, not inside a repository that must already be one.
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let wrapped = json!({
+        "root": canon.to_string_lossy(),
+    });
+    let wrapped = match serde_json::from_str::<Value>(record_line) {
+        // Splice the record's fields next to `root`.
+        Ok(Value::Object(fields)) => {
+            let mut out = serde_json::Map::new();
+            out.insert("root".into(), json!(canon.to_string_lossy()));
+            for (key, value) in fields {
+                out.insert(key, value);
+            }
+            Value::Object(out)
+        }
+        _ => {
+            let mut out = wrapped;
+            out["record"] = serde_json::from_str(record_line).unwrap_or(json!(record_line));
+            out
+        }
+    };
+    append(&path, &wrapped.to_string(), CENTRAL_MAX_LINES)
 }
 
 /// `existing` with `line` added, keeping the last `cap` lines.
@@ -651,6 +725,102 @@ mod tests {
         std::os::unix::fs::symlink(&real, &sidecar).unwrap();
         assert!(append(&sidecar.join(LOG_FILE), "leak", 3).is_err());
         assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn project_id_should_be_a_stable_sixteen_hex_of_the_canonical_root() {
+        let dir = scratch("project-id");
+        let root = dir.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let id = project_id(&root);
+        assert_eq!(id.len(), 16, "{id}");
+        assert!(id.chars().all(|ch| ch.is_ascii_hexdigit()), "{id}");
+        assert_eq!(project_id(&root), id, "stable for the same root");
+        // The same directory through a different spelling is one project.
+        assert_eq!(project_id(&root.join(".")), id);
+        // And it matches the daemon's socket scheme.
+        let daemon = pixel_daemon::daemon::socket_path(&root);
+        assert!(daemon.file_name().unwrap().to_string_lossy().contains(&id));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn central_log_path_should_gated_by_the_log_env_and_sit_under_the_home() {
+        let _g = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dir = scratch("central-path");
+        let root = dir.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::remove_var(LOG_ENV) };
+        let with_home = central_log_path(&root).unwrap();
+        assert_eq!(
+            with_home.file_name().unwrap().to_str().unwrap(),
+            format!("{}.jsonl", project_id(&root))
+        );
+        assert_eq!(
+            with_home.parent().unwrap().file_name().unwrap(),
+            CENTRAL_DIR
+        );
+        for off in ["0", "false", "off"] {
+            // SAFETY: under ENV_LOCK, single-threaded test setup.
+            unsafe { std::env::set_var(LOG_ENV, off) };
+            assert!(central_log_path(&root).is_none(), "{off}");
+        }
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::remove_var(LOG_ENV) };
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn append_central_should_wrap_the_line_with_the_root_and_keep_the_cap() {
+        let _g = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dir = scratch("central-append");
+        let root = dir.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::remove_var(LOG_ENV) };
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        let home = std::env::var("HOME").unwrap_or_default();
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::set_var("HOME", &dir) };
+        let path = central_log_path(&root).unwrap();
+        let canon = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        for n in 0..CENTRAL_MAX_LINES + 1 {
+            append_central(&root, &format!("{{\"n\":{n}}}")).unwrap();
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), CENTRAL_MAX_LINES);
+        let last: Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+        assert_eq!(last["n"], CENTRAL_MAX_LINES);
+        assert_eq!(last["root"], json!(canon));
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::set_var("HOME", home.as_str()) };
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::remove_var(LOG_ENV) };
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn append_central_should_write_nothing_when_the_log_is_switched_off() {
+        let _g = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dir = scratch("central-off");
+        let root = dir.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::set_var(LOG_ENV, "0") };
+        assert!(central_log_path(&root).is_none());
+        // A disabled central log is a no-op, not a failure.
+        append_central(&root, "{\"gate\":\"open\"}").unwrap();
+        // SAFETY: under ENV_LOCK, single-threaded test setup.
+        unsafe { std::env::remove_var(LOG_ENV) };
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
