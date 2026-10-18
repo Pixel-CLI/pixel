@@ -60,6 +60,7 @@ shared = [
   "~/.pixel/plugins/name-files/",
   "~/.pixel/plugins/overview-answer-evidence/",
   "~/.pixel/plugins/rank-blocks/",
+  "~/.pixel/plugins/test-bodies/",
 ]
 
 # Doctor checks on Pixel's own files, which no single agent owns.
