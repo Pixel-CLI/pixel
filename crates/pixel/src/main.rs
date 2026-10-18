@@ -3541,6 +3541,94 @@ fn resolve_upgrade_target(
     }
 }
 
+/// The first bytes of an executable `self-update` may install: ELF, and the
+/// four Mach-O headers (32/64-bit, either byte order) plus a universal binary.
+const EXECUTABLE_MAGICS: [[u8; 4]; 6] = [
+    [0x7f, b'E', b'L', b'F'],
+    [0xfe, 0xed, 0xfa, 0xce],
+    [0xfe, 0xed, 0xfa, 0xcf],
+    [0xce, 0xfa, 0xed, 0xfe],
+    [0xcf, 0xfa, 0xed, 0xfe],
+    [0xca, 0xfe, 0xba, 0xbe],
+];
+
+/// Put the built binary `src` at `dest` so that `dest` is, at every moment
+/// and across a crash or power loss, either the previous binary or the
+/// complete new one. The bytes go to `.<name>.tmp.<pid>` beside `dest` (same
+/// filesystem, so the rename is atomic), are checked to be as long as `src`
+/// and to start like an executable, and are `fsync`ed before the rename;
+/// the directory is `fsync`ed after it, so the rename itself is durable.
+/// A symbolic link at `dest` is refused: the rename would replace the link
+/// and leave the binary it points to as it was. Any failure before the
+/// rename removes the temp and leaves `dest` untouched.
+fn install_staged(src: &Path, dest: &Path, pid: u32) -> Result<(), String> {
+    if let Ok(target) = std::fs::read_link(dest) {
+        return Err(format!(
+            "{} is a symbolic link to {}: pass --install-path with the binary it points to",
+            dest.display(),
+            target.display()
+        ));
+    }
+    let tmp = dest.with_file_name(format!(
+        ".{}.tmp.{pid}",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("pixel"),
+    ));
+    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        std::fs::create_dir_all(parent).map_err(|e| format!("install directory: {e}"))?;
+    }
+    let staged = std::fs::copy(src, &tmp)
+        .map_err(|e| format!("copy failed: {e}"))
+        .and_then(|_| check_staged(src, &tmp));
+    if let Err(error) = staged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    std::fs::rename(&tmp, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename failed: {e}")
+    })?;
+    // Best effort: a filesystem that cannot fsync a directory still holds
+    // the renamed, already synced file.
+    if let Some(parent) = parent
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// Check the staged copy `tmp` of `src` before it may replace anything: as
+/// long as `src`, starting with one of [`EXECUTABLE_MAGICS`], then flushed
+/// to disk.
+fn check_staged(src: &Path, tmp: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let expected = std::fs::metadata(src)
+        .map_err(|e| format!("read {}: {e}", src.display()))?
+        .len();
+    let mut file = std::fs::File::open(tmp).map_err(|e| format!("read {}: {e}", tmp.display()))?;
+    let staged = file
+        .metadata()
+        .map_err(|e| format!("read {}: {e}", tmp.display()))?
+        .len();
+    if staged != expected {
+        return Err(format!(
+            "staged copy {} holds {staged} bytes, {} has {expected}",
+            tmp.display(),
+            src.display()
+        ));
+    }
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_err() || !EXECUTABLE_MAGICS.contains(&magic) {
+        return Err(format!(
+            "{} is not an executable ({expected} bytes, no ELF or Mach-O header): refusing to install it",
+            src.display()
+        ));
+    }
+    file.sync_all()
+        .map_err(|e| format!("fsync {}: {e}", tmp.display()))
+}
+
 /// The `pixel` that a shell would run INSTEAD of `installed`, if any: the
 /// first PATH hit that is a different file. This is how a stale copy in
 /// `~/.local/bin` silently kept serving an old version after an upgrade
@@ -5304,22 +5392,7 @@ fn run_command(
             // name would collide between concurrent upgrades. Use the real pid,
             // and keep the temp file in `dest`'s directory so the rename stays
             // atomic (same filesystem). Mirrors scripts/release/install.sh's `.pixel.tmp.$$`.
-            let tmp = dest.with_file_name(format!(
-                ".{}.tmp.{}",
-                dest.file_name().and_then(|n| n.to_str()).unwrap_or("pixel"),
-                std::process::id()
-            ));
-            if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent).map_err(|e| format!("install directory: {e}"))?;
-            }
-            std::fs::copy(&src, &tmp).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                format!("copy failed: {e}")
-            })?;
-            std::fs::rename(&tmp, &dest).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                format!("rename failed: {e}")
-            })?;
+            install_staged(&src, &dest, std::process::id())?;
             eprintln!("Installed binary: {} -> {}", src.display(), dest.display());
             if let Some(other) = upgrade_shadowed_by(&dest, path_var.as_deref()) {
                 eprintln!(

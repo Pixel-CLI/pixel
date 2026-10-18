@@ -1,0 +1,1 @@
+**self-update:** The new binary is now flushed to disk before it is renamed over the install path (and the directory after), so a crash or power loss can no longer leave a truncated `pixel`. A staged copy that is short or has no ELF/Mach-O header is refused, as is a symlinked install path. `install.sh` syncs the same way.

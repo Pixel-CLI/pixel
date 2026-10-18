@@ -837,7 +837,10 @@ retention remain those described below.
   integrity, not provenance; attestation verification is a manual step;
   the update prompt treats an empty answer as yes. `pixel self-update` runs
   `--build` in the current directory and installs whatever binary it
-  produced: run it from a Pixel checkout only.
+  produced: run it from a Pixel checkout only. It checks only that the
+  staged copy is complete and starts with an ELF or Mach-O header, flushes
+  it to disk before the atomic rename (`install.sh` runs `sync` the same
+  way), and refuses an install path that is a symbolic link.
 
 ### T21. The release chain is subverted (T, E, B7)
 
