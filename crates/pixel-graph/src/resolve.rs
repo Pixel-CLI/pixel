@@ -1182,7 +1182,11 @@ pub fn resolve_references(
 ///
 /// `replayed` holds the names of the rows the update itself moved back to
 /// `unresolved_calls` (a demoted incoming edge, a reconsidered one): under
-/// an alias the name the call wrote is not the target's.
+/// an alias the name the call wrote is not the target's. `rows_moved`
+/// holds the files of those rows, and of every import row the update
+/// pointed elsewhere outside its batch: the files whose rows a pass below
+/// changed although the batch did not touch them, which pixel-mvp's Rust
+/// rows are written again for (`mvp_adapter::merge_again`).
 ///
 /// Over-inclusion only costs time (an unchanged input gives the same
 /// decision); omission leaves a stale row, which
@@ -1193,6 +1197,7 @@ pub struct Affected {
     pub files: HashSet<i64>,
     pub constants: HashSet<String>,
     pub replayed: HashSet<String>,
+    pub rows_moved: HashSet<i64>,
     /// The batch changed a Ruby ancestor declaration, or a class or module
     /// a stored declaration names: every Ruby call to `self` (bare or
     /// written) or to a constant receiver, and every Ruby method-symbol
@@ -1621,6 +1626,7 @@ pub fn reconsider_resolved_calls(
     }
     for call in calls {
         affected.replayed.insert(call.name.clone());
+        affected.rows_moved.insert(call.file_id);
         store.insert_unresolved_call(
             call.file_id,
             &call.name,

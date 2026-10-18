@@ -493,10 +493,21 @@ envelope talks to the daemon socket directly.
   full build and every incremental update (`write_rows`, so
   `update_files` and `apply_tree_delta`) refresh pixel-mvp's index in
   `.pixel/.pixel-mvp/` and replace the Rust rows with its answer
-  (`mvp_adapter::switch_rust`): every `calls` edge from a Rust symbol
+  (`mvp_adapter::merge_into`): every `calls` edge from a Rust symbol
   (all `exact`: pixel-mvp links a site only where Rust's rules prove the
   target), every `references` edge (`probable`), every `unresolved_calls`
-  row of a Rust file, every Rust import's target. This resolver then
+  row of a Rust file, every Rust import's target. An incremental update
+  writes again only the Rust files whose rows may have moved
+  (`mvp_adapter::merge_again`): its own, those whose rows its passes moved
+  (`Affected::rows_moved`: a demoted edge, a reconsidered one, a
+  re-pointed import), those pixel-mvp's refresh rewrote or redirected a
+  site of, and those resolving a site into a file whose definitions moved;
+  every other file keeps its rows untouched. The graph records the
+  pixel-mvp generation its Rust rows were written from
+  (`rust_mvp_generation`, dropped by every full build): an index at
+  another generation, or a batch that makes a name defined nowhere else
+  appear or disappear (an unresolved reference to it is recorded only
+  while some symbol carries it), writes every Rust file again. This resolver then
   decides no Rust site (the batch's Rust calls are not resolved,
   `resolve_affected`'s retry skips their rows) and `ResolveIndex` offers
   no Rust symbol to a caller of another language. The graph records its
@@ -524,10 +535,10 @@ envelope talks to the daemon socket directly.
     forms outside `#[cfg]` are not read;
   - pixel-mvp's index spawns `git` without `GitRunner`'s timeout and output
     cap;
-  - an incremental update rewrites every Rust row: on this repository
-    (`b2d22eee`, `dev-release` build) the first graph command after a
-    one-file edit takes about 0.85 s instead of 0.22 s, and `.pixel/` holds
-    about 44 MB more.
+  - an incremental update refreshes pixel-mvp's index before it writes
+    any row: on this repository (`bb4991fe`, `dev-release` build) that
+    refresh is about 0.55 s of a one-file save, and `.pixel/` holds about
+    44 MB more.
 - The Ruby source switch, `PIXEL_GRAPH_SOURCE_RUBY` (`hybrid` on; unset or
   anything else off, the default; `pixel_graph::mvp_adapter::ruby_switch`),
   read like the Rust one. With it on, the full build and every incremental
