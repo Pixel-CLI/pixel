@@ -1,0 +1,1 @@
+**graph:** Kotlin (`.kt`, `.kts`) files get symbols, imports and call sites through the generic walker (`tree-sitter-kotlin-ng`), so `pixel coverage`, `who-calls` and `impact` see a Kotlin/Android repository: kotlinx-cli goes from 0 to 21 of 21 files indexed, 178 symbols. Existing graphs rebuild once (extractor version 29).
