@@ -1,7 +1,7 @@
 name = "error-origin"
-version = "0.2.0"
+version = "0.3.0"
 api = 1
-description = "Shows where an error message the question quotes or describes is raised, who calls it and the condition that selects the path"
+description = "Quotes error definitions, candidate occurrences and local raise/conversion syntax; qualifies unresolved call and dependency links"
 run = "probe"
 capabilities = ["brief-probe"]
 

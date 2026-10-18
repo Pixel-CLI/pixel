@@ -2,17 +2,13 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""error-origin: a prompt about an error message ("where does 'remote decisions refused the decision' come from")
-is answered by the code that emits it. A quoted message is found literally: the longest leading run
-(three words or more) in non-test source, cut at `(` or `{` since format placeholders differ. A message described in
-words ("the error saying the index is locked") is the short string literal that carries
-the most of the prompt's words, each weighed by how few source lines carry it, with the call and function that emit
-it counted beside the string (`eprint_nothing_searched`); a string longer than the window is a manual, not a message,
-and a message catalogue entry (JSON) is followed to the code that names its key. Shows the raising function, its
-callers up to two levels with the lines leading to each call (where the condition that selects the path is), and one
-test that exercises the function. Level 2 stays inside the origin's directory (`<top>/<second>/`), test code is
-excluded (a tests path, or inside `mod tests`: a lone `#[cfg(test)]` marks only its own item). Read-only,
-deterministic. Issues #906, #1197."""
+"""Quote error evidence without promoting lexical occurrences to runtime causes.
+Literal/described matches remain candidates; Python syntax distinguishes message
+assignments, documentation and local raises. Matching caught types add a handler
+with its conversion/rethrow branches and import boundary. Name-only callers and
+test links remain unresolved candidates, never a causal chain. Read-only and
+deterministic; a missing parser result cannot prove an emission. Issues #906, #1231."""
+import ast
 import json
 import math
 import re
@@ -246,8 +242,7 @@ def read(root, rel, cache):
 
 
 def callers(root, name, cache, seen, depth, out, home, defined_in):
-    """Callers of `name`, defined in `defined_in`. When another file defines a function of that name too, only the
-    callers beside the selected definition count: a call by name alone does not tell the two apart."""
+    """Bounded lexical call candidates; directory proximity does not resolve receiver or binding identity."""
     if depth == 0 or len(out) > MAX_LINES:
         return
     near = None
@@ -272,9 +267,9 @@ def callers(root, name, cache, seen, depth, out, home, defined_in):
         seen.add((rel, caller))
         lo = max(start + 1, index + 1 - CALLER_LINES)
         if lo > start + 4:
-            out += show(rel, lines, start + 1, start + 3, f"{caller} calls {name} (header)")
-        out += show(rel, lines, lo, index + 4, f"{caller} → {name}: the lines leading to the call")
-        callers(root, caller, cache, seen, depth - 1, out, home, rel)
+            out += show(rel, lines, start + 1, start + 3, f"{caller}: lexical caller candidate (binding unresolved)")
+        out += show(rel, lines, lo, index + 4, f"{caller} → {name}: lexical call candidate; receiver/binding unresolved")
+        # Do not extend an unresolved lexical edge into a causal chain.
 
 
 def origins(root, prompt):
@@ -284,31 +279,97 @@ def origins(root, prompt):
         hits = locate(root, message)
         if hits:
             path, line, _ = hits[0].split(":", 2)
-            return path.lstrip("./"), int(line), "the quoted message is raised", None
+            return path.lstrip("./"), int(line), "quoted occurrence candidate; emission unverified", None
     found = described(root, prompt)
     if found:
         rel, line, catalogue = found
-        return rel, line, "the message the question describes is raised", catalogue
+        return rel, line, "described occurrence candidate; emission unverified", catalogue
     return None
+
+
+def python_role(lines, line):
+    """Classify syntax, never infer a runtime binding from a literal occurrence."""
+    try:
+        tree = ast.parse('\n'.join(lines))
+    except (SyntaxError, ValueError, RecursionError):
+        return 'occurrence candidate; emission unverified'
+    for node in ast.walk(tree):
+        if not (getattr(node, 'lineno', 0) <= line <= getattr(node, 'end_lineno', 0)):
+            continue
+        if isinstance(node, ast.Raise):
+            return 'local raise syntax; message origin candidate'
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Constant):
+            return 'message definition; emission unverified'
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            return 'documentation occurrence; no emission proved'
+    return 'occurrence candidate; emission unverified'
+
+
+def python_handlers(root, prompt, cache):
+    """Quote matching typed handlers, not name-only callers. Imports mark a boundary, not an external raise."""
+    meaningful = set(prompt_words(prompt)) - {'error', 'exception', 'message', 'text', 'type', 'warning'}
+    candidates = []
+    for path in rg(root, '-l', '-g', '*.py', r'^\s*(except|raise)\b', '.')[:80]:
+        rel = path.removeprefix('./')
+        if is_test_path(rel):
+            continue
+        lines = read(root, rel, cache)
+        try:
+            tree = ast.parse('\n'.join(lines))
+        except (SyntaxError, ValueError, RecursionError):
+            continue
+        parents = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+        for handler in ast.walk(tree):
+            if not isinstance(handler, ast.ExceptHandler) or handler.type is None:
+                continue
+            shared = meaningful & {stem(t) for t in tokens(ast.unparse(handler.type))}
+            if len(shared) < MIN_SHARED:
+                continue
+            raises = [n for n in ast.walk(handler) if isinstance(n, ast.Raise)]
+            if not raises:
+                continue
+            candidates.append((-len(shared), rel, handler.lineno, handler, raises, parents, tree))
+    if not candidates:
+        return []
+    _, rel, _, handler, raises, parents, tree = min(candidates, key=lambda x: x[:3])
+    lines = cache[rel]
+    owner = parents.get(handler)
+    lo = max(handler.lineno - 20, getattr(owner, 'lineno', handler.lineno))
+    out = show(rel, lines, lo, min(handler.end_lineno, handler.lineno + 55),
+               'conversion/rethrow candidate: matching caught type; runtime message origin unresolved')
+    types = {n.id for n in ast.walk(handler.type) if isinstance(n, ast.Name)}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and any((a.asname or a.name) in types for a in node.names):
+            out += show(rel, lines, node.lineno, node.end_lineno,
+                        'dependency boundary: imported caught type; external emission not inspected')
+    # The syntax is direct evidence of raising here; matching the question's message remains a hypothesis.
+    for raised in raises[:6]:
+        out += show(rel, lines, raised.lineno, raised.end_lineno,
+                    'local raise/rethrow syntax in this handler; message identity unverified')
+    out.append('Call context unresolved: method names alone do not establish receiver identity.')
+    return out
 
 
 def main():
     req = json.load(sys.stdin)
     root, prompt = req["repo_root"], req["prompt"]
-    out, cache, seen = [], {}, set()
+    cache, seen = {}, set()
+    out = python_handlers(root, prompt, cache)
     for rel, line, how, catalogue in filter(None, [origins(root, prompt)]):
         lines = read(root, rel, cache)
         index = line - 1
         if index >= len(lines):
             break
         name, start = enclosing(lines, index, rel.endswith(JS_EXT))
+        if rel.endswith(".py"):
+            how = python_role(lines, line)
         out.append(f"### error origin — {how} at {rel}:{line}" + (f" in {name}" if name else ""))
         if catalogue:
             crel, cline = catalogue
             clines = read(root, crel, cache)
-            out += show(crel, clines, cline, cline, "the text, in its message catalogue")
+            out += show(crel, clines, cline, cline, "message definition in catalogue; emission unverified")
         lo = max(start + 1, line - 12) if name else line - 6
-        out += show(rel, lines, lo, line + 6, f"where {name or 'it'} emits it")
+        out += show(rel, lines, lo, line + 6, "candidate source occurrence; inspect the evidence category above")
         if not name:
             break
         seen.add((rel, name))
@@ -319,12 +380,12 @@ def main():
             tlines = read(root, other, cache)
             if in_test(other, tlines, int(at) - 1):
                 test, tstart = enclosing(tlines, int(at) - 1)
-                out += show(other, tlines, tstart + 1, tstart + 24, f"test {test} exercising {name}")
+                out += show(other, tlines, tstart + 1, tstart + 24, f"test {test}: name match for {name}; binding unresolved")
                 break
         break
     text = "\n".join(out)
     if text:
-        sys.stdout.write(text[:MAX_BYTES].rsplit("\n", 1)[0] + "\n")
+        sys.stdout.write((text if len(text) <= MAX_BYTES else text[:MAX_BYTES].rsplit("\n", 1)[0]) + "\n")
 
 
 main()
