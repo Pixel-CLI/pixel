@@ -40,7 +40,9 @@ use std::time::Duration;
 
 use mvp_model::{Graph, Lang};
 
-use crate::store::{EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, Tier};
+use crate::store::{
+    DELETE_FILE_UNRESOLVED_CALLS, EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, Tier,
+};
 
 pub mod ruby;
 pub mod ruby_switch;
@@ -56,6 +58,12 @@ pub const MVP_COMMIT: &str = "e91e8da";
 /// this graph's own resolver's, so a graph built with the switch off is
 /// the graph built before the switch existed.
 pub const GRAPH_SOURCE_KEY: &str = "graph_source";
+
+/// Meta key: the generation of pixel-mvp's index the graph's Rust rows were
+/// last written from ([`merge_into`], [`merge_again`]). Any full build
+/// forgets it ([`record_source`]); absent, or naming another generation
+/// than the one a refresh started from, every Rust file is written again.
+pub const RUST_GENERATION_KEY: &str = "rust_mvp_generation";
 
 /// The switch: `v1` takes Rust calls, references and imports from this
 /// graph's resolver; unset, or anything else, from pixel-mvp's index.
@@ -112,7 +120,13 @@ pub fn source_is_current(stored: Option<&str>, wanted: RustSource) -> bool {
 }
 
 /// Records where the graph's Rust edges come from: `None` removes the key.
+/// The generation its Rust rows were written from goes with it: the build
+/// that records a source writes them again ([`merge_into`]) or not at all.
 pub(crate) fn record_source(store: &GraphStore, source: Option<&str>) -> Result<(), StoreError> {
+    store.conn().exec_cached(
+        "DELETE FROM meta WHERE key = ?1",
+        rusqlite::params![RUST_GENERATION_KEY],
+    )?;
     match source {
         Some(value) => store.meta_set(GRAPH_SOURCE_KEY, value),
         None => {
@@ -134,20 +148,53 @@ pub fn rust_is_walled(store: &GraphStore) -> Result<bool, StoreError> {
         .is_some_and(|value| value.starts_with("rust=mvp ")))
 }
 
+/// Which Rust files a read or a write of pixel-mvp's rows covers.
+#[derive(Debug, Clone, Copy)]
+pub enum Scope<'a> {
+    /// Every Rust file of the graph.
+    All,
+    /// The Rust files of the graph at these paths; any other path is
+    /// ignored.
+    Files(&'a BTreeSet<String>),
+}
+
 /// Replaces the Rust rows of `store` with `rows`: every `calls` and
 /// `references` edge from a Rust symbol, every `unresolved_calls` row of a
 /// Rust file, and the target of every Rust import.
 pub fn apply(store: &GraphStore, rows: &RustRows) -> Result<(), StoreError> {
+    apply_in(store, rows, Scope::All)
+}
+
+/// [`apply`] over the Rust files of `scope` only: their edges and
+/// `unresolved_calls` rows are deleted, then `rows` written, which
+/// [`rust_rows_in`] read over the same scope.
+pub fn apply_in(store: &GraphStore, rows: &RustRows, scope: Scope<'_>) -> Result<(), StoreError> {
     let conn = store.conn();
-    conn.exec_cached(
-        "DELETE FROM edges WHERE kind IN ('calls', 'references') AND src_id IN
-           (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.lang = 'rust')",
-        [],
-    )?;
-    conn.exec_cached(
-        "DELETE FROM unresolved_calls WHERE file_id IN (SELECT id FROM files WHERE lang = 'rust')",
-        [],
-    )?;
+    match scope {
+        Scope::All => {
+            conn.exec_cached(
+                "DELETE FROM edges WHERE kind IN ('calls', 'references') AND src_id IN
+                   (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id
+                     WHERE f.lang = 'rust')",
+                [],
+            )?;
+            conn.exec_cached(
+                "DELETE FROM unresolved_calls
+                  WHERE file_id IN (SELECT id FROM files WHERE lang = 'rust')",
+                [],
+            )?;
+        }
+        Scope::Files(paths) => {
+            for file_id in rust_file_ids(store, paths)?.into_values() {
+                conn.exec_cached(
+                    "DELETE FROM edges WHERE kind IN ('calls', 'references') AND src_id IN
+                       (SELECT id FROM symbols WHERE file_id = ?1)",
+                    rusqlite::params![file_id],
+                )?;
+                conn.exec_cached(DELETE_FILE_UNRESOLVED_CALLS, rusqlite::params![file_id])?;
+            }
+        }
+    }
     for edge in rows.calls.iter().chain(&rows.references) {
         store.insert_edge(edge)?;
     }
@@ -194,12 +241,134 @@ pub fn refresh_crate(root: &Path, state: &Path) -> Result<mvp_store::Store, BoxE
 
 /// The switch at work: refreshes pixel-mvp's index of `root` under `state`
 /// ([`refresh_crate`]) and replaces the Rust rows of `store` with its
-/// answer ([`apply`]).
+/// answer ([`merge_into`]).
 pub fn switch_rust(root: &Path, store: &GraphStore, state: &Path) -> Result<(), BoxErr> {
     let mvp = refresh_crate(root, state)?;
-    let rows = rust_rows(store, &mvp)?;
-    apply(store, &rows)?;
+    merge_into(store, &mvp)
+}
+
+/// Replaces every Rust row of `store` with what pixel-mvp's index (`mvp`)
+/// decides ([`apply`]), and records the generation they were written from
+/// ([`RUST_GENERATION_KEY`]).
+pub fn merge_into(store: &GraphStore, mvp: &mvp_store::Store) -> Result<(), BoxErr> {
+    apply(store, &rust_rows(store, mvp)?)?;
+    store.meta_set(RUST_GENERATION_KEY, &mvp.provenance()?.generation)?;
     Ok(())
+}
+
+/// The Rust rows written again after an update whose files are `batch`,
+/// once the resolver's passes moved the rows of the files `moved` and the
+/// refresh of pixel-mvp's index (`mvp`) changed `changes`; `names_before`
+/// counts the names the batch's files defined before it ([`names_in`]).
+///
+/// A file's rows read pixel-mvp's sites of the file, the pairs of the
+/// file's symbols and those of the symbols its sites resolve to, the files
+/// its imports resolve to, and, for an unresolved reference, whether any
+/// symbol carries its name. So a file is written again when any of these
+/// may have moved: it is in `batch` or `moved`, rewritten or redirected by
+/// the refresh, or resolves a site into a file of `batch` or rewritten
+/// (whose symbols this graph numbers anew or pixel-mvp read again). Every
+/// other file keeps its rows, without a statement. Every file is written
+/// again ([`merge_into`]) when the rows were not written from the
+/// generation the refresh started from, or when the batch made a name
+/// defined nowhere else appear or disappear: an unresolved reference to it
+/// in any file is recorded or dropped.
+pub fn merge_again(
+    store: &GraphStore,
+    mvp: &mvp_store::Store,
+    changes: &Changes,
+    batch: &[&str],
+    moved: &BTreeSet<String>,
+    names_before: &HashMap<String, i64>,
+) -> Result<(), BoxErr> {
+    let written_from = store.meta_get(RUST_GENERATION_KEY)?;
+    if changes.before.is_none()
+        || written_from != changes.before
+        || defined_names_moved(
+            store,
+            names_before,
+            &names_in(store, batch.iter().copied())?,
+        )?
+    {
+        return merge_into(store, mvp);
+    }
+    let mut again: BTreeSet<String> = moved.clone();
+    again.extend(batch.iter().map(|path| (*path).to_string()));
+    again.extend(changes.redirected.iter().cloned());
+    let mut defined: BTreeSet<String> = changes.rewritten.clone();
+    defined.extend(batch.iter().map(|path| (*path).to_string()));
+    for path in &defined {
+        again.extend(mvp.files_reaching(path)?);
+    }
+    again.extend(defined);
+    let scope = Scope::Files(&again);
+    apply_in(store, &rust_rows_in(store, mvp, scope)?, scope)?;
+    store.meta_set(RUST_GENERATION_KEY, &mvp.provenance()?.generation)?;
+    Ok(())
+}
+
+/// How many symbols of the files at `paths` carry each name.
+pub fn names_in<'a>(
+    store: &GraphStore,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<HashMap<String, i64>, StoreError> {
+    let mut stmt = store.conn().prepare_cached(
+        "SELECT s.name, count(*) FROM symbols s JOIN files f ON f.id = s.file_id
+          WHERE f.path = ?1 GROUP BY s.name",
+    )?;
+    let mut out: HashMap<String, i64> = HashMap::new();
+    for path in paths {
+        let rows = stmt.query_map([path], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (name, n) = row?;
+            *out.entry(name).or_default() += n;
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a name the batch's files defined (`before`) or define (`after`),
+/// on one side only, is defined by no other symbol of `store`: then it went
+/// from defined somewhere to defined nowhere, or the other way.
+fn defined_names_moved(
+    store: &GraphStore,
+    before: &HashMap<String, i64>,
+    after: &HashMap<String, i64>,
+) -> Result<bool, StoreError> {
+    let mut count = store
+        .conn()
+        .prepare_cached("SELECT count(*) FROM symbols WHERE name = ?1")?;
+    for name in before.keys().chain(after.keys()) {
+        let in_batch = after.get(name).copied().unwrap_or_default();
+        if before.contains_key(name) == (in_batch > 0) {
+            continue;
+        }
+        let total: i64 = count.query_row([name], |r| r.get(0))?;
+        if total == in_batch {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The id of each Rust file of `store` at one of `paths`, by path.
+fn rust_file_ids(
+    store: &GraphStore,
+    paths: &BTreeSet<String>,
+) -> Result<HashMap<String, i64>, StoreError> {
+    let mut stmt = store
+        .conn()
+        .prepare_cached("SELECT id FROM files WHERE path = ?1 AND lang = 'rust'")?;
+    let mut out = HashMap::new();
+    for path in paths {
+        let rows = stmt.query_map([path], |r| r.get::<_, i64>(0))?;
+        for id in rows {
+            out.insert(path.clone(), id?);
+        }
+    }
+    Ok(out)
 }
 
 /// How long a refresh waits for another process writing pixel-mvp's index
@@ -544,55 +713,62 @@ fn uid_file(uid: &str) -> String {
 /// What pixel-mvp's index (`mvp`) decides at the Rust sites of `store`, in
 /// `store`'s rows. Reads both, writes neither.
 pub fn rust_rows(store: &GraphStore, mvp: &mvp_store::Store) -> Result<RustRows, BoxErr> {
-    let files: HashMap<String, i64> = store
-        .files()?
-        .into_iter()
-        .filter(|f| f.lang == "rust")
-        .map(|f| (f.path, f.id))
-        .collect();
-    let ours: Vec<Sym<i64>> = {
-        let mut stmt = store.conn().prepare(
-            "SELECT s.id, f.path, s.qualified, s.kind, s.start_line FROM symbols s
-               JOIN files f ON f.id = s.file_id WHERE f.lang = 'rust'",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Sym {
-                key: r.get::<_, i64>(0)?,
-                path: r.get(1)?,
-                name: r.get(2)?,
-                kind: common_kind(&r.get::<_, String>(3)?).to_string(),
-                line: r.get(4)?,
-            })
-        })?;
-        rows.collect::<Result<_, _>>()?
+    rust_rows_in(store, mvp, Scope::All)
+}
+
+/// [`rust_rows`] for the sites of the Rust files of `scope`: pixel-mvp's
+/// edges of those files, paired over their paths and their targets' only
+/// (each pass of the pairing matches within one path), and their imports.
+pub fn rust_rows_in(
+    store: &GraphStore,
+    mvp: &mvp_store::Store,
+    scope: Scope<'_>,
+) -> Result<RustRows, BoxErr> {
+    let files: HashMap<String, i64> = match scope {
+        Scope::All => store
+            .files()?
+            .into_iter()
+            .filter(|f| f.lang == "rust")
+            .map(|f| (f.path, f.id))
+            .collect(),
+        Scope::Files(paths) => rust_file_ids(store, paths)?,
     };
-    let mut theirs: Vec<Sym<String>> = Vec::new();
-    for file in mvp.files()?.into_iter().filter(|f| f.lang == Lang::Rust) {
-        for symbol in mvp.symbols(&file.path)? {
-            theirs.push(Sym {
-                kind: common_kind(symbol.kind.as_str()).to_string(),
-                key: symbol.uid,
-                path: symbol.file,
-                name: symbol.name,
-                line: symbol.line,
-            });
+    let (edges, ours, theirs) = match scope {
+        Scope::All => (mvp.all_edges()?, rust_symbols(store, None)?, {
+            let mut theirs = Vec::new();
+            for file in mvp.files()?.into_iter().filter(|f| f.lang == Lang::Rust) {
+                theirs.extend(mvp_symbols(mvp, &file.path)?);
+            }
+            theirs
+        }),
+        Scope::Files(_) => {
+            let mut sited: Vec<&String> = files.keys().collect();
+            sited.sort();
+            let mut edges = Vec::new();
+            for path in sited {
+                edges.extend(mvp.edges_of(path)?);
+            }
+            let mut paths: BTreeSet<String> = files.keys().cloned().collect();
+            paths.extend(edges.iter().filter_map(|e| e.dst.as_deref().map(uid_file)));
+            let (mut ours, mut theirs) = (Vec::new(), Vec::new());
+            for path in &paths {
+                ours.extend(rust_symbols(store, Some(path))?);
+                theirs.extend(mvp_symbols(mvp, path)?);
+            }
+            (edges, ours, theirs)
         }
-    }
+    };
     let paired = pair(&ours, &theirs);
     // A name some symbol of the graph carries: an unresolved reference to
     // anything else is a plain value, which this graph never records.
-    let named: HashSet<String> = {
-        let mut stmt = store.conn().prepare("SELECT DISTINCT name FROM symbols")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        rows.collect::<Result<_, _>>()?
-    };
+    let mut named = Named::of(store, scope)?;
     let all_files: HashMap<String, i64> =
         store.files()?.into_iter().map(|f| (f.path, f.id)).collect();
 
     let mut out = RustRows::default();
     // (importing file id, path as written) -> the files it resolved to.
     let mut imported: HashMap<(i64, String), HashSet<Option<i64>>> = HashMap::new();
-    for edge in mvp.all_edges()? {
+    for edge in edges {
         let path = uid_file(&edge.src);
         let Some(&file_id) = files.get(&path) else {
             continue;
@@ -621,7 +797,7 @@ pub fn rust_rows(store: &GraphStore, mvp: &mvp_store::Store) -> Result<RustRows,
             // in code this graph has no symbol for (a test) is none of its
             // sites; a reference to a name no symbol carries is a value.
             let in_graph = src.is_some() || is_file_symbol(&edge.src);
-            if in_graph && (kind == EdgeKind::Calls || named.contains(&callee)) {
+            if in_graph && (kind == EdgeKind::Calls || named.carried(store, &callee)?) {
                 out.unresolved.push(Unresolved {
                     file_id,
                     name: callee,
@@ -665,28 +841,112 @@ pub fn rust_rows(store: &GraphStore, mvp: &mvp_store::Store) -> Result<RustRows,
         }
     }
 
-    let mut stmt = store.conn().prepare(
+    let mut stmt = store.conn().prepare_cached(
         "SELECT i.id, i.file_id, i.path FROM imports i
-           JOIN files f ON f.id = i.file_id WHERE f.lang = 'rust' ORDER BY i.id",
+           JOIN files f ON f.id = i.file_id
+          WHERE f.lang = 'rust' AND (?1 IS NULL OR f.id = ?1) ORDER BY i.id",
     )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, String>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, file_id, path) = row?;
-        // Two `use` of one path that pixel-mvp resolves apart (in two
-        // scopes) give no single answer for the row: none.
-        let target = match imported.get(&(file_id, path)) {
-            Some(targets) if targets.len() == 1 => targets.iter().next().copied().flatten(),
-            _ => None,
-        };
-        out.imports.push((id, target));
+    let ids: Vec<Option<i64>> = match scope {
+        Scope::All => vec![None],
+        Scope::Files(_) => {
+            let mut ids: Vec<i64> = files.values().copied().collect();
+            ids.sort_unstable();
+            ids.into_iter().map(Some).collect()
+        }
+    };
+    for id in ids {
+        let rows = stmt.query_map([id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, file_id, path) = row?;
+            // Two `use` of one path that pixel-mvp resolves apart (in two
+            // scopes) give no single answer for the row: none.
+            let target = match imported.get(&(file_id, path)) {
+                Some(targets) if targets.len() == 1 => targets.iter().next().copied().flatten(),
+                _ => None,
+            };
+            out.imports.push((id, target));
+        }
     }
     Ok(out)
+}
+
+/// The Rust symbols of `store`, of the file at `path` when one is given, as
+/// the pairing reads them.
+fn rust_symbols(store: &GraphStore, path: Option<&str>) -> Result<Vec<Sym<i64>>, StoreError> {
+    let mut stmt = store.conn().prepare_cached(
+        "SELECT s.id, f.path, s.qualified, s.kind, s.start_line FROM symbols s
+           JOIN files f ON f.id = s.file_id
+          WHERE f.lang = 'rust' AND (?1 IS NULL OR f.path = ?1) ORDER BY s.id",
+    )?;
+    let rows = stmt.query_map([path], |r| {
+        Ok(Sym {
+            key: r.get::<_, i64>(0)?,
+            path: r.get(1)?,
+            name: r.get(2)?,
+            kind: common_kind(&r.get::<_, String>(3)?).to_string(),
+            line: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// pixel-mvp's symbols of the file at `path`, as the pairing reads them.
+fn mvp_symbols(mvp: &mvp_store::Store, path: &str) -> Result<Vec<Sym<String>>, BoxErr> {
+    Ok(mvp
+        .symbols(path)?
+        .into_iter()
+        .map(|symbol| Sym {
+            kind: common_kind(symbol.kind.as_str()).to_string(),
+            key: symbol.uid,
+            path: symbol.file,
+            name: symbol.name,
+            line: symbol.line,
+        })
+        .collect())
+}
+
+/// Whether some symbol of the graph carries a name: every name read at once
+/// for every Rust file, one indexed lookup per name met for a few.
+enum Named {
+    All(HashSet<String>),
+    Lookup(HashMap<String, bool>),
+}
+
+impl Named {
+    fn of(store: &GraphStore, scope: Scope<'_>) -> Result<Self, StoreError> {
+        Ok(match scope {
+            Scope::All => {
+                let mut stmt = store.conn().prepare("SELECT DISTINCT name FROM symbols")?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                Named::All(rows.collect::<Result<_, _>>()?)
+            }
+            Scope::Files(_) => Named::Lookup(HashMap::new()),
+        })
+    }
+
+    fn carried(&mut self, store: &GraphStore, name: &str) -> Result<bool, StoreError> {
+        match self {
+            Named::All(names) => Ok(names.contains(name)),
+            Named::Lookup(seen) => {
+                if let Some(&carried) = seen.get(name) {
+                    return Ok(carried);
+                }
+                let carried: bool = store.conn().query_row(
+                    "SELECT EXISTS (SELECT 1 FROM symbols WHERE name = ?1)",
+                    [name],
+                    |r| r.get(0),
+                )?;
+                seen.insert(name.to_string(), carried);
+                Ok(carried)
+            }
+        }
+    }
 }
 
 /// Whether a pixel-mvp uid is a file's own symbol (`path#path#file`): the

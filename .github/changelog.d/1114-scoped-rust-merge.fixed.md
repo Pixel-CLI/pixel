@@ -1,0 +1,1 @@
+**graph:** With the Rust source on (the default in a Cargo crate), a file save now rewrites only the Rust edges and unresolved rows of the files it can move, instead of every Rust row of the graph: the Rust merge of a one-file save of a leaf file drops from about 200 ms to 13 ms on this repository.

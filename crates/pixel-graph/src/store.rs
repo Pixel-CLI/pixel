@@ -485,7 +485,8 @@ pub struct GraphStore {
 /// The per-file delete [`GraphStore::replace_file`] and
 /// [`GraphStore::remove_file`] run once for every file of an incremental
 /// batch; `idx_unresolved_file` is what keeps it off a full-table scan.
-const DELETE_FILE_UNRESOLVED_CALLS: &str = "DELETE FROM unresolved_calls WHERE file_id = ?1";
+pub(crate) const DELETE_FILE_UNRESOLVED_CALLS: &str =
+    "DELETE FROM unresolved_calls WHERE file_id = ?1";
 
 /// Statements the write path keeps prepared: a cold build runs the same few
 /// dozen once per file, symbol, import and edge, so the connection's cache

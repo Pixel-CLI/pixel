@@ -667,7 +667,7 @@ fn build_graph_with(
     let clock = Instant::now();
     resolve_references(&store, &stored.references)?;
     if let Some(mvp) = mvp {
-        mvp_adapter::apply(&store, &mvp_adapter::rust_rows(&store, mvp)?)?;
+        mvp_adapter::merge_into(&store, mvp)?;
     }
     if let Some(index) = ruby_index {
         ruby_switch::merge_into(&store, index)?;
@@ -1425,10 +1425,12 @@ fn stored_definitions(
 /// just synchronised to.
 ///
 /// When the graph's Rust edges are pixel-mvp's (`mvp_adapter::rust_is_walled`),
-/// this resolver decides no Rust site, and the Rust rows are replaced last
-/// with pixel-mvp's answer, refreshed in `.pixel/.pixel-mvp/`, so whatever
-/// the passes before did to them (a demoted edge, a retried row) is not what
-/// stays.
+/// this resolver decides no Rust site, and the Rust rows are written again
+/// last with pixel-mvp's answer, refreshed in `.pixel/.pixel-mvp/`, so
+/// whatever the passes before did to them (a demoted edge, a retried row) is
+/// not what stays: the rows of the files the batch, the refresh or those
+/// passes may have moved, every file's when that cannot be bounded
+/// (`mvp_adapter::merge_again`).
 ///
 /// When the graph's Ruby rows are the hybrid merge (`ruby_switch::is_hybrid`),
 /// they are restored to this resolver's own first, and merged again last
@@ -1437,6 +1439,14 @@ fn stored_definitions(
 /// (`ruby_switch::merge_again`).
 fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Result<(), BoxErr> {
     let walled = mvp_adapter::rust_is_walled(store)?;
+    // The names the batch's files defined before it: whether one stopped or
+    // started being defined anywhere decides how much of pixel-mvp's Rust
+    // rows is written again (`mvp_adapter::merge_again`).
+    let names_before = if walled {
+        mvp_adapter::names_in(store, files.iter().map(|&(rel, _)| rel))?
+    } else {
+        HashMap::new()
+    };
     // A merged graph goes back to this resolver's own Ruby rows first, so
     // every pass below decides as it would without the merge; the merge is
     // planned again at the end, on what they wrote.
@@ -1512,6 +1522,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             }
             for (src_file, name, src_id, site_line, receiver, kind) in demoted {
                 affected.replayed.insert(name.clone());
+                affected.rows_moved.insert(src_file);
                 store.insert_unresolved_call(
                     src_file,
                     &name,
@@ -1615,6 +1626,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
                 .and_then(|p| path_to_id.get(&p).copied())
             {
                 affected.files.insert(importer_id);
+                affected.rows_moved.insert(importer_id);
                 store.conn().exec_cached(
                     "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
                     rusqlite::params![import_id, target],
@@ -1657,11 +1669,18 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         } else {
             mvp_adapter::refresh_changes(root, &state)?
         };
+        let batch: Vec<&str> = files.iter().map(|&(rel, _)| rel).collect();
         if walled {
-            mvp_adapter::apply(store, &mvp_adapter::rust_rows(store, &index)?)?;
+            let paths: HashMap<i64, String> =
+                store.files()?.into_iter().map(|f| (f.id, f.path)).collect();
+            let moved: std::collections::BTreeSet<String> = affected
+                .rows_moved
+                .iter()
+                .filter_map(|id| paths.get(id).cloned())
+                .collect();
+            mvp_adapter::merge_again(store, &index, &changes, &batch, &moved, &names_before)?;
         }
         if hybrid {
-            let batch: Vec<&str> = files.iter().map(|&(rel, _)| rel).collect();
             ruby_switch::merge_again(store, &index, &changes, &undo, &moved, &batch)?;
         }
     }
@@ -1705,6 +1724,7 @@ fn re_resolve_ruby_imports(
             .and_then(|p| path_to_id.get(&p).copied());
         if after != before {
             affected.files.insert(importer_id);
+            affected.rows_moved.insert(importer_id);
             store.conn().exec_cached(
                 "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
                 rusqlite::params![import_id, after],
