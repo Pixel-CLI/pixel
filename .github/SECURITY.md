@@ -76,8 +76,11 @@ Release binaries are built reproducibly: the same tag, rebuilt with the same
 Rust toolchain and the same `cross` version, gives a byte-identical `pixel`.
 `scripts/release/release-build-env.sh` sets what would otherwise vary between two
 builds: `SOURCE_DATE_EPOCH`, the commit's time, for the build date
-`pixel --version` prints, and `RUSTFLAGS` remapping the checkout and
-`CARGO_HOME` out of the binary's panic messages and debug information.
+`pixel --version` prints, `RUSTFLAGS` remapping the checkout and
+`CARGO_HOME` out of the binary's panic messages and debug information, and
+`CARGO_PROFILE_RELEASE_STRIP=none`: the build keeps its symbols, and
+`scripts/release/split-symbols.sh` strips the copy the archive ships (it
+needs `rustup component add llvm-tools` on Linux).
 `release-build.yml` builds every release with it, and
 `.github/workflows/reproducible-build.yml` builds the
 `x86_64-unknown-linux-musl` binary twice, from two checkouts at different
@@ -91,6 +94,7 @@ cargo install cross --locked --version 0.2.5   # the version release-build.yml p
 env_lines=$(scripts/release/release-build-env.sh) && eval "$env_lines"
 cross +1.NN.N build --release --locked --no-default-features --features model2vec \
   --target x86_64-unknown-linux-musl -p pixel-cli
+scripts/release/split-symbols.sh target/x86_64-unknown-linux-musl/release/pixel /tmp/pixel.symbols.tar.xz
 sha256sum target/x86_64-unknown-linux-musl/release/pixel
 gh release download vX.Y.Z --repo Pixel-CLI/pixel \
   --pattern 'pixel-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz'
@@ -103,6 +107,27 @@ Compare the binary, not the archive: `tar` records file times. The
 the `aarch64-apple-darwin` one is built with the same environment, but no CI
 job compares two of its builds. Releases cut before this script existed
 embed their build day and the runner's paths, and do not reproduce.
+
+### Symbols for a backtrace
+
+The binary in each archive is stripped of its symbol table (about 17% of
+its size). The same build, before stripping, ships beside it as
+`pixel-vX.Y.Z-<target>.symbols.tar.xz`, covered by the release's provenance
+attestation; stripping moves no code, so its symbols name the frames of the
+shipped binary. Releases up to v0.8.0 ship unstripped and need none. With
+`RUST_BACKTRACE=full`, a panic prints each frame's address; resolve them
+against the unstripped copy:
+
+```bash
+gh release download vX.Y.Z --repo Pixel-CLI/pixel --pattern 'pixel-vX.Y.Z-<target>.symbols.tar.xz'
+tar -xJf pixel-vX.Y.Z-<target>.symbols.tar.xz   # ./pixel, unstripped
+atos -o pixel -l <load address> <frame address>…           # macOS
+addr2line -f -C -e pixel <frame address - load address>…   # Linux
+```
+
+On macOS the load address is the `__TEXT` start the crash report lists
+(`0x100000000` without ASLR); both copies carry the same Mach-O UUID
+(`dwarfdump --uuid`).
 
 ### Software bill of materials
 

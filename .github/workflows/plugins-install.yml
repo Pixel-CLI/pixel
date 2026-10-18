@@ -27,21 +27,39 @@ name: Plugins install
 # publish: x86_64-musl, aarch64-musl, aarch64-darwin and x86_64-darwin (the
 # intel runner is the only machine that can run that asset together with a
 # core built here, since the core itself publishes no macOS Intel binary).
+#
+# Push and pull-request runs are scoped to the code the smoke crosses, not to
+# every crate: the dispatch of an unknown word and the clap surface a new
+# subcommand could shadow a moved word with (`pixel/src/main.rs`), the moved
+# hint (`removed_commands.rs`), install / enable (`plugin_cmd.rs`, the whole
+# `pixel-plugin` crate, `pixel-git` that its install runs git through) and
+# the plugin skill it deploys (`pixel-setup/src/skill.rs`). Build breakage
+# anywhere else is ci.yml's and cross-build.yml's to catch, and a dependency
+# bump (`Cargo.lock`) that changes this path at run time is caught by the
+# next daily run. `.cargo/` holds only `mutants.toml`.
 on:
   push:
     branches: [main]
     paths:
-      - ".cargo/**"
       - ".github/workflows/plugins-install.yml"
-      - "Cargo.*"
-      - "crates/**"
+      - ".github/workflows/release-prepare-scope.yml"
+      - "crates/pixel-git/**"
+      - "crates/pixel-plugin/**"
+      - "crates/pixel-setup/src/skill.rs"
+      - "crates/pixel/src/main.rs"
+      - "crates/pixel/src/plugin_cmd.rs"
+      - "crates/pixel/src/removed_commands.rs"
       - "scripts/ci/plugins-smoke.sh"
   pull_request:
     paths:
-      - ".cargo/**"
       - ".github/workflows/plugins-install.yml"
-      - "Cargo.*"
-      - "crates/**"
+      - ".github/workflows/release-prepare-scope.yml"
+      - "crates/pixel-git/**"
+      - "crates/pixel-plugin/**"
+      - "crates/pixel-setup/src/skill.rs"
+      - "crates/pixel/src/main.rs"
+      - "crates/pixel/src/plugin_cmd.rs"
+      - "crates/pixel/src/removed_commands.rs"
       - "scripts/ci/plugins-smoke.sh"
   schedule:
     - cron: "47 3 * * *"

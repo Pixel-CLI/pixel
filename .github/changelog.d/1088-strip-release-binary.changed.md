@@ -1,0 +1,1 @@
+**release:** the released `pixel` binary ships stripped of its symbol table (76.1 MB → 63.4 MB on aarch64-apple-darwin, archive 22.1 MB → 20.6 MB); each release attaches the unstripped build as `pixel-<tag>-<target>.symbols.tar.xz` to symbolize a backtrace (SECURITY.md, "Symbols for a backtrace").
