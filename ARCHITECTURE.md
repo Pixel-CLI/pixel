@@ -433,6 +433,11 @@ agree).
    back to a `{truncated, cap_bytes, note, partial}` wrapper. Human notes
    such as graph-build announcements and lower-bound caveats go to stderr,
    never stdout.
+   `find-code` bounds each match's inline context before that cap: 16
+   lines for the first match printed, 4 for the others, then a
+   `… N more lines, to <path>:<end>` pointer; a match whose span lies inside
+   a body already printed points back to it. Either bound, when it fires,
+   is named in the answer's `caps` (and as a `cap:` line in human output).
 
 A subcommand clap rejects as unknown never reaches `execute`: `main.rs` asks
 `pixel-plugin` to resolve the word as a plugin (trusted repo plugin, user

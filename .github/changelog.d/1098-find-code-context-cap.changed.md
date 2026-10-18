@@ -1,0 +1,1 @@
+**find-code:** A match's inline context is now bounded: 16 lines for the first match, 4 for the others, with a pointer to the lines left out; a match inside a body already shown points back to it instead of repeating it. `caps` names either bound. On a Ruby corpus the mean answer drops from 7.6 KB to 2.6 KB, same matches.

@@ -2676,19 +2676,35 @@ fn enrich_with_context(
     enriched
 }
 
+/// Lines of context `find-code` prints for its best match: a class or module
+/// span runs to hundreds of lines, and printing every match whole made a
+/// Ruby answer 20 KB for eight matches (#1098). The best match gets enough to
+/// read what it does; the rest stays one read away.
+const RESOLVE_CONTEXT_TOP_LINES: usize = 16;
+/// Lines of context for every other match: the margin and the definition's
+/// head, which name what the match is.
+const RESOLVE_CONTEXT_OTHER_LINES: usize = 4;
+
 /// Attach inline source context to every `resolve` match, same rationale as
 /// `enrich_with_context` for `search`: without this, a `resolve` response
 /// gives only a location, forcing a mandatory follow-up Read on every call —
 /// measured as a real cost on trivial lookups (docs/bench/agent-ab-2026-08-30
 /// clean-postfix.txt, s1-locate). Spans `[start_line - MARGIN, end_line +
 /// MARGIN]` (not a fixed radius around one line) so a multi-line symbol's
-/// full body is included, not just its first line.
+/// body is included, not just its first line — up to
+/// [`RESOLVE_CONTEXT_TOP_LINES`] for the first match printed and
+/// [`RESOLVE_CONTEXT_OTHER_LINES`] for the others. A match whose span lies inside a body
+/// an earlier match already printed points there instead of repeating it.
+/// Either bound, when it fires, is named in the envelope's `caps`.
 fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
     const MARGIN: usize = 2;
     let Some(matches) = data.get_mut("matches").and_then(Value::as_array_mut) else {
         return;
     };
     let mut cache: HashMap<PathBuf, Option<String>> = HashMap::new();
+    // The spans printed so far, per file: (first, last, the match's start).
+    let mut shown: HashMap<String, Vec<(usize, usize, usize)>> = HashMap::new();
+    let (mut cut, mut inside) = (0_usize, 0_usize);
     for m in matches.iter_mut() {
         let rel = m
             .get("path")
@@ -2707,6 +2723,15 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
         if start_line == 0 {
             continue;
         }
+        if let Some(&(_, _, at)) = shown.get(&rel).and_then(|spans| {
+            spans
+                .iter()
+                .find(|&&(first, last, _)| first <= start_line && end_line <= last)
+        }) {
+            m["context"] = Value::String(format!("   (inside {rel}:{at}, shown above)"));
+            inside += 1;
+            continue;
+        }
         let abs = root.join(&rel);
         let content = match cache.entry(abs.clone()) {
             std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
@@ -2717,8 +2742,14 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
         let Some(content) = content else { continue };
         let lines: Vec<&str> = content.lines().collect();
         let from = start_line.saturating_sub(MARGIN + 1).min(lines.len());
-        let to = (end_line + MARGIN).min(lines.len());
-        let mut ctx_lines = Vec::with_capacity(to - from);
+        let full = (end_line + MARGIN).min(lines.len());
+        let budget = if shown.is_empty() {
+            RESOLVE_CONTEXT_TOP_LINES
+        } else {
+            RESOLVE_CONTEXT_OTHER_LINES
+        };
+        let to = full.min(from + budget);
+        let mut ctx_lines = Vec::with_capacity(to - from + 1);
         for (i, l) in lines[from..to].iter().enumerate() {
             let ln = from + i + 1;
             let marker = if ln >= start_line && ln <= end_line {
@@ -2728,7 +2759,41 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
             };
             ctx_lines.push(format!("{marker} {ln:>5}: {l}"));
         }
+        // Only lost body lines are worth a pointer: a cut trailing margin is
+        // not, and its pointer would cost more than the lines it replaced.
+        if to < end_line {
+            ctx_lines.push(format!(
+                "   … {} more lines, to {rel}:{end_line}",
+                end_line - to
+            ));
+            cut += 1;
+        }
         m["context"] = Value::String(ctx_lines.join("\n"));
+        // Only what was printed can be pointed back to.
+        shown
+            .entry(rel)
+            .or_default()
+            .push((from + 1, to, start_line));
+    }
+    let mut fired = Vec::new();
+    if cut > 0 {
+        fired.push(format!(
+            "context: {cut} match bodies cut ({RESOLVE_CONTEXT_TOP_LINES} lines for the first, {RESOLVE_CONTEXT_OTHER_LINES} for the others)"
+        ));
+    }
+    if inside > 0 {
+        fired.push(format!(
+            "context: {inside} matches inside a body shown above, not repeated"
+        ));
+    }
+    if !fired.is_empty() {
+        let mut caps = data
+            .get("caps")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        caps.extend(fired.into_iter().map(Value::String));
+        data["caps"] = Value::Array(caps);
     }
 }
 
@@ -2792,6 +2857,11 @@ fn print_resolve_human(data: &Value) -> Result<(), String> {
         .unwrap_or("unknown");
     let basis = data.get("basis").and_then(Value::as_str).unwrap_or("");
     output.push_str(&format!("Confidence: {confidence} ({basis})\n"));
+    if let Some(caps) = data.get("caps").and_then(Value::as_array) {
+        for cap in caps.iter().filter_map(Value::as_str) {
+            output.push_str(&format!("cap: {cap}\n"));
+        }
+    }
     write_stdout(&output)
 }
 
@@ -6792,6 +6862,119 @@ mod tests {
         assert!(!ctx.contains(">>     9: line 9"));
 
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A scratch source file of `lines` numbered lines, and its directory.
+    fn numbered_source(tag: &str, lines: usize) -> (PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("pixel-resolve-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body: String = (1..=lines).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("big.rb"), body).unwrap();
+        (dir, "big.rb".to_string())
+    }
+
+    #[test]
+    fn resolve_context_should_cut_a_long_body_and_name_the_cap() {
+        let (root, rel) = numbered_source("cut", 200);
+        let mut data = serde_json::json!({
+            "matches": [{"path": rel, "start_line": 10, "end_line": 150}]
+        });
+        enrich_resolve_matches_with_context(&mut data, &root);
+        let ctx = data["matches"][0]["context"].as_str().unwrap();
+        let lines: Vec<&str> = ctx.lines().collect();
+        // Two margin lines, then the body up to the cap, then where it ends.
+        assert_eq!(lines.len(), RESOLVE_CONTEXT_TOP_LINES + 1, "{ctx}");
+        assert_eq!(lines[0], "       8: line 8");
+        assert_eq!(lines[RESOLVE_CONTEXT_TOP_LINES - 1], ">>    23: line 23");
+        assert_eq!(
+            lines[RESOLVE_CONTEXT_TOP_LINES],
+            "   … 127 more lines, to big.rb:150"
+        );
+        assert_eq!(
+            data["caps"],
+            serde_json::json!([
+                "context: 1 match bodies cut (16 lines for the first, 4 for the others)"
+            ])
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_context_should_point_a_match_inside_a_shown_body_back_to_it() {
+        let (root, rel) = numbered_source("inside", 60);
+        let mut data = serde_json::json!({
+            "matches": [
+                {"path": rel, "start_line": 5, "end_line": 20},
+                {"path": rel, "start_line": 8, "end_line": 12},
+                // Inside the first span, but past what the cap printed.
+                {"path": rel, "start_line": 40, "end_line": 41},
+                {"path": "other.rb", "start_line": 8, "end_line": 12},
+            ]
+        });
+        std::fs::write(root.join("other.rb"), "a\n".repeat(20)).unwrap();
+        enrich_resolve_matches_with_context(&mut data, &root);
+        assert_eq!(
+            data["matches"][1]["context"],
+            "   (inside big.rb:5, shown above)"
+        );
+        // Its body fits: only the trailing margin is dropped, with no pointer.
+        assert_eq!(
+            data["matches"][2]["context"],
+            "      38: line 38\n      39: line 39\n>>    40: line 40\n>>    41: line 41"
+        );
+        // The same lines in another file are another body, and as a later
+        // match it gets the shorter head.
+        let other: Vec<&str> = data["matches"][3]["context"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .collect();
+        assert_eq!(other.len(), RESOLVE_CONTEXT_OTHER_LINES + 1, "{other:?}");
+        assert_eq!(other[0], "       6: a");
+        assert_eq!(
+            other[RESOLVE_CONTEXT_OTHER_LINES],
+            "   … 3 more lines, to other.rb:12"
+        );
+        assert_eq!(
+            data["caps"],
+            serde_json::json!([
+                "context: 2 match bodies cut (16 lines for the first, 4 for the others)",
+                "context: 1 matches inside a body shown above, not repeated"
+            ])
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_context_should_keep_the_caps_the_daemon_named_and_add_none_when_nothing_fired() {
+        let (root, rel) = numbered_source("keep", 300);
+        let mut short = serde_json::json!({
+            "matches": [{"path": rel, "start_line": 3, "end_line": 6}],
+            "caps": ["semantic leads (unverified)"],
+        });
+        enrich_resolve_matches_with_context(&mut short, &root);
+        assert_eq!(
+            short["caps"],
+            serde_json::json!(["semantic leads (unverified)"])
+        );
+        let mut bare = serde_json::json!({
+            "matches": [{"path": rel, "start_line": 3, "end_line": 6}]
+        });
+        enrich_resolve_matches_with_context(&mut bare, &root);
+        assert!(bare.get("caps").is_none(), "{bare}");
+        let mut long = serde_json::json!({
+            "matches": [{"path": rel, "start_line": 3, "end_line": 290}],
+            "caps": ["semantic leads (unverified)"],
+        });
+        enrich_resolve_matches_with_context(&mut long, &root);
+        assert_eq!(
+            long["caps"],
+            serde_json::json!([
+                "semantic leads (unverified)",
+                "context: 1 match bodies cut (16 lines for the first, 4 for the others)"
+            ])
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
