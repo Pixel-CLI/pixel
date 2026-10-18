@@ -6,7 +6,8 @@
 
 A release binary is reproducible only if every input that varies between two
 builds of one commit is pinned: the build date crates/pixel/build.rs embeds
-(SOURCE_DATE_EPOCH, from the commit), the checkout and CARGO_HOME paths rustc
+(SOURCE_DATE_EPOCH, from the commit), the unstripped release profile
+(CARGO_PROFILE_RELEASE_STRIP=none), the checkout and CARGO_HOME paths rustc
 writes into panic messages and debug information (--remap-path-prefix), and
 the cross image (its version). reproducible-build.yml proves it by building
 twice; these cases hold what that proof depends on and what a later edit
@@ -98,6 +99,8 @@ class ScriptOutput(unittest.TestCase):
                 f"SOURCE_DATE_EPOCH={EPOCH}",
                 f"RUSTFLAGS=--remap-path-prefix={self.repo}=/pixel "
                 f"--remap-path-prefix={self.cargo_home}=/cargo",
+                # one unstripped build: split-symbols.sh makes both assets
+                "CARGO_PROFILE_RELEASE_STRIP=none",
             ],
         )
 
@@ -110,6 +113,7 @@ class ScriptOutput(unittest.TestCase):
                 f"export SOURCE_DATE_EPOCH='{EPOCH}'",
                 f"export RUSTFLAGS='-C target-cpu=x86-64-v2 --remap-path-prefix={self.repo}=/pixel "
                 f"--remap-path-prefix={self.cargo_home}=/cargo'",
+                "export CARGO_PROFILE_RELEASE_STRIP='none'",
             ],
         )
 

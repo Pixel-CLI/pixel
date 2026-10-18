@@ -59,6 +59,8 @@ jobs:
           # it is passed explicitly (same channel as before).
           toolchain: stable
           targets: ${{ matrix.target }}
+          # llvm-strip, which split-symbols.sh runs on the Linux binaries.
+          components: llvm-tools
 
       # The reproducible-build environment (SECURITY.md, "Reproducing a
       # release build"): SOURCE_DATE_EPOCH from the tagged commit, the
@@ -97,6 +99,11 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo build --release --locked ${{ matrix.features }} --target ${{ matrix.target }} -p pixel-cli
 
+      # The build kept its symbols (release-build-env.sh): split-symbols.sh
+      # archives that binary as pixel-<tag>-<target>.symbols.tar.xz, the
+      # file a backtrace is symbolized with (SECURITY.md, "Symbols for a
+      # backtrace"), and strips the copy the archive ships. The suffix
+      # matches none of the pixel-*.tar.gz globs downstream.
       - name: Package
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"
@@ -105,6 +112,7 @@ jobs:
           STAGING="pixel-${VERSION}-${TARGET}"
           mkdir -p "$STAGING/bin"
           cp "target/${TARGET}/release/pixel" "$STAGING/bin/"
+          scripts/release/split-symbols.sh "$STAGING/bin/pixel" "pixel-${VERSION}-${TARGET}.symbols.tar.xz"
           cp README.md LICENSE "$STAGING/"
           tar czf "$ARCHIVE" "$STAGING"
           shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
@@ -145,6 +153,7 @@ jobs:
             pixel-*.tar.gz
             pixel-*.tar.gz.sha256
             pixel-*.cdx.json
+            pixel-*.symbols.tar.xz
 
   attest:
     name: Package and attest
@@ -218,6 +227,7 @@ jobs:
           subject-path: |
             artifacts/pixel-*.tar.gz
             artifacts/pixel-*.cdx.json
+            artifacts/pixel-*.symbols.tar.xz
             pixel-*.bottle.tar.gz
             scripts/release/install.sh
 
@@ -236,7 +246,7 @@ jobs:
         run: |
           mkdir release-assets
           cp artifacts/pixel-*.tar.gz artifacts/pixel-*.tar.gz.sha256 \
-            artifacts/pixel-*.cdx.json \
+            artifacts/pixel-*.cdx.json artifacts/pixel-*.symbols.tar.xz \
             pixel-*.bottle.tar.gz pixel.rb pixel-core.rb scripts/release/install.sh \
             release-assets/
           if [ ! -s "$BUNDLE" ]; then

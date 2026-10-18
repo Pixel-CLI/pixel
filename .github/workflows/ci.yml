@@ -543,6 +543,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-fetch-embedding-model.py
 
+      - name: Release symbols split contract (archive as built, shipped copy stripped)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-split-symbols.py
+
       # The brief-gate bench parses `pixel brief` output and scores it against
       # eval/brief-gate/prompts.jsonl; the excerpt and span benches score the
       # answer blocks of confident briefs; the excavation counter reads agent
