@@ -523,9 +523,8 @@ fn fallback_flag(value: Option<&str>) -> bool {
 ///
 /// Never downloads the model: a daemon request must not block on the
 /// network. With no model on disk (fetched once by `pixel search-meaning`)
-/// or any other embedding error, the fallback is empty. This is not the
-/// daemon's `--scope hybrid` model (`potion-code-64M-v2`); each keeps its own
-/// download marker ([`crate::potion_marker`]).
+/// or any other embedding error, the fallback is empty. Meaning shares this
+/// code model, independently of transcript preferences.
 ///
 /// Returned paths are repo-relative (stripped of `root`) so they join with
 /// index paths, annotations, and evidence maps that are all relative.
@@ -648,11 +647,10 @@ pub(crate) fn ask_opening(
 
 /// The Hugging Face repository [`open_code_embedder`] loads: one name for
 /// the opener and [`warm_probe`], which reads its download marker.
-const CODE_SEARCH_MODEL_REPO: &str = "minishlab/potion-code-16M-v2";
+pub const CODE_SEARCH_MODEL_REPO: &str = "minishlab/potion-code-16M-v2";
 
-pub(crate) fn open_code_embedder(
-    download: bool,
-) -> Result<Box<dyn crate::embed::Embedder>, String> {
+/// Open the shared code model, independently of transcript model preferences.
+pub fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>, String> {
     crate::embed::open_embedder_with_potion_repo(download, Some(CODE_SEARCH_MODEL_REPO))
 }
 

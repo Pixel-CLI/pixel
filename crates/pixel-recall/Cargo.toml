@@ -13,7 +13,7 @@ workspace = true
 [features]
 default = ["fastembed", "model2vec"]
 fastembed = ["dep:fastembed", "dep:openssl"]
-model2vec = ["dep:model2vec-rs"]
+model2vec = ["dep:model2vec-rs", "dep:hf-hub"]
 
 [dependencies]
 mutants = { workspace = true }
@@ -26,6 +26,7 @@ pixel-graph = { path = "../pixel-graph" }
 pixel-index = { path = "../pixel-index" }
 pixel-rank = { path = "../pixel-rank" }
 memmap2 = "0.9.11"
+hf-hub = { version = "0.4", optional = true, default-features = false }
 model2vec-rs = { version = "0.3", optional = true }
 rayon = "1"
 regex = "1.13"

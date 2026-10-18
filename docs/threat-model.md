@@ -287,6 +287,9 @@ repository file.
   `--scope hybrid` search's `minishlab/potion-code-64M-v2`, when the serving
   process runs with `PIXEL_EMBED_DOWNLOAD=1`; otherwise that search prints
   how to opt in and ranks without the model.
+  The code-search opener ignores transcript model overrides; offline code
+  search reads the 16M cache bytes directly, with no network fallback when
+  a marker exists but weights are missing.
 - `pixel index-unpack <path|url>` (`crates/pixel/src/index_cmd.rs`,
   `FETCH_CAP` 2 GiB).
 - `pixel reference setup`: `git clone`/`git fetch` (through `GitRunner`) from

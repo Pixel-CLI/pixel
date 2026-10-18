@@ -80,7 +80,7 @@ pub fn models_dir() -> PathBuf {
 
 /// The marker a finished download of the potion model `repo` leaves under
 /// `models`: one per repository, since several share the directory (the
-/// daemon's `potion-code-64M-v2`, `search-meaning`'s `potion-code-16M-v2`,
+/// code search's `potion-code-16M-v2` shared with the daemon, and
 /// transcript recall's multilingual model).
 pub fn potion_marker(models: &Path, repo: &str) -> PathBuf {
     models.join(format!("potion-{}.ok", repo.replace('/', "--")))

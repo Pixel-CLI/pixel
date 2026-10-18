@@ -2328,6 +2328,7 @@ name = "pixel-recall"
 version = "0.8.0"
 dependencies = [
  "fastembed",
+ "hf-hub 0.4.3",
  "memmap2",
  "model2vec-rs",
  "mutants",

@@ -217,6 +217,9 @@ Machine-wide:
   `potion-code-64M-v2` is downloaded by the daemon only when it runs with
   `PIXEL_EMBED_DOWNLOAD=1`, and each potion download prints the repository,
   revision and destination first.
+  Code search selects `potion-code-16M-v2` independently of transcript
+  preferences. Its offline opener reads cached model bytes directly and
+  refuses missing files without contacting Hugging Face.
 - `~/.local/state/pixel/sniper/<project key>/`: the `pixel-session` error sink
   (`errors-v1.sqlite` plus a `project.json` naming the root);
   `$PIXEL_SNIPER_STATE_ROOT` overrides the state root.
