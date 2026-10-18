@@ -1455,8 +1455,75 @@ fn stored_definitions(
 /// with the same refresh of pixel-mvp's index: the files whose merge may
 /// have moved are planned again, every other gets back the rows it had
 /// (`ruby_switch::merge_again`).
+///
+/// That refresh reads the tree and writes pixel-mvp's own index, never this
+/// graph, so it runs on its own thread from the start of the update, while
+/// the passes write this graph's rows, and only the merges at the end wait
+/// for it: on antiwork/gumroad `b996417e`, run after the passes, it held one
+/// inserted Ruby method 4.8 s past their 3 s (#1204). An update that fails
+/// before its merges still waits for the refresh it started; the generation
+/// that refresh published is then not the one the graph was merged against,
+/// and the next update merges every file again.
 fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Result<(), BoxErr> {
+    write_rows_with(root, store, files, &refresh_mvp, &mut || {})
+}
+
+/// What one refresh of pixel-mvp's index gives [`write_rows`]: the index,
+/// and what the refresh changed in it.
+type Refreshed = Result<(mvp_store::Store, mvp_adapter::Changes), BoxErr>;
+
+/// Refreshes pixel-mvp's index of `root` in its sidecar state, as a crate
+/// root when the graph's Rust rows are pixel-mvp's (`walled`).
+fn refresh_mvp(root: &Path, walled: bool) -> Refreshed {
+    let state = pixel_git::sidecar::dir(root);
+    if walled {
+        mvp_adapter::refresh_crate_changes(root, &state)
+    } else {
+        mvp_adapter::refresh_changes(root, &state)
+    }
+}
+
+/// [`write_rows`] with two seams for tests: `refresh` stands for
+/// [`refresh_mvp`], and `joining` runs on the update's thread right before
+/// it waits for that refresh. Production passes [`refresh_mvp`] and a no-op.
+fn write_rows_with(
+    root: &Path,
+    store: &mut GraphStore,
+    files: &[(&str, bool)],
+    refresh: &(dyn Fn(&Path, bool) -> Refreshed + Sync),
+    joining: &mut dyn FnMut(),
+) -> Result<(), BoxErr> {
     let walled = mvp_adapter::rust_is_walled(store)?;
+    let hybrid = ruby_switch::is_hybrid(store)?;
+    std::thread::scope(|scope| {
+        let mut pending = (walled || hybrid).then(|| scope.spawn(move || refresh(root, walled)));
+        let mut refreshed = || {
+            joining();
+            joined(pending.take())
+        };
+        write_rows_in(root, store, files, walled, hybrid, &mut refreshed)
+    })
+}
+
+/// The refresh `handle` ran, or the panic it ended in, raised again here.
+fn joined(handle: Option<std::thread::ScopedJoinHandle<'_, Refreshed>>) -> Refreshed {
+    let handle = handle.ok_or("pixel-mvp's index was not refreshed for this update")?;
+    handle
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// The passes of [`write_rows`]; `refreshed` waits for the refresh of
+/// pixel-mvp's index, which the merges read when the graph's Rust rows are
+/// pixel-mvp's (`walled`) or its Ruby rows the merge (`hybrid`).
+fn write_rows_in(
+    root: &Path,
+    store: &mut GraphStore,
+    files: &[(&str, bool)],
+    walled: bool,
+    hybrid: bool,
+    refreshed: &mut dyn FnMut() -> Refreshed,
+) -> Result<(), BoxErr> {
     // The names the batch's files defined before it: whether one stopped or
     // started being defined anywhere decides how much of pixel-mvp's Rust
     // rows is written again (`mvp_adapter::merge_again`).
@@ -1468,7 +1535,6 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     // A merged graph goes back to this resolver's own Ruby rows first, so
     // every pass below decides as it would without the merge; the merge is
     // planned again at the end, on what they wrote.
-    let hybrid = ruby_switch::is_hybrid(store)?;
     let (undo, prints) = if hybrid {
         let undo = ruby_switch::restore(store)?;
         // What this resolver's rows hold before the passes below: the
@@ -1618,12 +1684,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     };
     if walled || hybrid {
         // One refresh of pixel-mvp's index serves both.
-        let state = pixel_git::sidecar::dir(root);
-        let (index, changes) = if walled {
-            mvp_adapter::refresh_crate_changes(root, &state)?
-        } else {
-            mvp_adapter::refresh_changes(root, &state)?
-        };
+        let (index, changes) = refreshed()?;
         let batch: Vec<&str> = files.iter().map(|&(rel, _)| rel).collect();
         if walled {
             let paths: HashMap<i64, String> =
@@ -4792,5 +4853,77 @@ mod tests {
         update_files(&dir, &db, &batch).unwrap();
         check("revert", &RETRY_TREE.iter().copied().collect());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_hybrid_update_should_refresh_pixel_mvp_while_its_passes_run_not_after_them() {
+        use mvp_model::Graph;
+
+        // The refresh reads the tree and pixel-mvp's own index only, so it
+        // need not wait for this resolver's passes: run after them, it held
+        // one inserted method on antiwork/gumroad 4.8 s past their 3 s
+        // (#1204). By the time the passes are done, it has started.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        crate::testutil::init_repo(
+            &root,
+            &[
+                (
+                    "app/models/card.rb",
+                    "class Card\n  def total\n    compute\n  end\n\n  def compute\n    1\n  end\nend\n",
+                ),
+                (
+                    "app/models/deck.rb",
+                    "class Deck\n  def size\n    Card.new.total\n  end\nend\n",
+                ),
+            ],
+        );
+        let db = root.join(".pixel").join("graph.db");
+        build_graph_sources(&root, &db, RustSource::Mvp, RubySource::Hybrid).unwrap();
+        std::fs::write(
+            root.join("app/models/card.rb"),
+            "class Card\n  def total\n    compute\n  end\n\n  def fresh\n    total\n  end\n\n  def compute\n    1\n  end\nend\n",
+        )
+        .unwrap();
+
+        let mut store = GraphStore::open(&db).unwrap();
+        assert!(
+            ruby_switch::is_hybrid(&store).unwrap(),
+            "the graph is the merge"
+        );
+        let (started, start) = std::sync::mpsc::channel();
+        let refresh = move |root: &Path, walled: bool| {
+            started.send(()).unwrap();
+            refresh_mvp(root, walled)
+        };
+        let mut during_the_passes = None;
+        store.begin_write().unwrap();
+        write_rows_with(
+            &root,
+            &mut store,
+            &[("app/models/card.rb", false)],
+            &refresh,
+            &mut || {
+                during_the_passes = Some(start.recv_timeout(Duration::from_secs(5)).is_ok());
+            },
+        )
+        .unwrap();
+        store.commit_write().unwrap();
+        assert_eq!(during_the_passes, Some(true), "the refresh had started");
+        // ...and the update still merged against the refresh it waited for.
+        let mvp = mvp_store::Store::open(&pixel_git::sidecar::dir(&root)).unwrap();
+        assert_eq!(
+            store.meta_get(ruby_switch::RUBY_GENERATION_KEY).unwrap(),
+            Some(mvp.provenance().unwrap().generation),
+        );
+        let fresh: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM symbols WHERE name = 'fresh'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh, 1);
     }
 }
