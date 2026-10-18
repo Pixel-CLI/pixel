@@ -1326,9 +1326,13 @@ fn record_event(root: &Path, ev: &notify::Event, pending: &mut BTreeMap<PathBuf,
         let root_git_exclude = path
             .strip_prefix(root)
             .is_ok_and(|relative| relative == Path::new(".git/info/exclude"));
+        // Only the components below the root: a repository that lives under
+        // `~/.cache/` or `~/code/build/` is not itself ignored (#1194). A
+        // path outside the root is judged whole, as before.
+        let judged = path.strip_prefix(root).unwrap_or(path);
         if !root_git_exclude
-            && path.components().any(|c| match c {
-                Component::Normal(s) => IGNORED_DIRS.iter().any(|d| s == *d),
+            && judged.components().any(|c| match c {
+                Component::Normal(name) => is_ignored_dir(name),
                 _ => false,
             })
         {
@@ -2333,6 +2337,38 @@ mod tests {
             ".pixel state is not a source change"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repository whose own path crosses a directory named like an ignored
+    /// one (`~/.cache/…`, `~/code/build/…`) still records its edits; only
+    /// the trees below its root are judged. Before #1194 every event of such
+    /// a repository was dropped, and nothing reached the index or the graph.
+    #[test]
+    fn record_event_should_judge_only_the_components_below_the_root() {
+        use notify::event::{DataChange, ModifyKind};
+
+        let base = scratch_root("ignored-ancestor");
+        for parent in [".cache", "build", "vendor"] {
+            let root = base.join(parent).join("repo");
+            let source = root.join("app/models/link.rb");
+            let below = root.join("node_modules/pkg/index.js");
+            for path in [&source, &below] {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "changed\n").unwrap();
+            }
+            let event =
+                notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    .add_path(source.clone())
+                    .add_path(below.clone());
+            let mut pending = BTreeMap::new();
+            assert!(record_event(&root, &event, &mut pending), "under {parent}");
+            assert_eq!(pending.get(&source), Some(&false), "under {parent}");
+            assert!(
+                !pending.contains_key(&below),
+                "an ignored tree below the root stays ignored, under {parent}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
