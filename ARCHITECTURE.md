@@ -497,7 +497,9 @@ envelope talks to the daemon socket directly.
   (all `exact`: pixel-mvp links a site only where Rust's rules prove the
   target), every `references` edge (`probable`), every `unresolved_calls`
   row of a Rust file (a site whose name no symbol carries leaves none: it
-  can stand for no symbol of the graph), every Rust import's target. An
+  can stand for no symbol of the graph; it is counted on its enclosing
+  symbol, `symbols.unnamed_calls`, which `uses … callees` adds to its
+  unresolved outgoing sites), every Rust import's target. An
   incremental update
   writes again only the Rust files whose rows may have moved
   (`mvp_adapter::merge_again`): its own, those whose rows its passes moved

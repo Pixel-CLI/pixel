@@ -2706,12 +2706,7 @@ impl Service {
             // Only calls: an unresolved callback argument is a reference the
             // symbol passes on, not a callee it invokes.
             let unresolved: u64 = store
-                .conn()
-                .query_row(
-                    "SELECT COUNT(*) FROM unresolved_calls WHERE enclosing_symbol_id = ?1 AND kind = 'calls'",
-                    [sym.id],
-                    |row| row.get::<_, i64>(0).map(|count| count as u64),
-                )
+                .unresolved_outgoing(sym.id)
                 .map_err(|e| e.to_string())?;
             envelope["unresolved_outgoing"] = json!(unresolved);
             if unresolved > 0 {

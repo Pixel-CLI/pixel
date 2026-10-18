@@ -85,6 +85,7 @@ fn decisions(db: &Path) -> Vec<String> {
                 || COALESCE(t.path, 'file ' || i.resolved_file_id, '-') FROM imports i
            JOIN files f ON f.id = i.file_id LEFT JOIN files t ON t.id = i.resolved_file_id",
         "SELECT key || '=' || value FROM meta WHERE key = 'graph_source'",
+        "SELECT uid || ' unnamed ' || unnamed_calls FROM symbols WHERE unnamed_calls > 0",
     ] {
         let mut stmt = store.conn().prepare(sql).unwrap();
         let rows: Vec<String> = stmt
@@ -491,6 +492,14 @@ fn a_rust_call_to_a_name_no_symbol_carries_is_stored_only_once_one_does() {
         unresolved_named(&db, "count"),
         vec!["src/lib.rs count 11 .x.iter()"]
     );
+    // `uses run callees` still counts the three sites it may miss: `p.join`
+    // and `.count()` as rows, `x.iter()` as a count on `run`.
+    let outgoing = |db: &Path| {
+        let store = GraphStore::open(db).unwrap();
+        let run = id(&store, "src/lib.rs", "run");
+        store.unresolved_outgoing(run).unwrap()
+    };
+    assert_eq!(outgoing(&db), 3);
     saves_store_what_a_full_build_stores(
         &root,
         &db,
@@ -500,6 +509,7 @@ fn a_rust_call_to_a_name_no_symbol_carries_is_stored_only_once_one_does() {
         )],
     );
     assert_eq!(unresolved_named(&db, "iter"), vec!["src/lib.rs iter 11 .x"]);
+    assert_eq!(outgoing(&db), 3);
 }
 
 #[test]

@@ -184,6 +184,11 @@ pub fn apply_in(store: &GraphStore, rows: &RustRows, scope: Scope<'_>) -> Result
                   WHERE file_id IN (SELECT id FROM files WHERE lang = 'rust')",
                 [],
             )?;
+            conn.exec_cached(
+                "UPDATE symbols SET unnamed_calls = 0
+                  WHERE file_id IN (SELECT id FROM files WHERE lang = 'rust')",
+                [],
+            )?;
         }
         Scope::Files(paths) => {
             for file_id in rust_file_ids(store, paths)?.into_values() {
@@ -193,8 +198,15 @@ pub fn apply_in(store: &GraphStore, rows: &RustRows, scope: Scope<'_>) -> Result
                     rusqlite::params![file_id],
                 )?;
                 conn.exec_cached(DELETE_FILE_UNRESOLVED_CALLS, rusqlite::params![file_id])?;
+                conn.exec_cached(
+                    "UPDATE symbols SET unnamed_calls = 0 WHERE file_id = ?1",
+                    rusqlite::params![file_id],
+                )?;
             }
         }
+    }
+    for (&symbol, &n) in &rows.unnamed {
+        store.add_unnamed_calls(symbol, n)?;
     }
     for edge in rows.calls.iter().chain(&rows.references) {
         store.insert_edge(edge)?;
@@ -389,6 +401,9 @@ pub struct RustRows {
     pub unresolved: Vec<Unresolved>,
     /// Every Rust `imports` row's id, with the file pixel-mvp resolved it to.
     pub imports: Vec<(i64, Option<i64>)>,
+    /// Per enclosing symbol, the unresolved calls to names no symbol
+    /// carries: counted (`symbols.unnamed_calls`), not stored per site.
+    pub unnamed: HashMap<i64, i64>,
     /// What had no counterpart in the graph and was left out.
     pub dropped: Dropped,
 }
@@ -802,7 +817,11 @@ pub fn rust_rows_in(
             // When a batch makes such a name defined, `merge_again` writes
             // every file again, which records it then.
             let in_graph = src.is_some() || is_file_symbol(&edge.src);
-            if in_graph && named.carried(store, &callee)? {
+            let carried = named.carried(store, &callee)?;
+            if let (Some(symbol), EdgeKind::Calls, false) = (src, kind, carried) {
+                *out.unnamed.entry(symbol).or_default() += 1;
+            }
+            if in_graph && carried {
                 out.unresolved.push(Unresolved {
                     file_id,
                     name: callee,

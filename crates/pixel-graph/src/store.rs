@@ -942,6 +942,31 @@ impl GraphStore {
         Ok(())
     }
 
+    /// Counts `n` more unresolved calls from `symbol_id` to names no symbol
+    /// carries, which no `unresolved_calls` row records.
+    pub fn add_unnamed_calls(&self, symbol_id: i64, n: i64) -> Result<()> {
+        self.conn.exec_cached(
+            "UPDATE symbols SET unnamed_calls = unnamed_calls + ?2 WHERE id = ?1",
+            params![symbol_id, n],
+        )?;
+        Ok(())
+    }
+
+    /// The unresolved call sites inside `symbol_id`: its `unresolved_calls`
+    /// rows of kind `calls`, and the calls to names no symbol carries,
+    /// which only a count records. What `uses … callees` reports as the
+    /// callees its answer may miss.
+    pub fn unresolved_outgoing(&self, symbol_id: i64) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM unresolved_calls
+                      WHERE enclosing_symbol_id = ?1 AND kind = 'calls')
+                  + COALESCE((SELECT unnamed_calls FROM symbols WHERE id = ?1), 0)",
+            params![symbol_id],
+            |r| r.get(0),
+        )?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
     pub fn insert_jsx_element(
         &self,
         file_id: i64,
@@ -1822,7 +1847,10 @@ CREATE TABLE IF NOT EXISTS symbols (
   end_line INTEGER NOT NULL,
   sig TEXT NOT NULL DEFAULT '',
   trait_impl INTEGER NOT NULL DEFAULT 0,
-  module_decl INTEGER NOT NULL DEFAULT 0
+  module_decl INTEGER NOT NULL DEFAULT 0,
+  -- Unresolved calls the symbol makes to names no symbol carries: counted
+  -- here instead of stored per site (`GraphStore::unresolved_outgoing`).
+  unnamed_calls INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
@@ -1988,6 +2016,12 @@ fn migrate(conn: &Connection) -> Result<()> {
     if !has_column("symbols", "trait_impl")? {
         conn.execute(
             "ALTER TABLE symbols ADD COLUMN trait_impl INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !has_column("symbols", "unnamed_calls")? {
+        conn.execute(
+            "ALTER TABLE symbols ADD COLUMN unnamed_calls INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
