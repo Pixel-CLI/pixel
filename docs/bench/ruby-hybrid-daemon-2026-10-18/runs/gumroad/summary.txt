@@ -1,0 +1,27 @@
+== v1
+prepare 5.53 s total_ms=5500 graph_ms=4451 .pixel=174 MB graph=144 MB mvp=0 MB edges=185680
+end .pixel=174 MB graph=144 MB mvp=0 MB
+hook all        n=60 p50=486 p95=2263 max=2913
+hook 1s after edit n=20 p50=1987 p95=2305 max=2913
+hook 3s/5s after   n=40 p50=438 p95=1316 max=1524
+  after: ops answered 50/59, briefs with content 20/20, out bytes 138529, routes {'daemon': 20}, rc!=0 0
+  later: ops answered 112/122, briefs with content 40/40, out bytes 285677, routes {'daemon': 40}, rc!=0 0
+daemon per cycle: cpu_s median 2.44 max 3.11; peak cpu% max 163; rss max 804 MB
+fresh passive: n=20 seen=20 p50=2.39 s p95=2.62 s max=2.69 s over5s=0
+  daemon during update: cpu_s median 1.92 peak cpu% max 120; rss max 1181 MB
+fresh active: n=20 seen=20 p50=2.14 s p95=2.51 s max=2.56 s over5s=0
+  daemon during update: cpu_s median 2.01 peak cpu% max 145; rss max 1264 MB
+== hybrid
+prepare 11.8 s total_ms=11776 graph_ms=10778 .pixel=304 MB graph=144 MB mvp=130 MB edges=198425
+end .pixel=304 MB graph=144 MB mvp=130 MB
+hook all        n=60 p50=1635 p95=3018 max=3061
+hook 1s after edit n=20 p50=3015 p95=3029 max=3061
+hook 3s/5s after   n=40 p50=732 p95=2490 max=3018
+  after: ops answered 0/20, briefs with content 0/20, out bytes 60, routes {'daemon': 20}, rc!=0 0
+  later: ops answered 112/122, briefs with content 40/40, out bytes 292879, routes {'daemon': 40}, rc!=0 0
+daemon per cycle: cpu_s median 6.68 max 7.72; peak cpu% max 140; rss max 2576 MB
+fresh passive: n=20 seen=20 p50=6.90 s p95=7.51 s max=8.97 s over5s=16
+  daemon during update: cpu_s median 6.24 peak cpu% max 144; rss max 2730 MB
+fresh active: n=20 seen=20 p50=6.46 s p95=7.40 s max=7.61 s over5s=16
+  daemon during update: cpu_s median 6.21 peak cpu% max 143; rss max 2679 MB
+load1 during run: min 3.1 median 5.5 max 9.6

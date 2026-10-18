@@ -36,6 +36,8 @@ are not copied into an unrelated CLI; Pixel keeps its own entry-point tests.
   The recorded experiment is pixel-research-mvp's
   `evaluation/results/2026-10-16-ruby-hybrid-daemon.md`. Reassess MVP #111
   against the imported head before treating its old edge counts as current.
+  Its rerun on Pixel main, `docs/bench/ruby-hybrid-daemon-2026-10-18.md`,
+  still loses every brief sent 1 s after an edit on gumroad.
 - Setup preservation and complete removal from #1011 are implemented by
   #1012, #1013, #1014, #1015 and #1019, including byte-exact restoration,
   owned-file cleanup, retries and symlink preservation. #1043 carries
