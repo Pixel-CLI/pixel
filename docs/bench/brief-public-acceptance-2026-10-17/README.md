@@ -197,6 +197,17 @@ pack's commit (after), `score_brief.py pinned --head-probe-commit <commit>`.
 | #1197 `error-origin` (described messages) | `fce305a2` (vs `77f565ba`) | `error-origin` `file_recall` 0.186 → 0.244, line coverage 9.0% → 11.3% | 0.420 → 0.427 | 0.087 → 0.088 | kept |
 | #1198 `flow-rank` (named entry) | `31086a92` (vs `fce305a2`) | `flow` line coverage 6.8% → 16.8%, `region_cov` 0.064 → 0.155; `impact` unchanged (11.2%) | 0.427 → 0.436 | 0.088 → 0.099 | kept |
 | #1200 `doc-sections` (reStructuredText) | `4cd7de05` (vs `31086a92`) | docs lines 320 → 371 of 3 488 (9.2% → 10.6%) | 0.436 → 0.447 | 0.099 → 0.105 | kept |
+| #1199 configuration pack (`config-sites` prototype) | not committed | config lines 371 → 371 of 979 (37.9%, already above the 9% target on the hook route); `config` line coverage 8.2% → 10.9% on 2 of 7 questions | 0.436 → 0.436 | 0.099 → 0.100 | dropped |
+
+The configuration pack (#1199) was tried and dropped. On the hook route `main`
+already covers 37.9% of the config oracle lines, so the issue's 9% came from the
+starved command route, and `config-registry` already gives each key's
+definition, default, override and read site. The prototype quoted the
+definition behind each code pointer of a config brief's `files:` line (offline,
+on the saved hook briefs of #1198's head, before the docs pack). It moved only
+`ripgrep-03` (1.1% → 8.7%) and `express-03` (0.5% → 11.6%), and the config line
+count not at all: not worth a fifteenth probe running on every prompt that names
+a setting.
 
 ## Remaining work
 
