@@ -1,14 +1,1 @@
----
-type: added
-scope: brief
----
-
-Every prompt and brief decision — accepted or declined — is now also mirrored to
-`~/.local/share/pixel/prompts/<project-id>.jsonl`, one central per-user store grouped by project
-(each line carries the repository root, project-id the xxh3 of its canonical path).
-
-The mirror uses the same masking and owner-only file mode as the repo-local log, with the same
-symlink refusal and locking. Set `PIXEL_BRIEF_LOG=0` to opt out of the central log as well.
-
-The new `pixel prompts` command reads the central log back, grouped by project (also with
-`--json`), so prompts can be analysed retroactively across all projects.
+**brief:** every prompt and brief decision — accepted or declined — is mirrored to `~/.local/share/pixel/prompts/<project-id>.jsonl`, one central per-user file per project (project-id the xxh3 of the canonical root, carried on each line); same masking, owner-only mode, symlink refusal and `PIXEL_BRIEF_LOG=0` opt-out as the repo-local log. `pixel prompts` reads the store back grouped by project (`--json`, `--limit`).
