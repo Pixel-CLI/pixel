@@ -154,7 +154,8 @@ pub struct Coverage {
     pub edges_followed: u64,
     /// Unresolved call sites: calls the resolver could not attach to an
     /// edge, so the stored relation may be missing edges that would form
-    /// additional cycles.
+    /// additional cycles. A call to a name no symbol carries could be no
+    /// edge and is not one (`unresolved_names`).
     pub unresolved_same_name_sites: u64,
     pub tiers: Vec<Tier>,
 }

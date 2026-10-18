@@ -60,17 +60,28 @@ fn fixture_acyclic(tag: &str) -> Scratch {
     dir
 }
 
-/// A repository with exactly one unresolved call: `a` calls `missing`,
-/// which is not defined anywhere and not imported, so the resolver cannot
-/// attach it to an edge.
+/// A repository with exactly one unresolved call: `a` calls `helper`, which
+/// two files define and `a.ts` imports from neither, so the resolver cannot
+/// attach it to one edge.
 fn fixture_with_unresolved_call(tag: &str) -> Scratch {
     let dir = Scratch::for_test("cycles-cli", tag);
     std::fs::create_dir_all(dir.join("src")).unwrap();
+    // Two files define `helper` and `a.ts` imports neither: the call names a
+    // symbol of the graph and stays unresolved, an edge the relation may
+    // miss. A call to a name no symbol carries could be no edge, and is not
+    // counted (#1163).
     std::fs::write(
         dir.join("src/a.ts"),
-        "export function a(): number { return missing() }\n",
+        "export function a(): number { return helper() }\n",
     )
     .unwrap();
+    for file in ["b.ts", "c.ts"] {
+        std::fs::write(
+            dir.join("src").join(file),
+            "export function helper(): number { return 1 }\n",
+        )
+        .unwrap();
+    }
     std::fs::write(dir.join(".gitignore"), ".pixel/\n").unwrap();
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "."]);
