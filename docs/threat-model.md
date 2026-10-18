@@ -284,9 +284,11 @@ repository file.
   and, with the `fastembed` feature, `intfloat/multilingual-e5-small`, from
   Hugging Face into `~/.local/share/pixel/models/`, only on an explicit
   command (`pixel recall setup`, `pixel search-meaning`) or, for the
-  `--scope hybrid` search's `minishlab/potion-code-64M-v2`, when the serving
+  `--scope hybrid` search's `minishlab/potion-code-16M-v2`, when the serving
   process runs with `PIXEL_EMBED_DOWNLOAD=1`; otherwise that search prints
-  how to opt in and ranks without the model.
+  how to opt in and ranks without the model. Failed downloads and loads
+  remain observable in `status.embedding.error` even for a detached daemon;
+  repeated searches do not spawn repeated downloads.
   The code-search opener ignores transcript model overrides; offline code
   search reads the 16M cache bytes directly, with no network fallback when
   a marker exists but weights are missing.

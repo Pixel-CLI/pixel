@@ -33,7 +33,8 @@ use pixel_proto::{
     Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, TargetsFactsInputs,
     TargetsFactsResult, TargetsFactsUnavailableReason, Warning,
 };
-use pixel_recall::embed::{EmbedKind, Embedder, open_default_embedder};
+use pixel_recall::code_search::{CODE_SEARCH_MODEL_REPO, code_model_on_disk, open_code_embedder};
+use pixel_recall::embed::{EmbedKind, Embedder};
 
 pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// Increment whenever the daemon request/response contract changes in a way
@@ -62,10 +63,6 @@ pub const PROTOCOL_VERSION: u64 = 16;
 pub const SEARCH_DEFAULT_ROWS: usize = 100;
 /// The most rows one `search` page returns, whatever `limit` asks for.
 pub const SEARCH_MAX_ROWS: usize = 10_000;
-
-/// The potion model the daemon warms. Its download leaves its own marker
-/// ([`pixel_recall::potion_marker`]), which another model's cannot overwrite.
-const POTION_V2_REPO: &str = "minishlab/potion-code-64M-v2";
 
 // `targets` (S3 probes, graph expansion and evidence): the caps keep the op
 // ms-scale; every cap that fires is named in the epistemics envelope.
@@ -301,13 +298,24 @@ fn visibility_of(facts: &FactsStore, refs: Option<&str>, rev_list_total: u64) ->
 /// disk, and whether this daemon holds a loaded embedder. Reads download
 /// markers and the vector store's manifest only — never loads a model,
 /// embeds, downloads or writes, so `status` stays cheap.
-fn embedding_status(root: &Path, embedder_resident: bool) -> Value {
+fn embedding_status(
+    root: &Path,
+    resident_model: Option<&str>,
+    error: Option<&str>,
+    downloading: bool,
+    semantic_searches: u64,
+) -> Value {
     let probe = pixel_recall::code_search::warm_probe(root);
     json!({
         "model_on_disk": probe.model_on_disk,
         "vectors_present": probe.vectors_present,
         "vectors_chunks": probe.vectors_chunks,
-        "embedder_resident": embedder_resident,
+        "embedder_resident": resident_model.is_some(),
+        "resident_model": resident_model,
+        "model": CODE_SEARCH_MODEL_REPO,
+        "error": error,
+        "downloading": downloading,
+        "semantic_searches": semantic_searches,
     })
 }
 
@@ -360,6 +368,12 @@ pub struct Service {
     /// [`EMBEDDER_HINT`] was printed or the opted-in download spawned: each
     /// happens once per daemon.
     embedder_hinted: bool,
+    /// The one opted-in download, polled without blocking by searches and status.
+    embedder_download: Option<std::thread::JoinHandle<Result<(), String>>>,
+    /// Latest load/download failure, exposed even when the daemon has no stderr.
+    embedder_error: Option<String>,
+    /// Searches whose semantic ranking completed, not just model loads.
+    semantic_searches: u64,
     /// The history store, kept open between facts and status requests:
     /// opening it runs the `.pixel` trust check (a `git ls-files` spawn),
     /// the DDL and the pragmas. Reopened, and so re-checked, whenever the
@@ -627,6 +641,9 @@ impl Service {
             embedder: None,
             embedder_unavailable: false,
             embedder_hinted: false,
+            embedder_download: None,
+            embedder_error: None,
+            semantic_searches: 0,
             facts: None,
             commit_total: None,
             #[cfg(test)]
@@ -674,6 +691,9 @@ impl Service {
             embedder: None,
             embedder_unavailable: true,
             embedder_hinted: false,
+            embedder_download: None,
+            embedder_error: None,
+            semantic_searches: 0,
             facts: None,
             commit_total: None,
             #[cfg(test)]
@@ -1167,49 +1187,71 @@ impl Service {
     /// `embedder_unavailable` is NEVER set for "not cached": a model cached
     /// later is picked up by the next `--scope hybrid` search without a
     /// restart.
-    // Loads or downloads the potion model: unit tests never have it, so no
-    // test can observe the difference; `embedder_step` holds the decision and is tested.
-    #[cfg_attr(test, mutants::skip)]
+    #[cfg_attr(test, mutants::skip)] // adapter reading the process environment and real model cache
     fn ensure_embedder(&mut self) {
-        if self.embedder.is_some() || self.embedder_unavailable {
+        self.ensure_embedder_with(
+            code_model_on_disk(),
+            embed_download_opted_in(std::env::var(EMBED_DOWNLOAD_ENV).ok().as_deref()),
+            open_code_embedder,
+        );
+    }
+
+    fn ensure_embedder_with(
+        &mut self,
+        cached: bool,
+        opted_in: bool,
+        open: impl FnOnce(bool) -> Result<Box<dyn Embedder>, String> + Send + 'static,
+    ) {
+        self.poll_embedder_download();
+        if self.embedder.is_some() || self.embedder_unavailable || self.embedder_download.is_some()
+        {
             return;
         }
-        // Cached means this model's own marker, or the legacy shared one
-        // while it still names this model.
-        let cached = pixel_recall::potion_cached(&pixel_recall::models_dir(), POTION_V2_REPO);
-        let opted_in = embed_download_opted_in(std::env::var(EMBED_DOWNLOAD_ENV).ok().as_deref());
         match embedder_step(cached, self.embedder_hinted, opted_in) {
-            EmbedderStep::Load => {
-                // SAFETY: set_var is process-global. This runs on the request thread
-                // before the embedder is opened, and nothing else reads
-                // PIXEL_RECALL_MODEL_REPO concurrently.
-                unsafe {
-                    std::env::set_var("PIXEL_RECALL_MODEL_REPO", POTION_V2_REPO);
+            EmbedderStep::Load => match open(false) {
+                Ok(embedder) => {
+                    self.embedder = Some(embedder);
+                    self.embedder_error = None;
                 }
-                match open_default_embedder(false) {
-                    Ok(e) => self.embedder = Some(e),
-                    Err(_) => self.embedder_unavailable = true,
+                Err(error) => {
+                    self.embedder_unavailable = true;
+                    self.embedder_error = Some(error);
                 }
-            }
+            },
             EmbedderStep::Hint => {
                 self.embedder_hinted = true;
                 eprintln!("{EMBEDDER_HINT}");
             }
             EmbedderStep::Download => {
                 self.embedder_hinted = true;
-                std::thread::spawn(move || {
-                    // SAFETY: same variable and value as the cached path above; the only
-                    // reader is the embedder opened on this thread right after.
-                    unsafe {
-                        std::env::set_var("PIXEL_RECALL_MODEL_REPO", POTION_V2_REPO);
+                match std::thread::Builder::new()
+                    .name("pixel-code-model".into())
+                    .spawn(move || open(true).map(drop))
+                {
+                    Ok(download) => self.embedder_download = Some(download),
+                    Err(error) => {
+                        self.embedder_error = Some(format!("start code-model download: {error}"))
                     }
-                    // Best effort: the next search rechecks the marker.
-                    let _ = open_default_embedder(true);
-                });
+                }
             }
-            // Degrade: semantic_rank_for_search returns None → caller skips
-            // the semantic channel, fusion is identical to `scope: "code"`.
             EmbedderStep::Degrade => {}
+        }
+    }
+
+    fn poll_embedder_download(&mut self) {
+        if self
+            .embedder_download
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            let download = self
+                .embedder_download
+                .take()
+                .expect("finished download is present");
+            self.embedder_error = download
+                .join()
+                .unwrap_or_else(|_| Err("code-model download thread panicked".into()))
+                .err();
         }
     }
 
@@ -1261,6 +1303,7 @@ impl Service {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.1.cmp(&b.1))
         });
+        self.semantic_searches += 1;
         Some(scored.into_iter().map(|(_, f)| f).collect())
     }
 
@@ -3267,6 +3310,7 @@ impl Service {
     }
 
     fn op_status(&mut self) -> Result<Value, String> {
+        self.poll_embedder_download();
         let s = self.index.read_or_recover().status();
         let db = self.graph_db_path();
         let graph = if db.exists() {
@@ -3312,7 +3356,7 @@ impl Service {
                 "git_dir": self.watch.map(|w| w.git_dir),
             },
             "facts": self.facts_status(),
-            "embedding": embedding_status(&self.root, self.embedder.is_some()),
+            "embedding": embedding_status(&self.root, self.embedder.as_ref().map(|model| model.model_id()), self.embedder_error.as_deref(), self.embedder_download.is_some(), self.semantic_searches),
         }))
     }
 
@@ -6216,7 +6260,7 @@ const EMBED_DOWNLOAD_ENV: &str = "PIXEL_EMBED_DOWNLOAD";
 
 /// What a `--scope hybrid` search tells the user, once, when the code
 /// embedding model is not cached and no download was opted into.
-const EMBEDDER_HINT: &str = "pixel: semantic channel unavailable — the code embedding model minishlab/potion-code-64M-v2 is not cached, and a search downloads it only on opt-in. \
+const EMBEDDER_HINT: &str = "pixel: semantic channel unavailable — the code embedding model minishlab/potion-code-16M-v2 is not cached, and a search downloads it only on opt-in. \
 Start pixel (and its daemon: `pixel daemon stop` first) with PIXEL_EMBED_DOWNLOAD=1 to fetch it from Hugging Face in the background. \
 Degrading to `code` ranking.";
 
@@ -6257,6 +6301,140 @@ mod tests {
     use pixel_index::verify::MatchLine;
     use std::path::PathBuf;
 
+    struct CodeTestEmbedder;
+
+    impl Embedder for CodeTestEmbedder {
+        fn model_id(&self) -> &str {
+            CODE_SEARCH_MODEL_REPO
+        }
+        fn dims(&self) -> usize {
+            1
+        }
+        fn embed_batch(
+            &mut self,
+            texts: &[&str],
+            _kind: EmbedKind,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts.iter().map(|_| vec![1.0]).collect())
+        }
+    }
+
+    fn finish_code_download(service: &mut Service) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while service
+            .embedder_download
+            .as_ref()
+            .is_some_and(|job| !job.is_finished())
+        {
+            assert!(Instant::now() < deadline, "fixture download did not finish");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn hybrid_should_load_a_model_cached_after_its_hint_without_restarting() {
+        let root = login_repo("hybrid-late-cache");
+        let mut service = Service::open(&root).unwrap();
+        service.ensure_embedder_with(false, false, |_| {
+            panic!("a search must not download without opt-in")
+        });
+        assert!(service.embedder_hinted);
+        assert!(!service.embedder_unavailable);
+        service.ensure_embedder_with(true, false, |download| {
+            assert!(!download, "a cached model must load offline");
+            Ok(Box::new(CodeTestEmbedder))
+        });
+        let status = service.op_status().unwrap();
+        assert_eq!(status["embedding"]["model"], CODE_SEARCH_MODEL_REPO);
+        assert_eq!(status["embedding"]["embedder_resident"], true);
+        assert_eq!(status["embedding"]["semantic_searches"], 0);
+        let matches = vec![MatchLine {
+            path: "login.rs".into(),
+            line_number: 1,
+            line: "login".into(),
+        }];
+        assert_eq!(
+            service.semantic_rank_for_search(&matches, "login"),
+            Some(vec!["login.rs".into()])
+        );
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["semantic_searches"],
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hybrid_should_report_failed_download_in_status_once_and_allow_external_recovery() {
+        let root = login_repo("hybrid-download-error");
+        let mut service = Service::open(&root).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        service.ensure_embedder_with(false, true, move |download| {
+            assert!(download);
+            wait.recv_timeout(Duration::from_secs(2)).unwrap();
+            Err("fixture hub rejected download".into())
+        });
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["downloading"],
+            true
+        );
+        service.ensure_embedder_with(false, true, |_| panic!("must not start a second download"));
+        release.send(()).unwrap();
+        finish_code_download(&mut service);
+        let status = service.op_status().unwrap();
+        assert_eq!(
+            status["embedding"]["error"],
+            "fixture hub rejected download"
+        );
+        assert_eq!(status["embedding"]["downloading"], false);
+        assert_eq!(status["embedding"]["embedder_resident"], false);
+        service.ensure_embedder_with(false, true, |_| {
+            panic!("a failed download must not be retried on every request")
+        });
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["error"],
+            "fixture hub rejected download"
+        );
+        service.ensure_embedder_with(true, false, |_| Ok(Box::new(CodeTestEmbedder)));
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["error"],
+            Value::Null
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hybrid_should_load_after_background_download_and_report_a_corrupt_cache() {
+        let root = login_repo("hybrid-download-ready");
+        let mut service = Service::open(&root).unwrap();
+        service.ensure_embedder_with(false, true, |download| {
+            assert!(download);
+            Ok(Box::new(CodeTestEmbedder))
+        });
+        finish_code_download(&mut service);
+        service.ensure_embedder_with(true, false, |download| {
+            assert!(!download);
+            Ok(Box::new(CodeTestEmbedder))
+        });
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["resident_model"],
+            CODE_SEARCH_MODEL_REPO
+        );
+        let mut service = Service::open(&root).unwrap();
+        service.ensure_embedder_with(true, false, |_| Err("fixture corrupt weights".into()));
+        let status = service.op_status().unwrap();
+        assert_eq!(status["embedding"]["error"], "fixture corrupt weights");
+        assert_eq!(status["embedding"]["downloading"], false);
+        service.ensure_embedder_with(true, false, |_| {
+            panic!("corrupt caches must not be reopened every request")
+        });
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["embedder_resident"],
+            false
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn embedder_step_should_download_only_when_opted_in() {
         for opted_in in [false, true] {
@@ -6269,7 +6447,7 @@ mod tests {
         assert!(
             EMBEDDER_HINT.contains("downloads it only on opt-in")
                 && EMBEDDER_HINT.contains("PIXEL_EMBED_DOWNLOAD=1")
-                && EMBEDDER_HINT.contains(POTION_V2_REPO),
+                && EMBEDDER_HINT.contains(CODE_SEARCH_MODEL_REPO),
             "{EMBEDDER_HINT}"
         );
     }

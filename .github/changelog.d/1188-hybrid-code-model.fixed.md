@@ -1,0 +1,1 @@
+**daemon:** Hybrid search reuses the 16M model downloaded by `search-meaning`, activating its semantic channel without a restart. Status exposes model load/download failures even for detached daemons, and the ranking gate now refuses a silently degraded hybrid lane.

@@ -214,9 +214,12 @@ Machine-wide:
   recall corpus (`$PIXEL_RECALL_DIR` overrides) and the embedding models,
   downloaded once from Hugging Face on `pixel recall setup` or
   `pixel search-meaning`; the `--scope hybrid` search's
-  `potion-code-64M-v2` is downloaded by the daemon only when it runs with
+  `potion-code-16M-v2` is downloaded by the daemon only when it runs with
   `PIXEL_EMBED_DOWNLOAD=1`, and each potion download prints the repository,
-  revision and destination first.
+  revision and destination first. Hybrid reuses the model cached by
+  `search-meaning` without restarting. `status.embedding` exposes its model,
+  resident state, completed semantic-search count, pending download and
+  latest load/download error, including for detached daemons.
   Code search selects `potion-code-16M-v2` independently of transcript
   preferences. Its offline opener reads cached model bytes directly and
   refuses missing files without contacting Hugging Face.

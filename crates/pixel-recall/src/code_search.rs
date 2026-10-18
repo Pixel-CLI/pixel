@@ -523,7 +523,7 @@ fn fallback_flag(value: Option<&str>) -> bool {
 ///
 /// Never downloads the model: a daemon request must not block on the
 /// network. With no model on disk (fetched once by `pixel search-meaning`)
-/// or any other embedding error, the fallback is empty. Meaning shares this
+/// or any other embedding error, the fallback is empty. Hybrid and meaning share this
 /// code model, independently of transcript preferences.
 ///
 /// Returned paths are repo-relative (stripped of `root`) so they join with

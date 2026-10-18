@@ -405,6 +405,26 @@ fn bench(c: &mut Criterion) {
     let semantic = run_ndcg_ask(&root, &suite, 10);
     // Precision 1 lane: hybrid search (lexical RRF + semantic channel fused).
     let hybrid = run_ndcg(&mut svc, &suite, Some("hybrid"), 10);
+    let status = svc.handle(Op::Status {});
+    assert!(status.ok, "hybrid status failed: {status:?}");
+    let embedding = &status.data()["embedding"];
+    assert_eq!(
+        embedding["model"],
+        pixel_recall::code_search::CODE_SEARCH_MODEL_REPO
+    );
+    assert_eq!(
+        embedding["resident_model"],
+        pixel_recall::code_search::CODE_SEARCH_MODEL_REPO,
+        "hybrid loaded a different model than its presence probe"
+    );
+    assert_eq!(
+        embedding["embedder_resident"], true,
+        "hybrid silently degraded: {embedding}"
+    );
+    assert!(
+        embedding["semantic_searches"].as_u64().unwrap_or(0) >= suite.len() as u64,
+        "hybrid must actually rank with the model, not merely load it: {embedding}"
+    );
     // Correctness / success-rate axis (P0·1): doesthe resolve machinery actually
     // *answer* the tasks, binary per task — not how high the relevant file ranks.
     // The point this lane adds: latency (m1_latency.rs) is a COST gate, not a
