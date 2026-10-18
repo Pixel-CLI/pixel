@@ -1,0 +1,1 @@
+**brief:** The `doc-sections` probe now reads reStructuredText too (underlined `.rst` titles), so projects documented in `.rst` get their matching documentation section quoted. On the 56-question bench, documentation oracle lines covered rise from 9.2% to 10.6%.

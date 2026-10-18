@@ -196,6 +196,7 @@ pack's commit (after), `score_brief.py pinned --head-probe-commit <commit>`.
 | #1196 `test-bodies` | `77f565ba` | tests lines 513 → 1 135 of 6 365 (8.1% → 17.8%); `tests` line coverage 9.6% → 21.1% | 0.419 → 0.420 | 0.084 → 0.087 | kept |
 | #1197 `error-origin` (described messages) | `fce305a2` (vs `77f565ba`) | `error-origin` `file_recall` 0.186 → 0.244, line coverage 9.0% → 11.3% | 0.420 → 0.427 | 0.087 → 0.088 | kept |
 | #1198 `flow-rank` (named entry) | `31086a92` (vs `fce305a2`) | `flow` line coverage 6.8% → 16.8%, `region_cov` 0.064 → 0.155; `impact` unchanged (11.2%) | 0.427 → 0.436 | 0.088 → 0.099 | kept |
+| #1200 `doc-sections` (reStructuredText) | `4cd7de05` (vs `31086a92`) | docs lines 320 → 371 of 3 488 (9.2% → 10.6%) | 0.436 → 0.447 | 0.099 → 0.105 | kept |
 
 ## Remaining work
 
