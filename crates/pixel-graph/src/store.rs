@@ -500,6 +500,9 @@ const DELETE_FILE_UNRESOLVED_NAMES: &str = "DELETE FROM unresolved_names WHERE f
 /// `PRAGMA auto_vacuum`'s value for `INCREMENTAL`.
 const AUTO_VACUUM_INCREMENTAL: i64 = 2;
 
+/// The per-file delete [`GraphStore::replace_file`] and
+/// [`GraphStore::remove_file`] run once for every file of an incremental
+/// batch; `idx_unresolved_file` is what keeps it off a full-table scan.
 pub(crate) const DELETE_FILE_UNRESOLVED_CALLS: &str =
     "DELETE FROM unresolved_calls WHERE file_id = ?1";
 
