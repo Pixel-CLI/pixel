@@ -1493,7 +1493,7 @@ may run: the user tier (`~/.pixel/plugins/<name>/`, first-party and the user's o
 (`<repo>/.pixel/plugins/<name>/`) only at the digest `pixel plugin trust` recorded, minus the ones
 `pixel plugin disable` switched off (`disabled` in `~/.pixel/plugins.toml`; `enable` undoes it).
 
-`pixel setup` writes thirteen curated first-party probes (embedded from the explicit allowlist in
+`pixel setup` writes fourteen curated first-party probes (embedded from the explicit allowlist in
 `pixel-setup::bundled_probes`, each
 directory marked so setup updates only its own copies and `--remove` deletes only them) next to the Claude or Codex
 brief hook; `PIXEL_BRIEF_PROBES=0` runs none. In `execution_brief::chain::Pending::finish_with_record`, once `fit`
@@ -1505,8 +1505,8 @@ prompt). A probe that overruns is killed; one that fails, prints nothing or is n
 An unjudged prompt can use matching probes. A relevance-closed gate permits only probes declaring
 `when_gate_closed = true`, which also requires an explicit nonempty `when_prompt` matcher; an intent denial,
 explicit silence, disabled briefs, and unindexed repositories remain off. Recovery can supply an otherwise empty
-brief without changing its logged relevance verdict. The shipped set includes caller/test evidence, complete
-flow bodies, stop-condition evidence, setting application sites, commit patches, and Cargo-member overviews.
+brief without changing its logged relevance verdict. The shipped set includes caller/test evidence, the bodies of the
+test cases a tests question asks about, complete flow bodies, stop-condition evidence, setting application sites, commit patches, and Cargo-member overviews.
 Experimental directories are not automatically shipped; the installer tests assert the exact allowlist.
 `probes::merge` folds what they print into the brief: `drop: <regex>` removes the brief's blocks whose header
 matches, `first: <regex>` moves them to the front, lead blocks go before the brief's and append blocks after, one

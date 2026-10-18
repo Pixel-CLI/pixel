@@ -565,6 +565,7 @@ jobs:
           python3 scripts/bench/brief-check.py --self-test
           python3 scripts/bench/probe-test.py --self-test
           python3 scripts/bench/probe-test.py --check-all
+          for t in probes/*/tests/test_*.py; do python3 "$t"; done
           python3 scripts/bench/probe-translate.py --self-test
           python3 scripts/bench/probe-loop.py --self-test
           python3 scripts/bench/probe-chain.py --self-test

@@ -88,6 +88,11 @@ const BUNDLED: &[(&str, &str, &str)] = &[
         include_str!("../../../probes/rank-blocks/pixel-plugin.toml"),
         include_str!("../../../probes/rank-blocks/probe"),
     ),
+    (
+        "test-bodies",
+        include_str!("../../../probes/test-bodies/pixel-plugin.toml"),
+        include_str!("../../../probes/test-bodies/probe"),
+    ),
 ];
 
 /// The names of the bundled probes.
@@ -211,6 +216,7 @@ mod tests {
         "name-files",
         "overview-answer-evidence",
         "rank-blocks",
+        "test-bodies",
     ];
 
     #[test]
@@ -238,20 +244,23 @@ mod tests {
     #[test]
     fn install_is_idempotent_updates_its_own_copies_and_never_overwrites_a_users_plugin() {
         let home = tempfile::tempdir().unwrap();
+        let n = SHIPPED_PROBE_NAMES.len();
         let first = install(home.path(), false).unwrap();
         assert!(
-            first.summary.contains("13 first-party brief probes"),
+            first
+                .summary
+                .contains(&format!("{n} first-party brief probes")),
             "{}",
             first.summary
         );
         assert!(
-            first.summary.contains("13 written, 0 current"),
+            first.summary.contains(&format!("{n} written, 0 current")),
             "{}",
             first.summary
         );
         let again = install(home.path(), false).unwrap();
         assert!(
-            again.summary.contains("0 written, 13 current"),
+            again.summary.contains(&format!("0 written, {n} current")),
             "{}",
             again.summary
         );
@@ -291,18 +300,19 @@ mod tests {
     #[test]
     fn a_dry_run_reports_what_a_real_run_would_write_and_remove_keeps_what_the_user_added() {
         let home = tempfile::tempdir().unwrap();
+        let n = SHIPPED_PROBE_NAMES.len();
         assert!(
             install(home.path(), true)
                 .unwrap()
                 .summary
-                .contains("13 written, 0 current")
+                .contains(&format!("{n} written, 0 current"))
         );
         install(home.path(), false).unwrap();
         assert!(
             install(home.path(), true)
                 .unwrap()
                 .summary
-                .contains("0 written, 13 current")
+                .contains(&format!("0 written, {n} current"))
         );
         let probe = home.path().join(PLUGINS_REL).join("rank-blocks/probe");
         fs::write(&probe, "old version").unwrap();
@@ -310,7 +320,7 @@ mod tests {
             install(home.path(), true)
                 .unwrap()
                 .summary
-                .contains("1 written, 12 current")
+                .contains(&format!("1 written, {} current", n - 1))
         );
         assert_eq!(
             fs::read_to_string(&probe).unwrap(),
@@ -357,7 +367,8 @@ mod tests {
         )
         .unwrap();
         let step = remove(home.path(), false).unwrap();
-        assert!(step.summary.contains("12 first-party"), "{}", step.summary);
+        let removed = format!("{} first-party", SHIPPED_PROBE_NAMES.len() - 1);
+        assert!(step.summary.contains(&removed), "{}", step.summary);
         assert!(own.is_dir());
         assert!(
             home.path().join(PLUGINS_REL).join("doc-sections").is_dir(),
