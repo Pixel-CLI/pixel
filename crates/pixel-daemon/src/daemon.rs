@@ -229,7 +229,7 @@ impl Job {
 }
 
 /// Git's empty tree (SHA-1): the base a first commit is diffed from.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+pub(crate) const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// A registered watch, alive for as long as the loop holds it.
 trait Watch: Send {
@@ -375,6 +375,9 @@ impl Corpus for Service {
 
     fn git_moved(&mut self) {
         self.note_git_moved();
+        // What the move rewrote is read now, whatever events the watcher
+        // delivers for it, so the index answers for the new HEAD.
+        self.catch_up_head();
     }
 
     /// Re-read every path that may have changed while the watch was still
@@ -386,24 +389,12 @@ impl Corpus for Service {
     fn watch_ready(&mut self, report: &WatchReport) {
         self.note_watch_ready(*report);
         let root = Service::root(self).to_path_buf();
-        let (opened_head, mut paths) = self.index_catch_up();
+        let (_opened_head, mut paths) = self.index_catch_up();
         paths.extend(
             pixel_index::gitsync::status_porcelain(&root)
                 .into_iter()
                 .map(|(_xy, path)| path),
         );
-        // A repository with no commit at open has no HEAD to diff from: a
-        // first commit made meanwhile is diffed from the empty tree.
-        if let Some(head) = pixel_index::gitsync::rev_parse_head(&root)
-            && opened_head.as_deref() != Some(head.as_str())
-        {
-            let from = opened_head.unwrap_or_else(|| EMPTY_TREE.to_string());
-            paths.extend(
-                pixel_index::gitsync::diff_name_status(&root, &from, &head)
-                    .into_iter()
-                    .map(|(_status, path)| path),
-            );
-        }
         let changes: Vec<(PathBuf, bool)> = paths
             .into_iter()
             .map(|path| {
@@ -413,6 +404,9 @@ impl Corpus for Service {
             })
             .collect();
         self.apply_changes(&changes);
+        // A HEAD move made meanwhile (a repository with no commit at open is
+        // diffed from the empty tree).
+        self.catch_up_head();
     }
 
     fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
@@ -2802,6 +2796,12 @@ mod tests {
         assert_eq!(search_hits(&mut svc, "otherNeedle"), 1, "modified on HEAD");
         assert_eq!(search_hits(&mut svc, "newNeedle"), 1, "added on HEAD");
         assert_eq!(search_hits(&mut svc, "alphaNeedle"), 0, "old text");
+        let head = pixel_index::gitsync::rev_parse_head(&root);
+        assert_eq!(
+            svc.index_covered_head(),
+            head,
+            "the catch-up tells the freshness gate the index covers HEAD"
+        );
 
         git_in(&root, &["checkout", "-q", "-"]);
         Corpus::watch_ready(&mut svc, &STUB_REPORT);

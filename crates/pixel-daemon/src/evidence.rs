@@ -129,23 +129,24 @@ impl Master {
         if now == self.seen {
             return Ok(());
         }
-        let committed = match (&self.seen.head, &now.head) {
-            (Some(before), Some(after)) if before != after => {
-                pixel_index::gitsync::diff_name_status(root, before, after)
-            }
-            _ => Vec::new(),
-        };
-        let stale = stale_paths(&self.seen, &now, &committed);
+        // The commit range is the service's to diff, from the HEAD its index
+        // covers, so the freshness gate learns the index caught up.
+        let stale = stale_paths(&self.seen, &now, &[]);
+        let mut service = self
+            .service
+            .lock()
+            .map_err(|_| "evidence service lock poisoned".to_string())?;
         if !stale.is_empty() {
             let files: Vec<(&str, bool)> = stale
                 .iter()
                 .map(|path| (path.as_str(), !root.join(path).exists()))
                 .collect();
-            self.service
-                .lock()
-                .map_err(|_| "evidence service lock poisoned".to_string())?
-                .refresh_files(&files);
+            service.refresh_files(&files);
         }
+        if self.seen.head != now.head {
+            service.catch_up_head();
+        }
+        drop(service);
         self.seen = now;
         Ok(())
     }
@@ -1028,6 +1029,47 @@ mod tests {
             partial(&second, "after").to_string().contains("late.rs"),
             "the edit made between two bundles is searchable: {second:?}"
         );
+    }
+
+    /// A commit made between two bundles leaves a clean tree: only the
+    /// commit range names its file, and the catch-up that reads it also
+    /// tells the freshness gate the index covers the new HEAD (#1032).
+    #[test]
+    fn a_catch_up_after_a_commit_should_read_it_and_cover_the_new_head() {
+        let root =
+            std::env::temp_dir().join(format!("pixel-evidence-commit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        std::fs::write(root.join("a.rs"), "fn early() {}\n").unwrap();
+        git(&root, &["add", "a.rs"]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut master = Master::open(&root).unwrap();
+        std::fs::write(root.join("b.rs"), "fn committed_marker() {}\n").unwrap();
+        git(&root, &["add", "b.rs"]);
+        git(&root, &["commit", "-qm", "b"]);
+        let head = pixel_index::gitsync::rev_parse_head(&root);
+
+        master.catch_up(&root).unwrap();
+
+        let mut service = master.service.lock().unwrap();
+        assert_eq!(service.index_covered_head(), head);
+        let found = service.handle(crate::api::Request::Search {
+            pattern: "committed_marker".into(),
+            json: false,
+            limit: None,
+            offset: None,
+            paths: None,
+            scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
+        });
+        assert!(
+            found.data().to_string().contains("b.rs"),
+            "the committed file is searchable: {found:?}"
+        );
+        drop(service);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A bundle that asks for `meaning` makes the bridge's writable service

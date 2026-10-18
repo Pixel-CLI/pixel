@@ -474,6 +474,15 @@ envelope talks to the daemon socket directly.
   ignore-control file (`.gitignore`, `.ignore`, `.git/info/exclude`) run the
   full `policy_walk`; any other batch judges a new path by a walk from its
   nearest admitted ancestor (`index::policy_admits_from`).
+  The set also keeps the HEAD its content covers (`IndexSet::covered_head`):
+  the HEAD at open (base ∪ delta answer for it), moved by
+  `Service::catch_up_head` once every path between it and a new HEAD is
+  refreshed. The daemon runs that catch-up when a ref moves (`git_moved`),
+  after its watch registers (`watch_ready`) and before each evidence bundle;
+  a move wider than `HEAD_CATCH_UP_MAX_PATHS` (2 000) or a failed diff
+  leaves it behind. `targets_facts` answers `index_stale` only while
+  `covered_head` differs from HEAD, never on the base shard's commit,
+  which only a rebuild moves.
 - The graph is built lazily on the first graph command and updated per file
   by the daemon watcher. Its quiet debounce extends only for recorded content
   events and is capped from the first pending edit (see Daemon and wire contract).

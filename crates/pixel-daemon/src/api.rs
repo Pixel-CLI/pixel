@@ -325,6 +325,12 @@ fn history_db_identity(root: &Path) -> Option<(u64, u64)> {
         .map(|meta| (meta.dev(), meta.ino()))
 }
 
+/// Paths a HEAD move may change for [`Service::catch_up_head`] to refresh
+/// them on the serving path; a wider move (a branch switch across a large
+/// refactor) is left to the watcher and the next open, and the index stays
+/// `index_stale` meanwhile.
+const HEAD_CATCH_UP_MAX_PATHS: usize = 2_000;
+
 pub struct Service {
     root: PathBuf,
     index: Arc<RwLock<IndexSet>>,
@@ -872,6 +878,55 @@ impl Service {
             index.opened_head().map(str::to_owned),
             index.overlay_paths(),
         )
+    }
+
+    /// The HEAD the text index covers, for the watch tests of `daemon`.
+    #[cfg(test)]
+    pub(crate) fn index_covered_head(&self) -> Option<String> {
+        self.index
+            .read_or_recover()
+            .covered_head()
+            .map(str::to_owned)
+    }
+
+    /// Bring the text index's content to HEAD after a ref move: refresh every
+    /// path that changed between the HEAD the index covers and HEAD now, then
+    /// record HEAD as covered. Whether the index covers HEAD afterwards. A
+    /// failed diff, or a move wider than [`HEAD_CATCH_UP_MAX_PATHS`], leaves
+    /// the covered HEAD where it was: the freshness gate goes on saying
+    /// `index_stale` rather than vouch for content nothing refreshed.
+    pub(crate) fn catch_up_head(&mut self) -> bool {
+        self.catch_up_head_within(HEAD_CATCH_UP_MAX_PATHS)
+    }
+
+    /// [`Service::catch_up_head`] with the widest move it refreshes.
+    fn catch_up_head_within(&mut self, max_paths: usize) -> bool {
+        let root = self.root.clone();
+        let Some(head) = pixel_index::gitsync::rev_parse_head(&root) else {
+            return false;
+        };
+        let covered = self
+            .index
+            .read_or_recover()
+            .covered_head()
+            .map(str::to_owned);
+        if covered.as_deref() == Some(head.as_str()) {
+            return true;
+        }
+        let from = covered.unwrap_or_else(|| crate::daemon::EMPTY_TREE.to_string());
+        let Ok(changed) = pixel_index::gitsync::diff_name_status_or_err(&root, &from, &head) else {
+            return false;
+        };
+        if changed.len() > max_paths {
+            return false;
+        }
+        let files: Vec<(&str, bool)> = changed
+            .iter()
+            .map(|(_status, path)| (path.as_str(), !root.join(path).exists()))
+            .collect();
+        self.refresh_files(&files);
+        self.index.write_or_recover().note_caught_up(&head);
+        true
     }
 
     /// Record the watch the transport loop registered, for `status`. Once
@@ -1833,7 +1888,10 @@ impl Service {
             Ok(index) => index.status(),
             Err(_) => return unavailable(TargetsFactsUnavailableReason::IndexUnavailable),
         };
-        if index_status.commit_oid != self.git_state.fresh_head(&self.root) {
+        // The HEAD the content covers, not the base shard's commit: a delta
+        // and the overlay carry the content past the base, which is rebuilt
+        // rarely (#1032).
+        if index_status.covered_head != self.git_state.fresh_head(&self.root) {
             return unavailable(TargetsFactsUnavailableReason::IndexStale);
         }
 
@@ -8466,6 +8524,129 @@ mod tests {
             graph_before,
             "a fact request must not refresh a stale graph"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// HEAD of the fixture repository at `root`.
+    fn head_of(root: &Path) -> String {
+        pixel_index::gitsync::rev_parse_head(root).expect("a committed fixture")
+    }
+
+    /// A `targets_facts` request for `task`, full or relevance-only.
+    fn facts(service: &mut Service, task: &str, relevance_only: bool) -> Value {
+        service
+            .handle(Request::TargetsFacts {
+                task: task.into(),
+                limit: Some(8),
+                relevance_only,
+            })
+            .data()
+            .clone()
+    }
+
+    /// The case behind 214 of 474 unbriefed prompts (#1032): the daemon
+    /// brought its content to the new HEAD, but the gate compared HEAD with
+    /// the base shard's commit, which only a rebuild moves, and closed every
+    /// prompt as `index_stale`.
+    #[test]
+    fn targets_facts_should_open_once_the_index_caught_up_with_a_commit() {
+        let root = tmpdir("targets-facts-caught-up");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let base = head_of(&root);
+        let mut service = Service::open(&root).unwrap();
+        let built = service.handle(Request::Targets {
+            task: "change login".into(),
+            limit: Some(8),
+            max_tier: None,
+            precision: false,
+            regions: false,
+        });
+        assert!(built.ok, "fixture graph build: {built:?}");
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        let moved = head_of(&root);
+        // Before the catch-up the gate is right to refuse.
+        assert_eq!(
+            facts(&mut service, "change session", false)["reason"],
+            "index_stale"
+        );
+
+        crate::daemon::Corpus::git_moved(&mut service);
+
+        let status = service.index.read_or_recover().status();
+        assert_eq!(
+            status.commit_oid.as_deref(),
+            Some(base.as_str()),
+            "the base did not move"
+        );
+        assert_eq!(status.covered_head.as_deref(), Some(moved.as_str()));
+        let full = facts(&mut service, "change session", false);
+        assert_eq!(full["status"], "available", "{full}");
+        let relevance_only = facts(&mut service, "change session", true);
+        assert_eq!(relevance_only["status"], "available", "{relevance_only}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A daemon opened after the commit covers HEAD through its delta, while
+    /// the base shard stays at the commit it was built at.
+    #[test]
+    fn targets_facts_should_open_on_a_delta_over_an_older_base() {
+        let root = tmpdir("targets-facts-delta");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let base = head_of(&root);
+        drop(Service::open(&root).unwrap());
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        let moved = head_of(&root);
+
+        let mut service = Service::open(&root).unwrap();
+        let built = service.handle(Request::Targets {
+            task: "change session".into(),
+            limit: Some(8),
+            max_tier: None,
+            precision: false,
+            regions: false,
+        });
+        assert!(built.ok, "fixture graph build: {built:?}");
+        let status = service.index.read_or_recover().status();
+        assert_eq!(status.commit_oid.as_deref(), Some(base.as_str()));
+        assert_eq!(status.covered_head.as_deref(), Some(moved.as_str()));
+        let answer = facts(&mut service, "change session", false);
+        assert_eq!(answer["status"], "available", "{answer}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A move wider than the bound is not refreshed on the serving path, and
+    /// the index does not claim a HEAD it did not read.
+    #[test]
+    fn catch_up_head_should_leave_a_move_wider_than_its_bound_uncovered() {
+        let (root, mut service) = cached_git_service("catch-up-bound");
+        let opened = head_of(&root);
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join("b.rs"), "pub fn b() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "two files"]);
+        assert!(!service.catch_up_head_within(1));
+        assert_eq!(
+            service.index.read_or_recover().covered_head(),
+            Some(opened.as_str())
+        );
+        // Two paths fit a bound of two, exactly.
+        assert!(service.catch_up_head_within(2));
+        assert_eq!(
+            service.index.read_or_recover().covered_head(),
+            Some(head_of(&root).as_str())
+        );
+        // Nothing moved since: covered, with nothing to refresh.
+        assert!(service.catch_up_head_within(0));
         let _ = std::fs::remove_dir_all(&root);
     }
 

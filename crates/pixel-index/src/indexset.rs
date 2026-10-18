@@ -108,7 +108,11 @@ impl std::error::Error for IndexSetError {}
 
 #[derive(Debug, Clone)]
 pub struct FreshnessStatus {
+    /// The base shard's commit: the layer rebuilt least often, which a
+    /// delta and the overlay bring up to date.
     pub commit_oid: Option<String>,
+    /// The HEAD the set's content answers for: [`IndexSet::covered_head`].
+    pub covered_head: Option<String>,
     pub base_files: u32,
     pub delta_files: u32,
     pub overlay_files: usize,
@@ -133,6 +137,10 @@ pub struct IndexSet {
     /// HEAD when the set was opened: the commit base ∪ delta covers. The
     /// overlay follows the working tree from there, HEAD moves included.
     head: Option<String>,
+    /// The HEAD the content answers for: `head` at open, moved by
+    /// [`IndexSet::note_caught_up`] once the caller has refreshed every path
+    /// a HEAD move touched.
+    covered: Option<String>,
     /// The walk policy's verdict between watcher batches, built by the
     /// first batch's full walk and rebuilt only when a batch touches an
     /// ignore-control file: a batch of one edit does not walk the tree.
@@ -762,6 +770,7 @@ impl IndexSet {
             delta_tombstones: HashSet::new(),
             overlay: Overlay::new(),
             head: head.clone(),
+            covered: head.clone(),
             admitted: None,
             #[cfg(test)]
             full_walks: 0,
@@ -823,6 +832,21 @@ impl IndexSet {
     /// commit base ∪ delta answers for, whatever HEAD has moved to since.
     pub fn opened_head(&self) -> Option<&str> {
         self.head.as_deref()
+    }
+
+    /// The HEAD the set's content answers for, `None` outside a git
+    /// repository: the opened HEAD until a catch-up moves it. The base
+    /// shard's commit is not it — a delta and the overlay carry the content
+    /// past it, and judging freshness by it closes every request after the
+    /// first commit until the base is rebuilt (#1032).
+    pub fn covered_head(&self) -> Option<&str> {
+        self.covered.as_deref()
+    }
+
+    /// Record that the content now answers for `head`: the caller refreshed
+    /// every path between [`IndexSet::covered_head`] and it.
+    pub fn note_caught_up(&mut self, head: &str) {
+        self.covered = Some(head.to_string());
     }
 
     /// Every path the overlay answers for instead of base ∪ delta: the
@@ -1192,6 +1216,7 @@ impl IndexSet {
     pub fn status(&self) -> FreshnessStatus {
         FreshnessStatus {
             commit_oid: self.base.commit_oid().map(str::to_string),
+            covered_head: self.covered.clone(),
             base_files: self.base.file_count(),
             delta_files: self.delta.as_ref().map_or(0, Shard::file_count),
             overlay_files: self.overlay.files.len(),
