@@ -36,6 +36,7 @@ apply to:
 | `validation-loop.md` | always | optional local diagnosis, prompt publication, required current-head CI and failure triage |
 | `pr-swarm.md` | `scripts/dev/pr-swarm.sh`, `.claude/settings.json` | the rmux pane-per-open-PR reconciler: the tool, the SessionStart watcher that replaces launchd (macOS TCC denies launchd any path under `~/Documents`), and the teardown rails that keep a merged PR's worktree when it is dirty, unpushed or the shared cache |
 | `prototype-first.md` | always | an uncertain change (retrieval, brief, ranking, gate) is proven by a throwaway scratchpad script and the fastest falsifying check (oracle coverage, tool-call replay, one live case) before any Rust; dropped hypotheses are recorded; only validated ones are ported, one at a time |
+| `script-repetitive-work.md` | always | repetitive, LLM-free work (a prompt sweep, N identical commands, fixture replay) is one committed-or-scratchpad script enumerating all cases, printing a verdict per case and a summary, exiting non-zero on failure — never N interactive tool calls |
 
 `.claude/rules` is a symlink to that directory (Claude Code loads it by
 itself, honouring `paths:`). A
