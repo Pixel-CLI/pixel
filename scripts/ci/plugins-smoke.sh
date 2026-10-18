@@ -21,7 +21,7 @@
 #             and names the repository that owns the command.
 #   install   `pixel install github:Pixel-CLI/<repo>` reports the plugin and
 #             downloads the release asset over the repository's launcher —
-#             `(sha256 verified)`; no "not runnable" wording may appear
+#             `(sha256 <hex> verified)`; no "not runnable" wording may appear
 #             (#1045's regression).
 #   identity  The installed file's hash equals the published `.sha256`, so
 #             what the host serves is the released asset, not the launcher.
@@ -106,7 +106,7 @@ fi
 printf '%s\n' "$install_lines" | sed 's/^/    /'
 printf '%s\n' "$install_lines" | grep -qF "installed plugin $plugin " \
   || fail "the install did not report the plugin: $install_lines"
-printf '%s\n' "$install_lines" | grep -qF "(sha256 verified)" \
+printf '%s\n' "$install_lines" | grep -qE '\(sha256 [0-9a-f]{64} verified\)' \
   || fail "the install downloaded nothing checksum-verified; the release asset was not installed over the launcher: $install_lines"
 printf '%s\n' "$install_lines" | grep -qiF "not runnable" \
   && fail "the core reported the installed program not runnable: $install_lines"
