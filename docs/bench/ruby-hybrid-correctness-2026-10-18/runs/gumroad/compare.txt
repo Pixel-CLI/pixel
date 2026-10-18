@@ -1,0 +1,26 @@
+class              v1   hybrid     both  dropped    added   raised
+call            82868    90387    82850       18     7537     4506
+call-self       78030    81441    77973       57     3468     1733
+route             702      788      702        0       86        0
+association       523      523      523        0        0        0
+reference        7528     9190     7528        0     1662        0
+known verdicts on the whole v1-only delta: 75 rows, 75 wrong
+known verdicts on the whole hybrid-only delta: 11005 rows, 94 correct
+known verdicts on the whole raised delta: 6239 rows, 5 correct
+known verdicts on the whole route-added delta: 86 rows, 29 correct
+call sites, v1 -> hybrid: absent -> edge 2, edge -> edge 160661, edge -> unresolved 57, unresolved -> absent 6, unresolved -> edge 10971, unresolved -> unresolved 775474
+  declared: 57 sites lost their edge and kept an unresolved_calls row; silent: 6 sites with neither edge nor row
+  callers that are no symbol: v1 73 edges, 111 unresolved rows; hybrid 79 edges, 105 rows, 6 of the edges written by the merge
+[PASS] pixel-mvp resolves more Ruby call sites than #111's 2 251: 53636 of 962240 call sites resolved
+[PASS] routes: hybrid > 0 and >= v1 (#111: 0 against 702): hybrid 788, v1 702; pixel-mvp resolves 636 of 925
+[OPEN] self-calls from a controller into ApplicationController resolve (#111: the chain's first step is unknown): 0 resolved into ApplicationController; 221 abstained on a name it defines (e404 100, e404_json 30, doorkeeper_token 20); controllers' self-calls: 1253 to their own class, 627 inherited, of 10214
+[PASS] no definition of any name on an object the rules cannot name in app code (#111: unnamed definition on an unknown receiver): 0 non-test files (); 8 test files, which taint only test callers
+[PASS] no anonymous Class.new in app code makes lookups abstain repository-wide (#111: Class.new(P)): 11 unassigned Class.new in non-test files (app/helpers/mailer_helper.rb:14, db/migrate/20260604142000_enable_device_authorization_for_gumroad_cli.rb:27, db/migrate/20261201000001_backfill_edit_emails_scope_for_default_oauth_applications.rb:34), 0 of them in a file with an unnamed taint
+sample-v1-only: 75 rows, 0 correct, 75 wrong, 0 undecidable, 0 without a verdict
+sample-hybrid-only: 80 rows, 80 correct, 0 wrong, 0 undecidable, 0 without a verdict
+sample-raised: 40 rows, 40 correct, 0 wrong, 0 undecidable, 0 without a verdict
+sample-routes-added: 40 rows, 40 correct, 0 wrong, 0 undecidable, 0 without a verdict
+estimate: {"v1_sample": "48/80", "v1_sample_in_both_graphs": 80, "v1_edges": 160898, "hybrid_edges": 171828, "v1_correct": 96539, "v1_interval": [78913, 112690], "dropped": 75, "dropped_correct": 0, "added": 11005, "added_precision": [1.0, 0.954, 1.0], "hybrid_correct": 107544, "difference": 11005, "difference_interval": [10501, 11005], "v1_precision": 0.6, "hybrid_precision": 0.6259}
+verdict: OPEN
+  - 6 call sites vanish silently (6 merge edges from a caller that is no symbol)
+  - self-calls from a controller into ApplicationController resolve (#111: the chain's first step is unknown)

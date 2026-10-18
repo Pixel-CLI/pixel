@@ -34,10 +34,11 @@ are not copied into an unrelated CLI; Pixel keeps its own entry-point tests.
 - Ruby hybrid stays opt-in. Its refresh can delay a brief after an edit;
   improve daemon responsiveness and incremental work before enabling it (#1040).
   The recorded experiment is pixel-research-mvp's
-  `evaluation/results/2026-10-16-ruby-hybrid-daemon.md`. Reassess MVP #111
-  against the imported head before treating its old edge counts as current.
+  `evaluation/results/2026-10-16-ruby-hybrid-daemon.md`.
   Its rerun on Pixel main, `docs/bench/ruby-hybrid-daemon-2026-10-18.md`,
-  still loses every brief sent 1 s after an edit on gumroad.
+  still loses every brief sent 1 s after an edit on gumroad. MVP #111 was
+  reassessed on main in `docs/bench/ruby-hybrid-correctness-2026-10-18.md`:
+  no wrong target in the merge's judged edges, one #111 case open (#1218).
 - Setup preservation and complete removal from #1011 are implemented by
   #1012, #1013, #1014, #1015 and #1019, including byte-exact restoration,
   owned-file cleanup, retries and symlink preservation. #1043 carries

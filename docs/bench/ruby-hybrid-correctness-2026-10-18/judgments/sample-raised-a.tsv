@@ -1,0 +1,40 @@
+call-raised-01314	correct	Order includes SecureExternalId (order.rb:4); class_methods block defines find_by_secure_external_id (secure_external_id.rb:36,43), only definition
+call-raised-00825	correct	ActionMailer class-method dispatch to ContactingCreatorMailer#subscription_product_deleted (contacting_creator_mailer.rb:304); no self. variant
+call-raised-04293	correct	writer = described_class.new(archive), describe StreamingZipWriter (spec:5,8); StreamingZipWriter#write_entry at :51
+call-raised-04133	correct	let(:service) { described_class.new } for Radar::ValueListSyncService (spec:5-6); #sync_blocked_emails at :80
+call-self-raised-00957	correct	Refund includes JsonData (refund.rb:15); JsonData class_methods defines attr_json_data_accessor (json_data.rb:18,25)
+call-raised-02502	correct	described_class is SocialConnectVerification (spec:5); def self.record_from_youtube! at social_connect_verification.rb:72
+call-raised-02208	correct	let!(:offer_code) { create(:offer_code ...) } (spec:1207) is an OfferCode; OfferCode#is_amount_valid? at :492, only def
+call-raised-03094	correct	let(:presenter) { described_class.new(pundit_user:) } in describe SettingsPresenter (spec:5,12); #payments_props at :248
+call-self-raised-01578	correct	ConfirmService < Purchase::BaseService (confirm_service.rb:4), no local purchase in perform; attr_accessor :purchase at base_service.rb:5
+call-raised-04457	correct	error = ChargeProcessorInvalidRequestError.new (spec:218); attr_writer :omitted_evidence_fields at charge_processor_invalid_request_error.rb:5
+call-raised-01235	correct	let!(:community) create(:community) (spec:9); Community includes ExternalId (community.rb:5), no override; ExternalId#external_id at :6
+call-raised-02136	correct	let(:license) { create(:license) } in describe License (spec:6); License#disable! at license.rb:45
+call-raised-01723	correct	ActionMailer class-method dispatch to CustomerMailer#grouped_receipt (customer_mailer.rb:31); no self. variant
+call-raised-02240	correct	described_class is Page (spec:5); def self.generate_slug_for at page.rb:89
+call-raised-04309	correct	described_class.new(now:) is a StripeBalanceCheckService (spec:5); #next_payout_run_at at :46
+call-self-raised-01595	correct	self is Purchase::ConfirmService < Purchase::BaseService, which defines protected handle_purchase_failure (base_service.rb:7,92); ConfirmService has no own def
+call-raised-02670	correct	Subscription does extend Restartable (subscription.rb:22) = Subscription::Restartable; restartable_for_product_and_buyer at restartable.rb:4
+call-raised-03611	correct	described_class is Checkout::PaymentMethodListToken (spec:5); direct_listed_currency_rate in class << self (payment_method_list_token.rb:32,67)
+call-raised-04200	correct	let!(:upsell) create(:upsell) (spec:112); Upsell includes ExternalId (upsell.rb:4), no override; ExternalId#external_id at :6
+call-self-raised-01704	correct	include RecurringLockTtl on line 11 of the job; RecurringLockTtl class_methods defines recurring_lock_ttl (recurring_lock_ttl.rb:47,51)
+call-raised-00792	correct	ActionMailer class-method dispatch to AffiliateMailer#notify_affiliate_of_sale (affiliate_mailer.rb:45); no self. variant
+call-raised-03378	correct	subject(:client) { described_class.new(...) } in describe Ai::AnthropicClient (spec:5,1549); #messages at anthropic_client.rb:185
+call-raised-00764	correct	subscription = Subscription.find(...) (worker:8); Subscription#unsubscribe_and_fail! at subscription.rb:986, only def
+call-raised-02070	correct	let(:affiliate) { create(:direct_affiliate) } (spec:834); DirectAffiliate < Affiliate, no override; Affiliate#referral_url_for_product at :90
+call-raised-01238	correct	let!(:community) create(:community) (spec:9); Community includes ExternalId (community.rb:5); ExternalId#external_id at :6
+call-raised-04463	correct	described_class is RefundAllForFraudWorker (spec:5); def self.refundable_purchases_for at refund_all_for_fraud_worker.rb:22
+call-raised-02790	correct	described_class.new(seller:) is a CollaboratorPresenter (spec:5); #new_collaborator_props at collaborator_presenter.rb:12
+call-self-raised-00926	correct	PeruBankAccount < BankAccount (peru_bank_account.rb:3), no own def; private BankAccount#account_number_decrypted at bank_account.rb:171,180
+call-raised-03693	correct	described_class is ContentModeration::ImageSelection (spec:5); def self.ordered at image_selection.rb:13
+call-self-raised-01486	correct	WorkflowPresenter includes MailerHelper (workflow_presenter.rb:6); creators_from_email_address only defined at mailer_helper.rb:17
+call-raised-02003	correct	described_class is ConsumptionEvent (spec:5); create_event! in class << self at consumption_event.rb:4-5
+call-self-raised-01514	correct	ForfeitBalanceService includes CurrencyHelper (forfeit_balance_service.rb:4); formatted_dollar_amount only defined at currency_helper.rb:417
+call-raised-03993	correct	described_class is Pages::Interpolator (spec:5); def self.interpolate at interpolator.rb:122
+call-raised-00770	correct	InternalNotificationWorker includes Sidekiq::Job (worker.rb:4); perform_async runs #perform (:7) by the job convention, as ActiveJob dispatch
+call-raised-02204	correct	described_class is OfferCode (spec:6); def self.uses_left_by_id at offer_code.rb:198
+call-raised-01962	correct	Affiliate includes Cookies = Affiliate::Cookies (affiliate.rb:9); its class_methods defines decrypt_cookie_id (cookies.rb:8,30)
+call-self-raised-00090	correct	StripeChargeIntent < ChargeIntent (stripe_charge_intent.rb:4), no own payment_intent; attr_accessor :payment_intent at charge_intent.rb:11
+call-self-raised-01279	correct	ProductReviewResponsePolicy < ApplicationPolicy, no own user; attr_reader :user at application_policy.rb:4
+call-raised-03660	correct	let(:extractor) { described_class.new } in describe ContentModeration::ContentExtractor (spec:5); #extract_from_page at :72
+call-raised-01160	correct	described_class is PaypalPayoutProcessor (spec:5); def self.rejection_to_explain at paypal_payout_processor.rb:223
