@@ -221,8 +221,10 @@ jobs:
           # change a clippy, cargo check or bench result, so those three
           # lanes skip it (#597). deny.toml is the deny job's input (via
           # `deps`); .config/ shapes the nextest run the Test lane owns.
+          # The model-pin script sets the bytes the Ranking lane embeds with.
           cat > rust-source.re <<'EOF'
           ^crates/.*\.rs$
+          ^scripts/ci/fetch-embedding-model\.sh$
           ^probes/
           ^crates/.*/Cargo\.(toml|lock)$
           ^Cargo\.(toml|lock)$
@@ -522,6 +524,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-cancel-stale-runs.py
 
+      - name: Embedding-model pin contract (file:// hub, sha256 refusal)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-fetch-embedding-model.py
+
       # The brief-gate bench parses `pixel brief` output and scores it against
       # eval/brief-gate/prompts.jsonl; the excerpt and span benches score the
       # answer blocks of confident briefs; the excavation counter reads agent
@@ -722,6 +728,35 @@ jobs:
             sudo apt-get install -y perl make
           fi
 
+      # The semantic lane embeds with potion-code-16M-v2. Its bytes are pinned
+      # to one Hugging Face revision by the script (sha256 per file) and kept
+      # in an actions/cache entry keyed by that revision, so a run neither
+      # depends on the hub nor follows an upstream re-upload. The script
+      # keeps the restored files and fetches only on a miss. The paths are
+      # hf-hub's default cache (model2vec-rs ignores HF_HOME) and pixel's
+      # download marker.
+      - name: Cache key of the pinned embedding model
+        id: model
+        run: echo "key=$(bash scripts/ci/fetch-embedding-model.sh --cache-key)" >> "$GITHUB_OUTPUT"
+      - name: Restore the pinned embedding model
+        id: model-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2
+            ~/.local/share/pixel/models/potion-minishlab--potion-code-16M-v2.ok
+          key: ${{ steps.model.outputs.key }}
+      - name: Pin the embedding model in pixel's model cache
+        run: bash scripts/ci/fetch-embedding-model.sh "$HOME"
+      - name: Save the pinned embedding model
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2
+            ~/.local/share/pixel/models/potion-minishlab--potion-code-16M-v2.ok
+          key: ${{ steps.model.outputs.key }}
+
       # `[[bench]]` targets are `harness = false`: criterion owns `main`, so
       # nextest never runs them and the ranking assertions inside would gate
       # nothing. `-- --test` runs the bench bodies once, without criterion's
@@ -730,7 +765,16 @@ jobs:
       # <1ms service-time budget and prints it, so a failure states the
       # number. The m1 fixture pins its own git identity and config, so the
       # measurement does not depend on the runner's.
+      # The hub client honours proxy variables (hf-hub sets ureq's
+      # try_proxy_from_env); a closed port as the proxy makes the lane run
+      # from the pinned cache alone, and a lookup that would reach the network
+      # fails the job instead of fetching whatever `main` holds today.
+      - name: Build the ranking bench (fetches crates, so before the proxy)
+        run: cargo bench -p pixel-bench --bench ndcg_relevance --locked --no-run
       - name: Ranking gates (NDCG@10, bench test mode)
+        env:
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
         run: cargo bench -p pixel-bench --bench ndcg_relevance --locked -- --test
       - name: M1 service-time gates (bench test mode)
         run: cargo bench -p pixel-bench --bench m1_latency --locked -- --test

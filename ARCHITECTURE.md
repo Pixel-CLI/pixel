@@ -1542,7 +1542,7 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
     release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
     nightly diff checkpoints, coverage selection, mutants
-    config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
+    config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, embedding-model pin, harness-grid dispatch input,
     reproducible release build environment, the brief-gate bench, excavation counter and live brief A/B driver self-tests with the `eval/brief-gate/` prompt set's schema check, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
     (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`);
@@ -1551,7 +1551,10 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
     `model2vec` only);
   - **MSRV**, **Ranking gates** (the NDCG@10 relevance bench and the
     `m1_latency` service-time bench, both in `--test` mode, so a red lane
-    fails the job) and **Dependency policy** (`cargo deny`, then
+    fails the job; the NDCG lane embeds with potion-code-16M-v2 pinned to one
+    Hugging Face revision by `scripts/ci/fetch-embedding-model.sh`, restored
+    from an actions/cache entry keyed by that revision, and runs behind a
+    closed proxy so it never reaches the hub) and **Dependency policy** (`cargo deny`, then
     `scripts/ci/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
     reads, accepts the same advisories as `deny.toml`).
 - `mvp-reference.yml` runs the imported index truth test on the pinned public
