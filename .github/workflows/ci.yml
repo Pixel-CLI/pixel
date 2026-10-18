@@ -565,6 +565,8 @@ jobs:
           python3 scripts/bench/brief-check.py --self-test
           python3 scripts/bench/probe-test.py --self-test
           python3 scripts/bench/probe-test.py --check-all
+          # The probes search with ripgrep, which the runner image lacks; their own tests need it.
+          command -v rg >/dev/null || sudo apt-get install -y ripgrep
           for t in probes/*/tests/test_*.py; do python3 "$t"; done
           python3 scripts/bench/probe-translate.py --self-test
           python3 scripts/bench/probe-loop.py --self-test
