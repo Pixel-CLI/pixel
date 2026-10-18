@@ -1460,7 +1460,7 @@ fn stored_definitions(
 /// graph, so it runs on its own thread from the start of the update, while
 /// the passes write this graph's rows, and only the merges at the end wait
 /// for it: on antiwork/gumroad `b996417e`, run after the passes, it held one
-/// inserted Ruby method 4.8 s past their 3 s (#1204). An update that fails
+/// inserted Ruby method 4.3 s past their 3.2 s (#1204). An update that fails
 /// before its merges still waits for the refresh it started; the generation
 /// that refresh published is then not the one the graph was merged against,
 /// and the next update merges every file again.
@@ -4861,7 +4861,7 @@ mod tests {
 
         // The refresh reads the tree and pixel-mvp's own index only, so it
         // need not wait for this resolver's passes: run after them, it held
-        // one inserted method on antiwork/gumroad 4.8 s past their 3 s
+        // one inserted method on antiwork/gumroad 4.3 s past their 3.2 s
         // (#1204). By the time the passes are done, it has started.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();

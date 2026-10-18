@@ -574,10 +574,11 @@ envelope talks to the daemon socket directly.
     forms outside `#[cfg]` are not read;
   - pixel-mvp's index spawns `git` without `GitRunner`'s timeout and output
     cap;
-  - an incremental update refreshes pixel-mvp's index before it writes
-    any row: on this repository (`bb4991fe`, `dev-release` build) that
-    refresh is about 0.55 s of a one-file save, and `.pixel/` holds about
-    44 MB more.
+  - an incremental update refreshes pixel-mvp's index on a thread of its
+    own while its passes write this graph's rows, and only the merges
+    wait for it (`write_rows_with`): on this repository (`bb4991fe`,
+    `dev-release` build) that refresh is about 0.55 s of a one-file save,
+    and `.pixel/` holds about 44 MB more.
 - The Ruby source switch, `PIXEL_GRAPH_SOURCE_RUBY` (`hybrid` on; unset or
   anything else off, the default; `pixel_graph::mvp_adapter::ruby_switch`),
   read like the Rust one. With it on, the full build and every incremental
@@ -595,7 +596,8 @@ envelope talks to the daemon socket directly.
   and `ruby_hybrid_unresolved`, each row with its site's file:
   `write_rows` restores this resolver's rows first, runs its passes as
   without the switch, then merges again, file by file
-  (`ruby_switch::merge_again`). The merge is decided per file, so only the
+  (`ruby_switch::merge_again`), with the refresh of pixel-mvp's index that
+  ran beside those passes, as for Rust. The merge is decided per file, so only the
   files whose merge may have moved are planned again: the update's own,
   those whose rows the passes moved (a multiset hash of each Ruby file's
   rows before and after them, `ruby_switch::prints`), those pixel-mvp's
@@ -614,7 +616,11 @@ envelope talks to the daemon socket directly.
   2.4 s → 6.1 s for a method inserted mid-file), nearly all of it
   pixel-mvp's refresh of its index (its writer's full open check and
   every Ruby site decided again, 2.9 s); a cold build 5.6 s → 12 s;
-  `.pixel/` 174 MB → 302 MB; that is why it is off by default.
+  `.pixel/` 174 MB → 302 MB. On the daemon bench of
+  `docs/bench/ruby-hybrid-daemon-2026-10-18/` (release build), with the
+  refresh beside the passes, a method inserted mid-file is in the graph
+  after 6.0 s p50, 7.3 s p95 (v1 2.7 s, 2.9 s), for 8.0 CPU s of the
+  daemon (v1 2.2); that is why it is off by default.
 - Ruby constant receivers are resolved in `pixel-graph/src/resolve/ruby.rs`
   against class/module scopes, preserving the difference between nested
   declarations and `class A::B`. Unique class and constructor targets are
