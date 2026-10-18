@@ -47,3 +47,19 @@ unregistered clone. Cleanup attempts every clone and records failures.
 the comparison, then propagates failure; `compare` also propagates a recorded
 failure. Cross-version comparisons warn of a measurement change and cannot
 establish a retrieval gain.
+
+## Version 3 (#1235)
+
+All v2 validity/denominator rules remain. Consecutive excerpt headers are
+boundaries, including untracked/unknown source headers and a header after an
+unterminated fence. Each numbered inline row must lie inside its own declared
+range and the tracked file. A rejected excerpt's fence is consumed once; it
+cannot be reinterpreted as a headerless excerpt outside that range.
+
+Pointer coverage (`all`) and quoted coordinates (`inline`) remain distinct.
+An empty excerpt may name a pointer without quoting its lines. A docs row may
+not become a code coordinate belonging to the preceding block. Scores can
+increase or decrease on byte-identical briefs because attribution is corrected;
+these are measurement corrections, never retrieval gains. Reports from earlier
+versions remain unchanged. Replay frozen briefs before running the complete
+#1201 pipeline; publish both per-question and per-category comparisons.

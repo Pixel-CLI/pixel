@@ -82,7 +82,7 @@ CITE_RANGE_CAP = 400
 TYPES = ("definition", "usage", "tests", "config", "docs")
 TYPE_LABELS = {"definition": "definition bodies (code read)", "usage": "usage / search-hit lines",
                "tests": "tests", "config": "config", "docs": "docs"}
-MEASUREMENT_PROTOCOL = {"name": "brief-oracle", "version": 2}
+MEASUREMENT_PROTOCOL = {"name": "brief-oracle", "version": 3}
 PROCESS_TIMEOUT_S = 300
 COMPLETE_STATUSES = {"ok", "abstained"}
 
@@ -629,20 +629,24 @@ class BriefRegions:
         self.count = 0
 
 
-def header_of(line, repo):
-    """(file, lo, hi) when ``line`` is only an excerpt header, else ``None``."""
+def header_match(line):
+    """Recognize header syntax even for an unknown file, which still ends the preceding excerpt."""
     s = line.strip().lstrip("#>*-+ ").strip().strip("`*_ ")
     s = s.rstrip(":").strip("`*_ ")
     if not s or " " in s.split(" —")[0].split(" –")[0].split(" (")[0]:
         return None
-    for pat in HEADERS:
-        m = pat.match(s)
-        if m:
-            rel = repo.resolve(m.group("p"))
-            if rel:
-                a = int(m.group("a")) if m.group("a") else None
-                b = int(m.group("b")) if m.group("b") else a
-                return rel, a, b
+    return next((m for pat in HEADERS if (m := pat.match(s))), None)
+
+
+def header_of(line, repo):
+    """(file, lo, hi) when ``line`` is only an excerpt header, else ``None``."""
+    m = header_match(line)
+    if m:
+        rel = repo.resolve(m.group("p"))
+        if rel:
+            a = int(m.group("a")) if m.group("a") else None
+            b = int(m.group("b")) if m.group("b") else a
+            return rel, a, b
     return None
 
 
@@ -693,11 +697,14 @@ def block_lines(lines, start):
         j += 1
         body = []
         while j < n and not lines[j].strip().startswith(mark[:3]):
+            if header_match(lines[j]) or lines[j].lstrip().startswith("### "):
+                return body, j, True
             body.append(lines[j])
             j += 1
         return body, j + 1, True
     body = []
-    while j < n and lines[j].strip() and not LABEL.match(lines[j]) and not lines[j].lstrip().startswith("[PIXEL"):
+    while (j < n and lines[j].strip() and not LABEL.match(lines[j])
+           and not lines[j].lstrip().startswith(("[PIXEL", "### ")) and not header_match(lines[j])):
         body.append(lines[j])
         j += 1
     return body, j, False
@@ -732,7 +739,8 @@ def parse_brief(text, repo):
                 have = [m for m in numbered if m]
                 got = []
                 if nonblank and len(have) * 10 >= len(nonblank) * 6:
-                    got = [(rel, int(m.group(1))) for m in have]
+                    got = [(rel, n) for m in have if 1 <= (n := int(m.group(1))) <= repo.nlines(rel)
+                           and (lo is None or n >= lo) and (hi is None or n <= hi)]
                 elif lo is not None and not any(ELISION.match(b) for b in body):
                     cap = hi if hi is not None else lo + len(body) - 1
                     sequential = [(rel, n) for n in range(lo, min(lo + len(body) - 1, cap) + 1)]
@@ -746,9 +754,10 @@ def parse_brief(text, repo):
                     regions.all.add(key)
                 if got:
                     regions.count += 1
-                    consumed.update(range(i, nxt))
-                    i = nxt
-                    continue
+            # Even a rejected/empty excerpt owns its fence; never retry it without its source/range.
+            consumed.update(range(i, nxt))
+            i = nxt
+            continue
         elif FENCE.match(lines[i]) and i not in consumed:
             body, nxt, _fenced = block_lines(lines, i - 1)
             got = matchback(repo, body)
@@ -1737,6 +1746,48 @@ class SelfTest(unittest.TestCase):
         self.assertEqual({k for k in r.inline if k[0] == "src/app.py"}, {("src/app.py", 30), ("src/app.py", 31)})
         self.assertEqual({k for k in r.inline if k[0] == "tests/test_app.py"},
                          {("tests/test_app.py", 8), ("tests/test_app.py", 9)})
+
+    def test_consecutive_doc_rows_cannot_become_code_oracle_hits(self):
+        text = "### src/app.py:1-1 — code\n1| code\n### README.md:2-2 — docs\n2| documentation\n"
+        regions = parse_brief(text, self.repo)
+        self.assertEqual(regions.inline, {("src/app.py", 1), ("README.md", 2)})
+        oracle = oracle_from_ranges(self.repo, [["src/app.py", 2, 2], ["README.md", 2, 2]])
+        metrics = score_session(oracle, regions, set(), text)
+        self.assertEqual(metrics["covered_lines"], 1, "only the docs oracle is present")
+        self.assertNotIn(("src/app.py", 2), regions.all)
+
+    def test_adjacent_blocks_keep_files_ranges_and_empty_blocks_separate(self):
+        cases = [
+            ("### README.md:1-1\n1| first doc\n### pyproject.toml:2-2\n2| config\n",
+             {("README.md", 1), ("pyproject.toml", 2)}),
+            ("### src/app.py:1-1\n1| first\n### src/app.py:5-5\n5| second\n",
+             {("src/app.py", 1), ("src/app.py", 5)}),
+            ("### src/app.py:1-1\n### README.md:2-2\n2| doc\n", {("README.md", 2)}),
+            ("### src/app.py:1-1\n1| code\n### missing.md:2-2\n2| untracked\n", {("src/app.py", 1)}),
+            ("src/app.py:1-1\n1| code\nREADME.md:2-2\n2| doc\n", {("src/app.py", 1), ("README.md", 2)}),
+            ("### src/app.py:1-1\n```\n1| code\n### README.md:2-2\n2| doc\n",
+             {("src/app.py", 1), ("README.md", 2)}),
+            ("### src/app.py:1-1\n```\n```\n### README.md:2-2\n2| doc\n", {("README.md", 2)}),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(parse_brief(text, self.repo).inline, expected)
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = fixture_repo(tmp)
+            (root / "docs").mkdir()
+            (root / "docs/guide.md").write_text("second doc\n")
+            sh(["git", "add", "docs/guide.md"], cwd=root)
+            text = "### README.md:1-1\n1| first doc\n### docs/guide.md:1-1\n1| second doc\n"
+            self.assertEqual(parse_brief(text, Repo(root)).inline, {("README.md", 1), ("docs/guide.md", 1)})
+
+    def test_numbered_rows_cannot_escape_the_declared_range_even_in_fences(self):
+        for fence in (False, True):
+            with self.subTest(fence=fence):
+                body = "0| zero\n1| first\n2| outside\n9999| past EOF\n"
+                text = "### src/app.py:1-1\n" + ("```\n" + body + "```\n" if fence else body)
+                self.assertEqual(parse_brief(text, self.repo).inline, {("src/app.py", 1)})
+                text = "### src/app.py:1-1\n```\n2| " + self.repo.lines("src/app.py")[1] + "\n```\n"
+                self.assertEqual(parse_brief(text, self.repo).inline, set(), "no retry outside the header's range")
 
     def test_brief_headerless_fenced_block_is_matched_back(self):
         quoted = "\n".join(self.repo.lines("src/app.py")[19:24])
