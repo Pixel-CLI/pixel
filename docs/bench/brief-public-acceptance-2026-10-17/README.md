@@ -194,6 +194,7 @@ pack's commit (after), `score_brief.py pinned --head-probe-commit <commit>`.
 | Pack | Commit | Targeted figure before → after | `file_recall` | `region_cov` | Verdict |
 |---|---|---|---:|---:|---|
 | #1196 `test-bodies` | `77f565ba` | tests lines 513 → 1 135 of 6 365 (8.1% → 17.8%); `tests` line coverage 9.6% → 21.1% | 0.419 → 0.420 | 0.084 → 0.087 | kept |
+| #1197 `error-origin` (described messages) | `fce305a2` (vs `77f565ba`) | `error-origin` `file_recall` 0.186 → 0.244, line coverage 9.0% → 11.3% | 0.420 → 0.427 | 0.087 → 0.088 | kept |
 
 ## Remaining work
 
