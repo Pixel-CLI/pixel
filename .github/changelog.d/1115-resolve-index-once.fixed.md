@@ -1,0 +1,1 @@
+**graph:** An incremental update builds the resolver's index once instead of three times, and reads a saved file's incoming edges in one query instead of one per symbol and per edge: a one-file save of `store.rs` on this repository (Rust resolver `v1`) drops from about 75 ms to 65 ms of graph update.

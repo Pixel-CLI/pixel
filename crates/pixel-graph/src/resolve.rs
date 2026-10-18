@@ -1018,7 +1018,17 @@ pub fn resolve_calls(
     store: &GraphStore,
     pending: &[FileCalls],
 ) -> Result<ResolveStats, StoreError> {
-    let idx = ResolveIndex::build(store)?;
+    resolve_calls_in(store, &ResolveIndex::build(store)?, pending)
+}
+
+/// [`resolve_calls`] against an index the caller built ([`ResolveIndex::build`])
+/// over the symbols and imports `pending` is decided against: one update
+/// builds it once for its three passes.
+pub fn resolve_calls_in(
+    store: &GraphStore,
+    idx: &ResolveIndex,
+    pending: &[FileCalls],
+) -> Result<ResolveStats, StoreError> {
     let mut stats = ResolveStats::default();
     for fc in pending {
         for call in &fc.calls {
@@ -1096,7 +1106,16 @@ pub fn resolve_references(
     store: &GraphStore,
     pending: &[FileReferences],
 ) -> Result<ResolveStats, StoreError> {
-    let idx = ResolveIndex::build(store)?;
+    resolve_references_in(store, &ResolveIndex::build(store)?, pending)
+}
+
+/// [`resolve_references`] against an index the caller built, as
+/// [`resolve_calls_in`].
+pub fn resolve_references_in(
+    store: &GraphStore,
+    idx: &ResolveIndex,
+    pending: &[FileReferences],
+) -> Result<ResolveStats, StoreError> {
     let mut stats = ResolveStats::default();
     for fr in pending {
         for r#ref in &fr.references {
@@ -1379,7 +1398,8 @@ fn retry_rows(
 /// the reference that one is held equal to.
 pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
     let rows = retry_rows(store, "", None)?;
-    retry(store, rows)
+    let idx = ResolveIndex::build(store)?;
+    retry(store, &idx, rows)
 }
 
 /// [`resolve_all`] restricted to the rows whose decision reads something
@@ -1389,6 +1409,19 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
 /// when the batch changed a class or a module.
 pub fn resolve_affected(
     store: &mut GraphStore,
+    affected: &Affected,
+) -> Result<ResolveStats, StoreError> {
+    let idx = ResolveIndex::build(store)?;
+    resolve_affected_in(store, &idx, affected)
+}
+
+/// [`resolve_affected`] against an index the caller built, as
+/// [`resolve_calls_in`]. Retrying writes edges and deletes rows, never a
+/// symbol or an import, so the index the update's first pass read still
+/// holds.
+pub fn resolve_affected_in(
+    store: &mut GraphStore,
+    idx: &ResolveIndex,
     affected: &Affected,
 ) -> Result<ResolveStats, StoreError> {
     let mut rows: HashMap<i64, RetryRow> = HashMap::new();
@@ -1420,7 +1453,7 @@ pub fn resolve_affected(
     }
     let mut rows: Vec<RetryRow> = rows.into_values().collect();
     rows.sort_by_key(|row| row.id);
-    retry(store, rows)
+    retry(store, idx, rows)
 }
 
 /// The `unresolved_calls` rows a Ruby ancestor chain decides: calls on
@@ -1432,8 +1465,11 @@ const RUBY_SELF_ROWS: &str = " AND u.file_id IN (SELECT id FROM files WHERE lang
             OR substr(TRIM(u.receiver), 1, 1) BETWEEN 'A' AND 'Z'
             OR TRIM(u.receiver) LIKE '::%')";
 
-fn retry(store: &mut GraphStore, rows: Vec<RetryRow>) -> Result<ResolveStats, StoreError> {
-    let idx = ResolveIndex::build(store)?;
+fn retry(
+    store: &mut GraphStore,
+    idx: &ResolveIndex,
+    rows: Vec<RetryRow>,
+) -> Result<ResolveStats, StoreError> {
     let mut stats = ResolveStats::default();
     for row in &rows {
         // pixel-mvp's row: this resolver does not decide it again.

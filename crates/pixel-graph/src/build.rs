@@ -24,10 +24,10 @@ use crate::imports::{resolve_import_in, ruby as ruby_projects};
 use crate::mvp_adapter::ruby_switch::{self, RubySource};
 use crate::mvp_adapter::{self, RustSource};
 use crate::resolve::{
-    Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference,
-    reconsider_resolved_calls, resolve_affected, resolve_calls, resolve_references,
+    Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference, ResolveIndex,
+    reconsider_resolved_calls, resolve_affected_in, resolve_calls_in, resolve_references_in,
 };
-use crate::store::{EdgeKind, ExecCached, GraphStore, StoreError, extract_crux};
+use crate::store::{ExecCached, GraphStore, StoreError, extract_crux};
 
 /// Extract concepts for a file and insert them, linking each to the smallest
 /// enclosing symbol (by line range) when one exists. `symbol_ids` are the ids
@@ -662,10 +662,13 @@ fn build_graph_with(
     phases.concepts_ms = millis(stored.concepts);
     phases.imports_ms = millis(stored.imports);
     let clock = Instant::now();
-    resolve_calls(&store, &stored.calls)?;
+    // Resolving writes edges and unresolved rows, never a symbol or an
+    // import: one index serves both passes.
+    let idx = ResolveIndex::build(&store)?;
+    resolve_calls_in(&store, &idx, &stored.calls)?;
     phases.resolve_calls_ms = millis(clock.elapsed());
     let clock = Instant::now();
-    resolve_references(&store, &stored.references)?;
+    resolve_references_in(&store, &idx, &stored.references)?;
     if let Some(mvp) = mvp {
         mvp_adapter::merge_into(&store, mvp)?;
     }
@@ -1477,7 +1480,6 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         // being silently dropped. The receiver and kind are preserved so
         // re-resolution produces the correct edge type (Calls vs References).
         if let Some(old) = store.file_by_path(rel)? {
-            let old_syms = store.symbols_in_file(old.id)?;
             before.extend(stored_definitions(store, old.id, rel)?);
             mixins_before.extend(
                 store
@@ -1490,36 +1492,34 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             for import in store.imports_to_file(old.id)? {
                 affected.files.insert(import.file_id);
             }
-            let mut demoted: Vec<(i64, String, i64, u32, Option<String>, String)> = Vec::new();
-            for sym in &old_syms {
-                for kind in [EdgeKind::Calls, EdgeKind::References] {
-                    for edge in store.edges_to(sym.id, Some(kind))? {
-                        let src_file: Option<i64> = store
-                            .conn()
-                            .query_row(
-                                "SELECT file_id FROM symbols WHERE id = ?1",
-                                rusqlite::params![edge.src_id],
-                                |r| r.get(0),
-                            )
-                            .ok();
-                        if let Some(src_file) = src_file
-                            && src_file != old.id
-                        {
-                            // Replay the name the site wrote: under an
-                            // alias (`leased()` → `push`) the target's name
-                            // is not in scope at the caller.
-                            demoted.push((
-                                src_file,
-                                edge.callee.clone().unwrap_or_else(|| sym.name.clone()),
-                                edge.src_id,
-                                edge.site_line,
-                                edge.receiver.clone(),
-                                kind.as_str().to_string(),
-                            ));
-                        }
-                    }
-                }
-            }
+            // One query for the file: each incoming edge with its site's
+            // file, which the edge row does not carry.
+            let demoted: Vec<(i64, String, i64, u32, Option<String>, String)> = {
+                let mut stmt = store.conn().prepare_cached(
+                    "SELECT src.file_id, COALESCE(e.callee, dst.name), e.src_id, e.site_line,
+                            e.receiver, e.kind
+                       FROM symbols dst
+                       JOIN edges e ON e.dst_id = dst.id
+                       JOIN symbols src ON src.id = e.src_id
+                      WHERE dst.file_id = ?1 AND e.kind IN ('calls', 'references')
+                        AND src.file_id != ?1
+                      ORDER BY dst.id, e.kind, e.id",
+                )?;
+                // Replay the name the site wrote: under an alias
+                // (`leased()` → `push`) the target's name is not in scope
+                // at the caller.
+                let rows = stmt.query_map(rusqlite::params![old.id], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })?;
+                rows.collect::<std::result::Result<_, _>>()?
+            };
             for (src_file, name, src_id, site_line, receiver, kind) in demoted {
                 affected.replayed.insert(name.clone());
                 affected.rows_moved.insert(src_file);
@@ -1645,17 +1645,21 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         re_resolve_ruby_imports(store, &all_paths, &projects, &mut affected)?;
     }
 
+    // Every symbol and import of the batch is stored by now, and the passes
+    // below write edges and unresolved rows only: one index serves all three
+    // (it loads every symbol and resolved import of the graph).
+    let idx = ResolveIndex::build(store)?;
     if !stored.calls.is_empty() {
-        resolve_calls(store, &stored.calls)?;
+        resolve_calls_in(store, &idx, &stored.calls)?;
     }
     if !stored.references.is_empty() {
-        resolve_references(store, &stored.references)?;
+        resolve_references_in(store, &idx, &stored.references)?;
     }
 
     // Any changed definition can invalidate a previously unique target.
     reconsider_resolved_calls(store, &mut affected)?;
     // Retry what the batch can have changed against the new candidate set.
-    resolve_affected(store, &affected)?;
+    resolve_affected_in(store, &idx, &affected)?;
     let moved = if hybrid {
         ruby_switch::moved(store, &prints)?
     } else {
@@ -1742,8 +1746,8 @@ pub fn update_file(root: &Path, db_path: &Path, rel: &str) -> Result<Publication
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolve::{Decision, ResolveIndex};
-    use crate::store::Tier;
+    use crate::resolve::Decision;
+    use crate::store::{EdgeKind, Tier};
 
     /// `graph_file_cap` is what an evaluation quotes when it says the build
     /// stopped at the cap, so the number it reports has to be the cap the
@@ -1990,6 +1994,78 @@ mod tests {
         // Sanity: counts agree with stats.
         let (f, s, e, _u) = store.counts().unwrap();
         assert_eq!((f, s, e), (stats.files, stats.symbols, stats.edges));
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The statements [`record_statement`] saw, on the one connection a test
+    /// traces.
+    static STATEMENTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    fn record_statement(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            STATEMENTS.lock().unwrap().push(sql.to_string());
+        }
+    }
+
+    #[test]
+    fn an_update_reads_the_symbol_table_once_and_its_incoming_edges_in_one_query() {
+        // `a.ts` defines 20 functions, each called from `b.ts`. Saving it
+        // used to build the resolve index three times (calls, references,
+        // retry), each loading every symbol, and to look up each incoming
+        // edge's site file with its own query (#1115).
+        let root = tmpdir("statements");
+        let defs: String = (0..20)
+            .map(|i| format!("export function f{i}() {{ return {i} }}\n"))
+            .collect();
+        let names: Vec<String> = (0..20).map(|i| format!("f{i}")).collect();
+        std::fs::write(root.join("a.ts"), &defs).unwrap();
+        std::fs::write(
+            root.join("b.ts"),
+            format!(
+                "import {{ {} }} from \"./a\";\nexport function main() {{ return {} }}\n",
+                names.join(", "),
+                names
+                    .iter()
+                    .map(|n| format!("{n}()"))
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            ),
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        std::fs::write(root.join("a.ts"), format!("{defs}// saved\n")).unwrap();
+
+        let mut store = GraphStore::open(&db).unwrap();
+        store.conn().trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(record_statement),
+        );
+        store.begin_write().unwrap();
+        write_rows(&root, &mut store, &[("a.ts", false)]).unwrap();
+        store.commit_write().unwrap();
+        let statements = std::mem::take(&mut *STATEMENTS.lock().unwrap());
+        let count = |needle: &str| statements.iter().filter(|s| s.contains(needle)).count();
+        assert_eq!(
+            count("SELECT name, file_id, id, kind, start_line, trait_impl, qualified FROM symbols"),
+            1
+        );
+        assert_eq!(count("SELECT file_id FROM symbols WHERE id = ?1"), 0);
+        assert_eq!(count("SELECT src_id, dst_id, kind, tier"), 0);
+        // The 20 calls came back: the edges are the ones the build wrote.
+        let callers: usize = store
+            .symbols_by_name("main", None, 10)
+            .unwrap()
+            .iter()
+            .map(|main| {
+                store
+                    .edges_from(main.id, Some(EdgeKind::Calls))
+                    .unwrap()
+                    .len()
+            })
+            .sum();
+        assert_eq!(callers, 20);
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
