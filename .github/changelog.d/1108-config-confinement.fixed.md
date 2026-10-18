@@ -1,0 +1,1 @@
+**config:** `pixel config metrics on|off` no longer writes the repository layer through a symbolic link: a linked or non-directory `.pixel` and a linked `.pixel/config.yaml` are refused instead of receiving the temp file and rename outside the repository.

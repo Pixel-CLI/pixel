@@ -547,7 +547,10 @@ boundary it crosses.
   `.pixel/` are opened with `O_NOFOLLOW` or created fresh and renamed into
   place, permissions are set on the open descriptor, and the SQLite databases
   open with `SQLITE_OPEN_NOFOLLOW` (`pixel_git::nofollow`), so nothing is
-  written, truncated or chmodded through a link. A path read from a shard or
+  written, truncated or chmodded through a link. `pixel config metrics on|off`
+  (the repository layer) refuses a `.pixel` that is a link or not a directory
+  and a `config.yaml` that is a link, without the tracked-files check, since a
+  repository may commit its `config.yaml`. A path read from a shard or
   the graph is used only when it is a plain relative path whose directory
   resolves inside the repository (`pixel_git::repo_path::confine`), and the
   credential filter covers `credentials`, `.netrc` and `.git-credentials`.
