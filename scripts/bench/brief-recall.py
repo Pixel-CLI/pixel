@@ -399,8 +399,8 @@ def replay_pass(rows, binary, replayer, warmed, stopper=stop_daemon):
             unindexed += 1
             continue
         if row["repo"] not in warmed:
-            # A daemon another binary started (an installed release) would answer the briefs of this replay: the
-            # #1216 run measured 0.8.0's facts check in two repositories instead of the binary under test.
+            # A daemon another binary started (an installed release) would answer the briefs of this replay: 0.8.0
+            # daemons were found serving two repositories after the #1216 run, which never checked.
             stopper(binary, row["repo"])
             warm(binary, row["repo"], replayer)
             warmed.add(row["repo"])
