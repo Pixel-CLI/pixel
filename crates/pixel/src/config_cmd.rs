@@ -221,6 +221,29 @@ fn repo_config_path(root: &Path) -> PathBuf {
     crate::config_file::path_in(&root.join(".pixel"))
 }
 
+/// The repository's `config.yaml`, for a write: refused when `.pixel` is a
+/// symbolic link or not a directory, or when `config.yaml` itself is a link.
+/// A link would carry the temp file and the rename to wherever it points,
+/// outside the repository, and the rename would replace a linked
+/// `config.yaml` with a plain file. `~/.pixel` is the user's own and may be
+/// a link (a dotfiles checkout), so the global layer is not checked.
+fn confined_repo_config(root: &Path) -> Result<PathBuf, String> {
+    let dir = pixel_git::sidecar::dir(root);
+    let path = repo_config_path(root);
+    for entry in [&dir, &path] {
+        if std::fs::symlink_metadata(entry).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(format!(
+                "{} is a symbolic link; pixel does not write configuration through a link under .pixel/",
+                entry.display()
+            ));
+        }
+    }
+    if std::fs::symlink_metadata(&dir).is_ok_and(|meta| !meta.is_dir()) {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    Ok(path)
+}
+
 fn global_config_path() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(|home| crate::config_file::path_in(&PathBuf::from(home).join(".pixel")))
@@ -1109,9 +1132,9 @@ fn run_metrics_with(
                 .map_err(|e| e.to_string())?;
                 note_repo_override(output, true, Some(on), root.as_deref())
             } else {
-                let target = repo_config_path(
+                let target = confined_repo_config(
                     &root.ok_or("no repository root here — pass --global or run inside a repo")?,
-                );
+                )?;
                 write_metrics(&target, on)?;
                 writeln!(
                     output,
@@ -1413,6 +1436,99 @@ mod tests {
             json!({"metrics":"on"})
         );
         restore_home(saved_home);
+    }
+
+    /// A git repository under `home` named `name`, for `discover_root`.
+    fn git_repo(home: &Path, name: &str) -> PathBuf {
+        let repo = home.join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        repo.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn config_metrics_on_repo_should_refuse_when_dot_pixel_links_out_of_the_repository() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        let repo = git_repo(&home.0, "repo-linked-dir");
+        let outside = home.0.join("outside-dir");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join(".pixel")).unwrap();
+
+        let mut out = Vec::new();
+        let err = run_metrics_with(&mut out, &repo, false, Some(true)).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "{} is a symbolic link; pixel does not write configuration through a link under .pixel/",
+                repo.join(".pixel").display()
+            )
+        );
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing written or renamed in the link target"
+        );
+        assert!(out.is_empty(), "no `wrote` line");
+        restore_home(saved_home);
+    }
+
+    #[test]
+    fn config_metrics_on_repo_should_refuse_to_replace_a_linked_config_yaml() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        let repo = git_repo(&home.0, "repo-linked-file");
+        let target = home.0.join("shared.yaml");
+        std::fs::write(&target, "metrics: off\n").unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        let link = repo.join(".pixel").join("config.yaml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut out = Vec::new();
+        let err = run_metrics_with(&mut out, &repo, false, Some(true)).unwrap_err();
+        assert!(err.starts_with(&link.display().to_string()), "{err}");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link is not replaced by a plain file"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "metrics: off\n");
+        let leftovers: Vec<_> = std::fs::read_dir(repo.join(".pixel"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("config.yaml")]);
+        restore_home(saved_home);
+    }
+
+    #[test]
+    fn confined_repo_config_should_refuse_a_file_where_dot_pixel_belongs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".pixel"), "x").unwrap();
+        let err = confined_repo_config(dir.path()).unwrap_err();
+        assert_eq!(
+            err,
+            format!("{} is not a directory", dir.path().join(".pixel").display())
+        );
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(
+            confined_repo_config(plain.path()).unwrap(),
+            plain.path().join(".pixel").join("config.yaml"),
+            "an absent .pixel is created by the write"
+        );
     }
 
     #[test]
