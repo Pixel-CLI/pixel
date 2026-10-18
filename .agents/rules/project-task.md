@@ -41,6 +41,42 @@ issue the way GitHub itself understands.
   keyword and says in a line why no issue was needed. Everything else links
   its issue as above.
 
+## An issue an agent can pick up
+
+When creating or updating an issue, make the following clear. Scale the
+detail to the work: a small fix can cover these points in one paragraph;
+no fixed set of headings is required.
+
+- **Problem and outcome.** What fails or is missing, and what should be
+  true afterwards. Separate observed evidence from suspected causes.
+- **Remaining scope.** Name the unit of work and useful exclusions. An
+  epic links its executable children and states what remains at the parent
+  level; split independently reviewable work before assigning it as one task.
+- **Dependencies and decisions.** Link prerequisites by issue number and
+  say what they must deliver before this work can proceed. State which open
+  decisions the agent may investigate and resolve, and which need a
+  maintainer's decision.
+- **Acceptance and evidence.** Give observable completion criteria and
+  the proof expected (a regression test, CLI output, a report or a capture).
+  For a measured improvement, name the metric, pinned baseline, comparison
+  command and meaningful success threshold, with regression guards where
+  relevant (`measuring.md`). If the threshold is unknown, make establishing
+  it an explicit investigation outcome before promising an implementation.
+- **Starting points.** Link the useful reproduction, report, command,
+  file or symbol. Include the source revision when the evidence depends on
+  it; a complete implementation plan is not required.
+
+When picking an issue, recheck its claims and linked dependencies against
+the current code and PR state. Investigate missing technical details;
+clarify a missing product decision or conflicting acceptance criteria
+before making a dependent change.
+
+When work lands or an issue is split, rewrite the current remaining scope,
+dependencies and acceptance at the top. Keep superseded plans and numbers
+under a clearly marked historical section, so they cannot be mistaken for
+current instructions. Link child issues directly rather than by an informal
+label such as "child 0".
+
 ## Install side-build & remote smoke (item #4, sub-task openai-install-smoke)
 
 Recorded procedure, verified live on 2026-10-07:
