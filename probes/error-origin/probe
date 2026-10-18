@@ -2,14 +2,19 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""error-origin: a prompt that quotes an error message ("where does 'remote decisions refused the decision' come
-from, what triggers it") is answered by the code that raises it. Finds the longest leading run (three words or more)
-of the quoted text literally in non-test source, cutting at `(` or `{` since format placeholders differ; shows the
-function that raises it, its callers up to two levels with the lines leading to each call (where the condition that
-selects the path is), and one test that exercises the function. Level 2 stays inside the origin's directory
-(`<top>/<second>/`), test code is excluded (a tests path, or inside `mod tests`: a lone `#[cfg(test)]` marks only its
-own item). Read-only, deterministic."""
+"""error-origin: a prompt about an error message ("where does 'remote decisions refused the decision' come from")
+is answered by the code that emits it. A quoted message is found literally: the longest leading run
+(three words or more) in non-test source, cut at `(` or `{` since format placeholders differ. A message described in
+words ("the error saying the index is locked") is the short string literal that carries
+the most of the prompt's words, each weighed by how few source lines carry it, with the call and function that emit
+it counted beside the string (`eprint_nothing_searched`); a string longer than the window is a manual, not a message,
+and a message catalogue entry (JSON) is followed to the code that names its key. Shows the raising function, its
+callers up to two levels with the lines leading to each call (where the condition that selects the path is), and one
+test that exercises the function. Level 2 stays inside the origin's directory (`<top>/<second>/`), test code is
+excluded (a tests path, or inside `mod tests`: a lone `#[cfg(test)]` marks only its own item). Read-only,
+deterministic. Issues #906, #1197."""
 import json
+import math
 import re
 import subprocess
 import sys
@@ -33,6 +38,151 @@ def rg(root, *args):
 
 def quoted(prompt):
     return re.findall(r"""['"`‘“]([^'"`’”]{%d,})['"`’”]""" % MIN_QUOTE, prompt)
+
+
+# Function words; how much a content word says is measured on the repository (`described`), never listed here.
+STOP = {"what", "where", "which", "that", "this", "with", "from", "does", "how", "the", "and", "are", "they", "them",
+        "for", "into", "about", "when", "should", "their", "there", "these", "those", "have", "your", "one", "than",
+        "its", "was", "has", "can", "not", "but", "all", "any", "you", "of", "to", "in", "is", "it", "on", "at", "by",
+        "an", "or", "as", "be", "do", "if", "so", "up", "me", "my", "we", "us", "am"}
+LITERAL_EXT = (".json",)          # message catalogues: the text lives here and the code names its key
+MIN_SHARED, SEED_WORDS, SEED_HITS = 2, 4, 300
+TRIPLE = re.compile(r'"""|\'\'\'')
+
+
+def tokens(text):
+    """The words of code or prose, split at case changes, underscores and punctuation, lowercased."""
+    return [t.lower() for t in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", text)]
+
+
+def stem(word):
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    for suffix in ("ing", "ed", "s"):
+        if len(word) - len(suffix) >= 3 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def string_part(text):
+    """The text inside the string literals of a code line ('', \"\" or ``), joined."""
+    return " ".join(m.group(2) for m in re.finditer(r"""(["'`])((?:\\.|(?!\1).)*)\1""", text))
+
+
+def prompt_words(prompt):
+    return [w for w in dict.fromkeys(stem(t) for t in tokens(prompt) if len(t) >= 2 and t not in STOP)]
+
+
+def open_quotes(text, rel):
+    """How many string delimiters a stretch of code holds: triple quotes in Python, backticks in JS, unescaped double
+    quotes (outside char literals) in Rust and the rest; an odd count leaves a string open."""
+    if rel.endswith(".py"):
+        return len(TRIPLE.findall(text))
+    if rel.endswith(JS_EXT):
+        return text.count("`")
+    return len(re.findall(r'(?<![\\\'])"', text))
+
+
+def in_multiline_string(lines, index, rel):
+    """The line sits inside a string that spans lines: Python triple quotes or a JS template literal opened above."""
+    start = max(0, index - 60)   # a message spans a few lines; parity over a bounded window keeps it cheap
+    return open_quotes("\n".join(lines[start:index]), rel) % 2 == 1
+
+
+def carried(word, toks):
+    """A token starting with the word carries it; a word of three letters or fewer must be the token (`no` is not
+    in `not`)."""
+    return word in toks if len(word) <= 3 else any(t.startswith(word) for t in toks)
+
+
+def emitter(lines, first, rel):
+    """The words of what emits a string that starts on line `first`: the call opening on that line or the one above,
+    and the name of the enclosing function (`eprint_nothing_searched`, `err_message!`)."""
+    name, _start = enclosing(lines, first, rel.endswith(JS_EXT))
+    above = lines[first - 1] if first > 0 else ""
+    return set(tokens(" ".join([name or "", above, lines[first].split('"')[0].split("'")[0]])))
+
+
+def string_span(lines, index, rel, reach=8):
+    """`(first, last)` line index of the multi-line string that holds line `index` (itself when it holds none), or
+    `None` when the string runs past `reach` lines on either side: a manual page or a doc block, not a message."""
+    lo = index
+    while in_multiline_string(lines, lo, rel):
+        if lo <= max(0, index - reach):
+            return None
+        lo -= 1
+    hi = index
+    while hi + 1 < len(lines) and in_multiline_string(lines, hi + 1, rel):
+        if hi >= index + reach:
+            return None
+        hi += 1
+    return lo, hi
+
+
+def described(root, prompt):
+    """A message the prompt describes without quoting it: the string literal that carries most of the prompt's words
+    (two at least), each weighed by how few source lines carry it, as `(path, line, catalogue)`. Candidate lines come
+    from the rarest words; a literal in a message catalogue (JSON) is followed to the code that names its key."""
+    words = prompt_words(prompt)
+    globs = SRC_GLOBS + ["-g", "*.json"]
+    df = {}
+    for w in words:
+        counts = rg(root, "-c", "-i", "-F", *globs, w, ".")
+        df[w] = sum(int(c.rpartition(":")[2]) for c in counts if c.rpartition(":")[2].isdigit())
+    present = sorted((w for w in words if df[w]), key=lambda w: (df[w], w))
+    if len(present) < MIN_SHARED:
+        return None
+    total = sum(df.values()) + 1
+    idf = {w: math.log(total / df[w]) for w in present}
+    best, seen, cache = None, set(), {}
+    for w in present[:SEED_WORDS]:
+        for hit in rg(root, "-n", "--no-heading", "-i", "-F", *globs, w, ".")[:SEED_HITS]:
+            if hit.count(":") < 2:
+                continue
+            path, line, text = hit.split(":", 2)
+            rel = path.lstrip("./")
+            if (rel, line) in seen or is_test_path(rel) or re.match(r"\s*(//|#|\*|/\*)", text):
+                continue
+            seen.add((rel, line))
+            message, context = string_part(text), set()
+            if not rel.endswith(LITERAL_EXT):
+                lines = read(root, rel, cache)
+                index = int(line) - 1
+                if index >= len(lines) or in_test(rel, lines, index):
+                    continue
+                span = string_span(lines, index, rel)
+                if span and span[0] == span[1] and open_quotes(text, rel) % 2 == 1:   # it opens here
+                    span = string_span(lines, index + 1, rel) if index + 1 < len(lines) else None
+                    span = span and (index, span[1])
+                if span is None:
+                    continue
+                if span[1] > span[0]:   # the whole string, wherever the word fell in it
+                    message = " ".join(lines[span[0]:span[1] + 1])
+                context = emitter(lines, span[0], rel)
+            words_in = tokens(message)
+            if not any(carried(r, set(words_in)) for r in present):
+                continue   # the emitter's words only count beside a string that carries the question's own
+            inside = set(words_in) | context
+            shared = [r for r in present if carried(r, inside)]
+            if len(shared) < MIN_SHARED:
+                continue
+            # More of the question's words first; then rarer words packed in a shorter text (a message, not a manual).
+            key = (-len(shared), -sum(idf[r] for r in shared) / math.log2(4 + len(words_in)), rel, int(line))
+            if best is None or key < best[0]:
+                best = (key, rel, int(line), text)
+    if best is None:
+        return None
+    _key, rel, line, text = best
+    if rel.endswith(LITERAL_EXT):
+        name = re.match(r'\s*"([A-Za-z_][\w.-]*)"\s*:', text)
+        if not name:
+            return None
+        for hit in rg(root, "-n", "--no-heading", "-w", "-F", *SRC_GLOBS, name.group(1), "."):
+            path, at, _ = hit.split(":", 2)
+            if not is_test_path(path.lstrip("./")):
+                return path.lstrip("./"), int(at), (rel, line)
+        return None
+    return rel, line, None
 
 
 def is_test_path(rel):
@@ -68,7 +218,7 @@ def definitions(root, name):
 
 def enclosing(lines, index, js=False):
     """`(name, line index)` of the function a line is in; the `const x = (` form only counts in JS and TS."""
-    for j in range(index, -1, -1):
+    for j in range(min(index, len(lines) - 1), -1, -1):
         match = FN.match(lines[j])
         if match and (match.group(1) or js):
             return (match.group(1) or match.group(2)), j
@@ -87,13 +237,16 @@ def in_test(rel, lines, index):
 
 def read(root, rel, cache):
     if rel not in cache:
-        cache[rel] = (Path(root) / rel).read_text(errors="replace").splitlines()
+        try:
+            cache[rel] = (Path(root) / rel).read_text(errors="replace").splitlines()
+        except OSError:   # a directory, a dangling link: nothing to quote
+            cache[rel] = []
     return cache[rel]
 
 
 def callers(root, name, cache, seen, depth, out, home, defined_in):
     """Callers of `name`, defined in `defined_in`. When another file defines a function of that name too, only the
-    callers beside the selected definition count: a call by name alone cannot tell the two apart."""
+    callers beside the selected definition count: a call by name alone does not tell the two apart."""
     if depth == 0 or len(out) > MAX_LINES:
         return
     near = None
@@ -123,20 +276,38 @@ def callers(root, name, cache, seen, depth, out, home, defined_in):
         callers(root, caller, cache, seen, depth - 1, out, home, rel)
 
 
+def origins(root, prompt):
+    """`(path, line, how, catalogue)` of the message the prompt asks about: a quoted one found literally first, else
+    the literal the prompt describes."""
+    for message in quoted(prompt)[:3]:
+        hits = locate(root, message)
+        if hits:
+            path, line, _ = hits[0].split(":", 2)
+            return path.lstrip("./"), int(line), "the quoted message is raised", None
+    found = described(root, prompt)
+    if found:
+        rel, line, catalogue = found
+        return rel, line, "the message the question describes is raised", catalogue
+    return None
+
+
 def main():
     req = json.load(sys.stdin)
     root, prompt = req["repo_root"], req["prompt"]
     out, cache, seen = [], {}, set()
-    for message in quoted(prompt)[:3]:
-        hits = locate(root, message)
-        if not hits:
-            continue   # this quote is not raised anywhere: try the next
-        path, line, _ = hits[0].split(":", 2)
-        rel = path.lstrip("./")
+    for rel, line, how, catalogue in filter(None, [origins(root, prompt)]):
         lines = read(root, rel, cache)
-        index = int(line) - 1
-        name, _start = enclosing(lines, index, rel.endswith(JS_EXT))
-        out.append(f"### error origin — the quoted message is raised at {rel}:{line}" + (f" in {name}" if name else ""))
+        index = line - 1
+        if index >= len(lines):
+            break
+        name, start = enclosing(lines, index, rel.endswith(JS_EXT))
+        out.append(f"### error origin — {how} at {rel}:{line}" + (f" in {name}" if name else ""))
+        if catalogue:
+            crel, cline = catalogue
+            clines = read(root, crel, cache)
+            out += show(crel, clines, cline, cline, "the text, in its message catalogue")
+        lo = max(start + 1, line - 12) if name else line - 6
+        out += show(rel, lines, lo, line + 6, f"where {name or 'it'} emits it")
         if not name:
             break
         seen.add((rel, name))
