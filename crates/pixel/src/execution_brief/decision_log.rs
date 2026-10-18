@@ -98,6 +98,13 @@ pub(crate) struct Record {
     /// The text search stood in for a graph that could not answer.
     pub(crate) fallback: bool,
     pub(crate) elapsed_ms: u64,
+    /// The packet was cut short (its window ended, or the op cap refused an
+    /// operation): what was rendered is hedged as partial.
+    pub(crate) cut: bool,
+    /// The window the brief was given; `None` for a prompt that got none.
+    pub(crate) deadline_ms: Option<u64>,
+    /// Where `elapsed_ms` went, stage by stage.
+    pub(crate) stages: Stages,
     /// Where the evidence came from: `daemon` or `local`.
     pub(crate) route: Option<&'static str>,
     /// What the daemon start the prompt gave came to, when it gave one and
@@ -110,6 +117,35 @@ pub(crate) struct Record {
     pub(crate) typed: String,
     /// SHA-256 of the whole typed text, lowercase hex.
     pub(crate) sha256: String,
+}
+
+/// How long each stage of a brief took, in milliseconds; `None` for a stage
+/// that did not run, never `0`: a declined prompt runs none, a closed gate
+/// never ranks, a prompt no probe ran for has no probe time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Stages {
+    /// Opening the evidence and the candidate searches: the relevance,
+    /// meaning and judge probes of a plain prompt, or the search, concept and
+    /// symbol lookups of a code-shaped one.
+    pub(crate) search_ms: Option<u64>,
+    /// Folding the candidates, the kind route, the answer excerpts and the
+    /// region pack, until the worker ended or the window cut it.
+    pub(crate) rank_ms: Option<u64>,
+    /// Rendering the block from what had arrived.
+    pub(crate) render_ms: Option<u64>,
+    /// The brief probes, end to end.
+    pub(crate) probe_ms: Option<u64>,
+}
+
+impl Stages {
+    fn to_json(self) -> Value {
+        json!({
+            "search_ms": self.search_ms,
+            "rank_ms": self.rank_ms,
+            "render_ms": self.render_ms,
+            "probe_ms": self.probe_ms,
+        })
+    }
 }
 
 /// Lowercase hex SHA-256 of `text`.
@@ -217,6 +253,9 @@ impl Record {
             "pack_located": self.pack_located,
             "fallback": self.fallback,
             "elapsed_ms": self.elapsed_ms,
+            "cut": self.cut,
+            "deadline_ms": self.deadline_ms,
+            "stages": self.stages.to_json(),
             "route": self.route,
             "daemon": self.daemon,
             "typed": self.typed,
@@ -441,6 +480,14 @@ mod tests {
             pack_located: 1,
             fallback: true,
             elapsed_ms: 188,
+            cut: true,
+            deadline_ms: Some(3000),
+            stages: Stages {
+                search_ms: Some(90),
+                rank_ms: Some(70),
+                render_ms: Some(3),
+                probe_ms: None,
+            },
             route: Some("daemon"),
             daemon: Some("running"),
             probes: Vec::new(),
@@ -516,6 +563,9 @@ mod tests {
                 "pack_located": 1,
                 "fallback": true,
                 "elapsed_ms": 188,
+                "cut": true,
+                "deadline_ms": 3000,
+                "stages": {"search_ms": 90, "rank_ms": 70, "render_ms": 3, "probe_ms": null},
                 "route": "daemon",
                 "daemon": "running",
                 "typed": "how does the daemon start",

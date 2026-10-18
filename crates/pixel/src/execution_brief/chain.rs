@@ -39,7 +39,7 @@ use regex::Regex;
 
 use super::answer::{self, Excerpt, Hop, Receipt};
 use super::autostart;
-use super::decision_log::{self, Record};
+use super::decision_log::{self, Record, Stages};
 use super::feedback;
 use super::intent::Verdict;
 use super::kinds::{self, ChangeScope, Changes, FlowNode, KindInput, RepoMap};
@@ -1045,6 +1045,10 @@ pub(crate) struct Brief {
     targeted: bool,
     cut: bool,
     finished: bool,
+    /// When the candidate searches were done: the end of the search stage.
+    searched_at: Option<Instant>,
+    /// When the worker returned, if it did before the brief was collected.
+    worked_at: Option<Instant>,
 }
 
 impl Brief {
@@ -1266,6 +1270,42 @@ fn edit<T>(state: &Mutex<Brief>, change: impl FnOnce(&mut Brief) -> T) -> T {
     change(&mut state.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
+/// End the search stage now, unless an earlier step already ended it.
+fn mark_searched(brief: &mut Brief) {
+    brief.searched_at.get_or_insert_with(Instant::now);
+}
+
+/// Whole milliseconds of `elapsed`, saturating.
+fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The worker's two stages, from its marks: the search ran from `started`
+/// to `searched`; ranking ran from there until the worker returned, or until
+/// `collected` when the window cut it first. A brief that never searched has
+/// neither, and one that closed after its searches did not rank.
+fn work_stages(
+    started: Instant,
+    searched: Option<Instant>,
+    worked: Option<Instant>,
+    collected: Instant,
+    ranked: bool,
+) -> (Option<u64>, Option<u64>) {
+    let Some(searched) = searched else {
+        return (None, None);
+    };
+    let search = millis(searched.saturating_duration_since(started));
+    let rank = ranked.then(|| {
+        millis(
+            worked
+                .unwrap_or(collected)
+                .min(collected)
+                .saturating_duration_since(searched),
+        )
+    });
+    (Some(search), rank)
+}
+
 /// Count one operation, or refuse it: the cap and the deadline both end the
 /// chain, and a refusal marks the brief as cut short.
 fn spend(state: &Mutex<Brief>, deadline: Instant) -> bool {
@@ -1427,6 +1467,9 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
             }),
         }
     }
+    // A code-shaped prompt's candidates are known here; a plain one's were
+    // when its probes answered, and keep that mark.
+    edit(state, mark_searched);
     // The routed kind spends the ops the prefix left on the evidence shape
     // the question asked for.
     run_kind(plan, evidence, state, deadline);
@@ -2590,6 +2633,9 @@ pub(crate) fn declined_record(declined: Declined, prompt: &str) -> Record {
         pack_located: 0,
         fallback: false,
         elapsed_ms: 0,
+        cut: false,
+        deadline_ms: None,
+        stages: Stages::default(),
         route: None,
         daemon: None,
         probes: Vec::new(),
@@ -2789,17 +2835,29 @@ impl Pending {
                 .recv_timeout(self.deadline.saturating_duration_since(Instant::now())),
             Err(mpsc::RecvTimeoutError::Timeout)
         );
+        let collected = Instant::now();
         let mut brief = edit(&self.state, |brief| brief.clone());
         // The window ended before the worker did: what is rendered is what
         // had arrived, and `fit` says so instead of staying silent.
         brief.cut |= timed_out;
+        let (search_ms, rank_ms) = work_stages(
+            self.started,
+            brief.searched_at,
+            brief.worked_at,
+            collected,
+            !brief.silenced,
+        );
+        let render_started = Instant::now();
         let (text, stats) = match fit(&brief) {
             Some((text, stats)) => (Some(text), stats),
             None => (None, AnswerStats::default()),
         };
+        let render_ms = millis(render_started.elapsed());
+        let probe_started = Instant::now();
         let (text, probe_runs) = self.probe_stage(&brief, text);
+        let probe_ms = (!probe_runs.is_empty()).then(|| millis(probe_started.elapsed()));
         let recovered = matches!(brief.admission, Admission::Closed(_)) && text.is_some();
-        let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let elapsed_ms = millis(self.started.elapsed());
         // The daemon start has had the whole brief to launch; a hook about to
         // exit sees it through, for at most the hook bound.
         let daemon = self
@@ -2842,6 +2900,16 @@ impl Pending {
             pack_located: stats.pack_located,
             fallback: stats.fallback,
             elapsed_ms,
+            cut: brief.cut,
+            deadline_ms: Some(millis(
+                self.deadline.saturating_duration_since(self.started),
+            )),
+            stages: Stages {
+                search_ms,
+                rank_ms,
+                render_ms: Some(render_ms),
+                probe_ms,
+            },
             route: brief.route,
             daemon,
             probes: probe_runs,
@@ -3134,6 +3202,7 @@ where
                 context: &context,
             };
             work(&job, open);
+            edit(&worker, |brief| brief.worked_at = Some(Instant::now()));
             let _ = finished.send(());
         })
         .map_err(|_| Declined::NoWorker)?;
@@ -3227,6 +3296,7 @@ where
         deadline,
         &mut settled,
     );
+    edit(state, mark_searched);
     if edit(state, |brief| brief.silenced) {
         return;
     }
@@ -3508,6 +3578,7 @@ fn note(brief: &mut Brief, got: &Gathered) {
 /// End the brief on a refusal that binds: nothing renders.
 fn close(state: &Mutex<Brief>, got: &Gathered, admission: Admission) {
     edit(state, |brief| {
+        mark_searched(brief);
         note(brief, got);
         brief.admission = admission;
         brief.silenced = true;
@@ -7447,6 +7518,111 @@ mod tests {
         );
         assert!(record.elapsed_ms >= 30, "{}", record.elapsed_ms);
         assert!(record.elapsed_ms < 1000, "{}", record.elapsed_ms);
+    }
+
+    #[test]
+    fn a_brief_its_window_cut_should_log_cut_and_the_deadline_it_was_given() {
+        let mut fake = Fake::new();
+        fake.pause = Duration::from_millis(300);
+        fake.files = Ok(found(vec![hit("src/a.ts", 2)]));
+        let started = Instant::now();
+        let record = try_start_with(
+            "callers of `fetchUser`",
+            OPEN,
+            Duration::from_millis(60),
+            move |_| Box::new(fake),
+            no_verdict,
+            model_high,
+            Around::default(),
+        )
+        .expect("the prompt starts a brief")
+        .finish_with_record()
+        .record;
+        assert!(started.elapsed() < Duration::from_millis(250));
+        // Without these two, a brief that lost its evidence to the window
+        // reads like a complete one in the log.
+        assert!(record.cut);
+        assert_eq!(record.deadline_ms, Some(60));
+        // The worker was still in its first search when the window ended.
+        assert_eq!(record.stages.search_ms, None);
+        assert_eq!(record.stages.rank_ms, None);
+        let value = record.to_json();
+        assert_eq!(value["cut"], true);
+        assert_eq!(value["deadline_ms"], 60);
+    }
+
+    #[test]
+    fn a_complete_brief_should_log_each_stage_it_ran_and_no_cut() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.pause = Duration::from_millis(30);
+        let record = briefed(PROSE, fake, no_verdict).record;
+        assert!(!record.cut);
+        assert_eq!(record.deadline_ms, Some(1000));
+        let search = record.stages.search_ms.expect("the probes searched");
+        assert!((30..1000).contains(&search), "{search}");
+        assert!(record.stages.rank_ms.is_some_and(|ms| ms < 1000));
+        assert!(record.stages.render_ms.is_some_and(|ms| ms < 1000));
+        // No probe is configured here: the stage is absent, not zero.
+        assert_eq!(record.stages.probe_ms, None);
+        assert!(
+            search <= record.elapsed_ms,
+            "{search} > {}",
+            record.elapsed_ms
+        );
+    }
+
+    #[test]
+    fn a_brief_the_gate_closes_should_log_its_search_but_no_rank() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        let record = briefed("how does the login flow work", fake, verdict("none")).record;
+        assert_eq!(record.gate, "denied");
+        assert!(record.stages.search_ms.is_some());
+        assert_eq!(record.stages.rank_ms, None);
+    }
+
+    #[test]
+    fn a_declined_prompt_should_log_no_window_and_no_stage() {
+        let record = declined_record(Declined::NotAboutCode, "thanks");
+        assert!(!record.cut);
+        assert_eq!(record.deadline_ms, None);
+        assert_eq!(record.stages, Stages::default());
+    }
+
+    #[test]
+    fn work_stages_should_split_the_worker_time_at_the_search_mark() {
+        let started = Instant::now();
+        let at = |ms| started + Duration::from_millis(ms);
+        // Searched at 40, worker done at 100, collected at 120.
+        assert_eq!(
+            work_stages(started, Some(at(40)), Some(at(100)), at(120), true),
+            (Some(40), Some(60))
+        );
+        // The window cut the worker: ranking ran until the brief was collected.
+        assert_eq!(
+            work_stages(started, Some(at(40)), None, at(120), true),
+            (Some(40), Some(80))
+        );
+        // A worker mark after collection cannot stretch the stage.
+        assert_eq!(
+            work_stages(started, Some(at(40)), Some(at(200)), at(120), true),
+            (Some(40), Some(80))
+        );
+        assert_eq!(
+            work_stages(started, Some(at(40)), Some(at(100)), at(120), false),
+            (Some(40), None)
+        );
+        assert_eq!(
+            work_stages(started, None, Some(at(100)), at(120), true),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn millis_should_count_whole_milliseconds_and_saturate() {
+        assert_eq!(millis(Duration::from_micros(2_999)), 2);
+        assert_eq!(millis(Duration::MAX), u64::MAX);
     }
 
     #[test]

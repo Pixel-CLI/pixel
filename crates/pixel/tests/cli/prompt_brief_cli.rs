@@ -417,6 +417,27 @@ fn the_brief_command_should_print_its_decision_as_json_beside_the_brief() {
 }
 
 #[test]
+fn the_brief_command_json_should_carry_the_window_the_cut_and_the_stage_timings() {
+    let root = indexed("brief-json-stages");
+    let decision = brief_json(&root, RENAME, &[("PIXEL_BRIEF_WINDOW_MS", "900")]);
+    // The fields that tell a brief its window cut from a complete one.
+    assert_eq!(decision["deadline_ms"], 900);
+    assert_eq!(decision["cut"], false);
+    let stages = &decision["stages"];
+    let elapsed = decision["elapsed_ms"].as_u64().unwrap();
+    for stage in ["search_ms", "rank_ms", "render_ms"] {
+        let ms = stages[stage]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{stage}: {stages}"));
+        assert!(ms <= elapsed, "{stage} {ms} > elapsed {elapsed}");
+    }
+    assert_eq!(stages["probe_ms"], Value::Null, "{stages}");
+    let declined = brief_json(&root, "thanks, that looks good", &[]);
+    assert_eq!(declined["deadline_ms"], Value::Null);
+    assert_eq!(declined["stages"]["search_ms"], Value::Null);
+}
+
+#[test]
 fn the_brief_command_should_say_why_a_prompt_got_no_brief() {
     let root = indexed("brief-json-declined");
     let quiet = brief_json(&root, "thanks, that looks good", &[]);

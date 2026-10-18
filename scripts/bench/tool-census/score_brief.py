@@ -920,7 +920,8 @@ def run_brief(info, clone, prompt, timeout=300):
             meta = {"error": (proc.stdout + proc.stderr)[-400:]}
     else:
         text = proc.stdout
-    keep = {k: meta.get(k) for k in ("signal", "gate", "kind", "tier", "score", "confidence", "ops", "answered", "error")
+    keep = {k: meta.get(k) for k in ("signal", "gate", "kind", "tier", "score", "confidence", "ops", "answered", "error",
+                                     "elapsed_ms", "cut", "deadline_ms", "stages")
             if k in meta}
     return text, keep, elapsed, proc.returncode
 
@@ -973,6 +974,35 @@ def mean(values):
     return sum(values) / len(values) if values else None
 
 
+STAGES = ("search_ms", "rank_ms", "render_ms", "probe_ms")
+
+
+def percentile(values, share):
+    """Nearest-rank percentile of ``values`` (``None`` when there are none)."""
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    rank = max(1, -(-len(ordered) * share // 100))
+    return ordered[int(rank) - 1]
+
+
+def latency(rows):
+    """The brief's own timing, read from ``brief --json``: p95 and max ``elapsed_ms``, how often the window cut the
+    packet, and each stage's share of the time. A row whose binary reports no ``elapsed_ms`` is not counted; a stage
+    that did not run is absent from its share, not a zero."""
+    timed = [m for m in (r.get("brief_meta") or {} for r in rows) if isinstance(m.get("elapsed_ms"), int)]
+    elapsed = [m["elapsed_ms"] for m in timed]
+    flagged = [m for m in timed if isinstance(m.get("cut"), bool)]
+    total = sum(elapsed)
+    shares = {}
+    for stage in STAGES:
+        spent = sum((m.get("stages") or {}).get(stage) or 0 for m in timed)
+        shares[stage] = ratio(spent, total) if any((m.get("stages") or {}).get(stage) is not None for m in timed) else None
+    return {"n": len(timed), "p95_ms": percentile(elapsed, 95), "max_ms": max(elapsed) if elapsed else None,
+            "cut": sum(1 for m in flagged if m["cut"]), "cut_rate": ratio(sum(1 for m in flagged if m["cut"]), len(flagged)),
+            "shares": shares}
+
+
 def aggregate(rows):
     """Macro means over sessions plus pooled (micro) line coverage and per-type pools."""
     agg = {"n": len(rows)}
@@ -998,6 +1028,7 @@ def aggregate(rows):
     pool("git", [(r["metrics"]["git"]["items"], r["metrics"]["git"]["covered"], 0) for r in rows])
     pool("list", [(r["metrics"]["list"]["items"], r["metrics"]["list"]["covered"], 0) for r in rows])
     agg["types"] = types
+    agg["latency"] = latency(rows)
     return agg
 
 
@@ -1034,6 +1065,17 @@ def render_markdown(report):
         out.append(f"| {name} | {a['n']} | {a['brief_made']} | {a['bytes']:.0f} | {pct(a['line_cov'])} | "
                    f"{pct(a['inline_cov'])} | {pct(a['region_cov'])} | {pct(a['file_recall'])} | "
                    f"{pct(a['content_file_recall'])} | {pct(a['answer_cov'])} |")
+    out += ["", "## Brief latency (from `brief --json`)", "",
+            "| group | timed | p95 ms | max ms | cut | " + " | ".join(f"{s[:-3]} share" for s in STAGES) + " |",
+            "|---|---:|---:|---:|---:|" + "---:|" * len(STAGES)]
+    for name, group in groups:
+        if not group:
+            continue
+        t = aggregate(group)["latency"]
+        cut = "n/a" if t["cut_rate"] is None else f"{t['cut']} ({pct(t['cut_rate'])})"
+        out.append(f"| {name} | {t['n']} | {t['p95_ms'] if t['p95_ms'] is not None else 'n/a'} | "
+                   f"{t['max_ms'] if t['max_ms'] is not None else 'n/a'} | {cut} | "
+                   + " | ".join(pct(t["shares"][s]) for s in STAGES) + " |")
     out += ["", "## Missed oracle regions by type (pooled over all sessions)", "",
             "| type | oracle items | covered | coverage | quoted inline | sessions with it | sessions >= half covered |",
             "|---|---:|---:|---:|---:|---:|---:|"]
@@ -1172,7 +1214,9 @@ elif a[:2] == ["brief", "--help"]:
 elif a[:1] == ["brief"]:
     prompt = [x for x in a if not x.startswith("-")][-2]
     text = open(__file__ + ".brief").read() if prompt.startswith("full") else ""
-    print(json.dumps({"brief": text, "signal": "weak", "gate": "open" if text else "closed"}))
+    print(json.dumps({"brief": text, "signal": "weak", "gate": "open" if text else "closed", "elapsed_ms": 120,
+                      "cut": False, "deadline_ms": 3000,
+                      "stages": {"search_ms": 60, "rank_ms": 40, "render_ms": 2, "probe_ms": None}}))
 '''
 
 
@@ -1383,6 +1427,23 @@ class SelfTest(unittest.TestCase):
         self.assertIsNone(agg["content_file_recall"])
         self.assertAlmostEqual(agg["pooled_line_cov"], 35 / 40)
 
+    def test_latency_reads_the_brief_json_timing_and_skips_untimed_rows(self):
+        def row(meta):
+            return {"brief_meta": meta}
+        rows = [row({"elapsed_ms": ms, "cut": ms >= 3000,
+                     "stages": {"search_ms": ms // 2, "rank_ms": ms // 4, "render_ms": 1, "probe_ms": None}})
+                for ms in (100, 200, 300, 400, 500, 600, 700, 800, 900, 3000)]
+        rows.append(row({"gate": "open"}))                     # an older binary: no timing, not a zero
+        t = latency(rows)
+        self.assertEqual(t["n"], 10)
+        self.assertEqual(t["p95_ms"], 3000)
+        self.assertEqual(t["max_ms"], 3000)
+        self.assertEqual((t["cut"], t["cut_rate"]), (1, 0.1))
+        self.assertAlmostEqual(t["shares"]["search_ms"], 3750 / 7500)
+        self.assertIsNone(t["shares"]["probe_ms"])
+        self.assertEqual(percentile([5, 1, 3], 50), 3)
+        self.assertIsNone(latency([row({})])["p95_ms"])
+
     # -- the CLI end to end with a fake binary, a fake census.db and a fake clone cache
     def test_cli_end_to_end(self):
         root = Path(self.tmp.name) / "census"
@@ -1421,6 +1482,8 @@ class SelfTest(unittest.TestCase):
         md = (root / "score" / "runs" / "fake" / "report.md").read_text()
         self.assertIn("| fx-1 | lookup | answer |", md)
         self.assertIn("## Missed oracle regions by type", md)
+        self.assertEqual(report["means"]["all"]["latency"]["p95_ms"], 120)
+        self.assertIn("| all | 2 | 120 | 120 | 0 (0%) | 50% | 33% | 2% | n/a |", md)
         self.assertIn("fx-1", render_compare([report, report], ["a", "b"]))
         # a second run reuses the indexed clone (the .ready marker) and only-filters
         code = main(["--root", str(root), "--census-db", str(root / "census.db"), "--bin", str(binary),

@@ -1,0 +1,1 @@
+**brief:** The decision log and `pixel brief --json` now say whether a brief was cut short (`cut`), the window it was given (`deadline_ms`) and where its time went (`stages`: search, rank, render, probes; `null` when a stage did not run). `score_brief.py` reports p95/max latency, cut rate and stage shares beside oracle coverage.
