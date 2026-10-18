@@ -3541,12 +3541,20 @@ fn admitted_by_kind(kind: QuestionKind, scored: Option<&relevance::Verdict>) -> 
     }
 }
 
+/// Keywords one file must hold, at least, for the coverage floor to overrule
+/// an off-topic score. Two was the walkthrough's bar, and two words a
+/// repository uses (`replay` and `fini`, `merge` and `PRs`) are what a
+/// status question or a steer of the agent shares with it: on the #1222
+/// replay, three words refused 11 `other` prompts against 1 follow-up on the
+/// reference window and 6 against 1 on a window held out from it.
+const COVERAGE_MIN_SHARED: usize = 3;
+
 /// A prompt the model read as off topic is still about the repository when
-/// one structural co-file holds half or more of its informative keywords:
-/// the words name something the codebase knows by name or symbol — the bar
-/// a walkthrough already passes, made of coverage on top of it.
+/// one structural co-file holds half or more of its informative keywords,
+/// and at least [`COVERAGE_MIN_SHARED`] of them: the words name something
+/// the codebase knows by name or symbol.
 fn admitted_by_coverage(scored: &relevance::Verdict) -> bool {
-    scored.features.shared >= FLOW_MIN_SHARED
+    scored.features.shared >= COVERAGE_MIN_SHARED
         && scored.features.shared * 2 >= scored.features.informative
         && scored.features.structural_files > 0
 }
@@ -8027,10 +8035,17 @@ mod tests {
         // admission without a pack would print nothing.
         let plan = Plan::from_typed(WALK, false, None);
         let state = Mutex::new(Brief::default());
-        let got = off_covered(2, 4, 4);
+        let got = off_covered(3, 6, 4);
         fold(&state, &plan, &got);
         let brief = edit(&state, |brief| brief.clone());
         assert_eq!(brief.admission, Admission::Open);
+        assert!(!brief.silenced);
+        // Two shared words are below the coverage floor: the walkthrough's
+        // own bar still admits it, by its kind.
+        let state = Mutex::new(Brief::default());
+        fold(&state, &plan, &off_covered(2, 4, 4));
+        let brief = edit(&state, |brief| brief.clone());
+        assert_eq!(brief.admission, Admission::Kind(QuestionKind::Flow));
         assert!(!brief.silenced);
     }
 
@@ -9574,9 +9589,19 @@ mod tests {
                 );
                 // The boundary is inclusive: exactly half the words covers.
                 assert_eq!(
-                    refusal(signal, &off_covered(2, 4, 4), true, true, kind),
+                    refusal(signal, &off_covered(3, 6, 4), true, true, kind),
                     None,
                     "{signal:?} {kind:?}"
+                );
+                // Two shared words, even all of them, are what a status
+                // question shares with a repository ("le replay a fini ?").
+                assert!(
+                    refusal(signal, &off_covered(2, 2, 4), true, true, kind).is_some(),
+                    "{signal:?} {kind:?}: two shared words are not coverage"
+                );
+                assert!(
+                    refusal(signal, &off_covered(2, 4, 4), true, true, kind).is_some(),
+                    "{signal:?} {kind:?}: two shared words are not coverage"
                 );
                 // The same coverage with no structural footing stays closed.
                 assert!(
