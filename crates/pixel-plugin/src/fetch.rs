@@ -3,7 +3,8 @@
 
 //! The prebuilt binary of a `github:` plugin: a release asset named
 //! `pixel-<name>-<target-triple>`, downloaded with `curl` (as `install.sh`
-//! does) and checked against `<asset>.sha256` when the release publishes one.
+//! does) and checked against `<asset>.sha256`. A release that publishes no
+//! digest is refused unless the caller passes [`Unverified::Allow`].
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -30,6 +31,18 @@ pub struct Downloaded {
     pub url: String,
     /// Whether a published `.sha256` matched the bytes.
     pub verified: bool,
+    /// The sha256 of the installed bytes, lowercase hex, published or not.
+    pub sha256: String,
+}
+
+/// Whether a release asset with no published `.sha256` may be installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Unverified {
+    /// Refuse it: nothing pins the bytes that will run (the default).
+    #[default]
+    Refuse,
+    /// Install it anyway, reported as unverified (`--allow-unverified`).
+    Allow,
 }
 
 /// The target triple of the release assets for the machine running pixel,
@@ -64,15 +77,21 @@ pub fn parse_sha256(text: &str) -> Option<String> {
 }
 
 /// Download `url` to `dest`, mark it executable and check it against
-/// `<url>.sha256` when that exists. The bytes land beside `dest` first and
-/// replace it only once checked, so a mismatch or a failed download leaves
-/// `dest` as it was: absent, or the program the repository shipped.
-pub fn download_program(url: &str, dest: &Path, allow_file: bool) -> Result<Downloaded, String> {
+/// `<url>.sha256`; without that file the download is refused unless
+/// `unverified` allows it. The bytes land beside `dest` first and replace it
+/// only once checked, so a mismatch, a missing digest or a failed download
+/// leaves `dest` as it was: absent, or the program the repository shipped.
+pub fn download_program(
+    url: &str,
+    dest: &Path,
+    allow_file: bool,
+    unverified: Unverified,
+) -> Result<Downloaded, String> {
     let Some(name) = dest.file_name() else {
         return Err(format!("{} names no file", dest.display()));
     };
     let partial = dest.with_file_name(format!(".{}.download", name.to_string_lossy()));
-    let result = download_checked(url, &partial, allow_file).and_then(|downloaded| {
+    let result = download_checked(url, &partial, allow_file, unverified).and_then(|downloaded| {
         std::fs::rename(&partial, dest)
             .map(|()| downloaded)
             .map_err(|e| format!("cannot install {}: {e}", dest.display()))
@@ -83,27 +102,35 @@ pub fn download_program(url: &str, dest: &Path, allow_file: bool) -> Result<Down
     result
 }
 
-fn download_checked(url: &str, dest: &Path, allow_file: bool) -> Result<Downloaded, String> {
+fn download_checked(
+    url: &str,
+    dest: &Path,
+    allow_file: bool,
+    unverified: Unverified,
+) -> Result<Downloaded, String> {
     curl(url, dest, allow_file).map_err(|e| format!("cannot download {url}: {}", e.message))?;
     let checksum = checksum_of(&format!("{url}.sha256"), allow_file)?;
+    let bytes = std::fs::read(dest).map_err(|e| format!("cannot read {}: {e}", dest.display()))?;
+    let actual = hex(&Sha256::digest(&bytes));
     let verified = match checksum {
-        None => false,
-        Some(expected) => {
-            let bytes =
-                std::fs::read(dest).map_err(|e| format!("cannot read {}: {e}", dest.display()))?;
-            let actual = hex(&Sha256::digest(&bytes));
-            if actual != expected {
-                return Err(format!(
-                    "{url} does not match its published sha256 (expected {expected}, got {actual})"
-                ));
-            }
-            true
+        None if unverified == Unverified::Refuse => {
+            return Err(format!(
+                "{url}.sha256 is not published, so the download cannot be verified (sha256 {actual}); pass --allow-unverified to install it anyway"
+            ));
         }
+        None => false,
+        Some(expected) if actual != expected => {
+            return Err(format!(
+                "{url} does not match its published sha256 (expected {expected}, got {actual})"
+            ));
+        }
+        Some(_) => true,
     };
     set_executable(dest)?;
     Ok(Downloaded {
         url: url.to_owned(),
         verified,
+        sha256: actual,
     })
 }
 
@@ -285,18 +312,41 @@ mod tests {
     }
 
     #[test]
-    fn a_local_file_downloads_executable_and_unverified_without_a_digest() {
+    fn download_should_refuse_when_the_release_publishes_no_digest() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("asset");
         fs::write(&src, "#!/bin/sh\n").unwrap();
         let dest = dir.path().join("out");
         let url = format!("file://{}", src.display());
-        let got = download_program(&url, &dest, true).unwrap();
+        let err = download_program(&url, &dest, true, Unverified::Refuse).unwrap_err();
+        let digest = hex(&Sha256::digest(b"#!/bin/sh\n"));
+        assert_eq!(
+            err,
+            format!(
+                "{url}.sha256 is not published, so the download cannot be verified (sha256 {digest}); pass --allow-unverified to install it anyway"
+            )
+        );
+        assert!(!dest.exists(), "an unverifiable download is not installed");
+        assert!(
+            !dir.path().join(".out.download").exists(),
+            "nor left beside it"
+        );
+    }
+
+    #[test]
+    fn download_should_install_unverified_when_allowed_and_no_digest_is_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("asset");
+        fs::write(&src, "#!/bin/sh\n").unwrap();
+        let dest = dir.path().join("out");
+        let url = format!("file://{}", src.display());
+        let got = download_program(&url, &dest, true, Unverified::Allow).unwrap();
         assert_eq!(
             got,
             Downloaded {
                 url,
-                verified: false
+                verified: false,
+                sha256: hex(&Sha256::digest(b"#!/bin/sh\n")),
             }
         );
         assert_eq!(fs::read_to_string(&dest).unwrap(), "#!/bin/sh\n");
@@ -315,16 +365,23 @@ mod tests {
         fs::write(dir.path().join("asset.sha256"), format!("{good}  asset\n")).unwrap();
         let url = format!("file://{}", src.display());
         let dest = dir.path().join("out");
-        assert!(download_program(&url, &dest, true).unwrap().verified);
+        assert_eq!(
+            download_program(&url, &dest, true, Unverified::Refuse).unwrap(),
+            Downloaded {
+                url: url.clone(),
+                verified: true,
+                sha256: good,
+            }
+        );
 
         fs::remove_file(&dest).unwrap();
         fs::write(dir.path().join("asset.sha256"), "00".repeat(32)).unwrap();
-        let err = download_program(&url, &dest, true).unwrap_err();
+        let err = download_program(&url, &dest, true, Unverified::Allow).unwrap_err();
         assert!(err.contains("does not match its published sha256"), "{err}");
         assert!(!dest.exists(), "a rejected download is removed");
 
         fs::write(dir.path().join("asset.sha256"), "not a digest").unwrap();
-        let err = download_program(&url, &dest, true).unwrap_err();
+        let err = download_program(&url, &dest, true, Unverified::Allow).unwrap_err();
         assert!(err.contains("does not hold a sha256 digest"), "{err}");
         assert!(!dest.exists());
     }
@@ -334,7 +391,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let url = format!("file://{}/nope", dir.path().display());
         let dest = dir.path().join("out");
-        let err = download_program(&url, &dest, true).unwrap_err();
+        let err = download_program(&url, &dest, true, Unverified::Allow).unwrap_err();
         assert!(err.starts_with(&format!("cannot download {url}")), "{err}");
         assert!(!dest.exists());
     }
@@ -346,7 +403,7 @@ mod tests {
         fs::write(&src, "x").unwrap();
         let dest = dir.path().join("out");
         let url = format!("file://{}", src.display());
-        assert!(download_program(&url, &dest, false).is_err());
+        assert!(download_program(&url, &dest, false, Unverified::Allow).is_err());
         assert!(!dest.exists());
     }
 

@@ -418,12 +418,14 @@ install <source>` and `pixel uninstall <name>` add and remove them and
   The program `run` names is downloaded from the repository's release by
   `curl` restricted to `https` (redirects included), capped at 256 MiB and
   300 s, into the plugin directory only (no symlink on the path is followed),
-  made executable and compared with `<asset>.sha256` when the release
-  publishes one, all in a file beside `run`; only a checked download replaces
-  the file the repository ships there, and a mismatch removes the download,
-  keeping the shipped file or, without one, leaving the plugin not runnable.
-  The asset and the shipped file have one publisher, the repository. A
-  release without a digest is installed unverified and says so.
+  made executable and compared with `<asset>.sha256`, all in a file beside
+  `run`; only a checked download replaces the file the repository ships
+  there, and a mismatch or a missing digest removes the download, keeping the
+  shipped file or, without one, leaving the plugin not runnable. The asset
+  and the shipped file have one publisher, the repository. A release without
+  a digest is refused unless the user passes `--allow-unverified`; the
+  install then prints `UNVERIFIED` with the bytes' sha256, and `--json`
+  reports `verified: false` beside the URL and digest.
 - **PATH lookup skips empty entries**, which a shell reads as the working
   directory, so a file in the repository is not found as `pixel-<name>`.
 - **Environment.** A plugin receives `PIXEL_API`, `PIXEL_REPO_ROOT`,
@@ -934,8 +936,8 @@ retention remain those described below.
   `pixel-plan-rollback` (`--apply` rewrites files) earlier on `PATH`, in
   `~/.pixel/plugins/` or in a trusted repo plugin is what `pixel squash-branch`
   runs. They are installed with `pixel install github:Pixel-CLI/<repo>` (a
-  release asset checked against its `.sha256` when one is published, else
-  `cargo install`), so the reviewer of that install is the user.
+  release asset checked against its `.sha256`, refused without one unless
+  `--allow-unverified` is passed, else `cargo install`), so the reviewer of that install is the user.
 
 ### Summary
 

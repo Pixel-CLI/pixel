@@ -86,10 +86,16 @@ pub fn available() -> pixel_plugin::Available {
 pub fn install(
     source: &str,
     name: Option<&str>,
+    unverified: pixel_plugin::Unverified,
+    json: bool,
     owned_exit: &std::cell::Cell<Option<i32>>,
 ) -> Result<(), String> {
     let host = host()?;
-    match pixel_plugin::add(&host, source, name) {
+    match pixel_plugin::add_with(&host, source, name, unverified) {
+        Ok(added) if json => {
+            println!("{}", installed_json(&added));
+            Ok(())
+        }
         Ok(added) => {
             print!("{}", render_installed(&added));
             Ok(())
@@ -115,9 +121,12 @@ fn render_installed(added: &pixel_plugin::Added) -> String {
         Binary::Present => {}
         Binary::Downloaded(got) => {
             let checked = if got.verified {
-                "sha256 verified"
+                format!("sha256 {} verified", got.sha256)
             } else {
-                "no .sha256 published: checksum not verified"
+                format!(
+                    "UNVERIFIED: no .sha256 published, installed by --allow-unverified; sha256 {}",
+                    got.sha256
+                )
             };
             out.push_str(&format!("downloaded {} ({checked})\n", got.url));
         }
@@ -156,6 +165,48 @@ fn render_installed(added: &pixel_plugin::Added) -> String {
         ));
     }
     out
+}
+
+/// What `pixel install --json` prints: the plugin, and how its program got
+/// there (`binary.kind`), with the downloaded asset's URL, sha256 and whether
+/// a published digest verified it.
+fn installed_json(added: &pixel_plugin::Added) -> serde_json::Value {
+    let binary = match &added.binary {
+        Binary::Present => serde_json::json!({ "kind": "present" }),
+        Binary::Downloaded(got) => serde_json::json!({
+            "kind": "downloaded",
+            "url": got.url,
+            "sha256": got.sha256,
+            "verified": got.verified,
+        }),
+        Binary::Shipped {
+            git_url,
+            reference,
+            download_error,
+        } => serde_json::json!({
+            "kind": "shipped",
+            "git_url": git_url,
+            "reference": reference,
+            "download_error": download_error,
+        }),
+        Binary::Missing {
+            git_url,
+            reference,
+            download_error,
+        } => serde_json::json!({
+            "kind": "missing",
+            "git_url": git_url,
+            "reference": reference,
+            "download_error": download_error,
+        }),
+    };
+    serde_json::json!({
+        "name": added.name,
+        "version": added.manifest.version,
+        "dir": added.dir.to_string_lossy(),
+        "network": added.manifest.network,
+        "binary": binary,
+    })
 }
 
 /// `pixel uninstall <plugin>`.
@@ -550,23 +601,26 @@ mod tests {
             "installed plugin tool 1.4.2 in /h/.pixel/plugins/tool\n"
         );
         let url = "https://github.com/acme/tool/releases/latest/download/pixel-tool-x".to_owned();
+        let digest = "ab".repeat(32);
         let verified = Binary::Downloaded(pixel_plugin::Downloaded {
             url: url.clone(),
             verified: true,
+            sha256: digest.clone(),
         });
         assert_eq!(
             render_installed(&installed(dir, "tool", verified)),
             format!(
-                "installed plugin tool 1.4.2 in /h/.pixel/plugins/tool\ndownloaded {url} (sha256 verified)\n"
+                "installed plugin tool 1.4.2 in /h/.pixel/plugins/tool\ndownloaded {url} (sha256 {digest} verified)\n"
             )
         );
         let unverified = Binary::Downloaded(pixel_plugin::Downloaded {
             url: url.clone(),
             verified: false,
+            sha256: digest.clone(),
         });
         assert!(
             render_installed(&installed(dir, "tool", unverified)).ends_with(&format!(
-                "downloaded {url} (no .sha256 published: checksum not verified)\n"
+                "downloaded {url} (UNVERIFIED: no .sha256 published, installed by --allow-unverified; sha256 {digest})\n"
             ))
         );
         let missing = Binary::Missing {
@@ -582,6 +636,50 @@ mod tests {
         assert!(
             text.contains("build it with: cargo install --git https://github.com/acme/tool.git --rev v2 --root /h/.pixel/plugins/tool\n"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn install_json_should_report_the_asset_url_digest_and_verification() {
+        let dir = Path::new("/h/.pixel/plugins");
+        let url = "https://github.com/acme/tool/releases/latest/download/pixel-tool-x";
+        let unverified = Binary::Downloaded(pixel_plugin::Downloaded {
+            url: url.to_owned(),
+            verified: false,
+            sha256: "cd".repeat(32),
+        });
+        assert_eq!(
+            installed_json(&installed(dir, "tool", unverified)),
+            serde_json::json!({
+                "name": "tool",
+                "version": "1.4.2",
+                "dir": "/h/.pixel/plugins/tool",
+                "network": false,
+                "binary": {
+                    "kind": "downloaded",
+                    "url": url,
+                    "sha256": "cd".repeat(32),
+                    "verified": false,
+                },
+            })
+        );
+        let missing = Binary::Missing {
+            git_url: "https://github.com/acme/tool.git".to_owned(),
+            reference: None,
+            download_error: "no digest".to_owned(),
+        };
+        assert_eq!(
+            installed_json(&installed(dir, "tool", missing))["binary"],
+            serde_json::json!({
+                "kind": "missing",
+                "git_url": "https://github.com/acme/tool.git",
+                "reference": null,
+                "download_error": "no digest",
+            })
+        );
+        assert_eq!(
+            installed_json(&installed(dir, "tool", Binary::Present))["binary"],
+            serde_json::json!({ "kind": "present" })
         );
     }
 

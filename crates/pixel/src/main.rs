@@ -880,6 +880,14 @@ enum Command {
         /// The plugin to install, when the source holds several.
         #[arg(long)]
         name: Option<String>,
+        /// Install a `github:` release asset even when its release publishes
+        /// no `.sha256` to check it against (reported as unverified).
+        #[arg(long)]
+        allow_unverified: bool,
+        /// Print what was installed as JSON (the downloaded asset's URL,
+        /// sha256 and whether a published digest verified it).
+        #[arg(long)]
+        json: bool,
     },
     /// Delete an installed plugin and forget its source and network opt-in.
     Uninstall {
@@ -5200,8 +5208,18 @@ fn run_command(
                 }
             }
         }
-        Command::Install { source, name } => {
-            plugin_cmd::install(&source, name.as_deref(), owned_exit)
+        Command::Install {
+            source,
+            name,
+            allow_unverified,
+            json,
+        } => {
+            let unverified = if allow_unverified {
+                pixel_plugin::Unverified::Allow
+            } else {
+                pixel_plugin::Unverified::Refuse
+            };
+            plugin_cmd::install(&source, name.as_deref(), unverified, json, owned_exit)
         }
         Command::Uninstall { name } => plugin_cmd::uninstall(&name),
         Command::CheckRelease {

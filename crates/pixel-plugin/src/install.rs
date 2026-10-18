@@ -13,7 +13,7 @@ use pixel_git::{GitOptions, GitRunner};
 use crate::Error;
 use crate::directory::Directory;
 use crate::discover::{Found, Host, contained_program, find_in};
-use crate::fetch::{self, Downloaded};
+use crate::fetch::{self, Downloaded, Unverified};
 use crate::hash::dir_digest;
 use crate::manifest::{self, MANIFEST_FILE, Manifest};
 use crate::source::{GITHUB_PREFIX, GitHubSource, NPM_PREFIX, NPM_UNSUPPORTED};
@@ -111,8 +111,20 @@ pub fn redact_source(source: &str) -> String {
 /// launcher that finds a separately built program, say). Without one, a
 /// shipped program stays ([`Binary::Shipped`]) and an absent one leaves the
 /// plugin installed but not runnable ([`Binary::Missing`]); both say how to
-/// build it.
+/// build it. A release asset with no published `.sha256` is not used: see
+/// [`add_with`] to accept one.
 pub fn add(host: &Host, source: &str, name: Option<&str>) -> Result<Added, Error> {
+    add_with(host, source, name, Unverified::Refuse)
+}
+
+/// [`add`], with `unverified` deciding whether a release asset whose release
+/// publishes no `.sha256` may still become the plugin's program.
+pub fn add_with(
+    host: &Host,
+    source: &str,
+    name: Option<&str>,
+    unverified: Unverified,
+) -> Result<Added, Error> {
     if let Some(name) = name
         && !manifest::valid_name(name)
     {
@@ -171,7 +183,7 @@ pub fn add(host: &Host, source: &str, name: Option<&str>) -> Result<Added, Error
     let staged = staging.path().join(&manifest.name);
     copy_tree(&from, &staged)?;
     let binary = match &github {
-        Some(github) => fetch_program(host, github, &staged, &manifest),
+        Some(github) => fetch_program(host, github, &staged, &manifest, unverified),
         None => Binary::Present,
     };
     std::fs::rename(&staged, &dest)
@@ -261,8 +273,14 @@ fn program_is_absent(dir: &Path, manifest: &Manifest) -> bool {
 
 /// Put the release asset of `manifest` at `<staged>/<run>`, or say why not
 /// and what the plugin runs instead.
-fn fetch_program(host: &Host, github: &GitHubSource, staged: &Path, manifest: &Manifest) -> Binary {
-    let download_error = match fetch_asset(host, github, staged, manifest) {
+fn fetch_program(
+    host: &Host,
+    github: &GitHubSource,
+    staged: &Path,
+    manifest: &Manifest,
+    unverified: Unverified,
+) -> Binary {
+    let download_error = match fetch_asset(host, github, staged, manifest, unverified) {
         Ok(downloaded) => return Binary::Downloaded(downloaded),
         Err(reason) => reason,
     };
@@ -288,6 +306,7 @@ fn fetch_asset(
     github: &GitHubSource,
     staged: &Path,
     manifest: &Manifest,
+    unverified: Unverified,
 ) -> Result<Downloaded, String> {
     let target = fetch::release_target()
         .ok_or_else(|| "no release asset is published for this platform".to_owned())?;
@@ -299,7 +318,7 @@ fn fetch_asset(
         .ok_or_else(|| format!("`run` = \"{}\" names no file", manifest.run))?;
     let dest = parent.join(file_name);
     let allow_file = host.github_base().starts_with("file://");
-    let downloaded = fetch::download_program(&url, &dest, allow_file)?;
+    let downloaded = fetch::download_program(&url, &dest, allow_file, unverified)?;
     contained_program(staged, manifest).map_err(|e| {
         let _ = std::fs::remove_file(&dest);
         e.to_string()
@@ -1228,16 +1247,37 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_ref_downloads_from_that_tags_release_without_a_digest() {
+    fn add_should_leave_the_program_unbuilt_when_the_release_publishes_no_digest() {
+        let mut f = fixture();
+        let base = github_base(&mut f, "acme", "tool", unbuilt);
+        publish_asset(&base, "download/v1", "tool", b"#!/bin/sh\n");
+        let added = add(&f.host, "github:acme/tool@v1", None).unwrap();
+        let Binary::Missing { download_error, .. } = &added.binary else {
+            panic!("expected the build hint: {:?}", added.binary);
+        };
+        assert!(
+            download_error.contains(".sha256 is not published")
+                && download_error.ends_with("pass --allow-unverified to install it anyway"),
+            "{download_error}"
+        );
+        assert!(
+            !added.dir.join("bin/tool").exists(),
+            "the unverifiable file is not installed"
+        );
+    }
+
+    #[test]
+    fn add_with_allow_should_install_a_pinned_release_asset_without_a_digest() {
         let mut f = fixture();
         let base = github_base(&mut f, "acme", "tool", unbuilt);
         publish_asset(&base, "download/v1", "tool", b"#!/bin/sh\n");
         publish_asset(&base, "latest/download", "tool", b"newest");
-        let added = add(&f.host, "github:acme/tool@v1", None).unwrap();
+        let added = add_with(&f.host, "github:acme/tool@v1", None, Unverified::Allow).unwrap();
         let Binary::Downloaded(got) = &added.binary else {
             panic!("expected a download: {:?}", added.binary);
         };
         assert!(!got.verified, "no .sha256 was published");
+        assert_eq!(got.sha256, hex(&Sha256::digest(b"#!/bin/sh\n")));
         assert!(got.url.contains("/releases/download/v1/"), "{}", got.url);
         assert_eq!(
             fs::read_to_string(added.dir.join("bin/tool")).unwrap(),
@@ -1305,7 +1345,12 @@ mod tests {
     fn a_release_asset_replaces_the_launcher_the_repository_ships() {
         let mut f = fixture();
         let base = github_base(&mut f, "acme", "tool", launcher);
-        publish_asset(&base, "latest/download", "tool", b"#!/bin/sh\necho built\n");
+        let asset = publish_asset(&base, "latest/download", "tool", b"#!/bin/sh\necho built\n");
+        fs::write(
+            format!("{}.sha256", asset.display()),
+            hex(&Sha256::digest(b"#!/bin/sh\necho built\n")),
+        )
+        .unwrap();
         let added = add(&f.host, "github:acme/tool", None).unwrap();
         assert!(
             matches!(added.binary, Binary::Downloaded(_)),
