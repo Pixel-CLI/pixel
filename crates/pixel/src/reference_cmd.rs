@@ -286,7 +286,7 @@ pub fn setup(root: &Path) -> Result<(Value, usize), String> {
                 if let Err(e) = verify_corpus(root, entry) {
                     failures.push(json!({
                         "id": entry.id,
-                        "repo": entry.repo,
+                        "repo": pixel_plugin::redact_source(&entry.repo),
                         "revision": entry.revision,
                         "source": dest.display().to_string(),
                         "role": entry.role.as_str(),
@@ -296,7 +296,7 @@ pub fn setup(root: &Path) -> Result<(Value, usize), String> {
                 } else {
                     results.push(json!({
                         "id": entry.id,
-                        "repo": entry.repo,
+                        "repo": pixel_plugin::redact_source(&entry.repo),
                         "revision": entry.revision,
                         "resolved": head,
                         "source": dest.display().to_string(),
@@ -308,7 +308,7 @@ pub fn setup(root: &Path) -> Result<(Value, usize), String> {
             Err(e) => {
                 failures.push(json!({
                     "id": entry.id,
-                    "repo": entry.repo,
+                    "repo": pixel_plugin::redact_source(&entry.repo),
                     "revision": entry.revision,
                     "source": dest.display().to_string(),
                     "role": entry.role.as_str(),
@@ -358,7 +358,7 @@ pub fn query(root: &Path, filter: Option<&str>) -> Result<Value, String> {
         if !dest.join(".git").is_dir() {
             disclosures.push(json!({
                 "id": entry.id,
-                "repo": entry.repo,
+                "repo": pixel_plugin::redact_source(&entry.repo),
                 "revision": entry.revision,
                 "source": dest.display().to_string(),
                 "role": role_str,
@@ -375,7 +375,7 @@ pub fn query(root: &Path, filter: Option<&str>) -> Result<Value, String> {
                 if revision_matches(&runner, &entry.revision, &head) {
                     results.push(json!({
                         "id": entry.id,
-                        "repo": entry.repo,
+                        "repo": pixel_plugin::redact_source(&entry.repo),
                         "revision": entry.revision,
                         "resolved": head,
                         "source": dest.display().to_string(),
@@ -387,7 +387,7 @@ pub fn query(root: &Path, filter: Option<&str>) -> Result<Value, String> {
                 } else {
                     disclosures.push(json!({
                         "id": entry.id,
-                        "repo": entry.repo,
+                        "repo": pixel_plugin::redact_source(&entry.repo),
                         "revision": entry.revision,
                         "source": dest.display().to_string(),
                         "role": role_str,
@@ -402,7 +402,7 @@ pub fn query(root: &Path, filter: Option<&str>) -> Result<Value, String> {
             None => {
                 disclosures.push(json!({
                     "id": entry.id,
-                    "repo": entry.repo,
+                    "repo": pixel_plugin::redact_source(&entry.repo),
                     "revision": entry.revision,
                     "source": dest.display().to_string(),
                     "role": role_str,
@@ -503,7 +503,7 @@ fn list_value(manifest: &ReferenceManifest) -> Value {
         "entries": manifest.entries.iter().map(|e| {
             json!({
                 "id": e.id,
-                "repo": e.repo,
+                "repo": pixel_plugin::redact_source(&e.repo),
                 "revision": e.revision,
                 "source": e.source.display().to_string(),
                 "licence": e.licence,
@@ -531,7 +531,7 @@ pub fn list(root: &Path, json: bool) -> Result<(), String> {
             println!(
                 "{} {} {} {} ({})",
                 e.id,
-                e.repo,
+                pixel_plugin::redact_source(&e.repo),
                 e.revision,
                 e.source.display(),
                 e.role.as_str()

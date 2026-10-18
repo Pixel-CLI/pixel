@@ -228,7 +228,10 @@ repository's own configuration and hooks.
 
 `pixel reference setup` clones or fetches each corpus named in
 `.pixel/reference.json` under `.pixel/references/`: the repository URL is
-passed after `--` to `git clone`, the pinned revision is validated by
+kept verbatim in the manifest (a private corpus needs its credential) but
+shown without its userinfo by `reference list`, `query` and the `setup`
+report, in the action log and in git errors; it is passed after `--` to
+`git clone`, the pinned revision is validated by
 `validate_ref` before it reaches `git fetch`/`git checkout`, and the fetched
 commit is checked out detached — so a pin is never left on a stale local
 branch and a fetched revision is used as the object, not re-resolved from a
@@ -553,7 +556,10 @@ boundary it crosses.
   `.pixel/` are opened with `O_NOFOLLOW` or created fresh and renamed into
   place, permissions are set on the open descriptor, and the SQLite databases
   open with `SQLITE_OPEN_NOFOLLOW` (`pixel_git::nofollow`), so nothing is
-  written, truncated or chmodded through a link. A path read from a shard or
+  written, truncated or chmodded through a link. `pixel config metrics on|off`
+  (the repository layer) refuses a `.pixel` that is a link or not a directory
+  and a `config.yaml` that is a link, without the tracked-files check, since a
+  repository may commit its `config.yaml`. A path read from a shard or
   the graph is used only when it is a plain relative path whose directory
   resolves inside the repository (`pixel_git::repo_path::confine`), and the
   credential filter covers `credentials`, `.netrc` and `.git-credentials`.
@@ -762,7 +768,8 @@ retention remain those described below.
   argv unredacted (the sink keeps the whole output of every failed `sniper
   run`, structured RSpec/RuboCop/Minitest runs included, for 7 days and
   at most 200 outputs); `logged_args` masks only `config remote-key` values,
-  `auth_url` and a plugin source's credentials, which also covers a plugin run
+  `auth_url` and the URL credentials of a plugin source or a `reference`
+  repository, which also covers a plugin run
   (`pixel flow … --var auth_url=…` is logged with the value redacted; any other
   `--var` value is logged as typed). The brief log masks key shapes and URL credentials,
   not a secret typed as ordinary words, which stays in that 0600 file until
@@ -967,7 +974,7 @@ retention remain those described below.
 | Hook payload cap and wait | `hook_input::read_within` | the `bounded_read_*` and `timed_read_*` tests in `hook_input.rs`; `hook_guarantees_cli.rs` (exit 0 and one JSON line over hostile payloads, broken state, argument errors, a stdin left open) |
 | Prompt-submit intent judge | `execution_brief::intent::judge` | subprocess JSON, empty stdout and invalid UTF-8 fallback tests in `intent.rs` |
 | Typed prompts in the brief log | `decision_log::{logged_typed, mask_keys, append}` | `logged_typed_should_mask_a_credential_and_cut_at_the_bound`, `logged_typed_should_keep_only_the_last_paragraph_of_a_pasted_log`, `mask_keys_should_hide_a_prefixed_key_and_a_long_run_and_keep_prose`, `append_should_be_owner_only_and_not_create_a_missing_directory`, `append_should_refuse_a_link_at_the_log_and_leave_its_target_alone`, `append_should_refuse_a_linked_directory_and_write_nothing_through_it` (`decision_log.rs`), `the_decision_log_should_stay_off_when_pixel_brief_log_says_so` (`prompt_brief_cli.rs`) |
-| Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask`, `a_plugin_source_url_is_logged_without_its_credentials` (`main.rs`) |
+| Secrets in the action log | `logged_args`, `GitError`'s `Display` (`pixel_git::redact`) | `only_the_remote_key_command_starts_the_mask`, `a_plugin_source_url_is_logged_without_its_credentials`, `logged_args_should_mask_the_credentials_of_a_reference_url` (`main.rs`), `display_should_mask_a_credentialed_url_in_every_args_variant` (`pixel-git`), `a_credentialed_reference_url_reaches_no_log_or_report` (CLI) |
 | Repo plugin trust | `pixel_plugin::resolve`, `dir_digest`, `contained_program` | `a_repo_plugin_is_refused_until_trusted_and_again_after_an_edit`, `every_kind_of_change_moves_the_digest`, `a_run_that_escapes_through_a_symlink_is_refused` (`pixel-plugin`); `plugin_cli.rs` |
 | Plugin copies | `pixel_plugin::add` (`copy_tree`, `copy_file`) | `add_refuses_a_fifo_in_the_source_instead_of_waiting_on_it`, `add_copies_a_link_as_a_link_and_never_what_it_points_at`, `a_file_copies_with_its_mode_and_never_past_the_size_listed` (`install.rs`) |
 | Plugin manifest reads | `pixel_plugin::manifest::load`, `file::open_regular` | `a_manifest_reached_through_a_link_is_refused_and_not_read`, `a_manifest_is_read_up_to_the_bound_and_refused_past_it` (`manifest.rs`), `a_repo_probe_whose_manifest_is_a_link_is_skipped_and_the_others_still_run` (`probe.rs`), `a_manifest_that_is_a_link_is_refused_by_name_and_listed_beside_the_others` (`discover.rs`), `a_fifo_is_refused_without_waiting_for_a_writer` (`file.rs`) |

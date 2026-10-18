@@ -1,0 +1,1 @@
+**reference:** A repository URL with credentials (`https://user:token@…`) no longer reaches `.pixel/actions.jsonl`, stderr or the `reference list`/`query`/`setup` output in clear: its userinfo is masked there and in every git error message, token-only URLs included. The manifest keeps the URL for `setup`.
