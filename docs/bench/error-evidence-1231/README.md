@@ -1,6 +1,9 @@
 # Error-origin evidence qualification — #1231, 2026-10-19
 
-Verdict: improved evidence, with a measured coverage gain and one regression.
+Historical pre-review result. See the [critical review and corrected candidate](review/README.md)
+for the current conclusion, restored ripgrep-07 context and residual flask-07 loss.
+
+Verdict at this snapshot: improved evidence, with a measured coverage gain and one regression.
 PR #1241 addresses #1231; #1197 remains closed. The rejected audit prototype was not ported.
 
 ## Hypothesis and controls

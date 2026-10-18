@@ -248,6 +248,7 @@ def callers(root, name, cache, seen, depth, out, home, defined_in):
     near = None
     if len(definitions(root, name)) > 1:
         near = defined_in.rsplit("/", 1)[0] + "/" if "/" in defined_in else ""
+    frontier = []
     for hit in rg(root, "-n", "--no-heading", *SRC_GLOBS, rf"\b{re.escape(name)}\s*\(", ".")[:40]:
         path, line, text = hit.split(":", 2)
         rel = path.lstrip("./")
@@ -262,14 +263,19 @@ def callers(root, name, cache, seen, depth, out, home, defined_in):
         if home and depth < LEVELS and not rel.startswith(home + "/"):
             continue  # deeper levels stay in the origin's directory; `crates/pixel/` is not `crates/pixel-x/`
         caller, start = enclosing(lines, index, rel.endswith(JS_EXT))
-        if not caller or (rel, caller) in seen:
+        if not caller or (rel, caller, name) in seen:
             continue
-        seen.add((rel, caller))
+        seen.add((rel, caller, name))
         lo = max(start + 1, index + 1 - CALLER_LINES)
         if lo > start + 4:
-            out += show(rel, lines, start + 1, start + 3, f"{caller}: lexical caller candidate (binding unresolved)")
-        out += show(rel, lines, lo, index + 4, f"{caller} → {name}: lexical call candidate; receiver/binding unresolved")
-        # Do not extend an unresolved lexical edge into a causal chain.
+            out += show(rel, lines, start + 1, start + 3, f"{caller}: lexical caller candidate (scope/binding unresolved)")
+        out += show(rel, lines, lo, index + 4, f"{caller} → {name}: lexical call candidate; receiver/binding unresolved; scope unverified" +
+                    ("; independent context, no composed path" if depth < LEVELS else ""))
+        if depth > 1 and near is None:
+            frontier.append((caller, rel))
+    # Visit every direct match before indirect context can claim the shared seen slot.
+    for caller, rel in frontier:
+        callers(root, caller, cache, seen, depth - 1, out, home, rel)
 
 
 def origins(root, prompt):
@@ -288,21 +294,36 @@ def origins(root, prompt):
 
 
 def python_role(lines, line):
-    """Classify syntax, never infer a runtime binding from a literal occurrence."""
+    """Classify syntax and its actual Python function span, never a nearby definition."""
+    role = 'occurrence candidate; emission unverified'
     try:
         tree = ast.parse('\n'.join(lines))
     except (SyntaxError, ValueError, RecursionError):
-        return 'occurrence candidate; emission unverified'
+        return role, None, 0
+    functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and n.lineno <= line <= n.end_lineno]
+    scope = max(functions, key=lambda n: n.lineno) if functions else None
     for node in ast.walk(tree):
         if not (getattr(node, 'lineno', 0) <= line <= getattr(node, 'end_lineno', 0)):
             continue
         if isinstance(node, ast.Raise):
-            return 'local raise syntax; message origin candidate'
+            role = 'local raise syntax; message origin candidate'
+            break
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Constant):
-            return 'message definition; emission unverified'
+            role = 'message definition; emission unverified'
+            break
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            return 'documentation occurrence; no emission proved'
-    return 'occurrence candidate; emission unverified'
+            role = 'documentation occurrence; no emission proved'
+            break
+    return role, scope.name if scope else None, scope.lineno - 1 if scope else 0
+
+
+def handler_nodes(node):
+    """Only this handler's lexical scope; nested functions/classes own their raises."""
+    yield node
+    for child in ast.iter_child_nodes(node):
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            yield from handler_nodes(child)
 
 
 def python_handlers(root, prompt, cache):
@@ -325,7 +346,7 @@ def python_handlers(root, prompt, cache):
             shared = meaningful & {stem(t) for t in tokens(ast.unparse(handler.type))}
             if len(shared) < MIN_SHARED:
                 continue
-            raises = [n for n in ast.walk(handler) if isinstance(n, ast.Raise)]
+            raises = [n for n in handler_nodes(handler) if isinstance(n, ast.Raise)]
             if not raises:
                 continue
             candidates.append((-len(shared), rel, handler.lineno, handler, raises, parents, tree))
@@ -341,7 +362,7 @@ def python_handlers(root, prompt, cache):
     for node in tree.body:
         if isinstance(node, ast.ImportFrom) and any((a.asname or a.name) in types for a in node.names):
             out += show(rel, lines, node.lineno, node.end_lineno,
-                        'dependency boundary: imported caught type; external emission not inspected')
+                        'dependency boundary candidate: matching import name; binding unresolved; external emission not inspected')
     # The syntax is direct evidence of raising here; matching the question's message remains a hypothesis.
     for raised in raises[:6]:
         out += show(rel, lines, raised.lineno, raised.end_lineno,
@@ -362,8 +383,9 @@ def main():
             break
         name, start = enclosing(lines, index, rel.endswith(JS_EXT))
         if rel.endswith(".py"):
-            how = python_role(lines, line)
-        out.append(f"### error origin — {how} at {rel}:{line}" + (f" in {name}" if name else ""))
+            how, name, start = python_role(lines, line)
+        scope = (f" in {name}" if rel.endswith(".py") else f" near {name} (scope unresolved)") if name else ""
+        out.append(f"### error origin — {how} at {rel}:{line}" + scope)
         if catalogue:
             crel, cline = catalogue
             clines = read(root, crel, cache)
@@ -372,8 +394,8 @@ def main():
         out += show(rel, lines, lo, line + 6, "candidate source occurrence; inspect the evidence category above")
         if not name:
             break
-        seen.add((rel, name))
-        callers(root, name, cache, seen, LEVELS, out, "/".join(rel.split("/")[:2]), rel)
+        seen.add((rel, name, name))
+        callers(root, name, cache, seen, LEVELS, out, "/".join(rel.split("/")[:-1][:2]), rel)
         for hit in rg(root, "-n", "--no-heading", *SRC_GLOBS, rf"\b{re.escape(name)}\s*\(", "."):
             other, at, _ = hit.split(":", 2)
             other = other.lstrip("./")

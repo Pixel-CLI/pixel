@@ -247,4 +247,4 @@ do not establish a causal speedup.
 
 ### Error evidence qualification, #1231 (2026-10-19)
 
-[Current v4 comparison and semantic controls](../error-evidence-1231/README.md): error-origin region coverage 0.050879 → 0.069507, file recall unchanged at 0.254737. The proof labels are qualified; requests-07 gains conversion/import evidence, while ripgrep-07 loses second-level lexical context. This is separate from the historical pack measurements above and makes no zero-call claim.
+[Reviewed v4 comparison and semantic controls](../error-evidence-1231/review/README.md): error-origin region coverage 0.050879 → 0.065860, file recall 0.254737 → 0.243748. requests-07 gains conversion evidence; ripgrep-07 recovers its context with unresolved links qualified. flask-07 loses coverage after removing a false global-message/function association. This is separate from the historical pack measurements above and makes no zero-call claim.

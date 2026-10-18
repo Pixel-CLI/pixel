@@ -889,7 +889,7 @@ class SelfTest(unittest.TestCase):
                                   cwd=repo)
             self.assertEqual(done.returncode, 0, done.stderr)
             text = done.stdout
-            self.assertIn("### error origin — quoted occurrence candidate; emission unverified at crates/pixel/src/decide.rs:4 in parse", text)
+            self.assertIn("### error origin — quoted occurrence candidate; emission unverified at crates/pixel/src/decide.rs:4 near parse (scope unresolved)", text)
             self.assertIn("run → parse: lexical call candidate; receiver/binding unresolved", text)
             self.assertIn("let decisions = preset == 3;", text, "the lines that select the path")
             self.assertIn("test refuses_an_empty_answer: name match for parse; binding unresolved", text)
@@ -902,7 +902,7 @@ class SelfTest(unittest.TestCase):
             (repo / "crates/pixel-other/src/dup.rs").write_text("fn parse() {}\nfn uses_the_other_parse() { parse(); }\n")
             second = dict(request, prompt="no 'a message that is nowhere in the code' but 'remote decisions refused the decision: x' yes")
             again = subprocess.run([str(probe / "probe")], input=json.dumps(second), capture_output=True, text=True, cwd=repo).stdout
-            self.assertIn("emission unverified at crates/pixel/src/decide.rs:4 in parse", again, "the comment is skipped, the second quote tried")
+            self.assertIn("emission unverified at crates/pixel/src/decide.rs:4 near parse (scope unresolved)", again, "the comment is skipped, the second quote tried")
             self.assertNotIn("uses_the_other_parse", again, "parse is defined twice: callers beside the selected one only")
             self.assertIn("run → parse", again)
             quiet = dict(request, prompt="where is the retry limit defined")
