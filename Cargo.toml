@@ -77,8 +77,14 @@ openssl = { version = "0.10", features = ["vendored"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
-# Keep macOS release binaries runnable with the current toolchain.
-strip = "none"
+# Ship without the symbol table (~17% of the binary, 76 MB -> 63 MB on
+# aarch64-apple-darwin): no DWARF is built in release, so local symbols are
+# the only weight. The release pipeline builds unstripped instead
+# (CARGO_PROFILE_RELEASE_STRIP=none in scripts/release/release-build-env.sh),
+# publishes that copy as `pixel-<tag>-<target>.symbols.tar.xz` and strips the
+# shipped one with scripts/release/split-symbols.sh, so a backtrace from a
+# released binary can still be symbolized.
+strip = "symbols"
 
 # Local iteration profile for `pixel upgrade`: same optimisation level as
 # release, minus the two settings that dominate an incremental rebuild

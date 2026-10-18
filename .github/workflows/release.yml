@@ -160,7 +160,8 @@ jobs:
           # assets/pixel-*.tar.gz matches the archives and the Linux
           # bottles (pixel-*.bottle.tar.gz) alike. pixel-*.intoto.jsonl is
           # the provenance bundle, the file Scorecard's Signed-Releases
-          # check looks for. pixel-*.cdx.json is each archive's SBOM.
+          # check looks for. pixel-*.cdx.json is each archive's SBOM, and
+          # pixel-*.symbols.tar.xz each binary before stripping.
           files: |
             assets/pixel-*.tar.gz
             assets/pixel-*.tar.gz.sha256
@@ -169,6 +170,7 @@ jobs:
             assets/install.sh
             assets/pixel-*.intoto.jsonl
             assets/pixel-*.cdx.json
+            assets/pixel-*.symbols.tar.xz
 
       - name: Check out the Homebrew tap
         if: env.HOMEBREW_TAP_TOKEN != ''

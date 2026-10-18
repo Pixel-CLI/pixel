@@ -1542,7 +1542,7 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
     release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
     nightly diff checkpoints, coverage selection, mutants
-    config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
+    config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, release symbols split, harness-grid dispatch input,
     reproducible release build environment, the brief-gate bench, excavation counter and live brief A/B driver self-tests with the `eval/brief-gate/` prompt set's schema check, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
     (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`);
@@ -1696,8 +1696,14 @@ the common dir), the index, or `SOURCE_DATE_EPOCH` changes, so the flag
 follows commits without a `cargo clean`.
 
 Release builds are reproducible. `scripts/release/release-build-env.sh` sets
-`SOURCE_DATE_EPOCH` to the commit's time and `RUSTFLAGS` to
-`--remap-path-prefix` the checkout (`/pixel`) and `CARGO_HOME` (`/cargo`);
+`SOURCE_DATE_EPOCH` to the commit's time, `RUSTFLAGS` to
+`--remap-path-prefix` the checkout (`/pixel`) and `CARGO_HOME` (`/cargo`),
+and `CARGO_PROFILE_RELEASE_STRIP=none`: `[profile.release]` strips symbols
+for every other build, while a release keeps them in its one build and
+`scripts/release/split-symbols.sh` archives that binary as
+`pixel-<tag>-<target>.symbols.tar.xz` before stripping the shipped copy
+(Apple `strip` on macOS, llvm-strip from `llvm-tools` on Linux; every
+`cross-build.yml` lane runs the same split);
 `release-build.yml` and `cross-build.yml` run it before their cache step
 (rust-cache hashes `RUSTFLAGS` into the key they share), `Cross.toml`
 forwards `SOURCE_DATE_EPOCH` into cross's container, and the three
