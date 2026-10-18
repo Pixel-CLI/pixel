@@ -3792,14 +3792,15 @@ fn logged_args(args: &[String]) -> String {
         .windows(2)
         .position(|pair| pair[0] == "config" && pair[1] == "remote-key")
         .map(|at| at + 3);
-    // `install https://user:token@host/…` carries the credential of a
-    // private plugin repository in its URL. Only the command word counts:
+    // `install https://user:token@host/…` and `reference add <id>
+    // https://user:token@host/… <rev>` carry the credential of a private
+    // repository in its URL. Only the command word counts:
     // `search-content install` is a query.
     let with_program: Vec<String> = std::iter::once(String::new())
         .chain(args.iter().cloned())
         .collect();
-    let plugin_install_from = pixel_plugin::command_word(&with_program)
-        .filter(|(_, word)| *word == "install")
+    let source_url_from = pixel_plugin::command_word(&with_program)
+        .filter(|(_, word)| matches!(*word, "install" | "reference"))
         .map(|(at, _)| at);
     let url_name = "auth_url";
     let url_var = format!("{url_name}=");
@@ -3817,7 +3818,7 @@ fn logged_args(args: &[String]) -> String {
                 format!("{url_name}=<redacted>")
             } else if secret_from.is_some_and(|from| i >= from) && !arg.starts_with("--") {
                 "<redacted>".to_string()
-            } else if plugin_install_from.is_some_and(|from| i >= from) {
+            } else if source_url_from.is_some_and(|from| i >= from) {
                 pixel_plugin::redact_source(arg)
             } else {
                 arg.clone()
@@ -6980,6 +6981,43 @@ mod hook_prompt_tests {
             ])),
             "search-content install https://a:b@c.test/d",
             "the word `install` in a query does not start the mask"
+        );
+    }
+
+    #[test]
+    fn logged_args_should_mask_the_credentials_of_a_reference_url() {
+        let argv = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            logged_args(&argv(&[
+                "reference",
+                "add",
+                "lib",
+                "https://user:ghp_secret@github.com/acme/private.git",
+                "v1"
+            ])),
+            "reference add lib https://github.com/acme/private.git v1"
+        );
+        assert_eq!(
+            logged_args(&argv(&[
+                "--metrics",
+                "off",
+                "reference",
+                "add",
+                "lib",
+                "https://ghp_token_only@h.test/p",
+                "main"
+            ])),
+            "--metrics off reference add lib https://h.test/p main",
+            "a token-only userinfo is masked too"
+        );
+        assert_eq!(
+            logged_args(&argv(&[
+                "search-content",
+                "reference",
+                "https://a:b@c.test/d"
+            ])),
+            "search-content reference https://a:b@c.test/d",
+            "the word `reference` in a query does not start the mask"
         );
     }
 

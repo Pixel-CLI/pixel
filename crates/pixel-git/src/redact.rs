@@ -13,9 +13,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-/// `https://user:token@host/...` -> `https://<redacted>@host/...`
-static CRED_URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"https://[^/\s:@]+:[^/\s@]+@").unwrap());
+/// `https://user:token@host/...` and the token-only
+/// `https://token@host/...` -> `https://<redacted>@host/...`
+static CRED_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https://[^/\s@]+@").unwrap());
 
 /// `Authorization: Bearer <token>` (or any single token after the colon),
 /// case-insensitive.
@@ -48,6 +48,19 @@ mod tests {
         assert!(!out.contains("ghp_abcdef1234567890"));
         assert!(!out.contains("alice:ghp_abcdef1234567890"));
         assert!(out.contains("https://<redacted>@github.com"));
+    }
+
+    #[test]
+    fn redact_should_mask_a_token_only_userinfo() {
+        assert_eq!(
+            redact("clone https://ghp_tokenonly123@github.com/x/y.git"),
+            "clone https://<redacted>@github.com/x/y.git"
+        );
+        assert_eq!(
+            redact("https://github.com/x/y.git"),
+            "https://github.com/x/y.git",
+            "a URL without userinfo is left alone"
+        );
     }
 
     #[test]

@@ -114,3 +114,58 @@ fn an_unsafe_revision_is_refused_at_add() {
         "{out:?}"
     );
 }
+
+/// A private corpus's URL carries its credential (`https://user:token@…`):
+/// `add` logs its arguments, `setup` reports git's failure, `list` and
+/// `query` print the corpus, and none of the action log, stderr or stdout
+/// may repeat the token. The manifest itself keeps it: `setup` needs it.
+#[test]
+fn a_credentialed_reference_url_reaches_no_log_or_report() {
+    let root = Scratch::for_test("reference-cli", "credential-url");
+    let path = root.to_str().unwrap();
+    // Port 9 (discard) refuses at once: the clone fails without a network.
+    let url = "https://user:ghp_reference_secret@127.0.0.1:9/acme/private.git";
+
+    let added = pixel(&["reference", "add", "private", url, "v1", path]);
+    assert!(added.status.success(), "{added:?}");
+    let setup = pixel(&["reference", "setup", path]);
+    assert!(!setup.status.success(), "{setup:?}");
+    let listed = pixel(&["reference", "list", "--json", path]);
+    let queried = pixel(&["reference", "query", "--json", path]);
+
+    let log = std::fs::read_to_string(root.join(".pixel/actions.jsonl")).unwrap();
+    let records: Vec<serde_json::Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 4, "one record per command: {log}");
+    assert!(
+        log.contains("https://127.0.0.1:9/acme/private.git"),
+        "the URL is logged without its userinfo: {log}"
+    );
+    for (sink, text) in [
+        ("action log", log.clone()),
+        (
+            "add stderr",
+            String::from_utf8_lossy(&added.stderr).into_owned(),
+        ),
+        (
+            "setup stdout",
+            String::from_utf8_lossy(&setup.stdout).into_owned(),
+        ),
+        (
+            "setup stderr",
+            String::from_utf8_lossy(&setup.stderr).into_owned(),
+        ),
+        (
+            "list stdout",
+            String::from_utf8_lossy(&listed.stdout).into_owned(),
+        ),
+        (
+            "query stdout",
+            String::from_utf8_lossy(&queried.stdout).into_owned(),
+        ),
+    ] {
+        assert!(!text.contains("ghp_reference_secret"), "{sink}: {text}");
+    }
+}

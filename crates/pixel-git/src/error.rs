@@ -53,16 +53,27 @@ impl From<std::string::FromUtf8Error> for GitError {
     }
 }
 
+/// `args` as `Display` shows them: debug-quoted, with the userinfo of a
+/// credentialed URL (`https://user:token@host/…`, a clone or fetch source)
+/// masked, so the error never carries the secret into a log or a terminal.
+fn shown_args(args: &[String]) -> String {
+    crate::redact::redact(&format!("{args:?}"))
+}
+
 impl fmt::Display for GitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             GitError::NotFound => write!(f, "git binary not found"),
-            GitError::Timeout { args } => write!(f, "git {args:?} timed out"),
+            GitError::Timeout { args } => write!(f, "git {} timed out", shown_args(args)),
             GitError::OutputTooLarge { args, cap } => {
-                write!(f, "git {args:?} exceeded output cap of {cap} bytes")
+                write!(
+                    f,
+                    "git {} exceeded output cap of {cap} bytes",
+                    shown_args(args)
+                )
             }
             GitError::NonZeroExit { args, code, stderr } => {
-                write!(f, "git {args:?} exited with {code:?}: {stderr}")
+                write!(f, "git {} exited with {code:?}: {stderr}", shown_args(args))
             }
             GitError::Io(e) => write!(f, "io error running git: {e}"),
             GitError::InvalidRef(r) => write!(f, "invalid git ref: {r:?}"),
@@ -72,3 +83,39 @@ impl fmt::Display for GitError {
 }
 
 impl std::error::Error for GitError {}
+
+#[cfg(test)]
+mod tests {
+    use super::GitError;
+
+    fn args(url: &str) -> Vec<String> {
+        ["clone", "--", url, "dest"].map(str::to_owned).to_vec()
+    }
+
+    #[test]
+    fn display_should_mask_a_credentialed_url_in_every_args_variant() {
+        let url = "https://user:ghp_secret@github.com/acme/private.git";
+        let shown = r#"["clone", "--", "https://<redacted>@github.com/acme/private.git", "dest"]"#;
+        assert_eq!(
+            GitError::NonZeroExit {
+                args: args(url),
+                code: Some(128),
+                stderr: "fatal: not found".to_owned(),
+            }
+            .to_string(),
+            format!("git {shown} exited with Some(128): fatal: not found")
+        );
+        assert_eq!(
+            GitError::Timeout { args: args(url) }.to_string(),
+            format!("git {shown} timed out")
+        );
+        assert_eq!(
+            GitError::OutputTooLarge {
+                args: args(url),
+                cap: 7
+            }
+            .to_string(),
+            format!("git {shown} exceeded output cap of 7 bytes")
+        );
+    }
+}
