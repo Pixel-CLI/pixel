@@ -209,7 +209,11 @@ Machine-wide:
   classify helpers are accepted; `pixel setup --remove` removes both.
 - `~/.local/share/pixel/recall/` and `~/.local/share/pixel/models/`: the
   recall corpus (`$PIXEL_RECALL_DIR` overrides) and the embedding models,
-  downloaded once from Hugging Face on `pixel recall setup`.
+  downloaded once from Hugging Face on `pixel recall setup` or
+  `pixel search-meaning`; the `--scope hybrid` search's
+  `potion-code-64M-v2` is downloaded by the daemon only when it runs with
+  `PIXEL_EMBED_DOWNLOAD=1`, and each potion download prints the repository,
+  revision and destination first.
 - `~/.local/state/pixel/sniper/<project key>/`: the `pixel-session` error sink
   (`errors-v1.sqlite` plus a `project.json` naming the root);
   `$PIXEL_SNIPER_STATE_ROOT` overrides the state root.

@@ -279,7 +279,11 @@ repository file.
   under `CI`.
 - Model downloads: `minishlab/potion-*` (`pixel_recall::embed::POTION_REPO`)
   and, with the `fastembed` feature, `intfloat/multilingual-e5-small`, from
-  Hugging Face into `~/.local/share/pixel/models/`.
+  Hugging Face into `~/.local/share/pixel/models/`, only on an explicit
+  command (`pixel recall setup`, `pixel search-meaning`) or, for the
+  `--scope hybrid` search's `minishlab/potion-code-64M-v2`, when the serving
+  process runs with `PIXEL_EMBED_DOWNLOAD=1`; otherwise that search prints
+  how to opt in and ranks without the model.
 - `pixel index-unpack <path|url>` (`crates/pixel/src/index_cmd.rs`,
   `FETCH_CAP` 2 GiB).
 - `pixel reference setup`: `git clone`/`git fetch` (through `GitRunner`) from
@@ -805,7 +809,10 @@ retention remain those described below.
 - **Residual**: models are fetched at the repository's default revision
   without a pinned revision or checksum; `PIXEL_RECALL_MODEL_REPO` can name
   any repository; the local engine setup runs `ollaya.dev/install.sh` without
-  a checksum. Each runs only on an explicit setup or first semantic query.
+  a checksum. Each runs only on an explicit command (`pixel recall setup`,
+  `pixel search-meaning`, the local engine setup) or, for a `--scope hybrid`
+  search, with `PIXEL_EMBED_DOWNLOAD=1`; a potion download prints the model
+  repository, revision and destination before it starts.
 
 ### T19. A packed index is tampered with (T, B6)
 

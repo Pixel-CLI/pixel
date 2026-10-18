@@ -384,6 +384,19 @@ pub mod potion {
         Ok(dims)
     }
 
+    /// The Hugging Face revision `from_pretrained` fetches: model2vec-rs
+    /// takes no revision argument, so the hub's default branch.
+    pub(crate) const HUB_REVISION: &str = "main";
+
+    /// The line printed once when a load is about to fetch `repo`: the
+    /// network destination, the model and the revision, before any byte moves.
+    pub(crate) fn download_notice(cache_dir: &Path, repo: &str) -> String {
+        format!(
+            "pixel: downloading embedding model {repo} (revision {HUB_REVISION}, unpinned) from https://huggingface.co into {}",
+            cache_dir.display()
+        )
+    }
+
     impl PotionEmbedder {
         pub fn open(cache_dir: &Path, download: bool) -> Result<Self, String> {
             Self::open_repo(cache_dir, download, &resolved_repo())
@@ -396,6 +409,9 @@ pub mod potion {
             repo: &str,
         ) -> Result<Self, String> {
             require_set_up(cache_dir, repo, download)?;
+            if download && !crate::potion_cached(cache_dir, repo) {
+                eprintln!("{}", download_notice(cache_dir, repo));
+            }
             let _ = std::fs::create_dir_all(cache_dir);
             // Route the HF hub cache under pixel's model dir.
             // SAFETY: set_var is process-global; both CLI and daemon call this
@@ -514,7 +530,7 @@ pub mod fast {
 
 #[cfg(all(test, feature = "model2vec"))]
 mod potion_gate_tests {
-    use super::potion::{finish_load, require_set_up};
+    use super::potion::{download_notice, finish_load, require_set_up};
 
     const CODE_16M: &str = "minishlab/potion-code-16M-v2";
     const CODE_64M: &str = "minishlab/potion-code-64M-v2";
@@ -550,6 +566,14 @@ mod potion_gate_tests {
 
         assert!(finish_load(dir.path(), CODE_16M, true, 0).is_err());
         assert!(!crate::potion_cached(dir.path(), CODE_16M));
+    }
+
+    #[test]
+    fn download_notice_should_name_the_model_revision_and_destination() {
+        assert_eq!(
+            download_notice(std::path::Path::new("/h/models"), CODE_64M),
+            "pixel: downloading embedding model minishlab/potion-code-64M-v2 (revision main, unpinned) from https://huggingface.co into /h/models"
+        );
     }
 }
 
