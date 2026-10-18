@@ -60,7 +60,7 @@ python3 -c 'import fcntl,subprocess,sys; lock=open("/tmp/pixel-benchmark.lock","
 
 For one content/probe candidate, keep the binary fixed: replace `--head "$BINARY"` with `--head-probe-commit "$CANDIDATE_REV" --repo "$CONTENT_REPO"`. The base remains the frozen home above. For a binary-only comparison, replace only `--head`. Never change both binary and probes in one arm.
 
-To reproduce the fixed-text scoring comparison (export each scorer and its sibling classify.py/question_source.py from the revision in identity.json):
+To reproduce the fixed-text scoring comparison, use Git worktrees at the revisions in identity.json for v2/v3, so each scorer records its own checkout's commit. Legacy v1 can also be exported with its sibling classify.py/question_source.py. Keep the explicit frozen question file:
 
 ```sh
 python3 -I scripts/bench/tool-census/replay_briefs.py \
