@@ -177,7 +177,11 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 28: this resolver records an unresolved call whose name no symbol carries
 ///    once per file and name (`unresolved_names`), not per site in
 ///    `unresolved_calls` (outside Ruby files and import bindings).
-pub const EXTRACTOR_VERSION: &str = "28";
+/// 29: Kotlin (`.kt`, `.kts`) is extracted by the generic walker; for every
+///    generic language an `object` declaration is a class, an import's
+///    `qualified_identifier` is its path, and a call through a field-less
+///    `navigation_expression` names its member and receiver.
+pub const EXTRACTOR_VERSION: &str = "29";
 
 /// True iff the graph's rows were written by the current extractor, from
 /// the Rust and Ruby sources the switches ask for now

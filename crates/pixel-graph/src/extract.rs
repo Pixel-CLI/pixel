@@ -170,6 +170,7 @@ pub fn lang_of(path: &str) -> Option<&'static str> {
         "swift" => Some("swift"),
         "ex" | "exs" => Some("elixir"),
         "lua" => Some("lua"),
+        "kt" | "kts" => Some("kotlin"),
         _ => None,
     }
 }
@@ -416,6 +417,7 @@ fn language_for(lang: &str) -> Option<Language> {
         "swift" => tree_sitter_swift::LANGUAGE.into(),
         "elixir" => tree_sitter_elixir::LANGUAGE.into(),
         "lua" => tree_sitter_lua::LANGUAGE.into(),
+        "kotlin" => tree_sitter_kotlin_ng::LANGUAGE.into(),
         _ => return None,
     })
 }
@@ -2497,11 +2499,17 @@ fn csharp_simple_name(w: &Walker, node: Node) -> String {
 // --- Generic heuristic walker -------------------------------------------------
 //
 // Languages without a hand-written walker (php, c, swift, elixir, lua,
-// and any future grammar wired into `language_for`) fall back to a node-kind
+// kotlin, and any future grammar wired into `language_for`) fall back to a node-kind
 // heuristic pass. We match node kinds ending in `_declaration`/`_definition`
 // for symbols、 call/invocation node kinds for call sites, and import/use/require
 // node kinds for import specs. It is deliberately coarse:s a less precise graph
 // beats an absent one. Field names and node kinds degrade gracefully to `None`.
+//
+// Kotlin through it: classes, `object`s and functions (members qualified by
+// their class, a companion object's by the enclosing class), imports by their
+// qualified name, calls with their receiver. An `interface` or `enum class` is
+// recorded as a class, `val`/`var` properties are not symbols, and an
+// extension function is named without its receiver type.
 
 fn walk_generic(w: &mut Walker, node: Node, depth: usize) {
     if too_deep(depth) {
@@ -2580,10 +2588,12 @@ fn generic_symbol_kind(kind: &str) -> Option<(SymbolKind, bool)> {
     {
         return Some((SymbolKind::Module, true));
     }
+    // Kotlin's `object Foo` (`object_declaration`) is a singleton class.
     if kind.contains("class")
         || kind.contains("struct")
         || kind.contains("record")
         || kind.contains("actor")
+        || kind.contains("object")
     {
         return Some((SymbolKind::Class, true));
     }
@@ -2696,6 +2706,16 @@ fn generic_call(w: &mut Walker, node: Node) {
                 .find_map(|f| e.child_by_field_name(f));
                 callee = pos_name.map(|n| w.text(n));
                 receiver = pos_recv.map(|r| w.text(r));
+                // Kotlin's `navigation_expression` names no field: the
+                // receiver is its first named child, the member its last.
+                if callee.is_none()
+                    && e.named_child_count() == 2
+                    && let (Some(recv), Some(member)) = (e.named_child(0), e.named_child(1))
+                    && member.kind() == "identifier"
+                {
+                    callee = Some(w.text(member));
+                    receiver = Some(w.text(recv));
+                }
             }
             _ => {}
         }
@@ -2774,7 +2794,12 @@ fn generic_import(w: &mut Walker, node: Node) {
                     return;
                 }
             }
-            "identifier" | "dotted_name" | "qualified_name" | "namespace_name" => {
+            // Kotlin's `import a.b.C` holds a `qualified_identifier`.
+            "identifier"
+            | "dotted_name"
+            | "qualified_name"
+            | "namespace_name"
+            | "qualified_identifier" => {
                 let spec = w.text(child);
                 if !spec.is_empty() {
                     w.push_import(spec, Vec::new());
