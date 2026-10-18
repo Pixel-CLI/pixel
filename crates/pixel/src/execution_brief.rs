@@ -774,6 +774,14 @@ pub fn brief_signal(prompt: &str) -> Option<(String, Signal)> {
         typed
     };
     let task = brief_task(&typed);
+    // A whole-purpose question (`what is this project for?`) carries too few
+    // content words to clear MIN_PROSE_KEYWORDS, but routing knows what to do
+    // with it; never refuse it before it can be classified.
+    let anchors = chain::Anchors::from_text(task);
+    if routes::asks_overview(task) && anchors.names().next().is_none() && anchors.paths().is_empty()
+    {
+        return Some((task.to_string(), Signal::Prose));
+    }
     let keywords = brief_keywords(task);
     (keywords.len() >= MIN_PROSE_KEYWORDS && !is_ops_request(&keywords))
         .then(|| (task.to_string(), Signal::Prose))
@@ -1637,6 +1645,28 @@ mod tests {
                 "{prompt}"
             );
         }
+    }
+
+    #[test]
+    fn brief_signal_should_take_a_whole_purpose_question_however_few_content_words() {
+        // "what is this project for" has one content word (`for` is a stop
+        // word), below MIN_PROSE_KEYWORDS, but it names the whole and the
+        // router answers it (issue #988).
+        for prompt in [
+            "what is this project for",
+            "what is this repo for",
+            "tell me what this repository is for",
+            "what is the purpose of this project",
+        ] {
+            assert_eq!(
+                brief_signal(prompt),
+                Some((prompt.to_string(), Signal::Prose)),
+                "{prompt}"
+            );
+        }
+        // A question about a part is not the whole and still passes on its
+        // own content words, unchanged.
+        assert!(brief_signal("what is the project config for").is_some());
     }
 
     #[test]

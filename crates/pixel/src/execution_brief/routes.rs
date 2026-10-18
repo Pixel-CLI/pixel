@@ -154,6 +154,7 @@ const WHOLE_WORDS: &[&str] = &[
     "code base",
     "project",
     "monorepo",
+    "code",
 ];
 /// Nouns for the whole or for its parts: what a tour is about.
 const SCOPE_WORDS: &[&str] = &[
@@ -411,6 +412,35 @@ pub(crate) fn asks_overview(typed: &str) -> bool {
     any(OVERVIEW_WHOLE)
         || (any(OVERVIEW_CUES) && any(SCOPE_WORDS))
         || (any(OVERVIEW_HOW) && any(WHOLE_WORDS))
+        || asks_whole_purpose(&text)
+}
+
+/// Whether `text` asks what the whole does or is: a `what does … <noun> do`
+/// or `what is … <noun> for/about` question whose subject is a noun of
+/// [`WHOLE_WORDS`] directly followed by the verb. A word between the noun and
+/// the verb (`what does the project config do`) names a part, not the whole,
+/// and a named symbol (`what does build_decisions_request do`) is a lookup.
+fn asks_whole_purpose(text: &str) -> bool {
+    // A question about the whole names it: "what does/is …" at the start or
+    // anywhere in the text ("tell me what this repository is for").
+    if !has_phrase(text, "what") {
+        return false;
+    }
+    let asked = |noun: &str, tail: &str| has_phrase(text, &format!("{noun} {tail}"));
+    let does = WHOLE_WORDS.iter().any(|noun| asked(noun, "do"));
+    let is = WHOLE_WORDS.iter().any(|noun| {
+        asked(noun, "is for")
+            || asked(noun, "is about")
+            || asked(noun, "for")
+            || asked(noun, "about")
+    });
+    let purpose = has_phrase(text, "purpose of")
+        && WHOLE_WORDS.iter().any(|noun| {
+            ["", "the ", "this "]
+                .iter()
+                .any(|article| has_phrase(text, &format!("purpose of {article}{noun}")))
+        });
+    does || is || purpose
 }
 
 /// Whether `typed` asks for a review of a change: a cue of review beside a
@@ -578,6 +608,34 @@ mod tests {
             assert_eq!(kind_of(prompt), expected, "{prompt}");
         }
         assert_eq!(kind_of("fix the crash in expire"), QuestionKind::Bugfix);
+    }
+
+    #[test]
+    fn heuristic_should_route_a_what_does_the_whole_do_question_to_overview() {
+        for prompt in [
+            "What does this project do?",
+            "what does this repo do",
+            "what does this codebase do",
+            "what does this monorepo do",
+            "what is this project for",
+            "what is this project about",
+            "what does the code do",
+            "tell me what this repository is for",
+            "what is the purpose of this project",
+        ] {
+            assert_eq!(kind_of(prompt), QuestionKind::Overview, "{prompt}");
+        }
+        // A word between the whole noun and the verb names a part, not the
+        // whole; a named symbol is a lookup.
+        assert_eq!(
+            kind_of("what does the project config do"),
+            QuestionKind::Config
+        );
+        assert_eq!(
+            kind_of("what does build_decisions_request do"),
+            QuestionKind::Lookup
+        );
+        assert_eq!(kind_of("what does the parser do"), QuestionKind::Lookup);
     }
 
     #[test]
