@@ -186,6 +186,15 @@ python3 -I scripts/bench/tool-census/score_brief.py pinned \
 Binary SHA-256 `c41d123bfbd7d593354df2f705a28afb133a1065be1b1bf42bb2ba8ed025cc96`
 (dev-release), question SHA-256 `984a632e…3c63e17069`, 26 frozen probe files.
 
+### Pack results on the frozen-probe harness
+
+Each row: the binary above, its probes frozen at `7887b9e6` (before) and at the
+pack's commit (after), `score_brief.py pinned --head-probe-commit <commit>`.
+
+| Pack | Commit | Targeted figure before → after | `file_recall` | `region_cov` | Verdict |
+|---|---|---|---:|---:|---|
+| #1196 `test-bodies` | `77f565ba` | tests lines 513 → 1 135 of 6 365 (8.1% → 17.8%); `tests` line coverage 9.6% → 21.1% | 0.419 → 0.420 | 0.084 → 0.087 | kept |
+
 ## Remaining work
 
 The next bounded prototypes should target the recorded failures, then be
