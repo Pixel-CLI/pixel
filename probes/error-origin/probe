@@ -66,7 +66,8 @@ def stem(word):
 
 def string_part(text):
     """The text inside the string literals of a code line ('', \"\" or ``), joined."""
-    return " ".join(m.group(2) for m in re.finditer(r"""(["'`])((?:\\.|(?!\1).)*)\1""", text))
+    # An escape and a plain character never match the same text (a plain one is no backslash): no backtracking blowup.
+    return " ".join(m.group(2) for m in re.finditer(r"""(["'`])((?:\\.|(?!\1)[^\\])*)\1""", text))
 
 
 def prompt_words(prompt):
