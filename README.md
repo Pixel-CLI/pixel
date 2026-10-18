@@ -87,7 +87,7 @@ Need more than the brief? `pixel setup` drops a `pixel` skill into each agent's 
 | Requests `models.py`: full read vs. outline | 10,365 tokens* | **641 tokens*** (−94%) |
 | 8 large open-source files: full read vs. outline | 100% | **median 5.5%** (−94.5%) |
 
-<sub>*Estimated tokens (bytes ÷ 4), Pixel 0.5.x, no billed cost. Every number has a protocol, and we publish the losses too: [benchmarks](https://pixel-cli.dev/benchmarks/).</sub>
+<sub>*Estimated tokens (bytes ÷ 4), Pixel 0.8.0 (the Codex run, Pixel 0.5.x), no billed cost. Every number has a protocol, and we publish the losses too: [benchmarks](https://pixel-cli.dev/benchmarks/).</sub>
 
 ## 🆚 Alternatives
 

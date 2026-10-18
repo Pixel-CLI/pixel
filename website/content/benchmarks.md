@@ -7,7 +7,7 @@ description: "Every number on the home page, with its method, its sample size an
 
 Figures below link to their available evidence and protocols. The Opus trial's raw runs are not archived; its known setup and limits are stated alongside the result. Losses sit next to wins.
 
-<!-- Each command in this box was run on a fresh clone of a third-party repository (psf/requests) before it was written here: `pixel audit` and `pixel list-signatures` at requests 611c616 with pixel 0.5.1, the others with pixel 0.5.0. Re-run them when an output or a prerequisite changes. -->
+<!-- Each command in this box was run on a fresh clone of a third-party repository (psf/requests) before it was written here: `pixel audit` and `pixel list-signatures` at requests 611c616 with pixel 0.8.0 (re-run 2026-10-18, same counts as 0.5.1), the others with pixel 0.5.0. Re-run them when an output or a prerequisite changes. -->
 <aside class="measure" aria-labelledby="measure-it-on-your-own-code">
 
 ## Measure it on your own code
@@ -20,7 +20,7 @@ Four checks, quickest first. Each needs `pixel` on your PATH ([install](../docs/
 pixel audit
 ```
 
-On Requests (commit `611c616`), a first run on a fresh clone built the graph and read 95,693 tokens for the twenty files whole against 11,447 for their outlines (−88%): 89% saved on the median file, from 61% to 98%. It left `docs/conf.py` out, a Sphinx configuration with no function or class to outline, rather than count an empty outline as a saving. `--top N` measures more files and `--json` prints every count; nothing leaves your machine.
+On Requests (commit `611c616`, with pixel 0.8.0), a first run on a fresh clone built the graph and read 95,693 tokens for the twenty files whole against 11,447 for their outlines (−88%): 89% saved on the median file, from 61% to 98%. It left `docs/conf.py` out, a Sphinx configuration with no function or class to outline, rather than count an empty outline as a saving. `--top N` measures more files and `--json` prints every count; nothing leaves your machine.
 
 **One large file, the same count.** `pixel list-signatures` prints the file's outline, then a report on stderr that compares it with reading the whole file, counted as below (bytes divided by four, rounded down):
 
@@ -62,7 +62,7 @@ These are file/answer volumes, not an invoice or an end-to-end task comparison. 
 
 ### Well-known files
 
-The same measurement on large files of popular projects, each pinned to a commit: the whole file against `pixel list-signatures` on it, with pixel 0.5.0 in September 2026. The home page's token wall shows the Transformers row: read whole, that one file takes {{% read-savings "window" %}}, before the agent has written anything. The signatures output is {{% read-savings "summary" %}} in estimated tokens (UTF-8 bytes ÷ 4, rounded down); the files with the most signatures per line (VS Code's text model, CPython's `typing.py`) save the least.
+The same measurement on large files of popular projects, each pinned to a commit: the whole file against `pixel list-signatures` on it, with pixel 0.8.0 in October 2026. The home page's token wall shows the Transformers row: read whole, that one file takes {{% read-savings "window" %}}, before the agent has written anything. The signatures output is {{% read-savings "summary" %}} in estimated tokens (UTF-8 bytes ÷ 4, rounded down); the files with the most signatures per line (VS Code's text model, CPython's `typing.py`) save the least.
 
 {{% read-savings %}}
 

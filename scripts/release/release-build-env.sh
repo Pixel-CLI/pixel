@@ -9,9 +9,15 @@
 # - SOURCE_DATE_EPOCH: the commit's committer time. crates/pixel/build.rs
 #   embeds the build date `pixel --version` prints; without it the date is
 #   the day of the build.
+# - CARGO_PROFILE_RELEASE_STRIP=none: the release profile strips symbols
+#   (Cargo.toml), but a release keeps them in the one build it makes:
+#   scripts/release/split-symbols.sh archives the unstripped binary as the
+#   symbols artifact and strips the shipped copy, so no second build is paid
+#   for the symbols. Here, not in one workflow, so cross-build.yml saves the
+#   cache entry release-build.yml restores (rust-cache hashes CARGO_* too).
 # - RUSTFLAGS: --remap-path-prefix for the checkout and CARGO_HOME, the two
 #   absolute paths rustc writes into panic messages and debug information
-#   (the release profile keeps symbols: strip = "none"). Under cross the
+#   (the unstripped build keeps its symbols). Under cross the
 #   container sees the checkout at its host path and CARGO_HOME at /cargo,
 #   which the second flag already names; cross forwards RUSTFLAGS by itself
 #   and [workspace.metadata.cross] forwards SOURCE_DATE_EPOCH.
@@ -49,10 +55,10 @@ fi
 
 case "${1:-}" in
   --github-env)
-    printf 'SOURCE_DATE_EPOCH=%s\nRUSTFLAGS=%s\n' "$epoch" "$flags" >> "$GITHUB_ENV"
+    printf 'SOURCE_DATE_EPOCH=%s\nRUSTFLAGS=%s\nCARGO_PROFILE_RELEASE_STRIP=none\n' "$epoch" "$flags" >> "$GITHUB_ENV"
     ;;
   "")
-    printf "export SOURCE_DATE_EPOCH='%s'\nexport RUSTFLAGS='%s'\n" "$epoch" "$flags"
+    printf "export SOURCE_DATE_EPOCH='%s'\nexport RUSTFLAGS='%s'\nexport CARGO_PROFILE_RELEASE_STRIP='none'\n" "$epoch" "$flags"
     ;;
   *)
     echo "usage: scripts/release/release-build-env.sh [--github-env]" >&2

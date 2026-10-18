@@ -42,6 +42,9 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/**"
+      # Integration tests never enter the release binary (later patterns
+      # win, so this drops them from `crates/**`).
+      - "!crates/*/tests/**"
       - "rust-toolchain*"
       - "scripts/release/release-build-env.sh"
   schedule:

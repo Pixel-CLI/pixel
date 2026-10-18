@@ -27,6 +27,7 @@ on:
       - ".github/workflows/cross-build.yml"
       - "Cargo.*"
       - "scripts/release/release-build-env.sh"
+      - "scripts/release/split-symbols.sh"
       - "crates/**"
       - "deny.toml"
       - "rust-toolchain*"
@@ -143,6 +144,8 @@ jobs:
           # it is passed explicitly (same channel as before).
           toolchain: stable
           targets: ${{ matrix.target }}
+          # llvm-strip, which split-symbols.sh runs on the Linux binaries.
+          components: llvm-tools
 
       # The same reproducible-build environment as release-build.yml, before
       # the cache step: rust-cache hashes RUSTFLAGS into its key, so the
@@ -192,6 +195,22 @@ jobs:
       - name: Build (macOS native)
         if: runner.os == 'macOS' && steps.dup.outputs.duplicate != 'true'
         run: cargo build --profile ${{ matrix.profile }} --locked --target ${{ matrix.target }} -p pixel-cli
+
+      # release-build.yml's packaging split, on every lane: the release tag is
+      # the only run of the Package step, so a strip tool that is missing, a
+      # binary that comes out of the build already stripped, or (macOS) a
+      # signature the strip breaks fails here first. The binary runs where
+      # the runner can execute it.
+      - name: Split symbols and strip (release-build.yml's Package step)
+        if: steps.dup.outputs.duplicate != 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          scripts/release/split-symbols.sh "target/$TARGET/$PROFILE/pixel" "$RUNNER_TEMP/pixel.symbols.tar.xz"
+          case "$TARGET" in
+            x86_64-unknown-linux-musl|aarch64-apple-darwin) "target/$TARGET/$PROFILE/pixel" --version ;;
+          esac
 
       # A green build records the verdict under
       # crossbuild-verdict-<profile>-<target>-<tree>-<day>: a later run of

@@ -48,7 +48,7 @@
 #
 # Placeholders, filled by the partial (an unknown one fails the build):
 #   {bench}        the /benchmarks/ page
-#   {kept.range}   the kept rows of data/read_savings.toml: "79.7 to 97.2%",
+#   {kept.range}   the kept rows of data/read_savings.toml: "79.7 to 97.1%",
 #   {kept.count}     how many there are,
 #   {kept.median}    and their median, formatted as on /benchmarks/
 #   {big.owner}    the token wall's row (partials/wall-row.html): its owner,

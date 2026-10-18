@@ -111,6 +111,8 @@ fn lang_of_should_map_every_wired_extension_to_its_walker_language() {
         ("a.ex", "elixir"),
         ("a.exs", "elixir"),
         ("a.lua", "lua"),
+        ("a.kt", "kotlin"),
+        ("build.gradle.kts", "kotlin"),
     ];
     for (path, lang) in cases {
         assert_eq!(lang_of(path), Some(lang), "{path}");
@@ -148,6 +150,7 @@ fn parse_file_should_parse_every_wired_language() {
         ("a.ex", "x = 1\n"),
         ("a.lua", "local x = 1\n"),
         ("A.cs", "class A {}\n"),
+        ("A.kt", "class A\n"),
     ] {
         let tree = parse_file(path, src.as_bytes()).unwrap_or_else(|| panic!("{path}"));
         assert!(!tree.root_node().has_error(), "{path} parses cleanly");
@@ -1342,4 +1345,95 @@ fn js_class_fields_with_a_function_value_should_be_methods_too() {
             .any(|(q, _)| q.starts_with("Board.") && q.ends_with("secret")),
         "{syms:?}"
     );
+}
+
+const KOTLIN_SRC: &str = r#"package com.acme.shop
+
+import com.acme.net.HttpClient
+import kotlinx.coroutines.launch
+
+interface Repository { fun load(id: Int): Order }
+
+class OrderService(private val client: HttpClient) {
+    fun total(order: Order): Int {
+        val price = client.fetch(order.id)
+        return applyTax(price)
+    }
+
+    private fun applyTax(price: Int): Int = price * 2
+
+    companion object {
+        fun create(): OrderService = OrderService(HttpClient())
+    }
+}
+
+object Registry {
+    fun register(service: OrderService) { println(service) }
+}
+
+fun main() { Registry.register(OrderService.create()) }
+"#;
+
+#[test]
+fn kotlin_should_record_classes_objects_functions_and_their_nesting() {
+    let fx = extract("src/main/kotlin/OrderService.kt", KOTLIN_SRC);
+    let syms = symbols(&fx);
+    for (qualified, kind) in [
+        ("Repository", SymbolKind::Class),
+        ("Repository.load", SymbolKind::Function),
+        ("OrderService", SymbolKind::Class),
+        ("OrderService.total", SymbolKind::Function),
+        ("OrderService.applyTax", SymbolKind::Function),
+        ("Registry", SymbolKind::Class),
+        ("Registry.register", SymbolKind::Function),
+        ("main", SymbolKind::Function),
+    ] {
+        assert!(
+            syms.contains(&(qualified.to_string(), kind)),
+            "{qualified} {kind:?} missing from {syms:?}"
+        );
+    }
+}
+
+#[test]
+fn kotlin_imports_should_record_the_qualified_name() {
+    let fx = extract("OrderService.kt", KOTLIN_SRC);
+    assert_eq!(
+        import_paths(&fx),
+        vec![
+            "com.acme.net.HttpClient".to_string(),
+            "kotlinx.coroutines.launch".to_string()
+        ]
+    );
+}
+
+#[test]
+fn kotlin_calls_should_name_the_member_and_its_receiver() {
+    let fx = extract("OrderService.kt", KOTLIN_SRC);
+    assert_eq!(call_receiver(&fx, "fetch"), Some("client".to_string()));
+    assert_eq!(call_receiver(&fx, "applyTax"), None);
+    assert_eq!(call_receiver(&fx, "register"), Some("Registry".to_string()));
+    assert_eq!(
+        call_receiver(&fx, "create"),
+        Some("OrderService".to_string())
+    );
+    assert!(has_call(&fx, "println"), "{:?}", calls(&fx));
+    assert_eq!(
+        owner_of_call(&fx, "fetch"),
+        Some("OrderService.total".to_string())
+    );
+}
+
+#[test]
+fn kotlin_script_files_should_extract_like_kotlin_sources() {
+    let fx = extract(
+        "build.gradle.kts",
+        "plugins { id(\"java\") }\nfun helper() = 1\n",
+    );
+    assert!(
+        symbols(&fx).contains(&("helper".to_string(), SymbolKind::Function)),
+        "{:?}",
+        symbols(&fx)
+    );
+    assert!(has_call(&fx, "id"), "{:?}", calls(&fx));
 }

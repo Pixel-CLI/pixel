@@ -8,7 +8,10 @@ Both sides estimate tokens from those bytes divided by four, rounded down, as th
 
 - **Command:** `scripts/bench/bench-read-savings.sh` (downloads each file at its
   pinned commit into a throwaway repository under `$TMPDIR`).
-- **Binary:** pixel 0.5.0, September 2026.
+- **Binary:** pixel 0.8.0 (`9a8adca`), 2026-10-18. The 0.5.0 run of
+  September 2026 differed on one row: Next.js's `base-server.ts` listed 60
+  signatures (832 tokens, 97.2% saved) where 0.8.0 lists 67 (964, 96.7%);
+  the median is 94.5% in both.
 - **Files:** ten large, well-known files of popular projects, listed for
   recognition across languages (Python, TypeScript, Rust, JavaScript)
   before any saving was measured, each pinned to the last commit that
@@ -23,7 +26,7 @@ Both sides estimate tokens from those bytes divided by four, rounded down, as th
 name	repository	path	commit	lines	full_tok	pixel_tok	saved_pct	signatures	status
 transformers	huggingface/transformers	src/transformers/trainer.py	98d3982	4639	57058	1649	97.1	90	kept
 fastapi	fastapi/fastapi	fastapi/routing.py	d623544	6447	63908	2237	96.5	150	kept
-next	vercel/next.js	packages/next/src/server/base-server.ts	52788bd	3459	29454	832	97.2	60	kept
+next	vercel/next.js	packages/next/src/server/base-server.ts	52788bd	3459	29454	964	96.7	67	kept
 langchain	langchain-ai/langchain	libs/core/langchain_core/language_models/chat_models.py	ed0ad74	2748	27493	876	96.8	65	kept
 django	django/django	django/db/models/query.py	6ade625	3137	30449	2453	91.9	186	kept
 cpython	python/cpython	Lib/typing.py	de2ea9a	3955	34829	3386	90.3	251	kept
