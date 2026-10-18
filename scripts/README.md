@@ -120,6 +120,7 @@ of each and the plain-Codex baselines of `baselines.jsonl`): `--questions <file.
 | `probe-loop.py` | `python3 -I scripts/bench/probe-loop.py --prompt "<question>" --repo <path>` | the whole probe loop on a plain prompt (adhoc question, git-ignored) |
 | `probe-equivalence.py` | `python3 -I scripts/bench/probe-equivalence.py --bin <pixel> --home <fake home>` | the native brief with probes equals the Python reference chain (`probe-chain.py`) |
 | `tool-census/score_brief.py` | `python3 -I scripts/bench/tool-census/score_brief.py --bin <pixel>` | offline scorer: how much of each question's oracle lines a brief quotes; `compare A.json B.json` |
+| `bench/brief-recall.py` | `python3 -I scripts/bench/brief-recall.py extract --since <ISO> --out rows.jsonl`, then `score --labels <labelled.jsonl> --bin <pixel> --out <dir>` | labelled replay of real prompts through the prompt-submit brief (issue #1032): project and follow-up recall, precision, hit@8; results in `docs/bench/brief-recall-2026-10-18/` |
 | `tool-census/run.py`, `oracle.py`, `extract.py`, `classify.py` | `python3 -I scripts/bench/tool-census/run.py --self-test` | the private census (#905): vanilla Claude Code runs, the oracle experiment, the transcript extractor and its classifier. `run.py` also carries the agent launch (env whitelist, `pixel` shim, quota guard) the live tools reuse; `manifest.json` stays local |
 
 `--self-test` of each runs in CI; `brief-check.py` and `probe-test.py` carry an end-to-end test on a throwaway pinned

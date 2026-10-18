@@ -575,6 +575,7 @@ jobs:
           python3 scripts/bench/brief-bench.py --self-test
           python3 scripts/bench/brief-bench.py check
           python3 scripts/bench/brief-zero-calls.py --self-test
+          python3 scripts/bench/brief-recall.py --self-test
           python3 scripts/bench/tool-census/question_source.py
           python3 scripts/bench/tool-census/score_brief.py --self-test
           python3 scripts/bench/tool-census/run.py --self-test
