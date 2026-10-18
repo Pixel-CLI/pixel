@@ -1,12 +1,14 @@
 name = "flow-rank"
-version = "0.1.0"
+version = "0.2.0"
 api = 1
-description = "Ranks the callees of a walkthrough's entry by the question's words and shows their bodies"
+description = "Ranks the callees of a walkthrough's entry (the one the question names, else the brief's) by the question's words and shows their bodies"
 run = "probe"
 capabilities = ["brief-probe"]
 
 [brief-probe]
 owner = "pixel"
 when_kinds = ["flow"]
+# A walkthrough the brief did not classify as flow (a "rationale" or unjudged prompt) still gets its chain.
+when_prompt = "(?i)\\bwalk (me )?through\\b"
 budget_ms = 1500
 mode = "lead"

@@ -3,10 +3,13 @@
 # SPDX-License-Identifier: MIT
 
 """flow-rank: a walkthrough question is answered by the callees that carry its words, not by a depth-first prefix
-of the entry's calls. Reads every callee of the entry the brief's trace names (who-calls pages), ranks them by the
-question's words (generic words weigh little, tests are left out, an exact edge weighs a little more), follows the
-best six one level at a time down to depth 3, and shows the entry in full and each ranked body. It replaces the
-brief's own flow blocks. Needs `pixel` (PIXEL_BIN, else PATH) and its daemon; prints nothing without them."""
+of the entry's calls. The entry is the one the question names in code form (`client.fetch`, `handle_event`) when the
+graph defines it, else the one the brief's trace names. Reads every callee of the entry (who-calls pages), ranks them
+by the question's words (generic words weigh little, tests are left out, an exact edge weighs a little more), follows
+the best six one level at a time down to depth 3 (from a named entry, a level where fewer than two callees carry the
+question's words keeps its best three: a narrow chain is the path), and shows the entry in full and each ranked body.
+It replaces the brief's own flow blocks. Needs `pixel` (PIXEL_BIN, else PATH) and its daemon; prints nothing without
+them. Issues #906, #1198."""
 import json
 import os
 import re
@@ -54,20 +57,47 @@ def numbered(root, path, lo, hi, cap):
     return [f"{n}| {lines[n - 1][:200]}" for n in range(lo, hi + 1)], hi
 
 
-def main():
-    req = json.load(sys.stdin)
-    root, prompt, brief = req["repo_root"], req["prompt"], req.get("brief", "")
-    m = re.search(r"^entry (\S+) — (\S+?):(\d+)-(\d+)", brief, re.M)
-    if not m or "### call trace" not in brief:
-        return
-    name, path, lo, hi = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
+def symbols(root, name):
     try:
         found = json.loads(pixel(root, "find-symbol", "--metrics", "off", "--json", name, ".") or "{}")
     except ValueError:
-        return
-    rows = found.get("symbols") or found.get("hits") or []
-    uid = next((s["uid"] for s in rows if s.get("path") == path and s.get("start_line") == lo), None)
-    if uid is None:
+        return []
+    return found.get("symbols") or found.get("hits") or []
+
+
+def named_entry(root, prompt):
+    """The entry a walkthrough names in code form (`client.fetch`, `handle_event`, `app.mount`): the first such name
+    the graph defines, as `(uid, name, path, lo, hi)`. A dotted name's leading parts pick among same-named symbols
+    (a path that holds them), then a function over a method, then the shortest path; tests never."""
+    names = re.findall(r"`([A-Za-z_][\w.]*)`", prompt)
+    names += re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", prompt)
+    names += re.findall(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b|\b[a-z]+[A-Z]\w*\b", prompt)
+    for full in dict.fromkeys(names):
+        parts = full.split(".")
+        rows = [r for r in symbols(root, parts[-1]) if r.get("name", "").split(".")[-1] == parts[-1]
+                and "test" not in r.get("path", "").lower()]
+        if not rows:
+            continue
+        rows.sort(key=lambda r: (-sum(q.lower() in r["path"].lower() for q in parts[:-1]),
+                                 r.get("kind") != "function", len(r["path"]), r["path"]))
+        r = rows[0]
+        return r["uid"], parts[-1], r["path"], r["start_line"], r["end_line"]
+    return None
+
+
+def main():
+    req = json.load(sys.stdin)
+    root, prompt, brief = req["repo_root"], req["prompt"], req.get("brief", "")
+    named = named_entry(root, prompt)
+    m = re.search(r"^entry (\S+) — (\S+?):(\d+)-(\d+)", brief, re.M)
+    if named:
+        uid, name, path, lo, hi = named   # the question's own entry wins over the one the brief guessed
+    elif m and "### call trace" in brief:
+        name, path, lo, hi = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
+        uid = next((s["uid"] for s in symbols(root, name) if s.get("path") == path and s.get("start_line") == lo), None)
+        if uid is None:
+            return
+    else:
         return
     terms = [w for w in dict.fromkeys(w.lower() for w in re.findall(r"[A-Za-z]{4,}", prompt)) if w not in NOISE]
     pool = {}
@@ -84,15 +114,22 @@ def main():
             res.append((score - 0.25 * (depth - 1), sym["uid"], sym, depth))
         return sorted(res, key=lambda r: (-r[0], r[1]))
 
-    frontier = [uid]
+    frontier, kept = [uid], set()
     for depth in (1, 2, 3):
         for u in frontier[:6]:
             for edge in callees(root, u):
                 sym = edge["symbol"]
                 if sym["uid"] != uid and sym["uid"] not in pool:
                     pool[sym["uid"]] = (sym, edge["tier"], depth)
-        frontier = [r[1] for r in scored() if r[3] == depth and r[0] > MIN_SCORE]
-    ranked = [r for r in scored() if r[0] > MIN_SCORE][:MAX_RANKED]
+        level = [r for r in scored() if r[3] == depth and r[0] > -1]
+        passing = [r for r in level if r[0] > MIN_SCORE]
+        # From an entry the question names, a narrow chain is the path itself: keep its best non-test callees even
+        # when their names do not carry the question's words (`client.fetch` calls `send`, then `Pool.open`).
+        chosen = passing if named is None or len(passing) >= 2 else level[:3]
+        frontier = [r[1] for r in chosen]
+        for r in chosen:
+            kept.add(r[1])
+    ranked = [r for r in scored() if r[0] > MIN_SCORE or r[1] in kept][:MAX_RANKED]
     if not ranked:
         return
     print("drop: .")
@@ -111,4 +148,5 @@ def main():
         print("\n".join(body))
 
 
-main()
+if __name__ == "__main__":
+    main()
