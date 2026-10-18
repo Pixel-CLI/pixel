@@ -82,7 +82,7 @@ CITE_RANGE_CAP = 400
 TYPES = ("definition", "usage", "tests", "config", "docs")
 TYPE_LABELS = {"definition": "definition bodies (code read)", "usage": "usage / search-hit lines",
                "tests": "tests", "config": "config", "docs": "docs"}
-MEASUREMENT_PROTOCOL = {"name": "brief-oracle", "version": 3}
+MEASUREMENT_PROTOCOL = {"name": "brief-oracle", "version": 4}
 PROCESS_TIMEOUT_S = 300
 COMPLETE_STATUSES = {"ok", "abstained"}
 
@@ -729,16 +729,17 @@ def parse_brief(text, repo):
     # 2. excerpt blocks (header + body) and headerless fenced blocks
     i, consumed = 0, set()
     while i < len(lines):
-        head = header_of(lines[i], repo) if i not in consumed else None
-        if head:
-            rel, lo, hi = head
+        source_header = header_match(lines[i]) if i not in consumed else None
+        if source_header:
+            head = header_of(lines[i], repo)
             body, nxt, fenced = block_lines(lines, i)
-            if body:
+            if head and body:
+                rel, lo, hi = head
                 numbered = [NUMLINE.match(b) for b in body]
-                nonblank = [b for b in body if b.strip()]
                 have = [m for m in numbered if m]
                 got = []
-                if nonblank and len(have) * 10 >= len(nonblank) * 6:
+                # Explicit coordinates own mixed blocks too: never renumber them via the sequential fallback.
+                if have:
                     got = [(rel, n) for m in have if 1 <= (n := int(m.group(1))) <= repo.nlines(rel)
                            and (lo is None or n >= lo) and (hi is None or n <= hi)]
                 elif lo is not None and not any(ELISION.match(b) for b in body):
@@ -754,7 +755,7 @@ def parse_brief(text, repo):
                     regions.all.add(key)
                 if got:
                     regions.count += 1
-            # Even a rejected/empty excerpt owns its fence; never retry it without its source/range.
+            # Unknown sources and rejected/empty excerpts own their fences; never retry them globally.
             consumed.update(range(i, nxt))
             i = nxt
             continue
@@ -1793,6 +1794,36 @@ class SelfTest(unittest.TestCase):
         quoted = "\n".join(self.repo.lines("src/app.py")[19:24])
         r = parse_brief(f"answer pack\n```\n{quoted}\n```\n", self.repo)
         self.assertEqual({k[1] for k in r.inline if k[0] == "src/app.py"}, set(range(20, 25)))
+
+    def test_unknown_source_owns_its_fence_without_global_matchback(self):
+        quoted = self.repo.lines("src/app.py")[6]
+        fence = f"```text\n{quoted}\n```\n"
+        oracle = oracle_from_ranges(self.repo, [["src/app.py", 7, 7]])
+        for header in ("### unknown/manual.md:7-7 — docs", "unknown/manual.md"):
+            with self.subTest(header=header):
+                text = header + "\n" + fence
+                regions = parse_brief(text, self.repo)
+                self.assertEqual(regions.inline, set(), "unknown docs cannot borrow matching code")
+                self.assertEqual(regions.all, set())
+                metrics = score_session(oracle, regions, set(), text)
+                self.assertEqual((metrics["covered_lines"], metrics["inline_lines"]), (0, 0))
+                following = text + "### README.md:2-2\n2| doc\n"
+                self.assertEqual(parse_brief(following, self.repo).inline, {("README.md", 2)})
+        self.assertEqual(parse_brief(fence, self.repo).inline, {("src/app.py", 7)},
+                         "a genuinely headerless quote still uses matchback")
+
+    def test_mixed_numbered_blocks_cannot_renumber_rows_into_the_header_range(self):
+        for rel in ("src/app.py", "README.md"):
+            for fenced in (False, True):
+                for number in (9, 2):
+                    with self.subTest(source=rel, fenced=fenced, number=number):
+                        # One numbered row out of two is below the legacy 60% threshold.
+                        body = f"{number}| " + self.repo.lines(rel)[number - 1] + "\nnot a numbered source row\n"
+                        text = f"### {rel}:2-2\n" + ("```\n" + body + "```\n" if fenced else body)
+                        regions = parse_brief(text, self.repo)
+                        expected = {(rel, 2)} if number == 2 else set()
+                        self.assertEqual(regions.inline, expected, "explicit rows retain their own coordinates")
+                        self.assertEqual(regions.all, {(rel, 2)}, "the header remains a pointer, not a quote")
 
     def test_brief_elided_header_block_uses_matchback_not_the_header_range(self):
         lines = self.repo.lines("src/app.py")

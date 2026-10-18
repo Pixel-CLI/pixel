@@ -63,3 +63,22 @@ increase or decrease on byte-identical briefs because attribution is corrected;
 these are measurement corrections, never retrieval gains. Reports from earlier
 versions remain unchanged. Replay frozen briefs before running the complete
 #1201 pipeline; publish both per-question and per-category comparisons.
+
+## Version 4 (#1239)
+
+All v2 validity and v3 attribution rules remain, with two additional source
+ownership guards. A syntactic source header owns its body even when the file
+cannot be resolved: its fence is consumed without global matchback. Truly
+headerless fences still use global matchback.
+
+If any body row carries an explicit line number, only those numbered rows are
+credited as inline coordinates, after the same file/range/EOF bounds. This
+also applies to mixed bodies below v3's 60% numbered-row threshold. Their
+unnumbered rows are ignored rather than sequentially renumbering the block.
+Wholly unnumbered blocks retain the existing sequential/bounded matchback
+rules. Header pointers remain distinct from inline quotes.
+
+These guards can remove false credit or restore an explicitly numbered row
+that v3 discarded. Compare the same frozen briefs and record each question
+and category; any delta is a measurement correction, not retrieval improvement.
+Keep the v1/v2/v3 reports and their dated reference unchanged.
