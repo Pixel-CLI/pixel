@@ -1,0 +1,1 @@
+**graph:** With the Rust source on, an unresolved Rust call whose name no symbol of the graph carries (a `std` method, a macro, another crate) is no longer stored: no `impact` or `uses` count could read it. On this repository the Rust `unresolved_calls` rows drop from 58,142 to 35,075 and `graph.v2.db` from 22.5 to 20.5 MB; graphs rebuild once.

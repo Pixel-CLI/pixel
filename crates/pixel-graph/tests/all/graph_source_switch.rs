@@ -321,14 +321,14 @@ fn an_incremental_update_with_the_switch_on_stores_what_a_full_build_stores() {
 fn an_incremental_update_with_the_switch_on_writes_only_the_rust_rows_it_may_have_moved() {
     // One save used to delete and write again every Rust edge and
     // unresolved row of the graph (#1114). `src/paths.rs` defines nothing
-    // another file calls or refers to: its own rows move; the edges and
-    // unresolved rows of `src/lib.rs` and `src/util.rs` stay as they are,
-    // without a statement.
+    // another file calls or refers to: its own rows move (its new call to
+    // `helper`); the edges and unresolved rows of `src/lib.rs` and
+    // `src/util.rs` stay as they are, without a statement.
     let (_dir, root, db) = built(RustSource::Mvp);
     count_writes(&db);
     fs::write(
         root.join("src/paths.rs"),
-        "// moved\npub fn join(a: &str) -> String {\n    a.to_string()\n}\n",
+        "// moved\npub fn join(a: &str) -> String {\n    crate::util::helper();\n    a.to_string()\n}\n",
     )
     .unwrap();
     update_file(&root, &db, "src/paths.rs").unwrap();
@@ -461,6 +461,47 @@ fn a_deleted_file_writes_its_importers_again() {
     );
 }
 
+/// The `unresolved_calls` rows named `name`, as `path name line receiver`.
+fn unresolved_named(db: &Path, name: &str) -> Vec<String> {
+    let store = GraphStore::open(db).unwrap();
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT f.path || ' ' || u.name || ' ' || u.site_line || ' ' || COALESCE(u.receiver, '-')
+               FROM unresolved_calls u JOIN files f ON f.id = u.file_id
+              WHERE u.name = ?1 ORDER BY 1",
+        )
+        .unwrap();
+    stmt.query_map([name], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn a_rust_call_to_a_name_no_symbol_carries_is_stored_only_once_one_does() {
+    // `x.iter()` names `iter`, which no symbol of the fixture carries: no
+    // `impact` or `uses` count can read its row (#1162); `.count()` names
+    // env.py's `count` and keeps its row. Once `paths.rs` defines an `iter`,
+    // the site is a call to a name the graph knows, and the update records
+    // it as a full build does.
+    let (_dir, root, db) = built(RustSource::Mvp);
+    assert_eq!(unresolved_named(&db, "iter"), Vec::<String>::new());
+    assert_eq!(
+        unresolved_named(&db, "count"),
+        vec!["src/lib.rs count 11 .x.iter()"]
+    );
+    saves_store_what_a_full_build_stores(
+        &root,
+        &db,
+        &[(
+            "src/paths.rs",
+            Some("pub fn join(a: &str) -> String {\n    a.to_string()\n}\npub fn iter() {}\n"),
+        )],
+    );
+    assert_eq!(unresolved_named(&db, "iter"), vec!["src/lib.rs iter 11 .x"]);
+}
+
 #[test]
 fn an_update_that_names_a_new_symbol_writes_every_rust_file_again() {
     // `join` gains a sibling `scale` no symbol carried: an unresolved
@@ -470,7 +511,7 @@ fn an_update_that_names_a_new_symbol_writes_every_rust_file_again() {
     count_writes(&db);
     fs::write(
         root.join("src/paths.rs"),
-        "pub fn join(a: &str) -> String {\n    a.to_string()\n}\npub fn scale() {}\n",
+        "pub fn join(a: &str) -> String {\n    crate::util::helper();\n    a.to_string()\n}\npub fn scale() {}\n",
     )
     .unwrap();
     update_file(&root, &db, "src/paths.rs").unwrap();
@@ -496,7 +537,7 @@ fn an_index_refreshed_without_the_graph_makes_the_next_update_write_every_rust_f
     count_writes(&db);
     fs::write(
         root.join("src/paths.rs"),
-        "// moved\npub fn join(a: &str) -> String {\n    a.to_string()\n}\n",
+        "// moved\npub fn join(a: &str) -> String {\n    crate::util::helper();\n    a.to_string()\n}\n",
     )
     .unwrap();
     update_file(&root, &db, "src/paths.rs").unwrap();

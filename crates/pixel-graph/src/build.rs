@@ -171,7 +171,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    of their class, and the calls made inside them belong to them.
 /// 26: an incomplete Ruby `alias` generates no method or forwarding reference,
 ///    so it cannot reassign a preceding alias's reference to another symbol.
-pub const EXTRACTOR_VERSION: &str = "26";
+/// 27: with the Rust source on, an unresolved Rust call whose name no symbol
+///    carries is no longer stored, as an unresolved reference already was not.
+pub const EXTRACTOR_VERSION: &str = "27";
 
 /// True iff the graph's rows were written by the current extractor, from
 /// the Rust and Ruby sources the switches ask for now

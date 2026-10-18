@@ -65,9 +65,10 @@ fn the_shadow_counts_what_each_resolver_links_alone() {
             different_file: 0,
         }
     );
-    // pixel-mvp keeps `p.join`, `x.iter`, `.count`, `v.unwrap` and the
-    // rest unresolved where this graph guessed.
-    assert_eq!(report.unresolved, Sides { v1: 2, mvp: 6 });
+    // pixel-mvp keeps `p.join`, `.count`, `v.unwrap` and `.len` unresolved
+    // where this graph guessed; `x.iter` and `a.to_string` name no symbol of
+    // the graph, so no row records them (#1162).
+    assert_eq!(report.unresolved, Sides { v1: 2, mvp: 4 });
     // `tests::t` -> helper.
     assert_eq!(report.dropped_no_caller, 1);
     // env.py's `count` -> helper, linked by name.
