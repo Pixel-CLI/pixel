@@ -1,7 +1,7 @@
 # What reaches an agent that needs to know what a well-known large file
 # contains: the whole file, or `pixel list-signatures` on it (UTF-8 bytes
 # divided by four on both sides). Produced by scripts/bench/bench-read-savings.sh
-# with pixel 0.5.0, each file pinned to `commit`; raw output and method in
+# with pixel 0.8.0, each file pinned to `commit`; raw output and method in
 # docs/bench/read-savings.md. The row marked `wall` drives the landing
 # page's token wall; the `kept` rows give the range and median its caption
 # quotes. `excluded` rows are shown on /benchmarks/ with the reason.
@@ -38,9 +38,9 @@ path = "packages/next/src/server/base-server.ts"
 commit = "52788bd"
 lines = 3459
 full = 29454
-pixel = 832
-saved = 97.2
-signatures = 60
+pixel = 964
+saved = 96.7
+signatures = 67
 status = "kept"
 
 [[row]]

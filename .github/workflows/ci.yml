@@ -53,6 +53,10 @@ on:
       - "docs/manual-setup.md"
       - "website/content/docs.md"
       - "website/content/benchmarks.md"
+      # scripts/ci/check-claims.py: the registry and the docs it binds.
+      - "docs/bench/claims.toml"
+      - "docs/bench/vs-gitnexus.md"
+      - "website/data/read_savings.toml"
       # docs_drift.rs reads llms.txt (agent pages and answers links):
       - "website/static/llms.txt"
       - ".agents/rules/**"
@@ -521,6 +525,17 @@ jobs:
       - name: Cancel-stale sweep contract (stubbed gh)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-cancel-stale-runs.py
+
+      # Every public number names the pixel version it was measured with
+      # (docs/bench/claims.toml); one more than a minor behind fails unless an
+      # issue tracks its re-measure. Unconditional: a version bump, a README
+      # or a website edit can each make a claim stale or unbound.
+      - name: Public claims bound to a version
+        run: python3 scripts/ci/check-claims.py
+
+      - name: Public-claims check contract (stale, tracked, unbound, malformed)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-check-claims.py
 
       # The brief-gate bench parses `pixel brief` output and scores it against
       # eval/brief-gate/prompts.jsonl; the excerpt and span benches score the

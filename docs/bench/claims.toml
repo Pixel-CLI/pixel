@@ -1,0 +1,164 @@
+# Every public number Pixel quotes, bound to the binary that produced it.
+#
+# One [[claim]] per figure a reader sees (README, the website, docs/bench):
+#
+#   id              stable name; scripts/bench/refresh-claim.sh <id> re-runs it
+#   doc             the file that quotes the number
+#   anchor          literal text of `doc` holding the number, so the entry
+#                   cannot outlive the sentence it describes
+#   version_text    literal text of `doc` that states the binary version
+#   protocol        where the method and raw output live
+#   binary_version  the pixel version measured: "x.y.z", "x.y.x" for a
+#                   range of patches, or "unknown" when nobody recorded it
+#   commit          the pixel commit measured ("" when unknown)
+#   measured        the date of the run
+#   command         the exact command that re-measures it
+#   live            true when it needs an agent, a model or another paid or
+#                   installed tool: refresh-claim.sh then refuses to run it
+#                   without --live
+#   tracking        the issue that re-measures a claim known to be stale
+#
+# scripts/ci/check-claims.py (CI: the docs job) fails when a claim's version
+# is more than one minor behind crates/pixel/Cargo.toml without a
+# `tracking` issue, when its doc no longer holds `anchor` or
+# `version_text`, or when an entry is malformed. A tracked stale claim is
+# printed as a warning on every run.
+
+[[claim]]
+id = "readme-codex-requests-run"
+doc = "README.md"
+anchor = "| Same Codex question on Requests (one recorded run) | 1 min 58 s | **36 s** |"
+version_text = "the Codex run, Pixel 0.5.x"
+protocol = "docs/motion/prompt-submit/README.md"
+binary_version = "0.5.x"
+commit = ""
+measured = "2026-09"
+command = "a recorded Codex session on psf/requests, with and without the prompt-submit brief (docs/motion/prompt-submit/README.md)"
+live = true
+tracking = "#1093"
+
+[[claim]]
+id = "readme-requests-models-outline"
+doc = "README.md"
+anchor = "| Requests `models.py`: full read vs. outline | 10,365 tokens* | **641 tokens*** (−94%) |"
+version_text = "Pixel 0.8.0"
+protocol = "website/content/benchmarks.md#measure-it-on-your-own-code"
+binary_version = "0.8.0"
+commit = "9a8adca44865008d7a2d63bd6d8f0565a640ba27"
+measured = "2026-10-18"
+command = "git clone https://github.com/psf/requests && cd requests && git checkout 611c616 && pixel list-signatures src/requests/models.py"
+live = false
+
+[[claim]]
+id = "readme-read-savings-median"
+doc = "README.md"
+anchor = "| 8 large open-source files: full read vs. outline | 100% | **median 5.5%** (−94.5%) |"
+version_text = "Pixel 0.8.0"
+protocol = "docs/bench/read-savings.md"
+binary_version = "0.8.0"
+commit = "9a8adca44865008d7a2d63bd6d8f0565a640ba27"
+measured = "2026-10-18"
+command = "scripts/bench/bench-read-savings.sh"
+live = false
+
+[[claim]]
+id = "benchmarks-requests-audit"
+doc = "website/content/benchmarks.md"
+anchor = "read 95,693 tokens for the twenty files whole against 11,447 for their outlines (−88%)"
+version_text = "with pixel 0.8.0"
+protocol = "website/content/benchmarks.md#measure-it-on-your-own-code"
+binary_version = "0.8.0"
+commit = "9a8adca44865008d7a2d63bd6d8f0565a640ba27"
+measured = "2026-10-18"
+command = "git clone https://github.com/psf/requests && cd requests && git checkout 611c616 && pixel audit"
+live = false
+
+[[claim]]
+id = "read-savings-table"
+doc = "website/data/read_savings.toml"
+anchor = "pixel = 964"
+version_text = "with pixel 0.8.0"
+protocol = "docs/bench/read-savings.md"
+binary_version = "0.8.0"
+commit = "9a8adca44865008d7a2d63bd6d8f0565a640ba27"
+measured = "2026-10-18"
+command = "scripts/bench/bench-read-savings.sh"
+live = false
+
+[[claim]]
+id = "benchmarks-cold-start-rails"
+doc = "website/content/benchmarks.md"
+anchor = "| Text index and code graph (59,609 symbols) | **12 s** |"
+version_text = "Apple M2, September 2026"
+protocol = "docs/bench/cold-index.md"
+binary_version = "unknown"
+commit = ""
+measured = "2026-09"
+command = "XDG_CACHE_HOME=\"$(mktemp -d)\" pixel prepare-repo --no-daemon --metrics off --json (on a private 18,782-file Rails clone; see the protocol)"
+live = true
+tracking = "#1093"
+
+[[claim]]
+id = "vs-gitnexus"
+doc = "docs/bench/vs-gitnexus.md"
+anchor = "Measured 2026-09-21 on an Apple M2 / 16 GiB / Darwin 25.6.0, pixel 0.4.0"
+version_text = "pixel 0.4.0"
+protocol = "docs/bench/vs-gitnexus.md"
+binary_version = "0.4.0"
+commit = "5c9b4ad"
+measured = "2026-09-21"
+command = "python3 scripts/bench/bench-vs/bench-impact.py (with GitNexus 1.6.12 built from source; see the protocol)"
+live = true
+tracking = "#1093"
+
+[[claim]]
+id = "benchmarks-vs-gitnexus-table"
+doc = "website/content/benchmarks.md"
+anchor = "| Median time per answer | **153 ms** | 432 ms |"
+version_text = "GitNexus 1.6.12 and Pixel 0.4.0"
+protocol = "docs/bench/vs-gitnexus.md"
+binary_version = "0.4.0"
+commit = "5c9b4ad"
+measured = "2026-09-21"
+command = "python3 scripts/bench/bench-vs/bench-impact.py (with GitNexus 1.6.12 built from source; see the protocol)"
+live = true
+tracking = "#1093"
+
+[[claim]]
+id = "benchmarks-opus-hook-trial"
+doc = "website/content/benchmarks.md"
+anchor = "| Duration | 42.9 s | 47.6 s | +11% |"
+version_text = "the `v0.5.0` worktree tag"
+protocol = "docs/bench/opus-install-hook-trial.md"
+binary_version = "0.5.0"
+commit = ""
+measured = "2026-09"
+command = "REF=v0.5.0 EFFORT=medium docs/motion/scripts/record-demo.sh <out-dir> 11 claude-opus-5-5"
+live = true
+tracking = "#1093"
+
+[[claim]]
+id = "benchmarks-nl-search-semble-warpgrep"
+doc = "website/content/benchmarks.md"
+anchor = "semble has the right file in its top 10 for 100%, Pixel 0.6.0 for 96%"
+version_text = "Pixel 0.6.0"
+protocol = "docs/bench/vs-landscape.md#natural-language-retrieval--pixel-060-four-arms-45-queries"
+binary_version = "0.6.0"
+commit = "3ff58da"
+measured = "2026-09-27"
+command = "python3 scripts/bench/bench-vs/bench-retrieval.py (semble installed; WarpGrep needs a Morph API key)"
+live = true
+tracking = "#1093"
+
+[[claim]]
+id = "benchmarks-context-cost-0.4.0-prompt"
+doc = "website/content/benchmarks.md"
+anchor = "| Context cost on every turn (Pixel: the agent prompt 0.4.0 installed) | **~4,160 estimated tokens** | ~19,700 tokens |"
+version_text = "the agent prompt 0.4.0 installed"
+protocol = "docs/bench/vs-gitnexus.md"
+binary_version = "0.4.0"
+commit = "5c9b4ad"
+measured = "2026-09-21"
+command = "python3 scripts/bench/bench-vs/mcp-schema-size.py (the 0.4.0 prompt; later releases ship a skill instead)"
+live = true
+tracking = "#1093"
