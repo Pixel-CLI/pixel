@@ -6,6 +6,16 @@
 //! `extract`/`resolve`/`build` write through this API; analyses read through
 //! it (plus ad-hoc SQL via `conn()` when a bespoke join is clearer). WAL
 //! mode; per-file replacement is transactional.
+//!
+//! Space: a graph db is created with `auto_vacuum = INCREMENTAL`, and one
+//! made before that is converted by a single `VACUUM` at its next full
+//! build ([`GraphStore::ensure_incremental_vacuum`]); a full build then
+//! hands its freed pages back to the file system
+//! ([`GraphStore::reclaim`]), as `history.db` does after an eviction.
+//! Every write transaction ends with `PRAGMA optimize`
+//! ([`GraphStore::commit_write`]), SQLite's bounded planner-statistics
+//! refresh: it analyses only tables whose row counts moved, within
+//! `analysis_limit`.
 
 use std::path::Path;
 
@@ -485,6 +495,9 @@ pub struct GraphStore {
 /// The per-file delete [`GraphStore::replace_file`] and
 /// [`GraphStore::remove_file`] run once for every file of an incremental
 /// batch; `idx_unresolved_file` is what keeps it off a full-table scan.
+/// `PRAGMA auto_vacuum`'s value for `INCREMENTAL`.
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
 pub(crate) const DELETE_FILE_UNRESOLVED_CALLS: &str =
     "DELETE FROM unresolved_calls WHERE file_id = ?1";
 
@@ -548,6 +561,10 @@ impl GraphStore {
             &path,
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
+        // Before the first table exists, or it has no effect: freed pages are
+        // then tracked so `reclaim` can hand them back after a rebuild,
+        // instead of the file keeping its largest size forever.
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         // WAL serializes writers: a second writer (the daemon's watcher
@@ -608,9 +625,40 @@ impl GraphStore {
     }
 
     /// Commit the transaction opened by [`Self::begin_write`]. Everything
-    /// written since becomes visible to other connections at once.
+    /// written since becomes visible to other connections at once. The
+    /// planner statistics are refreshed first (`PRAGMA optimize`), inside
+    /// the transaction: it already holds the write lock, so the refresh
+    /// never waits behind another writer.
     pub fn commit_write(&self) -> Result<()> {
-        self.conn.execute_batch("COMMIT")?;
+        self.conn.execute_batch("PRAGMA optimize; COMMIT")?;
+        Ok(())
+    }
+
+    /// Whether freed pages are tracked for [`Self::reclaim`]; a db created
+    /// before that is converted with one `VACUUM`, which rewrites the whole
+    /// file. Outside any transaction; `false` when the conversion could not
+    /// run (another connection busy), to be tried again by the next caller.
+    pub fn ensure_incremental_vacuum(&self) -> Result<bool> {
+        let mode: i64 = self
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        if mode == AUTO_VACUUM_INCREMENTAL {
+            return Ok(true);
+        }
+        self.conn
+            .pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        Ok(self.conn.execute_batch("VACUUM").is_ok())
+    }
+
+    /// Hand the free pages back to the file system; with an empty free list
+    /// it costs one statement and frees nothing. Outside any transaction.
+    ///
+    /// The pragma frees one page per result row it yields, so it is stepped
+    /// to the end: `execute_batch` steps once and would free a single page.
+    pub fn reclaim(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA incremental_vacuum")?;
+        let mut rows = stmt.query([])?;
+        while rows.next()?.is_some() {}
         Ok(())
     }
 
@@ -2000,6 +2048,38 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The statements [`record_statement`] saw, on the one connection a test
+    /// traces.
+    static STATEMENTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    fn record_statement(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            STATEMENTS.lock().unwrap().push(sql.to_string());
+        }
+    }
+
+    #[test]
+    fn a_write_transaction_refreshes_the_planner_statistics_before_it_commits() {
+        let store = super::GraphStore::open_in_memory().unwrap();
+        store.conn().trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(record_statement),
+        );
+        store.begin_write().unwrap();
+        store.meta_set("k", "v").unwrap();
+        store.commit_write().unwrap();
+        let statements = std::mem::take(&mut *STATEMENTS.lock().unwrap());
+        let at = |sql: &str| {
+            statements
+                .iter()
+                .position(|s| s.trim().trim_end_matches(';') == sql)
+        };
+        let optimize = at("PRAGMA optimize");
+        assert!(optimize.is_some(), "{statements:?}");
+        assert!(at("COMMIT") > optimize, "{statements:?}");
+        assert_eq!(store.meta_get("k").unwrap().as_deref(), Some("v"));
+    }
+
     #[test]
     fn concepts_version_reads_the_stamped_schema_version() {
         let store = super::GraphStore::open_in_memory().unwrap();

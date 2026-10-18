@@ -601,6 +601,9 @@ fn build_graph_with(
     let all_paths: Vec<String> = extracted.iter().map(|e| e.rel.clone()).collect();
 
     let mut store = GraphStore::open(db_path)?;
+    // A db made before graph dbs tracked their free pages is converted once,
+    // here, where every row is about to be rewritten anyway.
+    store.ensure_incremental_vacuum()?;
     // One transaction for the whole build: without it every row below is its
     // own autocommit, and on a 60 000-symbol repository the store and
     // resolution passes spent 43 s of a 49 s build committing (#309).
@@ -698,6 +701,8 @@ fn build_graph_with(
     store.meta_set(BUILD_STARTED_KEY, &started.to_string())?;
     store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
     store.commit_write()?;
+    // The pages of every row the build deleted or replaced.
+    store.reclaim()?;
 
     let (files, symbols, edges, unresolved) = store.counts()?;
     Ok(GraphStats {
@@ -2067,6 +2072,61 @@ mod tests {
             .sum();
         assert_eq!(callers, 20);
         drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn pragma(db: &Path, name: &str) -> i64 {
+        GraphStore::open(db)
+            .unwrap()
+            .conn()
+            .query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_rebuild_after_most_files_went_hands_their_pages_back() {
+        // Every graph update deletes and rewrites rows; their pages stayed on
+        // the free list forever, so `graph.v2.db` only grew (#1089).
+        let root = tmpdir("vacuum");
+        for i in 0..40 {
+            let body: String = (0..30)
+                .map(|j| {
+                    format!(
+                        "export function f{i}_{j}() {{ return f{i}_{}() }}\n",
+                        (j + 1) % 30
+                    )
+                })
+                .collect();
+            std::fs::write(root.join(format!("m{i}.ts")), body).unwrap();
+        }
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        assert_eq!(pragma(&db, "auto_vacuum"), 2, "INCREMENTAL");
+        let before = pragma(&db, "page_count");
+        for i in 5..40 {
+            std::fs::remove_file(root.join(format!("m{i}.ts"))).unwrap();
+        }
+        build_graph(&root, &db).unwrap();
+        assert_eq!(pragma(&db, "freelist_count"), 0, "freed pages handed back");
+        let after = pragma(&db, "page_count");
+        assert!(after < before, "{after} pages after, {before} before");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_graph_db_made_before_auto_vacuum_is_converted_by_its_next_full_build() {
+        let root = tmpdir("vacuum-legacy");
+        std::fs::write(root.join("a.ts"), "export function f() { return 1 }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("CREATE TABLE legacy (x INTEGER); DROP TABLE legacy;")
+                .unwrap();
+        }
+        assert_eq!(pragma(&db, "auto_vacuum"), 0, "a table already existed");
+        build_graph(&root, &db).unwrap();
+        assert_eq!(pragma(&db, "auto_vacuum"), 2, "INCREMENTAL");
         let _ = std::fs::remove_dir_all(&root);
     }
 
