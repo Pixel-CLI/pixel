@@ -79,5 +79,25 @@ class DescribedMessage(unittest.TestCase):
                          "")
 
 
+class StringPart(unittest.TestCase):
+    def test_an_unclosed_string_of_escapes_is_read_in_linear_time(self):
+        import importlib.machinery
+        import importlib.util
+        import io
+        import sys
+        import time
+        loader = importlib.machinery.SourceFileLoader("error_origin_probe", str(PROBE))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps({"prompt": "x", "repo_root": tempfile.mkdtemp()}))
+        try:
+            loader.exec_module(module)   # the probe runs main() on import: on an empty repo it prints nothing
+        finally:
+            sys.stdin = stdin
+        started = time.monotonic()
+        self.assertEqual(module.string_part('x = "' + "\\a" * 40), "")
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(module.string_part('err("No files \\"were\\" found", x)'), 'No files \\"were\\" found')
+
+
 if __name__ == "__main__":
     unittest.main()
