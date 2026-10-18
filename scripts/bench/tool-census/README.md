@@ -10,7 +10,7 @@ its result from those streams; this directory only produces them.
 | `run.py` | `prepare`, `probe`, `run`, `--self-test`. Standard library only. |
 | `manifest.json` | the 20 prompts: `id`, `repo`, `sha`, `category`, `mode`, `prompt`, `expected`. **Private and git-ignored**: write it yourself or set `PIXEL_CENSUS_MANIFEST`; nothing else needs it |
 | `question_source.py` | the question sources of the zero-call test tools: the public bench `eval/brief-bench/` (default) and the optional private census (`--census-db`) |
-| `score_brief.py` | offline scorer of how much of a question's oracle context (issue #906) a `pixel brief` reproduces: `--bin <pixel> [--questions Q.jsonl \| --census-db DB] [--sessions answer\|all]`, `compare`, `--self-test`; results in `docs/bench/brief-oracle-coverage.md` |
+| `score_brief.py` | offline scorer of how much of a question's oracle context (issue #906) a `pixel brief` reproduces: `--bin <pixel> [--questions Q.jsonl \| --census-db DB] [--sessions answer\|all] [--probe-home DIR] [--route hook\|command]`, `compare` (flags runs that differ in more than one input), `freeze-home --commit REV --out DIR` (the probes a binary built at REV embeds, hashed), `pinned --base BIN [--head BIN] --probe-commit REV [--head-probe-commit REV]` (two binaries, or two probe sets, on frozen homes; issue #1201), `--self-test`; results in `docs/bench/brief-oracle-coverage.md` |
 | `oracle.py` | the oracle experiment (private census only): `cap-probe`, `build`, `run`, `report`; results in `docs/bench/tool-census-oracle.md` |
 | `extract.py`, `classify.py` | the transcript extractor into `census.db` and its call classifier; rule tests in `test_classify.py`, `test_extract.py` |
 

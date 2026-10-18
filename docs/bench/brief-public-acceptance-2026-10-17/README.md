@@ -152,6 +152,40 @@ oracle baseline’s 5.81%. Line coverage is diagnostic and does not establish
 answer correctness. In particular, broad oracle ranges dilute coverage, and
 valid alternative Git commits are assessed during semantic review.
 
+## Frozen-probe baseline for the #906 packs (2026-10-18, #1201)
+
+The diagnostic run above used the `brief` command: a 750 ms window, no probe
+floor and one part. Two runs of one binary then differ (54/56 identical briefs:
+`config-registry` timed out at about 430 ms on one run of `pixel-03` and
+`excalidraw-03`, not on the other), and the probes get far less room than the
+live hook gives them. `score_brief.py` now builds the brief as the hook does
+(`--route hook`, the default: 3 s window, probe floor, three parts) against a
+home frozen from one commit (`freeze-home`, `--probe-home`), and records both.
+
+Two runs of `main` `7887b9e6` on the probes frozen at that commit: **56/56
+identical briefs, no metric differs**. This is the reference each pack
+compares against (same binary, its probes frozen at the pack's commit):
+
+| | command route | hook route (reference) |
+|---|---:|---:|
+| `file_recall` | 0.345 | **0.419** |
+| `region_cov` | 0.052 | **0.084** |
+| tests lines | 149/6 365 (2.3%) | **513/6 365 (8.1%)** |
+| config lines | 90/979 (9.2%) | **371/979 (37.9%)** |
+| docs lines | 85/3 488 (2.4%) | **320/3 488 (9.2%)** |
+| `error-origin` `file_recall` | 0.154 | **0.186** |
+| `flow` / `impact` line coverage | 6.7% / 6.2% | **6.8% / 11.2%** |
+
+```sh
+python3 -I scripts/bench/tool-census/score_brief.py pinned \
+  --base <pixel built at 7887b9e6> --probe-commit 7887b9e6 \
+  --label hook-7887b9e6 --root /tmp/pixel-906-baseline
+# a pack: the same binary, --head-probe-commit <pack commit>
+```
+
+Binary SHA-256 `c41d123bfbd7d593354df2f705a28afb133a1065be1b1bf42bb2ba8ed025cc96`
+(dev-release), question SHA-256 `984a632e…3c63e17069`, 26 frozen probe files.
+
 ## Remaining work
 
 The next bounded prototypes should target the recorded failures, then be

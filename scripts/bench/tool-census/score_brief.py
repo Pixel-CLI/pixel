@@ -31,13 +31,24 @@ CLI::
     score_brief.py --bin <pixel> [--questions Q.jsonl] [--label L] [--only id,id]
     score_brief.py --bin <pixel> --census-db <census.db> [--sessions answer|all]     # the private census
     score_brief.py compare A.json B.json            # side-by-side Markdown of two runs
+    score_brief.py freeze-home --commit <rev> --out <dir>   # the probes a binary built at <rev> embeds
+    score_brief.py --bin <pixel> --probe-home <dir> ...      # score against that frozen home
+    score_brief.py pinned --base <pixel> --head <pixel> --probe-commit <rev>   # both binaries, one frozen home
     score_brief.py --self-test
 
 By default the questions are the public bench (``eval/brief-bench/questions.jsonl``) and the oracle of a question is
 its recorded ``oracle`` lines (``question_source.py``); ``--census-db`` scores a local census instead, from its
 recorded calls. For each session the repo is cloned (``cp -c`` of ``cache/<repo>``), indexed once per binary and sha
-(``<bin> prepare-repo .``, cached under ``score/clones/``) and ``<bin> brief --json "<prompt>"`` runs in it
-(plain ``brief`` when the binary has no ``--json``). Standard library only; run with ``python3 -I``.
+(``<bin> prepare-repo .``, cached under ``score/clones/``) and the brief is built in it: by default as the prompt-submit
+hook builds it (``--route hook``: ``<bin> run-hook task-event --provider pi --event prompt-submit`` with a
+``brief_only`` payload, the hook's 3 s window and probe floor, all parts in one text), or with ``--route command``
+by ``<bin> brief --json "<prompt>"`` (750 ms, no probe floor, one part; plain ``brief`` when the binary has no
+``--json``), the route of runs scored before 2026-10-18. Standard library only; run with ``python3 -I``.
+
+The brief runs the probes of ``$HOME/.pixel/plugins``, and the installed ones drift from any commit (two differed from
+main on 2026-10-17). ``--probe-home`` points ``HOME`` at a directory written by ``freeze-home`` instead, so two runs
+see the same probes; ``report.json`` records which probes ran (``probe_home``), the route the brief took (``route``) and the question file's SHA-256
+(``questions``) beside the binary's, and ``compare`` flags two reports whose probes or questions differ (issue #1201).
 """
 
 import argparse
@@ -57,6 +68,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -832,10 +844,12 @@ def sh(argv, cwd=None, timeout=900, check=True, env=None):
     return proc
 
 
-def bin_env():
+def bin_env(info=None):
     env = dict(os.environ)
     env.pop("ANTHROPIC_API_KEY", None)  # banned everywhere
     env.pop("PIXEL_BRIEF", None)        # the kill switch must not blank a baseline
+    if info and info.get("home"):
+        env["HOME"] = info["home"]      # the frozen probe home: the brief runs $HOME/.pixel/plugins
     return env
 
 
@@ -857,11 +871,11 @@ def activate(info, clone, warm):
     answers differently (no meaning search, no history probe), so every run starts it again. The first brief after
     a daemon start also builds what it needs lazily and comes back empty (installed 0.7.1 does, on a large repo),
     so throwaway briefs run until the output settles, before any session is scored."""
-    sh([info["path"], "prepare-repo", "."], cwd=clone, timeout=1800, env=bin_env())
+    sh([info["path"], "prepare-repo", "."], cwd=clone, timeout=1800, env=bin_env(info))
     if warm:
         if info["has_meaning"]:
             sh([info["path"], "search-meaning", "how does this code work", "."], cwd=clone, timeout=1800, check=False,
-               env=bin_env())
+               env=bin_env(info))
         settle(info, clone)
 
 
@@ -871,7 +885,7 @@ def settle(info, clone, tries=14, need=3):
     last, same = None, 0
     for _ in range(tries):
         proc = sh([info["path"], "brief", "--metrics", "off", "where is the main entry point of this program defined",
-                   "."], cwd=clone, timeout=600, check=False, env=bin_env())
+                   "."], cwd=clone, timeout=600, check=False, env=bin_env(info))
         same = same + 1 if proc.stdout == last else 1
         last = proc.stdout
         if same >= need:
@@ -905,10 +919,50 @@ def indexed_clone(root, info, repo, sha, warm=True):
     return dest
 
 
+META_KEYS = ("signal", "gate", "kind", "tier", "score", "confidence", "ops", "answered", "error", "elapsed_ms", "cut",
+             "deadline_ms", "stages")
+DECISIONS = Path(".pixel") / "brief-decisions.jsonl"
+
+
+def decision_rows(clone):
+    try:
+        return (Path(clone) / DECISIONS).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+
+def run_hook_brief(info, clone, prompt, session, timeout=300):
+    """The brief as a prompt-submit hook builds it: Pi's ``brief_only`` payload, which gets the hook's window (3 s),
+    its probe floor and the configured parts' budget as one message, without binding a task. The ``brief`` command
+    gets 750 ms, no probe floor and one part, so a probe near the edge times out on one run and not the next; this
+    route is the live budget, and the decision row the hook appends gives the timing and the gate."""
+    payload = json.dumps({"session_id": session, "cwd": str(clone), "prompt": prompt, "brief_only": True})
+    env = bin_env(info)
+    env["PIXEL_BRIEF_DEDUPE"] = "0"   # every question is a first prompt: nothing was sent to this session before
+    before = len(decision_rows(clone))
+    started = time.monotonic()
+    proc = subprocess.run([info["path"], "run-hook", "task-event", "--provider", "pi", "--event", "prompt-submit"],
+                          input=payload, cwd=clone, capture_output=True, text=True, timeout=timeout, env=env)
+    elapsed = int((time.monotonic() - started) * 1000)
+    try:
+        text = json.loads(proc.stdout).get("context") or ""
+    except ValueError:
+        return "", {"error": (proc.stdout + proc.stderr)[-400:]}, elapsed, proc.returncode
+    rows = decision_rows(clone)
+    meta = {}
+    if len(rows) > before:
+        try:
+            row = json.loads(rows[-1])
+            meta = {k: row.get(k) for k in META_KEYS if k in row}
+        except ValueError:
+            pass
+    return text, meta, elapsed, proc.returncode
+
+
 def run_brief(info, clone, prompt, timeout=300):
     argv = [info["path"], "brief"] + (["--json"] if info["has_json"] else []) + ["--metrics", "off", prompt, "."]
     started = time.monotonic()
-    proc = sh(argv, cwd=clone, timeout=timeout, check=False, env=bin_env())
+    proc = sh(argv, cwd=clone, timeout=timeout, check=False, env=bin_env(info))
     elapsed = int((time.monotonic() - started) * 1000)
     meta = {}
     if info["has_json"]:
@@ -920,15 +974,145 @@ def run_brief(info, clone, prompt, timeout=300):
             meta = {"error": (proc.stdout + proc.stderr)[-400:]}
     else:
         text = proc.stdout
-    keep = {k: meta.get(k) for k in ("signal", "gate", "kind", "tier", "score", "confidence", "ops", "answered", "error",
-                                     "elapsed_ms", "cut", "deadline_ms", "stages")
-            if k in meta}
+    keep = {k: meta.get(k) for k in META_KEYS if k in meta}
     return text, keep, elapsed, proc.returncode
 
 
 def stop_daemons(info, clones):
     for clone in clones:
-        sh([info["path"], "daemon", "stop", "."], cwd=clone, check=False, timeout=60, env=bin_env())
+        sh([info["path"], "daemon", "stop", "."], cwd=clone, check=False, timeout=60, env=bin_env(info))
+
+
+# --------------------------------------------------------------------------
+# The probe home (issue #1201)
+# --------------------------------------------------------------------------
+
+BUNDLED_RS = "crates/pixel-setup/src/bundled_probes.rs"
+BUNDLED_RE = re.compile(r'include_str!\("\.\./\.\./\.\./probes/([^/"]+)/pixel-plugin\.toml"\)')
+PROBE_FILES = ("pixel-plugin.toml", "probe")
+PLUGINS_REL = Path(".pixel") / "plugins"
+HOME_MANIFEST = "probe-home.json"
+# Embedding weights the brief reads and would otherwise download into the fresh home: shared, never written by a run.
+SHARED_CACHES = (Path(".local") / "share" / "pixel" / "models",)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def bundled_names(text):
+    """The probe names ``bundled_probes.rs`` embeds, in the order it lists them."""
+    return list(dict.fromkeys(BUNDLED_RE.findall(text)))
+
+
+def freeze_probe_home(repo, rev, out, real_home=None):
+    """Write the probes a binary built at ``rev`` embeds into ``<out>/.pixel/plugins``, as ``pixel setup`` would.
+
+    The list and the bytes both come from ``rev`` (``bundled_probes.rs`` and ``probes/<name>/``), not from the working
+    tree, so a home frozen at a commit stays that commit's whatever the checkout holds later. ``probe-home.json`` records
+    the commit and each file's SHA-256. A directory already frozen at the same commit is reused after a hash check;
+    any other non-empty directory is refused."""
+    commit = sh(["git", "rev-parse", "--verify", f"{rev}^{{commit}}"], cwd=repo).stdout.strip()
+    out = Path(out)
+    if (out / HOME_MANIFEST).exists():
+        manifest = verify_probe_home(out)
+        if manifest["commit"] != commit:
+            raise SystemExit(f"{out} holds the probes of {manifest['commit'][:12]}, not {commit[:12]}: pick another --out")
+        return manifest
+    if out.exists() and any(out.iterdir()):
+        raise SystemExit(f"{out} is not empty and holds no {HOME_MANIFEST}: refusing to write a probe home into it")
+    names = bundled_names(sh(["git", "show", f"{commit}:{BUNDLED_RS}"], cwd=repo).stdout)
+    if not names:
+        raise SystemExit(f"{BUNDLED_RS} at {commit[:12]} embeds no probe")
+    files = {}
+    for name in names:
+        dest = out / PLUGINS_REL / name
+        dest.mkdir(parents=True)
+        for rel in PROBE_FILES:
+            data = subprocess.run(["git", "show", f"{commit}:probes/{name}/{rel}"], cwd=repo, capture_output=True,
+                                  check=True).stdout
+            (dest / rel).write_bytes(data)
+            files[f"{name}/{rel}"] = hashlib.sha256(data).hexdigest()
+        (dest / "probe").chmod(0o755)
+        (dest / ".pixel-bundled").write_text("first-party probe frozen by score_brief.py freeze-home\n")
+    real_home = Path(real_home or os.path.expanduser("~"))
+    for rel in SHARED_CACHES:
+        if (real_home / rel).is_dir():
+            (out / rel).parent.mkdir(parents=True, exist_ok=True)
+            (out / rel).symlink_to(real_home / rel, target_is_directory=True)
+    manifest = {"commit": commit, "probes": names, "probe_files": files}
+    (out / HOME_MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest
+
+
+def plugin_files(home):
+    """``{"<name>/<file>": sha256}`` of every probe manifest and program under ``<home>/.pixel/plugins``."""
+    root = Path(home) / PLUGINS_REL
+    if not root.is_dir():
+        return {}
+    return {f"{d.name}/{rel}": file_sha256(d / rel) for d in sorted(root.iterdir()) if d.is_dir()
+            for rel in PROBE_FILES if (d / rel).is_file()}
+
+
+def verify_probe_home(home):
+    """The manifest of a frozen home, after checking its probe files still hash as recorded and nothing switched one
+    off (``plugins.toml``): a home edited after freezing would score something no report names."""
+    home = Path(home)
+    try:
+        manifest = json.loads((home / HOME_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        raise SystemExit(f"{home}: not a frozen probe home ({err}); build one with `score_brief.py freeze-home`")
+    have = plugin_files(home)
+    if have != manifest.get("probe_files"):
+        changed = sorted(set(have.items()) ^ set(manifest.get("probe_files", {}).items()))
+        raise SystemExit(f"{home}: probe files differ from {HOME_MANIFEST}: {sorted({k for k, _v in changed})}")
+    if (home / ".pixel" / "plugins.toml").exists():
+        raise SystemExit(f"{home}: .pixel/plugins.toml exists, so some frozen probe may be disabled; freeze a new home")
+    return manifest
+
+
+def probe_identity(probe_home=None):
+    """Which probes a run's briefs saw: the frozen home's commit and hashes, or the installed home, said as such."""
+    if probe_home:
+        manifest = verify_probe_home(probe_home)
+        return {"frozen": True, "home": str(Path(probe_home).resolve()), "commit": manifest["commit"],
+                "probe_files": manifest["probe_files"]}
+    home = Path(os.path.expanduser("~"))
+    toml = home / ".pixel" / "plugins.toml"
+    return {"frozen": False, "home": str(home), "commit": None, "probe_files": plugin_files(home),
+            "plugins_toml_sha256": file_sha256(toml) if toml.is_file() else None}
+
+
+def source_identity(source):
+    path = Path(source.db_path if source.kind == "census" else source.path)
+    return {"kind": source.kind, "path": str(path), "sha256": file_sha256(path)}
+
+
+def like_for_like(reports, names):
+    """Warnings for reports that do not isolate one variable: other questions, an installed or unknown probe home, or
+    both the binary and the probes changed (measuring.md: an ablation changes one input)."""
+    out = []
+    probes = [r.get("probe_home") for r in reports]
+    for name, ident in zip(names, probes):
+        if not ident:
+            out.append(f"> **{name}** records no probe identity (scored before #1201): its probes are unknown.")
+        elif not ident["frozen"]:
+            out.append(f"> **{name}** ran the installed probes of `{ident['home']}`, not a frozen home.")
+    if len({r.get("route", "command") for r in reports}) > 1:
+        out.append("> **Not like for like:** the runs built their briefs through different routes (`--route`).")
+    if len({(r.get("questions") or {}).get("sha256") for r in reports}) > 1:
+        out.append("> **Not like for like:** the runs scored different question files.")
+    probes_differ = len({json.dumps((p or {}).get("probe_files"), sort_keys=True) for p in probes}) > 1
+    binaries_differ = len({(r.get("binary") or {}).get("sha256") for r in reports}) > 1
+    if probes_differ and binaries_differ:
+        out.append("> **Not like for like:** both the binary and the probe files differ between the runs.")
+    elif probes_differ:
+        out.append("> Same binary, different probe files: the probes are the variable.")
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -1036,6 +1220,10 @@ def pct(v):
     return "n/a" if v is None else f"{100 * v:.0f}%"
 
 
+ROUTES = {"hook": "prompt-submit hook (`run-hook task-event`, Pi `brief_only`: 3 s window, probe floor, all parts)",
+          "command": "`brief` command (750 ms window, no probe floor, one part)"}
+
+
 def render_markdown(report):
     rows = report["sessions"]
     out = [f"# Brief vs oracle: {report['label']}", ""]
@@ -1043,9 +1231,18 @@ def render_markdown(report):
     out += [f"- binary: `{b['path']}` ({b['version'].splitlines()[0] if b['version'] else '?'}, "
             f"commit {next((l.split(': ')[1] for l in b['version'].splitlines() if l.startswith('commit:')), '?')}, "
             f"sha256 `{b['sha256'][:12]}`, {'brief --json' if b['has_json'] else 'plain brief'})",
+            f"- route: {ROUTES.get(report.get('route', 'command'))}",
             f"- sessions: {len(rows)} ({report['sessions_arg']}), scored {report['date']}, "
-            f"{'warm index (search-meaning vectors built)' if report.get('warm', True) else 'cold index'}", ""]
-    out += ["| session | category | mode | brief B | oracle lines | line cov | inline cov | region cov | file recall | "
+            f"{'warm index (search-meaning vectors built)' if report.get('warm', True) else 'cold index'}"]
+    ident, questions = report.get("probe_home"), report.get("questions")
+    if ident:
+        out.append(f"- probes: frozen home `{ident['home']}` at commit `{ident['commit'][:12]}` "
+                   f"({len(ident['probe_files'])} files)" if ident["frozen"] else
+                   f"- probes: **installed home** `{ident['home']}/.pixel/plugins`, not frozen "
+                   f"({len(ident['probe_files'])} files)")
+    if questions:
+        out.append(f"- questions: `{questions['path']}` sha256 `{questions['sha256'][:12]}`")
+    out += ["", "| session | category | mode | brief B | oracle lines | line cov | inline cov | region cov | file recall | "
             "answer cov | gate |", "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|"]
     for r in rows:
         m = r["metrics"]
@@ -1095,7 +1292,8 @@ def render_compare(reports, labels):
     ids = sorted(set().union(*sets))
     cols = ["line cov", "inline", "file recall", "answer cov", "bytes"]
     head = "| session | category | mode | " + " | ".join(f"{n}: {c}" for n in names for c in cols) + " |"
-    out = [head, "|" + "---|" * (3 + len(cols) * len(names))]
+    warnings = like_for_like(reports, names)
+    out = (warnings + [""] if warnings else []) + [head, "|" + "---|" * (3 + len(cols) * len(names))]
     for sid in ids:
         first = next(s[sid] for s in sets if sid in s)
         cells = []
@@ -1132,6 +1330,9 @@ def render_compare(reports, labels):
 
 def score_all(args, root, source):
     info = bin_info(args.bin)
+    probes = probe_identity(args.probe_home)
+    if probes["frozen"]:
+        info["home"] = probes["home"]
     only = set(args.only.split(",")) if args.only else None
     add_workspace_root(root)
     if source.kind == "census":
@@ -1152,7 +1353,10 @@ def score_all(args, root, source):
         if s["repo"] not in repos:
             repos[s["repo"]] = Repo(root / "cache" / s["repo"])
         repo = repos[s["repo"]]
-        text, meta, elapsed, code = run_brief(info, clones[key], s["prompt"])
+        if args.route == "hook":
+            text, meta, elapsed, code = run_hook_brief(info, clones[key], s["prompt"], f"score-{label}-{s['id']}")
+        else:
+            text, meta, elapsed, code = run_brief(info, clones[key], s["prompt"])
         (out_dir / "briefs" / f"{s['id']}.txt").write_text(text, encoding="utf-8")
         oracle = (oracle_from_ranges(repo, s["oracle"], s.get("oracle_commits", []))
                   if s.get("oracle") is not None else build_oracle(repo, s["calls"]))
@@ -1167,14 +1371,16 @@ def score_all(args, root, source):
               f"answer={pct(metrics['answer_cov']):>4}", flush=True)
     if not args.keep_daemons:
         stop_daemons(info, clones.values())
-    report = {"label": label, "binary": info, "sessions_arg": args.sessions, "warm": not args.cold, "date": time.strftime("%Y-%m-%d"),
+    report = {"label": label, "binary": info, "route": args.route, "probe_home": probes,
+              "questions": source_identity(source),
+              "sessions_arg": args.sessions, "warm": not args.cold, "date": time.strftime("%Y-%m-%d"),
               "sessions": rows, "means": {"answer": aggregate([r for r in rows if r["mode"] == "answer"]),
                                           "edit": aggregate([r for r in rows if r["mode"] == "edit"]),
                                           "all": aggregate(rows)}}
     (out_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     (out_dir / "report.md").write_text(render_markdown(report), encoding="utf-8")
     print(f"wrote {out_dir / 'report.json'} and report.md")
-    return 0
+    return out_dir / "report.json"
 
 
 # --------------------------------------------------------------------------
@@ -1218,6 +1424,59 @@ elif a[:1] == ["brief"]:
                       "cut": False, "deadline_ms": 3000,
                       "stages": {"search_ms": 60, "rank_ms": 40, "render_ms": 2, "probe_ms": None}}))
 '''
+
+
+FAKE_HOME_BIN = '''#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+if a[:1] == ["--version"]:
+    print("fakepixel 0.0.2\\ncommit: def456")
+elif a[:2] == ["brief", "--help"]:
+    print("Options:\\n      --json   Print the decision")
+elif a[:4] == ["run-hook", "task-event", "--provider", "pi"]:
+    payload = json.load(sys.stdin)
+    probe = os.path.join(os.environ["HOME"], ".pixel", "plugins", "fx", "probe")
+    text = "read: src/app.py:5-14 - from the fx probe\\n" if os.access(probe, os.X_OK) else ""
+    os.makedirs(".pixel", exist_ok=True)
+    with open(os.path.join(".pixel", "brief-decisions.jsonl"), "a") as log:
+        log.write(json.dumps({"gate": "open" if text else "closed", "deadline_ms": 3000, "elapsed_ms": 42,
+                              "kind": f"{payload['brief_only']}-{os.environ.get('PIXEL_BRIEF_DEDUPE')}",
+                              "route": "daemon"}) + "\\n")
+    print(json.dumps({"decision": "observe", "context": text}))
+'''
+
+
+def probe_repo(base):
+    """A pixel-shaped checkout: ``bundled_probes.rs`` embeds ``fx``; a second commit edits it and registers ``late``.
+    Returns ``(repo, first, second)``."""
+    repo = Path(base) / "pixel-src"
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
+           "PATH": os.environ["PATH"], "HOME": str(base), "GIT_CONFIG_GLOBAL": os.devnull}
+
+    def entry(name):
+        return (f'    (\n        "{name}",\n        include_str!("../../../probes/{name}/pixel-plugin.toml"),\n'
+                f'        include_str!("../../../probes/{name}/probe"),\n    ),\n')
+
+    def commit(names, body, message):
+        rs = repo / BUNDLED_RS
+        rs.parent.mkdir(parents=True, exist_ok=True)
+        rs.write_text("const BUNDLED: &[(&str, &str, &str)] = &[\n" + "".join(map(entry, names)) + "];\n")
+        for name in names:
+            (repo / "probes" / name).mkdir(parents=True, exist_ok=True)
+            (repo / "probes" / name / "pixel-plugin.toml").write_text(f'name = "{name}"\n')
+            (repo / "probes" / name / "probe").write_text(body)
+        for argv in (["git", "add", "."], ["git", "commit", "-q", "-m", message]):
+            subprocess.run(argv, cwd=repo, check=True, env=env, capture_output=True)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env, capture_output=True)
+    first = commit(["fx"], "#!/bin/sh\necho first\n", "first")
+    (repo / "probes" / "unregistered").mkdir(parents=True)
+    (repo / "probes" / "unregistered" / "probe").write_text("#!/bin/sh\n")
+    second = commit(["fx", "late"], "#!/bin/sh\necho second\n", "second")
+    return repo, first, second
 
 
 class SelfTest(unittest.TestCase):
@@ -1469,7 +1728,7 @@ class SelfTest(unittest.TestCase):
         db.commit()
         db.close()
         code = main(["--root", str(root), "--census-db", str(root / "census.db"), "--bin", str(binary), "--sessions", "all",
-                     "--label", "fake"])
+                     "--label", "fake", "--route", "command"])
         self.assertEqual(code, 0)
         report = json.loads((root / "score" / "runs" / "fake" / "report.json").read_text())
         by_id = {r["id"]: r for r in report["sessions"]}
@@ -1487,7 +1746,7 @@ class SelfTest(unittest.TestCase):
         self.assertIn("fx-1", render_compare([report, report], ["a", "b"]))
         # a second run reuses the indexed clone (the .ready marker) and only-filters
         code = main(["--root", str(root), "--census-db", str(root / "census.db"), "--bin", str(binary),
-                     "--sessions", "answer", "--label", "fake2", "--only", "fx-1"])
+                     "--sessions", "answer", "--label", "fake2", "--only", "fx-1", "--route", "command"])
         self.assertEqual(code, 0)
         self.assertEqual(len(json.loads((root / "score" / "runs" / "fake2" / "report.json").read_text())["sessions"]), 1)
 
@@ -1504,7 +1763,7 @@ class SelfTest(unittest.TestCase):
         binary.chmod(0o755)
         Path(str(binary) + ".brief").write_text(f"read: src/app.py:5-14 — merge\ngit: {self.sha}\n")
         code = main(["--root", str(root), "--questions", str(bench / "questions.jsonl"), "--bin", str(binary),
-                     "--label", "bench"])
+                     "--label", "bench", "--route", "command"])
         self.assertEqual(code, 0)
         report = json.loads((root / "score" / "runs" / "bench" / "report.json").read_text())
         row = report["sessions"][0]
@@ -1515,9 +1774,162 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(row["metrics"]["commit_recall"], 1.0)
         self.assertTrue((root / "cache" / "o__fx" / ".git").exists())
 
+    # -- the frozen probe home (#1201)
+    def test_bundled_names_parse_the_real_registry(self):
+        # A reformatted bundled_probes.rs must not silently freeze an empty or partial home.
+        text = (qs.REPO / BUNDLED_RS).read_text(encoding="utf-8")
+        names = bundled_names(text)
+        self.assertEqual(len(names), text.count("include_str!(") // 2)
+        for name in names:
+            for rel in PROBE_FILES:
+                self.assertTrue((qs.REPO / "probes" / name / rel).is_file(), f"{name}/{rel}")
+
+    def test_freeze_home_writes_the_commit_not_the_working_tree(self):
+        base = Path(self.tmp.name) / "freeze"
+        repo, first, second = probe_repo(base)
+        (repo / "probes" / "fx" / "probe").write_text("#!/bin/sh\necho uncommitted\n")
+        real = base / "real-home"
+        (real / SHARED_CACHES[0]).mkdir(parents=True)
+        home = base / "home-first"
+        manifest = freeze_probe_home(repo, first, home, real_home=real)
+        self.assertEqual((manifest["commit"], manifest["probes"]), (first, ["fx"]))
+        program = home / PLUGINS_REL / "fx" / "probe"
+        self.assertEqual(program.read_text(), "#!/bin/sh\necho first\n")
+        self.assertTrue(os.access(program, os.X_OK))
+        self.assertFalse((home / PLUGINS_REL / "late").exists())
+        self.assertFalse((home / PLUGINS_REL / "unregistered").exists())
+        self.assertEqual(manifest["probe_files"]["fx/probe"],
+                         hashlib.sha256(b"#!/bin/sh\necho first\n").hexdigest())
+        self.assertEqual(json.loads((home / HOME_MANIFEST).read_text()), manifest)
+        self.assertEqual(os.path.realpath(home / SHARED_CACHES[0]), os.path.realpath(real / SHARED_CACHES[0]))
+        self.assertEqual(freeze_probe_home(repo, "HEAD~1", home, real_home=real), manifest)  # same commit: reused
+        with self.assertRaises(SystemExit):
+            freeze_probe_home(repo, second, home, real_home=real)                           # another commit: refused
+        stray = base / "not-a-home"
+        stray.mkdir()
+        (stray / "file").write_text("x")
+        with self.assertRaises(SystemExit):
+            freeze_probe_home(repo, first, stray, real_home=real)
+        self.assertEqual(freeze_probe_home(repo, second, base / "home-second", real_home=real)["probes"], ["fx", "late"])
+
+    def test_a_frozen_home_edited_after_freezing_is_refused(self):
+        base = Path(self.tmp.name) / "edited"
+        repo, first, _second = probe_repo(base)
+        home = base / "home"
+        freeze_probe_home(repo, first, home, real_home=base)
+        self.assertTrue(probe_identity(home)["frozen"])
+        (home / PLUGINS_REL / "fx" / "probe").write_text("#!/bin/sh\necho edited\n")
+        with self.assertRaises(SystemExit):
+            probe_identity(home)
+        (home / PLUGINS_REL / "fx" / "probe").write_text("#!/bin/sh\necho first\n")
+        (home / ".pixel" / "plugins.toml").write_text("[fx]\nenabled = false\n")
+        with self.assertRaises(SystemExit):
+            probe_identity(home)
+
+    def test_the_brief_runs_the_frozen_probes_and_the_report_names_them(self):
+        base = Path(self.tmp.name) / "pinned"
+        repo, first, second = probe_repo(base)
+        installed = base / "installed-home"            # the machine's home: no fx probe installed
+        (installed / PLUGINS_REL / "other").mkdir(parents=True)
+        (installed / PLUGINS_REL / "other" / "probe").write_text("#!/bin/sh\n")
+        root, bench = base / "root", base / "bench"
+        bench.mkdir()
+        question = {"id": "fx-01", "repo": "o/fx", "url": str(self.repo_dir), "sha": self.sha, "prompt": "q",
+                    "kind": "lookup", "oracle": [["src/app.py", 5, 14]], "oracle_lines": 10}
+        (bench / "questions.jsonl").write_text(json.dumps(question) + "\n")
+        binary = base / "fakepixel"
+        binary.write_text(FAKE_HOME_BIN)
+        binary.chmod(0o755)
+        common = ["--root", str(root), "--questions", str(bench / "questions.jsonl"), "--out", str(base / "runs")]
+        with mock.patch.dict(os.environ, {"HOME": str(installed)}):
+            self.assertEqual(main(["--bin", str(binary), "--label", "installed"] + common), 0)
+            self.assertEqual(main(["pinned", "--base", str(binary), "--head", str(binary), "--repo", str(repo),
+                                   "--probe-commit", first, "--label", "same"] + common), 0)
+        runs = base / "runs"
+        reports = {n: json.loads((runs / n / "report.json").read_text()) for n in ("installed", "same-base", "same-head")}
+        # Only the frozen home has the fx probe, so only the pinned runs see its region.
+        self.assertEqual(reports["installed"]["sessions"][0]["metrics"]["line_cov"], 0.0)
+        for n in ("same-base", "same-head"):
+            self.assertEqual(reports[n]["route"], "hook")
+            # The hook route sends a brief-only payload with dedupe off and reads the meta from the decision row.
+            self.assertEqual(reports[n]["sessions"][0]["brief_meta"],
+                             {"gate": "open", "deadline_ms": 3000, "elapsed_ms": 42, "kind": "True-0"})
+            self.assertEqual(reports[n]["sessions"][0]["metrics"]["line_cov"], 1.0)
+            ident = reports[n]["probe_home"]
+            self.assertEqual((ident["frozen"], ident["commit"]), (True, first))
+            self.assertEqual(set(ident["probe_files"]), {"fx/pixel-plugin.toml", "fx/probe"})
+            self.assertIn(f"frozen home `{ident['home']}` at commit `{first[:12]}`", (runs / n / "report.md").read_text())
+        self.assertEqual(reports["installed"]["probe_home"]["frozen"], False)
+        self.assertEqual(set(reports["installed"]["probe_home"]["probe_files"]), {"other/probe"})
+        self.assertIn("**installed home**", (runs / "installed" / "report.md").read_text())
+        sha = hashlib.sha256((bench / "questions.jsonl").read_bytes()).hexdigest()
+        self.assertEqual({r["questions"]["sha256"] for r in reports.values()}, {sha})
+        self.assertNotIn("Not like for like", (runs / "same-compare.md").read_text())
+        mixed = render_compare([reports["installed"], reports["same-head"]], ["installed", "head"])
+        self.assertIn("**installed** ran the installed probes", mixed)
+        self.assertIn("Same binary, different probe files", mixed)
+        other_bin = dict(reports["installed"], binary=dict(reports["installed"]["binary"], sha256="f" * 64))
+        self.assertIn("both the binary and the probe files differ",
+                      render_compare([other_bin, reports["same-head"]], ["a", "b"]))
+        # A probe A/B: one binary, the probes of two commits, each side frozen and named.
+        with mock.patch.dict(os.environ, {"HOME": str(installed)}):
+            self.assertEqual(main(["pinned", "--base", str(binary), "--repo", str(repo), "--probe-commit", first,
+                                   "--head-probe-commit", second, "--label", "ab"] + common), 0)
+        ab = {n: json.loads((runs / f"ab-{n}" / "report.json").read_text())["probe_home"] for n in ("base", "head")}
+        self.assertEqual((ab["base"]["commit"], ab["head"]["commit"]), (first, second))
+        self.assertIn("Same binary, different probe files", (runs / "ab-compare.md").read_text())
+        self.assertIn("different routes", render_compare([dict(reports["same-base"], route="command"),
+                                                           reports["same-head"]], ["a", "b"]))
+        self.assertIn("different routes", render_compare([{k: v for k, v in reports["same-base"].items() if k != "route"},
+                                                           reports["same-head"]], ["old", "b"]))
+        other = dict(reports["same-head"], questions={"sha256": "0" * 64})
+        self.assertIn("different question files", render_compare([reports["same-base"], other], ["a", "b"]))
+
     def test_two_sources_at_once_are_refused(self):
         with self.assertRaises(SystemExit):
             main(["--bin", "x", "--questions", "q.jsonl", "--census-db", "c.db"])
+
+
+def add_scoring_arguments(parser):
+    parser.add_argument("--sessions", choices=("answer", "all"), default="answer", help="census only")
+    qs.add_arguments(parser)
+    parser.add_argument("--db", dest="census_db", default=None, help=argparse.SUPPRESS)  # the old spelling
+    parser.add_argument("--out", default=None, help="output directory (default <root>/score/runs)")
+    parser.add_argument("--only", default=None, help="comma-separated session ids")
+    parser.add_argument("--cold", action="store_true",
+                        help="skip the search-meaning warm-up: score the first prompt of a fresh index")
+    parser.add_argument("--keep-daemons", action="store_true")
+    parser.add_argument("--route", choices=("hook", "command"), default="hook",
+                        help="hook: the prompt-submit hook's brief, the live budget (default); command: `pixel brief`")
+
+
+def pinned(args):
+    """Score two binaries against one frozen probe home and the same questions, then compare them; or, with
+    ``--head-probe-commit`` and one binary, the probes of two commits."""
+    source = qs.open_source(args)
+    root = Path(args.root)
+    out = Path(args.out or root / "score" / "runs")
+
+    def home_of(rev):
+        if args.probe_home and rev is None:
+            return Path(args.probe_home), verify_probe_home(args.probe_home)
+        commit = sh(["git", "rev-parse", "--verify", f"{rev}^{{commit}}"], cwd=args.repo).stdout.strip()
+        home = out / f"probe-home-{commit[:12]}"
+        return home, freeze_probe_home(args.repo, commit, home)
+
+    homes = {"base": home_of(args.probe_commit), "head": home_of(args.head_probe_commit or args.probe_commit)}
+    reports = []
+    for side, binary in (("base", args.base), ("head", args.head or args.base)):
+        home, manifest = homes[side]
+        print(f"{side}: {binary} with the probes of {manifest['commit'][:12]} ({home})", flush=True)
+        run = argparse.Namespace(**{**vars(args), "bin": binary, "label": f"{args.label}-{side}",
+                                    "probe_home": str(home)})
+        reports.append(json.loads(Path(score_all(run, root, source)).read_text(encoding="utf-8")))
+    text = render_compare(reports, [f"{args.label}-base", f"{args.label}-head"])
+    (out / f"{args.label}-compare.md").write_text(text, encoding="utf-8")
+    print(text)
+    print(f"wrote {out / (args.label + '-compare.md')}")
+    return 0
 
 
 def main(argv=None):
@@ -1534,20 +1946,39 @@ def main(argv=None):
         reports = [json.loads(Path(p).read_text(encoding="utf-8")) for p in args.reports]
         print(render_compare(reports, args.labels.split(",") if args.labels else None))
         return 0
+    if argv[:1] == ["freeze-home"]:
+        parser = argparse.ArgumentParser(prog="score_brief.py freeze-home",
+                                         description="write the probes a binary built at --commit embeds")
+        parser.add_argument("--commit", required=True, help="the pixel commit the scored binary was built from")
+        parser.add_argument("--out", required=True, help="the home directory to write (empty or absent)")
+        parser.add_argument("--repo", default=str(qs.REPO), help="the pixel checkout holding that commit")
+        args = parser.parse_args(argv[1:])
+        manifest = freeze_probe_home(args.repo, args.commit, args.out)
+        print(f"{args.out}: {len(manifest['probes'])} probes of {manifest['commit'][:12]}")
+        return 0
+    if argv[:1] == ["pinned"]:
+        parser = argparse.ArgumentParser(prog="score_brief.py pinned", description=pinned.__doc__)
+        parser.add_argument("--base", required=True, help="the reference pixel binary")
+        parser.add_argument("--head", default=None, help="the candidate pixel binary (default: --base)")
+        home = parser.add_mutually_exclusive_group(required=True)
+        home.add_argument("--probe-commit", help="freeze the probes of this pixel commit under <out>")
+        home.add_argument("--probe-home", help="an existing frozen home (score_brief.py freeze-home)")
+        parser.add_argument("--head-probe-commit", default=None,
+                            help="the head side's probes instead (a probe A/B: same binary, two commits)")
+        parser.add_argument("--repo", default=str(qs.REPO), help="the pixel checkout holding --probe-commit")
+        parser.add_argument("--label", default="pinned", help="run name prefix (<label>-base, <label>-head)")
+        add_scoring_arguments(parser)
+        return pinned(parser.parse_args(argv[1:]))
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--bin", required=True, help="the pixel binary to score")
-    parser.add_argument("--sessions", choices=("answer", "all"), default="answer", help="census only")
-    qs.add_arguments(parser)
-    parser.add_argument("--db", dest="census_db", default=None, help=argparse.SUPPRESS)  # the old spelling
-    parser.add_argument("--out", default=None, help="output directory (default <root>/score/runs)")
     parser.add_argument("--label", default=None, help="run name (default: the binary's file name)")
-    parser.add_argument("--only", default=None, help="comma-separated session ids")
-    parser.add_argument("--cold", action="store_true",
-                        help="skip the search-meaning warm-up: score the first prompt of a fresh index")
-    parser.add_argument("--keep-daemons", action="store_true")
+    parser.add_argument("--probe-home", default=None,
+                        help="run the briefs with HOME set to this frozen home (score_brief.py freeze-home)")
+    add_scoring_arguments(parser)
     args = parser.parse_args(argv)
     source = qs.open_source(args)
-    return score_all(args, Path(args.root), source)
+    score_all(args, Path(args.root), source)
+    return 0
 
 
 if __name__ == "__main__":
