@@ -1,5 +1,8 @@
 # Tool census runner
 
+The offline brief scorer's status, exit codes and report versions are defined
+in [SCORING_PROTOCOL.md](SCORING_PROTOCOL.md). Coverage is not answer quality.
+
 Issue #905. Twenty real-demand prompts, run as parallel **vanilla** Claude Code
 sessions (no Pixel at all) over four pinned repositories, with the full raw
 `stream-json` of every session kept. The extractor pairs each `tool_use` with

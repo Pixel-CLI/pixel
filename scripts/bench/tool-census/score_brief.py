@@ -82,6 +82,9 @@ CITE_RANGE_CAP = 400
 TYPES = ("definition", "usage", "tests", "config", "docs")
 TYPE_LABELS = {"definition": "definition bodies (code read)", "usage": "usage / search-hit lines",
                "tests": "tests", "config": "config", "docs": "docs"}
+MEASUREMENT_PROTOCOL = {"name": "brief-oracle", "version": 2}
+PROCESS_TIMEOUT_S = 300
+COMPLETE_STATUSES = {"ok", "abstained"}
 
 
 def load(name, path):
@@ -874,12 +877,17 @@ def activate(info, clone, warm):
     clone (left by an earlier run, or by a probe's own `pixel` calls outside the harness) is stopped first: a run on
     such a daemon once answered 7 of 56 briefs differently from its replays (an op left unanswered, a probe empty)."""
     sh([info["path"], "daemon", "stop", "."], cwd=clone, check=False, timeout=60, env=bin_env(info))
-    sh([info["path"], "prepare-repo", "."], cwd=clone, timeout=1800, env=bin_env(info))
-    if warm:
-        if info["has_meaning"]:
-            sh([info["path"], "search-meaning", "how does this code work", "."], cwd=clone, timeout=1800, check=False,
-               env=bin_env(info))
-        settle(info, clone)
+    try:
+        sh([info["path"], "prepare-repo", "."], cwd=clone, timeout=1800, env=bin_env(info))
+        if warm:
+            if info["has_meaning"]:
+                sh([info["path"], "search-meaning", "how does this code work", "."], cwd=clone, timeout=1800,
+                   check=False, env=bin_env(info))
+            settle(info, clone)
+    except BaseException:
+        # The caller cannot register a clone whose activation never returned.
+        stop_daemons(info, [clone])
+        raise
 
 
 def settle(info, clone, tries=14, need=3):
@@ -923,7 +931,7 @@ def indexed_clone(root, info, repo, sha, warm=True):
 
 
 META_KEYS = ("signal", "gate", "kind", "tier", "score", "confidence", "ops", "answered", "error", "elapsed_ms", "cut",
-             "deadline_ms", "stages")
+             "deadline_ms", "stages", "probes")
 DECISIONS = Path(".pixel") / "brief-decisions.jsonl"
 
 
@@ -934,7 +942,46 @@ def decision_rows(clone):
         return []
 
 
-def run_hook_brief(info, clone, prompt, session, timeout=300):
+def response_text(proc, field, meta):
+    """Validate the envelope before trusting context; retain failure evidence separately from credited text."""
+    if proc.stderr:
+        meta["stderr"] = proc.stderr[-4000:]
+    try:
+        data = json.loads(proc.stdout)
+        if not isinstance(data, dict):
+            raise ValueError("response must be an object")
+        for key in META_KEYS:
+            if key in data:
+                meta[key] = data[key]
+        text = data.get(field)
+        if text is None and (meta.get("gate") == "closed" or meta.get("error") is not None):
+            return ""
+        if not isinstance(text, str):
+            raise ValueError(f"{field} must be a string")
+        return text
+    except ValueError as err:
+        meta.update(malformed=True, response=proc.stdout[-4000:], response_error=str(err))
+        return ""
+
+
+def brief_status(text, meta, code):
+    """A status qualifies the run, not answer quality; optional probe outcomes are diagnostic only."""
+    if meta.get("timeout"):
+        return "timeout"
+    if code != 0:
+        return "process_error"
+    if meta.get("malformed"):
+        return "malformed"
+    if meta.get("error") is not None:
+        return "explicit_error"
+    elapsed, deadline = meta.get("elapsed_ms"), meta.get("deadline_ms")
+    if meta.get("cut") or (isinstance(elapsed, (int, float)) and isinstance(deadline, (int, float))
+                           and elapsed > deadline):
+        return "partial"
+    return "ok" if text.strip() else "abstained"
+
+
+def run_hook_brief(info, clone, prompt, session, timeout=PROCESS_TIMEOUT_S):
     """The brief as a prompt-submit hook builds it: Pi's ``brief_only`` payload, which gets the hook's window (3 s),
     its probe floor and the configured parts' budget as one message, without binding a task. The ``brief`` command
     gets 750 ms, no probe floor and one part, so a probe near the edge times out on one run and not the next; this
@@ -947,43 +994,45 @@ def run_hook_brief(info, clone, prompt, session, timeout=300):
     proc = subprocess.run([info["path"], "run-hook", "task-event", "--provider", "pi", "--event", "prompt-submit"],
                           input=payload, cwd=clone, capture_output=True, text=True, timeout=timeout, env=env)
     elapsed = int((time.monotonic() - started) * 1000)
-    try:
-        text = json.loads(proc.stdout).get("context") or ""
-    except ValueError:
-        return "", {"error": (proc.stdout + proc.stderr)[-400:]}, elapsed, proc.returncode
     rows = decision_rows(clone)
     meta = {}
     if len(rows) > before:
         try:
             row = json.loads(rows[-1])
+            if not isinstance(row, dict):
+                raise ValueError("decision must be an object")
             meta = {k: row.get(k) for k in META_KEYS if k in row}
-        except ValueError:
-            pass
+        except ValueError as err:
+            meta.update(malformed=True, response_error=f"decision row: {err}")
+    text = response_text(proc, "context", meta)
     return text, meta, elapsed, proc.returncode
 
 
-def run_brief(info, clone, prompt, timeout=300):
+def run_brief(info, clone, prompt, timeout=PROCESS_TIMEOUT_S):
     argv = [info["path"], "brief"] + (["--json"] if info["has_json"] else []) + ["--metrics", "off", prompt, "."]
     started = time.monotonic()
     proc = sh(argv, cwd=clone, timeout=timeout, check=False, env=bin_env(info))
     elapsed = int((time.monotonic() - started) * 1000)
     meta = {}
     if info["has_json"]:
-        try:
-            meta = json.loads(proc.stdout)
-            text = meta.pop("brief", "") or ""
-        except ValueError:
-            text = ""
-            meta = {"error": (proc.stdout + proc.stderr)[-400:]}
+        text = response_text(proc, "brief", meta)
     else:
         text = proc.stdout
-    keep = {k: meta.get(k) for k in META_KEYS if k in meta}
-    return text, keep, elapsed, proc.returncode
+        if proc.stderr:
+            meta["stderr"] = proc.stderr[-4000:]
+    return text, meta, elapsed, proc.returncode
 
 
 def stop_daemons(info, clones):
+    errors = []
     for clone in clones:
-        sh([info["path"], "daemon", "stop", "."], cwd=clone, check=False, timeout=60, env=bin_env(info))
+        try:
+            proc = sh([info["path"], "daemon", "stop", "."], cwd=clone, check=False, timeout=60, env=bin_env(info))
+            if proc.returncode:
+                errors.append(f"{clone}: stop exit {proc.returncode}: {proc.stderr[-400:]}")
+        except (OSError, subprocess.SubprocessError) as err:
+            errors.append(f"{clone}: {err}")
+    return errors
 
 
 # --------------------------------------------------------------------------
@@ -1099,8 +1148,14 @@ def like_for_like(reports, names):
     """Warnings for reports that do not isolate one variable: other questions, an installed or unknown probe home, or
     both the binary and the probes changed (measuring.md: an ablation changes one input)."""
     out = []
+    versions = {(r.get("protocol") or {}).get("version", 1) for r in reports}
+    if len(versions) > 1:
+        out.append("> **Measurement change:** different scorer protocols; these deltas are not retrieval gains.")
     probes = [r.get("probe_home") for r in reports]
-    for name, ident in zip(names, probes):
+    for name, ident, report in zip(names, probes, reports):
+        result = report.get("result")
+        if result and result["exit_code"]:
+            out.append(f"> **{name}: failed run**, coverage is diagnostic only; see its row statuses and errors.")
         if not ident:
             out.append(f"> **{name}** records no probe identity (scored before #1201): its probes are unknown.")
         elif not ident["frozen"]:
@@ -1231,6 +1286,8 @@ def render_markdown(report):
     rows = report["sessions"]
     out = [f"# Brief vs oracle: {report['label']}", ""]
     b = report["binary"]
+    out.append(f"- measurement protocol: {(report.get('protocol') or {}).get('version', 1)}; "
+               f"run status: {(report.get('result') or {}).get('status', 'legacy/unqualified')}")
     out += [f"- binary: `{b['path']}` ({b['version'].splitlines()[0] if b['version'] else '?'}, "
             f"commit {next((l.split(': ')[1] for l in b['version'].splitlines() if l.startswith('commit:')), '?')}, "
             f"sha256 `{b['sha256'][:12]}`, {'brief --json' if b['has_json'] else 'plain brief'})",
@@ -1245,13 +1302,17 @@ def render_markdown(report):
                    f"({len(ident['probe_files'])} files)")
     if questions:
         out.append(f"- questions: `{questions['path']}` sha256 `{questions['sha256'][:12]}`")
+    result = report.get("result")
+    if result:
+        out.append(f"- statuses: `{json.dumps(result['counts'], sort_keys=True)}`; exit {result['exit_code']}")
+        out += [f"- run error: {err}" for err in result["errors"]]
     out += ["", "| session | category | mode | brief B | oracle lines | line cov | inline cov | region cov | file recall | "
-            "answer cov | gate |", "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|"]
+            "answer cov | status | gate |", "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|"]
     for r in rows:
         m = r["metrics"]
         out.append(f"| {r['id']} | {r['category']} | {r['mode']} | {m['bytes']} | {m['oracle_lines']} | "
                    f"{pct(m['line_cov'])} | {pct(m['inline_cov'])} | {pct(m['region_cov'])} | {pct(m['file_recall'])} | "
-                   f"{pct(m['answer_cov'])} | {r['brief_meta'].get('gate', '-')} |")
+                   f"{pct(m['answer_cov'])} | {r.get('status', 'legacy/unqualified')} | {r['brief_meta'].get('gate', '-')} |")
     out += ["", "## Means", "", "| group | n | briefs | bytes | line cov | inline cov | region cov | file recall | files read/searched | "
             "answer cov |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     groups = [("answer sessions", [r for r in rows if r["mode"] == "answer"]),
@@ -1342,40 +1403,66 @@ def score_all(args, root, source):
         sessions = load_sessions(source.db_path, args.sessions, only)
     else:
         sessions = bench_sessions(source, only)
-        source.prepare(root, only)
     if not sessions:
         raise SystemExit(f"no {source.kind} sessions selected")
     label = args.label or Path(args.bin).name
     out_dir = Path(args.out or root / "score" / "runs") / label
     (out_dir / "briefs").mkdir(parents=True, exist_ok=True)
-    repos, clones, rows = {}, {}, []
-    for s in sessions:
-        key = (s["repo"], s["sha"])
-        if key not in clones:
-            clones[key] = indexed_clone(root, info, *key, warm=not args.cold)
-        if s["repo"] not in repos:
-            repos[s["repo"]] = Repo(root / "cache" / s["repo"])
-        repo = repos[s["repo"]]
-        if args.route == "hook":
-            text, meta, elapsed, code = run_hook_brief(info, clones[key], s["prompt"], f"score-{label}-{s['id']}")
-        else:
-            text, meta, elapsed, code = run_brief(info, clones[key], s["prompt"])
-        (out_dir / "briefs" / f"{s['id']}.txt").write_text(text, encoding="utf-8")
-        oracle = (oracle_from_ranges(repo, s["oracle"], s.get("oracle_commits", []))
-                  if s.get("oracle") is not None else build_oracle(repo, s["calls"]))
-        regions = parse_brief(text, repo) if text.strip() else BriefRegions()
-        metrics = score_session(oracle, regions, cited_lines(s["final_answer"], repo), text)
-        metrics["elapsed_ms"] = elapsed
-        metrics["exit"] = code
-        rows.append({"id": s["id"], "repo": s["repo"], "sha": s["sha"], "category": s["category"], "mode": s["mode"],
-                     "prompt": s["prompt"], "n_calls": len(s["calls"]), "brief_meta": meta, "metrics": metrics})
-        print(f"{s['id']:14} bytes={metrics['bytes']:6} line={pct(metrics['line_cov']):>4} "
-              f"inline={pct(metrics['inline_cov']):>4} files={pct(metrics['file_recall']):>4} "
-              f"answer={pct(metrics['answer_cov']):>4}", flush=True)
-    if not args.keep_daemons:
-        stop_daemons(info, clones.values())
+    repos, clones, rows, errors = {}, {}, [], []
+    try:
+        if source.kind != "census":
+            source.prepare(root, only)
+        for s in sessions:
+            key = (s["repo"], s["sha"])
+            if s["repo"] not in repos:
+                repos[s["repo"]] = Repo(root / "cache" / s["repo"])
+            repo = repos[s["repo"]]
+            started = time.monotonic()
+            try:
+                if key not in clones:
+                    clones[key] = indexed_clone(root, info, *key, warm=not args.cold)
+                if args.route == "hook":
+                    text, meta, elapsed, code = run_hook_brief(info, clones[key], s["prompt"],
+                                                             f"score-{label}-{s['id']}", timeout=args.timeout)
+                else:
+                    text, meta, elapsed, code = run_brief(info, clones[key], s["prompt"], timeout=args.timeout)
+            except (OSError, subprocess.SubprocessError, SystemExit) as err:
+                def decoded(value):
+                    return value.decode("utf-8", "replace") if isinstance(value, bytes) else value or ""
+                text, code = "", None
+                elapsed = int((time.monotonic() - started) * 1000)
+                meta = {"error": str(err), "timeout": isinstance(err, subprocess.TimeoutExpired),
+                        "response": decoded(getattr(err, "output", ""))[-4000:],
+                        "stderr": decoded(getattr(err, "stderr", ""))[-4000:]}
+            status = brief_status(text, meta, code)
+            (out_dir / "briefs" / f"{s['id']}.txt").write_text(text, encoding="utf-8")
+            # Failed text remains on disk as evidence but cannot earn oracle credit.
+            scored_text = text if status in ("ok", "partial") else ""
+            oracle = (oracle_from_ranges(repo, s["oracle"], s.get("oracle_commits", []))
+                      if s.get("oracle") is not None else build_oracle(repo, s["calls"]))
+            regions = parse_brief(scored_text, repo) if scored_text.strip() else BriefRegions()
+            metrics = score_session(oracle, regions, cited_lines(s["final_answer"], repo), scored_text)
+            metrics.update(elapsed_ms=elapsed, exit=code)
+            rows.append({"id": s["id"], "repo": s["repo"], "sha": s["sha"], "category": s["category"], "mode": s["mode"],
+                         "prompt": s["prompt"], "n_calls": len(s["calls"]), "brief_meta": meta, "metrics": metrics,
+                         "status": status, "output_bytes": len(text.encode("utf-8"))})
+            print(f"{s['id']:14} status={status:14} bytes={metrics['bytes']:6} line={pct(metrics['line_cov']):>4} "
+                  f"inline={pct(metrics['inline_cov']):>4} files={pct(metrics['file_recall']):>4}", flush=True)
+    except (Exception, SystemExit, KeyboardInterrupt) as err:
+        errors.append(f"{type(err).__name__}: {err}")
+    finally:
+        incomplete = errors or any(r["status"] not in COMPLETE_STATUSES for r in rows)
+        if not args.keep_daemons or incomplete:
+            errors.extend(stop_daemons(info, clones.values()))
+    failed = bool(errors or len(rows) != len(sessions) or any(r["status"] not in COMPLETE_STATUSES for r in rows))
     report = {"label": label, "binary": info, "route": args.route, "probe_home": probes,
-              "questions": source_identity(source),
+              "protocol": MEASUREMENT_PROTOCOL,
+              "scorer": {"sha256": file_sha256(__file__),
+                         "commit": sh(["git", "rev-parse", "HEAD"], cwd=qs.REPO).stdout.strip()},
+              "result": {"status": "failed" if failed else "complete", "exit_code": int(failed),
+                         "counts": dict(collections.Counter(r["status"] for r in rows)), "errors": errors},
+              "parameters": {"timeout_s": args.timeout, "selected_ids": [s["id"] for s in sessions],
+                             "keep_daemons": args.keep_daemons}, "questions": source_identity(source),
               "sessions_arg": args.sessions, "warm": not args.cold, "date": time.strftime("%Y-%m-%d"),
               "sessions": rows, "means": {"answer": aggregate([r for r in rows if r["mode"] == "answer"]),
                                           "edit": aggregate([r for r in rows if r["mode"] == "edit"]),
@@ -1448,6 +1535,39 @@ elif a[:4] == ["run-hook", "task-event", "--provider", "pi"]:
                               "kind": f"{payload['brief_only']}-{os.environ.get('PIXEL_BRIEF_DEDUPE')}",
                               "route": "daemon"}) + "\\n")
     print(json.dumps({"decision": "observe", "context": text}))
+'''
+
+FAKE_STATUS_BIN = '''#!/usr/bin/env python3
+import json, pathlib, sys, time
+a = sys.argv[1:]
+if a[:1] == ["--version"]:
+    print("fakepixel 0.0.3")
+elif "--help" in a:
+    print("--json")
+elif a[:1] in (["brief"], ["run-hook"]):
+    hook = a[0] == "run-hook"
+    mode = json.load(sys.stdin)["prompt"] if hook else a[-2]
+    if mode == "timeout":
+        time.sleep(2)
+    text = "read: src/app.py:5-14\\n" if mode != "abstained" else ""
+    meta = {"gate": "closed" if mode == "abstained" else "open"}
+    if mode == "explicit_error":
+        meta["error"] = "deliberate failure"
+    if mode == "partial":
+        meta.update(cut=True, elapsed_ms=3001, deadline_ms=3000)
+    if mode == "optional_timeout":
+        meta["probes"] = [{"name": "optional", "outcome": "timeout"}]
+    pathlib.Path(".pixel").mkdir(exist_ok=True)
+    with open(".pixel/brief-decisions.jsonl", "a") as log:
+        log.write(json.dumps(meta) + "\\n")
+    value = dict(meta, **({"context": text} if hook else {"brief": text}))
+    if mode == "malformed":
+        value = []
+    if mode == "wrong_text_type":
+        value = {"context" if hook else "brief": 42}
+    print(json.dumps(value))
+    print("fixture stderr", file=sys.stderr)
+    sys.exit(7 if mode == "process_error" else 0)
 '''
 
 
@@ -1709,6 +1829,94 @@ class SelfTest(unittest.TestCase):
         self.assertIsNone(latency([row({})])["p95_ms"])
 
     # -- the CLI end to end with a fake binary, a fake census.db and a fake clone cache
+    def status_fixture(self, base, modes):
+        binary, questions = base / "fakepixel", base / "questions.jsonl"
+        binary.write_text(FAKE_STATUS_BIN)
+        binary.chmod(0o755)
+        questions.write_text("".join(json.dumps({"id": mode, "repo": "o/fx", "url": str(self.repo_dir),
+                            "sha": self.sha, "prompt": mode, "kind": "lookup",
+                            "oracle": [["src/app.py", 5, 14]]}) + "\n" for mode in modes))
+        return ["--bin", str(binary), "--questions", str(questions), "--root", str(base / "state"),
+                "--out", str(base / "runs"), "--cold"], base / "runs"
+
+    def test_invalid_outputs_cannot_be_successful_comparisons_on_either_route(self):
+        modes = ["ok", "abstained", "process_error", "malformed", "wrong_text_type", "explicit_error", "partial",
+                 "optional_timeout"]
+        for route in ("hook", "command"):
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as tmp:
+                common, runs = self.status_fixture(Path(tmp), modes)
+                self.assertEqual(main(common + ["--route", route, "--label", "faults"]), 1)
+                report = json.loads((runs / "faults/report.json").read_text())
+                rows = {r["id"]: r for r in report["sessions"]}
+                self.assertEqual(report["result"]["status"], "failed")
+                self.assertEqual(report["means"]["all"]["n"], len(modes))
+                for mode in modes:
+                    expected = "ok" if mode == "optional_timeout" else "malformed" if mode == "wrong_text_type" else mode
+                    self.assertEqual(rows[mode]["status"], expected)
+                    cov = 1.0 if mode in ("ok", "partial", "optional_timeout") else 0.0
+                    self.assertEqual(rows[mode]["metrics"]["line_cov"], cov)
+                self.assertEqual(rows["process_error"]["metrics"]["exit"], 7)
+                self.assertIn("fixture stderr", rows["process_error"]["brief_meta"]["stderr"])
+                self.assertEqual(main(["compare", str(runs / "faults/report.json")]), 1)
+                # Abstention remains a zero in the denominator; an optional probe timeout is not a brief failure.
+                selected = ",".join(("ok", "abstained", "optional_timeout"))
+                self.assertEqual(main(common + ["--route", route, "--label", "healthy", "--only", selected]), 0)
+                healthy = json.loads((runs / "healthy/report.json").read_text())
+                self.assertEqual(healthy["means"]["all"]["line_cov"], 2 / 3)
+
+    def test_nonzero_json_process_fails_even_with_full_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            common, runs = self.status_fixture(Path(tmp), ["process_error"])
+            self.assertEqual(main(common + ["--label", "failed"]), 1)
+            row = json.loads((runs / "failed/report.json").read_text())["sessions"][0]
+            self.assertEqual((row["metrics"]["exit"], row["metrics"]["line_cov"]), (7, 0.0))
+
+    def test_pinned_saves_both_failed_reports_and_propagates_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            common, runs = self.status_fixture(base, ["process_error"])
+            repo, commit, _ = probe_repo(base / "source")
+            code = main(["pinned", "--base", common[1], "--repo", str(repo), "--probe-commit", commit,
+                         "--label", "pair"] + common[2:])
+            self.assertEqual(code, 1)
+            for side in ("base", "head"):
+                report = json.loads((runs / f"pair-{side}/report.json").read_text())
+                self.assertEqual(report["result"]["exit_code"], 1)
+            self.assertIn("failed run", (runs / "pair-compare.md").read_text())
+
+    def test_process_timeout_is_reported_on_both_routes(self):
+        for route in ("hook", "command"):
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as tmp:
+                common, runs = self.status_fixture(Path(tmp), ["timeout"])
+                self.assertEqual(main(common + ["--route", route, "--timeout", "0.05", "--label", "slow"]), 1)
+                row = json.loads((runs / "slow/report.json").read_text())["sessions"][0]
+                self.assertEqual((row["status"], row["metrics"]["exit"], row["metrics"]["line_cov"]),
+                                 ("timeout", None, 0.0))
+
+    def test_activation_failure_stops_the_unregistered_clone(self):
+        info = {"path": "fake"}
+        with mock.patch(f"{__name__}.sh", side_effect=[subprocess.CompletedProcess([], 0), OSError("prepare")]), \
+             mock.patch(f"{__name__}.stop_daemons", return_value=[]) as cleanup:
+            with self.assertRaisesRegex(OSError, "prepare"):
+                activate(info, self.repo_dir, False)
+        cleanup.assert_called_once_with(info, [self.repo_dir])
+
+    def test_timeout_and_prepare_failure_leave_reports_and_cleanup(self):
+        for phase in ("brief", "prepare"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
+                common, runs = self.status_fixture(Path(tmp), ["ok"])
+                target = "run_hook_brief" if phase == "brief" else "activate"
+                fault = subprocess.TimeoutExpired(["fakepixel"], 0.01, output=b"partial", stderr=b"deadline")
+                with mock.patch(f"{__name__}.{target}", side_effect=fault), \
+                     mock.patch(f"{__name__}.stop_daemons", return_value=[]) as cleanup:
+                    self.assertEqual(main(common + ["--label", "timeout"]), 1)
+                report = json.loads((runs / "timeout/report.json").read_text())
+                self.assertEqual(report["result"]["status"], "failed")
+                self.assertEqual(report["sessions"][0]["status"], "timeout")
+                self.assertEqual(report["sessions"][0]["metrics"]["line_cov"], 0.0)
+                self.assertIn("deadline", report["sessions"][0]["brief_meta"]["stderr"])
+                self.assertTrue(cleanup.called)
+
     def test_cli_end_to_end(self):
         root = Path(self.tmp.name) / "census"
         (root / "cache").mkdir(parents=True)
@@ -1910,6 +2118,8 @@ def add_scoring_arguments(parser):
     parser.add_argument("--cold", action="store_true",
                         help="skip the search-meaning warm-up: score the first prompt of a fresh index")
     parser.add_argument("--keep-daemons", action="store_true")
+    parser.add_argument("--timeout", type=float, default=PROCESS_TIMEOUT_S,
+                        help="maximum seconds per brief process (default: 300)")
     parser.add_argument("--route", choices=("hook", "command"), default="hook",
                         help="hook: the prompt-submit hook's brief, the live budget (default); command: `pixel brief`")
 
@@ -1940,7 +2150,7 @@ def pinned(args):
     (out / f"{args.label}-compare.md").write_text(text, encoding="utf-8")
     print(text)
     print(f"wrote {out / (args.label + '-compare.md')}")
-    return 0
+    return max(rep.get("result", {}).get("exit_code", 0) for rep in reports)
 
 
 def main(argv=None):
@@ -1956,7 +2166,7 @@ def main(argv=None):
         args = parser.parse_args(argv[1:])
         reports = [json.loads(Path(p).read_text(encoding="utf-8")) for p in args.reports]
         print(render_compare(reports, args.labels.split(",") if args.labels else None))
-        return 0
+        return max(rep.get("result", {}).get("exit_code", 0) for rep in reports)
     if argv[:1] == ["freeze-home"]:
         parser = argparse.ArgumentParser(prog="score_brief.py freeze-home",
                                          description="write the probes a binary built at --commit embeds")
@@ -1988,8 +2198,8 @@ def main(argv=None):
     add_scoring_arguments(parser)
     args = parser.parse_args(argv)
     source = qs.open_source(args)
-    score_all(args, Path(args.root), source)
-    return 0
+    report = json.loads(score_all(args, Path(args.root), source).read_text(encoding="utf-8"))
+    return report["result"]["exit_code"]
 
 
 if __name__ == "__main__":
