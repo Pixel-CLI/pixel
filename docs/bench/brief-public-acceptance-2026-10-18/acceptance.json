@@ -1,0 +1,1461 @@
+{
+  "questions": 56,
+  "accepted": 18,
+  "full_set_pass": false,
+  "first_run_brief_calls": 64,
+  "first_run_control_calls": 231,
+  "cases": [
+    {
+      "id": "excalidraw-01",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 3,
+          "control_calls": 7,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "excalidraw-02",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 1,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "excalidraw-03",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 2,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "excalidraw-04",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 10,
+          "control_calls": 9,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "excalidraw-05",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "excalidraw-06",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "excalidraw-07",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 1,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "excalidraw-08",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 2,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "express-01",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "express-02",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 1,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "express-03",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 4,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "express-04",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 3,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "express-05",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 1,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "express-06",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "express-07",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 3,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "express-08",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 2,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "fd-01",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "fd-02",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "fd-03",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "fd-04",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 4,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "fd-05",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "fd-06",
+      "accepted": false,
+      "reasons": [
+        "quality"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 6,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "fd-07",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 2,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "fd-08",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 6,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "flask-01",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "flask-02",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 1,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "flask-03",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "flask-04",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 1,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "flask-05",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "flask-06",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "flask-07",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 2,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "flask-08",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 6,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "pixel-01",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 6,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "pixel-02",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "pixel-03",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 6,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "pixel-04",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 11,
+          "control_calls": 8,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "pixel-05",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 1,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "pixel-06",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "pixel-07",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 7,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "pixel-08",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 8,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "requests-01",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "requests-02",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "requests-03",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "requests-04",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 7,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "requests-05",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 1,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "requests-06",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "requests-07",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 1,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "requests-08",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "ripgrep-01",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 2,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "ripgrep-02",
+      "accepted": true,
+      "reasons": [],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r2",
+          "brief_calls": 0,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        },
+        {
+          "run": "public56-904d9570-r3",
+          "brief_calls": 0,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": true,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "ripgrep-03",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 2,
+          "control_calls": 5,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "ripgrep-04",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 3,
+          "control_calls": 7,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "ripgrep-05",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 1,
+          "control_calls": 2,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "ripgrep-06",
+      "accepted": false,
+      "reasons": [
+        "quality",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 0,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "id": "ripgrep-07",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 2,
+          "control_calls": 4,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "id": "ripgrep-08",
+      "accepted": false,
+      "reasons": [
+        "unreviewed",
+        "quality",
+        "nonzero",
+        "fewer than three pairs"
+      ],
+      "pairs": [
+        {
+          "run": "public56-904d9570-r1",
+          "brief_calls": 3,
+          "control_calls": 3,
+          "protocol": true,
+          "delivered": true,
+          "quality": false,
+          "reviewed": false
+        }
+      ]
+    }
+  ]
+}

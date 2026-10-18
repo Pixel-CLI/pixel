@@ -74,7 +74,14 @@ from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 CENSUS_DIRS = tuple(Path(p) for p in (os.environ.get("PIXEL_CENSUS_DIR"), HERE / "tool-census") if p)
-CODEX = Path(os.environ.get("CODEX_BIN") or (Path.home() / ".local" / "bin" / "codex"))
+
+
+def codex_binary(env=os.environ, which=shutil.which, home=Path.home()):
+    """``CODEX_BIN``, else the ``codex`` on ``PATH`` (a mise or Homebrew install), else ``~/.local/bin/codex``."""
+    return Path(env.get("CODEX_BIN") or which("codex") or (home / ".local" / "bin" / "codex"))
+
+
+CODEX = codex_binary()
 CODEX_AUTH = Path.home() / ".codex" / "auth.json"
 # The campaign defaults of eval/run.sh.
 CODEX_MODEL = "gpt-5.6-terra"
@@ -650,6 +657,9 @@ def main(argv=None):
     if not args.brief_bin:
         parser.error("--brief-bin is required")
     args.brief_bin = str(Path(args.brief_bin).resolve())
+    # Every session would otherwise fail on its own with a bare FileNotFoundError (2026-10-18: 112 of 112).
+    if args.agent == "codex" and not os.access(CODEX, os.X_OK):
+        parser.error(f"no Codex binary at {CODEX}: put codex on PATH or set CODEX_BIN")
     census = load_census(args.census_dir)
     source = load_sources().open_source(args)
     root = Path(args.root)
@@ -684,6 +694,20 @@ def main(argv=None):
 
 
 class SelfTest(unittest.TestCase):
+    def test_codex_binary_is_codex_bin_then_the_one_on_path_then_local_bin(self):
+        home = Path("/h")
+        self.assertEqual(codex_binary({"CODEX_BIN": "/opt/codex"}, lambda _n: "/p/codex", home), Path("/opt/codex"))
+        self.assertEqual(codex_binary({}, lambda _n: "/p/codex", home), Path("/p/codex"))
+        self.assertEqual(codex_binary({}, lambda _n: None, home), Path("/h/.local/bin/codex"))
+
+    def test_a_missing_codex_stops_the_run_before_any_session(self):
+        with tempfile.TemporaryDirectory() as tmp, patch(f"{__name__}.CODEX", Path(tmp) / "no-codex"), \
+                patch(f"{__name__}.load_census") as census:
+            with self.assertRaises(SystemExit) as stop:
+                main(["--brief-bin", sys.executable, "--root", tmp])
+        self.assertEqual(stop.exception.code, 2)
+        census.assert_not_called()
+
     def test_settings_register_one_hook_per_part_the_way_setup_writes_them(self):
         body = settings_body("/x/pixel", 3)
         commands = [h["command"] for h in body["hooks"]["UserPromptSubmit"][0]["hooks"]]

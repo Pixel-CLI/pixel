@@ -123,3 +123,7 @@ do not bias the aggregate comparison.
 9/56 accepted after three paired repetitions; 78 brief versus 235 fresh control
 calls in the full first pass. The report carries the frozen inputs, per-question
 source reviews and aggregates to reproduce the failed full-set verdict offline.
+
+[2026-10-18 evaluation](../../docs/bench/brief-public-acceptance-2026-10-18/README.md)
+(`main` `904d9570`, after #1208–#1215): 18/56 accepted; 64 brief versus 231
+fresh control calls in the full first pass. Reviews by Claude sub-agents.
