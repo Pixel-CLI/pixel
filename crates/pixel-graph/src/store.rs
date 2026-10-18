@@ -492,9 +492,6 @@ pub struct GraphStore {
     conn: Connection,
 }
 
-/// The per-file delete [`GraphStore::replace_file`] and
-/// [`GraphStore::remove_file`] run once for every file of an incremental
-/// batch; `idx_unresolved_file` is what keeps it off a full-table scan.
 const DELETE_FILE_UNRESOLVED_NAMES: &str = "DELETE FROM unresolved_names WHERE file_id = ?1";
 
 /// `PRAGMA auto_vacuum`'s value for `INCREMENTAL`.
