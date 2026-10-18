@@ -230,7 +230,6 @@ fn deliver_skill(host: &Host, added: &pixel_plugin::Added) -> Result<(), String>
     Ok(())
 }
 
-
 /// `pixel uninstall <plugin>`.
 pub fn uninstall(name: &str) -> Result<(), String> {
     let host = host()?;
