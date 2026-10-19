@@ -964,6 +964,9 @@ def response_text(proc, field, meta):
             if key in data:
                 meta[key] = data[key]
         text = data.get(field)
+        # Pi's brief-only hook keeps the observe decision unchanged when no brief exists.
+        if field == "context" and field not in data and data.get("decision") == "observe":
+            return ""
         if text is None and (meta.get("gate") == "closed" or meta.get("error") is not None):
             return ""
         if not isinstance(text, str):
@@ -1945,6 +1948,23 @@ class SelfTest(unittest.TestCase):
                 self.assertEqual(main(common + ["--route", route, "--label", "healthy", "--only", selected]), 0)
                 healthy = json.loads((runs / "healthy/report.json").read_text())
                 self.assertEqual(healthy["means"]["all"]["line_cov"], 2 / 3)
+
+    def test_observe_without_context_is_hook_abstention_only(self):
+        for gate in (None, "declined", "closed"):
+            with self.subTest(gate=gate):
+                meta = {} if gate is None else {"gate": gate}
+                proc = subprocess.CompletedProcess([], 0, '{"decision":"observe"}\n', "")
+                self.assertEqual(response_text(proc, "context", meta), "")
+                self.assertEqual(brief_status("", meta, 0), "abstained")
+        for field, value in (("brief", {"decision": "observe"}), ("context", {}),
+                             ("context", {"decision": "observe", "context": None}),
+                             ("context", {"decision": "observe", "context": 42}),
+                             ("context", {"decision": "deny"})):
+            with self.subTest(field=field, value=value):
+                meta = {}
+                proc = subprocess.CompletedProcess([], 0, json.dumps(value), "")
+                self.assertEqual(response_text(proc, field, meta), "")
+                self.assertEqual(brief_status("", meta, 0), "malformed")
 
     def test_nonzero_json_process_fails_even_with_full_context(self):
         with tempfile.TemporaryDirectory() as tmp:
