@@ -33,6 +33,10 @@ evidence. The later supplemental run has 15/18 relevant among positive questions
 continuation and unrelated controls; 70 emitted zero brief bytes. This is
 not a production-readiness or general zero-call claim. An intermediate `bf180014` candidate scored 50/56 on source relevance. This was a real implementation regression: CI #1262 rejected Rust-incompatible lookaheads in the flow-rank manifest, so the loader omitted that probe metadata. The diagnostic run and its failure remain archived; later measurements use the corrected manifest.
 
+The 53/56 candidate result is frozen at source `df9f39fa9696432e0bdb73bc77fc847a2dd96513`.
+It does not include the later #1263 caller-binding fix at
+`fa472e760506f7811e94f7c034b197d9a60fd1a3`; that fix has not been measured here.
+
 Recount judgments, verify identities and check the complete archived evidence:
 
 ```sh
@@ -181,8 +185,12 @@ The original rejected report is retained, not rewritten.
 - Repeated outputs are compared by ID and brief SHA-256 above. Earlier relevance
   judgments are reused only for byte-identical output at the same source commit.
 
-Eight PRs have archived current-head CI receipts. Verify every PR head and required
-check before treating the candidate as ready; a receipt is not a merge authorization.
+The archive captured CI receipts for the then-current heads of eight PRs.
+The #1263 head listed below (`eb295c602e18ad231bcbc89b7f5ae836e9be3eaf`) was
+later superseded by `fa472e760506f7811e94f7c034b197d9a60fd1a3`; its fix is not
+part of the measured `df9f39fa9696432e0bdb73bc77fc847a2dd96513` candidate.
+Verify every PR's current head and required checks before treating the candidate as
+ready; an archived receipt is not a merge authorization.
 Focused unit suites cover config selectors, exact option tests, imported factory
 bindings, same-receiver methods/getters, source masking, caller identity, flow
 handoffs, and admission controls. Named-import recovery is supported; default imports,
