@@ -54,6 +54,8 @@ pub(crate) fn prepare(
                     uid_or_name: symbol.to_string(),
                     direction: "both".into(),
                     depth: Some(2),
+
+                    stale_ok: false,
                 },
                 false,
             )

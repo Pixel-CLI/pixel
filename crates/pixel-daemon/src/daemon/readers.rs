@@ -13,7 +13,7 @@
 //! cannot answer (no graph to read, the generation moved under it) gives the
 //! request back and the writer serves it in order.
 //!
-//! A request that sets `stale_ok` (`targets_facts`, `symbol`) asks for the
+//! A request that sets `stale_ok` (the brief graph reads and `targets_facts`) asks for the
 //! opposite trade: it goes to a reader precisely while a batch is queued or
 //! running, and the replica answers from the generation before it, saying
 //! how long the oldest unpublished batch has waited ([`Busy::behind`]).
@@ -469,6 +469,28 @@ mod tests {
         );
         busy.done(true);
         assert_eq!(cases(&busy), [false; 6], "idle again");
+    }
+
+    #[test]
+    fn brief_graph_reads_should_overtake_a_batch_only_with_stale_ok() {
+        let busy = Busy::default();
+        busy.queued(true);
+        for op in ["skeleton", "context", "uses", "impact", "trace", "evaluate"] {
+            let mut value = serde_json::json!({"op": op, "file": "a.rs", "uid": "a",
+                "uid_or_name": "a", "direction": "upstream", "role": "callers",
+                "from": "a", "to": "b"});
+            let ordinary = serde_json::from_value(value.clone()).unwrap();
+            assert!(
+                !busy.reader_may_take(&ordinary),
+                "{op} must wait for the edit"
+            );
+            value["stale_ok"] = serde_json::json!(true);
+            let stale = serde_json::from_value(value).unwrap();
+            assert!(
+                busy.reader_may_take(&stale),
+                "{op} accepts the published generation"
+            );
+        }
     }
 
     /// A reader hands its replica the writer's lag: present while a batch is

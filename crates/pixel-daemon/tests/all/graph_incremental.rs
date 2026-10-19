@@ -136,6 +136,8 @@ fn one_edited_file_updates_the_graph_incrementally() {
         uid_or_name: "src/worker.ts#work#function".into(),
         direction: "downstream".into(),
         depth: Some(1),
+
+        stale_ok: false,
     });
     assert!(resp.ok, "{:?}", resp.error);
     let impact = resp.into_data();

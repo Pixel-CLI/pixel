@@ -192,6 +192,8 @@ fn skeleton_should_accept_an_absolute_path_inside_the_root_and_name_a_missing_fi
         &mut service,
         Request::Skeleton {
             file: root.join("login.rs").display().to_string(),
+
+            stale_ok: false,
         },
     );
     assert_eq!(out["file"], "login.rs");
@@ -207,6 +209,8 @@ fn skeleton_should_accept_an_absolute_path_inside_the_root_and_name_a_missing_fi
         &mut service,
         Request::Skeleton {
             file: "/nope.rs".into(),
+
+            stale_ok: false,
         },
     );
     assert_eq!(code, "INVALID_INPUT");
@@ -225,6 +229,8 @@ fn context_should_return_candidates_for_an_ambiguous_name_and_not_found_for_an_u
         Request::Context {
             uid: "helper".into(),
             budget_tokens: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(names(&out), ["helper@caller.rs", "helper@login.rs"]);
@@ -235,6 +241,8 @@ fn context_should_return_candidates_for_an_ambiguous_name_and_not_found_for_an_u
         Request::Context {
             uid: "helper".into(),
             budget_tokens: Some(1),
+
+            stale_ok: false,
         },
     );
     assert_eq!(code, "INVALID_INPUT");
@@ -248,6 +256,8 @@ fn context_should_return_candidates_for_an_ambiguous_name_and_not_found_for_an_u
         Request::Context {
             uid: "nosuchsymbol".into(),
             budget_tokens: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(code, "NOT_FOUND");
@@ -267,6 +277,8 @@ fn impact_and_trace_should_stop_at_an_ambiguous_name_with_its_candidates() {
             uid_or_name: "helper".into(),
             direction: "upstream".into(),
             depth: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(names(&impact), ["helper@caller.rs", "helper@login.rs"]);
@@ -275,6 +287,8 @@ fn impact_and_trace_should_stop_at_an_ambiguous_name_with_its_candidates() {
         Request::Trace {
             from: "go".into(),
             to: "helper".into(),
+
+            stale_ok: false,
         },
     );
     assert_eq!(
@@ -287,6 +301,8 @@ fn impact_and_trace_should_stop_at_an_ambiguous_name_with_its_candidates() {
         Request::Trace {
             from: "helper".into(),
             to: "login".into(),
+
+            stale_ok: false,
         },
     );
     assert_eq!(names(&trace_from), ["helper@caller.rs", "helper@login.rs"]);
@@ -302,6 +318,8 @@ fn impact_should_name_a_uid_that_matches_nothing() {
             uid_or_name: "rust:nowhere.rs#ghost".into(),
             direction: "upstream".into(),
             depth: Some(1),
+
+            stale_ok: false,
         },
     );
     assert_eq!(code, "NOT_FOUND");
@@ -321,6 +339,8 @@ fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty()
             uid_or_name: "login".into(),
             role: "callers".into(),
             offset: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(callers["role"], "callers");
@@ -340,6 +360,8 @@ fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty()
             uid_or_name: "login".into(),
             role: "callers".into(),
             offset: Some(10),
+
+            stale_ok: false,
         },
     );
     assert_eq!(
@@ -355,6 +377,8 @@ fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty()
             uid_or_name: "go".into(),
             role: "callees".into(),
             offset: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(callees["role"], "callees");
@@ -371,6 +395,8 @@ fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty()
             uid_or_name: "helper".into(),
             role: "callers".into(),
             offset: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(names(&ambiguous), ["helper@caller.rs", "helper@login.rs"]);
@@ -391,6 +417,8 @@ fn uses_callees_should_mark_a_lower_bound_when_the_symbol_has_unresolved_calls()
             uid_or_name: "outer".into(),
             role: "callees".into(),
             offset: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(out["envelope"]["unresolved_outgoing"], 1, "{out}");
@@ -981,6 +1009,8 @@ fn evaluate_should_refuse_an_unknown_traversal_or_tier_instead_of_answering_anot
         time_budget_ms: None,
         scope: None,
         at_snapshot: false,
+
+        stale_ok: false,
     };
     let (_, message) = err(&mut service, request(Some("sideways"), None));
     assert_eq!(

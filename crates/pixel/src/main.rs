@@ -4679,7 +4679,14 @@ fn run_command(
             Ok(())
         }
         Command::ListSignatures { file, path, json } => {
-            let data = execute(&path, Request::Skeleton { file }, false)?;
+            let data = execute(
+                &path,
+                Request::Skeleton {
+                    file,
+                    stale_ok: false,
+                },
+                false,
+            )?;
             finish_graph_cmd(data, json, |d| {
                 let syms = d.get("symbols")?.as_array()?;
                 let fname = d.get("file")?.as_str().unwrap_or("");
@@ -4748,6 +4755,8 @@ fn run_command(
                 Request::Context {
                     uid,
                     budget_tokens: budget,
+
+                    stale_ok: false,
                 },
                 false,
             )?;
@@ -4806,6 +4815,8 @@ fn run_command(
                     uid_or_name: uid_or_name.clone(),
                     direction: dir.to_string(),
                     depth,
+
+                    stale_ok: false,
                 })?;
                 return workspace_cmd::print_fan_out(&results, json);
             }
@@ -4815,6 +4826,8 @@ fn run_command(
                     uid_or_name,
                     direction: dir.to_string(),
                     depth,
+
+                    stale_ok: false,
                 },
                 no_daemon,
             )?;
@@ -4839,6 +4852,8 @@ fn run_command(
                     uid_or_name: uid_or_name.clone(),
                     role: role_s.to_string(),
                     offset: Some(offset),
+
+                    stale_ok: false,
                 })?;
                 return workspace_cmd::print_fan_out(&results, json);
             }
@@ -4848,6 +4863,8 @@ fn run_command(
                     uid_or_name,
                     role: role_s.to_string(),
                     offset: Some(offset),
+
+                    stale_ok: false,
                 },
                 no_daemon,
             )?;
@@ -4962,7 +4979,15 @@ fn run_command(
             json,
         } => {
             let successor = call_path_successor(&from, &to, &path);
-            let mut data = execute(&path, Request::Trace { from, to }, false)?;
+            let mut data = execute(
+                &path,
+                Request::Trace {
+                    from,
+                    to,
+                    stale_ok: false,
+                },
+                false,
+            )?;
             if let Some(fields) = data.as_object_mut() {
                 fields.insert("successor".into(), successor);
             }
@@ -5832,6 +5857,8 @@ fn run_query(
                     uid_or_name: target.into(),
                     direction: "upstream".into(),
                     depth: Some(3),
+
+                    stale_ok: false,
                 },
                 no_daemon,
             )?
@@ -5923,6 +5950,8 @@ fn run_locate(
                 Request::Context {
                     uid,
                     budget_tokens: Some(share),
+
+                    stale_ok: false,
                 },
                 no_daemon,
             )
@@ -6003,6 +6032,8 @@ fn run_locate(
                 uid_or_name: uid.clone(),
                 role: "callers".into(),
                 offset: None,
+
+                stale_ok: false,
             },
             no_daemon,
         )?;

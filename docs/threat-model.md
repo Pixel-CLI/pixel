@@ -91,7 +91,8 @@ set to 0600 after `bind`; on Linux the fallback directory is set to 0700.
 `classify_ping`: an older daemon is shut down and replaced, a newer one is
 left alone and the command runs in process. One writer serves requests in
 arrival order; while it is busy, read replicas answer the read-plane ops,
-and a `targets_facts` or `symbol` that sets `stale_ok` even during a watcher
+and an opt-in brief graph read (`symbol`, `skeleton`, `context`, `uses`,
+`impact`, `trace`, `evaluate`) or `targets_facts` that sets `stale_ok` even during a watcher
 batch. A replica opens the graph read-only, runs no git and writes nothing,
 so the flag changes only how old an answer may be, which the envelope
 states (`staleness_ms`, a `STALE_GENERATION` warning). The op set includes git mutations (`publish`, `push`, `ship`,

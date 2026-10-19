@@ -106,20 +106,32 @@ pub enum Op {
     },
     /// All signatures in a file — the "list-signatures" view at ~10% of Read cost.
     Skeleton {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         file: String,
     },
     Context {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         uid: String,
         #[serde(default)]
         budget_tokens: Option<usize>,
     },
     Impact {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         uid_or_name: String,
         direction: String,
         #[serde(default)]
         depth: Option<u32>,
     },
     Uses {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         uid_or_name: String,
         /// "callers" | "callees"
         role: String,
@@ -127,6 +139,9 @@ pub enum Op {
         offset: Option<usize>,
     },
     Trace {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         from: String,
         to: String,
     },
@@ -378,6 +393,9 @@ pub enum Op {
     /// to a graph generation whose signature it checks against the working
     /// tree before and after the traversal.
     Evaluate {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         /// `--from`: a uid (`path#qualified#kind`) or a name.
         from: String,
         /// `--to`: a uid or a name.
@@ -442,12 +460,19 @@ impl Op {
     /// The caller accepts an answer from the generation published before
     /// the watcher batches still queued: a read replica may serve it during
     /// an update instead of the writer after it, and the envelope then says
-    /// so (`epistemics.staleness_ms` and a `STALE_GENERATION` warning). Only
-    /// `targets_facts` and `symbol` carry the field. An older daemon ignores
+    /// so (`epistemics.staleness_ms` and a `STALE_GENERATION` warning). The brief graph reads and
+    /// `targets_facts` carry the field. An older daemon ignores
     /// it and answers after the batch, as for any request.
     pub fn stale_ok(&self) -> bool {
         match self {
-            Op::TargetsFacts { stale_ok, .. } | Op::Symbol { stale_ok, .. } => *stale_ok,
+            Op::TargetsFacts { stale_ok, .. }
+            | Op::Symbol { stale_ok, .. }
+            | Op::Skeleton { stale_ok, .. }
+            | Op::Context { stale_ok, .. }
+            | Op::Impact { stale_ok, .. }
+            | Op::Uses { stale_ok, .. }
+            | Op::Trace { stale_ok, .. }
+            | Op::Evaluate { stale_ok, .. } => *stale_ok,
             _ => false,
         }
     }
@@ -717,7 +742,30 @@ mod tests {
 
     /// `stale_ok` is opt-in on the wire: a request that does not ask
     /// serializes as an older daemon knows it, one that asks round-trips,
-    /// and only the two ops a replica serves stale report it.
+    /// and only operations a replica serves stale report it.
+    #[test]
+    fn brief_graph_stale_ok_should_roundtrip_and_default_to_false() {
+        for op in ["skeleton", "context", "uses", "impact", "trace", "evaluate"] {
+            let mut value = serde_json::json!({"op": op, "file": "a.rs", "uid": "a",
+                "uid_or_name": "a", "direction": "upstream", "role": "callers",
+                "from": "a", "to": "b"});
+            let ordinary: Op = serde_json::from_value(value.clone()).unwrap();
+            assert!(!ordinary.stale_ok(), "{op}");
+            assert!(
+                serde_json::to_value(&ordinary)
+                    .unwrap()
+                    .get("stale_ok")
+                    .is_none()
+            );
+            value["stale_ok"] = serde_json::json!(true);
+            let stale: Op = serde_json::from_value(value).unwrap();
+            assert!(stale.stale_ok(), "{op}");
+            let wire = serde_json::to_value(&stale).unwrap();
+            assert_eq!(wire["stale_ok"], true);
+            assert_eq!(serde_json::from_value::<Op>(wire).unwrap(), stale);
+        }
+    }
+
     #[test]
     fn stale_ok_should_reach_the_wire_only_when_asked() {
         let asked = Op::TargetsFacts {
@@ -770,6 +818,8 @@ mod tests {
             uid_or_name: "foo#1".into(),
             direction: "upstream".into(),
             depth: Some(3),
+
+            stale_ok: false,
         };
         let text = serde_json::to_string(&op).unwrap();
         let parsed: Op = serde_json::from_str(&text).unwrap();
@@ -1012,11 +1062,19 @@ mod tests {
                 },
                 "symbol",
             ),
-            (Op::Skeleton { file: "".into() }, "skeleton"),
+            (
+                Op::Skeleton {
+                    file: "".into(),
+                    stale_ok: false,
+                },
+                "skeleton",
+            ),
             (
                 Op::Context {
                     uid: "".into(),
                     budget_tokens: None,
+
+                    stale_ok: false,
                 },
                 "context",
             ),
@@ -1025,6 +1083,8 @@ mod tests {
                     uid_or_name: "".into(),
                     direction: "".into(),
                     depth: None,
+
+                    stale_ok: false,
                 },
                 "impact",
             ),
@@ -1033,6 +1093,8 @@ mod tests {
                     uid_or_name: "".into(),
                     role: "".into(),
                     offset: None,
+
+                    stale_ok: false,
                 },
                 "uses",
             ),
@@ -1040,6 +1102,8 @@ mod tests {
                 Op::Trace {
                     from: "".into(),
                     to: "".into(),
+
+                    stale_ok: false,
                 },
                 "trace",
             ),
@@ -1207,6 +1271,8 @@ mod tests {
                     time_budget_ms: None,
                     scope: None,
                     at_snapshot: false,
+
+                    stale_ok: false,
                 },
                 "evaluate",
             ),
