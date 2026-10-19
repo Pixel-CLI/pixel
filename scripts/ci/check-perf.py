@@ -9,13 +9,16 @@ after one file change, and passes each `pixel prepare-repo --json` receipt
 here (`cold`, `incremental`). It also scores the brief on the 56 public
 questions and passes the scorer's `report.json` (`brief`): p95 and max
 `elapsed_ms`, and how many briefs came back `partial` (cut by the window, or
-past their `deadline_ms`). A metric over its ceiling
+past their `deadline_ms`). And it passes the `tree_delta` bench's
+`PIXEL_BENCH_JSON` receipt (`tree_delta`): the p50 of the whole-tree
+freshness check on the pinned corpus and on a synthetic tree. A metric over its ceiling
 prints the number and exits 1; so does a receipt that is shaped like a pass but
 measured nothing (a cold run that reused an index, one with no symbols, a
-brief run that timed fewer questions than it asked or ran installed probes),
+brief run that timed fewer questions than it asked or ran installed probes,
+a tree_delta run with too few samples or a subject under its file floor),
 so the lane fails on a real regression and never on a vacuous one.
 
-Usage: check-perf.py --label cold|incremental|brief --timings receipt.json
+Usage: check-perf.py --label cold|incremental|brief|tree_delta --timings receipt.json
                      [--baseline .github/perf-baseline.json]
                      [--multiplier N] [--summary "$GITHUB_STEP_SUMMARY"]
        check-perf.py --self-test
@@ -46,7 +49,13 @@ METRICS = {
         "p95_ms": "means.all.latency.p95_ms",
         "max_ms": "means.all.latency.max_ms",
     },
+    "tree_delta": {
+        "tree_p50_ms": "subjects.tree.tree_delta.p50_ms",
+        "synthetic_p50_ms": "subjects.synthetic.tree_delta.p50_ms",
+    },
 }
+# tree_delta subject -> the baseline key of its file floor.
+TREE_DELTA_FLOORS = {"tree": "min_tree_files", "synthetic": "min_synthetic_files"}
 # Scorer statuses that mean a question was not measured. `partial` is measured:
 # `score_brief.py` gives it to a brief flagged `cut` or whose `elapsed_ms`
 # passed its `deadline_ms`, and the lane counts it against `max_partial`. The
@@ -72,6 +81,8 @@ def evaluate(label, receipt, baseline, multiplier):
     for name, path in plan.items():
         measured = dig(receipt, path)
         ceiling = limits[name] * multiplier
+        if isinstance(ceiling, float):
+            ceiling = round(ceiling, 1)  # 82.2 x3 prints 246.6, not 246.60000000000002
         if not isinstance(measured, (int, float)):
             problems.append(f"{label}.{name}: receipt has no {path} (got {measured!r})")
             continue
@@ -85,6 +96,9 @@ def evaluate(label, receipt, baseline, multiplier):
         rows.append(("partial", (dig(receipt, "result.counts") or {}).get("partial", 0),
                      limits["max_partial"]))
         problems += brief_shape(receipt, limits)
+        return problems, rows
+    if label == "tree_delta":
+        problems += tree_delta_shape(receipt, limits)
         return problems, rows
     for key, receipt_key in (("min_files", "files"), ("min_symbols", "symbols")):
         measured, floor = dig(receipt, f"graph.{receipt_key}"), limits[key]
@@ -141,6 +155,20 @@ def brief_shape(receipt, limits):
     return problems
 
 
+def tree_delta_shape(receipt, limits):
+    """Problems of a `tree_delta` bench receipt whose p50 would say nothing: a subject that indexed fewer
+    files than its floor (a wrong root, a skipped synthetic tree) or a lane with fewer samples than asked."""
+    problems = []
+    for subject, floor_key in TREE_DELTA_FLOORS.items():
+        files, floor = dig(receipt, f"subjects.{subject}.files"), limits[floor_key]
+        if not isinstance(files, int) or files < floor:
+            problems.append(f"tree_delta: {subject} indexed {files!r} files, under the floor {floor}")
+        iters, wanted = dig(receipt, f"subjects.{subject}.tree_delta.iters"), limits["min_iters"]
+        if not isinstance(iters, int) or iters < wanted:
+            problems.append(f"tree_delta: {subject} has {iters!r} samples, under the floor {wanted}")
+    return problems
+
+
 def report(label, rows, problems, summary_path, provenance=""):
     lines = [f"| {label} | metric | measured | ceiling |", "| --- | --- | ---: | ---: |"]
     lines += [f"| {label} | {name} | {measured} | {ceiling} |" for name, measured, ceiling in rows]
@@ -165,6 +193,8 @@ def self_test():
         "incremental": {"total_ms": 10, "graph_elapsed_ms": 5, "min_files": 10, "min_symbols": 20},
         "brief": {"p95_ms": 100, "max_ms": 200, "max_partial": 1, "min_timed": 4, "route": "hook",
                   "questions_sha256": "q1"},
+        "tree_delta": {"tree_p50_ms": 10, "synthetic_p50_ms": 80, "min_tree_files": 7,
+                       "min_synthetic_files": 100, "min_iters": 5},
     }
     good_cold = {
         "timings": {
@@ -201,6 +231,17 @@ def self_test():
     vacuous_brief["probe_home"]["frozen"] = False
     vacuous_brief["questions"]["sha256"] = "q2"
     vacuous_brief["route"] = "command"
+    good_delta = {
+        "subjects": {
+            "tree": {"files": 7, "tree_delta": {"iters": 5, "p50_ms": 29.9}},
+            "synthetic": {"files": 100, "tree_delta": {"iters": 5, "p50_ms": 200.0}},
+        }
+    }
+    slow_delta = json.loads(json.dumps(good_delta))
+    slow_delta["subjects"]["synthetic"]["tree_delta"]["p50_ms"] = 240.1
+    # A bench run with `PIXEL_BENCH_SYNTH_FILES=0` and a root that is not the
+    # corpus: nothing over a ceiling, but nothing comparable measured either.
+    vacuous_delta = {"subjects": {"tree": {"files": 3, "tree_delta": {"iters": 2, "p50_ms": 1.0}}}}
     cases = [
         ("cold pass", "cold", good_cold, 3, []),
         ("incremental pass", "incremental", good_incr, 3, []),
@@ -210,6 +251,10 @@ def self_test():
         ("brief slower and cut more", "brief", slow_brief, 3, ["brief.p95_ms", "2 briefs partial"]),
         ("vacuous brief", "brief", vacuous_brief, 3,
          ["3 briefs reported", "'timeout': 1", "installed probes", "question file", "route 'command'"]),
+        ("tree_delta pass", "tree_delta", good_delta, 3, []),
+        ("tree_delta synthetic slower", "tree_delta", slow_delta, 3, ["tree_delta.synthetic_p50_ms"]),
+        ("vacuous tree_delta", "tree_delta", vacuous_delta, 3,
+         ["tree indexed 3 files", "tree has 2 samples", "synthetic indexed None", "synthetic_p50_ms: receipt has no"]),
     ]
     failures = []
     for name, label, receipt, multiplier, expected in cases:
@@ -223,11 +268,14 @@ def self_test():
     # cases above judge evaluate() and would stay green on a broken command line.
     with tempfile.TemporaryDirectory() as tmp:
         files = {"baseline": baseline | {"corpus": "self-test", "ceiling_multiplier": 3},
-                 "good": good_cold, "over": over, "brief": good_brief, "slow": slow_brief}
+                 "good": good_cold, "over": over, "brief": good_brief, "slow": slow_brief,
+                 "delta": good_delta, "slow_delta": slow_delta}
         for stem, doc in files.items():
             (Path(tmp) / f"{stem}.json").write_text(json.dumps(doc))
         cli_cases = [("cli pass", "cold", "good", 0), ("cli over ceiling", "cold", "over", 1),
-                     ("cli brief pass", "brief", "brief", 0), ("cli brief slow", "brief", "slow", 1)]
+                     ("cli brief pass", "brief", "brief", 0), ("cli brief slow", "brief", "slow", 1),
+                     ("cli tree_delta pass", "tree_delta", "delta", 0),
+                     ("cli tree_delta slow", "tree_delta", "slow_delta", 1)]
         for name, label, stem, expected in cli_cases:
             argv = ["--label", label, "--timings", f"{tmp}/{stem}.json",
                     "--baseline", f"{tmp}/baseline.json"]

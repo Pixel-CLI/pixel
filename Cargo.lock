@@ -2116,6 +2116,7 @@ dependencies = [
  "pixel-index",
  "pixel-proto",
  "pixel-recall",
+ "serde_json",
  "tempfile",
 ]
 

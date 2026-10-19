@@ -16,7 +16,10 @@
 //!   Rust files in a temp dir, `0` skips it.
 //!
 //! `PIXEL_BENCH_ITERS` (default 25) warm iterations per lane;
-//! `PIXEL_BENCH_RAW=1` also prints every sample, sorted, so a bimodal
+//! `PIXEL_BENCH_JSON=<path>` also writes the numbers as JSON, one object
+//! per subject under `subjects.tree` and `subjects.synthetic`, which the
+//! weekly `perf.yml` lane judges with `scripts/ci/check-perf.py --label
+//! tree_delta`; `PIXEL_BENCH_RAW=1` also prints every sample, sorted, so a bimodal
 //! distribution is visible instead of hidden behind p50/p95. Two lanes:
 //! `tree_delta` (walk + hash + db comparison) and `freshness_signature`
 //! (walk + hash alone, the same walk `tree_delta` makes). The API exposes
@@ -35,6 +38,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use pixel_graph::build::{build_graph, freshness_signature, tree_delta};
+use serde_json::{Value, json};
 use tempfile::tempdir;
 
 const DEFAULT_ITERS: usize = 25;
@@ -121,14 +125,32 @@ fn ms(d: Duration) -> String {
     format!("{:.1}", d.as_secs_f64() * 1000.0)
 }
 
+/// Milliseconds as a JSON number, one decimal like the table.
+fn ms_value(d: Duration) -> f64 {
+    (d.as_secs_f64() * 10_000.0).round() / 10.0
+}
+
+impl Lane {
+    fn to_json(&self) -> Value {
+        json!({
+            "iters": self.samples.len(),
+            "min_ms": ms_value(self.min()),
+            "p50_ms": ms_value(self.percentile(0.50)),
+            "p95_ms": ms_value(self.percentile(0.95)),
+            "max_ms": ms_value(self.max()),
+        })
+    }
+}
+
 fn time<T>(f: impl FnOnce() -> T) -> (T, Duration) {
     let t0 = Instant::now();
     let out = f();
     (out, t0.elapsed())
 }
 
-/// Build the graph for `root` into a temp db, then measure both lanes.
-fn measure(label: &str, root: &Path, iters: usize) {
+/// Build the graph for `root` into a temp db, then measure both lanes; the
+/// numbers are printed as a table and returned for `PIXEL_BENCH_JSON`.
+fn measure(label: &str, root: &Path, iters: usize) -> Value {
     let db_dir = tempdir().expect("db tempdir");
     let db = db_dir.path().join("graph.db");
     let (stats, build) = time(|| build_graph(root, &db).expect("build_graph"));
@@ -195,6 +217,16 @@ fn measure(label: &str, root: &Path, iters: usize) {
         "| db comparison share (derived: p50 delta − p50 signature) | — | — | {} | — | — |",
         ms(compare)
     );
+    json!({
+        "label": label,
+        "files": stats.files,
+        "symbols": stats.symbols,
+        "edges": stats.edges,
+        "build_graph_ms": ms_value(build),
+        "first_tree_delta_ms": ms_value(first_ms),
+        "tree_delta": delta.to_json(),
+        "freshness_signature": sig.to_json(),
+    })
 }
 
 fn main() {
@@ -206,11 +238,13 @@ fn main() {
         "rayon threads: {} · iters per lane: {iters}",
         std::thread::available_parallelism().map_or(0, std::num::NonZero::get)
     );
-    measure(
+    let mut subjects = serde_json::Map::new();
+    let tree = measure(
         &format!("repository tree `{}`", root.display()),
         &root,
         iters,
     );
+    subjects.insert("tree".to_owned(), tree);
 
     if synth > 0 {
         let dir = tempdir().expect("synthetic tempdir");
@@ -219,6 +253,18 @@ fn main() {
             "\nsynthetic tree: {synth} files in {SYNTH_DIRS} dirs, {SYNTH_MIN_BYTES}–{SYNTH_MAX_BYTES} bytes each, generated in {} ms",
             generated.as_millis()
         );
-        measure(&format!("synthetic tree, {synth} files"), dir.path(), iters);
+        let synthetic = measure(&format!("synthetic tree, {synth} files"), dir.path(), iters);
+        subjects.insert("synthetic".to_owned(), synthetic);
+    }
+
+    if let Some(path) = std::env::var_os("PIXEL_BENCH_JSON") {
+        let receipt = json!({
+            "iters": iters,
+            "synth_files": synth,
+            "threads": std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
+            "subjects": subjects,
+        });
+        let text = serde_json::to_string_pretty(&receipt).expect("a JSON value always serializes");
+        std::fs::write(&path, text + "\n").expect("PIXEL_BENCH_JSON is writable");
     }
 }

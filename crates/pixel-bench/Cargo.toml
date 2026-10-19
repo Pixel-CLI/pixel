@@ -20,6 +20,7 @@ pixel-daemon = { path = "../pixel-daemon" }
 pixel-graph = { path = "../pixel-graph" }
 pixel-proto = { path = "../pixel-proto" }
 pixel-recall = { path = "../pixel-recall" }
+serde_json = { workspace = true }
 tempfile = "3"
 
 [[bench]]

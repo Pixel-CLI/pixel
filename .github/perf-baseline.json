@@ -27,5 +27,15 @@
     "max_ms": 1042,
     "max_partial": 3,
     "min_timed": 56
+  },
+  "tree_delta": {
+    "corpus": "excalidraw/excalidraw@541653c7c9d587d463a47daacff9fb30e45a52e7 (the tree) and a generated tree of 10 000 Rust files (PIXEL_BENCH_SYNTH_FILES)",
+    "measured": "2026-10-19, Apple M-series dev machine, cargo bench --profile dev-release, 25 iterations per lane",
+    "doc": "docs/bench/tree-delta.md",
+    "tree_p50_ms": 11.1,
+    "synthetic_p50_ms": 82.2,
+    "min_tree_files": 700,
+    "min_synthetic_files": 10000,
+    "min_iters": 25
   }
 }

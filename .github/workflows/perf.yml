@@ -12,6 +12,9 @@
 # questions (`eval/brief-bench/`) through the prompt-submit hook route and
 # judges its p95/max `elapsed_ms` and its `partial` count (#1083, item 3 of
 # #1086): a regression in the brief's window lands here, not in a user's chat.
+# A third job times `tree_delta`, the whole-tree freshness check the daemon
+# runs on reopen, on the same corpus and a generated tree, against a p50
+# ceiling.
 name: Perf
 
 on:
@@ -195,4 +198,65 @@ jobs:
           path: |
             ${{ runner.temp }}/brief-runs/brief/report.json
             ${{ runner.temp }}/brief-runs/brief/report.md
+          if-no-files-found: warn
+
+  # `tree_delta` is what the daemon runs when it reopens a graph, and what
+  # every `evaluate` answer pays twice; `docs/bench/tree-delta.md` measured
+  # a 50 000-file tree between 1.3 s idle and 7 s loaded with no gate either
+  # way. The bench builds a graph, then times 25 warm `tree_delta` calls on
+  # the pinned corpus and on a generated tree of 10 000 files (the reduced
+  # variant: the 50 000-file build alone takes about 40 s), and writes the
+  # numbers as JSON for `check-perf.py --label tree_delta`.
+  tree-delta:
+    name: tree_delta freshness walk
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: linux-perf-bench
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - name: Check the checker
+        run: python3 -I scripts/ci/check-perf.py --self-test
+
+      - name: Clone the pinned corpus
+        run: |
+          git init -q "$RUNNER_TEMP/corpus"
+          git -C "$RUNNER_TEMP/corpus" remote add origin "https://github.com/$CORPUS.git"
+          git -C "$RUNNER_TEMP/corpus" fetch -q --depth 1 origin "$CORPUS_SHA"
+          git -C "$RUNNER_TEMP/corpus" checkout -q FETCH_HEAD
+
+      # `dev-release`, like the other jobs: the shipped optimisation without
+      # thin LTO, so the bench measures the walk, not a slower link.
+      - name: Time tree_delta
+        env:
+          PIXEL_BENCH_TREE_ROOT: ${{ runner.temp }}/corpus
+          PIXEL_BENCH_SYNTH_FILES: "10000"
+          PIXEL_BENCH_ITERS: "25"
+          PIXEL_BENCH_JSON: ${{ runner.temp }}/tree-delta.json
+        run: cargo bench --profile dev-release --locked -p pixel-bench --bench tree_delta
+
+      - name: tree_delta ceilings
+        run: |
+          python3 -I scripts/ci/check-perf.py --label tree_delta \
+            --timings "$RUNNER_TEMP/tree-delta.json" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tree-delta-receipt
+          path: ${{ runner.temp }}/tree-delta.json
           if-no-files-found: warn
