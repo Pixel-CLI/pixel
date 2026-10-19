@@ -36,6 +36,8 @@ PORT_CFG = re.compile(r"(?:\bport\s*[:=]\s*|--port[= ]|\bPORT=)([^,;}\n]+)", re.
 DEFAULT_AFTER = re.compile(r"(?:\|\||\?\?)\s*([^;,)\n]+)|,\s*([\"'0-9][^)]*)\)")
 CODE_EXT = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".py", ".rs", ".go", ".rb", ".vue", ".svelte")
 RG_EXCL = ["!node_modules", "!target", "!dist", "!build", "!vendor", "!*.lock", "!yarn.lock", "!package-lock.json", "!*.min.js", "!*.map", "!*.snap", "!*.svg", "!*.json5"]
+SCAN_MAX_COLUMNS = 300  # ripgrep counts bytes, including for UTF-8 input
+SCAN_MAX_FILE_BYTES = 400 * 1024
 PATTERNS = [r"process\.env|import\.meta\.env", r"(?:VITE|REACT_APP|NEXT_PUBLIC|NUXT|EXPO_PUBLIC)_[A-Z0-9_]{2,}",
             r"os\.(?:environ|getenv)", r"env::var|\benv\s*=\s*\"|env!\(", r"os\.(?:Getenv|LookupEnv)", r"\bENV(?:\[|\.fetch)",
             r"^\s*[A-Z][A-Z0-9_]{2,}\??\s*:\s*[A-Za-z<>\[\]| ]+;", r"^(?:export\s+)?[A-Z][A-Z0-9_]*=",
@@ -52,7 +54,7 @@ def tracked(clone, rel):
 
 def scan(clone):
     """[(path, line, text)] of every line that may define or read a config key; .env* admitted only as templates."""
-    cmd = ["rg", "-n", "--no-heading", "--no-messages", "--max-columns", "300", "--hidden", "-g", "!.git", "-g", "!.pixel", "-g", "!.env*", "-g", "!*.env", "--max-filesize", "400K"]
+    cmd = ["rg", "-n", "--no-heading", "--no-messages", "--max-columns", str(SCAN_MAX_COLUMNS), "--hidden", "-g", "!.git", "-g", "!.pixel", "-g", "!.env*", "-g", "!*.env", "--max-filesize", str(SCAN_MAX_FILE_BYTES)]
     for g in RG_EXCL: cmd += ["-g", g]
     for p in PATTERNS: cmd += ["-e", p]
     try:
@@ -66,10 +68,10 @@ def scan(clone):
         if not (TEMPLATE_ENV.fullmatch(base) or re.fullmatch(r"\.env\.(development|production|local\.example)", base)):
             continue
         path = Path(clone) / rel
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 400_000:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > SCAN_MAX_FILE_BYTES:
             continue
         for n, text in enumerate(path.read_text(errors="replace").splitlines(), 1):
-            if len(text) <= 300 and ENV_LINE.match(text): rows.append((rel, n, text))
+            if len(text.encode("utf-8")) <= SCAN_MAX_COLUMNS and ENV_LINE.match(text): rows.append((rel, n, text))
     for l in out.splitlines():
         m = re.match(r"\./(.+?):(\d+):(.*)$", l)
         if not m: continue

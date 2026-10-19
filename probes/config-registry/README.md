@@ -23,7 +23,8 @@ Environment files are excluded from the general ripgrep scan. Only tracked,
 regular environment templates and the supported mode files are read through
 the separate environment lane; symlinks are omitted. Values of secret-looking
 keys are masked in summaries, fallbacks and excerpts. Context containing a
-secret-looking identifier is masked conservatively too.
+secret-looking identifier is masked conservatively too. Both scan lanes share
+the same file-size and line-size limits; line size counts UTF-8 bytes like rg.
 
 Run the regression suite with
 `python3 -I probes/config-registry/tests/test_probe.py`. Set `PROBE_UNDER_TEST`

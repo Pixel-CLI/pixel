@@ -99,6 +99,13 @@ class DeclarationIdentity(unittest.TestCase):
         self.assertNotIn('### .env.example:', out, 'an alternate input lane must preserve the existing scan bound')
         self.assertNotIn('x' * 100, out)
 
+    def test_env_line_budget_counts_utf8_bytes_like_ripgrep(self):
+        root = self.repo({'.env.example': 'SERVICE_ORIGIN=' + 'é' * 150 + '\n',
+                          'main.js': 'const origin = process.env.SERVICE_ORIGIN;\n'})
+        out = self.emit(root, 'Where is the SERVICE_ORIGIN environment variable declared?')
+        self.assertNotIn('### .env.example:', out, 'multibyte text cannot bypass the shared byte budget')
+        self.assertNotIn('é' * 100, out)
+
     def test_a_tracked_env_symlink_is_not_followed(self):
         root = self.repo({'main.js': 'const port = process.env.APP_PORT || 2101;\n'})
         external = root.parent / (root.name + '-external-env')
