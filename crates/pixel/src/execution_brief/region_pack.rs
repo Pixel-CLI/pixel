@@ -276,6 +276,22 @@ impl Pack {
         self.fallback
     }
 
+    /// Keep the age warning even when it costs the final whole block. A
+    /// stale pack is a lead to verify, never an instruction to trust old rows.
+    pub(crate) fn text_with_notice(&self, notice: &str, limit: Limit) -> Option<String> {
+        let mut pack = self.clone();
+        pack.searched = format!("{notice}\n{}", pack.searched);
+        while !pack.blocks.is_empty() {
+            let text = pack.text_hedged(true);
+            if fits(&text, limit) {
+                return Some(text);
+            }
+            pack.blocks.pop();
+            pack.complete = false;
+        }
+        None
+    }
+
     /// The whole text, whatever its length: the tag line, the header, the
     /// blocks, then the directive (or the note that the window ended).
     pub(crate) fn text(&self) -> String {
@@ -3137,6 +3153,29 @@ mod tests {
         assert!(pack.has_evidence());
         assert_eq!(pack.targets(), 1);
         assert!(!pack.fallback());
+    }
+
+    #[test]
+    fn a_stale_pack_should_keep_its_notice_and_drop_whole_blocks_to_fit() {
+        let pack = built(&input(1), &repo()).unwrap();
+        let notice = "staleness: evidence predates the last edit";
+        let roomy = pack.text_with_notice(notice, Limit::of(1)).unwrap();
+        assert!(roomy.starts_with(&format!("{BRIEF_TAG}\n{notice}\n")));
+        assert!(roomy.ends_with(LEAD));
+        assert_eq!(roomy.matches("### ").count(), pack.blocks.len());
+        let limit = Limit {
+            parts: 1,
+            chars: roomy.len() - 1,
+        };
+        let tight = pack.text_with_notice(notice, limit).unwrap();
+        assert!(fits(&tight, limit), "{tight}");
+        assert!(tight.contains(notice));
+        assert!(tight.ends_with(INCOMPLETE));
+        assert_eq!(
+            pack.text_with_notice(notice, Limit { parts: 1, chars: 1 }),
+            None
+        );
+        assert!(tight.matches("### ").count() < pack.blocks.len());
     }
 
     #[test]

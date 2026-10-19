@@ -7,8 +7,8 @@
 //! facts come from read-only readers over the published index and graph.
 //! Neither route builds an index or a graph, refreshes one, or starts a
 //! daemon (`autostart.rs` does that, beside the brief, for the next prompt):
-//! a source that is not current fails its operation and the brief reports it
-//! as unresolved. Every daemon request carries what is left of the brief's
+//! local graph reads require freshness; daemon graph reads opt into the
+//! published generation and preserve its staleness notice. Every daemon request carries what is left of the brief's
 //! shared window as its socket timeout.
 
 use std::collections::HashSet;
@@ -32,7 +32,8 @@ use serde_json::Value;
 
 use super::chain::{
     CONCEPT_ROWS, CallerHit, Evidence, Flow, Found, HistoryHit, MAX_TARGETS, MeaningHit,
-    RelevanceAnswer, RichFound, RichHit, SEARCH_ROWS, SYMBOL_ROWS, StatusProbe, SymbolHit,
+    RelevanceAnswer, RichFound, RichHit, SEARCH_ROWS, SYMBOL_ROWS, Staleness, StatusProbe,
+    SymbolHit,
 };
 use super::git_changes;
 use super::graph_reads;
@@ -63,6 +64,7 @@ enum Route {
 
 /// The evidence source of one brief.
 struct Live {
+    staleness: Staleness,
     root: PathBuf,
     route: Route,
     /// The graph, opened read-only and checked for currency on first use;
@@ -87,6 +89,7 @@ pub(super) fn open(root: &Path, deadline: Instant) -> Box<dyn Evidence> {
 impl Live {
     fn new(root: &Path, route: Route) -> Self {
         Self {
+            staleness: Staleness::default(),
             root: root.to_path_buf(),
             route,
             graph: Mutex::new(None),
@@ -100,6 +103,14 @@ impl Live {
             .ok_or_else(|| "no daemon answered within the window".to_string())?;
         let response = crate::roundtrip(&mut stream, request)
             .ok_or_else(|| "the daemon did not answer within the window".to_string())?;
+        if response.ok
+            && response
+                .epistemics
+                .as_ref()
+                .is_some_and(|e| e.staleness_ms.is_some())
+        {
+            self.staleness.mark();
+        }
         crate::unwrap_response(response)
     }
 
@@ -333,7 +344,7 @@ impl Live {
             scope: None,
             at_snapshot: true,
 
-            stale_ok: false,
+            stale_ok: true,
         };
         let reason = match self.ask(&request, deadline) {
             Ok(data) => match evaluate_flow(&data) {
@@ -348,7 +359,7 @@ impl Live {
                 from: from.to_string(),
                 to: to.to_string(),
 
-                stale_ok: false,
+                stale_ok: true,
             },
             deadline,
         )?;
@@ -382,6 +393,10 @@ impl Live {
 }
 
 impl Evidence for Live {
+    fn staleness(&self) -> Staleness {
+        self.staleness.clone()
+    }
+
     #[cfg_attr(test, mutants::skip)] // thin adapter over the process's plugin directories
     fn plugins(&self) -> pixel_plugin::Available {
         crate::plugin_cmd::available()
@@ -415,7 +430,7 @@ impl Evidence for Live {
                     globs: Vec::new(),
                     types: Vec::new(),
 
-                    stale_ok: false,
+                    stale_ok: true,
                 };
                 Ok(search_rows(&self.ask(&request, deadline)?))
             }
@@ -434,7 +449,7 @@ impl Evidence for Live {
                     phrase: phrase.to_string(),
                     limit: Some(CONCEPT_ROWS),
 
-                    stale_ok: false,
+                    stale_ok: true,
                 };
                 Ok(resolve_rows(&self.ask(&request, deadline)?))
             }
@@ -450,16 +465,12 @@ impl Evidence for Live {
     ) -> Result<(String, Vec<String>), String> {
         match self.route {
             Route::Daemon => {
-                // `context` would otherwise let the daemon open a graph it
-                // still needed to build: the gate proves the published one
-                // is current first, so the request can only read.
-                self.with_graph(|_| Ok(()))?;
                 let data = self.ask(
                     &Request::Context {
                         uid: hit.uid.clone(),
                         budget_tokens: Some(budget_tokens),
 
-                        stale_ok: false,
+                        stale_ok: true,
                     },
                     deadline,
                 )?;
@@ -479,14 +490,13 @@ impl Evidence for Live {
     ) -> Result<(Vec<String>, Vec<String>), String> {
         match self.route {
             Route::Daemon => {
-                self.with_graph(|_| Ok(()))?;
                 let data = self.ask(
                     &Request::Uses {
                         uid_or_name: uid.to_string(),
                         role: "callers".to_string(),
                         offset: None,
 
-                        stale_ok: false,
+                        stale_ok: true,
                     },
                     deadline,
                 )?;
@@ -507,10 +517,7 @@ impl Evidence for Live {
         deadline: Instant,
     ) -> Result<Flow, String> {
         match self.route {
-            Route::Daemon => {
-                self.with_graph(|_| Ok(()))?;
-                self.daemon_flow(from, to, budget_ms, deadline)
-            }
+            Route::Daemon => self.daemon_flow(from, to, budget_ms, deadline),
             Route::Local => self.local_flow(from, to),
         }
     }
@@ -518,12 +525,11 @@ impl Evidence for Live {
     fn skeleton(&self, file: &str, deadline: Instant) -> Result<Vec<SymbolHit>, String> {
         match self.route {
             Route::Daemon => {
-                self.with_graph(|_| Ok(()))?;
                 let data = self.ask(
                     &Request::Skeleton {
                         file: file.to_string(),
 
-                        stale_ok: false,
+                        stale_ok: true,
                     },
                     deadline,
                 )?;
@@ -585,7 +591,7 @@ impl Evidence for Live {
                         task: task.to_string(),
                         limit: Some(MAX_TARGETS),
                         relevance_only: false,
-                        stale_ok: false,
+                        stale_ok: true,
                     },
                     deadline,
                 )?;
@@ -608,7 +614,7 @@ impl Evidence for Live {
                         task: typed.to_string(),
                         limit: Some(RELEVANCE_TARGETS),
                         relevance_only: true,
-                        stale_ok: false,
+                        stale_ok: true,
                     },
                     deadline,
                 )?;
@@ -632,7 +638,7 @@ impl Evidence for Live {
                         query: query.to_string(),
                         limit: Some(limit),
 
-                        stale_ok: false,
+                        stale_ok: true,
                     },
                     deadline,
                 )?;
@@ -678,12 +684,11 @@ impl Evidence for Live {
     }
 
     fn symbols(&self, name: &str, deadline: Instant) -> Result<Vec<SymbolHit>, String> {
-        self.with_graph(|_| Ok(()))?;
         match self.route {
             Route::Daemon => {
                 let request = Request::Symbol {
                     name: name.to_string(),
-                    stale_ok: false,
+                    stale_ok: true,
                 };
                 Ok(symbol_hits(&self.ask(&request, deadline)?))
             }
@@ -692,7 +697,6 @@ impl Evidence for Live {
     }
 
     fn callers(&self, target: &str, deadline: Instant) -> Result<Vec<CallerHit>, String> {
-        self.with_graph(|_| Ok(()))?;
         let data = match self.route {
             Route::Daemon => self.ask(
                 &Request::Impact {
@@ -700,7 +704,7 @@ impl Evidence for Live {
                     direction: "upstream".to_string(),
                     depth: Some(1),
 
-                    stale_ok: false,
+                    stale_ok: true,
                 },
                 deadline,
             )?,
@@ -1474,6 +1478,10 @@ mod tests {
 
     impl FakeDaemon {
         fn start(root: &Path, protocol: u64) -> Self {
+            Self::with_staleness(root, protocol, None)
+        }
+
+        fn with_staleness(root: &Path, protocol: u64, lag: Option<u64>) -> Self {
             let socket = pixel_daemon::socket_path(root);
             let _ = std::fs::remove_file(&socket);
             let listener = UnixListener::bind(&socket).unwrap();
@@ -1524,6 +1532,9 @@ mod tests {
                             {"symbol": {"path": "tests/a_test.rs"}}
                         ]}),
                         Some("context") => json!({"body": "fn go() {\n  go_body();\n}"}),
+                        Some("evaluate") if request["to"] == "missing" => {
+                            json!({"kind": "unknown", "reason": "budget"})
+                        }
                         Some("evaluate") => json!({"kind": "evaluation",
                             "predicate": "path", "status": "established",
                             "answer": true,
@@ -1594,7 +1605,22 @@ mod tests {
                         }),
                         _ => json!({}),
                     };
-                    let reply = pixel_daemon::Response::success("test", result);
+                    let mut reply = pixel_daemon::Response::success("test", result);
+                    if request["name"] == "fail" {
+                        reply = pixel_daemon::Response::failure(
+                            "symbol",
+                            pixel_proto::PixelError::new(
+                                pixel_proto::ErrorCode::NotFound,
+                                "no symbol",
+                            ),
+                        );
+                    }
+                    if request["op"] != "ping" {
+                        reply.epistemics = Some(pixel_proto::Epistemics {
+                            staleness_ms: lag,
+                            ..pixel_proto::Epistemics::default()
+                        });
+                    }
                     let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap());
                 }
             });
@@ -1820,10 +1846,56 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_graph_check_should_fail_symbols_and_callers_without_asking_the_daemon() {
+    fn brief_should_render_answered_daemon_evidence_without_a_local_graph_and_state_staleness() {
+        use super::super::chain::{self, Brief, Plan};
+        for lag in [None, Some(0), Some(1500)] {
+            let root = scratch(&format!("chain-staleness-{lag:?}"));
+            let daemon =
+                FakeDaemon::with_staleness(&root, pixel_daemon::api::PROTOCOL_VERSION, lag);
+            let deadline = Instant::now() + WINDOW;
+            let live = open(&root, deadline);
+            let state = Mutex::new(Brief::default());
+            let plan = Plan::from_prompt("Where is `go` defined?").unwrap();
+            chain::run(&plan, live.as_ref(), &state, deadline);
+            let text = chain::render(&state.lock().unwrap()).unwrap();
+            assert!(
+                text.contains("src/a.ts:3-8"),
+                "daemon definition must survive: {text}"
+            );
+            assert_eq!(text.contains("staleness:"), lag.is_some(), "{text}");
+            assert!(!text.contains("the graph is not built"), "{text}");
+            let requests = daemon.requests();
+            for request in requests
+                .iter()
+                .filter(|r| matches!(r["op"].as_str(), Some("symbol" | "impact" | "context")))
+            {
+                assert_eq!(request["stale_ok"], true, "{request}");
+            }
+            drop(daemon);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_daemon_evidence_should_not_mark_the_brief_stale() {
+        let root = scratch("failed-staleness");
+        let daemon =
+            FakeDaemon::with_staleness(&root, pixel_daemon::api::PROTOCOL_VERSION, Some(1500));
+        let live = Live::new(&root, Route::Daemon);
+        assert_eq!(
+            live.symbols("fail", Instant::now() + WINDOW).unwrap_err(),
+            "no symbol"
+        );
+        assert_eq!(live.staleness.line(), None);
+        drop(daemon);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_graph_reads_should_still_refuse_a_missing_graph() {
         let root = scratch("graph-gate");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
-        let live = Live::new(&root, Route::Daemon);
+        let live = Live::new(&root, Route::Local);
         let deadline = Instant::now() + WINDOW;
         assert_eq!(
             live.symbols("go", deadline).unwrap_err(),
@@ -1874,8 +1946,6 @@ mod tests {
         let root = scratch("daemon-route");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Daemon);
-        // A graph the readiness check already proved current.
-        *live.graph.lock().unwrap() = Some(Ok(GraphStore::open_in_memory().unwrap()));
         let deadline = Instant::now() + WINDOW;
 
         let files = live.files_with("a.b", deadline).unwrap();
@@ -1907,6 +1977,9 @@ mod tests {
 
         let requests = daemon.requests();
         assert_eq!(requests.len(), 4);
+        for request in &requests {
+            assert_eq!(request["stale_ok"], true, "{request}");
+        }
         assert_eq!(requests[0]["op"], "search");
         assert_eq!(requests[0]["pattern"], r"a\.b");
         assert_eq!(requests[0]["json"], true);
@@ -1929,7 +2002,6 @@ mod tests {
         let root = scratch("daemon-kinds");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Daemon);
-        *live.graph.lock().unwrap() = Some(Ok(GraphStore::open_in_memory().unwrap()));
         let deadline = Instant::now() + WINDOW;
         let hit = SymbolHit {
             uid: "src/a.ts#go#function".into(),
@@ -2009,6 +2081,14 @@ mod tests {
                 "targets_facts"
             ]
         );
+        for request in &requests {
+            let op = request["op"].as_str().unwrap();
+            if matches!(op, "status" | "history") {
+                assert!(request.get("stale_ok").is_none(), "{request}");
+            } else {
+                assert_eq!(request["stale_ok"], true, "{request}");
+            }
+        }
         assert_eq!(requests[0]["pattern"], r"a\.b");
         assert_eq!(requests[0]["limit"], SEARCH_ROWS);
         assert_eq!(requests[1]["pattern"], r"^\s*X\d+");
@@ -2028,6 +2108,30 @@ mod tests {
         assert_eq!(requests[8]["task"], "add flag");
         drop(daemon);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn daemon_flow_should_opt_in_when_falling_back_to_trace() {
+        let root = scratch("stale-trace-fallback");
+        let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
+        let live = Live::new(&root, Route::Daemon);
+        let flow = live
+            .flow("go", "missing", 100, Instant::now() + WINDOW)
+            .unwrap();
+        assert!(matches!(flow, Flow::Path { hops, .. } if hops == ["go", "stop"]));
+        let requests = daemon.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r["op"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["evaluate", "trace"]
+        );
+        for request in &requests {
+            assert_eq!(request["stale_ok"], true, "{request}");
+        }
+        drop(daemon);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2202,7 +2306,7 @@ mod tests {
             daemon.requests(),
             [
                 json!({"op": "targets_facts", "task": "the daemon and the weather", "limit": 8,
-                    "relevance_only": true})
+                    "relevance_only": true, "stale_ok": true})
             ]
         );
         let input = &answer.input;
@@ -2272,7 +2376,9 @@ mod tests {
         let leads = live.meaning("how the daemon starts", 8, deadline).unwrap();
         assert_eq!(
             daemon.requests(),
-            [json!({"op": "meaning", "query": "how the daemon starts", "limit": 8})]
+            [
+                json!({"op": "meaning", "query": "how the daemon starts", "limit": 8, "stale_ok": true})
+            ]
         );
         assert_eq!(
             leads,
@@ -2432,8 +2538,8 @@ mod tests {
             daemon.requests(),
             [
                 json!({"op": "targets_facts", "task": "the daemon", "limit": 8,
-                       "relevance_only": true}),
-                json!({"op": "targets_facts", "task": "the daemon", "limit": 4}),
+                       "relevance_only": true, "stale_ok": true}),
+                json!({"op": "targets_facts", "task": "the daemon", "limit": 4, "stale_ok": true}),
             ]
         );
         drop(daemon);

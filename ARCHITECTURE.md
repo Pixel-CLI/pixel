@@ -1045,6 +1045,19 @@ keep one hook too.
   parts each ending in a `PIXEL-PART-MARKER-K-OF-N` line; the CLI tests and
   the live proof against Claude Code use it to reach an oversized brief.
 
+The brief opts its daemon retrieval and graph requests into `stale_ok`:
+`search`, `resolve`, `meaning`, `targets_facts`, `symbol`, `context`, `uses`,
+`evaluate`/`trace`, `skeleton` and `impact`. Those requests rely on the daemon's
+answer rather than a client-side graph freshness refusal. A successful
+response with `epistemics.staleness_ms` (including zero) marks the shared
+brief evidence as stale before its rows are published. Normal, low-tier,
+partial and region-pack output retain one `staleness:` line saying that some
+evidence predates the last edit. A stale pack is a lead to verify; the notice
+counts against its limit and displaces whole trailing blocks if needed.
+Fresh responses add no notice, and later fresh reads cannot erase an earlier
+stale response's warning. Local graph readers retain their freshness checks;
+`status` and read-only `history` keep their existing writer route.
+
 The brief (`execution_brief/chain.rs`, `evidence.rs`, `relevance.rs`,
 `decision_log.rs`, `routes.rs`) is built on every prompt-submit event of a
 host that has a prompt hook: Claude Code, Codex and Devin through

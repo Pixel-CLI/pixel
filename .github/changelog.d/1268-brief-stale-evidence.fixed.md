@@ -1,0 +1,1 @@
+**brief:** Ask the daemon for published evidence during edits instead of refusing it locally. Briefs label evidence that predates the last edit, including partial and region-pack output; fresh responses and local freshness checks keep their existing behavior.

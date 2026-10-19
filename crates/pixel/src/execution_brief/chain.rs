@@ -31,6 +31,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -365,10 +366,34 @@ pub(crate) struct RelevanceAnswer {
     pub(crate) lines: Vec<RichHit>,
 }
 
+/// A brief can stop waiting while its worker still runs: the age must be
+/// recorded before an answered operation publishes its rows to that brief.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Staleness(Arc<AtomicBool>);
+
+/// A warning about evidence, not the current text read from cited files.
+const STALENESS_LINE: &str =
+    "staleness: some daemon evidence predates the last edit; verify against the current files.";
+
+impl Staleness {
+    pub(super) fn mark(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub(super) fn line(&self) -> Option<&'static str> {
+        self.0.load(Ordering::Acquire).then_some(STALENESS_LINE)
+    }
+}
+
 /// The lookups of the chain. Every method answers within `deadline` or
 /// fails; none of them builds, refreshes or starts anything. `Sync`: a
 /// plain-language prompt asks several of them from threads at once.
 pub(crate) trait Evidence: Sync {
+    /// Shared age of successful daemon evidence, including in-flight reads.
+    fn staleness(&self) -> Staleness {
+        Staleness::default()
+    }
+
     /// Files containing `anchor` as literal text.
     fn files_with(&self, anchor: &str, deadline: Instant) -> Result<Found, String>;
     /// The same literal search, keeping each row's matched text when the
@@ -948,6 +973,7 @@ impl Admission {
 /// What the chain has learned, shared between the worker and the hook.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Brief {
+    staleness: Staleness,
     /// How the prompt came to be briefed.
     signal: Option<Signal>,
     /// Where the evidence came from: `daemon` or `local`.
@@ -1370,6 +1396,7 @@ fn pin_named_files(
 /// Run the chain against `evidence`, writing into `state` after each
 /// operation so a reader that stops waiting still sees what is done.
 pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Instant) {
+    edit(state, |brief| brief.staleness = evidence.staleness());
     let admit_json = plan.kind == QuestionKind::Config;
     edit(state, |brief| {
         brief.anchors.clone_from(&plan.anchors.0);
@@ -3253,12 +3280,18 @@ where
     if signal == Signal::Strong {
         let plan = Plan::from_typed(typed, has_change_intent(typed), None);
         let evidence = open(deadline);
-        edit(state, |brief| brief.route = Some(evidence.route()));
+        edit(state, |brief| {
+            brief.route = Some(evidence.route());
+            brief.staleness = evidence.staleness();
+        });
         run(&plan, evidence.as_ref(), state, deadline);
         return;
     }
     let evidence = open(deadline);
-    edit(state, |brief| brief.route = Some(evidence.route()));
+    edit(state, |brief| {
+        brief.route = Some(evidence.route());
+        brief.staleness = evidence.staleness();
+    });
     let kind = QuestionKind::heuristic(typed, &Anchors::from_text(typed));
     // The session's files: they boost the leads, and a short follow-up that
     // the words alone cannot place is let through on them.
@@ -3945,7 +3978,13 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
         .filter(|pack| brief.pack_limit.on() && pack.has_evidence())
     {
         // The packet was cut short: the pack says it is a lead, not an answer.
-        let text = pack.text_hedged(brief.cut || low);
+        let text = match brief.staleness.line() {
+            Some(line) => match pack.text_with_notice(line, brief.pack_limit) {
+                Some(text) => text,
+                None => return render_low(brief).map(|text| (text, AnswerStats::default())),
+            },
+            None => pack.text_hedged(brief.cut || low),
+        };
         let stats = AnswerStats {
             answer: true,
             excerpt_bytes: text.len(),
@@ -4044,6 +4083,10 @@ fn render_low(brief: &Brief) -> Option<String> {
             .map(|hit| file_entry(hit, text_chars))
             .collect();
         let mut text = format!("{BRIEF_TAG}\nfiles: {}\n{confidence}", entries.join("; "));
+        if let Some(line) = brief.staleness.line() {
+            text.push('\n');
+            text.push_str(line);
+        }
         for line in &reads {
             text.push('\n');
             text.push_str(line);
@@ -4081,6 +4124,9 @@ fn byte_cap(signal: Option<Signal>, answer: bool) -> usize {
 
 fn render_with(brief: &Brief, shown: Shown) -> String {
     let mut lines = vec![BRIEF_TAG.to_string()];
+    if let Some(line) = brief.staleness.line() {
+        lines.push(line.to_string());
+    }
     if let Some(intent) = &brief.intent {
         lines.push(format!("intent: {}", clean(intent)));
     }
@@ -5830,6 +5876,24 @@ mod tests {
             finished: true,
             ..Brief::default()
         }
+    }
+
+    #[test]
+    fn staleness_should_survive_a_partial_snapshot_and_render_in_both_tiers() {
+        let brief = full_brief();
+        let mut partial = brief.clone();
+        partial.cut = true;
+        assert!(!render(&partial).unwrap().contains("staleness:"));
+        // A response arrives after the snapshot, before the worker finishes.
+        brief.staleness.mark();
+        let text = render(&partial).unwrap();
+        assert_eq!(text.matches(STALENESS_LINE).count(), 1);
+        assert!(text.contains("packet partial"));
+        let low = low_brief(vec![rhit("a.rs", 1, "pub fn go() {}")]);
+        low.staleness.mark();
+        let text = render(&low).unwrap();
+        assert_eq!(text.matches(STALENESS_LINE).count(), 1);
+        assert!(text.len() <= LOW_BRIEF_BYTES);
     }
 
     #[test]
@@ -9485,10 +9549,19 @@ mod tests {
         let repo = pack_source();
         let on = Mutex::new(brief(1));
         pack_evidence(&plan, &repo, &on, Instant::now() + SECOND);
-        let shown = on.into_inner().unwrap();
+        let mut shown = on.into_inner().unwrap();
         assert!(shown.pack.is_some());
         let text = fit(&shown).unwrap().0;
         assert!(text.starts_with("[PIXEL:BRIEF]\nregion pack"), "{text}");
+        shown.staleness.mark();
+        let text = fit(&shown).unwrap().0;
+        assert!(
+            text.starts_with(&format!("{BRIEF_TAG}\n{STALENESS_LINE}\n")),
+            "{text}"
+        );
+        assert!(text.ends_with(region_pack::LEAD), "{text}");
+        shown.pack_limit.chars = 1;
+        assert!(fit(&shown).is_none(), "a notice alone is not evidence");
         let off = Mutex::new(brief(0));
         pack_evidence(&plan, &repo, &off, Instant::now() + SECOND);
         assert!(off.into_inner().unwrap().pack.is_none());
