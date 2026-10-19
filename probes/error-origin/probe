@@ -12,6 +12,7 @@ import ast
 import json
 import math
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,9 @@ FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|def|function)\
                 r"|^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(")
 JS_EXT = (".js", ".ts", ".tsx", ".jsx")
 MIN_QUOTE, MIN_WORDS, CALLER_LINES, LEVELS, MAX_LINES, MAX_BYTES = 12, 3, 14, 2, 220, 9000
+MAX_DIAGNOSTIC_FILES, MAX_DIAGNOSTIC_PATH_BYTES = 1_500, 180_000
+MAX_DIAGNOSTIC_FILE_BYTES, MAX_DIAGNOSTIC_LINE_CHARS = 1_000_000, 900
+MAX_DIAGNOSTIC_OUTPUT_BYTES = 2_000_000
 
 
 def rg(root, *args):
@@ -32,11 +36,63 @@ def rg(root, *args):
         return []
 
 
+def tracked_source_paths(root):
+    """A small deterministic set of tracked regular source files, excluding symlink paths."""
+    try:
+        result = subprocess.run(["git", "ls-files", "-z", "--", "*.rs", "*.py", "*.ts", "*.tsx", "*.js", "*.go"],
+                                cwd=root, capture_output=True, timeout=0.8)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode or len(result.stdout) > 512_000:
+        return []
+    paths, used = [], 0
+    for raw in sorted(set(result.stdout.split(b"\0")) - {b""}):
+        try:
+            rel = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        path = Path(rel)
+        if path.is_absolute() or ".." in path.parts or not path.parts:
+            continue
+        current = Path(root)
+        safe = True
+        try:
+            for part in path.parts:
+                current /= part
+                if current.is_symlink():
+                    safe = False
+                    break
+            info = current.lstat() if safe else None
+        except OSError:
+            continue
+        if not safe or info is None or not stat.S_ISREG(info.st_mode) or info.st_size > MAX_DIAGNOSTIC_FILE_BYTES:
+            continue
+        if used + len(raw) > MAX_DIAGNOSTIC_PATH_BYTES or len(paths) >= MAX_DIAGNOSTIC_FILES:
+            break
+        paths.append(rel)
+        used += len(raw)
+    return paths
+
+
+def tracked_rg(root, paths, *args):
+    """Search only the bounded tracked regular-file list; truncate long matching lines."""
+    if not paths:
+        return []
+    try:
+        result = subprocess.run([*RG, "--with-filename", "--max-count", "8", "--max-filesize", "1M", "--max-columns",
+                                 str(MAX_DIAGNOSTIC_LINE_CHARS), "--max-columns-preview", *args, "--", *paths],
+                                cwd=root, capture_output=True, text=True, timeout=0.8)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode not in (0, 1) or len(result.stdout.encode("utf-8", errors="replace")) > MAX_DIAGNOSTIC_OUTPUT_BYTES:
+        return []
+    return result.stdout.splitlines()
+
+
 def quoted(prompt):
     return re.findall(r"""['"`‘“]([^'"`’”]{%d,})['"`’”]""" % MIN_QUOTE, prompt)
 
 
-# Function words; how much a content word says is measured on the repository (`described`), never listed here.
 STOP = {"what", "where", "which", "that", "this", "with", "from", "does", "how", "the", "and", "are", "they", "them",
         "for", "into", "about", "when", "should", "their", "there", "these", "those", "have", "your", "one", "than",
         "its", "was", "has", "can", "not", "but", "all", "any", "you", "of", "to", "in", "is", "it", "on", "at", "by",
@@ -293,6 +349,58 @@ def origins(root, prompt):
     return None
 
 
+def error_emission(root, prompt, paths=None):
+    """Find a bounded diagnostic emitter whose nearby tracked source carries two salient prompt terms."""
+    generic = {"error", "exception", "alert", "message", "warning", "text", "code", "where", "which", "what",
+               "when", "does", "do", "how", "the", "and", "or", "is", "are", "was", "were", "be", "not",
+               "printed", "print", "produced", "defined", "raised", "raise", "emitted", "emits", "called",
+               "comes", "come", "from", "that", "says", "reads", "contains", "default", "page"}
+    salient = set(prompt_words(prompt)) - generic
+    if len(salient) < 2:
+        return None
+    paths = tracked_source_paths(root) if paths is None else paths
+    pattern = r"(?:print_error!|eprintln!|bail!|throw\s+(?:new\s+)?(?:Error|Exception)|next\(err\))"
+    best = None
+    cache = {}
+    for hit in tracked_rg(root, paths, "-n", "--no-heading", pattern):
+        if hit.count(":") < 2:
+            continue
+        rel, at, _text = hit.split(":", 2)
+        if is_test_path(rel):
+            continue
+        try:
+            line = int(at)
+        except ValueError:
+            continue
+        lines = read(root, rel, cache)
+        if not lines or line > len(lines):
+            continue
+        # Macros often put their message on the following line. Keep context in the same function when one is clear.
+        _, function_start = enclosing(lines, line - 1, rel.endswith(JS_EXT))
+        lo_context, hi_context = max(function_start, line - 5), min(len(lines), line + 4)
+        function_end = len(lines)
+        for following in range(line, hi_context):
+            match = FN.match(lines[following])
+            if match and (match.group(1) or rel.endswith(JS_EXT)):
+                hi_context = following
+                function_end = following
+                break
+        shared = salient & {stem(token) for token in tokens(" ".join(lines[lo_context:hi_context]))}
+        if len(shared) < 2:
+            continue
+        statement = lines[line - 1]
+        priority = (0 if "print_error!" in statement else
+                    1 if "eprintln!" in statement else
+                    2 if "throw" in statement else
+                    3 if "bail!" in statement else 4)
+        rank = (-len(shared), priority, rel, line)
+        if best is None or rank < best[0]:
+            out = show(rel, lines, max(function_start + 1, line - 6), min(function_end, line + 6),
+                       "error-emission candidate; matching terms and source condition, exact runtime cause unproven")
+            best = (rank, rel, line, out)
+    return None if best is None else (best[1], best[2], best[3])
+
+
 def python_role(lines, line):
     """Classify syntax and its actual Python function span, never a nearby definition."""
     role = 'occurrence candidate; emission unverified'
@@ -375,8 +483,15 @@ def main():
     req = json.load(sys.stdin)
     root, prompt = req["repo_root"], req["prompt"]
     cache, seen = {}, set()
+    paths = tracked_source_paths(root)
     out = python_handlers(root, prompt, cache)
-    for rel, line, how, catalogue in filter(None, [origins(root, prompt)]):
+    diagnostic = error_emission(root, prompt, paths)
+    if diagnostic:
+        out += diagnostic[2]
+    origin = origins(root, prompt)
+    if diagnostic and origin and origin[0] == diagnostic[0] and not origin[2].startswith("quoted occurrence"):
+        origin = None  # the matching source emitter outranks a lexical neighbor in the same file
+    for rel, line, how, catalogue in filter(None, [origin]):
         lines = read(root, rel, cache)
         index = line - 1
         if index >= len(lines):

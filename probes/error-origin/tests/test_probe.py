@@ -32,6 +32,24 @@ def origin(root, prompt):
     return out, next((line for line in out.splitlines() if line.startswith("### error origin")), None)
 
 
+def probe_module(root, prompt):
+    import contextlib
+    import importlib.machinery
+    import importlib.util
+    import io
+    import sys
+
+    loader = importlib.machinery.SourceFileLoader("error_origin_probe_test", str(PROBE))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps({"prompt": prompt, "repo_root": str(root)}))
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            loader.exec_module(module)
+    finally:
+        sys.stdin = stdin
+    return module
+
+
 # A manual page that shares more of the question's words than the message does.
 MANUAL = ("pub fn doc_long() -> &'static str {\n    r\"\nPrint each file that would be found, without searching it.\n"
           "This shows whether a file is being found or not.\n\"\n}\n")
@@ -122,6 +140,98 @@ class EvidenceQualification(unittest.TestCase):
         self.assertTrue(edges, 'keep a bounded level of call context, rather than hiding all callers')
         self.assertTrue(all('receiver/binding unresolved' in edge for edge in edges), edges)
         self.assertNotIn('the lines leading to the call', out)
+
+
+class DiagnosticEmission(unittest.TestCase):
+    PROMPT = "where is the error printed when a search path does not exist produced"
+    SOURCE = ("fn paths() {\n"
+              "    if filesystem::is_existing_directory(path) {\n"
+              "        normalize(path);\n"
+              "    } else {\n"
+              "        print_error!(\n"
+              "            \"Search path {:?} is not a directory.\",\n"
+              "            path\n"
+              "        );\n"
+              "    }\n"
+              "}\n"
+              "fn path_separator(search_path: &str) {\n"
+              "    println!(\"Search path separator is configured here: {}\", search_path);\n"
+              "}\n"
+              "const HELP: &str = \"Set path separator when printing file paths\";\n")
+
+    def test_emitter_with_matching_condition_beats_same_word_option_help(self):
+        root = repo({"src/cli.rs": self.SOURCE})
+        out, _ = origin(root, self.PROMPT)
+        self.assertIn("### src/cli.rs:1-11 — error-emission candidate", out)
+        self.assertIn("is_existing_directory(path)", out)
+        self.assertIn("Search path {:?} is not a directory", out)
+        module = probe_module(root, self.PROMPT)
+        self.assertEqual(module.origins(str(root), self.PROMPT)[1], 6,
+                         "the original lexical search returns a same-file candidate")
+        self.assertNotIn("error origin — described occurrence candidate", out,
+                         "the diagnostic emitter supersedes a weaker same-file lexical neighbor")
+
+    def test_different_literal_error_uses_the_same_emitter_rule(self):
+        root = repo({"src/open.rs": (
+            "fn open(path: &Path) {\n"
+            "    if !path.exists() {\n"
+            "        eprintln!(\"Source path was not found: {}\", path.display());\n"
+            "    }\n"
+            "}\n")})
+        prompt = "where does the error for a missing source path come from and when does it print"
+        out, _ = origin(root, prompt)
+        self.assertIn("### src/open.rs:1-5 — error-emission candidate", out)
+        self.assertIn("Source path was not found", out)
+
+    def test_second_emitter_in_same_file_is_not_hidden_by_first(self):
+        root = repo({"src/open.rs": (
+            "fn warning() { eprintln!(\"Search path warning\"); }\n"
+            "fn open(path: &Path) {\n"
+            "    if !path.exists() {\n"
+            "        eprintln!(\"Missing source path was not found: {}\", path.display());\n"
+            "    }\n"
+            "}\n")})
+        prompt = "where is the error emitted for a missing source path that was not found"
+        out, _ = origin(root, prompt)
+        self.assertIn("### src/open.rs:2-6 — error-emission candidate", out)
+        self.assertIn("if !path.exists()", out)
+        self.assertNotIn("Search path warning", out)
+
+    def test_exact_quoted_origin_survives_a_same_file_diagnostic_candidate(self):
+        root = repo({"src/open.rs": (
+            "fn unrelated() { eprintln!(\"Missing source path failed to load\"); }\n"
+            "fn open(path: &Path) {\n"
+            "    if !path.exists() {\n"
+            "        eprintln!(\"The source path is missing\");\n"
+            "    }\n"
+            "}\n")})
+        prompt = 'where is "The source path is missing" emitted'
+        out, _ = origin(root, prompt)
+        self.assertIn("error origin — quoted occurrence candidate", out)
+        self.assertIn("error-emission candidate", out)
+
+    def test_same_words_in_non_emitting_help_are_not_an_emission(self):
+        root = repo({"src/help.rs": 'const HELP: &str = "Search path does not exist in the help output";\n'})
+        module = probe_module(root, self.PROMPT)
+        self.assertIsNone(module.error_emission(str(root), self.PROMPT))
+
+    def test_emitter_requires_two_salient_terms(self):
+        root = repo({"src/cli.rs": self.SOURCE})
+        module = probe_module(root, "where is the error printed")
+        self.assertIsNone(module.error_emission(str(root), "where is the error printed"))
+
+    def test_untracked_and_tracked_symlink_emitters_are_not_read(self):
+        root = repo({"src/main.rs": "fn main() {}\n"})
+        untracked = root / "src/untracked.rs"
+        untracked.write_text(self.SOURCE)
+        external = Path(tempfile.mkdtemp()) / "outside.rs"
+        external.write_text(self.SOURCE)
+        link = root / "src/external.rs"
+        link.symlink_to(external)
+        subprocess.run(["git", "add", "src/external.rs"], cwd=root, env=GIT_ENV, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "symlink"], cwd=root, env=GIT_ENV, check=True, capture_output=True)
+        module = probe_module(root, self.PROMPT)
+        self.assertIsNone(module.error_emission(str(root), self.PROMPT))
 
     def test_unparseable_python_is_only_a_candidate(self):
         source = 'def broken(:\n    raise ValueError("The amber river is frozen")\n'
