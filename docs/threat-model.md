@@ -346,7 +346,9 @@ clones the seven public repositories `eval/brief-bench/questions.jsonl` pins
 (full history, checked out at each pinned commit), indexes them and runs this
 commit's own probes over them; it downloads the embedding model at a pinned
 revision, each file checked against its sha256 by
-`scripts/ci/fetch-embedding-model.sh`. No corpus code runs there either. Local checks,
+`scripts/ci/fetch-embedding-model.sh`. No corpus code runs there either.
+Its `tree-delta` job fetches the same pinned corpus and only walks and
+indexes it from the `tree_delta` bench. Local checks,
 including pre-push validation and reinstalling, are optional diagnostics.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.

@@ -13,7 +13,26 @@ Re-run with one command (the harness prints these tables):
 ```sh
 cargo bench -p pixel-bench --bench tree_delta
 # knobs: PIXEL_BENCH_TREE_ROOT=<dir> PIXEL_BENCH_SYNTH_FILES=50000 PIXEL_BENCH_ITERS=25 PIXEL_BENCH_RAW=1
+#        PIXEL_BENCH_JSON=<file> also writes the numbers as JSON
 ```
+
+## Weekly CI tripwire
+
+`.github/workflows/perf.yml` runs the bench every Monday with
+`--profile dev-release`, on the `excalidraw/excalidraw` corpus pinned in
+`.github/perf-baseline.json` and on a generated tree of 10 000 files (the
+50 000-file build alone takes about 40 s). `scripts/ci/check-perf.py --label
+tree_delta` fails the run when either `tree_delta` p50 passes three times its
+baseline, or when a subject indexed fewer files or took fewer samples than
+asked. Baseline, GitHub `ubuntu-26.04` runner, 2026-10-19, 25 warm iterations:
+
+| Subject | Files | p50 ms | min–max ms |
+| --- | ---: | ---: | ---: |
+| excalidraw corpus | 708 | 10.5 | 10.4–10.9 |
+| synthetic tree | 10 000 | 54.9 | 54.3–55.7 |
+
+The runs below are the manual study on a laptop; refreshing the CI numbers is
+a pull request that edits the baseline and this table together.
 
 ## Method
 

@@ -1624,8 +1624,11 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   commit's probes frozen by `freeze-home` and the pinned embedding model,
   and `check-perf.py --label brief` judges the report's p95 and max
   `elapsed_ms` and its `partial` count, refusing a report that timed fewer
-  questions than the floor, ran installed probes or another question file.
-  A tripwire, not a benchmark: `tree_delta` is not covered),
+  questions than the floor, ran installed probes or another question file;
+  a third job, `tree-delta`, runs `cargo bench --bench tree_delta` on the
+  same corpus and a generated 10 000-file tree with `PIXEL_BENCH_JSON`, and
+  `check-perf.py --label tree_delta` judges each subject's `tree_delta` p50,
+  its file floor and its sample count. A tripwire, not a benchmark),
   `reproducible-build.yml` (the `x86_64-unknown-linux-musl` release binary
   built twice from two checkouts at different paths, no cache, failing
   unless the two sha256 match; on pull requests touching the build
