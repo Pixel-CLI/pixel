@@ -18,7 +18,10 @@ from pathlib import Path
 
 # Function words only: how much a content word says is measured on the repository (see `main`), never listed here.
 STOP = {"what", "where", "which", "that", "this", "with", "from", "does", "how", "the", "and", "are", "they", "them",
-        "for", "into", "about", "when", "should", "their", "there", "these", "those", "have", "your"}
+        "for", "into", "about", "when", "should", "their", "there", "these", "those", "have", "your", "can", "could",
+        "would", "will", "may", "might", "must", "whether", "test", "tests", "testing", "check", "checks", "please",
+        "need", "want", "you", "your", "our", "its", "does", "did", "do", "was", "were", "be", "been", "being",
+        "cover", "covers", "exercise", "include", "spec", "specs"}
 TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|spec|testdata)/|(^|/)test_[^/]*$|_tests?\.[a-z]+$|\.(test|spec)\.[a-z]+$|(^|/)tests?\.rs$", re.I)
 CODE = (".py", ".rs", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".go", ".rb")
 UNIT = [
@@ -56,8 +59,11 @@ def tokens(text):
 
 
 def carries(toks, word):
-    """A word is carried when a token starts with it: `cover` is in `coverage`, not in `recovery`."""
-    return any(t.startswith(word) for t in toks)
+    """Match a word or a simple inflection, not any longer token that shares its prefix."""
+    variants = {word, f"{word}s", f"{word}es", f"{word}ed", f"{word}d", f"{word}ing", f"{word}e"}
+    if word.endswith("e"):
+        variants.update((f"{word[:-1]}ed", f"{word[:-1]}ing"))
+    return bool(toks & variants)
 
 
 def units(lines, rel):
@@ -176,6 +182,9 @@ def main():
             if any(x <= a and b <= y for x, y in have.get(rel, [])):
                 continue
             body, title = tokens(" ".join(lines[a - 1:b])), tokens(name)
+            support = [w for w in words if carries(title, w) or carries(body, w)]
+            if len(support) < min(2, len(words)):
+                continue
             score = sum(idf[w] * (3 * carries(title, w) + carries(body, w)) for w in words)
             if score <= 0:
                 continue

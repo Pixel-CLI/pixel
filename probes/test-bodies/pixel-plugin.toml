@@ -8,7 +8,7 @@ capabilities = ["brief-probe"]
 [brief-probe]
 owner = "pixel"
 when_kinds = ["tests"]
-when_prompt = "(?i)\\b(tests?|specs?)\\b"
+when_prompt = "(?i)\\b(?:where|which|what)\\b.{0,80}\\b(?:tests?|specs?)\\b|\\b(?:tests?|specs?)\\s+(?:for|of|around)\\b|\\b(?:tests?|specs?)\\b.{0,40}\\b(?:cover|exercise|include)\\b"
 when_gate_closed = true
 skip_kinds = ["history", "review"]
 budget_ms = 1500

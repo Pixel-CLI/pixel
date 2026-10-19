@@ -7,6 +7,7 @@
 import json
 import importlib.util
 import os
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -28,8 +29,8 @@ def repo(files):
     return root
 
 
-def run(root, prompt, brief=""):
-    request = {"prompt": prompt, "repo_root": str(root), "brief": brief, "kind": "tests", "session_files": []}
+def run(root, prompt, brief="", kind="tests"):
+    request = {"prompt": prompt, "repo_root": str(root), "brief": brief, "kind": kind, "session_files": []}
     proc = subprocess.run([str(PROBE)], input=json.dumps(request), capture_output=True, text=True, check=True)
     return proc.stdout
 
@@ -41,7 +42,7 @@ def headers(out):
 PY_TESTS = """import pytest
 
 
-def test_follows_a_redirect_to_the_new_location():
+def test_follows_a_redirect_and_handles_the_new_location():
     response = get("/old", follow=True)
     assert response.redirect_target == "/new"
 
@@ -52,6 +53,16 @@ def test_parses_the_header_case_insensitively():
 
 
 class TestBodies(unittest.TestCase):
+    def test_subject_matching_uses_words_and_inflections_not_arbitrary_prefixes(self):
+        path = WORKTREE / "probes/test-bodies/probe"
+        probe = runpy.run_path(str(path))
+
+        self.assertTrue(probe["carries"](probe["tokens"]("redirects handles balanced"), "redirect"))
+        self.assertTrue(probe["carries"](probe["tokens"]("redirects handles balanced"), "handl"))
+        self.assertTrue(probe["carries"](probe["tokens"]("redirects handles balanced"), "balance"))
+        self.assertFalse(probe["carries"](probe["tokens"]("candidate production"), "can"))
+        self.assertFalse(probe["carries"](probe["tokens"]("candidate production"), "product"))
+
     def test_the_tests_probe_can_run_for_a_matching_closed_gate_prompt(self):
         path = WORKTREE / "scripts/bench/probe-test.py"
         spec = importlib.util.spec_from_file_location("probe_test", path)
@@ -69,13 +80,13 @@ class TestBodies(unittest.TestCase):
         output, _elapsed, error = probe_test.run_probe(probe, request, Path("/bin/true"), root)
         self.assertIsNone(error)
         merged = probe_test.merge(request["brief"], [(probe.name, probe.mode, output)])
-        self.assertIn("### tests/test_client.py:4-6 — test test_follows_a_redirect_to_the_new_location", merged)
+        self.assertIn("### tests/test_client.py:4-6 — test test_follows_a_redirect_and_handles_the_new_location", merged)
         self.assertIn('6|     assert response.redirect_target == "/new"', merged)
 
     def test_the_case_naming_the_subject_is_quoted_whole_and_the_unrelated_case_is_not(self):
         root = repo({"tests/test_client.py": PY_TESTS, "src/client.py": "def get(path, follow=False):\n    pass\n"})
         out = run(root, "where are the tests for redirect handling and what do they cover")
-        self.assertEqual(headers(out), ["### tests/test_client.py:4-6 — test test_follows_a_redirect_to_the_new_location"])
+        self.assertEqual(headers(out), ["### tests/test_client.py:4-6 — test test_follows_a_redirect_and_handles_the_new_location"])
         self.assertIn('6|     assert response.redirect_target == "/new"', out)
         self.assertNotIn("parses_the_header", out)
 
@@ -103,11 +114,35 @@ class TestBodies(unittest.TestCase):
 
     def test_a_js_case_ends_at_its_closing_line_and_the_spec_file_is_found_by_its_path(self):
         spec = ("describe('undo', () => {\n  it('restores the deleted shape on undo', () => {\n    del(shape);\n"
-                "    undo();\n    expect(shapes()).toContain(shape);\n  });\n\n  it('keeps the colour', () => {\n"
+                "    undo();\n    expect(shapes()).toContain(shape);\n    // The observable behaviours stay stable.\n  });\n\n  it('keeps the colour', () => {\n"
                 "    expect(colour()).toBe('red');\n  });\n});\n")
         root = repo({"src/history.test.ts": spec})
         out = run(root, "where are the tests for undo and what behaviours do they cover")
-        self.assertEqual(headers(out), ["### src/history.test.ts:2-6 — test restores the deleted shape on undo"])
+        self.assertEqual(headers(out), ["### src/history.test.ts:2-7 — test restores the deleted shape on undo"])
+
+    def test_weak_closed_gate_test_word_does_not_admit_or_emit_unrelated_cases(self):
+        path = WORKTREE / "scripts/bench/probe-test.py"
+        spec = importlib.util.spec_from_file_location("probe_test_negative", path)
+        probe_test = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe_test)
+        probe = probe_test.Probe(PROBE.parent)
+        prompts = [
+            "How do I test whether a dragon can balance a teacup?",
+            "Can you test whether our release mascot can drink tea?",
+            "Please test a concept for our product workshop.",
+        ]
+        root = repo({"tests/test_candidate_policy.py": (
+            "def test_candidate_policy_stays_explicit():\n    assert balance_is_stable()\n\n"
+            "def test_general_case():\n    assert can_run()\n"
+        )})
+
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertFalse(probe.applies(None, prompt))
+                self.assertEqual("", run(root, prompt, kind=None))
+
+        # The incidental `can` prefix in `candidate` and one body occurrence of `balance` are not a topic.
+        self.assertNotIn("test_candidate_policy", run(root, prompts[0], kind="tests"))
 
 
 if __name__ == "__main__":
