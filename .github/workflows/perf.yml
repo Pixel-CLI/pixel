@@ -173,10 +173,12 @@ jobs:
 
       # The scorer exits 1 on any `partial` brief; the next step judges the
       # report against the ceilings instead, so its exit is recorded, not fatal.
+      # `--bin` is absolute: the scorer runs it from inside each clone, and a
+      # relative path made all 56 questions `process_error` (run 39190747992).
       - name: Score the brief on the public questions
         run: |
           python3 -I scripts/bench/tool-census/score_brief.py \
-            --bin target/dev-release/pixel --probe-home "$PROBE_HOME" \
+            --bin "$GITHUB_WORKSPACE/target/dev-release/pixel" --probe-home "$PROBE_HOME" \
             --root "$RUNNER_TEMP/brief-bench" --out "$RUNNER_TEMP/brief-runs" --label brief \
             || echo "::notice::score_brief.py exited $? (judged by the next step)"
 
