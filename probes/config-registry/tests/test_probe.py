@@ -396,6 +396,21 @@ fn resolve(low: LowArgs) -> usize { low.threads.unwrap_or(8) }
         out = self.emit(self.repo({'flags.rs': source}), 'When I omit -j, how is the worker count calculated?')
         self.assertEqual(out, '')
 
+    def test_cli_setting_short_option_does_not_parse_double_dash_as_single_short(self):
+        source = '''
+trait Flag {}
+struct Threads;
+impl Flag for Threads {
+    fn name_short(&self) -> Option<u8> { Some(b'j') }
+    fn name_long(&self) -> &'static str { "threads" }
+    fn update(&self, args: &mut LowArgs) { args.threads = Some(8); }
+}
+fn resolve(low: LowArgs) -> usize { low.threads.unwrap_or(8) }
+'''
+        out = self.emit(self.repo({'flags.rs': source}),
+                        'When I omit --j, how is the worker count calculated, and what command-line flag lets me set it?')
+        self.assertEqual(out, '')
+
     def test_compiled_setting_connects_the_named_compiler_and_exact_getter_consumer(self):
         root = self.repo({
             'lib/application.js': '''
@@ -469,6 +484,34 @@ defineGetter(req, 'ip', function ip(){ return proxyaddr(this, this.app.get('trus
         })
         out = self.emit(root, 'Which code compiles the trust proxy setting, and how does req.ip use it?')
         self.assertNotIn('setting branch installs a compiled function', out)
+        self.assertNotIn('named getter reads the matching compiled setting', out)
+
+    def test_compiled_setting_ignores_multiline_template_decoys(self):
+        root = self.repo({
+            'lib/application.js': '''
+const docs = `
+var compileTrust = require('./utils').compileTrust;
+app.set('trust proxy', false);
+app.set = function set(setting, val) {
+  switch (setting) {
+    case 'trust proxy': this.set('trust proxy fn', compileTrust(val)); break;
+  }
+};
+`;
+''',
+            'lib/utils.js': "exports.compileTrust = function(val) { return proxyaddr.compile(val || []); };\n",
+            'lib/request.js': '''
+const docs = `
+defineGetter(req, 'ip', function ip(){
+  var trust = this.app.get('trust proxy fn');
+  return proxyaddr(this, trust);
+});
+`;
+''',
+        })
+        out = self.emit(root, 'Which code compiles the trust proxy setting, and how does req.ip use it?')
+        self.assertNotIn('setting branch installs a compiled function', out)
+        self.assertNotIn('exact imported setting compiler implementation', out)
         self.assertNotIn('named getter reads the matching compiled setting', out)
 
     def test_persistent_browser_preference_pairs_exact_subject_key_and_resolves_import(self):

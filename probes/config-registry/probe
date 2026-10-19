@@ -451,7 +451,7 @@ def cli_setting_evidence(clone, prompt):
         return ""
     prompt_terms = stems(words_of(prompt)) - WEAK - BOUND_WORDS
     if not prompt_terms: return ""
-    requested_short = {option[1:].lower() for option in re.findall(r"(?<![\w])-[A-Za-z](?![\w-])", prompt)}
+    requested_short = {option[1:].lower() for option in re.findall(r"(?<![\w-])-[A-Za-z](?![\w-])", prompt)}
     deadline = time.monotonic() + SCOPED_SCAN_MAX_MS / 1000
     impls = scoped_source_files(clone, r"impl\s+Flag\s+for", ".rs", deadline)
     selected = None
@@ -575,7 +575,7 @@ def js_code_mask(source):
             if ch != "\n": out[i] = " "
         else:
             if ch == "\n":
-                state = "code" if state == "`" else state
+                i += 1
                 continue
             if escaped:
                 out[i] = " "
