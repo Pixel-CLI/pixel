@@ -1,12 +1,12 @@
 {
   "corpus": "excalidraw/excalidraw@541653c7c9d587d463a47daacff9fb30e45a52e7",
-  "measured": "2026-10-19, GitHub ubuntu-26.04 runner, perf.yml run 39190113822 at main dbff5b09, pixel dev-release; two runs (cold, then one appended comment line)",
+  "measured": "2026-10-19, GitHub ubuntu-26.04 runner, pixel dev-release; the highest of three perf.yml runs (39190113822 at main dbff5b09, 39190747992 and 39191011797 on the #1083 branch), each a cold run then one appended comment line",
   "ceiling_multiplier": 3,
   "cold": {
     "doc": "docs/bench/cold-index.md",
-    "total_ms": 2926,
-    "index_base_ms": 377,
-    "graph_elapsed_ms": 2127,
+    "total_ms": 3029,
+    "index_base_ms": 387,
+    "graph_elapsed_ms": 2145,
     "min_files": 700,
     "min_symbols": 3900
   },
@@ -19,12 +19,12 @@
   },
   "brief": {
     "corpus": "eval/brief-bench/questions.jsonl (56 questions, 7 pinned repositories)",
-    "measured": "2026-10-19, Apple M-series dev machine at dbff5b09, pixel dev-release, probes frozen at dbff5b09; hook route (3 s window)",
+    "measured": "2026-10-19, GitHub ubuntu-26.04 runner, perf.yml run 39191011797 at b3a5db43, pixel dev-release, probes frozen at the same commit; hook route (3 s window), 56 of 56 timed, 0 partial",
     "doc": "eval/brief-bench/README.md",
     "route": "hook",
     "questions_sha256": "984a632e96f5f32891279d58f872c3a891bfeabaee110b3993be313c63e17069",
-    "p95_ms": 981,
-    "max_ms": 1378,
+    "p95_ms": 885,
+    "max_ms": 1042,
     "max_partial": 3,
     "min_timed": 56
   }

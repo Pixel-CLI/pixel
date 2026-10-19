@@ -29,6 +29,22 @@ XDG_CACHE_HOME="$(mktemp -d)" pixel prepare-repo --no-daemon --metrics off --jso
 
 The graph holds 59,609 symbols on every run.
 
+## Weekly CI tripwire
+
+`.github/workflows/perf.yml` runs the same command every Monday on the
+public `excalidraw/excalidraw` corpus pinned in `.github/perf-baseline.json`
+(708 files, 3,937 symbols), from nothing and then after one appended line.
+On a GitHub `ubuntu-26.04` runner, the highest of three runs on 2026-10-19:
+
+| Phase | Cold | Incremental |
+| --- | --- | --- |
+| Text index | 387 ms | — |
+| Code graph | 2,145 ms | 39 ms |
+| Whole command | 3,029 ms | 71 ms |
+
+The lane fails a run at three times these numbers. Refreshing them is a pull
+request that edits `.github/perf-baseline.json` and this table together.
+
 ## Caveats
 
 - One repository, one machine; re-run the command above on yours.

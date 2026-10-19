@@ -117,6 +117,18 @@ judge answer meaning. Quality verdicts still require the source review above.
 The output's call totals use only the full first pass, so selected repetitions
 do not bias the aggregate comparison.
 
+## Latency lane
+
+`.github/workflows/perf.yml` scores these 56 questions every Monday with
+`scripts/bench/tool-census/score_brief.py`, through the prompt-submit hook
+route (3 s window, probe floor) and with the commit's own probes frozen by
+`freeze-home`. `scripts/ci/check-perf.py --label brief` compares the report
+with `.github/perf-baseline.json`: p95 and max `elapsed_ms` at three times
+the baseline, at most three `partial` briefs (cut, or past `deadline_ms`),
+and all 56 timed with the baseline's question-file hash. Baseline, GitHub
+`ubuntu-26.04` runner, 2026-10-19: p95 885 ms, max 1,042 ms, 0 partial.
+A change to `questions.jsonl` refreshes the baseline in the same pull request.
+
 ## Published campaign
 
 [2026-10-17 evaluation](../../docs/bench/brief-public-acceptance-2026-10-17/README.md):
