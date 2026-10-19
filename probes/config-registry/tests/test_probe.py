@@ -259,6 +259,149 @@ class DeclarationIdentity(unittest.TestCase):
         self.assertIn('Candidate OtherOptions.load_env_file', out)
         self.assertEqual(out.count('self[key] = value'), 2)
 
+    def test_cli_setting_follows_option_name_to_its_function_scoped_runtime_value(self):
+        source = '''
+trait Flag {}
+struct WorkerCount;
+impl Flag for WorkerCount {
+    fn name_long(&self) -> &'static str { "workers" }
+    fn doc_short(&self) -> &'static str { "Set worker count." }
+    fn update(&self, args: &mut LowArgs) { args.workers = Some(8); }
+}
+fn resolve(low: LowArgs) -> usize {
+    let workers = if let Some(workers) = low.workers {
+        workers
+    } else {
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    };
+    workers
+}
+'''
+        out = self.emit(self.repo({'flags.rs': source}), 'how many workers does the program use and where can I override it')
+        self.assertIn('matched setting consumed within one function', out)
+        self.assertIn('available_parallelism()', out)
+        self.assertIn('low.workers', out)
+        self.assertIn('matching CLI setting declaration and override', out)
+        self.assertIn('fn name_long', out)
+        self.assertIn('args.workers', out)
+        self.assertRegex(out, r"### flags\.rs:\d+-\d+ — matching CLI setting declaration and override")
+
+    def test_cli_setting_does_not_join_an_unrelated_parallelism_function(self):
+        source = '''
+trait Flag {}
+struct WorkerCount;
+impl Flag for WorkerCount {
+    fn name_long(&self) -> &'static str { "workers" }
+    fn update(&self, args: &mut LowArgs) { args.workers = Some(8); }
+}
+fn configured(low: LowArgs) -> Option<usize> { low.workers }
+fn unrelated_capacity() -> usize { std::thread::available_parallelism().map_or(1, |n| n.get()) }
+'''
+        out = self.emit(self.repo({'flags.rs': source}), 'how many workers does the program use and where can I override it')
+        self.assertEqual(out, '')
+
+    def test_cli_setting_selector_matches_a_different_option_name(self):
+        source = '''
+trait Flag {}
+struct PoolSize;
+impl Flag for PoolSize {
+    fn name_long(&self) -> &'static str { "database-pool" }
+    fn update(&self, args: &mut LowArgs) { args.pool_size = Some(12); }
+}
+fn resolve(low: LowArgs) -> usize {
+    let pool_size = low.pool_size.unwrap_or(12);
+    pool_size
+}
+'''
+        out = self.emit(self.repo({'flags.rs': source}), 'where can I override the database pool option')
+        self.assertIn('database-pool', out)
+        self.assertIn('args.pool_size', out)
+        self.assertIn('low.pool_size', out)
+        self.assertIn('matched setting consumed within one function', out)
+
+    def test_cli_setting_selector_ignores_test_only_flag_implementations(self):
+        source = '''
+trait Flag {}
+struct WorkerCount;
+#[cfg(test)]
+impl Flag for WorkerCount {
+    fn name_long(&self) -> &'static str { "workers" }
+    fn update(&self, args: &mut LowArgs) { args.workers = Some(8); }
+}
+fn resolve(low: LowArgs) -> usize {
+    low.workers.unwrap_or(8)
+}
+'''
+        out = self.emit(self.repo({'flags.rs': source}), 'how many workers does the program use and where can I override it')
+        self.assertEqual(out, '')
+
+    def test_cli_setting_selector_ignores_flag_implementations_in_test_modules(self):
+        source = '''
+trait Flag {}
+struct WorkerCount;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    impl Flag for WorkerCount {
+        fn name_long(&self) -> &'static str { "workers" }
+        fn update(&self, args: &mut LowArgs) { args.workers = Some(8); }
+    }
+}
+fn resolve(low: LowArgs) -> usize {
+    low.workers.unwrap_or(8)
+}
+'''
+        out = self.emit(self.repo({'flags.rs': source}), 'how many workers does the program use and where can I override it')
+        self.assertEqual(out, '')
+
+    def test_persistent_browser_preference_pairs_exact_subject_key_and_resolves_import(self):
+        root = self.repo({
+            'src/preferences.ts': '''import { PREFERENCE_KEYS } from "./keys";
+export function useTheme() {
+  const theme = localStorage.getItem(PREFERENCE_KEYS.COLOR_THEME) || "light";
+  localStorage.setItem(PREFERENCE_KEYS.COLOR_THEME, theme);
+  return theme;
+}
+export function useAccount() {
+  const token = localStorage.getItem(PREFERENCE_KEYS.ACCOUNT_TOKEN);
+  localStorage.setItem(PREFERENCE_KEYS.ACCOUNT_TOKEN, token || "");
+  return token;
+}
+''',
+            'src/keys.ts': '''export const PREFERENCE_KEYS = {
+  COLOR_THEME: "draw-color-scheme",
+  ACCOUNT_TOKEN: "account-secret",
+} as const;
+''',
+        })
+        out = self.emit(root, 'how does the color theme setting persist between sessions')
+        self.assertIn('browser preference read/write using the same subject-matched storage key', out)
+        self.assertIn('localStorage.getItem(PREFERENCE_KEYS.COLOR_THEME)', out)
+        self.assertIn('localStorage.setItem(PREFERENCE_KEYS.COLOR_THEME, theme)', out)
+        self.assertIn('COLOR_THEME: "draw-color-scheme"', out)
+        self.assertNotIn('ACCOUNT_TOKEN', out)
+
+    def test_persistent_browser_preference_rejects_unpaired_and_unrelated_storage_keys(self):
+        root = self.repo({
+            'src/preferences.ts': '''import { PREFERENCE_KEYS } from "./keys";
+export function useTheme() {
+  return localStorage.getItem(PREFERENCE_KEYS.COLOR_THEME);
+}
+export function useAccount() {
+  localStorage.setItem(PREFERENCE_KEYS.ACCOUNT_TOKEN, "value");
+}
+''',
+            'src/keys.ts': '''export const PREFERENCE_KEYS = {
+  COLOR_THEME: "draw-color-scheme",
+  ACCOUNT_TOKEN: "account-secret",
+} as const;
+''',
+        })
+        out = self.emit(root, 'how does the color theme setting persist between sessions')
+        self.assertNotIn('browser preference read/write using the same subject-matched storage key', out)
+        self.assertNotIn('localStorage.getItem', out)
+        self.assertNotIn('localStorage.setItem', out)
+
     def test_an_unconnected_read_or_absent_writer_is_not_a_loader_chain(self):
         for source in [LOADER.replace('self.load_file(path,', 'self.load_file(other_path,'),
                        LOADER.replace('self[key] = value', 'print(key)')]:

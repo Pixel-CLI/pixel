@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tokenize
 from pathlib import Path
 
@@ -42,12 +43,19 @@ CODE_EXT = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".py",
 RG_EXCL = ["!node_modules", "!target", "!dist", "!build", "!vendor", "!*.lock", "!yarn.lock", "!package-lock.json", "!*.min.js", "!*.map", "!*.snap", "!*.svg", "!*.json5"]
 SCAN_MAX_COLUMNS = 300  # ripgrep counts bytes, including for UTF-8 input
 SCAN_MAX_FILE_BYTES = 400 * 1024
+SCOPED_SCAN_MAX_FILES = 160
+SCOPED_SCAN_MAX_MS = 450
+TRACKED_PATHS_MAX_BYTES = 4 * 1024 * 1024
+TRACKED_PATHS_MAX_COUNT = 50_000
+SCOPED_EVIDENCE_MAX = 3600
+SCOPED_BLOCK_MAX_LINES = 72
 PATTERNS = [r"process\.env|import\.meta\.env", r"(?:VITE|REACT_APP|NEXT_PUBLIC|NUXT|EXPO_PUBLIC)_[A-Z0-9_]{2,}",
             r"os\.(?:environ|getenv)", r"env::var|\benv\s*=\s*\"|env!\(", r"os\.(?:Getenv|LookupEnv)", r"\bENV(?:\[|\.fetch)",
             r"^\s*[A-Z][A-Z0-9_]{2,}\??\s*:\s*[A-Za-z<>\[\]| ]+;", r"^(?:export\s+)?[A-Z][A-Z0-9_]*=",
             r"^\s*(?:pub(?:\([a-z]+\))?\s+)?(?:export\s+)?(?:const|static)\s+[A-Z][A-Z0-9_]{2,}\b", r"^[A-Z][A-Z0-9_]{2,}\s*(?::[^=]+)?=",
              r"\bport\s*[:=]|--port|\bPORT=",
-             r"\b[\w.]+\.(?:set|setDefault|set_default)\(\s*['\"][\w .-]+['\"]\s*,"]
+             r"\b[\w.]+\.(?:set|setDefault|set_default)\(\s*['\"][\w .-]+['\"]\s*,",
+             r"\b(?:localStorage|sessionStorage)\.(?:getItem|setItem)\s*\("]
 
 
 def git(clone, *a): return subprocess.run(["git", "-C", clone, *a], capture_output=True, text=True).stdout
@@ -55,6 +63,32 @@ def git(clone, *a): return subprocess.run(["git", "-C", clone, *a], capture_outp
 
 def tracked(clone, rel):
     return bool(git(clone, "ls-files", "--", rel).strip())
+
+
+_TRACKED_PATHS_CACHE = {}
+
+
+def tracked_paths(clone, deadline=None):
+    """Return a bounded, invocation-local inventory of tracked paths."""
+    root = str(Path(clone).resolve())
+    if root in _TRACKED_PATHS_CACHE:
+        return _TRACKED_PATHS_CACHE[root]
+    timeout = 0.25 if deadline is None else min(0.25, deadline - time.monotonic())
+    if timeout <= 0:
+        return None
+    try:
+        proc = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True,
+                              timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode or len(proc.stdout) > TRACKED_PATHS_MAX_BYTES:
+        return None
+    paths = proc.stdout.decode("utf-8", errors="replace").split("\0")
+    if len(paths) > TRACKED_PATHS_MAX_COUNT:
+        return None
+    result = {path for path in paths if path}
+    _TRACKED_PATHS_CACHE[root] = result
+    return result
 
 
 def scan(clone):
@@ -261,6 +295,305 @@ def setter_evidence(clone, rows, prompt):
     return "\n".join(blocks) + ("\n" if blocks else "")
 
 
+def scoped_source_files(clone, pattern, suffix, deadline):
+    """Find bounded, tracked, regular source files matching a narrow source shape."""
+    root = Path(clone).resolve()
+    tracked_paths_for_root = tracked_paths(clone, deadline)
+    if tracked_paths_for_root is None:
+        return []
+    try:
+        suffixes = (suffix,) if isinstance(suffix, str) else suffix
+        globs = [arg for item in suffixes for arg in ("-g", f"*{item}")]
+        proc = subprocess.run(["rg", "-l", "--hidden", "-g", "!.git", "-g", "!target", "-g", "!node_modules",
+                              "-g", "!tests", "-g", "!test", "-g", "!__tests__", "-g", "!*.test.*", *globs,
+                              "--", pattern, "."], cwd=root, capture_output=True,
+                             text=True, timeout=max(0.02, min(0.25, deadline - time.monotonic())))
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for raw in sorted(proc.stdout.splitlines()):
+        if time.monotonic() >= deadline or len(found) >= SCOPED_SCAN_MAX_FILES:
+            break
+        rel = raw.removeprefix("./")
+        if rel not in tracked_paths_for_root or not rel.endswith(suffixes):
+            continue
+        full = root / rel
+        try:
+            if full.is_symlink() or not full.resolve().is_relative_to(root) or not full.is_file():
+                continue
+            if full.stat().st_size > SCAN_MAX_FILE_BYTES:
+                continue
+        except OSError:
+            continue
+        found.append((rel, full))
+    return found
+
+
+def rust_code_mask(source):
+    """Replace Rust comments and quoted literals with spaces, preserving offsets."""
+    out = list(source)
+    i, n, block_depth = 0, len(source), 0
+    state = "code"
+    while i < n:
+        if state == "code":
+            if source.startswith("//", i):
+                state = "line"
+                out[i] = out[i + 1] = " "
+                i += 2
+                continue
+            if source.startswith("/*", i):
+                state, block_depth = "block", 1
+                out[i] = out[i + 1] = " "
+                i += 2
+                continue
+            # Raw strings may contain braces in examples or diagnostics.
+            raw = re.match(r"r(#{0,8})\"", source[i:]) if source[i] == "r" else None
+            if raw:
+                state = "raw"
+                raw_end = '"' + raw.group(1)
+                for j in range(i, i + raw.end()):
+                    if source[j] != "\n": out[j] = " "
+                i += raw.end()
+                continue
+            if source[i] == '"':
+                state = "string"
+                out[i] = " "
+                i += 1
+                continue
+            if source[i] == "'" and i + 2 < n and (source[i+2] == "'" or source[i+1] == "\\"):
+                state = "char"
+                out[i] = " "
+                i += 1
+                continue
+        elif state == "line":
+            if source[i] == "\n": state = "code"
+            else: out[i] = " "
+        elif state == "block":
+            if source.startswith("/*", i):
+                block_depth += 1
+                out[i] = out[i+1] = " "
+                i += 2
+                continue
+            if source.startswith("*/", i):
+                block_depth -= 1
+                out[i] = out[i+1] = " "
+                i += 2
+                if block_depth == 0: state = "code"
+                continue
+            if source[i] != "\n": out[i] = " "
+        elif state == "raw":
+            if source.startswith(raw_end, i):
+                for j in range(i, i + len(raw_end)):
+                    if source[j] != "\n": out[j] = " "
+                i += len(raw_end)
+                state = "code"
+                continue
+            if source[i] != "\n": out[i] = " "
+        elif state in {"string", "char"}:
+            closing = '"' if state == "string" else "'"
+            if source[i] == "\\":
+                out[i] = " "
+                if i + 1 < n and source[i+1] != "\n": out[i+1] = " "
+                i += 2
+                continue
+            if source[i] == closing: state = "code"
+            if source[i] != "\n": out[i] = " "
+        i += 1
+    return "".join(out)
+
+
+def rust_scopes(source, pattern):
+    """Yield (start offset, end offset, body start offset) for braced Rust item matches."""
+    masked = rust_code_mask(source)
+    stack, matching = [], {}
+    for pos, char in enumerate(masked):
+        if char == "{":
+            stack.append(pos)
+        elif char == "}" and stack:
+            matching[stack.pop()] = pos
+    for match in re.finditer(pattern, masked, re.M):
+        opening = match.end() - 1 if match.end() and masked[match.end() - 1] == "{" else masked.find("{", match.end())
+        if opening < 0: continue
+        closing = matching.get(opening)
+        if closing is not None:
+            yield match.start(), closing + 1, opening + 1
+
+
+def rust_test_only(source, item_start, test_modules):
+    """Exclude a cfg(test) item or any implementation nested under a cfg(test) module."""
+    prefix = source[:item_start]
+    attributes = re.search(r"(?:^|\n)(\s*#\[[^\n]+\]\s*)+$", prefix)
+    if attributes and re.search(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]", attributes.group(1)):
+        return True
+    return any(start < item_start < end for start, end in test_modules)
+
+
+def source_range(path, source, start, end, note):
+    first = source.count("\n", 0, start) + 1
+    last = source.count("\n", 0, end) + 1
+    lines = source.splitlines()
+    lo, hi = max(1, first), min(len(lines), last)
+    if hi - lo + 1 > SCOPED_BLOCK_MAX_LINES:
+        hi = lo + SCOPED_BLOCK_MAX_LINES - 1
+    return [f"### {path}:{lo}-{hi} — {note}"] + [f"{i}| {lines[i-1][:150]}" for i in range(lo, hi+1)]
+
+
+def cli_setting_evidence(clone, prompt):
+    """Find a prompt-named CLI setting and its function-scoped runtime derivation."""
+    if not re.search(r"\b(config\w*|settings?|flags?|options?|defaults?|overrid\w+|where do i set|set (that|this|it))\b", prompt, re.I):
+        return ""
+    prompt_terms = stems(words_of(prompt)) - WEAK - BOUND_WORDS
+    if not prompt_terms: return ""
+    deadline = time.monotonic() + SCOPED_SCAN_MAX_MS / 1000
+    impls = scoped_source_files(clone, r"impl\s+Flag\s+for", ".rs", deadline)
+    selected = None
+    for rel, path in impls:
+        if time.monotonic() >= deadline: break
+        source = path.read_text(errors="replace")
+        test_modules = [(start, end) for start, end, _body in rust_scopes(
+            source, r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{)")]
+        for start, end, body_start in rust_scopes(source, r"^\s*impl\s+Flag\s+for\s+\w+\s*\{"):
+            if rust_test_only(source, start, test_modules): continue
+            body = source[body_start:end-1]
+            name_method = next((m for m in rust_scopes(body, r"\bfn\s+name_long\s*\(")), None)
+            update_method = next((m for m in rust_scopes(body, r"\bfn\s+update\s*\(")), None)
+            if not name_method or not update_method: continue
+            name_text = body[name_method[2]:name_method[1]-1]
+            name_match = re.search(r"\"([a-z][a-z0-9_-]*)\"", name_text, re.I)
+            if not name_match: continue
+            option_tokens = stems(re.findall(r"[a-z]+", name_match.group(1).lower()))
+            overlap = option_tokens & prompt_terms
+            if not overlap: continue
+            update_text = body[update_method[2]:update_method[1]-1]
+            field = re.search(r"\bargs\.([a-z_][a-z0-9_]*)\s*=", update_text)
+            if not field: continue
+            selected = (rel, source, start, end, field.group(1), len(overlap))
+            break
+        if selected: break
+    if not selected: return ""
+    rel, impl_source, start, end, field, _score = selected
+    deadline = max(deadline, time.monotonic() + 0.2)
+    consumers = scoped_source_files(clone, re.escape(field), ".rs", deadline)
+    for consumer_rel, path in consumers:
+        if time.monotonic() >= deadline: break
+        source = path.read_text(errors="replace")
+        # Most rg hits are comments, docs, or unrelated field mentions. Avoid
+        # parsing their full Rust syntax trees unless the exact receiver exists.
+        if f"low.{field}" not in source: continue
+        for fn_start, fn_end, fn_body in rust_scopes(source, r"^\s*(?:(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn)\s+\w+\s*(?:<[^>]*>)?\s*\("):
+            body = source[fn_body:fn_end-1]
+            masked_body = rust_code_mask(body)
+            if not re.search(r"\blow\." + re.escape(field) + r"\b", masked_body): continue
+            if not re.search(r"\b(parallelism|available_[a-z_]+|unwrap_or(?:_else)?|if\s+let|match)\b", masked_body, re.I): continue
+            positions = [m.start() for m in re.finditer(r"\blow\." + re.escape(field) + r"\b", masked_body)]
+            if not positions: continue
+            lo = max(fn_body, fn_body + min(positions) - 140)
+            hi = min(fn_end - 1, fn_body + max(positions) + 180)
+            blocks = source_range(consumer_rel, source, lo, hi, "matched setting consumed within one function")
+            blocks += source_range(rel, impl_source, start, end, "matching CLI setting declaration and override")
+            text = "\n".join(blocks) + "\n"
+            return text[:SCOPED_EVIDENCE_MAX]
+    return ""
+
+
+STORAGE_CALL = re.compile(r"\b(localStorage|sessionStorage)\.(getItem|setItem)\s*\(\s*([^,\n)]+)", re.I)
+PERSISTENCE_INTENT = re.compile(r"\b(persist\w*|session\w*|remember\w*|restore\w*|startup|initial|load\w*)\b", re.I)
+PERSISTENCE_WORDS = stems(["persist", "persistence", "session", "remember", "restore", "startup", "initial", "load"])
+
+
+def storage_key_tokens(expression):
+    expression = re.split(r"\bas\b", expression, maxsplit=1, flags=re.I)[0]
+    return stems(re.findall(r"[A-Za-z]+", expression.lower()))
+
+
+SENSITIVE_STORAGE_WORDS = {"key", "secret", "token", "password", "passwd", "credential", "private", "signature", "config"}
+
+
+def storage_text_is_sensitive(text):
+    return bool(set(key_tokens(text)) & SENSITIVE_STORAGE_WORDS)
+
+
+def storage_key_declaration(clone, source_path, source, expression):
+    """Resolve an imported object member only through a relative, tracked import."""
+    match = re.search(r"\b([A-Z][A-Z0-9_]*)\.([A-Z][A-Z0-9_]*)\b", expression)
+    if not match: return []
+    obj, member = match.groups()
+    import_match = re.search(r"import\s*\{([^}]+)\}\s*from\s*['\"]([^'\"]+)['\"]", source)
+    if not import_match or not re.search(r"\b" + re.escape(obj) + r"\b", import_match.group(1)): return []
+    module = import_match.group(2)
+    if not module.startswith("."): return []
+    root = Path(clone).resolve()
+    base = (root / source_path).parent / module
+    targets = [base.with_suffix(ext) for ext in (".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs")]
+    tracked_paths_for_root = tracked_paths(clone)
+    if tracked_paths_for_root is None: return []
+    for target in targets:
+        try:
+            if not target.resolve().is_relative_to(root) or target.is_symlink() or not target.is_file(): continue
+            rel = target.relative_to(root).as_posix()
+            if rel not in tracked_paths_for_root or target.stat().st_size > SCAN_MAX_FILE_BYTES: continue
+            target_source = target.read_text(errors="replace")
+        except (OSError, ValueError):
+            continue
+        for start, end, body_start in rust_scopes(target_source, r"\b(?:const|let)\s+" + re.escape(obj) + r"\s*=\s*\{"):
+            body = target_source[body_start:end-1]
+            key_match = re.search(r"(?m)^\s*" + re.escape(member) + r"\s*:\s*([^,\n]+)", body)
+            if key_match:
+                absolute = body_start + key_match.start()
+                lines = source_range(rel, target_source, absolute, absolute + len(key_match.group()), "imported storage-key declaration")
+                if storage_text_is_sensitive(member):
+                    lines = [lines[0]] + [line.split("|", 1)[0] + "| <masked>" for line in lines[1:]]
+                return lines
+    return []
+
+
+def browser_preference_evidence(clone, prompt):
+    """Pair subject-matched browser preference reads and writes by exact storage key."""
+    if not PERSISTENCE_INTENT.search(prompt): return ""
+    subject = stems(words_of(prompt)) - WEAK - PERSISTENCE_WORDS - BOUND_WORDS
+    if not subject: return ""
+    root = Path(clone).resolve()
+    deadline = time.monotonic() + SCOPED_SCAN_MAX_MS / 1000
+    source_files = scoped_source_files(clone, r"\b(?:localStorage|sessionStorage)\.(?:getItem|setItem)\s*\(",
+                                       (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"), deadline)
+    candidates = []
+    for rel, path in source_files:
+        if time.monotonic() >= deadline: break
+        try:
+            if path.is_symlink() or not path.resolve().is_relative_to(root) or path.stat().st_size > SCAN_MAX_FILE_BYTES: continue
+            source = path.read_text(errors="replace")
+        except OSError:
+            continue
+        calls = []
+        for match in STORAGE_CALL.finditer(source):
+            key = match.group(3).strip()
+            key_words = storage_key_tokens(key)
+            if not subject & key_words: continue
+            calls.append((match.group(1).lower(), match.group(2).lower(), key, match.start()))
+        for storage in sorted({call[0] for call in calls}):
+            for key in sorted({call[2] for call in calls if call[0] == storage}):
+                modes = {call[1] for call in calls if call[0] == storage and call[2] == key}
+                if not {"getitem", "setitem"}.issubset(modes): continue
+                positions = [call[3] for call in calls if call[0] == storage and call[2] == key]
+                candidates.append((rel, path, source, key, min(positions), max(positions)))
+    if not candidates: return ""
+    candidates.sort(key=lambda item: (item[0], item[4], item[3]))
+    rel, path, source, key, first, last = candidates[0]
+    lines = source.splitlines()
+    first_line, last_line = source.count("\n", 0, first) + 1, source.count("\n", 0, last) + 1
+    lo, hi = max(1, first_line - 3), min(len(lines), last_line + 5)
+    if hi - lo + 1 > SCOPED_BLOCK_MAX_LINES: hi = lo + SCOPED_BLOCK_MAX_LINES - 1
+    header = f"### {rel}:{lo}-{hi} — browser preference read/write using the same subject-matched storage key; active runtime conditions unknown"
+    block_lines = [header]
+    sensitive_key = storage_text_is_sensitive(key)
+    for number in range(lo, hi + 1):
+        line = lines[number - 1][:150]
+        block_lines.append(f"{number}| " + ("<masked>" if sensitive_key or storage_text_is_sensitive(line) else line))
+    declaration = storage_key_declaration(clone, rel, source, key)
+    blocks = block_lines + declaration
+    return ("\n".join(blocks) + "\n")[:SCOPED_EVIDENCE_MAX]
+
+
 def declaration_candidates(clone, key, defs):
     """A source coordinate identifies a declaration; a shared spelling proves no binding or precedence."""
     heads = [f"- {key} | {len(defs)} distinct declaration candidates; lexical binding and override precedence unknown"]
@@ -412,6 +745,9 @@ def emit(clone, prompt, brief):
     if not Path(clone).exists() or not INTENT.search(prompt): return ""
     global IDS_WORDS
     IDS_WORDS = words_of(prompt)
+    scoped = cli_setting_evidence(clone, prompt) + browser_preference_evidence(clone, prompt)
+    if scoped:
+        return scoped[:9000]
     loader = loader_evidence(clone, prompt)
     rows = scan(clone)
     reg = registry(clone, rows)
