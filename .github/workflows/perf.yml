@@ -8,8 +8,10 @@
 # calibrated study). `scripts/ci/check-perf.py` also refuses a receipt that
 # looks fast because it measured nothing — a reused index on the cold run, or
 # no symbols — and writes the numbers to the job summary. Both receipts ride
-# the run as an artifact. `#1083` extends this beyond the cold/incremental
-# `prepare-repo` path.
+# the run as an artifact. A second job scores the brief on the 56 public
+# questions (`eval/brief-bench/`) through the prompt-submit hook route and
+# judges its p95/max `elapsed_ms` and its `partial` count (#1083, item 3 of
+# #1086): a regression in the brief's window lands here, not in a user's chat.
 name: Perf
 
 on:
@@ -101,4 +103,94 @@ jobs:
           path: |
             ${{ runner.temp }}/cold.json
             ${{ runner.temp }}/incremental.json
+          if-no-files-found: warn
+
+  # The brief's own timing on the public acceptance set: `score_brief.py`
+  # clones the seven pinned repositories, indexes each once, builds every
+  # brief as the prompt-submit hook does (3 s window, probe floor) and writes
+  # `report.json`; `check-perf.py --label brief` judges it against
+  # `.github/perf-baseline.json`. The probes come from this commit, frozen in
+  # their own home (a fresh runner has none installed), and the embedding
+  # model is pinned into that home, so the measured binary, probes, model
+  # and questions are all named by the run.
+  brief-latency:
+    name: Brief latency (56 public questions)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+        with:
+          persist-credentials: false
+
+      # `runner.temp` is not available to a job-level `env:`.
+      - name: Name the probe home
+        run: echo "PROBE_HOME=$RUNNER_TEMP/probe-home" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: linux-perf
+          save-if: false
+          cache-on-failure: true
+
+      - name: Build the pixel under test
+        run: cargo build --profile dev-release --locked -p pixel-cli
+
+      - name: Check the checker
+        run: python3 -I scripts/ci/check-perf.py --self-test
+
+      # `freeze-home` writes this commit's bundled probes and their hashes;
+      # the scorer refuses a home whose files no longer match them.
+      - name: Freeze this commit's probes
+        run: python3 -I scripts/bench/tool-census/score_brief.py freeze-home --commit HEAD --out "$PROBE_HOME"
+
+      - name: Cache key of the pinned embedding model
+        id: model
+        run: echo "key=$(bash scripts/ci/fetch-embedding-model.sh --cache-key)-probe-home" >> "$GITHUB_OUTPUT"
+      - name: Restore the pinned embedding model
+        id: model-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.PROBE_HOME }}/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2
+            ${{ env.PROBE_HOME }}/.local/share/pixel/models/potion-minishlab--potion-code-16M-v2.ok
+          key: ${{ steps.model.outputs.key }}
+      - name: Pin the embedding model in the probe home
+        run: bash scripts/ci/fetch-embedding-model.sh "$PROBE_HOME"
+      - name: Save the pinned embedding model
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.PROBE_HOME }}/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2
+            ${{ env.PROBE_HOME }}/.local/share/pixel/models/potion-minishlab--potion-code-16M-v2.ok
+          key: ${{ steps.model.outputs.key }}
+
+      # The scorer exits 1 on any `partial` brief; the next step judges the
+      # report against the ceilings instead, so its exit is recorded, not fatal.
+      - name: Score the brief on the public questions
+        run: |
+          python3 -I scripts/bench/tool-census/score_brief.py \
+            --bin target/dev-release/pixel --probe-home "$PROBE_HOME" \
+            --root "$RUNNER_TEMP/brief-bench" --out "$RUNNER_TEMP/brief-runs" --label brief \
+            || echo "::notice::score_brief.py exited $? (judged by the next step)"
+
+      - name: Brief ceilings
+        run: |
+          python3 -I scripts/ci/check-perf.py --label brief \
+            --timings "$RUNNER_TEMP/brief-runs/brief/report.json" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the brief report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: brief-latency-report
+          path: |
+            ${{ runner.temp }}/brief-runs/brief/report.json
+            ${{ runner.temp }}/brief-runs/brief/report.md
           if-no-files-found: warn

@@ -341,7 +341,12 @@ normal tests and lint still validate the PR head before merge.
 `perf.yml` runs weekly and on manual dispatch, never on a pull request, with
 read-only contents and no secrets. It fetches one public corpus at the full
 commit ID in `CORPUS_SHA` with a plain `git fetch` (no credentials), and only indexes
-it: the corpus's code and build scripts never run. Local checks,
+it: the corpus's code and build scripts never run. Its `brief-latency` job
+clones the seven public repositories `eval/brief-bench/questions.jsonl` pins
+(full history, checked out at each pinned commit), indexes them and runs this
+commit's own probes over them; it downloads the embedding model at a pinned
+revision, each file checked against its sha256 by
+`scripts/ci/fetch-embedding-model.sh`. No corpus code runs there either. Local checks,
 including pre-push validation and reinstalling, are optional diagnostics.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.

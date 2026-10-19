@@ -1618,8 +1618,14 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   against `.github/perf-baseline.json` at its `ceiling_multiplier`; it also
   fails a receipt that measured nothing, such as a reused index on the cold
   run or a graph under its file and symbol floors, and uploads both receipts
-  as `perf-receipts`. A tripwire, not a benchmark: `tree_delta` and brief
-  latency are not covered),
+  as `perf-receipts`; a second job, `brief-latency`, runs
+  `scripts/bench/tool-census/score_brief.py` on the 56 questions of
+  `eval/brief-bench/` through the prompt-submit hook route, with this
+  commit's probes frozen by `freeze-home` and the pinned embedding model,
+  and `check-perf.py --label brief` judges the report's p95 and max
+  `elapsed_ms` and its `partial` count, refusing a report that timed fewer
+  questions than the floor, ran installed probes or another question file.
+  A tripwire, not a benchmark: `tree_delta` is not covered),
   `reproducible-build.yml` (the `x86_64-unknown-linux-musl` release binary
   built twice from two checkouts at different paths, no cache, failing
   unless the two sha256 match; on pull requests touching the build
