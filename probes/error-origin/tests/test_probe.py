@@ -305,5 +305,113 @@ class StringPart(unittest.TestCase):
         self.assertEqual(module.string_part('err("No files \\"were\\" found", x)'), 'No files \\"were\\" found')
 
 
+class DefaultDependencyBoundary(unittest.TestCase):
+    PROMPT = "Where is the default 404 page produced?"
+
+    def test_traces_an_imported_default_handler_through_request_completion(self):
+        root = repo({
+            "package.json": '{"dependencies":{"@demo/response-writer":"^1.0.0"}}\n',
+            "lib/app.js": ("const renderEnd = require('@demo/response-writer');\n"
+                           "function serve(req, res, callback) {\n"
+                           "  const done = callback || renderEnd(req, res);\n"
+                           "  router.handle(req, res, done);\n"
+                           "}\n"),
+        })
+        out, _ = origin(root, self.PROMPT)
+        self.assertIn("default request-handler dependency boundary", out)
+        self.assertIn("@demo/response-writer", out)
+        self.assertIn("external response text is not present or verified", out)
+        self.assertIn("### lib/app.js:1-1 — imported dependency binding", out)
+        self.assertIn("### lib/app.js:2-3 — optional callback fallback", out)
+        self.assertIn("### package.json:1-1 — declared non-development dependency", out)
+
+    def test_a_404_example_without_a_default_fallback_is_not_a_boundary(self):
+        root = repo({
+            "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',
+            "lib/app.js": "function serve(req, res) { router.handle(req, res); }\n",
+            "examples/not-found.js": "res.status(404).send('Cannot GET ' + req.url);\n",
+        })
+        out, _ = origin(root, self.PROMPT)
+        self.assertNotIn("default request-handler dependency boundary", out)
+
+    def test_a_default_boundary_does_not_promote_a_custom_404_example_as_its_origin(self):
+        root = repo({
+            "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',
+            "lib/app.js": ("const renderEnd = require('response-writer');\n"
+                           "function serve(req, res, callback) { const done = callback || renderEnd(req,res);\n"
+                           "  router.handle(req,res,done); }\n"),
+            "examples/not-found.js": "res.status(404).send('Cannot GET ' + req.url);\n",
+        })
+        out, _ = origin(root, "where is the default 404 page that says Cannot GET produced")
+        self.assertIn("default request-handler dependency boundary", out)
+        self.assertNotIn("examples/not-found.js", out)
+
+    def test_an_undeclared_import_is_not_a_dependency_boundary(self):
+        root = repo({
+            "package.json": '{"dependencies":{"some-other-package":"^1.0.0"}}\n',
+            "lib/app.js": ("const renderEnd = require('unlisted-renderer');\n"
+                           "function serve(req, res, callback) { const done = callback || renderEnd(req, res);\n"
+                           "  router.handle(req, res, done); }\n"),
+        })
+        out, _ = origin(root, self.PROMPT)
+        self.assertNotIn("default request-handler dependency boundary", out)
+
+    def test_a_shadowed_import_binding_is_not_resolved_to_the_package(self):
+        root = repo({
+            "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',
+            "lib/app.js": ("const renderEnd = require('response-writer');\n"
+                           "function serve(req, res, callback, renderEnd) {\n"
+                           "  const done = callback || renderEnd(req, res);\n"
+                           "  router.handle(req, res, done);\n}\n"),
+        })
+        out, _ = origin(root, self.PROMPT)
+        self.assertNotIn("default request-handler dependency boundary", out)
+
+    def test_a_fallback_must_be_passed_to_request_completion_in_the_same_function(self):
+        cases = [
+            ("function configure(options, callback) { const done = callback || renderEnd(options); builder.handle(options, done); }\n",
+             "unrelated callback"),
+            ("function choose(req, res, callback) { const done = callback || renderEnd(req, res); }\n"
+             "function route(req, res) { router.handle(req, res, done); }\n", "separate function"),
+            ("function serve(req, res, callback) { const done = renderEnd(req, res); router.handle(req, res, done); }\n",
+             "no optional callback fallback"),
+        ]
+        for source, label in cases:
+            with self.subTest(label=label):
+                root = repo({
+                    "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',
+                    "lib/app.js": "const renderEnd = require('response-writer');\n" + source,
+                })
+                out, _ = origin(root, self.PROMPT)
+                self.assertNotIn("default request-handler dependency boundary", out)
+
+    def test_comments_and_strings_cannot_supply_import_or_call_evidence(self):
+        root = repo({
+            "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',
+            "lib/app.js": ("// const renderEnd = require('response-writer');\n"
+                           "const HELP = `function serve(req, res, callback) { const done = callback || renderEnd(); router.handle(req,res,done); }`;\n"),
+        })
+        out, _ = origin(root, self.PROMPT)
+        self.assertNotIn("default request-handler dependency boundary", out)
+
+    def test_unrelated_prompt_is_not_admitted_and_requests_wrapper_is_not_a_new_gain(self):
+        root = repo({
+            "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',
+            "lib/app.js": ("const renderEnd = require('response-writer');\n"
+                           "function serve(req, res, callback) { const done = callback || renderEnd(req,res);\n"
+                           "  router.handle(req,res,done); }\n"),
+        })
+        out, _ = origin(root, "Where is the timeout response produced?")
+        self.assertNotIn("default request-handler dependency boundary", out)
+        requests = repo({
+            "src/requests/adapters.py": ("from urllib3.exceptions import MaxRetryError\n"
+                                         "def send():\n    try:\n        go()\n"
+                                         "    except MaxRetryError as exc:\n"
+                                         "        raise ConnectionError(exc)\n"),
+        })
+        out, _ = origin(requests, "where does the text of the max retries exceeded connection error come from")
+        self.assertNotIn("default request-handler dependency boundary", out)
+
+
 if __name__ == "__main__":
     unittest.main()

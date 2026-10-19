@@ -1,1 +1,1 @@
-**brief:** Find matching diagnostic emitters and nearby source conditions in tracked code when a described error previously led to unrelated option help. Preserve exact quoted-origin evidence and bound source scanning.
+**brief:** Find matching diagnostic emitters and nearby source conditions in tracked code when a described error previously led to unrelated option help. Preserve exact quoted-origin evidence and bound source scanning. Default error-page questions can identify a source-bound dependency handoff, while stating that external response text was not inspected.

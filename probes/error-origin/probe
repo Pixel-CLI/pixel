@@ -26,6 +26,8 @@ MIN_QUOTE, MIN_WORDS, CALLER_LINES, LEVELS, MAX_LINES, MAX_BYTES = 12, 3, 14, 2,
 MAX_DIAGNOSTIC_FILES, MAX_DIAGNOSTIC_PATH_BYTES = 1_500, 180_000
 MAX_DIAGNOSTIC_FILE_BYTES, MAX_DIAGNOSTIC_LINE_CHARS = 1_000_000, 900
 MAX_DIAGNOSTIC_OUTPUT_BYTES = 2_000_000
+MAX_HANDLER_MANIFESTS, MAX_HANDLER_MANIFEST_BYTES = 128, 512_000
+MAX_HANDLER_SOURCE_BYTES = 512_000
 
 
 def rg(root, *args):
@@ -72,6 +74,288 @@ def tracked_source_paths(root):
         paths.append(rel)
         used += len(raw)
     return paths
+
+
+def _js_mask_noncode(text):
+    """Blank JS strings and comments while preserving offsets and line breaks."""
+    chars = list(text)
+    i = 0
+    while i < len(text):
+        if text.startswith("//", i):
+            end = text.find("\n", i + 2)
+            end = len(text) if end < 0 else end
+            for j in range(i, end):
+                chars[j] = " "
+            i = end
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = len(text) if end < 0 else end + 2
+            for j in range(i, end):
+                if chars[j] != "\n":
+                    chars[j] = " "
+            i = end
+        elif text[i] in "'\"`":
+            quote = text[i]
+            end = i + 1
+            while end < len(text):
+                if text[end] == "\\":
+                    end += 2
+                elif text[end] == quote:
+                    end += 1
+                    break
+                else:
+                    end += 1
+            for j in range(i, min(end, len(text))):
+                if chars[j] != "\n":
+                    chars[j] = " "
+            i = end
+        else:
+            i += 1
+    return "".join(chars)
+
+
+def _js_matching_brace(code, start):
+    depth = 0
+    for i in range(start, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _js_function_spans(code):
+    pattern = re.compile(r"\bfunction(?:\s+[A-Za-z_$][\w$]*)?\s*\(([^)]*)\)\s*\{")
+    spans = []
+    for match in pattern.finditer(code):
+        open_at = match.end() - 1
+        close_at = _js_matching_brace(code, open_at)
+        if close_at < 0:
+            continue
+        params = [part.strip() for part in match.group(1).split(",")]
+        params = [part for part in params if re.fullmatch(r"[A-Za-z_$][\w$]*", part)]
+        spans.append((match.start(), open_at, close_at, params))
+    return spans
+
+
+def _js_package_name(specifier):
+    if not specifier or specifier.startswith((".", "/", "node:")):
+        return None
+    parts = specifier.split("/")
+    if specifier.startswith("@"):
+        return "/".join(parts[:2]) if len(parts) >= 2 else None
+    return parts[0]
+
+
+def _js_imports(text, code):
+    found = {}
+    patterns = (
+        re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\s*\("),
+        re.compile(r"\bimport\s+([A-Za-z_$][\w$]*)\s+from\s*"),
+    )
+    for index, pattern in enumerate(patterns):
+        for match in pattern.finditer(code):
+            literal = re.match(r"\s*(['\"])([^'\"]+)\1" + (r"\s*\)" if index == 0 else ""), text[match.end():])
+            dependency = _js_package_name(literal.group(2) if literal else None)
+            if dependency:
+                found.setdefault(match.group(1), []).append((dependency, match.start()))
+    return found
+
+
+def _tracked_package_manifests(root):
+    """Read bounded tracked package manifests only; never follow manifest symlinks."""
+    try:
+        result = subprocess.run(["git", "ls-files", "-z", "--", ":(glob)**/package.json"], cwd=root,
+                                capture_output=True, timeout=0.5)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if result.returncode or len(result.stdout) > MAX_HANDLER_MANIFEST_BYTES:
+        return {}
+    paths = sorted(set(result.stdout.split(b"\0")) - {b""})
+    if len(paths) > MAX_HANDLER_MANIFESTS:
+        return {}
+    manifests, used = {}, 0
+    for raw in paths:
+        try:
+            rel = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        path = Path(rel)
+        if path.is_absolute() or ".." in path.parts or not path.parts:
+            continue
+        current = Path(root)
+        safe = True
+        try:
+            for part in path.parts:
+                current /= part
+                if current.is_symlink():
+                    safe = False
+                    break
+            info = current.lstat() if safe else None
+        except OSError:
+            continue
+        if not safe or info is None or not stat.S_ISREG(info.st_mode) or info.st_size > 64_000:
+            continue
+        used += info.st_size
+        if used > MAX_HANDLER_MANIFEST_BYTES:
+            return {}
+        try:
+            text = current.read_text(errors="replace")
+            data = json.loads(text)
+        except (OSError, ValueError):
+            continue
+        deps = {}
+        for section in ("dependencies", "optionalDependencies", "peerDependencies"):
+            entries = data.get(section, {}) if isinstance(data, dict) else {}
+            if isinstance(entries, dict):
+                deps.update({name: version for name, version in entries.items() if isinstance(version, str)})
+        manifests[str(path)] = (text.splitlines(), deps)
+    return manifests
+
+
+def _manifest_for_source(rel, manifests):
+    directory = Path(rel).parent
+    for parent in (directory, *directory.parents):
+        manifest = str(parent / "package.json") if str(parent) != "." else "package.json"
+        if manifest in manifests:
+            return manifest, manifests[manifest]
+    return None
+
+
+def _js_arguments(body, open_at):
+    depth = 0
+    close_at = -1
+    for i in range(open_at, len(body)):
+        if body[i] == "(":
+            depth += 1
+        elif body[i] == ")":
+            depth -= 1
+            if depth == 0:
+                close_at = i
+                break
+    if close_at < 0:
+        return []
+    inner = body[open_at + 1:close_at]
+    args, start = [], 0
+    parens = braces = brackets = 0
+    for i, char in enumerate(inner):
+        if char == "(":
+            parens += 1
+        elif char == ")":
+            parens -= 1
+        elif char == "{":
+            braces += 1
+        elif char == "}":
+            braces -= 1
+        elif char == "[":
+            brackets += 1
+        elif char == "]":
+            brackets -= 1
+        elif char == "," and parens == braces == brackets == 0:
+            args.append(inner[start:i].strip())
+            start = i + 1
+    args.append(inner[start:].strip())
+    return args
+
+
+def _js_call_uses(body, result, request, response):
+    call = re.compile(r"\.\s*[A-Za-z_$][\w$]*\s*\(")
+    for match in call.finditer(body):
+        args = _js_arguments(body, match.end() - 1)
+        if len(args) < 3 or args[-1] != result:
+            continue
+        prefix = " ".join(args[:-1])
+        if re.search(rf"\b{re.escape(request)}\b", prefix) and re.search(rf"\b{re.escape(response)}\b", prefix):
+            return match.start()
+    return None
+
+
+def default_handler_boundary(root, prompt, paths, cache):
+    """Locate an imported dependency used as the default request-completion callback."""
+    if not re.search(r"\bdefault\b", prompt, re.I) or not re.search(r"\b404\b|\bnot[\s-]+found\b", prompt, re.I):
+        return []
+    manifests = _tracked_package_manifests(root)
+    if not manifests:
+        return []
+    candidates, used = [], 0
+    for rel in paths:
+        if not rel.endswith(JS_EXT) or is_test_path(rel) or re.search(r"(^|/)examples?\/", rel, re.I):
+            continue
+        lines = read(root, rel, cache)
+        source = "\n".join(lines)
+        size = len(source.encode("utf-8", errors="replace"))
+        used += size
+        if used > MAX_HANDLER_SOURCE_BYTES:
+            return []
+        code = _js_mask_noncode(source)
+        imported = _js_imports(source, code)
+        manifest_pair = _manifest_for_source(rel, manifests)
+        if not imported or not manifest_pair:
+            continue
+        manifest_rel, (manifest_lines, dependencies) = manifest_pair
+        spans = _js_function_spans(code)
+        for start, open_at, close_at, params in spans:
+            body_start = open_at + 1
+            body_chars = list(code[body_start:close_at])
+            for nested_start, _nested_open, nested_close, _nested_params in spans:
+                if nested_start > open_at and nested_close < close_at:
+                    for index in range(nested_start - body_start, nested_close - body_start + 1):
+                        if 0 <= index < len(body_chars) and body_chars[index] != "\n":
+                            body_chars[index] = " "
+            body = "".join(body_chars)
+            if re.search(r"(?<![\w$])/(?:\\.|[^/\n]){1,180}/[a-z]*", body, re.I):
+                continue  # regex literals make this lightweight brace scanner uncertain
+            request = next((name for name in params if re.fullmatch(r"(?:req|request)", name, re.I)), None)
+            response = next((name for name in params if re.fullmatch(r"(?:res|response)", name, re.I)), None)
+            if not request or not response:
+                continue
+            assignment = re.compile(r"\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*"
+                                    r"([A-Za-z_$][\w$]*)\s*\|\|\s*([A-Za-z_$][\w$]*)\s*\(")
+            for match in assignment.finditer(body):
+                result_name, callback, binding = match.groups()
+                if callback not in params or binding in params:
+                    continue
+                if re.search(rf"\b(?:const|let|var|class|function)\s+{re.escape(binding)}\b", body):
+                    continue  # any local declaration could shadow the imported binding
+                bindings = imported.get(binding, [])
+                if len(bindings) != 1:
+                    continue
+                dependency, import_at = bindings[0]
+                if dependency not in dependencies:
+                    continue
+                fallback_args = _js_arguments(body, match.end() - 1)
+                if not any(re.search(rf"\b{re.escape(request)}\b", arg) for arg in fallback_args):
+                    continue
+                if not any(re.search(rf"\b{re.escape(response)}\b", arg) for arg in fallback_args):
+                    continue
+                use_at = _js_call_uses(body[match.end():], result_name, request, response)
+                if use_at is None:
+                    continue
+                fallback_at = body_start + match.start()
+                use_line_at = body_start + match.end() + use_at
+                manifest_lines_for_dependency = [i + 1 for i, line in enumerate(manifest_lines)
+                                                 if re.search(rf"\"{re.escape(dependency)}\"\s*:", line)]
+                if len(manifest_lines_for_dependency) != 1:
+                    continue
+                candidates.append((rel, source, dependency, binding, import_at, fallback_at, use_line_at,
+                                   manifest_rel, manifest_lines, manifest_lines_for_dependency[0]))
+    if len(candidates) != 1:
+        return []
+    rel, source, dependency, binding, import_at, fallback_at, use_at, manifest_rel, manifest_lines, manifest_line = candidates[0]
+    source_lines = source.splitlines()
+    import_line = source.count("\n", 0, import_at) + 1
+    fallback_line = source.count("\n", 0, fallback_at) + 1
+    use_line = source.count("\n", 0, use_at) + 1
+    out = ["### default request-handler dependency boundary — optional callback falls back to an imported dependency; "
+           "the handler receives request/response and is passed to router completion; external response text is not present or verified"]
+    out += show(rel, source_lines, import_line, import_line, "imported dependency binding")
+    out += show(rel, source_lines, fallback_line - 1, fallback_line, "optional callback fallback")
+    out += show(rel, source_lines, use_line, use_line, "passes the selected handler into request completion")
+    out.append(f"### {manifest_rel}:{manifest_line}-{manifest_line} — declared non-development dependency: {dependency}")
+    out.append(f"{manifest_line}| {manifest_lines[manifest_line - 1][:MAX_DIAGNOSTIC_LINE_CHARS]}")
+    return out
 
 
 def tracked_rg(root, paths, *args):
@@ -484,11 +768,15 @@ def main():
     root, prompt = req["repo_root"], req["prompt"]
     cache, seen = {}, set()
     paths = tracked_source_paths(root)
-    out = python_handlers(root, prompt, cache)
+    boundary = default_handler_boundary(root, prompt, paths, cache)
+    out = list(boundary)
+    out += python_handlers(root, prompt, cache)
     diagnostic = error_emission(root, prompt, paths)
-    if diagnostic:
+    if diagnostic and not (boundary and re.search(r"(^|/)examples?/", diagnostic[0], re.I)):
         out += diagnostic[2]
     origin = origins(root, prompt)
+    if boundary and origin and re.search(r"(^|/)examples?/", origin[0], re.I):
+        origin = None  # a sample page is not the default handler's external response
     if diagnostic and origin and origin[0] == diagnostic[0] and not origin[2].startswith("quoted occurrence"):
         origin = None  # the matching source emitter outranks a lexical neighbor in the same file
     for rel, line, how, catalogue in filter(None, [origin]):
