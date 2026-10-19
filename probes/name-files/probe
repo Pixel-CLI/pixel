@@ -91,7 +91,7 @@ def tracked_stage_rows(root):
         raw = bytearray()
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline and len(raw) < TRACKED_MAX_BYTES:
-            ready = selector.select(min(0.05, deadline - time.monotonic()))
+            ready = selector.select(max(0.0, min(0.05, deadline - time.monotonic())))
             if not ready:
                 if proc.poll() is not None:
                     break
@@ -168,7 +168,7 @@ def module_references(root, modules, tracked_sources):
         rows, buffer, count = [], bytearray(), 0
         deadline = started + MODULE_SCAN_MS / 1000
         while time.monotonic() < deadline and len(rows) < MODULE_SCAN_ROWS and count < MODULE_SCAN_BYTES:
-            ready = selector.select(min(0.05, deadline - time.monotonic()))
+            ready = selector.select(max(0.0, min(0.05, deadline - time.monotonic())))
             if not ready:
                 if proc.poll() is not None:
                     break
