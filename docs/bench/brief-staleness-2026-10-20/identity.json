@@ -1,0 +1,400 @@
+{
+  "base": {
+    "binary_sha256": "f5c30a6e1576baf43ea11e955b4c3c452e9d53151f9e5b6f36d222adfbdff0a3",
+    "binary_version": "pixel 0.8.0\ncommit: c6cd78edf42272d401295935174862d6a069dd09\ntarget: aarch64-apple-darwin\nrustc: rustc 1.99.0 (b940084d7 2026-09-28)\nbuilt: 2026-10-19",
+    "questions": {
+      "kind": "bench",
+      "path": "$REPO/eval/brief-bench/questions.jsonl",
+      "sha256": "984a632e96f5f32891279d58f872c3a891bfeabaee110b3993be313c63e17069"
+    },
+    "probe_home": {
+      "frozen": true,
+      "home": "$RUN/probe-home",
+      "commit": "c6cd78edf42272d401295935174862d6a069dd09",
+      "probe_files": {
+        "cand-j-callers/pixel-plugin.toml": "fc4562bb75b2fd172017769d55897aed69576a7dccc0dac73a992b199e2ce4a0",
+        "cand-j-callers/probe": "4efa092c5da908e1cc5a19513dd6a2cc50053bf2209940084114814cca73df9d",
+        "cand-j-chain/pixel-plugin.toml": "36940a8b4be105293d3c6aae9c4bd6db30bf3f5867765c6f8f0e1e836c286231",
+        "cand-j-chain/probe": "6a88df37b0cc2b95b1d05f3094d9197a7ad5a14c24102ae23e9e96b548bfba44",
+        "cand-j-stop-cause/pixel-plugin.toml": "60cc795e085b65800467713223553ad68f7f02ce4bcc48d3cb978e508a52bfad",
+        "cand-j-stop-cause/probe": "2fa455eaa2eba65815f0765ed3e2a92ecaec85f7e7621310dedfcb75f5f6e38b",
+        "cand-k-code-sites/pixel-plugin.toml": "4b6934d13a144eb7fbae56091112dff1024910a5942263c30d33eb33e94e6966",
+        "cand-k-code-sites/probe": "1475af5454eaf32311734f48107f0a9612907d0d53e1f2c059a057323826e127",
+        "cand-k-commit-patch/pixel-plugin.toml": "c184afb77ce51ced638eb42b2910a64e67a8a7349badb21f644f2f24e285499c",
+        "cand-k-commit-patch/probe": "fb20b7b66ce1f6fdc5881f6180680e29adfda287b0cd83ccdd114bbc78d4cb19",
+        "config-registry/pixel-plugin.toml": "f0472c59644ec3c8db2a2109d889e898d66b65951d793f45acff300e75e4c2fc",
+        "config-registry/probe": "c11ab257b297c4ee4c506a5c6ae2083b1742e051a88dac1a819de2d8b3db0931",
+        "doc-sections/pixel-plugin.toml": "84f80d2e9ea03c81947bb0b547ef4c7f506d9622545a661cc7746358c233fb3e",
+        "doc-sections/probe": "03e62d444eb63973dfcf6cc7b39b1df77722085934e22e862b17be2763cc5c08",
+        "error-origin/pixel-plugin.toml": "1e23316a196c1d81dfa565993bccb88765b925714c11a581d91fa41bf591cd1d",
+        "error-origin/probe": "0d7bddde35b8b89b739be6fdd0958f08050f6e1ba994b2f14c6952a407c780dd",
+        "flow-rank/pixel-plugin.toml": "f84f006a18e03ae87efe57da08e95669ae6062e7c373c9b339eb9ca13490b232",
+        "flow-rank/probe": "092448162dd75d8da229203b79dfc6ff96425b4798cff51e5bca0941c5e7041d",
+        "history-fallback/pixel-plugin.toml": "bd45e81583779cb3d58476e67661fdeb131b1fe91ef48a4c0ddfcbd97b155b82",
+        "history-fallback/probe": "5a10186276dbd868ec4b7c4a43bcc06092aceda634207417045a08c4a214fc62",
+        "name-files/pixel-plugin.toml": "2ac1224e87eda108ceec6273c85001e0c7fcf58e702884297b414120cfc9d7eb",
+        "name-files/probe": "2610d8fee44776b1d94c5b95685991e3f80d630ce514b742796a9de3393c312e",
+        "overview-answer-evidence/pixel-plugin.toml": "bad7296859efc2e4da03b9c0ed59cb6af56a1380409610891b02101c7c922926",
+        "overview-answer-evidence/probe": "7f5f1be8239240a3ba92f20d3527fa80dcb3d74f32405c75b077d704e966d052",
+        "rank-blocks/pixel-plugin.toml": "fca68611008fc8b35facd2081197e51afa8d04ccb3ab9b5316930a37792c6060",
+        "rank-blocks/probe": "854f122c9733d5c87080ce2f015c84cbfc20e219f59d09fe0f468c5d5640068c",
+        "test-bodies/pixel-plugin.toml": "2c3f3f5d5cd96edc80039e3d579030ebd5db1bb70dd7599e922efa6a4670be72",
+        "test-bodies/probe": "c72dfd4eeaa3c245bd9f85d017fe3dfa83d754ec198a5953487b999663f78122"
+      }
+    },
+    "protocol": {
+      "name": "brief-oracle",
+      "version": 4
+    },
+    "scorer": {
+      "sha256": "d5a00772cc7543bb899291ccec1c0280a8f597f8438e212eb330be50b7ed4924",
+      "commit": "c54943f9f750c4e62b04bf12802b803d8b708d19"
+    },
+    "result": {
+      "status": "complete",
+      "exit_code": 0,
+      "counts": {
+        "ok": 56
+      },
+      "errors": []
+    },
+    "parameters": {
+      "timeout_s": 300,
+      "selected_ids": [
+        "pixel-01",
+        "pixel-02",
+        "pixel-03",
+        "pixel-04",
+        "pixel-05",
+        "pixel-06",
+        "pixel-07",
+        "pixel-08",
+        "ripgrep-01",
+        "ripgrep-02",
+        "ripgrep-03",
+        "ripgrep-04",
+        "ripgrep-05",
+        "ripgrep-06",
+        "ripgrep-07",
+        "ripgrep-08",
+        "requests-01",
+        "requests-02",
+        "requests-03",
+        "requests-04",
+        "requests-05",
+        "requests-06",
+        "requests-07",
+        "requests-08",
+        "excalidraw-01",
+        "excalidraw-02",
+        "excalidraw-03",
+        "excalidraw-04",
+        "excalidraw-05",
+        "excalidraw-06",
+        "excalidraw-07",
+        "excalidraw-08",
+        "flask-01",
+        "flask-02",
+        "flask-03",
+        "flask-04",
+        "flask-05",
+        "flask-06",
+        "flask-07",
+        "flask-08",
+        "fd-01",
+        "fd-02",
+        "fd-03",
+        "fd-04",
+        "fd-05",
+        "fd-06",
+        "fd-07",
+        "fd-08",
+        "express-01",
+        "express-02",
+        "express-03",
+        "express-04",
+        "express-05",
+        "express-06",
+        "express-07",
+        "express-08"
+      ],
+      "keep_daemons": false
+    },
+    "means": {
+      "n": 56,
+      "line_cov": 0.13063097302758603,
+      "inline_cov": 0.10737273448342059,
+      "region_cov": 0.0959898746645488,
+      "file_recall": 0.4574679310098721,
+      "content_file_recall": 0.4574679310098721,
+      "commit_recall": 1.0,
+      "answer_cov": null,
+      "bytes": 10621.0,
+      "brief_made": 56,
+      "pooled_line_cov": 0.09254066180594504,
+      "types": {
+        "definition": {
+          "lines": 26395,
+          "covered": 2516,
+          "inline": 2062,
+          "sessions": 42,
+          "sessions_half": 4
+        },
+        "usage": {
+          "lines": 1999,
+          "covered": 128,
+          "inline": 79,
+          "sessions": 39,
+          "sessions_half": 1
+        },
+        "tests": {
+          "lines": 6365,
+          "covered": 393,
+          "inline": 376,
+          "sessions": 34,
+          "sessions_half": 0
+        },
+        "config": {
+          "lines": 979,
+          "covered": 226,
+          "inline": 226,
+          "sessions": 19,
+          "sessions_half": 1
+        },
+        "docs": {
+          "lines": 3488,
+          "covered": 367,
+          "inline": 359,
+          "sessions": 41,
+          "sessions_half": 6
+        },
+        "git": {
+          "lines": 2,
+          "covered": 2,
+          "inline": 0,
+          "sessions": 2,
+          "sessions_half": 2
+        },
+        "list": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        }
+      },
+      "latency": {
+        "n": 56,
+        "p95_ms": 1084,
+        "max_ms": 2629,
+        "cut": 0,
+        "cut_rate": 0.0,
+        "shares": {
+          "search_ms": 0.21296925016975457,
+          "rank_ms": 0.07789310311378407,
+          "render_ms": 0.0,
+          "probe_ms": 0.7066155786206227
+        }
+      }
+    }
+  },
+  "head": {
+    "binary_sha256": "fca8803ef3b44866242147aebc1187c3e5f02cbb401b962b35f9718233663341",
+    "binary_version": "pixel 0.8.0\ncommit: c54943f9f750c4e62b04bf12802b803d8b708d19\ntarget: aarch64-apple-darwin\nrustc: rustc 1.99.0 (b940084d7 2026-09-28)\nbuilt: 2026-10-19",
+    "questions": {
+      "kind": "bench",
+      "path": "$REPO/eval/brief-bench/questions.jsonl",
+      "sha256": "984a632e96f5f32891279d58f872c3a891bfeabaee110b3993be313c63e17069"
+    },
+    "probe_home": {
+      "frozen": true,
+      "home": "$RUN/probe-home",
+      "commit": "c6cd78edf42272d401295935174862d6a069dd09",
+      "probe_files": {
+        "cand-j-callers/pixel-plugin.toml": "fc4562bb75b2fd172017769d55897aed69576a7dccc0dac73a992b199e2ce4a0",
+        "cand-j-callers/probe": "4efa092c5da908e1cc5a19513dd6a2cc50053bf2209940084114814cca73df9d",
+        "cand-j-chain/pixel-plugin.toml": "36940a8b4be105293d3c6aae9c4bd6db30bf3f5867765c6f8f0e1e836c286231",
+        "cand-j-chain/probe": "6a88df37b0cc2b95b1d05f3094d9197a7ad5a14c24102ae23e9e96b548bfba44",
+        "cand-j-stop-cause/pixel-plugin.toml": "60cc795e085b65800467713223553ad68f7f02ce4bcc48d3cb978e508a52bfad",
+        "cand-j-stop-cause/probe": "2fa455eaa2eba65815f0765ed3e2a92ecaec85f7e7621310dedfcb75f5f6e38b",
+        "cand-k-code-sites/pixel-plugin.toml": "4b6934d13a144eb7fbae56091112dff1024910a5942263c30d33eb33e94e6966",
+        "cand-k-code-sites/probe": "1475af5454eaf32311734f48107f0a9612907d0d53e1f2c059a057323826e127",
+        "cand-k-commit-patch/pixel-plugin.toml": "c184afb77ce51ced638eb42b2910a64e67a8a7349badb21f644f2f24e285499c",
+        "cand-k-commit-patch/probe": "fb20b7b66ce1f6fdc5881f6180680e29adfda287b0cd83ccdd114bbc78d4cb19",
+        "config-registry/pixel-plugin.toml": "f0472c59644ec3c8db2a2109d889e898d66b65951d793f45acff300e75e4c2fc",
+        "config-registry/probe": "c11ab257b297c4ee4c506a5c6ae2083b1742e051a88dac1a819de2d8b3db0931",
+        "doc-sections/pixel-plugin.toml": "84f80d2e9ea03c81947bb0b547ef4c7f506d9622545a661cc7746358c233fb3e",
+        "doc-sections/probe": "03e62d444eb63973dfcf6cc7b39b1df77722085934e22e862b17be2763cc5c08",
+        "error-origin/pixel-plugin.toml": "1e23316a196c1d81dfa565993bccb88765b925714c11a581d91fa41bf591cd1d",
+        "error-origin/probe": "0d7bddde35b8b89b739be6fdd0958f08050f6e1ba994b2f14c6952a407c780dd",
+        "flow-rank/pixel-plugin.toml": "f84f006a18e03ae87efe57da08e95669ae6062e7c373c9b339eb9ca13490b232",
+        "flow-rank/probe": "092448162dd75d8da229203b79dfc6ff96425b4798cff51e5bca0941c5e7041d",
+        "history-fallback/pixel-plugin.toml": "bd45e81583779cb3d58476e67661fdeb131b1fe91ef48a4c0ddfcbd97b155b82",
+        "history-fallback/probe": "5a10186276dbd868ec4b7c4a43bcc06092aceda634207417045a08c4a214fc62",
+        "name-files/pixel-plugin.toml": "2ac1224e87eda108ceec6273c85001e0c7fcf58e702884297b414120cfc9d7eb",
+        "name-files/probe": "2610d8fee44776b1d94c5b95685991e3f80d630ce514b742796a9de3393c312e",
+        "overview-answer-evidence/pixel-plugin.toml": "bad7296859efc2e4da03b9c0ed59cb6af56a1380409610891b02101c7c922926",
+        "overview-answer-evidence/probe": "7f5f1be8239240a3ba92f20d3527fa80dcb3d74f32405c75b077d704e966d052",
+        "rank-blocks/pixel-plugin.toml": "fca68611008fc8b35facd2081197e51afa8d04ccb3ab9b5316930a37792c6060",
+        "rank-blocks/probe": "854f122c9733d5c87080ce2f015c84cbfc20e219f59d09fe0f468c5d5640068c",
+        "test-bodies/pixel-plugin.toml": "2c3f3f5d5cd96edc80039e3d579030ebd5db1bb70dd7599e922efa6a4670be72",
+        "test-bodies/probe": "c72dfd4eeaa3c245bd9f85d017fe3dfa83d754ec198a5953487b999663f78122"
+      }
+    },
+    "protocol": {
+      "name": "brief-oracle",
+      "version": 4
+    },
+    "scorer": {
+      "sha256": "d5a00772cc7543bb899291ccec1c0280a8f597f8438e212eb330be50b7ed4924",
+      "commit": "c54943f9f750c4e62b04bf12802b803d8b708d19"
+    },
+    "result": {
+      "status": "complete",
+      "exit_code": 0,
+      "counts": {
+        "ok": 56
+      },
+      "errors": []
+    },
+    "parameters": {
+      "timeout_s": 300,
+      "selected_ids": [
+        "pixel-01",
+        "pixel-02",
+        "pixel-03",
+        "pixel-04",
+        "pixel-05",
+        "pixel-06",
+        "pixel-07",
+        "pixel-08",
+        "ripgrep-01",
+        "ripgrep-02",
+        "ripgrep-03",
+        "ripgrep-04",
+        "ripgrep-05",
+        "ripgrep-06",
+        "ripgrep-07",
+        "ripgrep-08",
+        "requests-01",
+        "requests-02",
+        "requests-03",
+        "requests-04",
+        "requests-05",
+        "requests-06",
+        "requests-07",
+        "requests-08",
+        "excalidraw-01",
+        "excalidraw-02",
+        "excalidraw-03",
+        "excalidraw-04",
+        "excalidraw-05",
+        "excalidraw-06",
+        "excalidraw-07",
+        "excalidraw-08",
+        "flask-01",
+        "flask-02",
+        "flask-03",
+        "flask-04",
+        "flask-05",
+        "flask-06",
+        "flask-07",
+        "flask-08",
+        "fd-01",
+        "fd-02",
+        "fd-03",
+        "fd-04",
+        "fd-05",
+        "fd-06",
+        "fd-07",
+        "fd-08",
+        "express-01",
+        "express-02",
+        "express-03",
+        "express-04",
+        "express-05",
+        "express-06",
+        "express-07",
+        "express-08"
+      ],
+      "keep_daemons": false
+    },
+    "means": {
+      "n": 56,
+      "line_cov": 0.13063097302758603,
+      "inline_cov": 0.10737273448342059,
+      "region_cov": 0.0959898746645488,
+      "file_recall": 0.4574679310098721,
+      "content_file_recall": 0.4574679310098721,
+      "commit_recall": 1.0,
+      "answer_cov": null,
+      "bytes": 10621.0,
+      "brief_made": 56,
+      "pooled_line_cov": 0.09254066180594504,
+      "types": {
+        "definition": {
+          "lines": 26395,
+          "covered": 2516,
+          "inline": 2062,
+          "sessions": 42,
+          "sessions_half": 4
+        },
+        "usage": {
+          "lines": 1999,
+          "covered": 128,
+          "inline": 79,
+          "sessions": 39,
+          "sessions_half": 1
+        },
+        "tests": {
+          "lines": 6365,
+          "covered": 393,
+          "inline": 376,
+          "sessions": 34,
+          "sessions_half": 0
+        },
+        "config": {
+          "lines": 979,
+          "covered": 226,
+          "inline": 226,
+          "sessions": 19,
+          "sessions_half": 1
+        },
+        "docs": {
+          "lines": 3488,
+          "covered": 367,
+          "inline": 359,
+          "sessions": 41,
+          "sessions_half": 6
+        },
+        "git": {
+          "lines": 2,
+          "covered": 2,
+          "inline": 0,
+          "sessions": 2,
+          "sessions_half": 2
+        },
+        "list": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        }
+      },
+      "latency": {
+        "n": 56,
+        "p95_ms": 1076,
+        "max_ms": 2606,
+        "cut": 0,
+        "cut_rate": 0.0,
+        "shares": {
+          "search_ms": 0.19377249100359856,
+          "rank_ms": 0.0778688524590164,
+          "render_ms": 0.0,
+          "probe_ms": 0.7252598960415834
+        }
+      }
+    }
+  }
+}
