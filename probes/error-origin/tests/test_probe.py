@@ -385,6 +385,31 @@ class DefaultDependencyBoundary(unittest.TestCase):
                 out, _ = origin(root, self.PROMPT)
                 self.assertNotIn("default request-handler dependency boundary", out)
 
+    def test_an_unrelated_telemetry_call_does_not_establish_request_completion(self):
+        root = repo({
+            "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',
+            "lib/app.js": ("const renderEnd = require('response-writer');\n"
+                           "function serve(req, res, callback) {\n"
+                           "  const done = callback || renderEnd(req, res);\n"
+                           "  metrics.record(req, res, done);\n"
+                           "}\n"),
+        })
+        out, _ = origin(root, self.PROMPT)
+        self.assertNotIn("default request-handler dependency boundary", out)
+
+    def test_a_generic_dispatcher_operation_is_not_framework_specific(self):
+        root = repo({
+            "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',
+            "lib/app.js": ("const renderEnd = require('response-writer');\n"
+                           "function serve(req, res, callback) {\n"
+                           "  const done = callback || renderEnd(req, res);\n"
+                           "  request_dispatcher.dispatch(req, res, done);\n"
+                           "}\n"),
+        })
+        out, _ = origin(root, self.PROMPT)
+        self.assertIn("default request-handler dependency boundary", out)
+        self.assertIn("request_dispatcher.dispatch(req, res, done)", out)
+
     def test_comments_and_strings_cannot_supply_import_or_call_evidence(self):
         root = repo({
             "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',

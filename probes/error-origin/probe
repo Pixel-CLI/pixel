@@ -261,8 +261,17 @@ def _js_arguments(body, open_at):
 
 
 def _js_call_uses(body, result, request, response):
-    call = re.compile(r"\.\s*[A-Za-z_$][\w$]*\s*\(")
+    # A request/response pair can also be passed to telemetry or logging. Require
+    # both a router/dispatcher receiver and a handling/dispatch method before
+    # treating the callback as part of request completion.
+    call = re.compile(r"([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(")
+    routing_receivers = {"router", "route", "routes", "dispatcher", "dispatch"}
+    handling_methods = {"handle", "dispatch", "route", "complete", "finish", "next"}
     for match in call.finditer(body):
+        receiver_words = {part for word in re.findall(r"[A-Za-z_$][\w$]*", match.group(1).lower())
+                          for part in re.split(r"[_$]+", word) if part}
+        if not receiver_words & routing_receivers or match.group(2).lower() not in handling_methods:
+            continue
         args = _js_arguments(body, match.end() - 1)
         if len(args) < 3 or args[-1] != result:
             continue
@@ -349,10 +358,10 @@ def default_handler_boundary(root, prompt, paths, cache):
     fallback_line = source.count("\n", 0, fallback_at) + 1
     use_line = source.count("\n", 0, use_at) + 1
     out = ["### default request-handler dependency boundary — optional callback falls back to an imported dependency; "
-           "the handler receives request/response and is passed to router completion; external response text is not present or verified"]
+           "the handler receives request/response and is passed to a router/dispatcher operation; external response text is not present or verified"]
     out += show(rel, source_lines, import_line, import_line, "imported dependency binding")
     out += show(rel, source_lines, fallback_line - 1, fallback_line, "optional callback fallback")
-    out += show(rel, source_lines, use_line, use_line, "passes the selected handler into request completion")
+    out += show(rel, source_lines, use_line, use_line, "passes the selected handler to a router/dispatcher operation")
     out.append(f"### {manifest_rel}:{manifest_line}-{manifest_line} — declared non-development dependency: {dependency}")
     out.append(f"{manifest_line}| {manifest_lines[manifest_line - 1][:MAX_DIAGNOSTIC_LINE_CHARS]}")
     return out
