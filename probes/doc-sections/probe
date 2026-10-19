@@ -56,11 +56,11 @@ def sections(lines, path=""):
 def source_question(req):
     """A source-navigation intent vetoes docs; weak kinds can still ask about code."""
     kind = req.get("kind")
-    if kind in ("lookup", "tests", "impact"):
+    if kind in ("lookup", "tests", "impact", None):
         return True
     if kind in ("overview", "config"):
         return False
-    return bool(re.search(r"\b(?:constants?|formula|callers?|callees?)\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b",
+    return bool(re.search(r"\b(?:constants?|callers?|callees?)\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b",
                           req["prompt"], re.I))
 
 
@@ -78,7 +78,7 @@ def quoted_lines(brief):
 
 
 def novel_ranges(first, last, held):
-    """Maximal consecutive ranges not already quoted; headers never bridge a gap."""
+    """Consecutive ranges not already quoted; each excerpt stops before a held row."""
     ranges, start = [], None
     for n in range(first, last + 2):
         if n <= last and n not in held:

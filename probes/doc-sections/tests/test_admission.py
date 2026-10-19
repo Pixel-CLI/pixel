@@ -40,7 +40,7 @@ class Admission(unittest.TestCase):
                 self.assertEqual(output('where is the environment variable loading constant defined', kind=kind), '')
 
     def test_config_and_overview_keep_documentation_with_exact_source_rows(self):
-        for kind in ('config', 'overview', 'flow', 'bugfix', None):
+        for kind in ('config', 'overview', 'flow', 'bugfix'):
             with self.subTest(kind=kind):
                 text = output('how do environment variables configure loading', kind=kind)
                 self.assertEqual(headers(text), ['### docs/guide.md:1-6 — Environment variables (documentation section)'])
