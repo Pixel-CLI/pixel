@@ -59,8 +59,11 @@ TREE_DELTA_FLOORS = {"tree": "min_tree_files", "synthetic": "min_synthetic_files
 # Scorer statuses that mean a question was not measured. `partial` is measured:
 # `score_brief.py` gives it to a brief flagged `cut` or whose `elapsed_ms`
 # passed its `deadline_ms`, and the lane counts it against `max_partial`. The
-# `cut` flag alone undercounts: with a 400 ms window, 18 of 56 briefs were
-# `partial` and 2 carried `cut`.
+# two differ: `cut` is evidence the chain lost to the window, while a hook's
+# probes may run past the window by `PROBE_FLOOR` after a complete chain. With
+# a 400 ms window, 18 of 56 briefs were `partial`, 2 of them `cut`; the other
+# 16 ended in the probe stage with no probe timed out (#1251). The lane counts
+# both, since either is a brief slower than its window.
 UNMEASURED = ("timeout", "process_error", "malformed", "explicit_error")
 
 

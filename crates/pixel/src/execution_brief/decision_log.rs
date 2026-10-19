@@ -97,11 +97,17 @@ pub(crate) struct Record {
     pub(crate) pack_located: usize,
     /// The text search stood in for a graph that could not answer.
     pub(crate) fallback: bool,
+    /// From the prompt to the brief's text, probes included.
     pub(crate) elapsed_ms: u64,
-    /// The packet was cut short (its window ended, or the op cap refused an
-    /// operation): what was rendered is hedged as partial.
+    /// The packet was cut short (its window ended before the chain did, or
+    /// the op cap refused an operation): what was rendered is hedged as
+    /// partial. Not set when only the probes ran past the window: a hook
+    /// gives them `PROBE_FLOOR` after a complete chain, so `elapsed_ms` can
+    /// exceed `deadline_ms` with nothing lost. A probe its own deadline ended
+    /// is that probe's `timeout` in `probes`, not a cut.
     pub(crate) cut: bool,
-    /// The window the brief was given; `None` for a prompt that got none.
+    /// The window the brief was given, for the chain; `None` for a prompt
+    /// that got none.
     pub(crate) deadline_ms: Option<u64>,
     /// Where `elapsed_ms` went, stage by stage.
     pub(crate) stages: Stages,

@@ -10349,4 +10349,80 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_probe_the_floor_carries_past_the_window_should_not_make_the_brief_cut() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let plugin = root.join(".pixel/plugins/slow");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plugin.join("pixel-plugin.toml"),
+            "name = \"slow\"\nversion = \"0.1.0\"\napi = 1\ndescription = \"slow evidence\"\nrun = \"probe\"\ncapabilities = [\"brief-probe\"]\n[brief-probe]\nowner = \"test\"\nbudget_ms = 1000\nwhen_prompt = \"crate\"\n",
+        ).unwrap();
+        let program = plugin.join("probe");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ncat >/dev/null\nsleep 0.2\nprintf '### source.rs:1-1 — evidence\\n1| pub struct Library;\\n'\n",
+        ).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let window = Duration::from_millis(60);
+        let finish = |floor| {
+            // The chain is complete before the window ends.
+            let (send, done) = mpsc::channel();
+            send.send(()).unwrap();
+            let started = Instant::now();
+            Pending {
+                state: Arc::new(Mutex::new(Brief::default())),
+                done,
+                deadline: started + window,
+                started,
+                log: None,
+                central: None,
+                kicked: None,
+                task: "what does this crate expose".into(),
+                signal: Signal::Prose,
+                sent: None,
+                probes: Some(ProbeSetup {
+                    host: pixel_plugin::Host {
+                        home: root.clone(),
+                        repo_root: None,
+                        path: std::ffi::OsString::new(),
+                        github_base: None,
+                    },
+                    root: root.clone(),
+                    cap: 1_000,
+                    floor,
+                    max_bytes: None,
+                }),
+            }
+            .finish_with_record()
+        };
+        // A hook's floor keeps the probe running past the window: the brief
+        // ends late, but nothing was lost, so it is neither hedged nor cut.
+        let floored = finish(PROBE_FLOOR);
+        assert!(
+            floored
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("pub struct Library")),
+            "{:?}",
+            floored.text
+        );
+        assert_eq!(floored.record.probes[0].outcome, "ok");
+        assert_eq!(floored.record.deadline_ms, Some(60));
+        assert!(
+            floored.record.elapsed_ms > 60,
+            "{}",
+            floored.record.elapsed_ms
+        );
+        assert!(!floored.record.cut);
+        // Without the floor the window ends the probe: that loss is the
+        // probe's `timeout`, and the packet still was not cut.
+        let unfloored = finish(Duration::ZERO);
+        assert_eq!(unfloored.record.probes[0].outcome, "timeout");
+        assert!(!unfloored.record.cut);
+    }
 }
