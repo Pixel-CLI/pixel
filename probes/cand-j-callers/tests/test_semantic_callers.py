@@ -122,6 +122,17 @@ class SemanticCallerFallbacks(unittest.TestCase):
         self.assertIn("src/canvas.ts", out)
         self.assertIn("id: createId()", out)
 
+    def test_id_factory_follows_renamed_barrel_reexport(self):
+        out = run("Which modules call the element ID generator?", {
+            "src/random.ts": "export const randomId = () => Math.random();\n",
+            "src/index.ts": "export { randomId as makeId } from './random';\n",
+            "src/canvas.ts": "import { makeId } from './index';\n"
+                "export const createElement = () => ({ id: makeId() });\n",
+        })
+        self.assertIn("src/random.ts", out)
+        self.assertIn("src/canvas.ts", out)
+        self.assertIn("id: makeId()", out)
+
     def test_shadowed_import_is_not_counted_as_factory_call(self):
         out = run("Which modules call the element ID generator?", {
             "src/ids.ts": "export const makeElementId = () => nanoid();\n",

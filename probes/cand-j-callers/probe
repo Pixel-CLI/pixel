@@ -310,10 +310,8 @@ def module_exports_name(path, exported_name, factory_path, texts, factory_name, 
 
 
 def imported_local_names(path, lines, factory_name, factory_path, texts):
-    """Return aliases imported from a module that re-exports the unique factory."""
+    """Return local import names whose module export resolves to the unique factory."""
     source = '\n'.join(lines)
-    if factory_name not in source:
-        return set()
     code = javascript_code_mask(source)
     aliases, import_spans = set(), []
     for match in IMPORT_BLOCK.finditer(source):
@@ -327,8 +325,6 @@ def imported_local_names(path, lines, factory_name, factory_path, texts):
             names = re.split(r'\s+as\s+', entry)
             imported = names[0].strip()
             local = names[-1].strip()
-            if imported != factory_name:
-                continue
             if any(module_exports_name(target, imported, factory_path, texts, factory_name) for target in targets):
                 aliases.add(local)
     if not aliases:
@@ -546,9 +542,9 @@ def semantic_caller_blocks(prompt, texts, partial=False):
                     continue
                 caller_source = source_by_path[caller_path]
                 # Skip most tracked files before comment masking and import
-                # parsing. Direct calls, aliases, and namespace members all
-                # retain the exact exported name in source.
-                if not re.search(r'\b' + re.escape(name) + r'\b', caller_source):
+                # parsing. Imports may rename the export in a barrel, so keep
+                # those files eligible even when the factory name is absent.
+                if not re.search(r'\b' + re.escape(name) + r'\b', caller_source) and 'import' not in caller_source:
                     continue
                 scan_lines = (javascript_code_mask(caller_source).splitlines()
                               if Path(caller_path).suffix.lower() in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts')
