@@ -165,6 +165,30 @@ class SemanticCallerFallbacks(unittest.TestCase):
         self.assertNotIn("src/wrong-consumer.ts", out)
         self.assertNotIn("src/comment-decoy.ts", out)
 
+    def test_reexport_text_in_comment_or_string_does_not_bind_factory_call(self):
+        out = run("Which modules call the element ID generator?", {
+            "src/ids.ts": "export const makeElementId = () => nanoid();\n",
+            "src/barrel.ts": "const docs = \"export { makeElementId } from './ids';\";\n"
+                "// export { makeElementId } from './ids';\n",
+            "src/consumer.ts": "import { makeElementId } from './barrel';\n"
+                "export const createElement = () => ({ id: makeElementId() });\n",
+            "src/star-barrel.ts": "const docs = \"export * from './ids';\";\n",
+            "src/star-consumer.ts": "import { makeElementId } from './star-barrel';\n"
+                "export const createElement = () => ({ id: makeElementId() });\n",
+        })
+        self.assertNotIn("src/consumer.ts", out)
+        self.assertNotIn("src/star-consumer.ts", out)
+
+    def test_fake_factory_export_text_does_not_bind_factory_import(self):
+        out = run("Which modules call the element ID generator?", {
+            "src/ids.ts": "const makeElementId = () => nanoid();\n"
+                "const docs = \"export const makeElementId = () => fake(); "
+                "export { makeElementId };\";\n",
+            "src/consumer.ts": "import { makeElementId } from './ids';\n"
+                "export const createElement = () => ({ id: makeElementId() });\n",
+        })
+        self.assertNotIn("src/consumer.ts", out)
+
     def test_factory_local_export_alias_is_kept_by_prefilter(self):
         out = run("Which modules call the element ID generator?", {
             "src/random.ts": "const randomId = () => Math.random();\n"

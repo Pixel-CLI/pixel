@@ -290,9 +290,12 @@ def module_exports_name(path, exported_name, factory_path, texts, factory_name, 
         return result
     if path == factory_path:
         source = '\n'.join(texts.get(path, []))
+        code = javascript_code_mask(source)
         direct = exported_name == factory_name and re.search(
-            r'\bexport\s+(?:const|let|var|function|class)\s+' + re.escape(factory_name) + r'\b', source)
-        for match in re.finditer(r'\bexport\s*\{([^}]+)\}', source, re.S):
+            r'\bexport\s+(?:const|let|var|function|class)\s+' + re.escape(factory_name) + r'\b', code)
+        for match in re.finditer(r'\bexport\s*\{([^}]+)\}', code, re.S):
+            if re.match(r'\s*from\b', code[match.end():]):
+                continue
             for entry in match.group(1).split(','):
                 names = re.split(r'\s+as\s+', entry.strip())
                 local, public = names[0].strip(), names[-1].strip()
@@ -304,17 +307,24 @@ def module_exports_name(path, exported_name, factory_path, texts, factory_name, 
         return False
     seen.add(state)
     source = '\n'.join(texts[path])
-    for match in re.finditer(r'\bexport\s*\{([^}]+)\}\s*from\s*([\'\"])([^\'\"]+)\2', source, re.S):
+    code = javascript_code_mask(source)
+    for match in re.finditer(r'\bexport\s*\{([^}]+)\}\s*from\b', code, re.S):
+        specifier = re.match(r'\s*([\'\"])([^\'\"]+)\1', source[match.end():])
+        if not specifier:
+            continue
         for entry in match.group(1).split(','):
             parts = re.split(r'\s+as\s+', entry.strip())
             source_name = parts[0].strip()
             public_name = parts[-1].strip()
             if public_name == exported_name:
-                for target in resolve_module_import(path, match.group(3), texts):
+                for target in resolve_module_import(path, specifier.group(2), texts):
                     if module_exports_name(target, source_name, factory_path, texts, factory_name, seen, cache):
                         return True
-    for match in re.finditer(r'\bexport\s*\*\s*from\s*([\'\"])([^\'\"]+)\1', source):
-        for target in resolve_module_import(path, match.group(2), texts):
+    for match in re.finditer(r'\bexport\s*\*\s*from\b', code):
+        specifier = re.match(r'\s*([\'\"])([^\'\"]+)\1', source[match.end():])
+        if not specifier:
+            continue
+        for target in resolve_module_import(path, specifier.group(2), texts):
             if module_exports_name(target, exported_name, factory_path, texts, factory_name, seen, cache):
                 return True
     return False
