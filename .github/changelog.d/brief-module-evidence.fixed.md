@@ -1,0 +1,1 @@
+**brief:** Locate tracked source modules from compound prompt words, including ordinary plural forms, and quote their imports or references. Matching dependency questions can recover this bounded evidence when the main brief gate abstains.

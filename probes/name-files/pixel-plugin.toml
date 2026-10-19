@@ -8,5 +8,8 @@ capabilities = ["brief-probe"]
 [brief-probe]
 owner = "pixel"
 skip_kinds = ["overview", "review", "flow", "history"]
+when_kinds = ["config", "lookup", "tests", "impact", "diagnosis", "error-origin", "feature", "bugfix", "rationale", "other"]
+when_prompt = "(?i)\\b(parts?|functions?|modules?|files?|depend(?:s|ed|ing)?)\\b"
+when_gate_closed = true
 budget_ms = 1500
 mode = "lead"
