@@ -2,11 +2,9 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""doc-sections: the brief never carries documentation, and a session asked where a setting lives reads the README's
-configuration section first. Splits the git-tracked Markdown and reStructuredText files (README, docs/, top-level
-guides) into sections by heading (an underlined title in `.rst`), keeps the sections whose heading or first
-paragraph names at least two of the prompt's words, ranks them by how many, and shows the best two with up to 40
-lines either side of the heading's body. Read-only, deterministic (sorted by count, path, line). Issues #906, #1200."""
+"""Quote matching Markdown/reStructuredText sections for explanatory questions. Source navigation is left to code
+packs. Rank by prompt overlap, keep the top two sections, omit already quoted rows and mark excerpt truncation.
+Read-only and deterministic (score, path, line). Issues #906, #1200, #1234."""
 import json
 import math
 import re
@@ -20,7 +18,7 @@ STOP = {"what", "where", "which", "that", "this", "with", "from", "does", "the",
         "its", "are", "not", "you", "can", "any", "all", "but", "was", "has", "our", "your", "into", "than"}
 GENERIC = {"file", "files", "code", "line", "thing", "error", "work", "works", "time", "name", "value"}
 SKIP = re.compile(r"(^|/)(CHANGELOG|HISTORY|LICENSE|NOTICE|CODE_OF_CONDUCT|node_modules|vendor|website|bench)", re.I)
-MAX_FILES, MAX_BYTES, MIN_WORDS, SHOWN, WINDOW, BODY_LINES = 60, 400_000, 2, 2, 40, 80
+MAX_FILES, MAX_BYTES, MIN_WORDS, SHOWN, WINDOW, BODY_LINES, LINE_CHARS = 60, 400_000, 2, 2, 40, 80, 160
 
 
 def stem(word):
@@ -55,8 +53,47 @@ def sections(lines, path=""):
     return out
 
 
+def source_question(req):
+    """A source-navigation intent vetoes docs; weak kinds can still ask about code."""
+    kind = req.get("kind")
+    if kind in ("lookup", "tests", "impact", None):
+        return True
+    if kind in ("overview", "config"):
+        return False
+    return bool(re.search(r"\b(?:constants?|callers?|callees?)\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b",
+                          req["prompt"], re.I))
+
+
+def quoted_lines(brief):
+    """Numbered source rows already quoted, with their header's file and bounds."""
+    held, current = {}, None
+    for line in brief.splitlines():
+        if line.startswith("### "):
+            current = re.match(r"^### ([\w@+./-]+):(\d+)(?:-(\d+))?(?:[ —:]|$)", line)
+        elif current and (row := re.match(r"^(\d+)\|", line)):
+            n = int(row[1])
+            if int(current[2]) <= n <= int(current[3] or current[2]):
+                held.setdefault(current[1], set()).add(n)
+    return held
+
+
+def novel_ranges(first, last, held):
+    """Consecutive ranges not already quoted; each excerpt stops before a held row."""
+    ranges, start = [], None
+    for n in range(first, last + 2):
+        if n <= last and n not in held:
+            if start is None:
+                start = n
+        elif start is not None:
+            ranges.append((start, n - 1))
+            start = None
+    return ranges
+
+
 def main():
     req = json.load(sys.stdin)
+    if source_question(req):
+        return
     root, prompt = req["repo_root"], req["prompt"]
     want = words(prompt)
     if len(want) < MIN_WORDS:
@@ -90,18 +127,23 @@ def main():
             found.append((-round(score, 3), path, start, end, title))
     found.sort()
     shown = 0
-    held = []
+    held = quoted_lines(req.get("brief", ""))
     for _, path, start, end, title in found:
         if shown >= SHOWN:
             break
-        if any(p == path and not (end < s or start > e) for p, s, e in held):
-            continue
         lines = (Path(root) / path).read_text(errors="replace").splitlines()
         first = max(1, start - 0)
         last = min(len(lines), end, start + BODY_LINES + WINDOW)
-        held.append((path, first, last))
-        print(f"### {path}:{first}-{last} — {title} (documentation section)")
-        print("\n".join(f"{i}| {lines[i - 1][:160]}" for i in range(first, last + 1)))
+        ranges = novel_ranges(first, last, held.get(path, set()))
+        for lo, hi in ranges:
+            print(f"### {path}:{lo}-{hi} — {title} (documentation section)")
+            for i in range(lo, hi + 1):
+                line = lines[i - 1]
+                text = line if len(line) <= LINE_CHARS else line[:LINE_CHARS] + " … [truncated]"
+                print(f"{i}| {text}")
+            held.setdefault(path, set()).update(range(lo, hi + 1))
+        if ranges and last < end:
+            print(f"excerpt truncated: section continues after line {last} (ends at {end})")
         shown += 1
 
 

@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::extract::{
-    FileExtraction, RawMixin, extract_file, is_binstub_candidate, lang_of, lang_of_file,
+    FileExtraction, RawMixin, RawSymbol, extract_file, is_binstub_candidate, lang_of, lang_of_file,
 };
 use crate::imports::{resolve_import_in, ruby as ruby_projects};
 use crate::mvp_adapter::ruby_switch::{self, RubySource};
@@ -182,7 +182,11 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    `qualified_identifier` is its path, and a call through a field-less
 ///    `navigation_expression` names its member and receiver.
 /// 30: separate JavaScript assignment/declaration syntax facts, without new symbols or edges.
-pub const EXTRACTOR_VERSION: &str = "30";
+/// 31: a second definition with the same qualified name and kind in one file
+///    keeps its own row under `<uid>~2` ([`symbol_uids`]) instead of
+///    replacing the first, so no edge or unresolved call is left on a missing
+///    symbol id (#1217).
+pub const EXTRACTOR_VERSION: &str = "31";
 
 /// True iff the graph's rows were written by the current extractor, from
 /// the Rust and Ruby sources the switches ask for now
@@ -726,6 +730,30 @@ fn build_graph_with(
     })
 }
 
+/// The uid of each of `symbols`, extracted in this order from `rel`:
+/// `rel#qualified#kind`, then `~n` from the second definition of the same
+/// qualified name and kind on, the suffix pixel-mvp writes
+/// (`mvp_index::extract::uid`). Two same-named spec helpers in sibling
+/// `describe` blocks shared one uid, and the second insert replaced the
+/// first row (#1217). The count follows source order, never the line: an
+/// edit above both definitions leaves their uids unchanged.
+pub fn symbol_uids(rel: &str, symbols: &[RawSymbol]) -> Vec<String> {
+    let mut seen: HashMap<(&str, &str), u32> = HashMap::new();
+    symbols
+        .iter()
+        .map(|s| {
+            let kind = s.kind.as_str();
+            let repetition = seen.entry((s.qualified.as_str(), kind)).or_default();
+            *repetition += 1;
+            if *repetition == 1 {
+                format!("{rel}#{}#{kind}", s.qualified)
+            } else {
+                format!("{rel}#{}#{kind}~{repetition}", s.qualified)
+            }
+        })
+        .collect()
+}
+
 /// What [`store_batch`] leaves to its caller: the calls and references of
 /// every stored file, waiting for resolution, and the time each pass took.
 struct StoredBatch {
@@ -771,8 +799,7 @@ fn store_batch(
         // below slices every symbol's body out of the same lines.
         let body_str = String::from_utf8_lossy(&e.content);
         let all_lines: Vec<&str> = body_str.lines().collect();
-        for s in &e.fx.symbols {
-            let uid = format!("{}#{}#{}", e.rel, s.qualified, s.kind.as_str());
+        for (s, uid) in e.fx.symbols.iter().zip(symbol_uids(&e.rel, &e.fx.symbols)) {
             let id = store.insert_symbol(
                 file_id,
                 &uid,
