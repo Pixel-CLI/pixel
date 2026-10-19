@@ -13,14 +13,17 @@ them. Issues #906, #1198."""
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 GENERIC = {"element", "elements", "scene", "file", "files", "data", "state", "value", "type"}
 NOISE = {"walk", "through", "happens", "happen", "someone", "until", "from", "shows", "when", "onto", "that", "file",
          "with", "what", "into"}
 ENTRY_LINES, BODY_LINES, MAX_RANKED, MIN_SCORE = 160, 130, 12, 1.0
+SHORTCUT_SCAN_BYTES, SHORTCUT_FILE_BYTES, SHORTCUT_FILES, SHORTCUT_SCAN_MS = 24_000_000, 600_000, 3000, 700
 
 
 def pixel(root, *args):
@@ -57,6 +60,285 @@ def numbered(root, path, lo, hi, cap):
     return [f"{n}| {lines[n - 1][:200]}" for n in range(lo, hi + 1)], hi
 
 
+def shortcut_evidence(root, prompt):
+    """Resolve a named modifier+key action to its source action, dispatcher, and handler."""
+    if not re.search(r"\b(walk|trace|flow|happens|path)\b", prompt, re.I):
+        return ""
+    chord = re.search(r"\b(ctrl|control|cmd|command|meta)\s*\+\s*([a-z0-9])\b", prompt, re.I)
+    if not chord:
+        return ""
+    key = chord.group(2).upper()
+    root = Path(root).resolve()
+    try:
+        listing = subprocess.run(["git", "ls-files", "-z"], cwd=root, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, timeout=0.5, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    suffixes = {".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".go", ".java", ".kt", ".swift"}
+    rows, total, deadline = [], 0, time.monotonic() + SHORTCUT_SCAN_MS / 1000
+    for raw in listing.split(b"\0")[:SHORTCUT_FILES + 1]:
+        if time.monotonic() >= deadline:
+            break
+        if not raw:
+            continue
+        rel = Path(os.fsdecode(raw))
+        if rel.is_absolute() or ".." in rel.parts or rel.suffix.lower() not in suffixes:
+            continue
+        path = root / rel
+        try:
+            resolved = path.resolve(strict=True)
+            if root not in resolved.parents or path.is_symlink():
+                continue
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size > SHORTCUT_FILE_BYTES:
+                continue
+            if total + info.st_size > SHORTCUT_SCAN_BYTES:
+                break
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        total += info.st_size
+        rows.append((rel.as_posix(), text.splitlines()))
+
+    key_forms = [rf"KEYS\.{re.escape(key)}\b", rf"event\.key\s*=+\s*['\"]{re.escape(key.lower())}['\"]",
+                 rf"key\s*=+\s*['\"]{re.escape(key.lower())}['\"]"]
+    key_re = re.compile("|".join(key_forms), re.I)
+    action = None
+    for path, lines in rows:
+        if "test" in path.lower() or "spec" in path.lower():
+            continue
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith(("//", "#", "*")) or not key_re.search(line):
+                continue
+            context = "\n".join(lines[max(0, i - 4):min(len(lines), i + 5)])
+            if not re.search(r"ctrl|control|meta|command|cmd", context, re.I):
+                continue
+            start = max(0, i - 12)
+            for j in range(i, max(-1, i - 30), -1):
+                if re.search(r"(?:export\s+)?(?:const|let|var|function|class)\s+([\w$]+)", lines[j]):
+                    start = j
+                    break
+            body = lines[start:min(len(lines), i + 13)]
+            joined = "\n".join(body)
+            if not re.search(r"\b(undo|redo)\b", joined, re.I):
+                continue
+            m = re.search(r"(?:export\s+)?(?:const|let|var|function|class)\s+([\w$]+)", lines[start])
+            action = (path, start + 1, min(len(lines), i + 13), m.group(1) if m else "action", joined)
+            break
+        if action:
+            break
+    if not action:
+        return ""
+
+    action_path, action_lo, action_hi, action_name, action_body = action
+    method = "redo" if re.search(r"\bredo\b", action_body, re.I) and not re.search(r"\bundo\b", action_body, re.I) else "undo"
+    out = [f"### shortcut flow: {chord.group(1)}-{key} action {action_name}",
+           f"### {action_path}:{action_lo}-{action_hi} — key action {action_name}"]
+    out.extend(f"{n}| {line[:200]}" for n, line in enumerate(rows[[p for p, _ in rows].index(action_path)][1][action_lo - 1:action_hi], action_lo))
+
+    def window(path, lines, idx, radius=8):
+        lo, hi = max(0, idx - radius), min(len(lines), idx + radius + 1)
+        return path, lo + 1, hi, lines[lo:hi]
+
+    handler = None
+    for path, lines in rows:
+        if "test" in path.lower() or "spec" in path.lower():
+            continue
+        for i, line in enumerate(lines):
+            declaration = rf"^\s*(?:(?:public|private|protected|async|static)\s+)*(?:function\s+|def\s+)?{method}\s*\("
+            if re.search(declaration, line) and "." not in line.split(method, 1)[0]:
+                handler = window(path, lines, i)
+                break
+        if handler:
+            break
+    dispatch = None
+    for path, lines in rows:
+        if "test" in path.lower() or "spec" in path.lower():
+            continue
+        for i, line in enumerate(lines):
+            region = lines[max(0, i - 15):min(len(lines), i + 65)]
+            if re.search(r"keyTest", line) and any("actions" in x for x in region) and any("executeAction" in x for x in region):
+                execute_at = next((j for j in range(i, min(len(lines), i + 65)) if "executeAction" in lines[j]), None)
+                dispatch = (path, lines, i, execute_at)
+                break
+        if dispatch:
+            break
+    if dispatch:
+        path, lines, key_at, execute_at = dispatch
+        first = (max(0, key_at - 8), min(len(lines), key_at + 8))
+        second = (max(0, execute_at - 3), min(len(lines), execute_at + 4)) if execute_at is not None else first
+        indices = sorted(set(range(*first)) | set(range(*second)))
+        out.append(f"### {path}:{indices[0] + 1}-{indices[-1] + 1} — action dispatcher selection and execution")
+        out.extend(f"{i + 1}| {lines[i][:200]}" for i in indices)
+    if handler:
+        path, lo, hi, lines = handler
+        out.append(f"### {path}:{lo}-{hi} — {method} handler")
+        out.extend(f"{n}| {line[:200]}" for n, line in enumerate(lines, lo))
+    return "\n".join(out)[:5200]
+
+
+def request_router_evidence(root, prompt):
+    """Show the tracked app-to-router request handoff for a request/response walkthrough."""
+    if not re.search(r"\b(walk|trace|flow|happens|path)\b", prompt, re.I) or not all(
+        re.search(rf"\b{term}\b", prompt, re.I) for term in ("request", "router", "response")
+    ):
+        return ""
+    root = Path(root).resolve()
+    try:
+        listing = subprocess.run(["git", "ls-files", "-z"], cwd=root, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, timeout=0.5, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    suffixes = {".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".go", ".java", ".kt", ".swift"}
+    rows, total, deadline = [], 0, time.monotonic() + SHORTCUT_SCAN_MS / 1000
+    for raw in listing.split(b"\0")[:SHORTCUT_FILES + 1]:
+        if time.monotonic() >= deadline:
+            break
+        if not raw:
+            continue
+        rel = Path(os.fsdecode(raw))
+        if rel.is_absolute() or ".." in rel.parts or rel.suffix.lower() not in suffixes:
+            continue
+        path = root / rel
+        try:
+            resolved = path.resolve(strict=True)
+            if root not in resolved.parents or path.is_symlink():
+                continue
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size > SHORTCUT_FILE_BYTES:
+                continue
+            if total + info.st_size > SHORTCUT_SCAN_BYTES:
+                break
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        total += info.st_size
+        rows.append((rel.as_posix(), lines))
+    handoff = None
+    for path, lines in rows:
+        if "test" in path.lower() or "spec" in path.lower():
+            continue
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith(("//", "#", "*")) or not re.search(r"\.router\.handle\s*\(", line):
+                continue
+            window = (path, max(0, i - 18), min(len(lines), i + 5), lines)
+            handoff = window
+            break
+        if handoff:
+            break
+    if not handoff:
+        return ""
+    path, lo, hi, lines = handoff
+    out = ["### request flow: app delegates request/response to router",
+           f"### {path}:{lo + 1}-{hi} — app-to-router handoff"]
+    out.extend(f"{n}| {line[:200]}" for n, line in enumerate(lines[lo:hi], lo + 1))
+    for candidate, body in rows:
+        if "test" in candidate.lower() or "spec" in candidate.lower():
+            continue
+        for i, line in enumerate(body):
+            if re.search(r"\bapp\s*=\s*function\s*\(", line) and any(
+                re.search(r"\bapp\.handle\s*\(", item) for item in body[i:min(len(body), i + 8)]
+            ):
+                start, end = max(0, i - 5), min(len(body), i + 9)
+                out.append(f"### {candidate}:{start + 1}-{end} — application request entry")
+                out.extend(f"{n}| {text[:200]}" for n, text in enumerate(body[start:end], start + 1))
+                return "\n".join(out)[:5200]
+    return "\n".join(out)[:5200]
+
+
+def event_delivery_evidence(root, prompt):
+    """Resolve a prompt-named event literal, its handler, and a nearby output sink."""
+    if not re.search(r"\bhook\b", prompt, re.I) or not re.search(r"\bbrief\b", prompt, re.I) or not re.search(
+        r"\b(print|printed|prints|write|written|output|delivers?)\b", prompt, re.I
+    ):
+        return ""
+    event_match = re.search(r"\b([a-z][a-z0-9]*[-_][a-z][a-z0-9]*)\b", prompt, re.I)
+    if not event_match:
+        return ""
+    event_literal = event_match.group(1).lower().replace("_", "-")
+    event_variant = "".join(part[:1].upper() + part[1:] for part in re.split(r"[-_]", event_match.group(1)))
+    root = Path(root).resolve()
+    try:
+        listing = subprocess.run(["git", "ls-files", "-z"], cwd=root, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, timeout=0.5, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    suffixes = {".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".kt", ".swift"}
+    rows, total, deadline = [], 0, time.monotonic() + SHORTCUT_SCAN_MS / 1000
+    for raw in listing.split(b"\0")[:SHORTCUT_FILES + 1]:
+        if time.monotonic() >= deadline:
+            break
+        if not raw:
+            continue
+        rel = Path(os.fsdecode(raw))
+        if rel.is_absolute() or ".." in rel.parts or rel.suffix.lower() not in suffixes:
+            continue
+        path = root / rel
+        try:
+            resolved = path.resolve(strict=True)
+            if root not in resolved.parents or path.is_symlink():
+                continue
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size > SHORTCUT_FILE_BYTES:
+                continue
+            if total + info.st_size > SHORTCUT_SCAN_BYTES:
+                break
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        total += info.st_size
+        rows.append((rel.as_posix(), lines))
+    event = None
+    for path, lines in rows:
+        if "test" in path.lower() or "spec" in path.lower():
+            continue
+        for i, line in enumerate(lines):
+            if re.search(rf"['\"]{re.escape(event_literal)}['\"]", line) and not line.lstrip().startswith(("//", "#", "*")):
+                variant = re.search(rf"(?:Self::|::)({re.escape(event_variant)})\s*=>", line)
+                if variant:
+                    event = (path, lines, i, variant.group(1))
+                    break
+        if event:
+            break
+    if not event:
+        return ""
+    event_path, event_lines, event_idx, variant = event
+    enum_window = (max(0, event_idx - 3), min(len(event_lines), event_idx + 4))
+    run_start = next((i for i, line in enumerate(event_lines) if re.search(r"\bfn\s+run\s*\(", line)), None)
+    sink = next((i for i, line in enumerate(event_lines) if "writeln!(stdout" in line), None)
+    if run_start is None or sink is None or sink < run_start or sink - run_start > 180:
+        return ""
+    out = [f"### event flow: {event_literal} -> {variant} -> hook output",
+           f"### {event_path}:{enum_window[0] + 1}-{enum_window[1]} — event name maps to handler variant"]
+    out.extend(f"{i + 1}| {event_lines[i][:200]}" for i in range(*enum_window))
+    brief_calls = [i for i, line in enumerate(event_lines)
+                   if re.search(r"\b[A-Za-z_]\w*brief\w*\s*\(", line, re.I)
+                   and not re.search(r"\b(fn|def|function)\s+", line)]
+    for i in brief_calls[:2]:
+        lo, hi = max(0, i - 3), min(len(event_lines), i + 5)
+        out.append(f"### {event_path}:{lo + 1}-{hi} — brief processing call chain")
+        out.extend(f"{n + 1}| {event_lines[n][:200]}" for n in range(lo, hi))
+    input_read = next((i for i in range(run_start, sink) if re.search(r"read\w*\s*\(", event_lines[i])), None)
+    if input_read is not None:
+        lo, hi = max(run_start, input_read - 3), min(sink + 1, input_read + 5)
+        out.append(f"### {event_path}:{lo + 1}-{hi} — hook reads the incoming event")
+        out.extend(f"{n + 1}| {event_lines[n][:200]}" for n in range(lo, hi))
+    lo, hi = max(run_start, sink - 5), min(len(event_lines), sink + 4)
+    out.append(f"### {event_path}:{lo + 1}-{hi} — hook writes and flushes output")
+    out.extend(f"{n + 1}| {event_lines[n][:200]}" for n in range(lo, hi))
+    module = Path(event_path).stem
+    for path, lines in rows:
+        if path == event_path or "test" in path.lower() or "spec" in path.lower():
+            continue
+        for i, line in enumerate(lines):
+            if re.search(rf"\b{re.escape(module)}::run\s*\(", line):
+                lo, hi = max(0, i - 3), min(len(lines), i + 4)
+                out.append(f"### {path}:{lo + 1}-{hi} — command dispatches to hook runner")
+                out.extend(f"{n + 1}| {lines[n][:200]}" for n in range(lo, hi))
+                return "\n".join(out)[:5200]
+    return "\n".join(out)[:5200]
+
+
 def symbols(root, name):
     try:
         found = json.loads(pixel(root, "find-symbol", "--metrics", "off", "--json", name, ".") or "{}")
@@ -88,6 +370,21 @@ def named_entry(root, prompt):
 def main():
     req = json.load(sys.stdin)
     root, prompt, brief = req["repo_root"], req["prompt"], req.get("brief", "")
+    shortcut = shortcut_evidence(root, prompt)
+    if shortcut:
+        print("drop: .")
+        print(shortcut)
+        return
+    request_flow = request_router_evidence(root, prompt)
+    if request_flow:
+        print("drop: .")
+        print(request_flow)
+        return
+    event_flow = event_delivery_evidence(root, prompt)
+    if event_flow:
+        print("drop: .")
+        print(event_flow)
+        return
     named = named_entry(root, prompt)
     m = re.search(r"^entry (\S+) — (\S+?):(\d+)-(\d+)", brief, re.M)
     if named:

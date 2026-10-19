@@ -9,6 +9,7 @@ capabilities = ["brief-probe"]
 owner = "pixel"
 when_kinds = ["flow"]
 # A walkthrough the brief did not classify as flow (a "rationale" or unjudged prompt) still gets its chain.
-when_prompt = "(?i)\\bwalk (me )?through\\b"
+when_prompt = "(?i)(\\bwalk (me )?through\\b.*\\b(hook|prompt|router|request|press|key|event|response|code|function|method)\\b|\\b(hook|prompt|router|request|press|key|event|response|code|function|method)\\b.*\\bwalk (me )?through\\b)"
+when_gate_closed = true
 budget_ms = 1500
 mode = "lead"
