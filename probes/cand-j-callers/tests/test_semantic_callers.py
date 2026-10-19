@@ -166,6 +166,31 @@ class SemanticCallerFallbacks(unittest.TestCase):
         self.assertIn("this.get('Range')", out)
         self.assertNotIn("not a request header", out)
 
+    def test_getter_helper_is_followed_only_with_receiver_binding_proof(self):
+        out = run("Which parts of lib call req.get?", {
+            "lib/request.js": "req.get = function get(name) { return headers[name]; };\n"
+                "function defineGetter(obj, name, getter) {\n"
+                "  Object.defineProperty(obj, name, { configurable: true, get: getter });\n"
+                "}\n"
+                "defineGetter(req, 'protocol', function protocol() {\n"
+                "  return this.get('X-Forwarded-Proto');\n"
+                "});\n",
+        })
+        self.assertIn("this.get('X-Forwarded-Proto')", out)
+        self.assertIn("getter calls this.get on the proven receiver", out)
+
+    def test_getter_call_does_not_trust_comment_or_string_helper_definition(self):
+        out = run("Which parts of lib call req.get?", {
+            "lib/request.js": "req.get = function get(name) { return headers[name]; };\n"
+                "/* function defineGetter(obj, name, getter) { "
+                "Object.defineProperty(obj, name, { get: getter }); } */\n"
+                "const note = \"function defineGetter(obj, name, getter) {\";\n"
+                "defineGetter(req, 'protocol', function protocol() {\n"
+                "  return this.get('X-Forwarded-Proto');\n"
+                "});\n",
+        })
+        self.assertNotIn("X-Forwarded-Proto", out)
+
     def test_graph_resolved_symbol_does_not_emit_semantic_fallback_blocks(self):
         pixel = '''#!/usr/bin/env python3
 import json

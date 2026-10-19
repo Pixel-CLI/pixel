@@ -442,8 +442,10 @@ def proven_getter_functions(source, receiver, queried_method):
     for helper, _obj, _name, _getter in helpers:
         call = re.compile(r'\b' + re.escape(helper) + r'\s*\(\s*' + re.escape(receiver) +
                           r'\s*,\s*([\'\"])([A-Za-z_$][\w$]*)\1\s*,\s*function\b')
-        for match in call.finditer(mask):
-            if not top_level(mask, match.start()) or match.group(2) == queried_method:
+        for match in call.finditer(source):
+            code_call = re.match(r'\b' + re.escape(helper) + r'\s*\(\s*' + re.escape(receiver) + r'\s*,\s*',
+                                 mask[match.start():])
+            if not code_call or not top_level(mask, match.start()) or match.group(2) == queried_method:
                 continue
             opening = mask.find('{', match.end())
             closing = braces.get(opening)
