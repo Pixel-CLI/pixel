@@ -152,6 +152,8 @@ fn resolve_success_rate(svc: &mut Service, qrels: &[(&'static str, Vec<String>)]
         let resp = svc.handle(Op::Resolve {
             phrase: q.to_string(),
             limit: Some(10),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "resolve query {q:?} failed: {resp:?}");
         let order = file_order_from_response(&resp);
@@ -217,6 +219,8 @@ fn run_ndcg(
                 scope: scope.map(str::to_string),
                 globs: Vec::new(),
                 types: Vec::new(),
+
+                stale_ok: false,
             });
             assert!(
                 resp.ok,
@@ -389,6 +393,8 @@ fn bench(c: &mut Criterion) {
         scope: Some("code".to_string()),
         globs: Vec::new(),
         types: Vec::new(),
+
+        stale_ok: false,
     });
 
     let ranked = run_ndcg(&mut svc, &suite, Some("code"), 10);

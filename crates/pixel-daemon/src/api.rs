@@ -786,9 +786,11 @@ impl Service {
             // Ranks from the resident vectors the writable service builds;
             // a replica never builds, embeds a chunk or reads a file. The
             // generation is the one held above, not a second lock.
-            Some(Request::Meaning { query, limit }) => {
-                self.meaning.answer(state.generation, &query, limit)
-            }
+            Some(Request::Meaning {
+                query,
+                limit,
+                stale_ok: _,
+            }) => self.meaning.answer(state.generation, &query, limit),
             Some(req) => self.dispatch(req),
             None => Err(format!("unsupported evidence query kind: {kind}")),
         };
@@ -1546,6 +1548,7 @@ impl Service {
                 scope,
                 globs,
                 types,
+                stale_ok: _,
             } => pixel_index::path_filter::PathFilter::new(&globs, &types).and_then(|filter| {
                 self.op_search(
                     &pattern,
@@ -1565,7 +1568,7 @@ impl Service {
                 relevance_only,
                 stale_ok: _,
             } => self.op_targets_facts(&task, limit, relevance_only),
-            Request::Meaning { query, limit } => self.op_meaning(&query, limit),
+            Request::Meaning { query, limit, stale_ok: _ } => self.op_meaning(&query, limit),
             Request::Symbol { name, stale_ok: _ } => self.op_symbol(&name),
             Request::Skeleton { file, .. } => self.op_skeleton(&file),
             Request::Context { uid, budget_tokens, .. } => self.op_context(&uid, budget_tokens),
@@ -1593,7 +1596,7 @@ impl Service {
             Request::Graph { if_stale } => self.op_graph(if_stale),
             Request::Status {} => self.op_status(),
             Request::Reindex {} => self.op_reindex(),
-            Request::Resolve { phrase, limit } => self.op_resolve(&phrase, limit),
+            Request::Resolve { phrase, limit, stale_ok: _ } => self.op_resolve(&phrase, limit),
             Request::History { query, facet, limit, read_only } => {
                 self.op_history(&query, facet.as_deref(), limit, read_only)
             }
@@ -6682,6 +6685,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         }
     }
 
@@ -6867,6 +6872,8 @@ mod tests {
         let resolve = Request::Resolve {
             phrase: "login_v2".into(),
             limit: Some(5),
+
+            stale_ok: false,
         };
         let symbol = reader
             .read_answer(&resolve, &|| None)
@@ -6978,7 +6985,7 @@ mod tests {
     fn stale_brief_read(op: &str) {
         let mut held = HeldBatch::start(&format!("stale-brief-{op}"));
         let mut value = json!({"op": op, "stale_ok": true,
-            "file": "login.rs", "uid": "login", "uid_or_name": "login",
+            "pattern": "login", "phrase": "login", "query": "login", "file": "login.rs", "uid": "login", "uid_or_name": "login",
             "direction": "upstream", "role": "callers", "depth": 1,
             "from": "go", "to": "login"});
         let request: Request = serde_json::from_value(value.clone()).unwrap();
@@ -6999,6 +7006,18 @@ mod tests {
         );
         let data = response.data();
         match op {
+            "search" => assert!(
+                data["matches"].as_array().unwrap().iter().any(|r| r["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("pub fn login_v2()")),
+                "{data}"
+            ),
+            "resolve" => assert!(data.to_string().contains("login.rs"), "{data}"),
+            "meaning" => assert_eq!(
+                data["status"], "unavailable",
+                "cold replica must not build embeddings"
+            ),
             "skeleton" => assert_eq!(data["symbols"][0]["name"], "login"),
             "context" => {
                 assert_eq!(data["text"], "", "changed source must not be quoted");
@@ -7069,6 +7088,21 @@ mod tests {
     #[test]
     fn stale_brief_evaluate_should_answer_the_published_generation() {
         stale_brief_read("evaluate");
+    }
+
+    #[test]
+    fn stale_brief_search_should_answer_the_published_generation() {
+        stale_brief_read("search");
+    }
+
+    #[test]
+    fn stale_brief_resolve_should_answer_the_published_generation() {
+        stale_brief_read("resolve");
+    }
+
+    #[test]
+    fn stale_brief_meaning_should_answer_the_published_generation() {
+        stale_brief_read("meaning");
     }
 
     fn relevance_request(stale_ok: bool) -> Request {
@@ -8432,6 +8466,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "search: {resp:?}");
         let matches = resp
@@ -8461,6 +8497,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok);
         let matches = resp
@@ -8486,6 +8524,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok);
         let second_page = resp
@@ -8542,6 +8582,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(unranked.ok, "unranked: {:?}", unranked.error);
         assert_eq!(
@@ -8574,6 +8616,8 @@ mod tests {
             scope: Some("code".into()),
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(ranked.ok, "ranked: {:?}", ranked.error);
         assert_eq!(
@@ -8930,6 +8974,8 @@ mod tests {
             scope: Some("code".into()),
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "ranked search: {:?}", resp.error);
         let matches = resp
@@ -8987,6 +9033,8 @@ mod tests {
                 scope: Some("code".into()),
                 globs: Vec::new(),
                 types: Vec::new(),
+
+                stale_ok: false,
             });
             assert!(resp.ok, "page at offset {o}: {:?}", resp.error);
             let matches = resp
@@ -9067,6 +9115,8 @@ mod tests {
                 scope: Some("code".into()),
                 globs: Vec::new(),
                 types: Vec::new(),
+
+                stale_ok: false,
             });
             assert!(resp.ok, "search: {:?}", resp.error);
             resp.data()
@@ -9131,6 +9181,8 @@ mod tests {
             scope: Some("banana".into()),
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(!resp.ok, "unknown scope must fail, not silently succeed");
         assert_eq!(
@@ -9147,6 +9199,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(
             unranked.ok,
@@ -9163,6 +9217,8 @@ mod tests {
             scope: Some("CODE".into()),
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(
             upper.ok,
@@ -9851,6 +9907,8 @@ mod tests {
             scope: Some("code".into()),
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "ranked search: {:?}", resp.error);
         let matches = resp
@@ -9919,6 +9977,8 @@ mod tests {
                     scope: None,
                     globs: Vec::new(),
                     types: Vec::new(),
+
+                    stale_ok: false,
                 },
             ),
             (
@@ -9926,6 +9986,8 @@ mod tests {
                 Request::Resolve {
                     phrase: "alpha".into(),
                     limit: Some(5),
+
+                    stale_ok: false,
                 },
             ),
             (
@@ -9952,6 +10014,8 @@ mod tests {
                 Request::Meaning {
                     query: "alpha beta".into(),
                     limit: Some(5),
+
+                    stale_ok: false,
                 },
             ),
             (
@@ -10520,6 +10584,8 @@ mod tests {
         let resp = svc.handle(Request::Resolve {
             phrase: "uniqueTargetFn".into(),
             limit: Some(5),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "resolve: {:?}", resp.error);
         let data = resp.data();
@@ -11658,6 +11724,8 @@ mod tests {
                 scope: None,
                 globs: globs.iter().map(ToString::to_string).collect(),
                 types: types.iter().map(ToString::to_string).collect(),
+
+                stale_ok: false,
             })
         };
         let paths = |resp: &Response| -> Vec<String> {
@@ -11709,6 +11777,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "search: {resp:?}");
         let data = resp.data();
@@ -11741,6 +11811,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert_eq!(
             resp.data()["cap_hits"],

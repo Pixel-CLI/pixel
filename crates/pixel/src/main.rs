@@ -1435,6 +1435,8 @@ fn kick_meaning(root: &Path) {
             &Request::Meaning {
                 query: MEANING_WARM_QUERY.to_string(),
                 limit: Some(1),
+
+                stale_ok: false,
             },
         )
     });
@@ -2998,6 +3000,8 @@ fn run_task_aware_search_fallback(
         Request::Resolve {
             phrase: phrase.to_string(),
             limit,
+
+            stale_ok: false,
         },
         no_daemon,
     )?;
@@ -3082,6 +3086,8 @@ fn run_search_one(
             scope,
             globs: globs.to_vec(),
             types: types.to_vec(),
+
+            stale_ok: false,
         },
         no_daemon,
     )?;
@@ -5370,7 +5376,15 @@ fn run_command(
                     Ok(())
                 };
             }
-            let mut data = execute(&path, Request::Resolve { phrase, limit }, false)?;
+            let mut data = execute(
+                &path,
+                Request::Resolve {
+                    phrase,
+                    limit,
+                    stale_ok: false,
+                },
+                false,
+            )?;
             if let Ok(root) = discover_root(&path) {
                 enrich_resolve_matches_with_context(&mut data, &root);
             }
@@ -5834,6 +5848,8 @@ fn run_query(
                 Request::Resolve {
                     phrase: phrase.into(),
                     limit: None,
+
+                    stale_ok: false,
                 },
                 no_daemon,
             )?
@@ -5932,6 +5948,8 @@ fn run_locate(
         Request::Resolve {
             phrase: phrase.clone(),
             limit: None,
+
+            stale_ok: false,
         },
         no_daemon,
     )?;

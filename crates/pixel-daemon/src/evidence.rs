@@ -1063,6 +1063,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(
             found.data().to_string().contains("b.rs"),

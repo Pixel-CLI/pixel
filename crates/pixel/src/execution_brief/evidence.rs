@@ -414,6 +414,8 @@ impl Evidence for Live {
                     scope: None,
                     globs: Vec::new(),
                     types: Vec::new(),
+
+                    stale_ok: false,
                 };
                 Ok(search_rows(&self.ask(&request, deadline)?))
             }
@@ -431,6 +433,8 @@ impl Evidence for Live {
                 let request = Request::Resolve {
                     phrase: phrase.to_string(),
                     limit: Some(CONCEPT_ROWS),
+
+                    stale_ok: false,
                 };
                 Ok(resolve_rows(&self.ask(&request, deadline)?))
             }
@@ -627,6 +631,8 @@ impl Evidence for Live {
                     &Request::Meaning {
                         query: query.to_string(),
                         limit: Some(limit),
+
+                        stale_ok: false,
                     },
                     deadline,
                 )?;

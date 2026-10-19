@@ -25,6 +25,9 @@ pub enum Op {
         params: Value,
     },
     Search {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         pattern: String,
         #[serde(default)]
         json: bool,
@@ -93,6 +96,9 @@ pub enum Op {
     /// (a background build is started), so a deadline-bounded caller falls
     /// back. Never downloads the model.
     Meaning {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         query: String,
         /// Leads returned; the daemon's default when absent, capped.
         #[serde(default)]
@@ -190,6 +196,9 @@ pub enum Op {
     /// word intersection → T3 trigram), each tier short-circuiting, with
     /// explicit confidence.
     Resolve {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         phrase: String,
         #[serde(default)]
         limit: Option<usize>,
@@ -465,7 +474,10 @@ impl Op {
     /// it and answers after the batch, as for any request.
     pub fn stale_ok(&self) -> bool {
         match self {
-            Op::TargetsFacts { stale_ok, .. }
+            Op::Search { stale_ok, .. }
+            | Op::Resolve { stale_ok, .. }
+            | Op::Meaning { stale_ok, .. }
+            | Op::TargetsFacts { stale_ok, .. }
             | Op::Symbol { stale_ok, .. }
             | Op::Skeleton { stale_ok, .. }
             | Op::Context { stale_ok, .. }
@@ -622,6 +634,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(
@@ -691,6 +705,8 @@ mod tests {
         let op = Op::Meaning {
             query: "how is the index refreshed".into(),
             limit: Some(5),
+
+            stale_ok: false,
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(
@@ -706,6 +722,8 @@ mod tests {
             Op::Meaning {
                 query: "refresh".into(),
                 limit: None,
+
+                stale_ok: false,
             }
         );
     }
@@ -745,8 +763,11 @@ mod tests {
     /// and only operations a replica serves stale report it.
     #[test]
     fn brief_graph_stale_ok_should_roundtrip_and_default_to_false() {
-        for op in ["skeleton", "context", "uses", "impact", "trace", "evaluate"] {
-            let mut value = serde_json::json!({"op": op, "file": "a.rs", "uid": "a",
+        for op in [
+            "search", "resolve", "meaning", "skeleton", "context", "uses", "impact", "trace",
+            "evaluate",
+        ] {
+            let mut value = serde_json::json!({"op": op, "pattern": "a", "phrase": "a", "query": "a", "file": "a.rs", "uid": "a",
                 "uid_or_name": "a", "direction": "upstream", "role": "callers",
                 "from": "a", "to": "b"});
             let ordinary: Op = serde_json::from_value(value.clone()).unwrap();
@@ -935,6 +956,8 @@ mod tests {
         let op = Op::Resolve {
             phrase: "the form".into(),
             limit: Some(5),
+
+            stale_ok: false,
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(value["op"], "resolve");
@@ -1026,6 +1049,8 @@ mod tests {
                     scope: None,
                     globs: Vec::new(),
                     types: Vec::new(),
+
+                    stale_ok: false,
                 },
                 "search",
             ),
@@ -1052,6 +1077,8 @@ mod tests {
                 Op::Meaning {
                     query: "".into(),
                     limit: None,
+
+                    stale_ok: false,
                 },
                 "meaning",
             ),
@@ -1124,6 +1151,8 @@ mod tests {
                 Op::Resolve {
                     phrase: "".into(),
                     limit: None,
+
+                    stale_ok: false,
                 },
                 "resolve",
             ),

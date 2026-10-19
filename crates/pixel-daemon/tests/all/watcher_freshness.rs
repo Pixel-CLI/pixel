@@ -333,6 +333,8 @@ fn search(pattern: &str) -> Request {
         scope: None,
         globs: Vec::new(),
         types: Vec::new(),
+
+        stale_ok: false,
     }
 }
 

@@ -258,6 +258,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         }
     }
 
@@ -320,7 +322,8 @@ mod tests {
                 .offer(
                     Request::Resolve {
                         phrase: "p".into(),
-                        limit: None
+                        limit: None,
+                        stale_ok: false,
                     },
                     reply
                 )
@@ -475,8 +478,11 @@ mod tests {
     fn brief_graph_reads_should_overtake_a_batch_only_with_stale_ok() {
         let busy = Busy::default();
         busy.queued(true);
-        for op in ["skeleton", "context", "uses", "impact", "trace", "evaluate"] {
-            let mut value = serde_json::json!({"op": op, "file": "a.rs", "uid": "a",
+        for op in [
+            "search", "resolve", "meaning", "skeleton", "context", "uses", "impact", "trace",
+            "evaluate",
+        ] {
+            let mut value = serde_json::json!({"op": op, "pattern": "a", "phrase": "a", "query": "a", "file": "a.rs", "uid": "a",
                 "uid_or_name": "a", "direction": "upstream", "role": "callers",
                 "from": "a", "to": "b"});
             let ordinary = serde_json::from_value(value.clone()).unwrap();

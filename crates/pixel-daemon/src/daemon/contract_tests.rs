@@ -352,6 +352,8 @@ fn search_hits(service: &mut Service, pattern: &str) -> Vec<String> {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         },
     );
     let value = serde_json::to_value(&resp).unwrap();

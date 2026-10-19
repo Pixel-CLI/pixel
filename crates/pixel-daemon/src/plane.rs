@@ -121,10 +121,14 @@ pub(crate) fn evidence_request(kind: &str, query: &str, limit: usize) -> Option<
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         },
         "resolve" => Request::Resolve {
             phrase: text,
             limit: Some(limit),
+
+            stale_ok: false,
         },
         "impact" => Request::Impact {
             uid_or_name: text,
@@ -136,6 +140,8 @@ pub(crate) fn evidence_request(kind: &str, query: &str, limit: usize) -> Option<
         "meaning" => Request::Meaning {
             query: text,
             limit: Some(limit),
+
+            stale_ok: false,
         },
         "reindex" => Request::Reindex {},
         _ => return None,

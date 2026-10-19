@@ -1124,6 +1124,8 @@ fn meaning_request(limit: Option<usize>) -> Request {
     Request::Meaning {
         query: MEANING_QUERY.into(),
         limit,
+
+        stale_ok: false,
     }
 }
 
@@ -1236,6 +1238,8 @@ fn meaning_should_refuse_a_blank_question_as_invalid_input() {
         Request::Meaning {
             query: "  ".into(),
             limit: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(code, "INVALID_INPUT");
@@ -1633,6 +1637,8 @@ fn resolve_should_count_no_fan_in_and_targets_should() {
     let resolved = service.handle(Request::Resolve {
         phrase: "login".into(),
         limit: Some(4),
+
+        stale_ok: false,
     });
     assert!(resolved.ok, "{resolved:?}");
     assert_eq!(service.fan_in_queries, 0);

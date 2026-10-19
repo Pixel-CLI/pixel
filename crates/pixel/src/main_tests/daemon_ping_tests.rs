@@ -434,6 +434,8 @@ fn kick_meaning_asks_the_daemon_one_meaning_question() {
         vec![Request::Meaning {
             query: MEANING_WARM_QUERY.to_string(),
             limit: Some(1),
+
+            stale_ok: false,
         }]
     );
     let _ = std::fs::remove_file(daemon::socket_path(&root));
