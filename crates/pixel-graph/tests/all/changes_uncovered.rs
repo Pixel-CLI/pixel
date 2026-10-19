@@ -182,6 +182,48 @@ fn deleting_a_function_leaves_it_unanchored_under_its_old_uid() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Deleting the second of two same-named spec helpers (#1217) reports it
+/// under the uid the build gave it (`~2`): looked up as the bare
+/// `…#helper#function`, it would find the surviving first helper and the
+/// deletion would go unreported.
+#[test]
+fn deleting_the_second_same_named_definition_leaves_it_unanchored() {
+    let source = [
+        "RSpec.describe \"a\" do",
+        "  describe \"one\" do",
+        "    def helper",
+        "      1",
+        "    end",
+        "  end",
+        "  describe \"two\" do",
+        "    def helper",
+        "      2",
+        "    end",
+        "  end",
+        "end",
+        "",
+    ]
+    .join("\n");
+    let root = tmpdir("same-named");
+    std::fs::create_dir_all(root.join("spec")).unwrap();
+    std::fs::write(root.join("spec/a_spec.rb"), &source).unwrap();
+    std::fs::write(root.join(".gitignore"), "graph.db*\n").unwrap();
+    git(&root, &["init", "-q"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "baseline"]);
+    let edited = source.replace("    def helper\n      2\n    end\n", "");
+    std::fs::write(root.join("spec/a_spec.rb"), edited).unwrap();
+
+    let r = report(&root, Some("HEAD"));
+    let lost: Vec<(&str, [u32; 2])> = r
+        .unanchored
+        .iter()
+        .map(|u| (u.uid.as_str(), u.old_lines))
+        .collect();
+    assert_eq!(lost, vec![("spec/a_spec.rb#helper#function~2", [8, 10])]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn deleting_a_file_unanchors_its_symbols_even_when_the_graph_still_holds_them() {
     let root = repo("deleted-file");

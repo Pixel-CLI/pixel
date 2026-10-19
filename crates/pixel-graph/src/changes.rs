@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::build::{Indexability, graph_file_cap, indexability};
+use crate::build::{Indexability, graph_file_cap, indexability, symbol_uids};
 use crate::concept::is_test_path;
 use crate::extract::{extract_file, lang_of};
 use crate::impact::{file_path_by_id, processes_for_symbol, symbol_by_id};
@@ -549,13 +549,17 @@ fn scan_uncovered(
             unexamined(&mut changes, motif);
             continue;
         };
+        // Numbered over the whole old file, as the build numbers a second
+        // same-named definition, so the uid looked up is the one it wrote.
+        let uids = symbol_uids(&fd.old_path, &extraction.symbols);
         for &(start, end) in &fd.old_ranges {
             // Same overlap rule the new side uses, so a range touching a
             // symbol's first or last line anchors on it either way.
-            let hits: Vec<&crate::extract::RawSymbol> = extraction
+            let hits: Vec<(&crate::extract::RawSymbol, &String)> = extraction
                 .symbols
                 .iter()
-                .filter(|s| overlaps(&[(s.start_line, s.end_line)], start, end))
+                .zip(&uids)
+                .filter(|(s, _)| overlaps(&[(s.start_line, s.end_line)], start, end))
                 .collect();
             if hits.is_empty() {
                 changes.push(UncoveredChange {
@@ -566,15 +570,14 @@ fn scan_uncovered(
                 });
                 continue;
             }
-            for sym in hits {
-                let uid = format!("{}#{}#{}", fd.old_path, sym.qualified, sym.kind.as_str());
+            for (sym, uid) in hits {
                 // A deleted file's symbols are unanchored whatever the graph
                 // still holds: a graph built before the deletion answers for
                 // a file that is gone.
-                let gone = fd.status == FileStatus::Deleted || store.symbol_by_uid(&uid)?.is_none();
+                let gone = fd.status == FileStatus::Deleted || store.symbol_by_uid(uid)?.is_none();
                 if gone && seen_uids.insert(uid.clone()) {
                     unanchored.push(UnanchoredSymbol {
-                        uid,
+                        uid: uid.clone(),
                         name: sym.name.clone(),
                         path: fd.old_path.clone(),
                         old_lines: [sym.start_line, sym.end_line],
