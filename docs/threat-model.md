@@ -329,6 +329,9 @@ version, sha256 check).
 
 Pull requests run `ci.yml`, `cross-build.yml`, `codeql.yml`,
 `fuzz.yml` and the others listed in ARCHITECTURE.md, "Testing and gates".
+The `ci.yml` pull-request path filter excludes most documentation but includes
+`docs/bench/**`, so benchmark-report changes still receive the required CI
+status checks through the existing `pull_request` workflow and permissions.
 `board-sync.yml` runs on `pull_request_target` to move the project board.
 `mutants.yml` runs the cumulative main diff nightly, with read-only contents
 and Actions metadata access. It accepts checkpoint metadata only from its

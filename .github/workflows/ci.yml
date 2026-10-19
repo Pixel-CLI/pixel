@@ -15,7 +15,7 @@ on:
     # run; the Hugo site under website/ has its own workflow, pages.yml
     # (which stays in: scripts/ci/verify-action-pins.py reads every workflow).
     # Later patterns win: the negations drop the docs first, then the
-    # re-includes put back what the suite actually reads:
+    # re-includes put back what the suite actually reads or must validate:
     #   - crates/**: the bundled agent prompts, checked by the install tests;
     #   - the files crates/pixel/tests/cli/docs_drift.rs reads: it asserts
     #     that every `pixel <command>` quoted there exists and that the rule
@@ -28,10 +28,11 @@ on:
     #   - .agents/skills/pixel-retro/: lead_time.py and its contract test;
     #   - .agents/skills/ultima-arena/: ultima_arena.py and its contract test.
     # Every other skill is excluded: no test reads it.
+    # docs/bench/** also runs CI so benchmark reports receive the required
+    # green-verdict status check even though they do not change Rust code.
     # Add a path here when a test starts reading one. Pushes to main stay
-    # unfiltered so every merge there keeps a complete run. No branch
-    # rule requires this check today; if one is added, the excluded paths
-    # need a twin workflow that reports success.
+    # unfiltered so every merge there keeps a complete run. Paths excluded
+    # here must not be required checks unless another workflow reports them.
     paths:
       - "**"
       - "!**.md"
@@ -51,6 +52,7 @@ on:
       - "CHANGELOG.md"
       - ".github/changelog.d/**"
       - "docs/manual-setup.md"
+      - "docs/bench/**"
       - "website/content/docs.md"
       - "website/content/benchmarks.md"
       # scripts/ci/check-claims.py: the registry and the docs it binds.

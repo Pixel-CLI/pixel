@@ -1565,6 +1565,8 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   through `CARGO_BIN_EXE_pixel` against a temp fixture repo.
 - CI (`.github/workflows/ci.yml`) classifies the diff first, so a job whose
   paths did not change skips its steps, then runs in parallel:
+  Its pull-request path filter also includes `docs/bench/**` so benchmark
+  reports receive the required status checks.
   - **Test + Format**: action-pin verification (`scripts/ci/verify-action-pins.py`),
     the SPDX header check (`scripts/ci/check-spdx.py`, on every diff),
     `cargo fmt --check`, `cargo nextest run --profile ci`
