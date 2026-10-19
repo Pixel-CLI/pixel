@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use pixel_git::BatchObject;
@@ -144,11 +144,46 @@ pub struct IndexSet {
     /// The walk policy's verdict between watcher batches, built by the
     /// first batch's full walk and rebuilt only when a batch touches an
     /// ignore-control file: a batch of one edit does not walk the tree.
-    admitted: Option<Admitted>,
+    /// Behind its own lock because [`IndexSet::stage_refresh`] updates it
+    /// while readers share the set; no query reads it.
+    admitted: Mutex<Option<Admitted>>,
     /// Full policy walks the watcher batches ran, for the tests that pin
     /// them to the first batch and the ignore-control edits.
     #[cfg(test)]
-    full_walks: usize,
+    full_walks: std::sync::atomic::AtomicUsize,
+}
+
+/// A watcher batch read from disk and judged, not yet visible to queries:
+/// what [`IndexSet::stage_refresh`] prepares and [`IndexSet::apply_refresh`]
+/// stores. One final change per path, in path order.
+pub struct StagedRefresh {
+    changes: BTreeMap<String, StagedChange>,
+}
+
+/// What a staged path becomes in the overlay.
+enum StagedChange {
+    /// Removed, or no longer admitted by the walk policy: tombstoned.
+    Excluded,
+    /// Admitted: tombstoned in base/delta, with the grams read from disk
+    /// (`None` for a file that turned out missing, binary or a link).
+    Indexed(Option<HashSet<u64>>),
+}
+
+impl StagedRefresh {
+    /// Each path of the batch (and, after an ignore-control edit, each path
+    /// whose admission changed) with its outcome, in path order.
+    pub fn outcomes(&self) -> Vec<(String, RefreshOutcome)> {
+        self.changes
+            .iter()
+            .map(|(path, change)| {
+                let outcome = match change {
+                    StagedChange::Excluded => RefreshOutcome::Excluded,
+                    StagedChange::Indexed(_) => RefreshOutcome::Indexed,
+                };
+                (path.clone(), outcome)
+            })
+            .collect()
+    }
 }
 
 /// Files the walk policy admits, and the directories that hold them, as of
@@ -771,9 +806,9 @@ impl IndexSet {
             overlay: Overlay::new(),
             head: head.clone(),
             covered: head.clone(),
-            admitted: None,
+            admitted: Mutex::new(None),
             #[cfg(test)]
-            full_walks: 0,
+            full_walks: std::sync::atomic::AtomicUsize::new(0),
             open_timings: OpenTimings {
                 base: base_source,
                 base_ms,
@@ -943,62 +978,83 @@ impl IndexSet {
     /// first batch and a batch that touches an ignore-control file walk the
     /// tree; any other batch decides admission path by path.
     pub fn refresh_files(&mut self, files: &[(&str, bool)]) -> Vec<(String, RefreshOutcome)> {
+        let staged = self.stage_refresh(files);
+        let outcomes = staged.outcomes();
+        self.apply_refresh(staged);
+        outcomes
+    }
+
+    /// The slow half of [`IndexSet::refresh_files`], on a shared borrow:
+    /// judge every path against the walk policy and read the admitted ones
+    /// from disk, leaving every query's answer as it was. Only the policy
+    /// cache moves. The batch must be applied before another one is staged:
+    /// the next batch is judged against the cache this one updated.
+    pub fn stage_refresh(&self, files: &[(&str, bool)]) -> StagedRefresh {
         let policy_changed = files.iter().any(|(path, _)| is_ignore_control_path(path));
-        let mut outcomes = BTreeMap::new();
+        let mut changes = BTreeMap::new();
+        let mut cache = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
         if !policy_changed {
-            let root = self.root.clone();
-            let admitted = self.admitted.get_or_insert_with(|| {
+            let admitted = cache.get_or_insert_with(|| {
                 #[cfg(test)]
-                {
-                    self.full_walks += 1;
-                }
-                Admitted::new(index::policy_file_paths(&root))
+                self.full_walks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Admitted::new(index::policy_file_paths(&self.root))
             });
             for &(path, removed) in files {
                 if removed {
                     admitted.files.remove(path);
                 }
-                if removed || !admitted.admits(&root, path) {
-                    self.overlay.remove_file(path);
-                    outcomes.insert(path.to_string(), RefreshOutcome::Excluded);
+                let change = if removed || !admitted.admits(&self.root, path) {
+                    StagedChange::Excluded
                 } else {
-                    self.overlay
-                        .refresh_file(&root, path, self.extractor.as_ref());
-                    outcomes.insert(path.to_string(), RefreshOutcome::Indexed);
-                }
+                    self.staged_read(path)
+                };
+                changes.insert(path.to_string(), change);
             }
-            return outcomes.into_iter().collect();
+            return StagedRefresh { changes };
         }
 
         #[cfg(test)]
-        {
-            self.full_walks += 1;
-        }
+        self.full_walks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let policy_files = index::policy_file_paths(&self.root);
         let admitted = index::indexable_subset(&self.root, &policy_files);
-        self.admitted = Some(Admitted::new(policy_files));
+        *cache = Some(Admitted::new(policy_files));
         let before: HashSet<String> = self.paths().into_iter().collect();
         for &(path, removed) in files {
-            if removed || !admitted.contains(path) {
-                self.overlay.remove_file(path);
-                outcomes.insert(path.to_string(), RefreshOutcome::Excluded);
+            let change = if removed || !admitted.contains(path) {
+                StagedChange::Excluded
             } else {
-                self.overlay
-                    .refresh_file(&self.root, path, self.extractor.as_ref());
-                outcomes.insert(path.to_string(), RefreshOutcome::Indexed);
-            }
+                self.staged_read(path)
+            };
+            changes.insert(path.to_string(), change);
         }
-
         for path in before.difference(&admitted) {
-            self.overlay.remove_file(path);
-            outcomes.insert(path.clone(), RefreshOutcome::Excluded);
+            changes.insert(path.clone(), StagedChange::Excluded);
         }
         for path in admitted.difference(&before) {
-            self.overlay
-                .refresh_file(&self.root, path, self.extractor.as_ref());
-            outcomes.insert(path.clone(), RefreshOutcome::Indexed);
+            if !changes.contains_key(path) {
+                changes.insert(path.clone(), self.staged_read(path));
+            }
         }
-        outcomes.into_iter().collect()
+        StagedRefresh { changes }
+    }
+
+    /// An admitted path's grams, read from the working tree.
+    fn staged_read(&self, path: &str) -> StagedChange {
+        StagedChange::Indexed(Overlay::extract(&self.root, path, self.extractor.as_ref()))
+    }
+
+    /// The fast half of [`IndexSet::refresh_files`]: store a staged batch in
+    /// the overlay. No disk read, so a caller holding readers off for it
+    /// holds them for an in-memory update only.
+    pub fn apply_refresh(&mut self, staged: StagedRefresh) {
+        for (path, change) in staged.changes {
+            match change {
+                StagedChange::Excluded => self.overlay.remove_file(&path),
+                StagedChange::Indexed(grams) => self.overlay.insert_extracted(&path, grams),
+            }
+        }
     }
 
     /// Tombstone a deleted file everywhere.
@@ -2690,6 +2746,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    impl IndexSet {
+        fn full_walks(&self) -> usize {
+            self.full_walks.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
     /// A git fixture with ignore rules at every level the walk policy
     /// reads: a root `.gitignore` naming a directory, a nested `.gitignore`,
     /// and `.git/info/exclude`.
@@ -2717,19 +2779,20 @@ mod tests {
 
         std::fs::write(dir.join("src/a.rs"), "fn alpha_edited() {}\n").unwrap();
         assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
-        assert_eq!(set.full_walks, 1, "the first batch builds the verdict");
+        assert_eq!(set.full_walks(), 1, "the first batch builds the verdict");
         std::fs::write(dir.join("src/c.rs"), "fn gamma_added() {}\n").unwrap();
         assert_eq!(set.refresh_file("src/c.rs"), RefreshOutcome::Indexed);
         std::fs::write(dir.join("src/a.rs"), "fn alpha_again() {}\n").unwrap();
         assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
-        assert_eq!(set.full_walks, 1, "an edit batch walked the whole tree");
+        assert_eq!(set.full_walks(), 1, "an edit batch walked the whole tree");
         assert_eq!(set.search("gamma_added", None).unwrap().0.len(), 1);
         assert_eq!(set.search("alpha_again", None).unwrap().0.len(), 1);
 
         std::fs::write(dir.join(".gitignore"), "logs/\nsrc/c.rs\n").unwrap();
         let outcomes = set.refresh_files(&[(".gitignore", false)]);
         assert_eq!(
-            set.full_walks, 2,
+            set.full_walks(),
+            2,
             "an ignore-control edit rebuilds the verdict"
         );
         assert!(
@@ -2739,7 +2802,7 @@ mod tests {
         assert!(set.search("gamma_added", None).unwrap().0.is_empty());
         std::fs::write(dir.join("src/c.rs"), "fn gamma_edited() {}\n").unwrap();
         assert_eq!(set.refresh_file("src/c.rs"), RefreshOutcome::Excluded);
-        assert_eq!(set.full_walks, 2);
+        assert_eq!(set.full_walks(), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2775,7 +2838,7 @@ mod tests {
                 "{path}: the full walk disagrees"
             );
         }
-        assert_eq!(set.full_walks, 1);
+        assert_eq!(set.full_walks(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2800,6 +2863,8 @@ mod tests {
         );
         assert!(
             !set.admitted
+                .lock()
+                .unwrap()
                 .as_ref()
                 .unwrap()
                 .files

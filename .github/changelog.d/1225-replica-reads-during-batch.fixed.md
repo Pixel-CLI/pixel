@@ -1,0 +1,1 @@
+**daemon:** a read replica keeps answering from the last published generation while a watcher batch reads and extracts the edited files; the batch takes the publication lock only to swap in the new index, commit the graph and bump the generation, instead of from its first line to its last.

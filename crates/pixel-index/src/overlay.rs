@@ -35,23 +35,39 @@ impl Overlay {
     /// tombstoned without an overlay gram set (they can never match). Symlinks
     /// are rejected so a tracked symlink can never expose out-of-repo content.
     pub fn refresh_file(&mut self, root: &Path, rel_path: &str, extractor: &dyn GramExtractor) {
+        self.insert_extracted(rel_path, Self::extract(root, rel_path, extractor));
+    }
+
+    /// The gram set [`Overlay::refresh_file`] would store for `rel_path`, read
+    /// without touching the overlay: `None` for a missing, binary or
+    /// symlinked file. The disk read and the extraction are the slow half of
+    /// a refresh, so a caller can do them while readers still use the overlay.
+    pub fn extract(
+        root: &Path,
+        rel_path: &str,
+        extractor: &dyn GramExtractor,
+    ) -> Option<HashSet<u64>> {
+        let content = read_regular_bounded(&root.join(rel_path), MAX_FILE_BYTES).ok()?;
+        // Binary sniff: NUL in the first 8KiB (same policy as the builder).
+        if content[..content.len().min(8192)].contains(&0) {
+            return None;
+        }
+        let mut hits = Vec::new();
+        extractor.grams(&content, &mut hits);
+        Some(hits.iter().map(|h| h.hash).collect())
+    }
+
+    /// Store what [`Overlay::extract`] read for `rel_path`: tombstone its
+    /// base/delta entries, and keep its grams unless there were none.
+    pub fn insert_extracted(&mut self, rel_path: &str, grams: Option<HashSet<u64>>) {
         if self.tombstones.len() >= MAX_TOMBSTONES {
             self.tombstones.clear();
         }
         self.tombstones.insert(rel_path.to_string());
-        let abs = root.join(rel_path);
-        let Ok(content) = read_regular_bounded(&abs, MAX_FILE_BYTES) else {
+        let Some(hashes) = grams else {
             self.files.remove(rel_path);
             return;
         };
-        // Binary sniff: NUL in the first 8KiB (same policy as the builder).
-        if content[..content.len().min(8192)].contains(&0) {
-            self.files.remove(rel_path);
-            return;
-        }
-        let mut hits = Vec::new();
-        extractor.grams(&content, &mut hits);
-        let hashes: HashSet<u64> = hits.iter().map(|h| h.hash).collect();
         if self.files.len() >= MAX_OVERLAY_FILES
             && !self.files.contains_key(rel_path)
             && let Some(old_key) = self.files.keys().next().cloned()

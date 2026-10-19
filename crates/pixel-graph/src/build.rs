@@ -1248,6 +1248,7 @@ pub fn apply_tree_delta(root: &Path, db_path: &Path, delta: &TreeDelta) -> Resul
             Ok(Some(delta.signature.clone()))
         },
         &mut || {},
+        &mut || {},
     )?;
     if let Some(rel) = drifted {
         return Err(std::io::Error::new(
@@ -1324,18 +1325,36 @@ pub fn update_files_cached(
     files: &[(&str, bool)],
     cache: &mut TreeHashCache,
 ) -> Result<Publication, BoxErr> {
-    update_files_probed(root, db_path, files, cache, &mut || {})
+    update_files_gated(root, db_path, files, cache, &mut || {})
 }
 
-/// [`update_files`] with a seam for tests: `probe` runs after the rows are
-/// written and before the tree walk that decides the signature, inside the
-/// open transaction. Production passes a no-op.
+/// [`update_files_cached`] that runs `before_commit` once the rows and the
+/// signature are written, right before the `COMMIT` that shows them to every
+/// other connection. A caller that publishes its own view of the update (the
+/// daemon's text index and generation) takes its readers' lock there, so its
+/// readers keep the previous state for the whole extraction and never see
+/// the new rows under the old generation. Not run when the update fails
+/// before that point: nothing was committed.
+pub fn update_files_gated(
+    root: &Path,
+    db_path: &Path,
+    files: &[(&str, bool)],
+    cache: &mut TreeHashCache,
+    before_commit: &mut dyn FnMut(),
+) -> Result<Publication, BoxErr> {
+    update_files_probed(root, db_path, files, cache, &mut || {}, before_commit)
+}
+
+/// [`update_files_gated`] with a seam for tests: `probe` runs after the rows
+/// are written and before the tree walk that decides the signature, inside
+/// the open transaction. Production passes a no-op.
 fn update_files_probed(
     root: &Path,
     db_path: &Path,
     files: &[(&str, bool)],
     cache: &mut TreeHashCache,
     probe: &mut dyn FnMut(),
+    before_commit: &mut dyn FnMut(),
 ) -> Result<Publication, BoxErr> {
     update_files_in_one_transaction(
         root,
@@ -1347,6 +1366,7 @@ fn update_files_probed(
             Ok(rows_match_tree(&known, &walk, batch).then(|| signature_of(&walk)))
         },
         probe,
+        before_commit,
     )
 }
 
@@ -1412,7 +1432,8 @@ fn final_actions<'a>(files: &[(&'a str, bool)]) -> Vec<(&'a str, bool)> {
 /// open the store, `BEGIN IMMEDIATE`, write the rows for the batch (one final
 /// action per path, see [`final_actions`]), run `probe` (a test seam), ask
 /// `sign` which signature (if any) describes the rows now, write it under
-/// [`FRESHNESS_KEY`], or [`FRESHNESS_WITHHELD`] when there is none, `COMMIT`.
+/// [`FRESHNESS_KEY`], or [`FRESHNESS_WITHHELD`] when there is none, run
+/// `before_commit` (see [`update_files_gated`]), `COMMIT`.
 /// An error anywhere returns before the commit and the dropped connection
 /// rolls everything back, so another connection never observes new rows
 /// under the old signature, and rows that did commit are never left under
@@ -1423,6 +1444,7 @@ fn update_files_in_one_transaction(
     files: &[(&str, bool)],
     sign: impl FnOnce(&GraphStore, &[(&str, bool)]) -> Result<Option<String>, BoxErr>,
     probe: &mut dyn FnMut(),
+    before_commit: &mut dyn FnMut(),
 ) -> Result<Publication, BoxErr> {
     if files.is_empty() {
         return Ok(Publication::Withheld);
@@ -1437,6 +1459,7 @@ fn update_files_in_one_transaction(
         FRESHNESS_KEY,
         signature.as_deref().unwrap_or(FRESHNESS_WITHHELD),
     )?;
+    before_commit();
     store.commit_write()?;
     Ok(if signature.is_some() {
         Publication::Signed
@@ -2644,6 +2667,7 @@ mod tests {
                     "signature became visible before the commit"
                 );
             },
+            &mut || {},
         )
         .unwrap();
         assert!(probed, "the seam must run inside the transaction");
@@ -2651,6 +2675,47 @@ mod tests {
         assert_eq!(stored_hash(&reader, "a.ts"), hash_of(v2));
         assert_eq!(stored_signature(&reader), new_signature);
         assert!(is_fresh(&root, &db));
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The gate a publishing caller takes its readers' lock in runs once, in
+    /// the open transaction after the rows are written, and before any other
+    /// connection can see them: a reader of the daemon that is let through
+    /// until then answers from the previous rows, and one that waits behind
+    /// the gate sees the new rows as soon as it returns.
+    #[test]
+    fn update_files_gated_should_run_its_gate_once_right_before_the_commit() {
+        let root = tmpdir("gated-publish");
+        let v1 = b"export function alpha() { return 1 }\n";
+        let v2 = b"export function alpha() { return 2 }\n";
+        std::fs::write(root.join("a.ts"), v1).unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let reader = GraphStore::open(&db).unwrap();
+        std::fs::write(root.join("a.ts"), v2).unwrap();
+        let rows_written = std::cell::Cell::new(false);
+        let mut gated = 0;
+        let published = update_files_probed(
+            &root,
+            &db,
+            &[("a.ts", false)],
+            &mut TreeHashCache::default(),
+            &mut || rows_written.set(true),
+            &mut || {
+                gated += 1;
+                assert!(rows_written.get(), "the gate ran before the rows");
+                assert_eq!(
+                    stored_hash(&reader, "a.ts"),
+                    hash_of(v1),
+                    "the rows were committed before the gate"
+                );
+            },
+        )
+        .unwrap();
+        assert_eq!(gated, 1);
+        assert_eq!(published, Publication::Signed);
+        assert_eq!(stored_hash(&reader, "a.ts"), hash_of(v2));
         drop(reader);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2682,6 +2747,7 @@ mod tests {
                 // The "concurrent" edit: the file moves on after extraction.
                 std::fs::write(root.join("a.ts"), v3).unwrap();
             },
+            &mut || {},
         )
         .unwrap();
         assert_eq!(published, Publication::Withheld);
@@ -2964,6 +3030,7 @@ mod tests {
                 // Back to A before the walk that would sign.
                 std::fs::write(root.join("a.ts"), a).unwrap();
             },
+            &mut || {},
         )
         .unwrap();
         assert_eq!(published, Publication::Withheld);

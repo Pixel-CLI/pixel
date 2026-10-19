@@ -28,7 +28,9 @@ use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
 use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, credential_path, open_regular_bounded};
-use pixel_index::indexset::{IndexSet, IndexSetError, OpenTimings, RefreshOutcome, millis};
+use pixel_index::indexset::{
+    IndexSet, IndexSetError, OpenTimings, RefreshOutcome, StagedRefresh, millis,
+};
 use pixel_proto::{
     Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, TargetsFactsInputs,
     TargetsFactsResult, TargetsFactsUnavailableReason, Warning,
@@ -420,6 +422,10 @@ pub struct Service {
     published_snapshot: Arc<RwLock<Option<PublishedSnapshot>>>,
     /// On a replica, the published snapshot the read in progress attaches.
     reader_snapshot: Option<SnapshotInfo>,
+    /// Runs inside a watcher batch's graph transaction, right before the
+    /// swap: the tests hold the batch open there.
+    #[cfg(test)]
+    before_swap: Option<Box<dyn FnMut() + Send>>,
 }
 
 /// How long a cached HEAD, branch or dirty list may be served. One
@@ -579,6 +585,36 @@ impl Publication {
     }
 }
 
+/// The moment a watcher batch becomes what readers see. Until
+/// [`Swap::open`], replicas answer from the published generation; `open`
+/// takes the publication's write lock, marks it unhealthy (a panic before
+/// the publish leaves it refusing reads, not answering from a half-applied
+/// batch) and applies the staged index. The lock is held until the swap is
+/// dropped, after the caller committed the graph and published.
+struct Swap<'a> {
+    publication: &'a RwLock<Publication>,
+    index: &'a RwLock<IndexSet>,
+    staged: Option<StagedRefresh>,
+    state: Option<RwLockWriteGuard<'a, Publication>>,
+}
+
+impl Swap<'_> {
+    /// The publication, write-locked, with the staged index applied: taken
+    /// on the first call, returned as is on the next ones.
+    fn open(&mut self) -> &mut Publication {
+        let publication = self.publication;
+        let state = self.state.get_or_insert_with(|| {
+            let mut state = publication.write_or_recover();
+            state.healthy = false;
+            state
+        });
+        if let Some(staged) = self.staged.take() {
+            self.index.write_or_recover().apply_refresh(staged);
+        }
+        state
+    }
+}
+
 /// Counts watcher-side failures and decides which ones are logged: the
 /// first, then every doubling (1, 2, 4, 8 …). A permanently broken graph.db
 /// or watch stays visible in `status` without one stderr line per filesystem
@@ -659,6 +695,8 @@ impl Service {
             meaning,
             published_snapshot: Arc::new(RwLock::new(None)),
             reader_snapshot: None,
+            #[cfg(test)]
+            before_swap: None,
         })
     }
 
@@ -709,6 +747,8 @@ impl Service {
             meaning: Arc::clone(&self.meaning),
             published_snapshot: Arc::clone(&self.published_snapshot),
             reader_snapshot: None,
+            #[cfg(test)]
+            before_swap: None,
         }
     }
 
@@ -835,6 +875,14 @@ impl Service {
     }
 
     /// Watcher hook: refresh a batch of files in index + graph.
+    ///
+    /// Readers keep the published generation while the batch is read and
+    /// extracted: the index is staged under its read lock and the graph rows
+    /// are written in an uncommitted transaction, which SQLite readers do not
+    /// see. Only the swap takes the publication's write lock: applying the
+    /// staged index, the graph `COMMIT` and the generation bump, so a replica
+    /// never waits for the extraction and never answers from the new index
+    /// or rows under the old generation.
     pub fn refresh_files(&mut self, files: &[(&str, bool)]) {
         if files.is_empty() {
             return;
@@ -842,14 +890,26 @@ impl Service {
         // A watcher batch means the working tree changed: the cached dirty
         // list is stale as of right now. HEAD and the branch are not.
         self.git_state.dirty = None;
-        let publication = Arc::clone(&self.publication);
-        let mut state = publication.write_or_recover();
-        state.healthy = false;
-        let graph_changes = self.index.write_or_recover().refresh_files(files);
-        let graph_files: Vec<(&str, bool)> = graph_changes
-            .iter()
-            .map(|(path, outcome)| (path.as_str(), *outcome == RefreshOutcome::Excluded))
+        let staged = self.index.read_or_recover().stage_refresh(files);
+        let graph_files: Vec<(String, bool)> = staged
+            .outcomes()
+            .into_iter()
+            .map(|(path, outcome)| (path, outcome == RefreshOutcome::Excluded))
             .collect();
+        let graph_files: Vec<(&str, bool)> = graph_files
+            .iter()
+            .map(|(path, removed)| (path.as_str(), *removed))
+            .collect();
+        let publication = Arc::clone(&self.publication);
+        let index = Arc::clone(&self.index);
+        let mut swap = Swap {
+            publication: &publication,
+            index: &index,
+            staged: Some(staged),
+            state: None,
+        };
+        #[cfg(test)]
+        let mut before_swap = self.before_swap.take();
         let db = self.graph_db_path();
         let lock = if db.exists() {
             GraphLock::try_acquire(&db)
@@ -861,20 +921,32 @@ impl Service {
             // file): leave it to the next graph op, which sees the drift.
             self.graph = None;
         } else if db.exists() {
-            if let Err(error) =
-                bridge::update_files_cached(&self.root, &db, &graph_files, &mut self.hash_cache)
-            {
+            let updated = bridge::update_files_gated(
+                &self.root,
+                &db,
+                &graph_files,
+                &mut self.hash_cache,
+                &mut || {
+                    #[cfg(test)]
+                    if let Some(hold) = before_swap.as_mut() {
+                        hold();
+                    }
+                    swap.open();
+                },
+            );
+            self.graph = None;
+            if let Err(error) = updated {
                 self.note_graph_update_failure(
                     &format!("batch of {} file(s) from {}", files.len(), files[0].0),
                     &error,
                 );
-                self.graph = None;
+                let state = swap.open();
                 state.publish_after_failure();
                 self.meaning.nudge(state.generation);
                 return;
             }
-            self.graph = None;
         }
+        let state = swap.open();
         state.publish();
         self.meaning.nudge(state.generation);
     }
@@ -5701,14 +5773,16 @@ mod bridge {
 
     /// The same for a debounced batch of watcher events, reusing the
     /// caller's stat memo: a batch re-reads only the files whose stat moved
-    /// since the last walk.
-    pub fn update_files_cached(
+    /// since the last walk. `before_commit` runs right before the rows
+    /// become visible to other connections.
+    pub fn update_files_gated(
         root: &Path,
         db: &Path,
         files: &[(&str, bool)],
         cache: &mut pixel_graph::build::TreeHashCache,
+        before_commit: &mut dyn FnMut(),
     ) -> Result<(), String> {
-        pixel_graph::build::update_files_cached(root, db, files, cache)
+        pixel_graph::build::update_files_gated(root, db, files, cache, before_commit)
             .map(|_| ())
             .map_err(es)
     }
@@ -6643,6 +6717,88 @@ mod tests {
         assert!(
             writer.published_snapshot.read_or_recover().is_none(),
             "withdrawn after the write"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A watcher batch held open inside its graph transaction, right before
+    /// it swaps, leaves the published generation readable: a replica answers
+    /// within a second, from the index and the rows of before the edit, under
+    /// the generation it read. Once the batch swaps, the next read sees the
+    /// edit (#1225). Before, the batch held the publication's write lock from
+    /// its first line, and the replica waited for the whole update.
+    #[test]
+    fn a_replica_should_answer_from_the_last_generation_while_a_batch_is_held() {
+        let root = login_repo("held-batch");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        assert!(writer.handle(search_request("login")).ok);
+        let generation = writer.publication_generation();
+        let mut reader = writer.read_replica();
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        writer.before_swap = Some(Box::new(move || {
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        }));
+        std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
+        let batch = std::thread::spawn(move || {
+            writer.refresh_file("login.rs");
+            writer
+        });
+        held.recv_timeout(Duration::from_secs(10))
+            .expect("the batch reaches its swap");
+
+        let started = Instant::now();
+        let old = reader
+            .read_answer(&search_request("login"))
+            .expect("the replica answers during the batch");
+        let renamed = reader
+            .read_answer(&search_request("login_v2"))
+            .expect("the replica answers during the batch");
+        let resolve = Request::Resolve {
+            phrase: "login_v2".into(),
+            limit: Some(5),
+        };
+        let symbol = reader
+            .read_answer(&resolve)
+            .expect("the replica answers during the batch");
+        let elapsed = started.elapsed();
+        release.send(()).unwrap();
+        let mut writer = batch.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the replica waited {elapsed:?} for the batch"
+        );
+        assert!(
+            old.ok && renamed.ok && symbol.ok,
+            "{old:?} {renamed:?} {symbol:?}"
+        );
+        assert!(
+            old.data().to_string().contains("login.rs"),
+            "the published index still holds login: {old:?}"
+        );
+        assert!(
+            !renamed.data().to_string().contains("login.rs"),
+            "the staged index leaked before the swap: {renamed:?}"
+        );
+        assert_ne!(
+            symbol.data()["confidence"],
+            json!("resolved"),
+            "uncommitted rows leaked before the swap: {symbol:?}"
+        );
+        assert_eq!(writer.publication_generation(), generation + 1);
+        assert!(writer.handle(search_request("login_v2")).ok);
+        let fresh = reader
+            .read_answer(&search_request("login_v2"))
+            .expect("the next generation");
+        assert!(fresh.data().to_string().contains("login.rs"), "{fresh:?}");
+        let resolved = reader.read_answer(&resolve).expect("the next generation");
+        assert_eq!(
+            resolved.data()["confidence"],
+            json!("resolved"),
+            "the committed rows: {resolved:?}"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
