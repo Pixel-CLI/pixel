@@ -12,6 +12,28 @@ import sys
 
 PROBE = Path(os.environ.get('PROBE_UNDER_TEST', Path(__file__).resolve().parents[1] / 'probe'))
 
+LOADER = '''import os
+class Options:
+    def __init__(self, defaults):
+        self.data = defaults.copy()
+    def load_env_file(self, env_name, silent=False):
+        """doc-sentinel: deliberately excluded from executable evidence."""
+        path = os.environ.get(env_name)
+        if not path:
+            if silent:
+                return False
+            raise ValueError("literal-sentinel")
+        return self.load_file(path, silent=silent)
+    def load_file(self, path, silent=False):
+        values = parse_file(path)
+        return self.apply(values)
+    def apply(self, values):
+        for key, value in values.items():
+            self[key] = value
+        diagnostic = f"fstring-sentinel {key}"
+        password = 99887766  # comment-sentinel
+'''
+
 
 class DeclarationIdentity(unittest.TestCase):
     def repo(self, files, tracked=None):
@@ -139,6 +161,53 @@ class DeclarationIdentity(unittest.TestCase):
         out = self.emit(root, 'Where is the REQUEST_LIMIT setting declared?')
         self.assertEqual(out.count('REQUEST_LIMIT @'), 4)
         self.assertIn('2 additional candidates omitted; no unique default established', out)
+
+    def test_env_named_file_loader_keeps_failure_mode_and_overwrite_chain_together(self):
+        out = self.emit(self.repo({'loader.py': LOADER}), 'Which environment-file overrides apply?')
+        for evidence in ['Candidate Options.load_env_file @ loader.py:5', 'self.data = defaults.copy()',
+                         'path = os.environ.get(env_name)', 'if silent:', 'return False',
+                         'self.load_file(path, silent=silent)', 'self.apply(values)', 'self[key] = value']:
+            self.assertIn(evidence, out, 'the lookup alone cannot establish how defaults are overwritten')
+        self.assertIn('active mode, file contents and effective values unknown', out)
+        self.assertNotIn('doc-sentinel', out)
+        self.assertNotIn('### loader.py:5-7', out, 'a source range must not credit the omitted docstring')
+
+    def test_loader_candidates_do_not_collapse_homonymous_methods_across_classes(self):
+        source = LOADER + LOADER.replace('import os\n', '').replace('Options', 'OtherOptions')
+        out = self.emit(self.repo({'loader.py': source}), 'Which environment-file overrides apply?')
+        self.assertIn('Candidate Options.load_env_file @ loader.py:5', out)
+        self.assertIn('Candidate OtherOptions.load_env_file', out)
+        self.assertEqual(out.count('self[key] = value'), 2)
+
+    def test_an_unconnected_read_or_absent_writer_is_not_a_loader_chain(self):
+        for source in [LOADER.replace('self.load_file(path,', 'self.load_file(other_path,'),
+                       LOADER.replace('self[key] = value', 'print(key)')]:
+            with self.subTest(source=source):
+                out = self.emit(self.repo({'loader.py': source}), 'Which environment-file overrides apply?')
+                self.assertNotIn('configuration loader', out)
+
+    def test_loader_literals_fstrings_numbers_comments_and_docstrings_are_not_values(self):
+        out = self.emit(self.repo({'loader.py': LOADER}), 'Which environment-file overrides apply?')
+        self.assertIn('self[key] = value', out, 'generic key identifiers must retain the overwrite evidence')
+        self.assertIn('<masked>', out)
+        for sentinel in ['literal-sentinel', 'fstring-sentinel', '99887766', 'comment-sentinel', 'doc-sentinel']:
+            self.assertNotIn(sentinel, out)
+
+    def test_loader_source_requires_tracking_and_does_not_follow_symlinks(self):
+        root = self.repo({'loader.py': LOADER, 'keep.js': 'const OTHER_LIMIT = 10;\n'}, tracked=['keep.js'])
+        self.assertNotIn('configuration loader', self.emit(root, 'Which environment-file overrides apply?'))
+        (root / 'link.py').symlink_to(root / 'loader.py')
+        subprocess.run(['git', 'add', '--', 'link.py'], cwd=root, check=True)
+        self.assertNotIn('configuration loader', self.emit(root, 'Which environment-file overrides apply?'))
+
+    def test_loader_evidence_stays_absent_for_unrelated_intent(self):
+        self.assertEqual(self.emit(self.repo({'loader.py': LOADER}), 'Give me a tour of this repository'), '')
+
+    def test_loader_candidate_cap_reports_unresolved_omissions(self):
+        source = 'import os\n' + ''.join(LOADER.replace('import os\n', '').replace('Options', f'Options{i}') for i in range(3))
+        out = self.emit(self.repo({'loader.py': source}), 'Which environment-file overrides apply?')
+        self.assertEqual(out.count('Candidate Options'), 2)
+        self.assertIn('Additional loader candidates omitted: 1; no unique loader established.', out)
 
 
 if __name__ == '__main__':

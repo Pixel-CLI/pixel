@@ -7,11 +7,14 @@ by a registry built with rg over the working tree: key, value or fallback, where
 Reads env reads in JS/TS/Python/Rust/Go/Ruby, typed env declarations, committed .env templates and the git-tracked
 .env.development / .env.production (values that look like secrets are masked; untracked .env* are never read),
 exported default constants and dev-server port settings. Read-only, deterministic."""
+import ast
+import io
 import json
 import os
 import re
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 TEMPLATE_ENV = re.compile(r"^\.env\.(example|sample|template|dist|defaults?)$|^(example|sample)\.env$")
@@ -205,6 +208,132 @@ def mask(key, val):
     return "<masked>" if val and SECRETISH.search(key) else val
 
 
+LOADER_MAX_FILES = 256
+LOADER_MAX_LINES = 80
+LOADER_MAX_HELPERS = 3
+LOADER_MAX_CANDIDATES = 2
+LOADER_MAX_CHARS = 6000
+
+
+def loader_body_nodes(fn):
+    nodes = [n for stmt in fn.body for n in ast.walk(stmt)]
+    return [] if any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)) for n in nodes) else nodes
+
+
+def loader_source_rows(source, fn):
+    lines = source.splitlines()
+    omitted = set()
+    for n in loader_body_nodes(fn):
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
+            omitted.update(range(n.lineno, n.end_lineno + 1))
+    replacements = {}
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if not (fn.lineno <= tok.start[0] <= fn.end_lineno) or tok.start[0] in omitted:
+            continue
+        if tok.type not in (tokenize.STRING, tokenize.NUMBER, tokenize.COMMENT,
+                            getattr(tokenize, 'FSTRING_MIDDLE', -1), getattr(tokenize, 'TSTRING_MIDDLE', -1)):
+            continue
+        for line in range(tok.start[0], tok.end[0] + 1):
+            lo = tok.start[1] if line == tok.start[0] else 0
+            hi = tok.end[1] if line == tok.end[0] else len(lines[line - 1])
+            replacements.setdefault(line, []).append((lo, hi, '' if tok.type == tokenize.COMMENT else '<masked>'))
+    rows = []
+    for n in range(fn.lineno, fn.end_lineno + 1):
+        if n in omitted:
+            continue
+        text = lines[n - 1]
+        for lo, hi, value in sorted(replacements.get(n, []), reverse=True):
+            text = text[:lo] + value + text[hi:]
+        if text.strip():
+            rows.append((n, text))
+    return rows
+
+
+def loader_evidence(root, prompt):
+    if not re.search(r'\b(env\w*|overrid\w*|load\w*|precedence)\b', prompt, re.I):
+        return ''
+    paths = subprocess.run(['git', '-C', str(root), 'ls-files', '-z', '--', '*.py'],
+                           text=True, capture_output=True, check=True).stdout.split('\0')
+    candidates = []
+    for rel in sorted(p for p in paths if p)[:LOADER_MAX_FILES]:
+        path = Path(root) / rel
+        if path.is_symlink() or path.name.startswith('.env') or not path.is_file():
+            continue
+        if path.stat().st_size > SCAN_MAX_FILE_BYTES or re.search(r'(^|/)(tests?|fixtures?|vendor)/', rel):
+            continue
+        try:
+            source = path.read_text()
+            if 'os.environ' not in source and 'os.getenv' not in source:
+                continue
+            tree = ast.parse(source)
+        except (OSError, UnicodeError, SyntaxError):
+            continue
+        # A deliberately small shape: direct os import, dynamic env-name parameter,
+        # followed through the same class. No imports, overrides or bindings guessed.
+        if not any(isinstance(n, ast.Import) and any(a.name == 'os' and a.asname is None for a in n.names) for n in tree.body):
+            continue
+        for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+            methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef) and not n.decorator_list}
+            for fn in methods.values():
+                params = {a.arg for a in fn.args.args}
+                if not fn.args.args:
+                    continue
+                receiver = fn.args.args[0].arg
+                reads = [n for n in loader_body_nodes(fn) if isinstance(n, ast.Call) and n.args
+                         and ast.unparse(n.func) in ('os.environ.get', 'os.getenv')
+                         and isinstance(n.args[0], ast.Name) and n.args[0].id in params]
+                names = {n.targets[0].id for n in loader_body_nodes(fn) if isinstance(n, ast.Assign)
+                         and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.value in reads}
+                forwards = [n for n in loader_body_nodes(fn) if isinstance(n, ast.Call) and n.args
+                            and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                            and n.func.value.id == receiver and n.func.attr in methods
+                            and isinstance(n.args[0], ast.Name) and n.args[0].id in names]
+                if not forwards:
+                    continue
+                chain, pending = [fn], [methods[n.func.attr] for n in forwards]
+                while pending and len(chain) < LOADER_MAX_HELPERS:
+                    node = pending.pop(0)
+                    if node in chain:
+                        continue
+                    chain.append(node)
+                    for call in (n for n in loader_body_nodes(node) if isinstance(n, ast.Call)):
+                        target = call.func
+                        if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == receiver and target.attr in methods and methods[target.attr] not in chain:
+                            pending.append(methods[target.attr])
+                if not any(isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)
+                           and isinstance(n.value, ast.Name) and n.value.id == receiver
+                           for method in chain for n in loader_body_nodes(method)):
+                    continue
+                selected = ([methods['__init__']] if '__init__' in methods and methods['__init__'] not in chain else []) + chain
+                rows = [(n, text) for method in selected for n, text in loader_source_rows(source, method)]
+                if len(rows) > LOADER_MAX_LINES or any(len(t.encode()) > SCAN_MAX_COLUMNS for _, t in rows):
+                    continue
+                out = ['### configuration loader — dynamic environment-name lookup, same-class helper candidates and mapping writes. Conditions and parameters are source evidence; runtime dispatch, active mode, file contents and effective values unknown. Literal values masked.']
+                if pending:
+                    out.append('Additional helper candidates omitted; chain is incomplete.')
+                previous = -1
+                for n, text in rows:
+                    if n != previous + 1:
+                        out.append(f'### {rel}:{n}-{n} — loader evidence')
+                    else:
+                        header = next(i for i in range(len(out)-1, -1, -1) if out[i].startswith('### '))
+                        out[header] = re.sub(r'-(\d+) —', f'-{n} —', out[header])
+                    out.append(f'{n}| {text}')
+                    previous = n
+                out[0] += f' Candidate {cls.name}.{fn.name} @ {rel}:{fn.lineno}.'
+                candidates.append('\n'.join(out) + '\n')
+    if not candidates:
+        return ''
+    selected = []
+    for candidate in candidates[:LOADER_MAX_CANDIDATES]:
+        if len(''.join(selected)) + len(candidate) <= LOADER_MAX_CHARS:
+            selected.append(candidate)
+    result = ''.join(selected)
+    if result and len(candidates) > len(selected):
+        result += f'Additional loader candidates omitted: {len(candidates)-len(selected)}; no unique loader established.\n'
+    return result
+
+
 INTENT = re.compile(r"\b(config\w*|settings?|env(ironment)?(\s+var\w*)?|variables?|flags?|options?|defaults?|ports?|overrid\w+|where do i set|set (that|this|it))\b", re.I)
 
 
@@ -212,9 +341,10 @@ def emit(clone, prompt, brief):
     if not Path(clone).exists() or not INTENT.search(prompt): return ""
     global IDS_WORDS
     IDS_WORDS = words_of(prompt)
+    loader = loader_evidence(clone, prompt)
     reg = registry(clone)
     keys = rank(clone, reg, prompt)
-    if not keys: return ""
+    if not keys: return loader
     envfiles = [f for f in git(clone, "ls-files", "--", ".env*", "*/.env*").split() if os.path.basename(f).startswith(".env")]
     head = [f"### config registry — keys matching {', '.join(IDS_WORDS[:6])} (key | value or fallback | declared | read at)"]
     blocks, seen = [], set()
@@ -250,7 +380,7 @@ def emit(clone, prompt, brief):
             if (r[0], r[1]) not in seen:
                 seen.add((r[0], r[1])); blocks += evidence_block(clone, k, r[0], r[1], 1, 2)
     if envfiles: head.append("env files in the repo (names only; local .env* are never indexed): " + ", ".join(sorted(envfiles)[:6]))
-    return "\n".join(head + blocks)[:9000] + "\n"
+    return loader + "\n".join(head + blocks)[:9000 - len(loader)] + "\n"
 
 
 def main():

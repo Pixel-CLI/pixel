@@ -1,0 +1,1 @@
+**brief:** Configuration evidence now includes bounded Python environment-file loader chains, their conditional modes and mapping writes. Runtime precedence and effective values remain explicitly unknown; literals are masked and homonymous loaders keep separate identities.
