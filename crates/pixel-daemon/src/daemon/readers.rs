@@ -12,13 +12,21 @@
 //! published generation, as if it had arrived just before. A replica that
 //! cannot answer (no graph to read, the generation moved under it) gives the
 //! request back and the writer serves it in order.
+//!
+//! A request that sets `stale_ok` (`targets_facts`, `symbol`) asks for the
+//! opposite trade: it goes to a reader precisely while a batch is queued or
+//! running, and the replica answers from the generation before it, saying
+//! how long the oldest unpublished batch has waited ([`Busy::behind`]).
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use super::{Msg, panic_message};
 use crate::api::{Request, Response, failure_response};
+use crate::plane::replica_may_answer;
 
 /// Readers a daemon runs beside its writer.
 pub(super) const READERS: usize = 2;
@@ -26,17 +34,23 @@ pub(super) const READERS: usize = 2;
 /// A copy of the corpus that answers read-plane requests from what the
 /// writer last published, on its own thread.
 pub trait ReadReplica: Send {
-    /// The answer, or `None` when only the writer can give it.
-    fn read(&mut self, req: &Request) -> Option<Response>;
+    /// The answer, or `None` when only the writer can give it. `behind`
+    /// says how long the oldest watcher batch the writer has not finished
+    /// has been queued, `None` when there is none: a `stale_ok` answer
+    /// samples it once computed and states it.
+    fn read(&mut self, req: &Request, behind: &dyn Fn() -> Option<Duration>) -> Option<Response>;
 }
 
 /// How much the writer holds: every job queued or running, and among them
 /// the ones that change what a read answers (a watcher batch, a HEAD move,
-/// the watch's catch-up), which no read may overtake.
+/// the watch's catch-up), which no read may overtake, with the instant each
+/// was queued.
 #[derive(Debug, Default)]
 pub(super) struct Busy {
     jobs: AtomicUsize,
-    applies: AtomicUsize,
+    /// Queue instants of the refreshing jobs, oldest first: the writer runs
+    /// jobs in order, so the one it finishes is always the front.
+    refreshes: Mutex<VecDeque<Instant>>,
 }
 
 impl Busy {
@@ -44,14 +58,14 @@ impl Busy {
     pub(super) fn queued(&self, apply: bool) {
         self.jobs.fetch_add(1, Ordering::AcqRel);
         if apply {
-            self.applies.fetch_add(1, Ordering::AcqRel);
+            self.refreshes().push_back(Instant::now());
         }
     }
 
     /// The writer finished a job; `apply` when it was a watcher batch.
     pub(super) fn done(&self, apply: bool) {
         if apply {
-            self.applies.fetch_sub(1, Ordering::AcqRel);
+            self.refreshes().pop_front();
         }
         self.jobs.fetch_sub(1, Ordering::AcqRel);
     }
@@ -59,7 +73,29 @@ impl Busy {
     /// A read may skip the writer's queue: the writer is busy, and nothing
     /// ahead of the read is a watcher batch it must see.
     pub(super) fn read_may_bypass(&self) -> bool {
-        self.applies.load(Ordering::Acquire) == 0 && self.jobs.load(Ordering::Acquire) > 0
+        self.refreshes().is_empty() && self.jobs.load(Ordering::Acquire) > 0
+    }
+
+    /// `req` goes to a reader rather than the writer: a replica may answer
+    /// it ([`replica_may_answer`]) and either the writer is busy with no
+    /// batch ahead, or the request accepts the generation before the batch.
+    pub(super) fn reader_may_take(&self, req: &Request) -> bool {
+        replica_may_answer(req)
+            && (self.read_may_bypass() || (req.stale_ok() && self.behind().is_some()))
+    }
+
+    /// How long the oldest unfinished watcher batch has been queued: what a
+    /// generation published before it lacks, at least. It leaves out the
+    /// debounce that preceded the queueing (at most `MAX_PENDING_WAIT`), and
+    /// a batch already published counts until the writer marks it done.
+    pub(super) fn behind(&self) -> Option<Duration> {
+        self.refreshes().front().map(Instant::elapsed)
+    }
+
+    fn refreshes(&self) -> std::sync::MutexGuard<'_, VecDeque<Instant>> {
+        self.refreshes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -82,8 +118,13 @@ pub(super) struct Readers {
 
 impl Readers {
     /// One thread per replica. A request a replica gives back goes to the
-    /// loop as [`Msg::Requeue`], for the writer.
-    pub(super) fn spawn(replicas: Vec<Box<dyn ReadReplica>>, requeue: &mpsc::Sender<Msg>) -> Self {
+    /// loop as [`Msg::Requeue`], for the writer. `busy` is the writer's, so
+    /// a `stale_ok` answer says how far behind it is.
+    pub(super) fn spawn(
+        replicas: Vec<Box<dyn ReadReplica>>,
+        requeue: &mpsc::Sender<Msg>,
+        busy: &Arc<Busy>,
+    ) -> Self {
         let (jobs, queue) = mpsc::channel::<ReadJob>();
         let queue = Arc::new(Mutex::new(queue));
         let threads = replicas
@@ -91,13 +132,14 @@ impl Readers {
             .map(|mut replica| {
                 let queue = Arc::clone(&queue);
                 let requeue = requeue.clone();
+                let busy = Arc::clone(busy);
                 std::thread::spawn(move || {
                     loop {
                         let next = queue.lock().unwrap_or_else(PoisonError::into_inner).recv();
                         let Ok(job) = next else {
                             return;
                         };
-                        serve_read(replica.as_mut(), job, &requeue);
+                        serve_read(replica.as_mut(), job, &requeue, &busy);
                     }
                 })
             })
@@ -139,10 +181,16 @@ impl Drop for Readers {
 
 /// Answer one read. A panic fails that request alone; a replica that cannot
 /// answer hands the request back to the loop.
-fn serve_read(replica: &mut dyn ReadReplica, job: ReadJob, requeue: &mpsc::Sender<Msg>) {
+fn serve_read(
+    replica: &mut dyn ReadReplica,
+    job: ReadJob,
+    requeue: &mpsc::Sender<Msg>,
+    busy: &Busy,
+) {
     let op = job.req.op_name();
-    let answered =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| replica.read(&job.req)));
+    let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        replica.read(&job.req, &|| busy.behind())
+    }));
     match answered {
         Ok(Some(response)) => {
             let _ = job.reply.send(response);
@@ -164,15 +212,24 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// Answers `search`, gives back `status`, panics on `resolve`, and holds
-    /// `targets` until released.
+    /// Answers `search`, gives back `status`, panics on `resolve`, holds
+    /// `targets` until released, and answers `symbol` with the lag it was
+    /// handed.
     struct Scripted {
         release: Arc<Mutex<mpsc::Receiver<()>>>,
     }
 
     impl ReadReplica for Scripted {
-        fn read(&mut self, req: &Request) -> Option<Response> {
+        fn read(
+            &mut self,
+            req: &Request,
+            behind: &dyn Fn() -> Option<Duration>,
+        ) -> Option<Response> {
             match req {
+                Request::Symbol { .. } => Some(Response::success(
+                    "symbol",
+                    serde_json::json!({"behind": behind().is_some()}),
+                )),
                 Request::Search { .. } => Some(Response::success(
                     "search",
                     serde_json::json!({"from": "replica"}),
@@ -214,7 +271,30 @@ mod tests {
         }
     }
 
+    fn symbol(stale_ok: bool) -> Request {
+        Request::Symbol {
+            name: "login".into(),
+            stale_ok,
+        }
+    }
+
+    fn targets_facts(stale_ok: bool) -> Request {
+        Request::TargetsFacts {
+            task: "t".into(),
+            limit: None,
+            relevance_only: true,
+            stale_ok,
+        }
+    }
+
     fn pool(release: &Arc<Mutex<mpsc::Receiver<()>>>) -> (Readers, mpsc::Receiver<Msg>) {
+        pool_over(release, &Arc::new(Busy::default()))
+    }
+
+    fn pool_over(
+        release: &Arc<Mutex<mpsc::Receiver<()>>>,
+        busy: &Arc<Busy>,
+    ) -> (Readers, mpsc::Receiver<Msg>) {
         let (loop_tx, loop_rx) = mpsc::channel();
         let replicas: Vec<Box<dyn ReadReplica>> = (0..READERS)
             .map(|_| {
@@ -223,7 +303,7 @@ mod tests {
                 }) as Box<dyn ReadReplica>
             })
             .collect();
-        (Readers::spawn(replicas, &loop_tx), loop_rx)
+        (Readers::spawn(replicas, &loop_tx, busy), loop_rx)
     }
 
     /// A reader answers; a panic fails only its own request and the reader
@@ -322,6 +402,96 @@ mod tests {
         busy.done(true);
         assert!(!busy.read_may_bypass(), "idle again");
         assert_eq!(busy.jobs.load(Ordering::Acquire), 0);
-        assert_eq!(busy.applies.load(Ordering::Acquire), 0);
+        assert!(busy.refreshes().is_empty());
+    }
+
+    /// `behind` dates the oldest batch the writer has not finished: from its
+    /// queueing, kept while a later batch waits behind it, and gone with the
+    /// last one. A job that is not a batch never dates anything.
+    #[test]
+    fn busy_behind_should_date_the_oldest_unfinished_batch() {
+        let busy = Busy::default();
+        busy.queued(false);
+        assert_eq!(busy.behind(), None, "a request is not a batch");
+        busy.queued(true);
+        std::thread::sleep(Duration::from_millis(30));
+        busy.queued(true);
+        let both = busy.behind().expect("two batches queued");
+        assert!(both >= Duration::from_millis(30), "{both:?}");
+        busy.done(false);
+        busy.done(true);
+        let second = busy.behind().expect("the second batch still waits");
+        assert!(second < both, "{second:?} after {both:?}");
+        busy.done(true);
+        assert_eq!(busy.behind(), None);
+    }
+
+    /// Who takes a request. A read-plane op overtakes a busy writer but
+    /// never a batch; a `stale_ok` read overtakes the batch too; the same
+    /// ops without the flag, and every other write-plane op, stay with the
+    /// writer whatever it holds.
+    #[test]
+    fn reader_may_take_should_let_only_stale_ok_reads_overtake_a_batch() {
+        let busy = Busy::default();
+        let cases = |busy: &Busy| {
+            [
+                search(),
+                symbol(true),
+                targets_facts(true),
+                symbol(false),
+                targets_facts(false),
+                Request::Status {},
+            ]
+            .map(|req| busy.reader_may_take(&req))
+        };
+        assert_eq!(
+            cases(&busy),
+            [false; 6],
+            "an idle writer answers everything"
+        );
+        busy.queued(false);
+        assert_eq!(
+            cases(&busy),
+            [true, true, true, false, false, false],
+            "a busy writer with no batch"
+        );
+        busy.queued(true);
+        assert_eq!(
+            cases(&busy),
+            [false, true, true, false, false, false],
+            "a batch ahead: only a stale_ok read overtakes it"
+        );
+        busy.done(false);
+        assert_eq!(
+            cases(&busy),
+            [false, true, true, false, false, false],
+            "the batch runs alone"
+        );
+        busy.done(true);
+        assert_eq!(cases(&busy), [false; 6], "idle again");
+    }
+
+    /// A reader hands its replica the writer's lag: present while a batch is
+    /// unfinished, absent once it is done.
+    #[test]
+    fn a_reader_should_hand_the_replica_the_writers_lag() {
+        let (_release_tx, release_rx) = mpsc::channel();
+        let release = Arc::new(Mutex::new(release_rx));
+        let busy = Arc::new(Busy::default());
+        let (readers, _loop_rx) = pool_over(&release, &busy);
+        let ask = || {
+            let (reply, answer) = mpsc::channel();
+            assert!(readers.offer(symbol(true), reply).is_none());
+            answer
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .result
+                .unwrap()["behind"]
+                .clone()
+        };
+        busy.queued(true);
+        assert_eq!(ask(), serde_json::json!(true));
+        busy.done(true);
+        assert_eq!(ask(), serde_json::json!(false));
     }
 }

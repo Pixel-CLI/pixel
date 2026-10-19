@@ -306,7 +306,20 @@ answer, or computed before a repository write starts). A watcher batch, a
 HEAD move or a repository write withdraws it, and `Job::refreshes` keeps
 reads from overtaking the batch or the HEAD move. The replica hands the
 request back to the writer when the graph is missing or lags, no snapshot
-describes its generation, or the generation moved. The watcher debounces
+describes its generation, or the generation moved. A `targets_facts` or
+`symbol` that sets `stale_ok` (`Op::stale_ok`) trades that ordering for
+latency: `Busy::reader_may_take` sends it to a reader while a batch is queued
+or running too (`plane::replica_may_answer`; both ops stay `Plane::Write`
+everywhere else), and the replica answers from the generation before the
+batch. On a replica `targets_facts` compares the index with the HEAD of the
+published snapshot and takes the graph's stored signature
+(`published_signature`) instead of walking the tree. When `Busy::behind`
+reports an unfinished batch once the answer is computed, `stamp_stale` sets
+`epistemics.staleness_ms` to how long the oldest one has been queued (the
+debounce before it is not counted) and adds a `STALE_GENERATION` warning
+naming the generation served. Without the flag nothing changes; a daemon
+that predates it ignores the field and answers after the batch, so a client
+reads the envelope, not its own flag, and `PROTOCOL_VERSION` stays. The watcher debounces
 filesystem events and refreshes the index and graph for changed files
 (`Service::refresh_files`) without stopping the replicas: it stages the
 index batch under the index's read lock (`IndexSet::stage_refresh`: the

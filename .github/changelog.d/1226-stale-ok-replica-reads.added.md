@@ -1,0 +1,1 @@
+**daemon:** `targets_facts` and `symbol` take an opt-in `stale_ok` field: during a watcher batch a read replica answers at once from the generation before it, and the envelope states the lag (`epistemics.staleness_ms`, a `STALE_GENERATION` warning naming the generation). Without the flag, reads still wait for the batch.

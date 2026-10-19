@@ -91,6 +91,14 @@ pub(crate) fn plane(req: &Request) -> Plane {
     }
 }
 
+/// A read replica may answer `req`: a read-plane op, or a `targets_facts`
+/// or `symbol` that sets `stale_ok`. Those stay [`Plane::Write`] for every
+/// other purpose (the evidence bridge, the git-state invalidation): only the
+/// caller that accepts the published generation lets a replica serve them.
+pub(crate) fn replica_may_answer(req: &Request) -> bool {
+    plane(req) == Plane::Read || req.stale_ok()
+}
+
 /// The request an evidence-bridge query kind stands for, `None` for a kind
 /// the bridge does not know. The bridge serves it only when its [`plane`] is
 /// [`Plane::Read`].

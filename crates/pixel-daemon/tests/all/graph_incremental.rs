@@ -63,6 +63,7 @@ fn build_graph(dir: &Path) -> serde_json::Value {
     let mut svc = Service::open(dir).unwrap();
     let resp = svc.handle(Request::Symbol {
         name: "work".into(),
+        stale_ok: false,
     });
     assert!(resp.ok, "{:?}", resp.error);
     let data = resp.into_data();
@@ -86,7 +87,10 @@ fn changes(dir: &Path) -> serde_json::Value {
 
 fn symbol(dir: &Path, name: &str) -> serde_json::Value {
     let mut svc = Service::open(dir).unwrap();
-    let resp = svc.handle(Request::Symbol { name: name.into() });
+    let resp = svc.handle(Request::Symbol {
+        name: name.into(),
+        stale_ok: false,
+    });
     assert!(resp.ok, "{:?}", resp.error);
     resp.into_data()
 }

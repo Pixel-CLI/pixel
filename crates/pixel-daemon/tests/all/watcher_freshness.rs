@@ -13,6 +13,8 @@
 //! served. Since #1150 a read-plane request (`search`, `targets`, …) that
 //! arrives while the writer is busy is answered by a read replica, unless a
 //! watcher batch is queued ahead of it: the last two tests pin both halves.
+//! A `symbol` that sets `stale_ok` (#1226) asks for the opposite: a replica
+//! answers it during the batch, from the generation before, and says so.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -100,6 +102,12 @@ impl Client {
             "daemon closed the connection without answering"
         );
         serde_json::from_str(&reply).expect("one response envelope")
+    }
+
+    /// Fail a `receive` after `limit` instead of the default 30 s.
+    fn within(self, limit: Duration) -> Self {
+        self.stream.set_read_timeout(Some(limit)).unwrap();
+        self
     }
 
     fn request(&mut self, req: &Request) -> Response {
@@ -198,6 +206,7 @@ fn a_file_changed_during_a_held_request_is_visible_to_the_next_request() {
     let mut warm = Client::connect(&sock);
     let warm = warm.request(&Request::Symbol {
         name: "helper".into(),
+        stale_ok: false,
     });
     assert!(warm.ok, "{warm:?}");
     assert!(
@@ -225,6 +234,7 @@ fn a_file_changed_during_a_held_request_is_visible_to_the_next_request() {
     let mut probe = Client::connect(&sock);
     probe.send(&Request::Symbol {
         name: "fresh_probe".into(),
+        stale_ok: false,
     });
 
     release_tx.send(()).unwrap();
@@ -280,6 +290,7 @@ impl Gated {
         }
         let built = Client::connect(&sock).request(&Request::Symbol {
             name: "helper".into(),
+            stale_ok: false,
         });
         assert!(built.ok, "{built:?}");
         Gated {
@@ -378,6 +389,68 @@ fn a_read_after_an_edit_should_wait_for_the_batch_not_take_a_replica() {
     let mut held = held;
     let held_reply = held.receive();
     assert!(held_reply.ok, "{held_reply:?}");
+    let bye = Client::connect(&gated.sock).request(&Request::Shutdown);
+    assert!(bye.ok, "{bye:?}");
+    gated.daemon.join().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&gated.dir);
+}
+
+/// A `symbol` sent after an edit, while the writer holds a request and the
+/// edit's batch waits behind it: with `stale_ok` a replica answers before
+/// the writer is released, from the generation without the edit, and the
+/// envelope states the lag; the same request without the flag waits for the
+/// batch and sees the edit, with no lag stated.
+#[test]
+fn a_stale_ok_read_after_an_edit_should_be_answered_during_the_batch_and_say_so() {
+    let gated = Gated::start("stale-ok-batch");
+    let held = gated.hold();
+    std::fs::write(
+        gated.dir.join("src/util.ts"),
+        "export function helper(x: number): number { return x + 1 }\n\
+         export function fresh_probe(): number { return 42 }\n",
+    )
+    .unwrap();
+    std::thread::sleep(WATCHER_SETTLE);
+    let symbol = |stale_ok| Request::Symbol {
+        name: "fresh_probe".into(),
+        stale_ok,
+    };
+    let stated = |response: &Response| {
+        (
+            response.epistemics.as_ref().and_then(|e| e.staleness_ms),
+            response
+                .warnings
+                .iter()
+                .filter(|w| w.code == "STALE_GENERATION")
+                .count(),
+        )
+    };
+
+    let mut waiting = Client::connect(&gated.sock);
+    waiting.send(&symbol(false));
+    let stale = Client::connect(&gated.sock)
+        .within(Duration::from_secs(5))
+        .request(&symbol(true));
+    assert!(stale.ok, "{stale:?}");
+    assert_eq!(
+        stale.data()["symbols"],
+        serde_json::json!([]),
+        "the generation before the edit: {stale:?}"
+    );
+    let (lag, warnings) = stated(&stale);
+    // How it is dated is `Busy::behind`'s test; here, that it is stated.
+    assert!(lag.is_some(), "the lag is stated: {stale:?}");
+    assert_eq!(warnings, 1, "{stale:?}");
+
+    gated.release.send(()).unwrap();
+    let fresh = waiting.receive();
+    assert!(
+        fresh.data().to_string().contains("fresh_probe"),
+        "without stale_ok the read waits for the batch: {fresh:?}"
+    );
+    assert_eq!(stated(&fresh), (None, 0), "{fresh:?}");
+    let mut held = held;
+    assert!(held.receive().ok);
     let bye = Client::connect(&gated.sock).request(&Request::Shutdown);
     assert!(bye.ok, "{bye:?}");
     gated.daemon.join().unwrap().unwrap();

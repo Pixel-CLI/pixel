@@ -104,6 +104,7 @@ fn build_graph(dir: &Path) {
     let mut svc = Service::open(dir).unwrap();
     let resp = svc.handle(Request::Symbol {
         name: "work".into(),
+        stale_ok: false,
     });
     assert!(resp.ok, "graph build failed: {:?}", resp.error);
 }

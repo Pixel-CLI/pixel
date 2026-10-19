@@ -571,6 +571,7 @@ impl Evidence for Live {
                         task: task.to_string(),
                         limit: Some(MAX_TARGETS),
                         relevance_only: false,
+                        stale_ok: false,
                     },
                     deadline,
                 )?;
@@ -593,6 +594,7 @@ impl Evidence for Live {
                         task: typed.to_string(),
                         limit: Some(RELEVANCE_TARGETS),
                         relevance_only: true,
+                        stale_ok: false,
                     },
                     deadline,
                 )?;
@@ -665,6 +667,7 @@ impl Evidence for Live {
             Route::Daemon => {
                 let request = Request::Symbol {
                     name: name.to_string(),
+                    stale_ok: false,
                 };
                 Ok(symbol_hits(&self.ask(&request, deadline)?))
             }

@@ -1607,6 +1607,7 @@ fn execute_targets_facts_read_only(
             task,
             limit,
             relevance_only: false,
+            stale_ok: false,
         },
     ) {
         DaemonRoute::Served(response) => unwrap_response(*response).or_else(|_| unavailable()),
@@ -4653,7 +4654,14 @@ fn run_command(
             }
         }
         Command::FindSymbol { name, path, json } => {
-            let data = execute(&path, Request::Symbol { name }, false)?;
+            let data = execute(
+                &path,
+                Request::Symbol {
+                    name,
+                    stale_ok: false,
+                },
+                false,
+            )?;
             finish_graph_cmd(data, json, |d| {
                 let syms = d.get("symbols")?.as_array()?;
                 let mut output = String::new();

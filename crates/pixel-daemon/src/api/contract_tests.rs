@@ -136,6 +136,7 @@ fn a_retrieval_answer_should_carry_epistemics_and_a_compact_snapshot() {
         &mut service,
         Request::Symbol {
             name: "login".into(),
+            stale_ok: false,
         },
     );
     assert_eq!(env["ok"], true, "{env}");
@@ -166,6 +167,7 @@ fn symbol_should_list_every_definition_of_a_shared_name_with_its_file() {
         &mut service,
         Request::Symbol {
             name: "helper".into(),
+            stale_ok: false,
         },
     );
     let mut paths: Vec<&str> = out["symbols"]
@@ -573,6 +575,7 @@ fn rename_should_rewrite_the_definition_and_its_call_sites_and_answer_from_the_n
         &mut service,
         Request::Symbol {
             name: "sign_in".into(),
+            stale_ok: false,
         },
     );
     assert_eq!(

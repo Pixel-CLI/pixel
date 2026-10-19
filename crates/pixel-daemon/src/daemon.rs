@@ -27,7 +27,6 @@ use fs2::FileExt;
 use notify::{RecursiveMode, Watcher};
 
 use crate::api::{Request, Response, ServeError, Service, failure_response};
-use crate::plane::{Plane, plane};
 
 mod readers;
 
@@ -734,7 +733,9 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
     let busy = Arc::new(Busy::default());
     let replicas: Option<Vec<Box<dyn ReadReplica>>> =
         (0..READERS).map(|_| service.read_replica()).collect();
-    let readers = replicas.map_or_else(Readers::none, |replicas| Readers::spawn(replicas, &tx));
+    let readers = replicas.map_or_else(Readers::none, |replicas| {
+        Readers::spawn(replicas, &tx, &busy)
+    });
     let lane = Lane {
         root,
         sock,
@@ -838,9 +839,9 @@ impl Queued {
     }
 
     /// Serve `req`: on a reader when it is a read the writer's queue may be
-    /// skipped for, on the writer otherwise.
+    /// skipped for ([`Busy::reader_may_take`]), on the writer otherwise.
     fn route(&mut self, readers: &Readers, req: Request, reply: mpsc::Sender<Response>) {
-        if plane(&req) == Plane::Read && self.busy.read_may_bypass() {
+        if self.busy.reader_may_take(&req) {
             if let Some((req, reply)) = readers.offer(req, reply) {
                 self.serve(req, reply);
             }

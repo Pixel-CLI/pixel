@@ -82,6 +82,9 @@ pub enum Op {
         limit: Option<usize>,
         #[serde(default, skip_serializing_if = "is_false")]
         relevance_only: bool,
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
     },
     /// Natural-language retrieval over the code chunks whose embeddings stay
     /// resident in the daemon: ranked leads (file, lines, symbol, snippet),
@@ -97,6 +100,9 @@ pub enum Op {
     },
     Symbol {
         name: String,
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
     },
     /// All signatures in a file — the "list-signatures" view at ~10% of Read cost.
     Skeleton {
@@ -433,6 +439,19 @@ pub enum Op {
 }
 
 impl Op {
+    /// The caller accepts an answer from the generation published before
+    /// the watcher batches still queued: a read replica may serve it during
+    /// an update instead of the writer after it, and the envelope then says
+    /// so (`epistemics.staleness_ms` and a `STALE_GENERATION` warning). Only
+    /// `targets_facts` and `symbol` carry the field. An older daemon ignores
+    /// it and answers after the batch, as for any request.
+    pub fn stale_ok(&self) -> bool {
+        match self {
+            Op::TargetsFacts { stale_ok, .. } | Op::Symbol { stale_ok, .. } => *stale_ok,
+            _ => false,
+        }
+    }
+
     /// The wire tag name for this variant — the value serde emits under the
     /// `"op"` field (`"ping"`, `"search-content"`, `"scope-task"`, …). Used to populate
     /// the response envelope's `op` field so every response self-describes
@@ -616,6 +635,7 @@ mod tests {
             task: "fix login flow".into(),
             limit: Some(12),
             relevance_only: false,
+            stale_ok: false,
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(
@@ -635,6 +655,7 @@ mod tests {
                 task: "fix login flow".into(),
                 limit: None,
                 relevance_only: false,
+                stale_ok: false,
             }
         );
     }
@@ -670,6 +691,7 @@ mod tests {
             task: "how does install work".into(),
             limit: Some(8),
             relevance_only: true,
+            stale_ok: false,
         };
         let value = serde_json::to_value(&asked).unwrap();
         assert_eq!(
@@ -683,6 +705,7 @@ mod tests {
             task: "how does install work".into(),
             limit: Some(8),
             relevance_only: false,
+            stale_ok: false,
         };
         assert!(
             serde_json::to_value(&plain)
@@ -690,6 +713,55 @@ mod tests {
                 .get("relevance_only")
                 .is_none()
         );
+    }
+
+    /// `stale_ok` is opt-in on the wire: a request that does not ask
+    /// serializes as an older daemon knows it, one that asks round-trips,
+    /// and only the two ops a replica serves stale report it.
+    #[test]
+    fn stale_ok_should_reach_the_wire_only_when_asked() {
+        let asked = Op::TargetsFacts {
+            task: "how does install work".into(),
+            limit: Some(8),
+            relevance_only: true,
+            stale_ok: true,
+        };
+        let value = serde_json::to_value(&asked).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "targets_facts", "task": "how does install work", "limit": 8,
+                   "relevance_only": true, "stale_ok": true})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), asked);
+        assert!(asked.stale_ok());
+
+        let symbol = Op::Symbol {
+            name: "login".into(),
+            stale_ok: true,
+        };
+        let value = serde_json::to_value(&symbol).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "symbol", "name": "login", "stale_ok": true})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), symbol);
+        assert!(symbol.stale_ok());
+
+        let plain: Op = serde_json::from_value(json!({"op": "symbol", "name": "login"})).unwrap();
+        assert_eq!(
+            plain,
+            Op::Symbol {
+                name: "login".into(),
+                stale_ok: false
+            }
+        );
+        assert!(!plain.stale_ok());
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            json!({"op": "symbol", "name": "login"})
+        );
+        // Another op never claims it, whatever its other fields say.
+        assert!(!Op::Graph { if_stale: true }.stale_ok());
     }
 
     #[test]
@@ -922,6 +994,7 @@ mod tests {
                     task: "".into(),
                     limit: None,
                     relevance_only: false,
+                    stale_ok: false,
                 },
                 "targets_facts",
             ),
@@ -932,7 +1005,13 @@ mod tests {
                 },
                 "meaning",
             ),
-            (Op::Symbol { name: "".into() }, "symbol"),
+            (
+                Op::Symbol {
+                    name: "".into(),
+                    stale_ok: false,
+                },
+                "symbol",
+            ),
             (Op::Skeleton { file: "".into() }, "skeleton"),
             (
                 Op::Context {

@@ -191,7 +191,7 @@ pub const EXTRACTOR_VERSION: &str = "31";
 /// True iff the graph's rows were written by the current extractor, from
 /// the Rust and Ruby sources the switches ask for now
 /// (`mvp_adapter::RustSource`, `ruby_switch::RubySource`).
-fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
+pub fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
     Ok(
         store.meta_get(EXTRACTOR_VERSION_KEY)?.as_deref() == Some(EXTRACTOR_VERSION)
             && mvp_adapter::source_is_current(

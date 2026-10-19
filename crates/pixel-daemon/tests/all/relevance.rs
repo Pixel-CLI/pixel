@@ -85,6 +85,7 @@ fn facts(service: &mut Service, task: &str) -> Response {
         task: task.to_owned(),
         limit: Some(10),
         relevance_only: false,
+        stale_ok: false,
     });
     assert!(response.ok, "targets_facts: {:?}", response.error);
     assert_eq!(response.data()["status"], "available", "{response:?}");
@@ -97,6 +98,7 @@ fn facts_relevance_only(service: &mut Service, task: &str) -> Response {
         task: task.to_owned(),
         limit: Some(10),
         relevance_only: true,
+        stale_ok: false,
     });
     assert!(
         response.ok,
@@ -494,6 +496,7 @@ fn relevance_only_should_refuse_a_task_with_no_keyword_like_the_full_answer() {
             task: "the of a".to_owned(),
             limit: Some(10),
             relevance_only,
+            stale_ok: false,
         })
     };
     let full = ask(&mut service, false);

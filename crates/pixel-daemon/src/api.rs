@@ -647,8 +647,8 @@ fn note_failure(log: &mut FailureLog, what: &str) {
 }
 
 impl crate::daemon::ReadReplica for Service {
-    fn read(&mut self, req: &Request) -> Option<Response> {
-        self.read_answer(req)
+    fn read(&mut self, req: &Request, behind: &dyn Fn() -> Option<Duration>) -> Option<Response> {
+        self.read_answer(req, behind)
     }
 }
 
@@ -799,16 +799,22 @@ impl Service {
     }
 
     /// Answer a read-plane request on a replica, from the generation the
-    /// writer last published, or `None` when the writer must: not a
-    /// read-plane op, not a replica, an unhealthy or graph-lagging
+    /// writer last published, or `None` when the writer must: not an op a
+    /// replica may answer (`plane::replica_may_answer`), not a replica, an unhealthy or graph-lagging
     /// publication, no graph on disk to read (the writer builds it), no
     /// snapshot published for this generation, or a generation that moved
     /// while the answer was computed. The graph is read inside one
     /// transaction, so the answer sees one database state, and the answer
     /// carries the snapshot published with that generation: a replica runs
-    /// no git.
-    pub(crate) fn read_answer(&mut self, req: &Request) -> Option<Response> {
-        if !self.read_only || crate::plane::plane(req) != Plane::Read {
+    /// no git. A `stale_ok` answer given while a watcher batch is unfinished
+    /// (`behind`, sampled once the answer is computed) states it
+    /// ([`stamp_stale`]).
+    pub(crate) fn read_answer(
+        &mut self,
+        req: &Request,
+        behind: &dyn Fn() -> Option<Duration>,
+    ) -> Option<Response> {
+        if !self.read_only || !crate::plane::replica_may_answer(req) {
             return None;
         }
         let before = *self.publication.read_or_recover();
@@ -834,7 +840,13 @@ impl Service {
             let _ = graph.conn().execute_batch("ROLLBACK");
         }
         let after = *self.publication.read_or_recover();
-        (after.healthy && after.generation == before.generation).then_some(response)
+        if !after.healthy || after.generation != before.generation {
+            return None;
+        }
+        Some(match behind() {
+            Some(lag) if req.stale_ok() => stamp_stale(response, before.generation, lag),
+            _ => response,
+        })
     }
 
     /// Semantic leads for a lexical miss. The read plane never embeds: a
@@ -1541,13 +1553,16 @@ impl Service {
                 )
             }),
             Request::Targets { task, limit, max_tier, precision, regions } => self.op_targets(&task, limit, max_tier.as_deref(), precision, regions),
+            // `stale_ok` chose who answers (`Queued::route`); the op is the
+            // same on the writer and on a replica.
             Request::TargetsFacts {
                 task,
                 limit,
                 relevance_only,
+                stale_ok: _,
             } => self.op_targets_facts(&task, limit, relevance_only),
             Request::Meaning { query, limit } => self.op_meaning(&query, limit),
-            Request::Symbol { name } => self.op_symbol(&name),
+            Request::Symbol { name, stale_ok: _ } => self.op_symbol(&name),
             Request::Skeleton { file } => self.op_skeleton(&file),
             Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
             Request::Impact {
@@ -2005,8 +2020,14 @@ impl Service {
         };
         // The HEAD the content covers, not the base shard's commit: a delta
         // and the overlay carry the content past the base, which is rebuilt
-        // rarely (#1032).
-        if index_status.covered_head != self.git_state.fresh_head(&self.root) {
+        // rarely (#1032). A replica runs no git: it compares with the HEAD
+        // the writer published with the generation it reads.
+        let head = if self.read_only {
+            self.reader_snapshot.as_ref().and_then(|s| s.head.clone())
+        } else {
+            self.git_state.fresh_head(&self.root)
+        };
+        if index_status.covered_head != head {
             return unavailable(TargetsFactsUnavailableReason::IndexStale);
         }
 
@@ -2014,19 +2035,32 @@ impl Service {
         if !graph_path.is_file() {
             return unavailable(TargetsFactsUnavailableReason::GraphMissing);
         }
-        let graph = match GraphStore::open_read_only(&graph_path) {
-            Ok(graph) => graph,
-            Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
-        };
-        // One stat-cached walk answers the stored signature, the extractor
-        // version and the tree's signature at once: files unchanged since
-        // the last walk are stat-only instead of re-read and re-hashed, so
-        // the freshness check stops dominating the request's window.
-        let graph_signature =
-            match bridge::tree_delta_cached(&self.root, &graph_path, &mut self.hash_cache) {
-                Ok(Some(delta)) if delta.fresh => delta.signature,
+        let graph_signature = if self.read_only {
+            // A replica answers a `stale_ok` request from the graph the
+            // writer published, which `read_answer` holds in one read
+            // transaction. It walks no tree: the edits of the batch under
+            // way already moved it, and the envelope states that lag.
+            match self.graph.as_ref().map(published_signature) {
+                Some(Some(signature)) => signature,
                 _ => return unavailable(TargetsFactsUnavailableReason::GraphStale),
+            }
+        } else {
+            let graph = match GraphStore::open_read_only(&graph_path) {
+                Ok(graph) => graph,
+                Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
             };
+            // One stat-cached walk answers the stored signature, the extractor
+            // version and the tree's signature at once: files unchanged since
+            // the last walk are stat-only instead of re-read and re-hashed, so
+            // the freshness check stops dominating the request's window.
+            match bridge::tree_delta_cached(&self.root, &graph_path, &mut self.hash_cache) {
+                Ok(Some(delta)) if delta.fresh => {
+                    self.graph = Some(graph);
+                    delta.signature
+                }
+                _ => return unavailable(TargetsFactsUnavailableReason::GraphStale),
+            }
+        };
 
         let inputs = TargetsFactsInputs {
             task: task.to_owned(),
@@ -2042,7 +2076,6 @@ impl Service {
             activity_reranking: false,
             semantic_fallback: false,
         };
-        self.graph = Some(graph);
         let facts = if relevance_only {
             // The same gate and inputs as the full answer; the ranking of
             // targets, the part of the work a gate on relevance does not read,
@@ -4711,6 +4744,41 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "cycles",
 ];
 
+/// The freshness signature stored in `graph`, `None` when it has none or
+/// another extractor or graph source built it (the writer would rebuild):
+/// what a replica vouches for without walking the tree.
+fn published_signature(graph: &GraphStore) -> Option<String> {
+    if !pixel_graph::build::extractor_is_current(graph).ok()? {
+        return None;
+    }
+    graph
+        .meta_get(pixel_graph::build::FRESHNESS_KEY)
+        .ok()
+        .flatten()
+}
+
+/// Say that `response` comes from `generation` while watcher batches queued
+/// `lag` ago are unpublished: `epistemics.staleness_ms` and a
+/// `STALE_GENERATION` warning naming the generation. A failure is left as it
+/// is: it states nothing about the corpus.
+fn stamp_stale(mut response: Response, generation: u64, lag: Duration) -> Response {
+    if !response.ok {
+        return response;
+    }
+    let ms = u64::try_from(lag.as_millis()).unwrap_or(u64::MAX);
+    response
+        .epistemics
+        .get_or_insert_with(Epistemics::default)
+        .staleness_ms = Some(ms);
+    response.warnings.push(Warning {
+        code: "STALE_GENERATION".to_string(),
+        message: format!(
+            "answered from generation {generation}, which predates watcher batches queued {ms} ms ago and not yet published"
+        ),
+    });
+    response
+}
+
 fn is_retrieval_op(op_name: &str) -> bool {
     RETRIEVAL_OPS.contains(&op_name)
 }
@@ -6606,7 +6674,8 @@ mod tests {
         let mut writer = Service::open(&root).unwrap();
         let mut cold = writer.read_replica();
         assert!(
-            cold.read_answer(&search_request("login")).is_none(),
+            cold.read_answer(&search_request("login"), &|| None)
+                .is_none(),
             "no graph on disk: the writer builds it"
         );
         writer.ensure_graph().unwrap();
@@ -6615,13 +6684,15 @@ mod tests {
         let mut reader = writer.read_replica();
 
         let found = reader
-            .read_answer(&search_request("login"))
+            .read_answer(&search_request("login"), &|| None)
             .expect("a read-plane op");
         assert!(found.ok, "{found:?}");
         assert!(found.data().to_string().contains("login.rs"), "{found:?}");
-        assert!(reader.read_answer(&Request::Status {}).is_none());
+        assert!(reader.read_answer(&Request::Status {}, &|| None).is_none());
         assert!(
-            writer.read_answer(&search_request("login")).is_none(),
+            writer
+                .read_answer(&search_request("login"), &|| None)
+                .is_none(),
             "only a replica answers on the read plane"
         );
 
@@ -6629,13 +6700,15 @@ mod tests {
         writer.refresh_file("login.rs");
         assert!(writer.handle(search_request("login_v2")).ok);
         let fresh = reader
-            .read_answer(&search_request("login_v2"))
+            .read_answer(&search_request("login_v2"), &|| None)
             .expect("next generation");
         assert!(fresh.data().to_string().contains("login_v2"), "{fresh:?}");
 
         writer.publication.write_or_recover().graph_lagging = true;
         assert!(
-            reader.read_answer(&search_request("login_v2")).is_none(),
+            reader
+                .read_answer(&search_request("login_v2"), &|| None)
+                .is_none(),
             "a lagging graph sends the read to the writer, which repairs it"
         );
         std::fs::remove_dir_all(root).unwrap();
@@ -6652,7 +6725,9 @@ mod tests {
         writer.ensure_graph().unwrap();
         let mut reader = writer.read_replica();
         assert!(
-            reader.read_answer(&search_request("login")).is_none(),
+            reader
+                .read_answer(&search_request("login"), &|| None)
+                .is_none(),
             "nothing published yet"
         );
 
@@ -6662,7 +6737,9 @@ mod tests {
         assert_eq!(Some(&published.snapshot), written.snapshot.as_ref());
         assert!(published.snapshot.head.is_some(), "{published:?}");
 
-        let read = reader.read_answer(&search_request("login")).unwrap();
+        let read = reader
+            .read_answer(&search_request("login"), &|| None)
+            .unwrap();
         assert_eq!(read.snapshot, Some(published.snapshot.clone()));
         assert_eq!(reader.git_state.lookups, 0, "a replica spawned git");
 
@@ -6670,15 +6747,25 @@ mod tests {
         // not describe it.
         std::fs::write(root.join("login.rs"), "pub fn login_v3() {}\n").unwrap();
         writer.refresh_file("login.rs");
-        assert!(reader.read_answer(&search_request("login_v3")).is_none());
+        assert!(
+            reader
+                .read_answer(&search_request("login_v3"), &|| None)
+                .is_none()
+        );
         assert!(writer.handle(search_request("login_v3")).ok);
-        let next = reader.read_answer(&search_request("login_v3")).unwrap();
+        let next = reader
+            .read_answer(&search_request("login_v3"), &|| None)
+            .unwrap();
         assert_eq!(next.snapshot.and_then(|s| s.dirty_count), Some(1));
 
         // A HEAD move unpublishes it.
         writer.note_git_moved();
         assert!(writer.published_snapshot.read_or_recover().is_none());
-        assert!(reader.read_answer(&search_request("login_v3")).is_none());
+        assert!(
+            reader
+                .read_answer(&search_request("login_v3"), &|| None)
+                .is_none()
+        );
         assert_eq!(reader.git_state.lookups, 0);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -6751,17 +6838,17 @@ mod tests {
 
         let started = Instant::now();
         let old = reader
-            .read_answer(&search_request("login"))
+            .read_answer(&search_request("login"), &|| None)
             .expect("the replica answers during the batch");
         let renamed = reader
-            .read_answer(&search_request("login_v2"))
+            .read_answer(&search_request("login_v2"), &|| None)
             .expect("the replica answers during the batch");
         let resolve = Request::Resolve {
             phrase: "login_v2".into(),
             limit: Some(5),
         };
         let symbol = reader
-            .read_answer(&resolve)
+            .read_answer(&resolve, &|| None)
             .expect("the replica answers during the batch");
         let elapsed = started.elapsed();
         release.send(()).unwrap();
@@ -6791,16 +6878,285 @@ mod tests {
         assert_eq!(writer.publication_generation(), generation + 1);
         assert!(writer.handle(search_request("login_v2")).ok);
         let fresh = reader
-            .read_answer(&search_request("login_v2"))
+            .read_answer(&search_request("login_v2"), &|| None)
             .expect("the next generation");
         assert!(fresh.data().to_string().contains("login.rs"), "{fresh:?}");
-        let resolved = reader.read_answer(&resolve).expect("the next generation");
+        let resolved = reader
+            .read_answer(&resolve, &|| None)
+            .expect("the next generation");
         assert_eq!(
             resolved.data()["confidence"],
             json!("resolved"),
             "the committed rows: {resolved:?}"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A writer over `login_repo(tag)` that answered once (so a snapshot is
+    /// published), then holds a watcher batch renaming `login` to
+    /// `login_v2` right before its swap, with a replica of it.
+    struct HeldBatch {
+        root: PathBuf,
+        reader: Service,
+        generation: u64,
+        /// The graph signature the writer's own gate vouched for before.
+        signature: Value,
+        release: std::sync::mpsc::Sender<()>,
+        batch: std::thread::JoinHandle<Service>,
+    }
+
+    impl HeldBatch {
+        fn start(tag: &str) -> Self {
+            let root = login_repo(tag);
+            let mut writer = Service::open(&root).unwrap();
+            writer.ensure_graph().unwrap();
+            assert!(writer.handle(search_request("login")).ok);
+            let generation = writer.publication_generation();
+            let signature =
+                writer.handle(relevance_request(false)).data()["inputs"]["graph_signature"].clone();
+            assert!(signature.is_string(), "the writer's gate: {signature:?}");
+            let reader = writer.read_replica();
+            let (held_tx, held) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel::<()>();
+            writer.before_swap = Some(Box::new(move || {
+                held_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            }));
+            std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
+            let batch = std::thread::spawn(move || {
+                writer.refresh_file("login.rs");
+                writer
+            });
+            held.recv_timeout(Duration::from_secs(10))
+                .expect("the batch reaches its swap");
+            HeldBatch {
+                root,
+                reader,
+                generation,
+                signature,
+                release,
+                batch,
+            }
+        }
+
+        /// Let the batch publish; the writer, now one generation on.
+        fn finish(self) -> (PathBuf, Service, Service) {
+            self.release.send(()).unwrap();
+            let mut writer = self.batch.join().unwrap();
+            assert_eq!(writer.publication_generation(), self.generation + 1);
+            assert!(
+                writer.handle(search_request("login_v2")).ok,
+                "publish a snapshot"
+            );
+            (self.root, writer, self.reader)
+        }
+    }
+
+    fn relevance_request(stale_ok: bool) -> Request {
+        Request::TargetsFacts {
+            task: "fix the login check".into(),
+            limit: Some(8),
+            relevance_only: true,
+            stale_ok,
+        }
+    }
+
+    /// What a held batch makes `Busy::behind` say.
+    const HELD_LAG: Duration = Duration::from_millis(1_500);
+
+    /// The lag a `stale_ok` answer states, and its `STALE_GENERATION`
+    /// warnings: none at all on an answer that is not stale.
+    fn stated_lag(response: &Response) -> (Option<u64>, Vec<String>) {
+        (
+            response.epistemics.as_ref().and_then(|e| e.staleness_ms),
+            response
+                .warnings
+                .iter()
+                .filter(|w| w.code == "STALE_GENERATION")
+                .map(|w| w.message.clone())
+                .collect(),
+        )
+    }
+
+    fn symbol_names(response: &Response) -> Vec<String> {
+        response.data()["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// While a batch is held, a `symbol` that sets `stale_ok` is answered by
+    /// the replica at once, from the generation before the batch, and says
+    /// so; without the flag the replica refuses and the writer answers after
+    /// the batch (read-after-write). Once the batch is published, the same
+    /// request reads the new rows and states no lag.
+    #[test]
+    fn a_stale_ok_symbol_should_be_answered_from_the_last_generation_and_say_so() {
+        let mut held = HeldBatch::start("stale-ok-symbol");
+        let symbol = |name: &str, stale_ok| Request::Symbol {
+            name: name.into(),
+            stale_ok,
+        };
+        let lag = || Some(HELD_LAG);
+
+        assert!(
+            held.reader
+                .read_answer(&symbol("login", false), &lag)
+                .is_none(),
+            "without stale_ok the writer answers, after the batch"
+        );
+        let started = Instant::now();
+        let old = held
+            .reader
+            .read_answer(&symbol("login", true), &lag)
+            .expect("the replica answers during the batch");
+        let renamed = held
+            .reader
+            .read_answer(&symbol("login_v2", true), &lag)
+            .expect("the replica answers during the batch");
+        let elapsed = started.elapsed();
+        let generation = held.generation;
+        let (root, _writer, mut reader) = held.finish();
+
+        assert!(elapsed < Duration::from_secs(1), "waited {elapsed:?}");
+        assert!(old.ok && renamed.ok, "{old:?} {renamed:?}");
+        assert_eq!(symbol_names(&old), ["login"], "the published rows");
+        assert_eq!(
+            symbol_names(&renamed),
+            Vec::<String>::new(),
+            "no uncommitted row"
+        );
+        let stated = (
+            Some(1_500),
+            vec![format!(
+                "answered from generation {generation}, which predates watcher batches queued 1500 ms ago and not yet published"
+            )],
+        );
+        assert_eq!(stated_lag(&old), stated);
+        assert_eq!(stated_lag(&renamed), stated);
+
+        let fresh = reader
+            .read_answer(&symbol("login_v2", true), &|| None)
+            .expect("the next generation");
+        assert_eq!(symbol_names(&fresh), ["login_v2"]);
+        assert_eq!(
+            stated_lag(&fresh),
+            (None, Vec::new()),
+            "nothing pending: not stale"
+        );
+        assert_eq!(reader.git_state.lookups, 0, "a replica spawned git");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The relevance probe the brief sends on every prompt: during a held
+    /// batch a `stale_ok` `targets_facts` is available on the replica, its
+    /// inputs name the generation before the batch, and the envelope states
+    /// the lag. The replica runs no git and walks no tree, which the batch
+    /// has already moved (the writer's gate would say `graph_stale`).
+    #[test]
+    fn a_stale_ok_targets_facts_should_be_answered_from_the_last_generation_and_say_so() {
+        let mut held = HeldBatch::start("stale-ok-facts");
+        let facts = relevance_request;
+        let lag = || Some(HELD_LAG);
+
+        assert!(
+            held.reader.read_answer(&facts(false), &lag).is_none(),
+            "without stale_ok the writer answers, after the batch"
+        );
+        let started = Instant::now();
+        let stale = held
+            .reader
+            .read_answer(&facts(true), &lag)
+            .expect("the replica answers during the batch");
+        let elapsed = started.elapsed();
+        let generation = held.generation;
+        let signature = held.signature.clone();
+        let (root, _writer, mut reader) = held.finish();
+
+        assert!(elapsed < Duration::from_secs(1), "waited {elapsed:?}");
+        assert_eq!(stale.data()["status"], "available", "{stale:?}");
+        assert_eq!(
+            stale.data()["inputs"]["graph_generation"],
+            json!(generation)
+        );
+        assert_eq!(
+            stale.data()["inputs"]["graph_signature"],
+            signature,
+            "the signature the writer vouched for before the batch"
+        );
+        assert!(
+            stale.data()["facts"].get("relevance").is_some(),
+            "the relevance block: {stale:?}"
+        );
+        assert_eq!(stated_lag(&stale).0, Some(1_500));
+        assert_eq!(stated_lag(&stale).1.len(), 1, "{stale:?}");
+
+        let fresh = reader
+            .read_answer(&facts(true), &|| None)
+            .expect("the next generation");
+        assert_eq!(fresh.data()["status"], "available", "{fresh:?}");
+        assert_eq!(
+            fresh.data()["inputs"]["graph_generation"],
+            json!(generation + 1)
+        );
+        assert_ne!(
+            fresh.data()["inputs"]["graph_signature"],
+            stale.data()["inputs"]["graph_signature"],
+            "the stale answer vouched for the old graph, not the edited tree"
+        );
+        assert_eq!(stated_lag(&fresh), (None, Vec::new()));
+        assert_eq!(reader.git_state.lookups, 0, "a replica spawned git");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A replica vouches only for a graph the current extractor wrote: one
+    /// another extractor built is the writer's to rebuild, so the replica
+    /// says `graph_stale` rather than serve its rows.
+    #[test]
+    fn a_replica_should_not_vouch_for_a_graph_another_extractor_built() {
+        let root = login_repo("stale-ok-extractor");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        assert!(writer.handle(search_request("login")).ok);
+        let mut reader = writer.read_replica();
+        let current = reader
+            .read_answer(&relevance_request(true), &|| None)
+            .expect("a published generation");
+        assert_eq!(current.data()["status"], "available", "{current:?}");
+
+        GraphStore::open(&writer.graph_db_path())
+            .unwrap()
+            .meta_set(pixel_graph::build::EXTRACTOR_VERSION_KEY, "0")
+            .unwrap();
+        let older = reader
+            .read_answer(&relevance_request(true), &|| None)
+            .expect("a published generation");
+        assert_eq!(older.data()["status"], "unavailable", "{older:?}");
+        assert_eq!(older.data()["reason"], "graph_stale", "{older:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A failure says nothing about the corpus, so it carries no lag; a
+    /// success gets the lag in `staleness_ms` and one warning naming the
+    /// generation it was read from.
+    #[test]
+    fn stamp_stale_should_state_the_lag_on_a_success_only() {
+        let failed = failure_response("symbol", "no graph");
+        assert_eq!(
+            stamp_stale(failed.clone(), 7, HELD_LAG),
+            failed,
+            "a failure is left as it is"
+        );
+        let stamped = stamp_stale(Response::success("symbol", json!({})), 7, HELD_LAG);
+        assert_eq!(
+            stated_lag(&stamped),
+            (
+                Some(1_500),
+                vec!["answered from generation 7, which predates watcher batches queued 1500 ms ago and not yet published".to_owned()]
+            )
+        );
     }
 
     fn login_repo(tag: &str) -> PathBuf {
@@ -7513,12 +7869,16 @@ mod tests {
         };
         let found = svc.handle(Request::Symbol {
             name: "ActionLog::finish".into(),
+            stale_ok: false,
         });
         assert!(found.ok, "{found:?}");
         assert_eq!(uids(&found), vec![action_log.to_string()]);
         // The dotted spelling a Python uid carries, and the Rust one for it.
         for name in ["Builder.finish", "Builder::finish"] {
-            let found = svc.handle(Request::Symbol { name: name.into() });
+            let found = svc.handle(Request::Symbol {
+                name: name.into(),
+                stale_ok: false,
+            });
             assert_eq!(
                 uids(&found),
                 vec!["build.py#Builder.finish#method".to_string()],
@@ -7678,6 +8038,7 @@ mod tests {
         // Find the uid for `alpha`.
         let sym = svc.handle(Request::Symbol {
             name: "alpha".into(),
+            stale_ok: false,
         });
         assert!(sym.ok, "symbol lookup: {sym:?}");
         let uid = sym
@@ -7828,6 +8189,7 @@ mod tests {
         let mut svc = Service::open(&root).unwrap();
         let sym = svc.handle(Request::Symbol {
             name: "alpha".into(),
+            stale_ok: false,
         });
         let uid = sym
             .data()
@@ -8791,6 +9153,7 @@ mod tests {
             task: "change login".into(),
             limit: Some(8),
             relevance_only: false,
+            stale_ok: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
@@ -8800,6 +9163,7 @@ mod tests {
             task: "change login".into(),
             limit: Some(8),
             relevance_only: true,
+            stale_ok: false,
         });
         assert_eq!(
             relevance_only.data(),
@@ -8838,6 +9202,7 @@ mod tests {
             task: "change login".into(),
             limit: Some(8),
             relevance_only: false,
+            stale_ok: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
@@ -8847,6 +9212,7 @@ mod tests {
             task: "change login".into(),
             limit: Some(8),
             relevance_only: true,
+            stale_ok: false,
         });
         assert_eq!(
             relevance_only.data(),
@@ -8873,6 +9239,7 @@ mod tests {
                 task: task.into(),
                 limit: Some(8),
                 relevance_only,
+                stale_ok: false,
             })
             .data()
             .clone()
@@ -9113,6 +9480,7 @@ mod tests {
             task: "change session".into(),
             limit: Some(8),
             relevance_only: false,
+            stale_ok: false,
         });
         assert_eq!(response.data()["reason"], "index_stale", "{response:?}");
         assert_eq!(
@@ -9151,6 +9519,7 @@ mod tests {
             task: "change session".into(),
             limit: Some(8),
             relevance_only: false,
+            stale_ok: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
@@ -9160,6 +9529,7 @@ mod tests {
             task: "change session".into(),
             limit: Some(8),
             relevance_only: true,
+            stale_ok: false,
         });
         assert_eq!(
             relevance_only.data(),
@@ -9201,6 +9571,7 @@ mod tests {
             task: "change login".into(),
             limit: Some(8),
             relevance_only: false,
+            stale_ok: false,
         };
         let first = service.handle(request());
         let second = service.handle(request());
@@ -9240,6 +9611,7 @@ mod tests {
             task: "change login".into(),
             limit: Some(8),
             relevance_only: true,
+            stale_ok: false,
         };
         let (fast, fast_again) = (service.handle(only()), service.handle(only()));
         assert_eq!(fast.data(), fast_again.data(), "the fast path repeats too");
@@ -9343,6 +9715,7 @@ mod tests {
         let uid = {
             let sym = svc.handle(Request::Symbol {
                 name: "alpha".into(),
+                stale_ok: false,
             });
             sym.data()["symbols"][0]["uid"]
                 .as_str()
@@ -9387,6 +9760,7 @@ mod tests {
                     task: "alpha beta".into(),
                     limit: Some(5),
                     relevance_only: false,
+                    stale_ok: false,
                 },
             ),
             (
@@ -9439,6 +9813,7 @@ mod tests {
                 "symbol",
                 Request::Symbol {
                     name: "alpha".into(),
+                    stale_ok: false,
                 },
             ),
             ("processes", Request::Processes { offset: None }),
@@ -10950,6 +11325,7 @@ mod tests {
         // new name, not the pre-rename snapshot.
         let sym = svc.handle(Request::Symbol {
             name: "authenticate".to_string(),
+            stale_ok: false,
         });
         assert!(sym.ok, "{sym:?}");
         assert!(

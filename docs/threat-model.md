@@ -89,8 +89,12 @@ wire contract"). In `crates/pixel-daemon/src/daemon.rs`: `MAX_REQUEST_LINE`
 set to 0600 after `bind`; on Linux the fallback directory is set to 0700.
 `PROTOCOL_VERSION` (`pixel_daemon::api`, 16) is compared by the CLI's
 `classify_ping`: an older daemon is shut down and replaced, a newer one is
-left alone and the command runs in process. Requests are served one at a
-time. The op set includes git mutations (`publish`, `push`, `ship`,
+left alone and the command runs in process. One writer serves requests in
+arrival order; while it is busy, read replicas answer the read-plane ops,
+and a `targets_facts` or `symbol` that sets `stale_ok` even during a watcher
+batch. A replica opens the graph read-only, runs no git and writes nothing,
+so the flag changes only how old an answer may be, which the envelope
+states (`staleness_ms`, a `STALE_GENERATION` warning). The op set includes git mutations (`publish`, `push`, `ship`,
 `branch_op`, `update`, `sync`, `reconcile`), file writes (`rename`), index
 rebuilds and `shutdown`. The CLI starts a daemon on demand
 (`auto_start_daemon`; `PIXEL_DAEMON_AUTO_START=0` turns that off).
