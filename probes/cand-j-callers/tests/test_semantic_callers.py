@@ -72,6 +72,45 @@ class SemanticCallerFallbacks(unittest.TestCase):
         self.assertIn("src/store.ts", out)
         self.assertIn("id: makeId()", out)
 
+    def test_id_scan_skips_irrelevant_source_before_comment_masking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = {
+                "src/ids.ts": "export const makeElementId = () => nanoid();\n",
+                "src/canvas.ts": "import { makeElementId } from './ids';\nconst element = { id: makeElementId() };\n",
+                "src/noise.ts": "export const unrelated = () => true;\n",
+            }
+            for rel, text in files.items():
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            texts, partial = PROBE_MODULE.tracked_source(root, "Which modules call the element ID generator?")
+            with mock.patch.object(PROBE_MODULE, "javascript_code_mask", wraps=PROBE_MODULE.javascript_code_mask) as mask:
+                out = PROBE_MODULE.semantic_caller_blocks(
+                    "Which modules call the element ID generator?", texts, partial
+                )
+            self.assertIn("src/canvas.ts", out)
+            self.assertNotIn("unrelated", [call.args[0] for call in mask.call_args_list])
+
+    def test_tracked_source_prioritizes_query_matching_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = {
+                "aaa/noise.py": "def unrelated():\n    return True\n",
+                "zzz/element_ids.py": "def make_element_id():\n    return uuid4()\n",
+            }
+            for rel, text in files.items():
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            texts, partial = PROBE_MODULE.tracked_source(root, "Show callers of fresh drawing element IDs")
+            self.assertFalse(partial)
+            self.assertEqual(list(texts)[:2], ["zzz/element_ids.py", "aaa/noise.py"])
+
     def test_id_factory_resolves_typescript_alias_and_barrel_export(self):
         out = run("Which modules call the element ID generator?", {
             "tsconfig.json": '{"compilerOptions":{"baseUrl":".","paths":{"@core/*":["src/*"]}}}',
@@ -132,6 +171,39 @@ class SemanticCallerFallbacks(unittest.TestCase):
         self.assertIn("wsgi_app", out)
         self.assertIn("ctx.push()", out)
         self.assertNotIn("_Globals.push", out)
+
+    def test_show_callers_of_fresh_element_id_factory(self):
+        out = run("Show callers of the function that creates fresh drawing element IDs.", {
+            "packages/common/src/random.ts": "export const randomId = () => Math.random().toString(36);\n",
+            "packages/element/src/newElement.ts": "import { randomId } from '../../common/src/random';\n"
+                "export const createElement = () => ({ id: randomId() });\n",
+        })
+        self.assertIn("ID factory randomId", out)
+        self.assertIn("packages/element/src/newElement.ts", out)
+        self.assertIn("id: randomId()", out)
+
+    def test_locate_request_context_alias_and_internal_push_callers(self):
+        out = run("Locate RequestContext.push and the internal entry points that invoke it.", {
+            "src/flask/ctx.py": "class AppContext:\n"
+                "    \"\"\"An app context contains request information.\\n"
+                "    Merged with RequestContext; the alias will be removed.\"\"\"\n"
+                "    def push(self):\n        self.activate_request()\n\n"
+                "    def __enter__(self):\n        self.push()\n        return self\n\n"
+                "def __getattr__(name):\n"
+                "    if name == \"RequestContext\":\n        return AppContext\n"
+                "    raise AttributeError(name)\n",
+            "src/flask/app.py": "class Flask:\n"
+                "    def request_context(self, environ) -> AppContext:\n"
+                "        return AppContext(environ)\n\n"
+                "    def wsgi_app(self, environ):\n"
+                "        ctx = self.request_context(environ)\n        ctx.push()\n",
+        })
+        self.assertIn("RequestContext", out)
+        self.assertIn("RequestContext alias resolves to merged AppContext", out)
+        self.assertIn("AppContext.push", out)
+        self.assertIn("__enter__", out)
+        self.assertIn("wsgi_app", out)
+        self.assertIn("ctx.push()", out)
 
     def test_generic_workflow_id_question_abstains(self):
         out = run("Can you generate an ID for this workflow ticket?", {
