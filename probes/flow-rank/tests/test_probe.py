@@ -228,6 +228,13 @@ class NamedEntry(unittest.TestCase):
 
 
 class ManifestAdmission(unittest.TestCase):
+    def test_when_prompt_avoids_lookaround_unsupported_by_native_regex(self):
+        with MANIFEST.open("rb") as manifest_file:
+            pattern = tomllib.load(manifest_file)["brief-probe"]["when_prompt"]
+        for unsupported in ("(?=", "(?!", "(?<=", "(?<!"):
+            with self.subTest(unsupported=unsupported):
+                self.assertNotIn(unsupported, pattern)
+
     def test_paraphrased_flow_forms_admit_but_near_misses_do_not(self):
         with MANIFEST.open("rb") as manifest_file:
             pattern = re.compile(tomllib.load(manifest_file)["brief-probe"]["when_prompt"])

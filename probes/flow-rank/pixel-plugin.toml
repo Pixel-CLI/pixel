@@ -9,7 +9,7 @@ capabilities = ["brief-probe"]
 owner = "pixel"
 when_kinds = ["flow"]
 # A walkthrough the brief did not classify as flow (a "rationale" or unjudged prompt) still gets its chain.
-when_prompt = "(?i)(\\bwalk (me )?through\\b.*\\b(hook|prompt|router|request|press|key|event|response|code|function|method)\\b|\\b(hook|prompt|router|request|press|key|event|response|code|function|method)\\b.*\\bwalk (me )?through\\b|(?=.*\\bhook\\b)(?=.*\\bprompt\\b)(?=.*\\b(submitted|submission)\\b)(?=.*\\b(text|context)\\b)|(?=.*\\b(trace|walk|flow|happens|path)\\b)(?=.*\\b(undo|redo)\\b)(?=.*\\b(keyboard shortcut|shortcut)\\b)|(?=.*\\b(how does|trace|walk|flow)\\b)(?=.*\\b(application|app)\\b)(?=.*\\bcallback\\b.*\\brequest\\b)(?=.*\\b(router|routing|route)\\b)(?=.*\\bcompletion\\b)(?=.*\\bcallback\\b))"
+when_prompt = "(?i)(\\bwalk (me )?through\\b.*\\b(hook|prompt|router|request|press|key|event|response|code|function|method)\\b|\\b(hook|prompt|router|request|press|key|event|response|code|function|method)\\b.*\\bwalk (me )?through\\b|\\b(trace|walk|flow|happens|path)\\b.{0,220}\\b(hook|prompt)\\b|\\b(trace|walk|flow|happens|path)\\b.{0,120}\\b(undo|redo)\\b.{0,100}\\b(keyboard shortcut|shortcut)\\b|\\b(how does|walk|trace|flow|happens|path)\\b.{0,160}\\b(application|app)\\b.{0,50}\\bcallback\\b.{0,180}\\brequest\\b.{0,160}\\b(router|routing|route)\\b.{0,160}\\b(completion|response)\\b.{0,50}\\bcallback\\b)"
 when_gate_closed = true
 budget_ms = 1500
 mode = "lead"
