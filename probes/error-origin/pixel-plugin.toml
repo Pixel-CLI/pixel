@@ -8,6 +8,6 @@ capabilities = ["brief-probe"]
 [brief-probe]
 owner = "pixel"
 # A quoted message, or one the question describes in words ("the error about working outside of application context").
-when_prompt = "['\"`‘“][^'\"`’”]{12,}['\"`’”]|(?i:\\b(errors?|exceptions?|messages?|warnings?|alerts?|panics?|text)\\b)"
+when_prompt = "['\"`‘“][^'\"`’”]{12,}['\"`’”]|(?i:\\b(errors?|exceptions?|messages?|warnings?|alerts?|panics?|text)\\b)|(?i:\\b(?:404|not[\\s-]+found)\\b.{0,60}\\b(?:page|handler|response|message|text|produced|generated|comes? from|created)\\b|\\b(?:page|handler|response|message|text)\\b.{0,60}\\b(?:404|not[\\s-]+found)\\b)"
 budget_ms = 2000
 mode = "append"

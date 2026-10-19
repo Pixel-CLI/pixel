@@ -6,12 +6,15 @@
 
 import json
 import os
+import re
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
 PROBE = Path(__file__).resolve().parents[1] / "probe"
+MANIFEST = Path(__file__).resolve().parents[1] / "pixel-plugin.toml"
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
            "GIT_CONFIG_GLOBAL": os.devnull, "PATH": os.environ["PATH"]}
 
@@ -440,6 +443,29 @@ class DefaultDependencyBoundary(unittest.TestCase):
         })
         out, _ = origin(requests, "where does the text of the max retries exceeded connection error come from")
         self.assertNotIn("default handler callback candidate", out)
+
+
+class ManifestAdmission(unittest.TestCase):
+    def test_default_not_found_source_questions_admit_without_generic_404_admission(self):
+        manifest = tomllib.loads(MANIFEST.read_text())
+        gate = re.compile(manifest["brief-probe"]["when_prompt"])
+        positives = [
+            "where is the default 404 page that says Cannot GET produced",
+            "Where is the standard not-found response generated?",
+            "Where is the 404 response message generated?",
+        ]
+        negatives = [
+            "What does HTTP status 404 mean?",
+            "Where does an unrelated parser produce status code 404?",
+            "continue",
+            "What is the weather?",
+        ]
+        for prompt in positives:
+            with self.subTest(prompt=prompt):
+                self.assertIsNotNone(gate.search(prompt))
+        for prompt in negatives:
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(gate.search(prompt))
 
 
 if __name__ == "__main__":
