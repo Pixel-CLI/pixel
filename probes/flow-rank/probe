@@ -23,7 +23,30 @@ GENERIC = {"element", "elements", "scene", "file", "files", "data", "state", "va
 NOISE = {"walk", "through", "happens", "happen", "someone", "until", "from", "shows", "when", "onto", "that", "file",
          "with", "what", "into"}
 ENTRY_LINES, BODY_LINES, MAX_RANKED, MIN_SCORE = 160, 130, 12, 1.0
-SHORTCUT_SCAN_BYTES, SHORTCUT_FILE_BYTES, SHORTCUT_FILES, SHORTCUT_SCAN_MS = 24_000_000, 600_000, 3000, 700
+SHORTCUT_SCAN_BYTES, SHORTCUT_FILE_BYTES, SHORTCUT_FILES, SHORTCUT_SCAN_MS = 24_000_000, 600_000, 3000, 950
+
+
+def prioritized_source_paths(listing, prompt, suffixes):
+    """Order tracked source paths by prompt-term overlap before the bounded read."""
+    stop = NOISE | GENERIC | {"walk", "trace", "flow", "happens", "path", "show", "find", "tell", "explain"}
+    terms = {term.lower() for term in re.findall(r"[A-Za-z][A-Za-z0-9]*", prompt) if len(term) > 2}
+    terms -= stop
+    if re.search(r"\b(walk|trace|flow|happens|path)\b", prompt, re.I):
+        # A traced path may need its top-level caller even when no prompt term
+        # appears in that conventional entry filename.
+        terms.add("main")
+    paths = [raw for raw in listing.split(b"\0")[:SHORTCUT_FILES + 1]
+             if raw and Path(os.fsdecode(raw)).suffix.lower() in suffixes]
+
+    def rank(raw):
+        path = os.fsdecode(raw)
+        # Split camel case as well as path punctuation, so an identifier such
+        # as actionHistory can match ordinary question vocabulary.
+        words = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", path).lower()
+        tokens = set(re.findall(r"[a-z0-9]+", words))
+        return (-len(terms & tokens), path)
+
+    return sorted(paths, key=rank)
 
 
 def pixel(root, *args):
@@ -65,9 +88,11 @@ def shortcut_evidence(root, prompt):
     if not re.search(r"\b(walk|trace|flow|happens|path)\b", prompt, re.I):
         return ""
     chord = re.search(r"\b(ctrl|control|cmd|command|meta)\s*\+\s*([a-z0-9])\b", prompt, re.I)
-    if not chord:
+    operation = re.search(r"\b(undo|redo)\b", prompt, re.I)
+    named_shortcut = operation and re.search(r"\b(keyboard\s+shortcut|shortcut)\b", prompt, re.I)
+    if not chord and not named_shortcut:
         return ""
-    key = chord.group(2).upper()
+    key = chord.group(2).upper() if chord else None
     root = Path(root).resolve()
     try:
         listing = subprocess.run(["git", "ls-files", "-z"], cwd=root, stdout=subprocess.PIPE,
@@ -76,7 +101,7 @@ def shortcut_evidence(root, prompt):
         return ""
     suffixes = {".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".go", ".java", ".kt", ".swift"}
     rows, total, deadline = [], 0, time.monotonic() + SHORTCUT_SCAN_MS / 1000
-    for raw in listing.split(b"\0")[:SHORTCUT_FILES + 1]:
+    for raw in prioritized_source_paths(listing, prompt, suffixes)[:SHORTCUT_FILES + 1]:
         if time.monotonic() >= deadline:
             break
         if not raw:
@@ -100,25 +125,39 @@ def shortcut_evidence(root, prompt):
         total += info.st_size
         rows.append((rel.as_posix(), text.splitlines()))
 
-    key_forms = [rf"KEYS\.{re.escape(key)}\b", rf"event\.key\s*=+\s*['\"]{re.escape(key.lower())}['\"]",
-                 rf"key\s*=+\s*['\"]{re.escape(key.lower())}['\"]"]
-    key_re = re.compile("|".join(key_forms), re.I)
     action = None
     for path, lines in rows:
         if "test" in path.lower() or "spec" in path.lower():
             continue
         for i, line in enumerate(lines):
-            if line.lstrip().startswith(("//", "#", "*")) or not key_re.search(line):
+            if line.lstrip().startswith(("//", "#", "*")):
                 continue
-            context = "\n".join(lines[max(0, i - 4):min(len(lines), i + 5)])
-            if not re.search(r"ctrl|control|meta|command|cmd", context, re.I):
-                continue
-            start = max(0, i - 12)
-            for j in range(i, max(-1, i - 30), -1):
-                if re.search(r"(?:export\s+)?(?:const|let|var|function|class)\s+([\w$]+)", lines[j]):
-                    start = j
-                    break
-            body = lines[start:min(len(lines), i + 13)]
+            if chord:
+                key_forms = [rf"KEYS\.{re.escape(key)}\b", rf"event\.key\s*=+\s*['\"]{re.escape(key.lower())}['\"]",
+                             rf"key\s*=+\s*['\"]{re.escape(key.lower())}['\"]"]
+                if not re.search("|".join(key_forms), line, re.I):
+                    continue
+                context = "\n".join(lines[max(0, i - 4):min(len(lines), i + 5)])
+                if not re.search(r"ctrl|control|meta|command|cmd", context, re.I):
+                    continue
+                start = max(0, i - 12)
+                for j in range(i, max(-1, i - 30), -1):
+                    if re.search(r"(?:export\s+)?(?:const|let|var|function|class)\s+([\w$]+)", lines[j]):
+                        start = j
+                        break
+                end = min(len(lines), i + 13)
+            else:
+                if not re.search(r"\bkeyTest\s*:", line):
+                    continue
+                start = max(0, i - 20)
+                start = next((j for j in range(i, max(-1, i - 40), -1)
+                              if re.search(r"(?:export\s+)?(?:const|let|var|function|class)\s+([\w$]+)", lines[j])), start)
+                end = min(len(lines), i + 8)
+                candidate = "\n".join(lines[start:end])
+                expected = operation.group(1).lower()
+                if not re.search(rf"name\s*:\s*['\"]{expected}['\"]", candidate, re.I):
+                    continue
+            body = lines[start:end]
             joined = "\n".join(body)
             if not re.search(r"\b(undo|redo)\b", joined, re.I):
                 continue
@@ -131,8 +170,10 @@ def shortcut_evidence(root, prompt):
         return ""
 
     action_path, action_lo, action_hi, action_name, action_body = action
-    method = "redo" if re.search(r"\bredo\b", action_body, re.I) and not re.search(r"\bundo\b", action_body, re.I) else "undo"
-    out = [f"### shortcut flow: {chord.group(1)}-{key} action {action_name}",
+    method = operation.group(1).lower() if operation else (
+        "redo" if re.search(r"\bredo\b", action_body, re.I) and not re.search(r"\bundo\b", action_body, re.I) else "undo")
+    label = f"{chord.group(1)}-{key}" if chord else f"{method} keyboard shortcut (key from source)"
+    out = [f"### shortcut flow: {label} action {action_name}",
            f"### {action_path}:{action_lo}-{action_hi} — key action {action_name}"]
     out.extend(f"{n}| {line[:200]}" for n, line in enumerate(rows[[p for p, _ in rows].index(action_path)][1][action_lo - 1:action_hi], action_lo))
 
@@ -157,8 +198,10 @@ def shortcut_evidence(root, prompt):
             continue
         for i, line in enumerate(lines):
             region = lines[max(0, i - 15):min(len(lines), i + 65)]
-            if re.search(r"keyTest", line) and any("actions" in x for x in region) and any("executeAction" in x for x in region):
-                execute_at = next((j for j in range(i, min(len(lines), i + 65)) if "executeAction" in lines[j]), None)
+            executes = any(re.search(r"executeAction\s*\(|\.perform\s*\(", x) for x in region)
+            if re.search(r"keyTest", line) and any("actions" in x for x in region) and executes:
+                execute_at = next((j for j in range(i, min(len(lines), i + 65))
+                                   if re.search(r"executeAction\s*\(|\.perform\s*\(", lines[j])), None)
                 dispatch = (path, lines, i, execute_at)
                 break
         if dispatch:
@@ -179,9 +222,16 @@ def shortcut_evidence(root, prompt):
 
 def request_router_evidence(root, prompt):
     """Show the tracked app-to-router request handoff for a request/response walkthrough."""
-    if not re.search(r"\b(walk|trace|flow|happens|path)\b", prompt, re.I) or not all(
-        re.search(rf"\b{term}\b", prompt, re.I) for term in ("request", "router", "response")
-    ):
+    flow_intent = re.search(r"\b(walk|trace|flow|happens|path|how does)\b", prompt, re.I)
+    request = re.search(r"\brequest\b", prompt, re.I)
+    routing = re.search(r"\b(router|routing|route)\b", prompt, re.I)
+    callback = re.findall(r"\bcallback\b", prompt, re.I)
+    app_callback = re.search(r"\b(application|app)\b.{0,50}\bcallback\b", prompt, re.I)
+    completion = re.search(r"\b(response|completion)\b", prompt, re.I)
+    request_trace = all((flow_intent, request, routing, len(callback) >= 2, app_callback, completion))
+    legacy_trace = flow_intent and all(re.search(rf"\b{term}\b", prompt, re.I)
+                                      for term in ("request", "router", "response"))
+    if not (request_trace or legacy_trace):
         return ""
     root = Path(root).resolve()
     try:
@@ -191,7 +241,7 @@ def request_router_evidence(root, prompt):
         return ""
     suffixes = {".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".go", ".java", ".kt", ".swift"}
     rows, total, deadline = [], 0, time.monotonic() + SHORTCUT_SCAN_MS / 1000
-    for raw in listing.split(b"\0")[:SHORTCUT_FILES + 1]:
+    for raw in prioritized_source_paths(listing, prompt, suffixes)[:SHORTCUT_FILES + 1]:
         if time.monotonic() >= deadline:
             break
         if not raw:
@@ -248,15 +298,25 @@ def request_router_evidence(root, prompt):
 
 def event_delivery_evidence(root, prompt):
     """Resolve a prompt-named event literal, its handler, and a nearby output sink."""
-    if not re.search(r"\bhook\b", prompt, re.I) or not re.search(r"\bbrief\b", prompt, re.I) or not re.search(
-        r"\b(print|printed|prints|write|written|output|delivers?)\b", prompt, re.I
-    ):
+    hook = re.search(r"\bhook\b", prompt, re.I)
+    explicit_brief = re.search(r"\bbrief\b", prompt, re.I)
+    submitted_prompt = (re.search(r"\bprompt\b", prompt, re.I)
+                        and re.search(r"\b(submitted|submission)\b", prompt, re.I))
+    output_intent = re.search(r"\b(print|printed|prints|write|written|output|delivers?)\b", prompt, re.I)
+    context_delivery = (submitted_prompt and re.search(r"\b(text|context)\b", prompt, re.I)
+                        and re.search(r"\b(sent|send|returned|return|back)\b", prompt, re.I))
+    if not hook or not (explicit_brief or submitted_prompt) or not (output_intent or context_delivery):
         return ""
     event_match = re.search(r"\b([a-z][a-z0-9]*[-_][a-z][a-z0-9]*)\b", prompt, re.I)
-    if not event_match:
+    semantic_event = (not event_match and re.search(r"\bhook\b", prompt, re.I)
+                      and re.search(r"\bprompt\b", prompt, re.I)
+                      and re.search(r"\b(submitted|submission)\b", prompt, re.I)
+                      and re.search(r"\b(text|context)\b", prompt, re.I))
+    if not event_match and not semantic_event:
         return ""
-    event_literal = event_match.group(1).lower().replace("_", "-")
-    event_variant = "".join(part[:1].upper() + part[1:] for part in re.split(r"[-_]", event_match.group(1)))
+    event_literal = event_match.group(1).lower().replace("_", "-") if event_match else ""
+    event_variant = ("".join(part[:1].upper() + part[1:] for part in re.split(r"[-_]", event_match.group(1)))
+                     if event_match else "")
     root = Path(root).resolve()
     try:
         listing = subprocess.run(["git", "ls-files", "-z"], cwd=root, stdout=subprocess.PIPE,
@@ -265,7 +325,7 @@ def event_delivery_evidence(root, prompt):
         return ""
     suffixes = {".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".kt", ".swift"}
     rows, total, deadline = [], 0, time.monotonic() + SHORTCUT_SCAN_MS / 1000
-    for raw in listing.split(b"\0")[:SHORTCUT_FILES + 1]:
+    for raw in prioritized_source_paths(listing, prompt, suffixes)[:SHORTCUT_FILES + 1]:
         if time.monotonic() >= deadline:
             break
         if not raw:
@@ -292,12 +352,26 @@ def event_delivery_evidence(root, prompt):
     for path, lines in rows:
         if "test" in path.lower() or "spec" in path.lower():
             continue
-        for i, line in enumerate(lines):
-            if re.search(rf"['\"]{re.escape(event_literal)}['\"]", line) and not line.lstrip().startswith(("//", "#", "*")):
-                variant = re.search(rf"(?:Self::|::)({re.escape(event_variant)})\s*=>", line)
-                if variant:
-                    event = (path, lines, i, variant.group(1))
-                    break
+        masked_lines = rust_code_mask("\n".join(lines)).splitlines()
+        for i, (line, active) in enumerate(zip(lines, masked_lines)):
+            mapping = re.search(r"(?:Self::|::)([A-Z][A-Za-z0-9_]*)\s*=>\s*['\"]([^'\"]+)['\"]", line)
+            if not mapping:
+                continue
+            active_variant = re.search(r"(?:Self::|::)([A-Z][A-Za-z0-9_]*)\s*=>", active)
+            if (not active_variant or active_variant.group(1) != mapping.group(1)
+                    or active_variant.start() != mapping.start()):
+                continue
+            variant_name, literal = mapping.groups()
+            if event_match:
+                if literal != event_literal or variant_name != event_variant:
+                    continue
+            else:
+                parts = [part.lower() for part in re.findall(r"[A-Z][a-z0-9]*", variant_name)]
+                if not ("prompt" in parts and "submit" in parts):
+                    continue
+            event = (path, lines, i, variant_name)
+            event_literal = literal
+            break
         if event:
             break
     if not event:
@@ -361,6 +435,90 @@ def event_delivery_evidence(root, prompt):
                 out.extend(f"{n + 1}| {lines[n][:200]}" for n in range(lo, hi))
                 return "\n".join(out)[:5200]
     return "\n".join(out)[:5200]
+
+
+def rust_code_mask(source):
+    """Mask Rust comments and string literals while preserving active code offsets."""
+    out = list(source)
+    raw_string_start = re.compile(r"(?:br|r)(\#*)\"")
+    i, state, escaped, block_depth, raw_end = 0, "code", False, 0, ""
+    while i < len(source):
+        if state == "code":
+            if source.startswith("//", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "line"
+                continue
+            if source.startswith("/*", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state, block_depth = "block", 1
+                continue
+            raw = None
+            if source[i] in "rb" and (i == 0 or not (source[i - 1].isalnum() or source[i - 1] == "_")):
+                raw = raw_string_start.match(source, i)
+            if raw:
+                end = i + raw.end()
+                for pos in range(i, end):
+                    out[pos] = " "
+                raw_end = '"' + raw.group(1)
+                i = end
+                state = "raw"
+                continue
+            if source[i] == '"':
+                out[i] = " "
+                i += 1
+                state, escaped = "string", False
+                continue
+        elif state == "line":
+            if source[i] == "\n":
+                state = "code"
+            else:
+                out[i] = " "
+        elif state == "block":
+            if source.startswith("/*", i):
+                out[i] = out[i + 1] = " "
+                block_depth += 1
+                i += 2
+                continue
+            if source.startswith("*/", i):
+                out[i] = out[i + 1] = " "
+                block_depth -= 1
+                i += 2
+                if not block_depth:
+                    state = "code"
+                continue
+            if source[i] != "\n":
+                out[i] = " "
+        elif state == "raw":
+            if source.startswith(raw_end, i):
+                for pos in range(i, i + len(raw_end)):
+                    out[pos] = " "
+                i += len(raw_end)
+                state = "code"
+                continue
+            if source[i] != "\n":
+                out[i] = " "
+        elif state == "string":
+            if source[i] == "\n":
+                state = "code"
+                i += 1
+                continue
+            if escaped:
+                out[i] = " "
+                escaped = False
+                i += 1
+                continue
+            if source[i] == "\\":
+                out[i] = " "
+                escaped = True
+                i += 1
+                continue
+            if source[i] == '"':
+                state = "code"
+            out[i] = " "
+        i += 1
+    return "".join(out)
 
 
 def symbols(root, name):

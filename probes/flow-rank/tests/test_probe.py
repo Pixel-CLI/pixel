@@ -7,12 +7,17 @@
 
 import json
 import os
+import re
+import runpy
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
 PROBE = Path(__file__).resolve().parents[1] / "probe"
+MANIFEST = Path(__file__).resolve().parents[1] / "pixel-plugin.toml"
+SOURCE_PATH_ORDER = runpy.run_path(str(PROBE))["prioritized_source_paths"]
 
 FAKE = r'''#!/usr/bin/env python3
 import json, sys
@@ -106,6 +111,28 @@ class NamedEntry(unittest.TestCase):
         self.assertEqual(run("Ctrl+Z", files=files), "")
         self.assertEqual(run("walk me through what happens when a user presses Ctrl+Z", files=files), "")
 
+    def test_named_undo_shortcut_without_literal_chord_resolves_action_and_dispatcher(self):
+        files = {
+            "src/history.ts": "export class History {\n  public undo() { return this.restorePrevious(); }\n}\n",
+            "src/action.ts": "export const createUndoAction = (history) => ({\n"
+                "  name: \"undo\",\n  perform: () => history.undo(),\n"
+                "  keyTest: (event) => event[KEYS.CTRL_OR_CMD] && matchKey(event, KEYS.Z),\n});\n",
+            "src/manager.ts": "handleKeyDown(event) {\n"
+                "  const data = Object.values(this.actions).filter((action) => action.keyTest(event));\n"
+                "  this.updater(data[0].perform(elements, appState));\n}\n",
+        }
+        prompt = "Trace the undo keyboard shortcut from keydown handling to the restored scene."
+        out = run(prompt, files=files)
+        self.assertIn("undo keyboard shortcut (key from source)", out)
+        self.assertIn("KEYS.CTRL_OR_CMD", out)
+        self.assertIn("action.keyTest(event)", out)
+        self.assertIn("this.updater(data[0].perform", out)
+        self.assertIn("public undo()", out)
+
+    def test_undo_without_shortcut_intent_does_not_emit_shortcut_evidence(self):
+        files = {"src/history.ts": "export function undo() { return restore(); }\n"}
+        self.assertEqual(run("Trace the undo operation to the restored scene.", files=files), "")
+
     def test_request_flow_follows_real_router_handoff_and_abstains_on_comment(self):
         prompt = "walk me through what happens when a request arrives until the router sends the response"
         files = {
@@ -119,6 +146,20 @@ class NamedEntry(unittest.TestCase):
         self.assertIn("app.handle(req, res, next)", out)
         comment_only = {"lib/app.js": "// this.router.handle(req, res, done)\n"}
         self.assertEqual(run(prompt, files=comment_only), "")
+
+    def test_application_completion_paraphrase_is_source_bound_and_near_miss_abstains(self):
+        prompt = "How does the application callback hand an incoming HTTP request to routing and its completion callback?"
+        files = {
+            "lib/app.js": "var app = function(req, res, next) {\n  app.handle(req, res, next);\n};\n"
+                "app.handle = function handle(req, res, callback) {\n"
+                "  var done = callback || finalhandler(req, res);\n"
+                "  this.router.handle(req, res, done);\n}\n",
+        }
+        out = run(prompt, files=files)
+        self.assertIn("this.router.handle(req, res, done)", out)
+        self.assertIn("app.handle(req, res, next)", out)
+        self.assertEqual(run("How does the application callback hand a request to its completion callback?", files=files), "")
+        self.assertEqual(run("How does the application route a request to the router?", files=files), "")
 
     def test_event_flow_uses_query_literal_and_requires_read_brief_and_output_chain(self):
         prompt = "walk me through what happens from the prompt-submit hook until the brief is printed"
@@ -146,6 +187,76 @@ class NamedEntry(unittest.TestCase):
         self.assertEqual(run(prompt, files=unbound_runner), "")
         wrong_event_type = {"src/task_hook.rs": files["src/task_hook.rs"].replace("event: HookEvent", "event: OtherEvent")}
         self.assertEqual(run(prompt, files=wrong_event_type), "")
+
+    def test_submitted_prompt_paraphrase_resolves_mapped_event_and_abstains_without_delivery_context(self):
+        prompt = "Trace a submitted user prompt through the hook handler to the text sent back as agent context."
+        files = {
+            "src/task_hook.rs": "enum HookEvent { PromptSubmit }\n"
+                "impl HookEvent { fn as_str(self) -> &'static str { match self {\n"
+                "  Self::PromptSubmit => \"prompt-submit\",\n} } }\n"
+                "pub fn run(event: HookEvent) {\n  let raw = read_payload();\n"
+                "  let output = if event == HookEvent::PromptSubmit { process(event, raw) } else { None };\n"
+                "  let brief = start_brief(raw);\n  let text = finish_brief(brief);\n"
+                "  let output = envelope(text);\n  writeln!(stdout, \"{output}\");\n}\n",
+            "src/main.rs": "fn main() { task_hook::run(event); }\n",
+        }
+        out = run(prompt, files=files)
+        self.assertIn("prompt-submit -> PromptSubmit", out)
+        self.assertIn("process(event, raw)", out)
+        self.assertIn("writeln!(stdout", out)
+        self.assertEqual(run("Trace a submitted user prompt through the hook handler.", files=files), "")
+
+    def test_event_mapping_inside_raw_string_does_not_prove_active_name_mapping(self):
+        prompt = "walk me through what happens from the prompt-submit hook until the brief is printed"
+        source = "enum HookEvent { PromptSubmit }\n"
+        source += 'const DOC: &str = r#"Self::PromptSubmit => "prompt-submit""#;\n'
+        source += "pub fn run(event: HookEvent) {\n"
+        source += "  let output = process(event, read_payload());\n"
+        source += '  writeln!(stdout, "{output}");\n}\n'
+        files = {"src/task_hook.rs": source, "src/main.rs": "fn main() { task_hook::run(event); }\n"}
+        self.assertEqual(run(prompt, files=files), "")
+
+    def test_same_line_active_non_mapping_arm_does_not_bind_later_raw_string(self):
+        prompt = "walk me through what happens from the prompt-submit hook until the brief is printed"
+        source = "enum HookEvent { PromptSubmit }\n"
+        source += 'fn route(event: HookEvent) { match event { Self::PromptSubmit => { let _doc = r#"Self::PromptSubmit => "prompt-submit""#; process(event, read_payload()); } } }\n'
+        source += "pub fn run(event: HookEvent) {\n"
+        source += "  let output = process(event, read_payload());\n"
+        source += '  writeln!(stdout, "{output}");\n}\n'
+        files = {"src/task_hook.rs": source, "src/main.rs": "fn main() { task_hook::run(event); }\n"}
+        self.assertEqual(run(prompt, files=files), "")
+
+
+class ManifestAdmission(unittest.TestCase):
+    def test_paraphrased_flow_forms_admit_but_near_misses_do_not(self):
+        with MANIFEST.open("rb") as manifest_file:
+            pattern = re.compile(tomllib.load(manifest_file)["brief-probe"]["when_prompt"])
+        positives = [
+            "Trace a submitted user prompt through the hook handler to the text sent back as agent context.",
+            "Trace the undo keyboard shortcut from keydown handling to the restored scene.",
+            "How does the application callback hand an incoming HTTP request to routing and its completion callback?",
+        ]
+        negatives = [
+            "What is a submitted prompt?",
+            "How does the keyboard work?",
+            "How does the application callback hand a request to its completion callback?",
+            "Where is routing configured?",
+        ]
+        for prompt in positives:
+            with self.subTest(prompt=prompt):
+                self.assertRegex(prompt, pattern)
+        for prompt in negatives:
+            with self.subTest(prompt=prompt):
+                self.assertNotRegex(prompt, pattern)
+
+    def test_trace_scan_prioritizes_prompt_terms_and_top_level_caller(self):
+        listing = b"lib/unrelated.js\0src/main.rs\0src/task_hook.rs\0"
+        ordered = SOURCE_PATH_ORDER(
+            listing,
+            "Trace a submitted user prompt through the hook handler to text sent back as agent context.",
+            {".rs", ".js"},
+        )
+        self.assertEqual(set(ordered[:2]), {b"src/main.rs", b"src/task_hook.rs"})
 
 
 if __name__ == "__main__":
