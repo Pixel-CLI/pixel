@@ -150,6 +150,24 @@ fn test_search_depth_default() {
         out = run(root, "where are the integration tests for the --search-depth option")
         self.assertEqual(headers(out), ["### tests/options.rs:2-5 — test test_search_depth"])
 
+    def test_exact_option_requires_title_or_exact_flag_evidence(self):
+        root = repo({"tests/options.rs": '''
+#[test]
+fn test_exec_batch() {
+    run(&["--exec-batch", "echo", "{}"]).assert_stdout("one.txt");
+}
+'''})
+        self.assertEqual("", run(root, "where are the tests for the exec option"))
+
+        root = repo({"tests/options.rs": '''
+#[test]
+fn test_uses_command_override() {
+    run(&["--exec", "echo", "{}"]).assert_stdout("one.txt");
+}
+'''})
+        out = run(root, "where are the tests for the exec option")
+        self.assertEqual(headers(out), ["### tests/options.rs:2-5 — test test_uses_command_override"])
+
     def test_a_js_case_ends_at_its_closing_line_and_the_spec_file_is_found_by_its_path(self):
         spec = ("describe('undo', () => {\n  it('restores the deleted shape on undo', () => {\n    del(shape);\n"
                 "    undo();\n    expect(shapes()).toContain(shape);\n    // The observable behaviours stay stable.\n  });\n\n  it('keeps the colour', () => {\n"

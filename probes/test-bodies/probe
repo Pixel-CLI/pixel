@@ -61,13 +61,16 @@ def requested_option(prompt):
     return match.group(1).lower().replace("-", "_") if match else None
 
 
-def exact_option_case(name, option):
-    """Match the case title to the exact option name; sibling suffixes remain distinct."""
+def exact_option_case(name, option, body=""):
+    """Prove the exact option from a case title or its exact option flag literal."""
     if not option:
         return False
     normalized = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
     normalized = re.sub(r"^(?:test|spec)_", "", normalized)
-    return normalized == option
+    if normalized == option:
+        return True
+    flag = "--" + option.replace("_", "-")
+    return bool(re.search(r"(?<![A-Za-z0-9_-])" + re.escape(flag) + r"(?![A-Za-z0-9_-])", body))
 
 
 def tokens(text):
@@ -199,8 +202,9 @@ def main():
         for name, a, b in us:
             if any(x <= a and b <= y for x, y in have.get(rel, [])):
                 continue
-            exact_option_match = exact_option_case(name, exact_option)
-            body, title = tokens(" ".join(lines[a - 1:b])), tokens(name)
+            case_text = " ".join(lines[a - 1:b])
+            exact_option_match = exact_option_case(name, exact_option, case_text)
+            body, title = tokens(case_text), tokens(name)
             support = [w for w in words if carries(title, w) or carries(body, w)]
             if len(support) < min(2, len(words)) and not exact_option_match:
                 continue
@@ -212,9 +216,12 @@ def main():
             cands.append((-score, rank, rel, a, b, name))
     cands.sort()
     if exact_option is not None:
-        exact = [candidate for candidate in cands if exact_option_case(candidate[5], exact_option)]
-        if exact:
-            cands = exact
+        titled = [candidate for candidate in cands if exact_option_case(candidate[5], exact_option)]
+        if titled:
+            cands = titled
+        else:
+            cands = [candidate for candidate in cands if exact_option_case(
+                candidate[5], exact_option, " ".join(parsed[candidate[2]][0][candidate[3]-1:candidate[4]]))]
     if cands:
         best = -cands[0][0]
         cands = [c for c in cands if -c[0] >= 0.5 * best]   # the subject's tests, not every test that says "prompt"
