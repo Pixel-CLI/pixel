@@ -1,0 +1,268 @@
+{
+  "protocol": {
+    "name": "brief-oracle",
+    "version": 4
+  },
+  "baseline": {
+    "n": 56,
+    "line_cov": 0.11079910397621592,
+    "inline_cov": 0.09381480884674467,
+    "region_cov": 0.08486914875976619,
+    "file_recall": 0.42537796760149316,
+    "content_file_recall": 0.42537796760149316,
+    "commit_recall": 1.0,
+    "answer_cov": null,
+    "bytes": 11042.464285714286,
+    "brief_made": 53,
+    "pooled_line_cov": 0.08206291745270994,
+    "types": {
+      "definition": {
+        "lines": 26395,
+        "covered": 2032,
+        "inline": 1609,
+        "sessions": 42,
+        "sessions_half": 3
+      },
+      "usage": {
+        "lines": 1999,
+        "covered": 113,
+        "inline": 65,
+        "sessions": 39,
+        "sessions_half": 1
+      },
+      "tests": {
+        "lines": 6365,
+        "covered": 478,
+        "inline": 464,
+        "sessions": 34,
+        "sessions_half": 0
+      },
+      "config": {
+        "lines": 979,
+        "covered": 225,
+        "inline": 225,
+        "sessions": 19,
+        "sessions_half": 0
+      },
+      "docs": {
+        "lines": 3488,
+        "covered": 371,
+        "inline": 364,
+        "sessions": 41,
+        "sessions_half": 6
+      },
+      "git": {
+        "lines": 2,
+        "covered": 2,
+        "inline": 0,
+        "sessions": 2,
+        "sessions_half": 2
+      },
+      "list": {
+        "lines": 0,
+        "covered": 0,
+        "inline": 0,
+        "sessions": 0,
+        "sessions_half": 0
+      }
+    },
+    "latency": {
+      "published_internal_p95_ms": [
+        657,
+        705
+      ]
+    }
+  },
+  "r1": {
+    "n": 56,
+    "line_cov": 0.11434024802264975,
+    "inline_cov": 0.09736645709485917,
+    "region_cov": 0.0867807786559844,
+    "file_recall": 0.4240043412278668,
+    "content_file_recall": 0.4240043412278668,
+    "commit_recall": 1.0,
+    "answer_cov": null,
+    "bytes": 11008.392857142857,
+    "brief_made": 53,
+    "pooled_line_cov": 0.08354152857798398,
+    "types": {
+      "definition": {
+        "lines": 26395,
+        "covered": 2091,
+        "inline": 1669,
+        "sessions": 42,
+        "sessions_half": 3
+      },
+      "usage": {
+        "lines": 1999,
+        "covered": 112,
+        "inline": 64,
+        "sessions": 39,
+        "sessions_half": 1
+      },
+      "tests": {
+        "lines": 6365,
+        "covered": 478,
+        "inline": 464,
+        "sessions": 34,
+        "sessions_half": 0
+      },
+      "config": {
+        "lines": 979,
+        "covered": 225,
+        "inline": 225,
+        "sessions": 19,
+        "sessions_half": 0
+      },
+      "docs": {
+        "lines": 3488,
+        "covered": 371,
+        "inline": 364,
+        "sessions": 41,
+        "sessions_half": 6
+      },
+      "git": {
+        "lines": 2,
+        "covered": 2,
+        "inline": 0,
+        "sessions": 2,
+        "sessions_half": 2
+      },
+      "list": {
+        "lines": 0,
+        "covered": 0,
+        "inline": 0,
+        "sessions": 0,
+        "sessions_half": 0
+      }
+    },
+    "latency": {
+      "n": 56,
+      "p95_ms": 906,
+      "max_ms": 1216,
+      "cut": 0,
+      "cut_rate": 0.0,
+      "shares": {
+        "search_ms": 0.23520759510597045,
+        "rank_ms": 0.09507254128501705,
+        "render_ms": 0.0,
+        "probe_ms": 0.6651066390318914
+      }
+    }
+  },
+  "r2": {
+    "n": 56,
+    "line_cov": 0.11434024802264975,
+    "inline_cov": 0.09736645709485917,
+    "region_cov": 0.0867807786559844,
+    "file_recall": 0.4240043412278668,
+    "content_file_recall": 0.4240043412278668,
+    "commit_recall": 1.0,
+    "answer_cov": null,
+    "bytes": 11008.392857142857,
+    "brief_made": 53,
+    "pooled_line_cov": 0.08354152857798398,
+    "types": {
+      "definition": {
+        "lines": 26395,
+        "covered": 2091,
+        "inline": 1669,
+        "sessions": 42,
+        "sessions_half": 3
+      },
+      "usage": {
+        "lines": 1999,
+        "covered": 112,
+        "inline": 64,
+        "sessions": 39,
+        "sessions_half": 1
+      },
+      "tests": {
+        "lines": 6365,
+        "covered": 478,
+        "inline": 464,
+        "sessions": 34,
+        "sessions_half": 0
+      },
+      "config": {
+        "lines": 979,
+        "covered": 225,
+        "inline": 225,
+        "sessions": 19,
+        "sessions_half": 0
+      },
+      "docs": {
+        "lines": 3488,
+        "covered": 371,
+        "inline": 364,
+        "sessions": 41,
+        "sessions_half": 6
+      },
+      "git": {
+        "lines": 2,
+        "covered": 2,
+        "inline": 0,
+        "sessions": 2,
+        "sessions_half": 2
+      },
+      "list": {
+        "lines": 0,
+        "covered": 0,
+        "inline": 0,
+        "sessions": 0,
+        "sessions_half": 0
+      }
+    },
+    "latency": {
+      "n": 56,
+      "p95_ms": 884,
+      "max_ms": 1127,
+      "cut": 0,
+      "cut_rate": 0.0,
+      "shares": {
+        "search_ms": 0.2534222778125217,
+        "rank_ms": 0.09763046348412202,
+        "render_ms": 0.0,
+        "probe_ms": 0.643805156000278
+      }
+    }
+  },
+  "results": [
+    {
+      "status": "complete",
+      "exit_code": 0,
+      "counts": {
+        "ok": 53,
+        "abstained": 3
+      },
+      "errors": []
+    },
+    {
+      "status": "complete",
+      "exit_code": 0,
+      "counts": {
+        "ok": 53,
+        "abstained": 3
+      },
+      "errors": []
+    }
+  ],
+  "changed_questions": [
+    "ripgrep-07",
+    "requests-07",
+    "flask-03",
+    "flask-07"
+  ],
+  "changed_texts": [
+    "ripgrep-03",
+    "ripgrep-07",
+    "requests-07",
+    "excalidraw-03",
+    "excalidraw-07",
+    "flask-03",
+    "flask-04",
+    "flask-07",
+    "fd-07"
+  ],
+  "unstable": []
+}
