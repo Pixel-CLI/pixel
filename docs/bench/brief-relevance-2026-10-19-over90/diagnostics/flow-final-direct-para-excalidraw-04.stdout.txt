@@ -1,0 +1,68 @@
+drop: .
+### shortcut flow: undo keyboard shortcut (key from source) action createUndoAction
+### packages/excalidraw/actions/actionHistory.tsx:69-91 — key action createUndoAction
+69| export const createUndoAction: ActionCreator = (history) => ({
+70|   name: "undo",
+71|   label: "buttons.undo",
+72|   icon: UndoIcon,
+73|   trackEvent: { category: "history" },
+74|   viewMode: false,
+75|   perform: (elements, appState, value, app) =>
+76|     executeHistoryAction(app, appState, () =>
+77|       history.undo(arrayToMap(elements) as SceneElementsMap, appState),
+78|     ),
+79|   keyTest: (event) =>
+80|     event[KEYS.CTRL_OR_CMD] && matchKey(event, KEYS.Z) && !event.shiftKey,
+81|   PanelComponent: ({ appState, updateData, data, app }) => {
+82|     const { isUndoStackEmpty } = useEmitter<HistoryChangedEvent>(
+83|       history.onHistoryChangedEmitter,
+84|       new HistoryChangedEvent(
+85|         history.isUndoStackEmpty,
+86|         history.isRedoStackEmpty,
+87|       ),
+88|     );
+89|     const isMobile = useStylesPanelMode() === "mobile";
+90| 
+91|     return (
+### packages/excalidraw/actions/manager.tsx:97-150 — action dispatcher selection and execution
+97|     const canvasActions = this.app.props.UIOptions.canvasActions;
+98|     const data = Object.values(this.actions)
+99|       .sort((a, b) => (b.keyPriority || 0) - (a.keyPriority || 0))
+100|       .filter(
+101|         (action) =>
+102|           (action.name in canvasActions
+103|             ? canvasActions[action.name as keyof typeof canvasActions]
+104|             : true) &&
+105|           action.keyTest &&
+106|           action.keyTest(
+107|             event,
+108|             this.getAppState(),
+109|             this.getElementsIncludingDeleted(),
+110|             this.app,
+111|           ),
+112|       );
+144| 
+145|     event.preventDefault();
+146|     event.stopPropagation();
+147|     this.updater(data[0].perform(elements, appState, value, this.app));
+148|     return true;
+149|   }
+150| 
+### packages/excalidraw/history.ts:131-147 — undo handler
+131|       this.redoStack.length = 0;
+132|     }
+133| 
+134|     this.onHistoryChangedEmitter.trigger(
+135|       new HistoryChangedEvent(this.isUndoStackEmpty, this.isRedoStackEmpty),
+136|     );
+137|   }
+138| 
+139|   public undo(elements: SceneElementsMap, appState: AppState) {
+140|     return this.perform(
+141|       elements,
+142|       appState,
+143|       () => History.pop(this.undoStack),
+144|       (entry: HistoryDelta) => History.push(this.redoStack, entry),
+145|     );
+146|   }
+147| 

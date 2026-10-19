@@ -1,0 +1,11 @@
+{
+  "pr": 1262,
+  "head": "f5d3d3fdd41017ae6b90df96e7aa26cf73f47fe7",
+  "run": 39260002989,
+  "url": "https://github.com/Pixel-CLI/pixel/actions/runs/39260002989/job/118084973683",
+  "failed_test": "bundled_probes::tests::every_bundled_probe_has_a_valid_probe_manifest_and_an_executable_program",
+  "error": "flow-rank when_prompt is not a regex: look-around, including look-ahead and look-behind, is not supported",
+  "observed_effect": "The bf180014 native sweep omits flow-rank from probe metadata, losing previously delivered source evidence in requests-04, excalidraw-04 and express-04.",
+  "test_summary": {"passed": 5614, "failed": 1, "skipped": 8},
+  "classification": "implementation regression; not attributed to host load"
+}
