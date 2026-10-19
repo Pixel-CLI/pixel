@@ -839,12 +839,16 @@ impl Service {
         if let Some(graph) = &self.graph {
             let _ = graph.conn().execute_batch("ROLLBACK");
         }
+        // Sample batch state before validating the generation. If a batch
+        // publishes between the two checks, the generation comparison sends
+        // this response back to the writer instead of returning it unstamped.
+        let stale_lag = req.stale_ok().then(behind).flatten();
         let after = *self.publication.read_or_recover();
         if !after.healthy || after.generation != before.generation {
             return None;
         }
-        Some(match behind() {
-            Some(lag) if req.stale_ok() => stamp_stale(response, before.generation, lag),
+        Some(match stale_lag {
+            Some(lag) => stamp_stale(response, before.generation, lag),
             _ => response,
         })
     }
@@ -7157,6 +7161,33 @@ mod tests {
                 vec!["answered from generation 7, which predates watcher batches queued 1500 ms ago and not yet published".to_owned()]
             )
         );
+    }
+
+    /// If a queued batch publishes after the generation check but before its
+    /// lag is sampled, the old-generation response must not escape unstamped.
+    #[test]
+    fn a_replica_should_requeue_when_publication_advances_before_lag_sampling() {
+        let root = login_repo("stale-ok-publish-before-lag");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        assert!(writer.handle(search_request("login")).ok);
+        let publication = Arc::clone(&writer.publication);
+        let queued_lag = Arc::new(std::sync::Mutex::new(Some(HELD_LAG)));
+        assert_eq!(*queued_lag.lock().unwrap(), Some(HELD_LAG));
+        let lag_after_publish = Arc::clone(&queued_lag);
+        let mut reader = writer.read_replica();
+
+        let response = reader.read_answer(&relevance_request(true), &|| {
+            publication.write_or_recover().generation += 1;
+            assert_eq!(lag_after_publish.lock().unwrap().take(), Some(HELD_LAG));
+            None
+        });
+
+        assert!(
+            response.is_none(),
+            "the replica must not return a response after its generation changed"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn login_repo(tag: &str) -> PathBuf {
