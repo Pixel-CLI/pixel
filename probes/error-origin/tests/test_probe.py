@@ -318,9 +318,11 @@ class DefaultDependencyBoundary(unittest.TestCase):
                            "}\n"),
         })
         out, _ = origin(root, self.PROMPT)
-        self.assertIn("default request-handler dependency boundary", out)
+        self.assertIn("default handler callback candidate", out)
         self.assertIn("@demo/response-writer", out)
-        self.assertIn("external response text is not present or verified", out)
+        self.assertIn("callee behavior and external response text are not inspected", out)
+        self.assertIn("passed as the final argument to router.handle", out)
+        self.assertIn("call behavior unverified", out)
         self.assertIn("### lib/app.js:1-1 — imported dependency binding", out)
         self.assertIn("### lib/app.js:2-3 — optional callback fallback", out)
         self.assertIn("### package.json:1-1 — declared non-development dependency", out)
@@ -332,7 +334,7 @@ class DefaultDependencyBoundary(unittest.TestCase):
             "examples/not-found.js": "res.status(404).send('Cannot GET ' + req.url);\n",
         })
         out, _ = origin(root, self.PROMPT)
-        self.assertNotIn("default request-handler dependency boundary", out)
+        self.assertNotIn("default handler callback candidate", out)
 
     def test_a_default_boundary_does_not_promote_a_custom_404_example_as_its_origin(self):
         root = repo({
@@ -343,7 +345,7 @@ class DefaultDependencyBoundary(unittest.TestCase):
             "examples/not-found.js": "res.status(404).send('Cannot GET ' + req.url);\n",
         })
         out, _ = origin(root, "where is the default 404 page that says Cannot GET produced")
-        self.assertIn("default request-handler dependency boundary", out)
+        self.assertIn("default handler callback candidate", out)
         self.assertNotIn("examples/not-found.js", out)
 
     def test_an_undeclared_import_is_not_a_dependency_boundary(self):
@@ -354,7 +356,7 @@ class DefaultDependencyBoundary(unittest.TestCase):
                            "  router.handle(req, res, done); }\n"),
         })
         out, _ = origin(root, self.PROMPT)
-        self.assertNotIn("default request-handler dependency boundary", out)
+        self.assertNotIn("default handler callback candidate", out)
 
     def test_a_shadowed_import_binding_is_not_resolved_to_the_package(self):
         root = repo({
@@ -365,7 +367,7 @@ class DefaultDependencyBoundary(unittest.TestCase):
                            "  router.handle(req, res, done);\n}\n"),
         })
         out, _ = origin(root, self.PROMPT)
-        self.assertNotIn("default request-handler dependency boundary", out)
+        self.assertNotIn("default handler callback candidate", out)
 
     def test_a_fallback_must_be_passed_to_request_completion_in_the_same_function(self):
         cases = [
@@ -383,19 +385,21 @@ class DefaultDependencyBoundary(unittest.TestCase):
                     "lib/app.js": "const renderEnd = require('response-writer');\n" + source,
                 })
                 out, _ = origin(root, self.PROMPT)
-                self.assertNotIn("default request-handler dependency boundary", out)
+                self.assertNotIn("default handler callback candidate", out)
 
     def test_an_unrelated_telemetry_call_does_not_establish_request_completion(self):
-        root = repo({
-            "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',
-            "lib/app.js": ("const renderEnd = require('response-writer');\n"
-                           "function serve(req, res, callback) {\n"
-                           "  const done = callback || renderEnd(req, res);\n"
-                           "  metrics.record(req, res, done);\n"
-                           "}\n"),
-        })
-        out, _ = origin(root, self.PROMPT)
-        self.assertNotIn("default request-handler dependency boundary", out)
+        for telemetry in ("metrics.record", "router_metrics.finish"):
+            with self.subTest(telemetry=telemetry):
+                root = repo({
+                    "package.json": '{"dependencies":{"response-writer":"^1.0.0"}}\n',
+                    "lib/app.js": ("const renderEnd = require('response-writer');\n"
+                                   "function serve(req, res, callback) {\n"
+                                   "  const done = callback || renderEnd(req, res);\n"
+                                   f"  {telemetry}(req, res, done);\n"
+                                   "}\n"),
+                })
+                out, _ = origin(root, self.PROMPT)
+                self.assertNotIn("default handler callback candidate", out)
 
     def test_a_generic_dispatcher_operation_is_not_framework_specific(self):
         root = repo({
@@ -407,7 +411,7 @@ class DefaultDependencyBoundary(unittest.TestCase):
                            "}\n"),
         })
         out, _ = origin(root, self.PROMPT)
-        self.assertIn("default request-handler dependency boundary", out)
+        self.assertIn("default handler callback candidate", out)
         self.assertIn("request_dispatcher.dispatch(req, res, done)", out)
 
     def test_comments_and_strings_cannot_supply_import_or_call_evidence(self):
@@ -417,7 +421,7 @@ class DefaultDependencyBoundary(unittest.TestCase):
                            "const HELP = `function serve(req, res, callback) { const done = callback || renderEnd(); router.handle(req,res,done); }`;\n"),
         })
         out, _ = origin(root, self.PROMPT)
-        self.assertNotIn("default request-handler dependency boundary", out)
+        self.assertNotIn("default handler callback candidate", out)
 
     def test_unrelated_prompt_is_not_admitted_and_requests_wrapper_is_not_a_new_gain(self):
         root = repo({
@@ -427,7 +431,7 @@ class DefaultDependencyBoundary(unittest.TestCase):
                            "  router.handle(req,res,done); }\n"),
         })
         out, _ = origin(root, "Where is the timeout response produced?")
-        self.assertNotIn("default request-handler dependency boundary", out)
+        self.assertNotIn("default handler callback candidate", out)
         requests = repo({
             "src/requests/adapters.py": ("from urllib3.exceptions import MaxRetryError\n"
                                          "def send():\n    try:\n        go()\n"
@@ -435,7 +439,7 @@ class DefaultDependencyBoundary(unittest.TestCase):
                                          "        raise ConnectionError(exc)\n"),
         })
         out, _ = origin(requests, "where does the text of the max retries exceeded connection error come from")
-        self.assertNotIn("default request-handler dependency boundary", out)
+        self.assertNotIn("default handler callback candidate", out)
 
 
 if __name__ == "__main__":
