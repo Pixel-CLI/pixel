@@ -444,6 +444,7 @@ def cli_setting_evidence(clone, prompt):
         return ""
     prompt_terms = stems(words_of(prompt)) - WEAK - BOUND_WORDS
     if not prompt_terms: return ""
+    requested_short = {option[1:].lower() for option in re.findall(r"(?<![\w])-[A-Za-z](?![\w-])", prompt)}
     deadline = time.monotonic() + SCOPED_SCAN_MAX_MS / 1000
     impls = scoped_source_files(clone, r"impl\s+Flag\s+for", ".rs", deadline)
     selected = None
@@ -456,22 +457,33 @@ def cli_setting_evidence(clone, prompt):
             if rust_test_only(source, start, test_modules): continue
             body = source[body_start:end-1]
             name_method = next((m for m in rust_scopes(body, r"\bfn\s+name_long\s*\(")), None)
+            short_method = next((m for m in rust_scopes(body, r"\bfn\s+name_short\s*\(")), None)
             update_method = next((m for m in rust_scopes(body, r"\bfn\s+update\s*\(")), None)
-            if not name_method or not update_method: continue
-            name_text = body[name_method[2]:name_method[1]-1]
-            name_match = re.search(r"\"([a-z][a-z0-9_-]*)\"", name_text, re.I)
-            if not name_match: continue
-            option_tokens = stems(re.findall(r"[a-z]+", name_match.group(1).lower()))
+            if not update_method: continue
+            name_text = body[name_method[2]:name_method[1]-1] if name_method else ""
+            name_match = re.search(r"\"([a-z][a-z0-9_-]*)\"", name_text, re.I) if name_method else None
+            option_tokens = stems(re.findall(r"[a-z]+", name_match.group(1).lower())) if name_match else set()
             overlap = option_tokens & prompt_terms
-            if not overlap: continue
+            short_char = None
+            if short_method:
+                short_start, short_end, short_body = short_method
+                short_text = body[short_body:short_end-1]
+                masked_short = rust_code_mask(short_text)
+                for short_match in re.finditer(r"Some\s*\(\s*b(['\"])([A-Za-z0-9])\1\s*\)", short_text):
+                    masked_span = masked_short[short_match.start():short_match.end()]
+                    if re.search(r"\bSome\s*\(\s*b\s+\s*\)", masked_span):
+                        short_char = short_match.group(2).lower()
+                        break
+            short_match = short_char in requested_short if short_char else False
+            if not overlap and not short_match: continue
             update_text = body[update_method[2]:update_method[1]-1]
             field = re.search(r"\bargs\.([a-z_][a-z0-9_]*)\s*=", update_text)
             if not field: continue
-            selected = (rel, source, start, end, field.group(1), len(overlap))
+            selected = (rel, source, start, end, field.group(1), len(overlap), short_match)
             break
         if selected: break
     if not selected: return ""
-    rel, impl_source, start, end, field, _score = selected
+    rel, impl_source, start, end, field, _score, _short_match = selected
     deadline = max(deadline, time.monotonic() + 0.2)
     consumers = scoped_source_files(clone, re.escape(field), ".rs", deadline)
     for consumer_rel, path in consumers:
@@ -493,6 +505,211 @@ def cli_setting_evidence(clone, prompt):
             blocks += source_range(rel, impl_source, start, end, "matching CLI setting declaration and override")
             text = "\n".join(blocks) + "\n"
             return text[:SCOPED_EVIDENCE_MAX]
+    return ""
+
+
+COMPILED_SETTING_INTENT = re.compile(r"\b(compil\w*|implement\w*|use\w*|consumer|getter)\b", re.I)
+JS_SOURCE_SUFFIXES = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts")
+
+
+def js_function_ranges(source):
+    """Yield braced JavaScript function bodies using an offset-preserving JS masker."""
+    masked = js_code_mask(source)
+    stack, matching = [], {}
+    for pos, char in enumerate(masked):
+        if char == "{":
+            stack.append(pos)
+        elif char == "}" and stack:
+            matching[stack.pop()] = pos
+    for match in re.finditer(r"\bfunction(?:\s+[A-Za-z_$][\w$]*)?\s*\(", masked):
+        opening = masked.find("{", match.end())
+        if opening < 0: continue
+        closing = matching.get(opening)
+        if closing is not None:
+            yield match.start(), closing + 1, opening + 1
+
+
+def js_code_mask(source):
+    """Mask JavaScript comments and all quoted strings while preserving offsets and newlines."""
+    out = list(source)
+    i, state, escaped = 0, "code", False
+    while i < len(source):
+        ch = source[i]
+        if state == "code":
+            if source.startswith("//", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "line"
+                continue
+            if source.startswith("/*", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "block"
+                continue
+            if ch in "'\"`":
+                out[i] = " "
+                state = ch
+                escaped = False
+        elif state == "line":
+            if ch == "\n": state = "code"
+            else: out[i] = " "
+        elif state == "block":
+            if source.startswith("*/", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "code"
+                continue
+            if ch != "\n": out[i] = " "
+        else:
+            if ch == "\n":
+                state = "code" if state == "`" else state
+                continue
+            if escaped:
+                out[i] = " "
+                escaped = False
+                i += 1
+                continue
+            if ch == "\\":
+                out[i] = " "
+                escaped = True
+                i += 1
+                continue
+            if ch == state: state = "code"
+            out[i] = " "
+        i += 1
+    return "".join(out)
+
+
+def active_string_match(source, pattern, expected, accepts=None):
+    """Find a literal-bearing match and reject occurrences that are only comments or strings."""
+    masked = js_code_mask(source)
+    for match in re.finditer(pattern, source):
+        segment = masked[match.start():match.end()]
+        if expected(segment) and (accepts is None or accepts(match)):
+            return match
+    return None
+
+
+def compiled_setting_evidence(clone, prompt, rows):
+    """Link a named setting's source compiler to the exact named getter that consumes it."""
+    if not COMPILED_SETTING_INTENT.search(prompt): return ""
+    dotted = re.search(r"\b([a-z_$][\w$]*)\.([a-z_$][\w$]*)\b", prompt)
+    if not dotted: return ""
+    receiver, property_name = dotted.groups()
+    prompt_words = stems(words_of(prompt)) - WEAK - BOUND_WORDS
+    root = Path(clone).resolve()
+    tracked_inventory = tracked_paths(clone, time.monotonic() + SCOPED_SCAN_MAX_MS / 1000)
+    if tracked_inventory is None: return ""
+
+    settings = []
+    for path, number, text in rows:
+        if path not in tracked_inventory or not path.endswith(JS_SOURCE_SUFFIXES): continue
+        if text.lstrip().startswith(("//", "/*", "*")) or len(text.encode("utf-8")) > SCAN_MAX_COLUMNS: continue
+        match = SETTER_CALL.search(text)
+        if not match: continue
+        setting = match.group(2).strip()
+        setting_words = stems(re.findall(r"[a-z]+", setting.lower()))
+        overlap = len(prompt_words & setting_words)
+        if overlap:
+            settings.append((-overlap, len(setting_words), path, setting))
+    if not settings: return ""
+
+    deadline = time.monotonic() + SCOPED_SCAN_MAX_MS / 1000
+    for _negative_overlap, _word_count, setting_path, setting in sorted(set(settings))[:3]:
+        setting_file = root / setting_path
+        try:
+            if setting_file.is_symlink() or not setting_file.resolve().is_relative_to(root): continue
+            if not setting_file.is_file() or setting_file.stat().st_size > SCAN_MAX_FILE_BYTES: continue
+            setting_source = setting_file.read_text(errors="replace")
+        except OSError:
+            continue
+        compiler_binding = None
+        setter_span = None
+        compiled_key = setting + " fn"
+        for start, end, body_start in js_function_ranges(setting_source):
+            body = setting_source[body_start:end-1]
+            for case in re.finditer(r"case\s*(['\"])(.*?)\1\s*:", body):
+                if case.group(2) != setting: continue
+                case_mask = js_code_mask(body)[case.start():case.end()]
+                if not re.search(r"\bcase\s*:", case_mask): continue
+                compile_call = active_string_match(
+                    body,
+                    r"this\s*\.\s*set\s*\(\s*(['\"])(.*?)\1\s*,\s*([A-Za-z_$][\w$]*)\s*\(\s*[A-Za-z_$][\w$]*\s*\)",
+                    lambda segment: bool(re.search(r"\bthis\s*\.\s*set\s*\(\s*,\s*[A-Za-z_$][\w$]*\s*\(", segment)),
+                    lambda match: match.group(2) == compiled_key)
+                if not compile_call or compile_call.start() < case.end(): continue
+                intervening_case = active_string_match(
+                    body[case.end():compile_call.start()], r"case\s*(['\"])(.*?)\1\s*:",
+                    lambda segment: bool(re.search(r"\bcase\s*:", segment)))
+                if intervening_case: continue
+                compiler_binding = compile_call.group(3)
+                setter_span = (start, end)
+                break
+            if compiler_binding: break
+        if not compiler_binding: continue
+
+        import_pattern = re.compile(
+            r"\b(?:var|let|const)\s+" + re.escape(compiler_binding) +
+            r"\s*=\s*require\(\s*(['\"])(\.[^'\"]+)\1\s*\)\.([A-Za-z_$][\w$]*)")
+        imported = active_string_match(setting_source, import_pattern,
+                                       lambda segment: bool(re.search(r"\b(?:var|let|const)\s+" + re.escape(compiler_binding) +
+                                                                      r"\s*=\s*require\s*\(\s*\)\s*\.\s*[A-Za-z_$][\w$]*", segment)),
+                                       lambda match: match.group(3) == compiler_binding)
+        if not imported: continue
+        module = imported.group(2)
+        if not module.startswith("."): continue
+        module_base = (setting_file.parent / module).resolve()
+        compiler_path = None
+        compiler_source = None
+        for suffix in JS_SOURCE_SUFFIXES:
+            target = Path(str(module_base) + suffix)
+            try:
+                if target.is_symlink() or not target.resolve().is_relative_to(root): continue
+                rel = target.relative_to(root).as_posix()
+                if rel not in tracked_inventory or not target.is_file() or target.stat().st_size > SCAN_MAX_FILE_BYTES: continue
+                compiler_source = target.read_text(errors="replace")
+                compiler_path = rel
+                break
+            except (OSError, ValueError):
+                continue
+        if not compiler_source or not compiler_path: continue
+        compiler_ranges = []
+        for start, end, _body in js_function_ranges(compiler_source):
+            prefix = compiler_source[max(0, start - 100):start]
+            if re.search(r"\bexports\s*\.\s*" + re.escape(compiler_binding) + r"\s*=\s*$", prefix) or \
+               re.search(r"\bfunction\s+" + re.escape(compiler_binding) + r"\s*\(", compiler_source[start:end]):
+                compiler_ranges.append((start, end))
+        if len(compiler_ranges) != 1: continue
+        compiler_start, compiler_end = compiler_ranges[0]
+
+        getter_pattern = r"defineGetter\s*\(\s*" + re.escape(receiver) + r"\s*,\s*(['\"])" + re.escape(property_name) + r"\1\s*,\s*function(?:\s+[A-Za-z_$][\w$]*)?\s*\("
+        consumer_files = scoped_source_files(clone, r"\bdefineGetter\s*\(", JS_SOURCE_SUFFIXES, deadline)
+        for consumer_rel, consumer_file in consumer_files:
+            if time.monotonic() >= deadline: break
+            try:
+                source = consumer_file.read_text(errors="replace")
+            except OSError:
+                continue
+            getter = active_string_match(source, getter_pattern,
+                lambda segment: bool(re.search(r"\bdefineGetter\s*\(\s*" + re.escape(receiver) +
+                                               r"\s*,\s*,\s*function(?:\s+[A-Za-z_$][\w$]*)?\s*\(", segment)))
+            if not getter: continue
+            functions = [(start, end) for start, end, _body in js_function_ranges(source)
+                         if getter.start() <= start <= getter.end() + 20]
+            for fn_start, fn_end in functions:
+                body = source[fn_start:fn_end]
+                key_access = active_string_match(body,
+                    r"\.\s*get\s*\(\s*(['\"])(.*?)\1\s*\)",
+                    lambda segment: bool(re.search(r"\.\s*get\s*\(\s*\)", segment)),
+                    lambda match: match.group(2) == compiled_key)
+                if not key_access: continue
+                getter_span = (getter.start(), fn_end)
+                lines = source_range(consumer_rel, source, *getter_span, "named getter reads the matching compiled setting")
+                setter_lines = source_range(setting_path, setting_source, *setter_span,
+                                             "setting branch installs a compiled function")
+                compiler_lines = source_range(compiler_path, compiler_source, compiler_start, compiler_end,
+                                               "exact imported setting compiler implementation")
+                return "\n".join(setter_lines + compiler_lines + lines) + "\n"
     return ""
 
 
@@ -750,6 +967,9 @@ def emit(clone, prompt, brief):
         return scoped[:9000]
     loader = loader_evidence(clone, prompt)
     rows = scan(clone)
+    compiled = compiled_setting_evidence(clone, prompt, rows)
+    if compiled:
+        return compiled[:9000]
     reg = registry(clone, rows)
     bound_only = bool(BOUND_QUERY.search(prompt)) and not EXISTING_CONFIG_INTENT.search(prompt)
     keys = rank_bound(clone, reg, prompt) if bound_only else rank(clone, reg, prompt)

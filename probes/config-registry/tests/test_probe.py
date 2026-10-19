@@ -354,6 +354,115 @@ fn resolve(low: LowArgs) -> usize {
         out = self.emit(self.repo({'flags.rs': source}), 'how many workers does the program use and where can I override it')
         self.assertEqual(out, '')
 
+    def test_cli_setting_resolves_an_explicit_short_option_to_its_runtime_value(self):
+        source = '''
+trait Flag {}
+struct Threads;
+impl Flag for Threads {
+    fn name_short(&self) -> Option<u8> { Some(b'j') }
+    fn name_long(&self) -> &'static str { "threads" }
+    fn doc_short(&self) -> &'static str { "Set the approximate number of threads." }
+    fn update(&self, args: &mut LowArgs) { args.threads = Some(8); }
+}
+fn resolve(low: LowArgs) -> usize {
+    if let Some(threads) = low.threads { threads }
+    else { std::thread::available_parallelism().map_or(1, |n| n.get()).min(12) }
+}
+'''
+        out = self.emit(self.repo({'flags.rs': source}),
+                        'When I omit -j, how is the worker count calculated, and what command-line flag lets me set it?')
+        self.assertIn("Some(b'j')", out)
+        self.assertIn('name_long', out)
+        self.assertIn('available_parallelism()', out)
+        self.assertIn('low.threads', out)
+
+    def test_cli_setting_short_option_does_not_match_a_different_flag(self):
+        source = '''
+trait Flag {}
+struct Threads;
+impl Flag for Threads {
+    fn name_short(&self) -> Option<u8> { Some(b'k') }
+    fn name_long(&self) -> &'static str { "threads" }
+    fn update(&self, args: &mut LowArgs) { args.threads = Some(8); }
+}
+fn resolve(low: LowArgs) -> usize { low.threads.unwrap_or(8) }
+'''
+        out = self.emit(self.repo({'flags.rs': source}), 'When I omit -j, how is the worker count calculated?')
+        self.assertEqual(out, '')
+
+    def test_compiled_setting_connects_the_named_compiler_and_exact_getter_consumer(self):
+        root = self.repo({
+            'lib/application.js': '''
+var compileTrust = require('./utils').compileTrust;
+app.set('trust proxy', false);
+app.set = function set(setting, val) {
+  this.settings[setting] = val;
+  switch (setting) {
+    case 'trust proxy':
+      this.set('trust proxy fn', compileTrust(val));
+      break;
+  }
+};
+''',
+            'lib/utils.js': '''
+exports.compileTrust = function(val) {
+  if (typeof val === 'function') return val;
+  if (typeof val === 'number') return function(a, i){ return i < val };
+  return proxyaddr.compile(val || []);
+};
+''',
+            'lib/request.js': '''
+defineGetter(req, 'ip', function ip(){
+  var trust = this.app.get('trust proxy fn');
+  return proxyaddr(this, trust);
+});
+''',
+        })
+        out = self.emit(root, 'Which code compiles the trust proxy setting, and how does req.ip use it?')
+        for evidence in ["case 'trust proxy'", "compileTrust(val)", 'exports.compileTrust',
+                         "defineGetter(req, 'ip'", "get('trust proxy fn')", 'proxyaddr(this, trust)']:
+            self.assertIn(evidence, out)
+
+    def test_compiled_setting_does_not_join_a_different_getter_or_comment_decoy(self):
+        root = self.repo({
+            'lib/application.js': '''
+var compileTrust = require('./utils').compileTrust;
+app.set('trust proxy', false);
+app.set = function set(setting, val) {
+  switch (setting) { case 'trust proxy': this.set('trust proxy fn', compileTrust(val)); }
+};
+// case 'trust proxy': this.set('trust proxy fn', fakeCompile(val));
+''',
+            'lib/utils.js': "exports.compileTrust = function(val) { return proxyaddr.compile(val || []); };\n",
+            'lib/request.js': '''
+defineGetter(req, 'ip', function ip(){ return proxyaddr(this, this.app.get('session proxy fn')); });
+defineGetter(req, 'secure', function secure(){ return this.app.get('trust proxy fn'); });
+''',
+        })
+        out = self.emit(root, 'Which code compiles the trust proxy setting, and how does req.ip use it?')
+        self.assertNotIn('named getter reads the matching compiled setting', out)
+        self.assertNotIn('exact imported setting compiler implementation', out)
+        self.assertNotIn('proxyaddr(this, trust)', out)
+
+    def test_compiled_setting_ignores_comment_only_compile_branches(self):
+        root = self.repo({
+            'lib/application.js': '''
+var compileTrust = require('./utils').compileTrust;
+app.set('trust proxy', false);
+app.set = function set(setting, val) {
+  switch (setting) { case 'other proxy': this.set('other proxy fn', compileTrust(val)); }
+};
+// case 'trust proxy': this.set('trust proxy fn', compileTrust(val));
+''',
+            'lib/utils.js': "exports.compileTrust = function(val) { return proxyaddr.compile(val || []); };\n",
+            'lib/request.js': '''
+defineGetter(req, 'ip', function ip(){ return proxyaddr(this, this.app.get('trust proxy fn')); });
+''',
+        })
+        out = self.emit(root, 'Which code compiles the trust proxy setting, and how does req.ip use it?')
+        self.assertNotIn('setting branch installs a compiled function', out)
+        self.assertNotIn('named getter reads the matching compiled setting', out)
+
     def test_persistent_browser_preference_pairs_exact_subject_key_and_resolves_import(self):
         root = self.repo({
             'src/preferences.ts': '''import { PREFERENCE_KEYS } from "./keys";
