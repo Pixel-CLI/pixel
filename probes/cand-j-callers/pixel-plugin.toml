@@ -7,7 +7,7 @@ capabilities = ["brief-probe"]
 
 [brief-probe]
 owner = "LivioGama"
-when_prompt = "(?i)\\b(callers?|who calls|(functions?|methods?) (that )?(calls?|invokes?|uses?)|called (by|from)|call sites?|calls it)\\b"
+when_prompt = "(?i)\\b(callers?|who calls|(functions?|methods?) (that )?(calls?|invokes?|uses?)|called (by|from)|call sites?|calls it|which (code|modules?|parts?) (call|calls|invoke|uses?))\\b"
 skip_kinds = ["overview", "review", "history"]
 when_gate_closed = true
 budget_ms = 2500
