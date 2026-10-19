@@ -181,7 +181,8 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    generic language an `object` declaration is a class, an import's
 ///    `qualified_identifier` is its path, and a call through a field-less
 ///    `navigation_expression` names its member and receiver.
-pub const EXTRACTOR_VERSION: &str = "29";
+/// 30: separate JavaScript assignment/declaration syntax facts, without new symbols or edges.
+pub const EXTRACTOR_VERSION: &str = "30";
 
 /// True iff the graph's rows were written by the current extractor, from
 /// the Rust and Ruby sources the switches ask for now
@@ -761,6 +762,9 @@ fn store_batch(
     let mut stored_ids: Vec<(i64, Vec<i64>)> = Vec::with_capacity(files.len());
     for e in &mut files {
         let file_id = store.replace_file(&e.rel, &e.blob_oid, e.fx.lang)?;
+        if e.fx.lang == "js" {
+            store.set_js_assignment_facts(file_id, &e.fx.js_assignments)?;
+        }
         let mut ids = Vec::with_capacity(e.fx.symbols.len());
         let mut lines = Vec::with_capacity(e.fx.symbols.len());
         // Decoded and split once per file, not once per symbol: the crux

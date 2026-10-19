@@ -621,6 +621,17 @@ envelope talks to the daemon socket directly.
   refresh beside the passes, a method inserted mid-file is in the graph
   after 6.0 s p50, 7.3 s p95 (v1 2.7 s, 2.9 s), for 8.0 CPU s of the
   daemon (v1 2.2); that is why it is off by default.
+- JavaScript assignment syntax is retained separately in `js_assignment_facts`
+  (extractor 30). `extract::js_assignments` records byte ranges, AST context
+  identities, variable/parameter patterns and write expressions, including
+  chained RHS references, computed accesses and nonfunction reassignments.
+  Contexts describe containment, not binding resolution or runtime receivers;
+  imports and other declaration forms are outside this partial inventory.
+  Invalid parses and depth cuts are explicit. Full and incremental `store_batch`
+  share the writer; file replacement/removal clears old facts. The resolver,
+  symbol lookup, rename and brief packs do not consume these rows: an assigned
+  method name creates no new symbol or edge. Facts refer to `files.blob_oid`'s
+  bytes, and the extractor-version change rebuilds older graphs.
 - Ruby constant receivers are resolved in `pixel-graph/src/resolve/ruby.rs`
   against class/module scopes, preserving the difference between nested
   declarations and `class A::B`. Unique class and constructor targets are

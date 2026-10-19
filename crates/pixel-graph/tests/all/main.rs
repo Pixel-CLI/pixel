@@ -15,6 +15,7 @@ mod env_read_concepts;
 mod graph_shadow;
 mod graph_source_switch;
 mod import_resolution;
+mod js_assignment_facts;
 mod mvp_adapter;
 mod mvp_adapter_ruby;
 mod mvp_integrity;

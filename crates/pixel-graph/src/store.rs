@@ -23,6 +23,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::extract::ImportBinding;
+use crate::extract::js_assignments::Facts as JsAssignmentFacts;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -705,6 +706,7 @@ impl GraphStore {
             tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM ruby_mixins WHERE file_id = ?1", params![id])?;
+            tx.exec_cached(DELETE_FILE_JS_ASSIGNMENTS, params![id])?;
             tx.exec_cached(
                 "UPDATE files SET blob_oid = ?2, lang = ?3 WHERE id = ?1",
                 params![id, blob_oid, lang],
@@ -751,10 +753,43 @@ impl GraphStore {
             tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM ruby_mixins WHERE file_id = ?1", params![id])?;
+            tx.exec_cached(DELETE_FILE_JS_ASSIGNMENTS, params![id])?;
             tx.exec_cached("DELETE FROM files WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Persist syntax separately so assigned method names cannot enter resolution tiers.
+    pub fn set_js_assignment_facts(&self, file_id: i64, facts: &JsAssignmentFacts) -> Result<()> {
+        let json = serde_json::to_string(facts)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        self.conn.exec_cached(
+            "INSERT OR REPLACE INTO js_assignment_facts (file_id, facts) VALUES (?1, ?2)",
+            params![file_id, json],
+        )?;
+        Ok(())
+    }
+
+    /// Read version-bound syntax evidence; absence says nothing about runtime aliases.
+    pub fn js_assignment_facts(&self, file_id: i64) -> Result<Option<JsAssignmentFacts>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT facts FROM js_assignment_facts WHERE file_id = ?1",
+                [file_id],
+                |row| {
+                    let json: String = row.get(0)?;
+                    serde_json::from_str(&json).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// Record that `symbol_id` implements a trait method: it is called
@@ -1854,7 +1889,13 @@ impl GraphStore {
     }
 }
 
+const DELETE_FILE_JS_ASSIGNMENTS: &str = "DELETE FROM js_assignment_facts WHERE file_id = ?1";
+
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS js_assignment_facts (
+  file_id INTEGER PRIMARY KEY,
+  facts TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY,
   path TEXT NOT NULL UNIQUE,

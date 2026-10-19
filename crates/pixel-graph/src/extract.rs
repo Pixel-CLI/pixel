@@ -16,6 +16,7 @@ use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Tree};
 
 use crate::store::SymbolKind;
 
+pub mod js_assignments;
 pub(crate) mod ruby_associations;
 pub(crate) mod ruby_callbacks;
 pub(crate) mod ruby_generated;
@@ -135,6 +136,8 @@ pub struct FileExtraction {
     pub jsx_elements: Vec<RawJsxElement>,
     /// Ruby only: the superclass and modules each class or module declares.
     pub mixins: Vec<RawMixin>,
+    /// JavaScript syntax evidence, never a resolver candidate.
+    pub js_assignments: js_assignments::Facts,
 }
 
 /// Whether a walker at `depth` has passed the recursion cap: a node at
@@ -463,6 +466,11 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         imports: w.imports,
         jsx_elements: w.jsx_elements,
         mixins: w.mixins,
+        js_assignments: if lang == "js" {
+            js_assignments::collect(root, content)
+        } else {
+            js_assignments::Facts::default()
+        },
     };
     assign_enclosing(&mut fx);
     Some(fx)
@@ -2985,6 +2993,7 @@ mod tests {
             jsx_elements: vec![],
             references: vec![],
             mixins: vec![],
+            js_assignments: Default::default(),
         };
         assign_enclosing(&mut fx);
         let owners: Vec<Option<usize>> = fx.calls.iter().map(|c| c.enclosing_index).collect();
