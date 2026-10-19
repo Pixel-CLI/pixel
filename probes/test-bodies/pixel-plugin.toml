@@ -9,6 +9,7 @@ capabilities = ["brief-probe"]
 owner = "pixel"
 when_kinds = ["tests"]
 when_prompt = "(?i)\\b(tests?|specs?)\\b"
+when_gate_closed = true
 skip_kinds = ["history", "review"]
 budget_ms = 1500
 mode = "append"

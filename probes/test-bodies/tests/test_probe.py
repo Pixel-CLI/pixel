@@ -5,6 +5,7 @@
 """What the test-bodies probe quotes for a question about tests (issue #1196)."""
 
 import json
+import importlib.util
 import os
 import subprocess
 import tempfile
@@ -12,6 +13,7 @@ import unittest
 from pathlib import Path
 
 PROBE = Path(__file__).resolve().parents[1] / "probe"
+WORKTREE = PROBE.parents[2]
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
            "GIT_CONFIG_GLOBAL": os.devnull, "PATH": os.environ["PATH"]}
 
@@ -50,6 +52,26 @@ def test_parses_the_header_case_insensitively():
 
 
 class TestBodies(unittest.TestCase):
+    def test_the_tests_probe_can_run_for_a_matching_closed_gate_prompt(self):
+        path = WORKTREE / "scripts/bench/probe-test.py"
+        spec = importlib.util.spec_from_file_location("probe_test", path)
+        probe_test = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe_test)
+        probe = probe_test.Probe(PROBE.parent)
+        root = repo({"tests/test_client.py": PY_TESTS})
+        prompt = "where are the tests for redirect handling and what do they cover"
+
+        self.assertEqual(probe.problems, [])
+        self.assertTrue(probe_test.gate_runs("closed", probe) and probe.applies("tests", prompt))
+        self.assertFalse(probe_test.gate_runs("denied", probe))
+        request = {"prompt": prompt, "repo_root": str(root), "brief": "[PIXEL:BRIEF]\n",
+                   "kind": "tests", "session_files": []}
+        output, _elapsed, error = probe_test.run_probe(probe, request, Path("/bin/true"), root)
+        self.assertIsNone(error)
+        merged = probe_test.merge(request["brief"], [(probe.name, probe.mode, output)])
+        self.assertIn("### tests/test_client.py:4-6 — test test_follows_a_redirect_to_the_new_location", merged)
+        self.assertIn('6|     assert response.redirect_target == "/new"', merged)
+
     def test_the_case_naming_the_subject_is_quoted_whole_and_the_unrelated_case_is_not(self):
         root = repo({"tests/test_client.py": PY_TESTS, "src/client.py": "def get(path, follow=False):\n    pass\n"})
         out = run(root, "where are the tests for redirect handling and what do they cover")
