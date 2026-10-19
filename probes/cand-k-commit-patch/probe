@@ -13,7 +13,10 @@ carries the header history-fallback uses, so in `lead` mode it replaces that blo
 already held is skipped by the merge).
 
 Read-only git, deterministic, nothing printed when no commit matches or the brief already holds a history block."""
+import collections
 import json
+import math
+import tempfile
 import re
 import subprocess
 import sys
@@ -39,6 +42,54 @@ VERSION = re.compile(r"(?<![\w.])v?(\d+\.\d+(?:\.\d+)*)(?!\w|\.\d)")
 # Words any history question uses: they name no commit of their own.
 ASKING = {"which", "what", "when", "where", "commit", "commits", "change", "changed", "changes", "release",
           "released", "made", "make", "does", "version", "versions"}
+
+
+# Kept identical in both standalone history probes: bundles install each script alone.
+SUBJECT_LIMIT = 20_000
+SUBJECT_BYTES = 4 * 1024 * 1024
+SUBJECT_STOP = ASKING | set("was were is are the to of a an and or it did that this how from with for in added add introduced introduce happen happens first".split())
+
+
+def subject_words(text):
+    return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in SUBJECT_STOP and len(w) >= 2]
+
+
+def by_subject(root, prompt):
+    """Prefer multi-term subject evidence to incidental mentions in long message bodies.
+
+    This ranks candidate commits, not proof of first introduction. Exact versions and
+    quoted titles retain precedence. A lone shared word never admits a candidate.
+    """
+    try:
+        with tempfile.TemporaryFile() as output:
+            result = subprocess.run(["git", "-C", root, "log", "-n", str(SUBJECT_LIMIT),
+                                     "--format=%H\t%h %as %s"], stdout=output,
+                                    stderr=subprocess.DEVNULL, timeout=0.8)
+            if result.returncode or output.tell() > SUBJECT_BYTES:
+                return []
+            output.seek(0)
+            rows = output.read(SUBJECT_BYTES).decode("utf-8", errors="replace").splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return []
+    records = [r.split("\t", 1) for r in rows if "\t" in r]
+    corpus = [set(subject_words(r[1].split(" ", 2)[-1])) for r in records]
+    counts = collections.Counter(w for row in corpus for w in row)
+    asked = set(subject_words(prompt))
+    raw = re.findall(r"[a-z0-9]+", prompt.lower())
+    pairs = {(a, b) for a, b in zip(raw, raw[1:]) if a in asked and b in asked}
+    ranked = []
+    for index, (record, tokens) in enumerate(zip(records, corpus)):
+        shared = asked & tokens
+        if len(shared) < 2:
+            continue
+        seq = re.findall(r"[a-z0-9]+", record[1].split(" ", 2)[-1].lower())
+        adjacent = set(zip(seq, seq[1:])) & pairs
+        if len(shared) < 3 and not adjacent:
+            continue
+        score = sum(math.log1p(len(records) / (1 + counts[w])) for w in sorted(shared)) + 4 * len(adjacent)
+        ranked.append((score, len(shared), -index, record))
+    return [record for _, _, _, record in sorted(ranked, reverse=True)[:6]]
+
 
 
 def stems(text):
@@ -74,6 +125,9 @@ def find_commit(root, prompt):
         out = git(root, "log", "-i", "--fixed-strings", "-n", "6", "--format=%h", f"--grep={phrase}").split()
         if out:
             return out[0]
+    named = by_subject(root, prompt)
+    if named:
+        return named[0][0]
     words = [w for w in dict.fromkeys(re.findall(r"[a-z]{5,}", prompt.lower()))]
     messages = git(root, "log", "-i", "-n", "20000", "--format=%B%x00").lower().split("\0")
     counts = {w: sum(w in m for m in messages) for w in words[:24]}
