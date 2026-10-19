@@ -140,9 +140,7 @@ class TestBodies(unittest.TestCase):
             with self.subTest(prompt=prompt):
                 self.assertFalse(probe.applies(None, prompt))
                 self.assertEqual("", run(root, prompt, kind=None))
-
-        # The incidental `can` prefix in `candidate` and one body occurrence of `balance` are not a topic.
-        self.assertNotIn("test_candidate_policy", run(root, prompts[0], kind="tests"))
+                self.assertEqual("", run(root, prompt, kind="tests"))
 
 
 if __name__ == "__main__":
