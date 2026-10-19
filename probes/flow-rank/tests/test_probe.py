@@ -126,18 +126,26 @@ class NamedEntry(unittest.TestCase):
             "src/task_hook.rs": "enum HookEvent { PromptSubmit }\n"
                 "impl HookEvent { fn as_str(self) -> &'static str { match self {\n"
                 "  Self::PromptSubmit => \"prompt-submit\",\n} } }\n"
-                "pub fn run() {\n  let raw = read_payload();\n"
+                "pub fn run(event: HookEvent) {\n  let raw = read_payload();\n"
+                "  let output = if event == HookEvent::PromptSubmit { process(event, raw) } else { None };\n"
                 "  let brief = start_brief(raw);\n  let text = finish_brief(brief);\n"
                 "  let output = envelope(text);\n  writeln!(stdout, \"{output}\");\n}\n",
-            "src/main.rs": "fn main() { task_hook::run(); }\n",
+            "src/main.rs": "fn main() { task_hook::run(event); }\n",
         }
         out = run(prompt, files=files)
         self.assertIn("prompt-submit -> PromptSubmit", out)
         self.assertIn("read_payload()", out)
+        self.assertIn("process(event, raw)", out)
         self.assertIn("finish_brief(brief)", out)
         self.assertIn("writeln!(stdout", out)
+        self.assertIn("task_hook::run(event)", out)
         no_output = {"src/task_hook.rs": files["src/task_hook.rs"].replace('writeln!(stdout, "{output}");', "")}
         self.assertEqual(run(prompt, files=no_output), "")
+        unbound_runner = {"src/task_hook.rs": files["src/task_hook.rs"].replace("run(event: HookEvent)", "run()"),
+                          "src/main.rs": "fn main() { task_hook::run(); }\n"}
+        self.assertEqual(run(prompt, files=unbound_runner), "")
+        wrong_event_type = {"src/task_hook.rs": files["src/task_hook.rs"].replace("event: HookEvent", "event: OtherEvent")}
+        self.assertEqual(run(prompt, files=wrong_event_type), "")
 
 
 if __name__ == "__main__":

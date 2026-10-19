@@ -303,14 +303,34 @@ def event_delivery_evidence(root, prompt):
     if not event:
         return ""
     event_path, event_lines, event_idx, variant = event
-    enum_window = (max(0, event_idx - 3), min(len(event_lines), event_idx + 4))
     run_start = next((i for i, line in enumerate(event_lines) if re.search(r"\bfn\s+run\s*\(", line)), None)
     sink = next((i for i, line in enumerate(event_lines) if "writeln!(stdout" in line), None)
     if run_start is None or sink is None or sink < run_start or sink - run_start > 180:
         return ""
+    signature = re.search(r"\bevent\s*:\s*([A-Z][A-Za-z0-9_]*)", event_lines[run_start])
+    if not signature:
+        return ""
+    event_type = signature.group(1)
+    enum_start = next((i for i, line in enumerate(event_lines)
+                       if re.search(rf"\benum\s+{re.escape(event_type)}\b", line)), None)
+    if enum_start is None or not any(re.search(rf"\b{re.escape(variant)}\b", line)
+                                     for line in event_lines[enum_start:min(len(event_lines), enum_start + 40)]):
+        return ""
+    consumer = next((i for i in range(run_start, sink)
+                     if not re.search(r"\bfn\s+", event_lines[i])
+                     and re.search(r"\bprocess\w*\s*\([^;\n]*\bevent\b[^;\n]*\)", event_lines[i])), None)
+    if consumer is None:
+        return ""
+    enum_window = (enum_start, min(len(event_lines), max(event_idx + 4, enum_start + 4)))
     out = [f"### event flow: {event_literal} -> {variant} -> hook output",
-           f"### {event_path}:{enum_window[0] + 1}-{enum_window[1]} — event name maps to handler variant"]
+           f"### {event_path}:{enum_window[0] + 1}-{enum_window[1]} — typed event and host-name mapping"]
     out.extend(f"{i + 1}| {event_lines[i][:200]}" for i in range(*enum_window))
+    signature_hi = min(len(event_lines), run_start + 3)
+    out.append(f"### {event_path}:{run_start + 1}-{signature_hi} — runner receives typed event")
+    out.extend(f"{i + 1}| {event_lines[i][:200]}" for i in range(run_start, signature_hi))
+    lo, hi = max(run_start, consumer - 3), min(sink + 1, consumer + 4)
+    out.append(f"### {event_path}:{lo + 1}-{hi} — runner passes event to processing")
+    out.extend(f"{i + 1}| {event_lines[i][:200]}" for i in range(lo, hi))
     brief_calls = [i for i, line in enumerate(event_lines)
                    if re.search(r"\b[A-Za-z_]\w*brief\w*\s*\(", line, re.I)
                    and not re.search(r"\b(fn|def|function)\s+", line)]
@@ -333,7 +353,11 @@ def event_delivery_evidence(root, prompt):
         for i, line in enumerate(lines):
             if re.search(rf"\b{re.escape(module)}::run\s*\(", line):
                 lo, hi = max(0, i - 3), min(len(lines), i + 4)
-                out.append(f"### {path}:{lo + 1}-{hi} — command dispatches to hook runner")
+                invocation = "\n".join(lines[lo:hi])
+                call = re.search(rf"\b{re.escape(module)}::run\s*\(([^)]{{0,400}})\)", invocation, re.S)
+                if not call or not re.search(r"\bevent\b", call.group(1)):
+                    continue
+                out.append(f"### {path}:{lo + 1}-{hi} — command passes event to hook runner")
                 out.extend(f"{n + 1}| {lines[n][:200]}" for n in range(lo, hi))
                 return "\n".join(out)[:5200]
     return "\n".join(out)[:5200]
