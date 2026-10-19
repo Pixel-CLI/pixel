@@ -1,0 +1,36 @@
+{
+  "baseline": "final-baseline-r3-412d302f",
+  "candidate": "final-candidate-df9f39fa",
+  "repeat": "final-repeat-df9f39fa",
+  "ids": [
+    "pixel-03",
+    "pixel-04",
+    "ripgrep-03",
+    "ripgrep-07",
+    "ripgrep-08",
+    "requests-02",
+    "excalidraw-02",
+    "excalidraw-03",
+    "excalidraw-04",
+    "flask-04",
+    "flask-07",
+    "flask-08",
+    "fd-05",
+    "fd-06",
+    "express-04",
+    "express-08"
+  ],
+  "command": [
+    "rtk",
+    "bypass",
+    "python3",
+    "/tmp/pixel-brief-over-90/run_score.py",
+    "candidate",
+    "--label",
+    "final-repeat-df9f39fa",
+    "--root",
+    "/tmp/pixel-brief-over-90/final3-candidate-root",
+    "--only",
+    "pixel-03,pixel-04,ripgrep-03,ripgrep-07,ripgrep-08,requests-02,excalidraw-02,excalidraw-03,excalidraw-04,flask-04,flask-07,flask-08,fd-05,fd-06,express-04,express-08"
+  ]
+}

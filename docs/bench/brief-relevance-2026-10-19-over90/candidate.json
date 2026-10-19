@@ -1,0 +1,6499 @@
+{
+  "label": "final-candidate-df9f39fa",
+  "binary": {
+    "path": "/tmp/pixel-brief-coverage-evidence/target/dev-release/pixel",
+    "real_path": "/private/tmp/pixel-brief-coverage-evidence/target/dev-release/pixel",
+    "sha256": "0772041bc814c6bfd65c76c5a70c29fe60537dd94649fec143cc48849385a38c",
+    "version": "pixel 0.8.0\ncommit: 1d1c063de058fb132d84623e67a199aaf3308904\ntarget: aarch64-apple-darwin\nrustc: rustc 1.97.1 (8bab26f4f 2026-07-14)\nbuilt: 2026-10-19",
+    "has_json": true,
+    "has_meaning": true,
+    "key": "pixel-0772041b",
+    "home": "/private/tmp/pixel-brief-over-90/candidate-home"
+  },
+  "route": "hook",
+  "probe_home": {
+    "frozen": true,
+    "home": "/private/tmp/pixel-brief-over-90/candidate-home",
+    "commit": "df9f39fa9696432e0bdb73bc77fc847a2dd96513",
+    "probe_files": {
+      "cand-j-callers/pixel-plugin.toml": "fc4562bb75b2fd172017769d55897aed69576a7dccc0dac73a992b199e2ce4a0",
+      "cand-j-callers/probe": "b1bbc61fefd4cbfbc1252f595c6e604bef368b5f8b2cf7d4dd4ec51372722ebb",
+      "cand-j-chain/pixel-plugin.toml": "36940a8b4be105293d3c6aae9c4bd6db30bf3f5867765c6f8f0e1e836c286231",
+      "cand-j-chain/probe": "6a88df37b0cc2b95b1d05f3094d9197a7ad5a14c24102ae23e9e96b548bfba44",
+      "cand-j-stop-cause/pixel-plugin.toml": "60cc795e085b65800467713223553ad68f7f02ce4bcc48d3cb978e508a52bfad",
+      "cand-j-stop-cause/probe": "2fa455eaa2eba65815f0765ed3e2a92ecaec85f7e7621310dedfcb75f5f6e38b",
+      "cand-k-code-sites/pixel-plugin.toml": "4b6934d13a144eb7fbae56091112dff1024910a5942263c30d33eb33e94e6966",
+      "cand-k-code-sites/probe": "1475af5454eaf32311734f48107f0a9612907d0d53e1f2c059a057323826e127",
+      "cand-k-commit-patch/pixel-plugin.toml": "c184afb77ce51ced638eb42b2910a64e67a8a7349badb21f644f2f24e285499c",
+      "cand-k-commit-patch/probe": "fb20b7b66ce1f6fdc5881f6180680e29adfda287b0cd83ccdd114bbc78d4cb19",
+      "config-registry/pixel-plugin.toml": "f0472c59644ec3c8db2a2109d889e898d66b65951d793f45acff300e75e4c2fc",
+      "config-registry/probe": "c11ab257b297c4ee4c506a5c6ae2083b1742e051a88dac1a819de2d8b3db0931",
+      "doc-sections/pixel-plugin.toml": "84f80d2e9ea03c81947bb0b547ef4c7f506d9622545a661cc7746358c233fb3e",
+      "doc-sections/probe": "03e62d444eb63973dfcf6cc7b39b1df77722085934e22e862b17be2763cc5c08",
+      "error-origin/pixel-plugin.toml": "1e23316a196c1d81dfa565993bccb88765b925714c11a581d91fa41bf591cd1d",
+      "error-origin/probe": "0d7bddde35b8b89b739be6fdd0958f08050f6e1ba994b2f14c6952a407c780dd",
+      "flow-rank/pixel-plugin.toml": "f84f006a18e03ae87efe57da08e95669ae6062e7c373c9b339eb9ca13490b232",
+      "flow-rank/probe": "092448162dd75d8da229203b79dfc6ff96425b4798cff51e5bca0941c5e7041d",
+      "history-fallback/pixel-plugin.toml": "bd45e81583779cb3d58476e67661fdeb131b1fe91ef48a4c0ddfcbd97b155b82",
+      "history-fallback/probe": "5a10186276dbd868ec4b7c4a43bcc06092aceda634207417045a08c4a214fc62",
+      "name-files/pixel-plugin.toml": "2ac1224e87eda108ceec6273c85001e0c7fcf58e702884297b414120cfc9d7eb",
+      "name-files/probe": "2610d8fee44776b1d94c5b95685991e3f80d630ce514b742796a9de3393c312e",
+      "overview-answer-evidence/pixel-plugin.toml": "bad7296859efc2e4da03b9c0ed59cb6af56a1380409610891b02101c7c922926",
+      "overview-answer-evidence/probe": "7f5f1be8239240a3ba92f20d3527fa80dcb3d74f32405c75b077d704e966d052",
+      "rank-blocks/pixel-plugin.toml": "fca68611008fc8b35facd2081197e51afa8d04ccb3ab9b5316930a37792c6060",
+      "rank-blocks/probe": "854f122c9733d5c87080ce2f015c84cbfc20e219f59d09fe0f468c5d5640068c",
+      "test-bodies/pixel-plugin.toml": "2c3f3f5d5cd96edc80039e3d579030ebd5db1bb70dd7599e922efa6a4670be72",
+      "test-bodies/probe": "c72dfd4eeaa3c245bd9f85d017fe3dfa83d754ec198a5953487b999663f78122"
+    }
+  },
+  "protocol": {
+    "name": "brief-oracle",
+    "version": 4
+  },
+  "scorer": {
+    "sha256": "d5a00772cc7543bb899291ccec1c0280a8f597f8438e212eb330be50b7ed4924",
+    "commit": "df9f39fa9696432e0bdb73bc77fc847a2dd96513"
+  },
+  "result": {
+    "status": "failed",
+    "exit_code": 1,
+    "counts": {
+      "ok": 53,
+      "partial": 3
+    },
+    "errors": []
+  },
+  "parameters": {
+    "timeout_s": 300,
+    "selected_ids": [
+      "pixel-01",
+      "pixel-02",
+      "pixel-03",
+      "pixel-04",
+      "pixel-05",
+      "pixel-06",
+      "pixel-07",
+      "pixel-08",
+      "ripgrep-01",
+      "ripgrep-02",
+      "ripgrep-03",
+      "ripgrep-04",
+      "ripgrep-05",
+      "ripgrep-06",
+      "ripgrep-07",
+      "ripgrep-08",
+      "requests-01",
+      "requests-02",
+      "requests-03",
+      "requests-04",
+      "requests-05",
+      "requests-06",
+      "requests-07",
+      "requests-08",
+      "excalidraw-01",
+      "excalidraw-02",
+      "excalidraw-03",
+      "excalidraw-04",
+      "excalidraw-05",
+      "excalidraw-06",
+      "excalidraw-07",
+      "excalidraw-08",
+      "flask-01",
+      "flask-02",
+      "flask-03",
+      "flask-04",
+      "flask-05",
+      "flask-06",
+      "flask-07",
+      "flask-08",
+      "fd-01",
+      "fd-02",
+      "fd-03",
+      "fd-04",
+      "fd-05",
+      "fd-06",
+      "fd-07",
+      "fd-08",
+      "express-01",
+      "express-02",
+      "express-03",
+      "express-04",
+      "express-05",
+      "express-06",
+      "express-07",
+      "express-08"
+    ],
+    "keep_daemons": false
+  },
+  "questions": {
+    "kind": "bench",
+    "path": "/Users/livio/Documents/pixel-worktrees/brief-over-90/eval/brief-bench/questions.jsonl",
+    "sha256": "984a632e96f5f32891279d58f872c3a891bfeabaee110b3993be313c63e17069"
+  },
+  "sessions_arg": "answer",
+  "warm": true,
+  "date": "2026-10-19",
+  "sessions": [
+    {
+      "id": "pixel-01",
+      "repo": "Pixel-CLI__pixel",
+      "sha": "fe0a1eab44420768a8b8a115fb91c4148292fd9f",
+      "category": "overview",
+      "mode": "answer",
+      "prompt": "give me a tour of this repository: what are the main crates and how do they fit together",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "overview",
+        "tier": "off",
+        "score": 0.15226115030889087,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 387,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 108,
+          "rank_ms": 26,
+          "render_ms": 0,
+          "search_ms": 252
+        },
+        "probes": [
+          {
+            "bytes": 1510,
+            "ms": 90,
+            "name": "doc-sections",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 18981,
+        "brief_made": true,
+        "oracle_lines": 988,
+        "covered_lines": 155,
+        "inline_lines": 150,
+        "line_cov": 0.15688259109311742,
+        "inline_cov": 0.15182186234817813,
+        "region_cov": 0.13522280707154657,
+        "oracle_regions": 7,
+        "oracle_files": 4,
+        "files_named": 3,
+        "file_recall": 0.75,
+        "content_files": 4,
+        "content_file_recall": 0.75,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 91,
+            "covered": 45,
+            "inline": 45
+          },
+          "docs": {
+            "lines": 897,
+            "covered": 110,
+            "inline": 105
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 104,
+        "elapsed_ms": 398,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 18981
+    },
+    {
+      "id": "pixel-02",
+      "repo": "Pixel-CLI__pixel",
+      "sha": "fe0a1eab44420768a8b8a115fb91c4148292fd9f",
+      "category": "lookup",
+      "mode": "answer",
+      "prompt": "what is the byte limit of the rendered prompt brief and which constants define the caps for plain-language briefs",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "open",
+        "kind": "lookup",
+        "tier": "high",
+        "score": 2.711912024500415,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 962,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 192,
+          "rank_ms": 411,
+          "render_ms": 0,
+          "search_ms": 359
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 164,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 1007,
+            "ms": 55,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 10492,
+        "brief_made": true,
+        "oracle_lines": 324,
+        "covered_lines": 56,
+        "inline_lines": 56,
+        "line_cov": 0.1728395061728395,
+        "inline_cov": 0.1728395061728395,
+        "region_cov": 0.0700280112044818,
+        "oracle_regions": 119,
+        "oracle_files": 24,
+        "files_named": 1,
+        "file_recall": 0.041666666666666664,
+        "content_files": 24,
+        "content_file_recall": 0.041666666666666664,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 185,
+            "covered": 49,
+            "inline": 49
+          },
+          "usage": {
+            "lines": 83,
+            "covered": 7,
+            "inline": 7
+          },
+          "tests": {
+            "lines": 2,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 2,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 52,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 16,
+        "elapsed_ms": 978,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 10492
+    },
+    {
+      "id": "pixel-03",
+      "repo": "Pixel-CLI__pixel",
+      "sha": "fe0a1eab44420768a8b8a115fb91c4148292fd9f",
+      "category": "config",
+      "mode": "answer",
+      "prompt": "how do I turn the prompt brief off, both for one repository and with an environment variable",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "config",
+        "tier": "high",
+        "score": 2.63065718069278,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 2853,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 2072,
+          "rank_ms": 341,
+          "render_ms": 0,
+          "search_ms": 439
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 2008,
+            "name": "config-registry",
+            "outcome": "timeout"
+          },
+          {
+            "bytes": 9704,
+            "ms": 171,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 348,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 4505,
+            "ms": 299,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 29355,
+        "brief_made": true,
+        "oracle_lines": 553,
+        "covered_lines": 10,
+        "inline_lines": 8,
+        "line_cov": 0.018083182640144666,
+        "inline_cov": 0.014466546112115732,
+        "region_cov": 0.02914862914862915,
+        "oracle_regions": 99,
+        "oracle_files": 27,
+        "files_named": 6,
+        "file_recall": 0.2222222222222222,
+        "content_files": 27,
+        "content_file_recall": 0.2222222222222222,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 286,
+            "covered": 8,
+            "inline": 6
+          },
+          "usage": {
+            "lines": 42,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 54,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 8,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 163,
+            "covered": 2,
+            "inline": 2
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 52,
+        "elapsed_ms": 2876,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 29355
+    },
+    {
+      "id": "pixel-04",
+      "repo": "Pixel-CLI__pixel",
+      "sha": "fe0a1eab44420768a8b8a115fb91c4148292fd9f",
+      "category": "flow",
+      "mode": "answer",
+      "prompt": "walk me through what happens from the moment the prompt-submit hook receives a prompt until the brief text is printed to the agent",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": null,
+        "tier": "low",
+        "score": 1.0341331760293095,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 3766,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 1218,
+          "rank_ms": 192,
+          "render_ms": 0,
+          "search_ms": 2355
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 1169,
+            "name": "cand-j-chain",
+            "outcome": "timeout"
+          },
+          {
+            "bytes": 0,
+            "ms": 100,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 1169,
+            "name": "error-origin",
+            "outcome": "timeout"
+          },
+          {
+            "bytes": 3870,
+            "ms": 406,
+            "name": "flow-rank",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 791,
+            "ms": 105,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 4242,
+        "brief_made": true,
+        "oracle_lines": 2478,
+        "covered_lines": 71,
+        "inline_lines": 71,
+        "line_cov": 0.028652138821630348,
+        "inline_cov": 0.028652138821630348,
+        "region_cov": 0.007604010463345502,
+        "oracle_regions": 50,
+        "oracle_files": 18,
+        "files_named": 2,
+        "file_recall": 0.1111111111111111,
+        "content_files": 18,
+        "content_file_recall": 0.1111111111111111,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 2439,
+            "covered": 71,
+            "inline": 71
+          },
+          "usage": {
+            "lines": 12,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 3,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 24,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 16,
+        "elapsed_ms": 3821,
+        "exit": 0
+      },
+      "status": "partial",
+      "output_bytes": 4242
+    },
+    {
+      "id": "pixel-05",
+      "repo": "Pixel-CLI__pixel",
+      "sha": "fe0a1eab44420768a8b8a115fb91c4148292fd9f",
+      "category": "history",
+      "mode": "answer",
+      "prompt": "which commit introduced the region pack of the prompt brief and what did it add",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "open",
+        "kind": "history",
+        "tier": "high",
+        "score": 1.370415334763257,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 770,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 252,
+          "rank_ms": 44,
+          "render_ms": 0,
+          "search_ms": 473
+        },
+        "probes": [
+          {
+            "bytes": 6733,
+            "ms": 221,
+            "name": "cand-k-commit-patch",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 6202,
+            "ms": 225,
+            "name": "history-fallback",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 8972,
+        "brief_made": true,
+        "oracle_lines": 42,
+        "covered_lines": 0,
+        "inline_lines": 0,
+        "line_cov": 0.0,
+        "inline_cov": 0.0,
+        "region_cov": 0.0,
+        "oracle_regions": 42,
+        "oracle_files": 11,
+        "files_named": 9,
+        "file_recall": 0.8181818181818182,
+        "content_files": 11,
+        "content_file_recall": 0.8181818181818182,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 31,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 7,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 4,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 11,
+        "elapsed_ms": 813,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 8972
+    },
+    {
+      "id": "pixel-06",
+      "repo": "Pixel-CLI__pixel",
+      "sha": "fe0a1eab44420768a8b8a115fb91c4148292fd9f",
+      "category": "tests",
+      "mode": "answer",
+      "prompt": "which tests cover the relevance gate that decides whether a plain-language prompt gets a brief",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "tests",
+        "tier": "high",
+        "score": 3.466534581932107,
+        "ops": 5,
+        "answered": 5,
+        "elapsed_ms": 1393,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 373,
+          "rank_ms": 115,
+          "render_ms": 0,
+          "search_ms": 904
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 334,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 1793,
+            "ms": 68,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 2082,
+            "ms": 268,
+            "name": "test-bodies",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 16115,
+        "brief_made": true,
+        "oracle_lines": 766,
+        "covered_lines": 0,
+        "inline_lines": 0,
+        "line_cov": 0.0,
+        "inline_cov": 0.0,
+        "region_cov": 0.0,
+        "oracle_regions": 133,
+        "oracle_files": 23,
+        "files_named": 2,
+        "file_recall": 0.08695652173913043,
+        "content_files": 23,
+        "content_file_recall": 0.08695652173913043,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 626,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 21,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 119,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 53,
+        "elapsed_ms": 1412,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 16115
+    },
+    {
+      "id": "pixel-07",
+      "repo": "Pixel-CLI__pixel",
+      "sha": "fe0a1eab44420768a8b8a115fb91c4148292fd9f",
+      "category": "error-origin",
+      "mode": "answer",
+      "prompt": "pixel doctor says the claude hooks run a different pixel binary than the one I am running, where is that message built and what condition triggers it",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "lookup",
+        "tier": "high",
+        "score": 1.4970732773120408,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 3021,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 1865,
+          "rank_ms": 688,
+          "render_ms": 0,
+          "search_ms": 467
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 1790,
+            "name": "error-origin",
+            "outcome": "timeout"
+          },
+          {
+            "bytes": 0,
+            "ms": 447,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 1038,
+            "ms": 184,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 12963,
+        "brief_made": true,
+        "oracle_lines": 73,
+        "covered_lines": 0,
+        "inline_lines": 0,
+        "line_cov": 0.0,
+        "inline_cov": 0.0,
+        "region_cov": 0.0,
+        "oracle_regions": 63,
+        "oracle_files": 9,
+        "files_named": 1,
+        "file_recall": 0.1111111111111111,
+        "content_files": 9,
+        "content_file_recall": 0.1111111111111111,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 5,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 2,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 1,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 65,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 16,
+        "elapsed_ms": 3045,
+        "exit": 0
+      },
+      "status": "partial",
+      "output_bytes": 12963
+    },
+    {
+      "id": "pixel-08",
+      "repo": "Pixel-CLI__pixel",
+      "sha": "fe0a1eab44420768a8b8a115fb91c4148292fd9f",
+      "category": "impact",
+      "mode": "answer",
+      "prompt": "if I change how the brief is split into hook parts, which functions and files depend on that code",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "lookup",
+        "tier": "high",
+        "score": 1.1958237228905322,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 1172,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 361,
+          "rank_ms": 113,
+          "render_ms": 0,
+          "search_ms": 698
+        },
+        "probes": [
+          {
+            "bytes": 3000,
+            "ms": 308,
+            "name": "name-files",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 2290,
+            "ms": 85,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 26102,
+        "brief_made": true,
+        "oracle_lines": 1790,
+        "covered_lines": 24,
+        "inline_lines": 24,
+        "line_cov": 0.013407821229050279,
+        "inline_cov": 0.013407821229050279,
+        "region_cov": 0.000814111261872456,
+        "oracle_regions": 88,
+        "oracle_files": 13,
+        "files_named": 2,
+        "file_recall": 0.15384615384615385,
+        "content_files": 13,
+        "content_file_recall": 0.15384615384615385,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 1282,
+            "covered": 24,
+            "inline": 24
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 469,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 39,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 49,
+        "elapsed_ms": 1418,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 26102
+    },
+    {
+      "id": "ripgrep-01",
+      "repo": "BurntSushi__ripgrep",
+      "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "category": "overview",
+      "mode": "answer",
+      "prompt": "give me an overview of the crates in this workspace and what each one is responsible for",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "overview",
+        "tier": "off",
+        "score": -4.260522605655719,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 303,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 193,
+          "rank_ms": 16,
+          "render_ms": 0,
+          "search_ms": 93
+        },
+        "probes": [
+          {
+            "bytes": 5021,
+            "ms": 146,
+            "name": "doc-sections",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 13555,
+        "brief_made": true,
+        "oracle_lines": 294,
+        "covered_lines": 45,
+        "inline_lines": 45,
+        "line_cov": 0.15306122448979592,
+        "inline_cov": 0.15306122448979592,
+        "region_cov": 0.017006802721088437,
+        "oracle_regions": 21,
+        "oracle_files": 5,
+        "files_named": 4,
+        "file_recall": 0.8,
+        "content_files": 5,
+        "content_file_recall": 0.8,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 160,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 8,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 126,
+            "covered": 45,
+            "inline": 45
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 54,
+        "elapsed_ms": 328,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 13555
+    },
+    {
+      "id": "ripgrep-02",
+      "repo": "BurntSushi__ripgrep",
+      "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "category": "lookup",
+      "mode": "answer",
+      "prompt": "which function decides whether a file is treated as binary and where is binary detection configured",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "config",
+        "tier": "high",
+        "score": 1.838086533851871,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 1494,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 1141,
+          "rank_ms": 227,
+          "render_ms": 0,
+          "search_ms": 126
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 1033,
+            "name": "config-registry",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 258,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 4677,
+            "ms": 428,
+            "name": "name-files",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 3055,
+            "ms": 170,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 24785,
+        "brief_made": true,
+        "oracle_lines": 835,
+        "covered_lines": 77,
+        "inline_lines": 77,
+        "line_cov": 0.09221556886227544,
+        "inline_cov": 0.09221556886227544,
+        "region_cov": 0.07391146251289694,
+        "oracle_regions": 160,
+        "oracle_files": 26,
+        "files_named": 8,
+        "file_recall": 0.3076923076923077,
+        "content_files": 26,
+        "content_file_recall": 0.3076923076923077,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 702,
+            "covered": 66,
+            "inline": 66
+          },
+          "usage": {
+            "lines": 57,
+            "covered": 11,
+            "inline": 11
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 10,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 66,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 72,
+        "elapsed_ms": 1522,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 24785
+    },
+    {
+      "id": "ripgrep-03",
+      "repo": "BurntSushi__ripgrep",
+      "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "category": "config",
+      "mode": "answer",
+      "prompt": "how does ripgrep decide how many threads to use and where can I override it",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "lookup",
+        "tier": "off",
+        "score": 0.48890429019921045,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 1313,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 1077,
+          "rank_ms": 3,
+          "render_ms": 0,
+          "search_ms": 230
+        },
+        "probes": [
+          {
+            "bytes": 1719,
+            "ms": 1011,
+            "name": "config-registry",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 337,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 140,
+            "name": "rank-blocks",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 3007,
+        "brief_made": true,
+        "oracle_lines": 183,
+        "covered_lines": 45,
+        "inline_lines": 43,
+        "line_cov": 0.2459016393442623,
+        "inline_cov": 0.23497267759562843,
+        "region_cov": 0.047875452893812745,
+        "oracle_regions": 45,
+        "oracle_files": 11,
+        "files_named": 5,
+        "file_recall": 0.45454545454545453,
+        "content_files": 11,
+        "content_file_recall": 0.45454545454545453,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 138,
+            "covered": 44,
+            "inline": 43
+          },
+          "usage": {
+            "lines": 45,
+            "covered": 1,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 12,
+        "elapsed_ms": 1344,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 3007
+    },
+    {
+      "id": "ripgrep-04",
+      "repo": "BurntSushi__ripgrep",
+      "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "category": "flow",
+      "mode": "answer",
+      "prompt": "trace how a pattern given on the command line becomes a compiled matcher, from argument parsing to the regex engine being built",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "flow",
+        "tier": "high",
+        "score": 2.1355311154690932,
+        "ops": 5,
+        "answered": 5,
+        "elapsed_ms": 1059,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 767,
+          "rank_ms": 92,
+          "render_ms": 0,
+          "search_ms": 199
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 729,
+            "name": "cand-j-chain",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 4840,
+            "ms": 131,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 8123,
+            "ms": 603,
+            "name": "flow-rank",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 13255,
+        "brief_made": true,
+        "oracle_lines": 2519,
+        "covered_lines": 154,
+        "inline_lines": 154,
+        "line_cov": 0.0611353711790393,
+        "inline_cov": 0.0611353711790393,
+        "region_cov": 0.0050025671752947426,
+        "oracle_regions": 160,
+        "oracle_files": 18,
+        "files_named": 4,
+        "file_recall": 0.2222222222222222,
+        "content_files": 18,
+        "content_file_recall": 0.2222222222222222,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 2363,
+            "covered": 154,
+            "inline": 154
+          },
+          "usage": {
+            "lines": 156,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 31,
+        "elapsed_ms": 1092,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 13255
+    },
+    {
+      "id": "ripgrep-05",
+      "repo": "BurntSushi__ripgrep",
+      "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "category": "history",
+      "mode": "answer",
+      "prompt": "when was incremental checking added to the ignore crate and which commit did it",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": null,
+        "tier": "low",
+        "score": 0.9651094342982168,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 469,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 335,
+          "rank_ms": 17,
+          "render_ms": 0,
+          "search_ms": 116
+        },
+        "probes": [
+          {
+            "bytes": 4574,
+            "ms": 274,
+            "name": "cand-k-commit-patch",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 90,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 4119,
+            "ms": 296,
+            "name": "history-fallback",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 9467,
+            "ms": 126,
+            "name": "overview-answer-evidence",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 90,
+            "name": "rank-blocks",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 14973,
+        "brief_made": true,
+        "oracle_lines": 1,
+        "covered_lines": 0,
+        "inline_lines": 0,
+        "line_cov": 0.0,
+        "inline_cov": 0.0,
+        "region_cov": 0.0,
+        "oracle_regions": 1,
+        "oracle_files": 1,
+        "files_named": 1,
+        "file_recall": 1.0,
+        "content_files": 1,
+        "content_file_recall": 1.0,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 1,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 11,
+        "elapsed_ms": 489,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 14973
+    },
+    {
+      "id": "ripgrep-06",
+      "repo": "BurntSushi__ripgrep",
+      "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "category": "tests",
+      "mode": "answer",
+      "prompt": "where are the tests for gitignore matching and how are they organised",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "tests",
+        "tier": "high",
+        "score": 1.9390968927832488,
+        "ops": 5,
+        "answered": 5,
+        "elapsed_ms": 492,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 241,
+          "rank_ms": 108,
+          "render_ms": 0,
+          "search_ms": 142
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 187,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 908,
+            "ms": 102,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 5978,
+            "ms": 195,
+            "name": "test-bodies",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 12390,
+        "brief_made": true,
+        "oracle_lines": 820,
+        "covered_lines": 9,
+        "inline_lines": 9,
+        "line_cov": 0.01097560975609756,
+        "inline_cov": 0.01097560975609756,
+        "region_cov": 0.0033088235294117647,
+        "oracle_regions": 160,
+        "oracle_files": 23,
+        "files_named": 4,
+        "file_recall": 0.17391304347826086,
+        "content_files": 23,
+        "content_file_recall": 0.17391304347826086,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 227,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 101,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 384,
+            "covered": 9,
+            "inline": 9
+          },
+          "config": {
+            "lines": 47,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 61,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 56,
+        "elapsed_ms": 526,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 12390
+    },
+    {
+      "id": "ripgrep-07",
+      "repo": "BurntSushi__ripgrep",
+      "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "category": "error-origin",
+      "mode": "answer",
+      "prompt": "where does the message about no files being searched come from and when is it printed",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "rationale",
+        "tier": "high",
+        "score": 1.8400522849579115,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 1200,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 1051,
+          "rank_ms": 42,
+          "render_ms": 0,
+          "search_ms": 106
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 134,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 8252,
+            "ms": 1008,
+            "name": "error-origin",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 210,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 399,
+            "ms": 111,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 14220,
+        "brief_made": true,
+        "oracle_lines": 1700,
+        "covered_lines": 172,
+        "inline_lines": 172,
+        "line_cov": 0.1011764705882353,
+        "inline_cov": 0.1011764705882353,
+        "region_cov": 0.0038949275362318843,
+        "oracle_regions": 96,
+        "oracle_files": 19,
+        "files_named": 2,
+        "file_recall": 0.10526315789473684,
+        "content_files": 19,
+        "content_file_recall": 0.10526315789473684,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 1179,
+            "covered": 172,
+            "inline": 172
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 192,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 329,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 29,
+        "elapsed_ms": 1251,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 14220
+    },
+    {
+      "id": "ripgrep-08",
+      "repo": "BurntSushi__ripgrep",
+      "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "category": "diagnosis",
+      "mode": "answer",
+      "prompt": "rg refuses to read a UTF-16 file as text unless I pass an encoding flag, where is the BOM and encoding sniffing done",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "config",
+        "tier": "high",
+        "score": 1.2258400230487423,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 2377,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 2073,
+          "rank_ms": 118,
+          "render_ms": 1,
+          "search_ms": 183
+        },
+        "probes": [
+          {
+            "bytes": 3291,
+            "ms": 381,
+            "name": "config-registry",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 9217,
+            "ms": 107,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 2006,
+            "name": "error-origin",
+            "outcome": "timeout"
+          },
+          {
+            "bytes": 0,
+            "ms": 167,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 941,
+            "ms": 81,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 29394,
+        "brief_made": true,
+        "oracle_lines": 539,
+        "covered_lines": 109,
+        "inline_lines": 109,
+        "line_cov": 0.20222634508348794,
+        "inline_cov": 0.20222634508348794,
+        "region_cov": 0.09913793103448275,
+        "oracle_regions": 46,
+        "oracle_files": 19,
+        "files_named": 4,
+        "file_recall": 0.21052631578947367,
+        "content_files": 19,
+        "content_file_recall": 0.21052631578947367,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 498,
+            "covered": 106,
+            "inline": 106
+          },
+          "usage": {
+            "lines": 19,
+            "covered": 3,
+            "inline": 3
+          },
+          "tests": {
+            "lines": 16,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 1,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 5,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 30,
+        "elapsed_ms": 2414,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 29394
+    },
+    {
+      "id": "requests-01",
+      "repo": "psf__requests",
+      "sha": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+      "category": "overview",
+      "mode": "answer",
+      "prompt": "give me an overview of the package modules and what each one does",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "overview",
+        "tier": "off",
+        "score": -0.8259327890648718,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 688,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 373,
+          "rank_ms": 21,
+          "render_ms": 0,
+          "search_ms": 293
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 283,
+            "name": "doc-sections",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 8014,
+        "brief_made": true,
+        "oracle_lines": 2205,
+        "covered_lines": 56,
+        "inline_lines": 45,
+        "line_cov": 0.025396825396825397,
+        "inline_cov": 0.02040816326530612,
+        "region_cov": 0.03560004841987727,
+        "oracle_regions": 123,
+        "oracle_files": 9,
+        "files_named": 8,
+        "file_recall": 0.8888888888888888,
+        "content_files": 9,
+        "content_file_recall": 0.8888888888888888,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 1715,
+            "covered": 7,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 116,
+            "covered": 4,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 134,
+            "covered": 45,
+            "inline": 45
+          },
+          "docs": {
+            "lines": 240,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 55,
+        "elapsed_ms": 743,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 8014
+    },
+    {
+      "id": "requests-02",
+      "repo": "psf__requests",
+      "sha": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+      "category": "lookup",
+      "mode": "answer",
+      "prompt": "where is the default timeout handled and what happens when a request is sent without one",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "flow",
+        "tier": "high",
+        "score": 1.2624960094461386,
+        "ops": 5,
+        "answered": 5,
+        "elapsed_ms": 1619,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 1203,
+          "rank_ms": 154,
+          "render_ms": 0,
+          "search_ms": 260
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 427,
+            "name": "cand-k-code-sites",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 632,
+            "ms": 713,
+            "name": "config-registry",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 3463,
+            "ms": 484,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 21281,
+            "ms": 1132,
+            "name": "flow-rank",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 25667,
+        "brief_made": true,
+        "oracle_lines": 823,
+        "covered_lines": 156,
+        "inline_lines": 153,
+        "line_cov": 0.18955042527339003,
+        "inline_cov": 0.1859052247873633,
+        "region_cov": 0.028909691629955946,
+        "oracle_regions": 160,
+        "oracle_files": 24,
+        "files_named": 5,
+        "file_recall": 0.20833333333333334,
+        "content_files": 24,
+        "content_file_recall": 0.20833333333333334,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 427,
+            "covered": 148,
+            "inline": 145
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 187,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 209,
+            "covered": 8,
+            "inline": 8
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 25,
+        "elapsed_ms": 1682,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 25667
+    },
+    {
+      "id": "requests-03",
+      "repo": "psf__requests",
+      "sha": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+      "category": "config",
+      "mode": "answer",
+      "prompt": "how does requests find proxy settings from the environment and which variables does it read",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "config",
+        "tier": "high",
+        "score": 2.4098021016458504,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 1033,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 729,
+          "rank_ms": 104,
+          "render_ms": 0,
+          "search_ms": 199
+        },
+        "probes": [
+          {
+            "bytes": 471,
+            "ms": 646,
+            "name": "config-registry",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 5046,
+            "ms": 410,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 489,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 660,
+            "ms": 287,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 10472,
+        "brief_made": true,
+        "oracle_lines": 156,
+        "covered_lines": 57,
+        "inline_lines": 56,
+        "line_cov": 0.36538461538461536,
+        "inline_cov": 0.358974358974359,
+        "region_cov": 0.5043627438381866,
+        "oracle_regions": 4,
+        "oracle_files": 3,
+        "files_named": 3,
+        "file_recall": 1.0,
+        "content_files": 3,
+        "content_file_recall": 1.0,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 140,
+            "covered": 41,
+            "inline": 40
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 16,
+            "covered": 16,
+            "inline": 16
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 25,
+        "elapsed_ms": 1079,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 10472
+    },
+    {
+      "id": "requests-04",
+      "repo": "psf__requests",
+      "sha": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+      "category": "flow",
+      "mode": "answer",
+      "prompt": "walk me through what happens when I call requests.get, from the call until the Response object is returned",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "flow",
+        "tier": "off",
+        "score": -0.34509028916485973,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 1036,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 876,
+          "rank_ms": 11,
+          "render_ms": 0,
+          "search_ms": 148
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 841,
+            "name": "cand-j-chain",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 5420,
+            "ms": 121,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 9257,
+            "ms": 282,
+            "name": "flow-rank",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 14985,
+        "brief_made": true,
+        "oracle_lines": 1213,
+        "covered_lines": 436,
+        "inline_lines": 161,
+        "line_cov": 0.359439406430338,
+        "inline_cov": 0.1327287716405606,
+        "region_cov": 0.3102000396118043,
+        "oracle_regions": 11,
+        "oracle_files": 4,
+        "files_named": 2,
+        "file_recall": 0.5,
+        "content_files": 4,
+        "content_file_recall": 0.5,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 1213,
+            "covered": 436,
+            "inline": 161
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 13,
+        "elapsed_ms": 1058,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 14985
+    },
+    {
+      "id": "requests-05",
+      "repo": "psf__requests",
+      "sha": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+      "category": "history",
+      "mode": "answer",
+      "prompt": "which commit fixed the link to the AI policy in the contributing guide and what did it change",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "open",
+        "kind": null,
+        "tier": "low",
+        "score": 0.6367140959245976,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 442,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 378,
+          "rank_ms": 7,
+          "render_ms": 0,
+          "search_ms": 57
+        },
+        "probes": [
+          {
+            "bytes": 556,
+            "ms": 297,
+            "name": "cand-k-commit-patch",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 73,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 1013,
+            "ms": 344,
+            "name": "history-fallback",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 73,
+            "name": "rank-blocks",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 1587,
+        "brief_made": true,
+        "oracle_lines": 3,
+        "covered_lines": 2,
+        "inline_lines": 0,
+        "line_cov": 0.6666666666666666,
+        "inline_cov": 0.0,
+        "region_cov": 0.6666666666666666,
+        "oracle_regions": 3,
+        "oracle_files": 2,
+        "files_named": 2,
+        "file_recall": 1.0,
+        "content_files": 2,
+        "content_file_recall": 1.0,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 3,
+            "covered": 2,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 6,
+        "elapsed_ms": 464,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 1587
+    },
+    {
+      "id": "requests-06",
+      "repo": "psf__requests",
+      "sha": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+      "category": "tests",
+      "mode": "answer",
+      "prompt": "where are the tests for redirect handling and what scenarios do they cover",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "closed",
+        "kind": null,
+        "tier": "off",
+        "score": 0.20577461665813157,
+        "ops": 2,
+        "answered": 0,
+        "elapsed_ms": 220,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 159,
+          "rank_ms": null,
+          "render_ms": 0,
+          "search_ms": 61
+        },
+        "probes": [
+          {
+            "bytes": 2026,
+            "ms": 121,
+            "name": "test-bodies",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 2040,
+        "brief_made": true,
+        "oracle_lines": 1130,
+        "covered_lines": 40,
+        "inline_lines": 40,
+        "line_cov": 0.035398230088495575,
+        "inline_cov": 0.035398230088495575,
+        "region_cov": 0.005121638924455826,
+        "oracle_regions": 142,
+        "oracle_files": 17,
+        "files_named": 1,
+        "file_recall": 0.058823529411764705,
+        "content_files": 17,
+        "content_file_recall": 0.058823529411764705,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 19,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 74,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 967,
+            "covered": 40,
+            "inline": 40
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 70,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 2,
+        "elapsed_ms": 237,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 2040
+    },
+    {
+      "id": "requests-07",
+      "repo": "psf__requests",
+      "sha": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+      "category": "error-origin",
+      "mode": "answer",
+      "prompt": "where does the text of the max retries exceeded connection error come from",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "bugfix",
+        "tier": "high",
+        "score": 1.4623188884871834,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 545,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 433,
+          "rank_ms": 36,
+          "render_ms": 0,
+          "search_ms": 76
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 171,
+            "name": "config-registry",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 1098,
+            "ms": 103,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 5425,
+            "ms": 394,
+            "name": "error-origin",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 140,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 1055,
+            "ms": 77,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 12426,
+        "brief_made": true,
+        "oracle_lines": 234,
+        "covered_lines": 48,
+        "inline_lines": 48,
+        "line_cov": 0.20512820512820512,
+        "inline_cov": 0.20512820512820512,
+        "region_cov": 0.13680597719759832,
+        "oracle_regions": 12,
+        "oracle_files": 4,
+        "files_named": 3,
+        "file_recall": 0.75,
+        "content_files": 4,
+        "content_file_recall": 0.75,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 223,
+            "covered": 46,
+            "inline": 46
+          },
+          "usage": {
+            "lines": 8,
+            "covered": 2,
+            "inline": 2
+          },
+          "tests": {
+            "lines": 2,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 1,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 41,
+        "elapsed_ms": 563,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 12426
+    },
+    {
+      "id": "requests-08",
+      "repo": "psf__requests",
+      "sha": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+      "category": "impact",
+      "mode": "answer",
+      "prompt": "if I change how cookies are merged into a prepared request, what other parts of the library call that code",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "flow",
+        "tier": "off",
+        "score": -0.9846521317097024,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 309,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 244,
+          "rank_ms": 12,
+          "render_ms": 0,
+          "search_ms": 53
+        },
+        "probes": [
+          {
+            "bytes": 5010,
+            "ms": 95,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 2637,
+            "ms": 214,
+            "name": "flow-rank",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 85,
+            "name": "overview-answer-evidence",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 7955,
+        "brief_made": true,
+        "oracle_lines": 1082,
+        "covered_lines": 50,
+        "inline_lines": 50,
+        "line_cov": 0.04621072088724584,
+        "inline_cov": 0.04621072088724584,
+        "region_cov": 0.0032113037893384717,
+        "oracle_regions": 45,
+        "oracle_files": 8,
+        "files_named": 1,
+        "file_recall": 0.125,
+        "content_files": 8,
+        "content_file_recall": 0.125,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 1042,
+            "covered": 50,
+            "inline": 50
+          },
+          "usage": {
+            "lines": 22,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 18,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 10,
+        "elapsed_ms": 326,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 7955
+    },
+    {
+      "id": "excalidraw-01",
+      "repo": "excalidraw__excalidraw",
+      "sha": "541653c7c9d587d463a47daacff9fb30e45a52e7",
+      "category": "overview",
+      "mode": "answer",
+      "prompt": "give me an overview of the monorepo packages and how the web app uses them",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "open",
+        "kind": "overview",
+        "tier": "off",
+        "score": 0.46900330145786284,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 194,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 72,
+          "rank_ms": 17,
+          "render_ms": 0,
+          "search_ms": 103
+        },
+        "probes": [
+          {
+            "bytes": 678,
+            "ms": 55,
+            "name": "doc-sections",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 12620,
+        "brief_made": true,
+        "oracle_lines": 1168,
+        "covered_lines": 115,
+        "inline_lines": 115,
+        "line_cov": 0.09845890410958905,
+        "inline_cov": 0.09845890410958905,
+        "region_cov": 0.009747793670115641,
+        "oracle_regions": 106,
+        "oracle_files": 44,
+        "files_named": 6,
+        "file_recall": 0.13636363636363635,
+        "content_files": 44,
+        "content_file_recall": 0.13636363636363635,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 428,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 85,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 389,
+            "covered": 45,
+            "inline": 45
+          },
+          "docs": {
+            "lines": 266,
+            "covered": 70,
+            "inline": 70
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 92,
+        "elapsed_ms": 208,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 12620
+    },
+    {
+      "id": "excalidraw-02",
+      "repo": "excalidraw__excalidraw",
+      "sha": "541653c7c9d587d463a47daacff9fb30e45a52e7",
+      "category": "lookup",
+      "mode": "answer",
+      "prompt": "where is the maximum zoom level defined and what is its value",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": null,
+        "tier": "low",
+        "score": 0.7405854101807372,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 577,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 294,
+          "rank_ms": 213,
+          "render_ms": 0,
+          "search_ms": 69
+        },
+        "probes": [
+          {
+            "bytes": 407,
+            "ms": 267,
+            "name": "config-registry",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 43,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 2186,
+            "ms": 42,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 9383,
+        "brief_made": true,
+        "oracle_lines": 28,
+        "covered_lines": 1,
+        "inline_lines": 1,
+        "line_cov": 0.03571428571428571,
+        "inline_cov": 0.03571428571428571,
+        "region_cov": 0.03571428571428571,
+        "oracle_regions": 28,
+        "oracle_files": 14,
+        "files_named": 5,
+        "file_recall": 0.35714285714285715,
+        "content_files": 14,
+        "content_file_recall": 0.35714285714285715,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 22,
+            "covered": 1,
+            "inline": 1
+          },
+          "tests": {
+            "lines": 5,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 1,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 45,
+        "elapsed_ms": 588,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 9383
+    },
+    {
+      "id": "excalidraw-03",
+      "repo": "excalidraw__excalidraw",
+      "sha": "541653c7c9d587d463a47daacff9fb30e45a52e7",
+      "category": "config",
+      "mode": "answer",
+      "prompt": "where is the initial theme chosen at startup and how does the theme setting persist between sessions",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "config",
+        "tier": "off",
+        "score": 0.25192754236241177,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 616,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 180,
+          "rank_ms": 207,
+          "render_ms": 0,
+          "search_ms": 228
+        },
+        "probes": [
+          {
+            "bytes": 1264,
+            "ms": 108,
+            "name": "config-registry",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 59,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 159,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 567,
+            "ms": 46,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 2607,
+        "brief_made": true,
+        "oracle_lines": 108,
+        "covered_lines": 7,
+        "inline_lines": 7,
+        "line_cov": 0.06481481481481481,
+        "inline_cov": 0.06481481481481481,
+        "region_cov": 0.05660377358490566,
+        "oracle_regions": 106,
+        "oracle_files": 48,
+        "files_named": 1,
+        "file_recall": 0.020833333333333332,
+        "content_files": 48,
+        "content_file_recall": 0.020833333333333332,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 95,
+            "covered": 7,
+            "inline": 7
+          },
+          "tests": {
+            "lines": 10,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 3,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 8,
+        "elapsed_ms": 628,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 2607
+    },
+    {
+      "id": "excalidraw-04",
+      "repo": "excalidraw__excalidraw",
+      "sha": "541653c7c9d587d463a47daacff9fb30e45a52e7",
+      "category": "flow",
+      "mode": "answer",
+      "prompt": "walk me through what happens when a user presses ctrl+z, from the key event until the canvas shows the previous state",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "open",
+        "kind": "flow",
+        "tier": "off",
+        "score": 0.1474010521951452,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 856,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 626,
+          "rank_ms": 22,
+          "render_ms": 0,
+          "search_ms": 207
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 607,
+            "name": "cand-j-chain",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 60,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 2523,
+            "ms": 329,
+            "name": "flow-rank",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 2831,
+        "brief_made": true,
+        "oracle_lines": 3331,
+        "covered_lines": 95,
+        "inline_lines": 64,
+        "line_cov": 0.028519963974782347,
+        "inline_cov": 0.019213449414590213,
+        "region_cov": 0.0033877192299709424,
+        "oracle_regions": 160,
+        "oracle_files": 42,
+        "files_named": 3,
+        "file_recall": 0.07142857142857142,
+        "content_files": 42,
+        "content_file_recall": 0.07142857142857142,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 3169,
+            "covered": 95,
+            "inline": 64
+          },
+          "usage": {
+            "lines": 73,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 89,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 6,
+        "elapsed_ms": 871,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 2831
+    },
+    {
+      "id": "excalidraw-05",
+      "repo": "excalidraw__excalidraw",
+      "sha": "541653c7c9d587d463a47daacff9fb30e45a52e7",
+      "category": "history",
+      "mode": "answer",
+      "prompt": "which commit added the w shortcut to wrap or unwrap a selection and what did it change",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "open",
+        "kind": "history",
+        "tier": "off",
+        "score": 0.5872645900529211,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 538,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 294,
+          "rank_ms": 4,
+          "render_ms": 0,
+          "search_ms": 239
+        },
+        "probes": [
+          {
+            "bytes": 6193,
+            "ms": 239,
+            "name": "cand-k-commit-patch",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 4160,
+            "ms": 273,
+            "name": "history-fallback",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 7795,
+        "brief_made": true,
+        "oracle_lines": 162,
+        "covered_lines": 1,
+        "inline_lines": 0,
+        "line_cov": 0.006172839506172839,
+        "inline_cov": 0.0,
+        "region_cov": 0.00625,
+        "oracle_regions": 160,
+        "oracle_files": 17,
+        "files_named": 6,
+        "file_recall": 0.35294117647058826,
+        "content_files": 17,
+        "content_file_recall": 0.35294117647058826,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 3,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 144,
+            "covered": 1,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 13,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 2,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 7,
+        "elapsed_ms": 556,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 7795
+    },
+    {
+      "id": "excalidraw-06",
+      "repo": "excalidraw__excalidraw",
+      "sha": "541653c7c9d587d463a47daacff9fb30e45a52e7",
+      "category": "tests",
+      "mode": "answer",
+      "prompt": "where are the tests for undo and redo and what behaviours do they cover",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "tests",
+        "tier": "high",
+        "score": 2.3999994797139705,
+        "ops": 5,
+        "answered": 5,
+        "elapsed_ms": 579,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 295,
+          "rank_ms": 127,
+          "render_ms": 0,
+          "search_ms": 156
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 245,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 2830,
+            "ms": 79,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 8878,
+            "ms": 197,
+            "name": "test-bodies",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 27622,
+        "brief_made": true,
+        "oracle_lines": 1091,
+        "covered_lines": 136,
+        "inline_lines": 131,
+        "line_cov": 0.12465627864344637,
+        "inline_cov": 0.12007332722273144,
+        "region_cov": 0.04072254763588442,
+        "oracle_regions": 160,
+        "oracle_files": 6,
+        "files_named": 3,
+        "file_recall": 0.5,
+        "content_files": 6,
+        "content_file_recall": 0.5,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 1091,
+            "covered": 136,
+            "inline": 131
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 79,
+        "elapsed_ms": 598,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 27622
+    },
+    {
+      "id": "excalidraw-07",
+      "repo": "excalidraw__excalidraw",
+      "sha": "541653c7c9d587d463a47daacff9fb30e45a52e7",
+      "category": "error-origin",
+      "mode": "answer",
+      "prompt": "where is the alert text for a file that could not be loaded defined and which code raises it",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": null,
+        "tier": "low",
+        "score": 0.7365700287205919,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 2393,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 2052,
+          "rank_ms": 77,
+          "render_ms": 0,
+          "search_ms": 263
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 211,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 2005,
+            "name": "error-origin",
+            "outcome": "timeout"
+          },
+          {
+            "bytes": 0,
+            "ms": 729,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 320,
+            "ms": 243,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 3777,
+        "brief_made": true,
+        "oracle_lines": 846,
+        "covered_lines": 77,
+        "inline_lines": 77,
+        "line_cov": 0.09101654846335698,
+        "inline_cov": 0.09101654846335698,
+        "region_cov": 0.0074266975308641976,
+        "oracle_regions": 128,
+        "oracle_files": 85,
+        "files_named": 1,
+        "file_recall": 0.011764705882352941,
+        "content_files": 85,
+        "content_file_recall": 0.011764705882352941,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 776,
+            "covered": 77,
+            "inline": 77
+          },
+          "usage": {
+            "lines": 54,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 10,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 5,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 1,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 4,
+        "elapsed_ms": 2420,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 3777
+    },
+    {
+      "id": "excalidraw-08",
+      "repo": "excalidraw__excalidraw",
+      "sha": "541653c7c9d587d463a47daacff9fb30e45a52e7",
+      "category": "impact",
+      "mode": "answer",
+      "prompt": "if I change how element ids are generated, which modules call the id generator",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "flow",
+        "tier": "off",
+        "score": 0.4816339971854058,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 3008,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 2353,
+          "rank_ms": 229,
+          "render_ms": 0,
+          "search_ms": 426
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 2312,
+            "name": "cand-j-callers",
+            "outcome": "timeout"
+          },
+          {
+            "bytes": 0,
+            "ms": 212,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 433,
+            "name": "flow-rank",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 9113,
+        "brief_made": true,
+        "oracle_lines": 180,
+        "covered_lines": 0,
+        "inline_lines": 0,
+        "line_cov": 0.0,
+        "inline_cov": 0.0,
+        "region_cov": 0.0,
+        "oracle_regions": 160,
+        "oracle_files": 22,
+        "files_named": 1,
+        "file_recall": 0.045454545454545456,
+        "content_files": 22,
+        "content_file_recall": 0.045454545454545456,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 3,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 146,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 27,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 4,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 35,
+        "elapsed_ms": 3039,
+        "exit": 0
+      },
+      "status": "partial",
+      "output_bytes": 9113
+    },
+    {
+      "id": "flask-01",
+      "repo": "pallets__flask",
+      "sha": "d086db856be187255b8ec61ef409357393020f32",
+      "category": "overview",
+      "mode": "answer",
+      "prompt": "give me an overview of the flask package: its modules and what each is responsible for",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "overview",
+        "tier": "off",
+        "score": -1.1305619534879598,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 735,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 428,
+          "rank_ms": 41,
+          "render_ms": 0,
+          "search_ms": 262
+        },
+        "probes": [
+          {
+            "bytes": 2719,
+            "ms": 361,
+            "name": "doc-sections",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 10247,
+        "brief_made": true,
+        "oracle_lines": 392,
+        "covered_lines": 67,
+        "inline_lines": 53,
+        "line_cov": 0.17091836734693877,
+        "inline_cov": 0.13520408163265307,
+        "region_cov": 0.36850848050358453,
+        "oracle_regions": 38,
+        "oracle_files": 6,
+        "files_named": 6,
+        "file_recall": 1.0,
+        "content_files": 6,
+        "content_file_recall": 1.0,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 301,
+            "covered": 1,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 38,
+            "covered": 13,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 53,
+            "covered": 53,
+            "inline": 53
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 74,
+        "elapsed_ms": 771,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 10247
+    },
+    {
+      "id": "flask-02",
+      "repo": "pallets__flask",
+      "sha": "d086db856be187255b8ec61ef409357393020f32",
+      "category": "lookup",
+      "mode": "answer",
+      "prompt": "where is the default name of the session cookie defined and what is it",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "config",
+        "tier": "high",
+        "score": 1.4299669301009006,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 868,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 590,
+          "rank_ms": 83,
+          "render_ms": 0,
+          "search_ms": 194
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 519,
+            "name": "config-registry",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 650,
+            "ms": 267,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 400,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 666,
+            "ms": 160,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 9323,
+        "brief_made": true,
+        "oracle_lines": 62,
+        "covered_lines": 7,
+        "inline_lines": 7,
+        "line_cov": 0.11290322580645161,
+        "inline_cov": 0.11290322580645161,
+        "region_cov": 0.09090909090909091,
+        "oracle_regions": 55,
+        "oracle_files": 16,
+        "files_named": 4,
+        "file_recall": 0.25,
+        "content_files": 16,
+        "content_file_recall": 0.25,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 19,
+            "covered": 5,
+            "inline": 5
+          },
+          "tests": {
+            "lines": 6,
+            "covered": 2,
+            "inline": 2
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 37,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 19,
+        "elapsed_ms": 904,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 9323
+    },
+    {
+      "id": "flask-03",
+      "repo": "pallets__flask",
+      "sha": "d086db856be187255b8ec61ef409357393020f32",
+      "category": "config",
+      "mode": "answer",
+      "prompt": "how do I load configuration from a file named by an environment variable, and which helper methods exist for loading config",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "config",
+        "tier": "high",
+        "score": 2.1451522590181433,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 642,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 485,
+          "rank_ms": 68,
+          "render_ms": 0,
+          "search_ms": 88
+        },
+        "probes": [
+          {
+            "bytes": 2388,
+            "ms": 438,
+            "name": "config-registry",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 803,
+            "ms": 207,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 244,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 872,
+            "ms": 133,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 16139,
+        "brief_made": true,
+        "oracle_lines": 494,
+        "covered_lines": 122,
+        "inline_lines": 122,
+        "line_cov": 0.24696356275303644,
+        "inline_cov": 0.24696356275303644,
+        "region_cov": 0.010000410764775551,
+        "oracle_regions": 49,
+        "oracle_files": 11,
+        "files_named": 2,
+        "file_recall": 0.18181818181818182,
+        "content_files": 11,
+        "content_file_recall": 0.18181818181818182,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 271,
+            "covered": 102,
+            "inline": 102
+          },
+          "usage": {
+            "lines": 2,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 28,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 193,
+            "covered": 20,
+            "inline": 20
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 45,
+        "elapsed_ms": 666,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 16139
+    },
+    {
+      "id": "flask-04",
+      "repo": "pallets__flask",
+      "sha": "d086db856be187255b8ec61ef409357393020f32",
+      "category": "flow",
+      "mode": "answer",
+      "prompt": "walk me through what happens when a request reaches a Flask app, from wsgi_app until the response is returned, including error handling",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "strong",
+        "gate": "unjudged",
+        "kind": "rationale",
+        "tier": null,
+        "score": null,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 1789,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 1729,
+          "rank_ms": 10,
+          "render_ms": 0,
+          "search_ms": 50
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 1680,
+            "name": "cand-j-chain",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 160,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 806,
+            "ms": 1082,
+            "name": "error-origin",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 19314,
+            "ms": 1037,
+            "name": "flow-rank",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 2631,
+            "ms": 301,
+            "name": "name-files",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 214,
+            "ms": 141,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 23022,
+        "brief_made": true,
+        "oracle_lines": 249,
+        "covered_lines": 136,
+        "inline_lines": 136,
+        "line_cov": 0.5461847389558233,
+        "inline_cov": 0.5461847389558233,
+        "region_cov": 0.6053030303030303,
+        "oracle_regions": 3,
+        "oracle_files": 1,
+        "files_named": 1,
+        "file_recall": 1.0,
+        "content_files": 1,
+        "content_file_recall": 1.0,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 249,
+            "covered": 136,
+            "inline": 136
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 38,
+        "elapsed_ms": 1813,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 23022
+    },
+    {
+      "id": "flask-05",
+      "repo": "pallets__flask",
+      "sha": "d086db856be187255b8ec61ef409357393020f32",
+      "category": "history",
+      "mode": "answer",
+      "prompt": "which commit dropped support for Python 3.10 and what did it change",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "closed",
+        "kind": null,
+        "tier": "off",
+        "score": -2.3748531156895787,
+        "ops": 2,
+        "answered": 0,
+        "elapsed_ms": 484,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 405,
+          "rank_ms": null,
+          "render_ms": 0,
+          "search_ms": 79
+        },
+        "probes": [
+          {
+            "bytes": 5231,
+            "ms": 324,
+            "name": "cand-k-commit-patch",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 3477,
+            "ms": 367,
+            "name": "history-fallback",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 5588,
+        "brief_made": true,
+        "oracle_lines": 39,
+        "covered_lines": 0,
+        "inline_lines": 0,
+        "line_cov": 0.0,
+        "inline_cov": 0.0,
+        "region_cov": 0.0,
+        "oracle_regions": 3,
+        "oracle_files": 3,
+        "files_named": 3,
+        "file_recall": 1.0,
+        "content_files": 3,
+        "content_file_recall": 1.0,
+        "oracle_commits": 1,
+        "commits_named": 1,
+        "commit_recall": 1.0,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 16,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 23,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 1,
+          "covered": 1
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 0,
+        "elapsed_ms": 510,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 5588
+    },
+    {
+      "id": "flask-06",
+      "repo": "pallets__flask",
+      "sha": "d086db856be187255b8ec61ef409357393020f32",
+      "category": "tests",
+      "mode": "answer",
+      "prompt": "where are the tests for blueprint registration and what do they check",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "tests",
+        "tier": "high",
+        "score": 2.17009618864856,
+        "ops": 5,
+        "answered": 5,
+        "elapsed_ms": 395,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 238,
+          "rank_ms": 46,
+          "render_ms": 0,
+          "search_ms": 110
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 196,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 1281,
+            "ms": 107,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 181,
+            "name": "test-bodies",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 14190,
+        "brief_made": true,
+        "oracle_lines": 558,
+        "covered_lines": 48,
+        "inline_lines": 41,
+        "line_cov": 0.08602150537634409,
+        "inline_cov": 0.07347670250896057,
+        "region_cov": 0.034278829056789584,
+        "oracle_regions": 39,
+        "oracle_files": 7,
+        "files_named": 5,
+        "file_recall": 0.7142857142857143,
+        "content_files": 7,
+        "content_file_recall": 0.7142857142857143,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 558,
+            "covered": 48,
+            "inline": 41
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 41,
+        "elapsed_ms": 413,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 14190
+    },
+    {
+      "id": "flask-07",
+      "repo": "pallets__flask",
+      "sha": "d086db856be187255b8ec61ef409357393020f32",
+      "category": "error-origin",
+      "mode": "answer",
+      "prompt": "where does the runtime error about working outside of application context come from and what triggers it",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "bugfix",
+        "tier": "high",
+        "score": 1.873485796047469,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 718,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 623,
+          "rank_ms": 15,
+          "render_ms": 0,
+          "search_ms": 79
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 161,
+            "name": "cand-k-code-sites",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 1743,
+            "ms": 201,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 707,
+            "ms": 585,
+            "name": "error-origin",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 247,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 121,
+            "name": "rank-blocks",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 12826,
+        "brief_made": true,
+        "oracle_lines": 471,
+        "covered_lines": 22,
+        "inline_lines": 22,
+        "line_cov": 0.04670912951167728,
+        "inline_cov": 0.04670912951167728,
+        "region_cov": 0.040111786947229985,
+        "oracle_regions": 79,
+        "oracle_files": 13,
+        "files_named": 5,
+        "file_recall": 0.38461538461538464,
+        "content_files": 13,
+        "content_file_recall": 0.38461538461538464,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 389,
+            "covered": 13,
+            "inline": 13
+          },
+          "usage": {
+            "lines": 75,
+            "covered": 2,
+            "inline": 2
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 7,
+            "covered": 7,
+            "inline": 7
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 13,
+        "elapsed_ms": 738,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 12826
+    },
+    {
+      "id": "flask-08",
+      "repo": "pallets__flask",
+      "sha": "d086db856be187255b8ec61ef409357393020f32",
+      "category": "impact",
+      "mode": "answer",
+      "prompt": "if I change how the request context is pushed, which code calls it and what depends on it",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "flow",
+        "tier": "off",
+        "score": 0.3328069212355771,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 463,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 325,
+          "rank_ms": 19,
+          "render_ms": 0,
+          "search_ms": 118
+        },
+        "probes": [
+          {
+            "bytes": 4777,
+            "ms": 218,
+            "name": "cand-j-callers",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 5119,
+            "ms": 167,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 1231,
+            "ms": 287,
+            "name": "flow-rank",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 11435,
+        "brief_made": true,
+        "oracle_lines": 1455,
+        "covered_lines": 106,
+        "inline_lines": 106,
+        "line_cov": 0.07285223367697595,
+        "inline_cov": 0.07285223367697595,
+        "region_cov": 0.0031965466040808506,
+        "oracle_regions": 160,
+        "oracle_files": 34,
+        "files_named": 2,
+        "file_recall": 0.058823529411764705,
+        "content_files": 34,
+        "content_file_recall": 0.058823529411764705,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 1032,
+            "covered": 106,
+            "inline": 106
+          },
+          "usage": {
+            "lines": 57,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 300,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 66,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 22,
+        "elapsed_ms": 483,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 11435
+    },
+    {
+      "id": "fd-01",
+      "repo": "sharkdp__fd",
+      "sha": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc",
+      "category": "overview",
+      "mode": "answer",
+      "prompt": "give me an overview of the source modules and what each one does",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "overview",
+        "tier": "off",
+        "score": -4.260522605655719,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 415,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 283,
+          "rank_ms": 11,
+          "render_ms": 0,
+          "search_ms": 120
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 233,
+            "name": "doc-sections",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 7786,
+        "brief_made": true,
+        "oracle_lines": 1269,
+        "covered_lines": 166,
+        "inline_lines": 115,
+        "line_cov": 0.13081166272655634,
+        "inline_cov": 0.09062253743104808,
+        "region_cov": 0.5316009441008465,
+        "oracle_regions": 59,
+        "oracle_files": 21,
+        "files_named": 21,
+        "file_recall": 1.0,
+        "content_files": 21,
+        "content_file_recall": 1.0,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 975,
+            "covered": 21,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 49,
+            "covered": 30,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 115,
+            "covered": 45,
+            "inline": 45
+          },
+          "docs": {
+            "lines": 130,
+            "covered": 70,
+            "inline": 70
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 72,
+        "elapsed_ms": 475,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 7786
+    },
+    {
+      "id": "fd-02",
+      "repo": "sharkdp__fd",
+      "sha": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc",
+      "category": "lookup",
+      "mode": "answer",
+      "prompt": "where is the default number of search threads decided and what formula is used",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": null,
+        "tier": "low",
+        "score": 1.1447398465904928,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 564,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 395,
+          "rank_ms": 50,
+          "render_ms": 0,
+          "search_ms": 118
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 188,
+            "name": "cand-k-code-sites",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 345,
+            "name": "config-registry",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 137,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 527,
+            "ms": 128,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 5001,
+        "brief_made": true,
+        "oracle_lines": 152,
+        "covered_lines": 68,
+        "inline_lines": 68,
+        "line_cov": 0.4473684210526316,
+        "inline_cov": 0.4473684210526316,
+        "region_cov": 0.12781954887218044,
+        "oracle_regions": 7,
+        "oracle_files": 4,
+        "files_named": 1,
+        "file_recall": 0.25,
+        "content_files": 4,
+        "content_file_recall": 0.25,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 117,
+            "covered": 68,
+            "inline": 68
+          },
+          "usage": {
+            "lines": 4,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 31,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 10,
+        "elapsed_ms": 599,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 5001
+    },
+    {
+      "id": "fd-03",
+      "repo": "sharkdp__fd",
+      "sha": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc",
+      "category": "config",
+      "mode": "answer",
+      "prompt": "how does fd decide whether to use colors and which environment variables or flags change that",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "config",
+        "tier": "off",
+        "score": 0.20126646189372027,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 1220,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 980,
+          "rank_ms": 23,
+          "render_ms": 0,
+          "search_ms": 217
+        },
+        "probes": [
+          {
+            "bytes": 330,
+            "ms": 926,
+            "name": "config-registry",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 887,
+            "ms": 665,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 731,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 672,
+            "ms": 544,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 3181,
+        "brief_made": true,
+        "oracle_lines": 321,
+        "covered_lines": 37,
+        "inline_lines": 37,
+        "line_cov": 0.11526479750778816,
+        "inline_cov": 0.11526479750778816,
+        "region_cov": 0.03931101115462665,
+        "oracle_regions": 148,
+        "oracle_files": 21,
+        "files_named": 4,
+        "file_recall": 0.19047619047619047,
+        "content_files": 21,
+        "content_file_recall": 0.19047619047619047,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 151,
+            "covered": 24,
+            "inline": 24
+          },
+          "usage": {
+            "lines": 99,
+            "covered": 3,
+            "inline": 3
+          },
+          "tests": {
+            "lines": 3,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 15,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 53,
+            "covered": 10,
+            "inline": 10
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 19,
+        "elapsed_ms": 1258,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 3181
+    },
+    {
+      "id": "fd-04",
+      "repo": "sharkdp__fd",
+      "sha": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc",
+      "category": "flow",
+      "mode": "answer",
+      "prompt": "walk me through how fd turns the command line into a parallel directory walk until the results are printed",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "open",
+        "kind": "flow",
+        "tier": "off",
+        "score": 0.05512933391399022,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 1160,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 1001,
+          "rank_ms": 19,
+          "render_ms": 0,
+          "search_ms": 138
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 950,
+            "name": "cand-j-chain",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 798,
+            "ms": 138,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 211,
+            "name": "flow-rank",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 11439,
+        "brief_made": true,
+        "oracle_lines": 1387,
+        "covered_lines": 235,
+        "inline_lines": 133,
+        "line_cov": 0.16943042537851477,
+        "inline_cov": 0.0958904109589041,
+        "region_cov": 0.10975056689342404,
+        "oracle_regions": 12,
+        "oracle_files": 7,
+        "files_named": 2,
+        "file_recall": 0.2857142857142857,
+        "content_files": 7,
+        "content_file_recall": 0.2857142857142857,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 1377,
+            "covered": 233,
+            "inline": 131
+          },
+          "usage": {
+            "lines": 6,
+            "covered": 2,
+            "inline": 2
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 4,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 22,
+        "elapsed_ms": 1195,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 11439
+    },
+    {
+      "id": "fd-05",
+      "repo": "sharkdp__fd",
+      "sha": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc",
+      "category": "history",
+      "mode": "answer",
+      "prompt": "which commit pointed cargo-binstall at the fd release asset and what did it change",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "open",
+        "kind": "history",
+        "tier": "off",
+        "score": -1.2460047791422888,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 775,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 547,
+          "rank_ms": 6,
+          "render_ms": 0,
+          "search_ms": 220
+        },
+        "probes": [
+          {
+            "bytes": 1162,
+            "ms": 477,
+            "name": "cand-k-commit-patch",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 1590,
+            "ms": 498,
+            "name": "history-fallback",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 2703,
+        "brief_made": true,
+        "oracle_lines": 6,
+        "covered_lines": 1,
+        "inline_lines": 0,
+        "line_cov": 0.16666666666666666,
+        "inline_cov": 0.0,
+        "region_cov": 0.16666666666666666,
+        "oracle_regions": 6,
+        "oracle_files": 2,
+        "files_named": 2,
+        "file_recall": 1.0,
+        "content_files": 2,
+        "content_file_recall": 1.0,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 5,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 1,
+            "covered": 1,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 8,
+        "elapsed_ms": 828,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 2703
+    },
+    {
+      "id": "fd-06",
+      "repo": "sharkdp__fd",
+      "sha": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc",
+      "category": "tests",
+      "mode": "answer",
+      "prompt": "where are the integration tests for the exec option and what behaviours do they cover",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "closed",
+        "kind": null,
+        "tier": "off",
+        "score": 0.5500560447444214,
+        "ops": 2,
+        "answered": 0,
+        "elapsed_ms": 301,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 212,
+          "rank_ms": null,
+          "render_ms": 0,
+          "search_ms": 89
+        },
+        "probes": [
+          {
+            "bytes": 1534,
+            "ms": 166,
+            "name": "test-bodies",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 1548,
+        "brief_made": true,
+        "oracle_lines": 615,
+        "covered_lines": 40,
+        "inline_lines": 40,
+        "line_cov": 0.06504065040650407,
+        "inline_cov": 0.06504065040650407,
+        "region_cov": 0.0032615786040443573,
+        "oracle_regions": 28,
+        "oracle_files": 7,
+        "files_named": 1,
+        "file_recall": 0.14285714285714285,
+        "content_files": 7,
+        "content_file_recall": 0.14285714285714285,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 5,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 596,
+            "covered": 40,
+            "inline": 40
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 14,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 2,
+        "elapsed_ms": 331,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 1548
+    },
+    {
+      "id": "fd-07",
+      "repo": "sharkdp__fd",
+      "sha": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc",
+      "category": "error-origin",
+      "mode": "answer",
+      "prompt": "where is the error printed when a search path does not exist produced",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "rationale",
+        "tier": "high",
+        "score": 1.938276382852931,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 631,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 515,
+          "rank_ms": 32,
+          "render_ms": 0,
+          "search_ms": 83
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 199,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 754,
+            "ms": 476,
+            "name": "error-origin",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 282,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 228,
+            "ms": 138,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 6447,
+        "brief_made": true,
+        "oracle_lines": 213,
+        "covered_lines": 83,
+        "inline_lines": 83,
+        "line_cov": 0.38967136150234744,
+        "inline_cov": 0.38967136150234744,
+        "region_cov": 0.18303030303030304,
+        "oracle_regions": 25,
+        "oracle_files": 10,
+        "files_named": 3,
+        "file_recall": 0.3,
+        "content_files": 10,
+        "content_file_recall": 0.3,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 142,
+            "covered": 79,
+            "inline": 79
+          },
+          "usage": {
+            "lines": 16,
+            "covered": 4,
+            "inline": 4
+          },
+          "tests": {
+            "lines": 49,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 6,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 6,
+        "elapsed_ms": 658,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 6447
+    },
+    {
+      "id": "fd-08",
+      "repo": "sharkdp__fd",
+      "sha": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc",
+      "category": "impact",
+      "mode": "answer",
+      "prompt": "if I change the exit codes, which parts of the code use the exit code module",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "closed",
+        "kind": null,
+        "tier": "off",
+        "score": -0.610702592619468,
+        "ops": 2,
+        "answered": 0,
+        "elapsed_ms": 347,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 265,
+          "rank_ms": null,
+          "render_ms": 0,
+          "search_ms": 82
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 119,
+            "name": "cand-j-callers",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 1195,
+            "ms": 205,
+            "name": "name-files",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 1209,
+        "brief_made": true,
+        "oracle_lines": 90,
+        "covered_lines": 12,
+        "inline_lines": 12,
+        "line_cov": 0.13333333333333333,
+        "inline_cov": 0.13333333333333333,
+        "region_cov": 0.1095890410958904,
+        "oracle_regions": 73,
+        "oracle_files": 12,
+        "files_named": 6,
+        "file_recall": 0.5,
+        "content_files": 12,
+        "content_file_recall": 0.5,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 7,
+            "covered": 4,
+            "inline": 4
+          },
+          "usage": {
+            "lines": 79,
+            "covered": 8,
+            "inline": 8
+          },
+          "tests": {
+            "lines": 1,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 3,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 12,
+        "elapsed_ms": 379,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 1209
+    },
+    {
+      "id": "express-01",
+      "repo": "expressjs__express",
+      "sha": "a419aa7350389a275ab45fde2e849ed1f02449ef",
+      "category": "overview",
+      "mode": "answer",
+      "prompt": "give me an overview of the library files in lib and what each one is responsible for",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "open",
+        "kind": "overview",
+        "tier": "off",
+        "score": -1.0059606207578438,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 235,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 156,
+          "rank_ms": 10,
+          "render_ms": 0,
+          "search_ms": 68
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 127,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 126,
+            "name": "overview-answer-evidence",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 4945,
+        "brief_made": true,
+        "oracle_lines": 1373,
+        "covered_lines": 7,
+        "inline_lines": 0,
+        "line_cov": 0.005098324836125273,
+        "inline_cov": 0.0,
+        "region_cov": 0.008807459296961155,
+        "oracle_regions": 5,
+        "oracle_files": 5,
+        "files_named": 5,
+        "file_recall": 1.0,
+        "content_files": 5,
+        "content_file_recall": 1.0,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 1373,
+            "covered": 7,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 17,
+        "elapsed_ms": 266,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 4945
+    },
+    {
+      "id": "express-02",
+      "repo": "expressjs__express",
+      "sha": "a419aa7350389a275ab45fde2e849ed1f02449ef",
+      "category": "lookup",
+      "mode": "answer",
+      "prompt": "where is the default etag setting defined and what is its value",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "config",
+        "tier": "off",
+        "score": -0.1652360895594541,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 355,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 271,
+          "rank_ms": 12,
+          "render_ms": 0,
+          "search_ms": 71
+        },
+        "probes": [
+          {
+            "bytes": 304,
+            "ms": 235,
+            "name": "config-registry",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 125,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 207,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 101,
+            "name": "rank-blocks",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 1573,
+        "brief_made": true,
+        "oracle_lines": 198,
+        "covered_lines": 2,
+        "inline_lines": 1,
+        "line_cov": 0.010101010101010102,
+        "inline_cov": 0.005050505050505051,
+        "region_cov": 0.0125,
+        "oracle_regions": 160,
+        "oracle_files": 12,
+        "files_named": 7,
+        "file_recall": 0.5833333333333334,
+        "content_files": 12,
+        "content_file_recall": 0.5833333333333334,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 8,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 25,
+            "covered": 1,
+            "inline": 1
+          },
+          "tests": {
+            "lines": 77,
+            "covered": 1,
+            "inline": 0
+          },
+          "config": {
+            "lines": 1,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 87,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 10,
+        "elapsed_ms": 377,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 1573
+    },
+    {
+      "id": "express-03",
+      "repo": "expressjs__express",
+      "sha": "a419aa7350389a275ab45fde2e849ed1f02449ef",
+      "category": "config",
+      "mode": "answer",
+      "prompt": "how do app settings such as trust proxy work and where are their defaults declared",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "config",
+        "tier": "off",
+        "score": -0.607918668408292,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 466,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 332,
+          "rank_ms": 22,
+          "render_ms": 0,
+          "search_ms": 112
+        },
+        "probes": [
+          {
+            "bytes": 364,
+            "ms": 288,
+            "name": "config-registry",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 143,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 247,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 113,
+            "name": "rank-blocks",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 1615,
+        "brief_made": true,
+        "oracle_lines": 568,
+        "covered_lines": 10,
+        "inline_lines": 7,
+        "line_cov": 0.017605633802816902,
+        "inline_cov": 0.01232394366197183,
+        "region_cov": 0.001773079333392398,
+        "oracle_regions": 50,
+        "oracle_files": 13,
+        "files_named": 7,
+        "file_recall": 0.5384615384615384,
+        "content_files": 13,
+        "content_file_recall": 0.5384615384615384,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 380,
+            "covered": 9,
+            "inline": 7
+          },
+          "usage": {
+            "lines": 4,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 184,
+            "covered": 1,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 10,
+        "elapsed_ms": 511,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 1615
+    },
+    {
+      "id": "express-04",
+      "repo": "expressjs__express",
+      "sha": "a419aa7350389a275ab45fde2e849ed1f02449ef",
+      "category": "flow",
+      "mode": "answer",
+      "prompt": "walk me through what happens when a request arrives at an express app until the router sends the response",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "open",
+        "kind": "flow",
+        "tier": "off",
+        "score": -0.8799830476889001,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 1415,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 1306,
+          "rank_ms": 13,
+          "render_ms": 0,
+          "search_ms": 95
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 1271,
+            "name": "cand-j-chain",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 550,
+            "ms": 132,
+            "name": "doc-sections",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 1150,
+            "ms": 178,
+            "name": "flow-rank",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 2819,
+        "brief_made": true,
+        "oracle_lines": 138,
+        "covered_lines": 35,
+        "inline_lines": 34,
+        "line_cov": 0.2536231884057971,
+        "inline_cov": 0.2463768115942029,
+        "region_cov": 0.3063973063973064,
+        "oracle_regions": 4,
+        "oracle_files": 2,
+        "files_named": 2,
+        "file_recall": 1.0,
+        "content_files": 2,
+        "content_file_recall": 1.0,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 138,
+            "covered": 35,
+            "inline": 34
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 14,
+        "elapsed_ms": 1443,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 2819
+    },
+    {
+      "id": "express-05",
+      "repo": "expressjs__express",
+      "sha": "a419aa7350389a275ab45fde2e849ed1f02449ef",
+      "category": "history",
+      "mode": "answer",
+      "prompt": "what changed in the 5.3.0 release and which commit made it",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "prose",
+        "gate": "closed",
+        "kind": null,
+        "tier": "off",
+        "score": -6.093482623972457,
+        "ops": 2,
+        "answered": 0,
+        "elapsed_ms": 884,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 748,
+          "rank_ms": null,
+          "render_ms": 0,
+          "search_ms": 130
+        },
+        "probes": [
+          {
+            "bytes": 2795,
+            "ms": 693,
+            "name": "cand-k-commit-patch",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 3929,
+            "ms": 564,
+            "name": "history-fallback",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 2882,
+        "brief_made": true,
+        "oracle_lines": 66,
+        "covered_lines": 0,
+        "inline_lines": 0,
+        "line_cov": 0.0,
+        "inline_cov": 0.0,
+        "region_cov": 0.0,
+        "oracle_regions": 2,
+        "oracle_files": 2,
+        "files_named": 2,
+        "file_recall": 1.0,
+        "content_files": 2,
+        "content_file_recall": 1.0,
+        "oracle_commits": 1,
+        "commits_named": 1,
+        "commit_recall": 1.0,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 8,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 58,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 1,
+          "covered": 1
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 0,
+        "elapsed_ms": 927,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 2882
+    },
+    {
+      "id": "express-06",
+      "repo": "expressjs__express",
+      "sha": "a419aa7350389a275ab45fde2e849ed1f02449ef",
+      "category": "tests",
+      "mode": "answer",
+      "prompt": "where are the tests for res.sendFile and what do they cover",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "strong",
+        "gate": "unjudged",
+        "kind": "tests",
+        "tier": null,
+        "score": null,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 659,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 527,
+          "rank_ms": 69,
+          "render_ms": 0,
+          "search_ms": 62
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 449,
+            "name": "name-files",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 1233,
+            "ms": 176,
+            "name": "rank-blocks",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 5843,
+            "ms": 394,
+            "name": "test-bodies",
+            "outcome": "ok"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 14603,
+        "brief_made": true,
+        "oracle_lines": 987,
+        "covered_lines": 123,
+        "inline_lines": 120,
+        "line_cov": 0.12462006079027356,
+        "inline_cov": 0.12158054711246201,
+        "region_cov": 0.13476348576122674,
+        "oracle_regions": 64,
+        "oracle_files": 5,
+        "files_named": 4,
+        "file_recall": 0.8,
+        "content_files": 5,
+        "content_file_recall": 0.8,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "usage": {
+            "lines": 15,
+            "covered": 7,
+            "inline": 7
+          },
+          "tests": {
+            "lines": 931,
+            "covered": 116,
+            "inline": 113
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 41,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 76,
+        "elapsed_ms": 725,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 14603
+    },
+    {
+      "id": "express-07",
+      "repo": "expressjs__express",
+      "sha": "a419aa7350389a275ab45fde2e849ed1f02449ef",
+      "category": "error-origin",
+      "mode": "answer",
+      "prompt": "where is the default 404 page that says Cannot GET produced",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": null,
+        "tier": "low",
+        "score": 1.0700674420053407,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 2666,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 2073,
+          "rank_ms": 25,
+          "render_ms": 0,
+          "search_ms": 566
+        },
+        "probes": [
+          {
+            "bytes": 0,
+            "ms": 745,
+            "name": "config-registry",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 285,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 2007,
+            "name": "error-origin",
+            "outcome": "timeout"
+          },
+          {
+            "bytes": 0,
+            "ms": 233,
+            "name": "rank-blocks",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 8632,
+        "brief_made": true,
+        "oracle_lines": 250,
+        "covered_lines": 17,
+        "inline_lines": 17,
+        "line_cov": 0.068,
+        "inline_cov": 0.068,
+        "region_cov": 0.0875,
+        "oracle_regions": 160,
+        "oracle_files": 46,
+        "files_named": 2,
+        "file_recall": 0.043478260869565216,
+        "content_files": 46,
+        "content_file_recall": 0.043478260869565216,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 64,
+            "covered": 3,
+            "inline": 3
+          },
+          "usage": {
+            "lines": 83,
+            "covered": 14,
+            "inline": 14
+          },
+          "tests": {
+            "lines": 57,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 1,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 45,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 6,
+        "elapsed_ms": 2723,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 8632
+    },
+    {
+      "id": "express-08",
+      "repo": "expressjs__express",
+      "sha": "a419aa7350389a275ab45fde2e849ed1f02449ef",
+      "category": "impact",
+      "mode": "answer",
+      "prompt": "if I change how req.get reads headers, which parts of lib call it",
+      "n_calls": 0,
+      "brief_meta": {
+        "signal": "weak",
+        "gate": "open",
+        "kind": "flow",
+        "tier": "off",
+        "score": -0.19343606155859439,
+        "ops": 2,
+        "answered": 2,
+        "elapsed_ms": 434,
+        "cut": false,
+        "deadline_ms": 3000,
+        "stages": {
+          "probe_ms": 290,
+          "rank_ms": 15,
+          "render_ms": 0,
+          "search_ms": 128
+        },
+        "probes": [
+          {
+            "bytes": 2383,
+            "ms": 241,
+            "name": "cand-j-callers",
+            "outcome": "ok"
+          },
+          {
+            "bytes": 0,
+            "ms": 160,
+            "name": "doc-sections",
+            "outcome": "empty"
+          },
+          {
+            "bytes": 0,
+            "ms": 189,
+            "name": "flow-rank",
+            "outcome": "empty"
+          }
+        ]
+      },
+      "metrics": {
+        "bytes": 3621,
+        "brief_made": true,
+        "oracle_lines": 208,
+        "covered_lines": 62,
+        "inline_lines": 62,
+        "line_cov": 0.2980769230769231,
+        "inline_cov": 0.2980769230769231,
+        "region_cov": 0.049331585176585036,
+        "oracle_regions": 38,
+        "oracle_files": 4,
+        "files_named": 3,
+        "file_recall": 0.75,
+        "content_files": 4,
+        "content_file_recall": 0.75,
+        "oracle_commits": 0,
+        "commits_named": 0,
+        "commit_recall": null,
+        "cited_lines": 0,
+        "cited_covered": 0,
+        "answer_cov": null,
+        "by_type": {
+          "definition": {
+            "lines": 173,
+            "covered": 62,
+            "inline": 62
+          },
+          "usage": {
+            "lines": 28,
+            "covered": 0,
+            "inline": 0
+          },
+          "tests": {
+            "lines": 7,
+            "covered": 0,
+            "inline": 0
+          },
+          "config": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          },
+          "docs": {
+            "lines": 0,
+            "covered": 0,
+            "inline": 0
+          }
+        },
+        "git": {
+          "items": 0,
+          "covered": 0
+        },
+        "list": {
+          "items": 0,
+          "covered": 0
+        },
+        "brief_regions": 18,
+        "elapsed_ms": 462,
+        "exit": 0
+      },
+      "status": "ok",
+      "output_bytes": 3621
+    }
+  ],
+  "means": {
+    "answer": {
+      "n": 56,
+      "line_cov": 0.1299348468349418,
+      "inline_cov": 0.10667660829077638,
+      "region_cov": 0.09585887884766144,
+      "file_recall": 0.45660886153667224,
+      "content_file_recall": 0.45660886153667224,
+      "commit_recall": 1.0,
+      "answer_cov": null,
+      "bytes": 10615.517857142857,
+      "brief_made": 56,
+      "pooled_line_cov": 0.09203079590067813,
+      "types": {
+        "definition": {
+          "lines": 26395,
+          "covered": 2497,
+          "inline": 2043,
+          "sessions": 42,
+          "sessions_half": 4
+        },
+        "usage": {
+          "lines": 1999,
+          "covered": 126,
+          "inline": 77,
+          "sessions": 39,
+          "sessions_half": 1
+        },
+        "tests": {
+          "lines": 6365,
+          "covered": 393,
+          "inline": 376,
+          "sessions": 34,
+          "sessions_half": 0
+        },
+        "config": {
+          "lines": 979,
+          "covered": 225,
+          "inline": 225,
+          "sessions": 19,
+          "sessions_half": 0
+        },
+        "docs": {
+          "lines": 3488,
+          "covered": 369,
+          "inline": 361,
+          "sessions": 41,
+          "sessions_half": 6
+        },
+        "git": {
+          "lines": 2,
+          "covered": 2,
+          "inline": 0,
+          "sessions": 2,
+          "sessions_half": 2
+        },
+        "list": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        }
+      },
+      "latency": {
+        "n": 56,
+        "p95_ms": 3008,
+        "max_ms": 3766,
+        "cut": 0,
+        "cut_rate": 0.0,
+        "shares": {
+          "search_ms": 0.2354853032590356,
+          "rank_ms": 0.0778438859781547,
+          "render_ms": 1.7760412041559363e-05,
+          "probe_ms": 0.6856229464523577
+        }
+      }
+    },
+    "edit": {
+      "n": 0,
+      "line_cov": null,
+      "inline_cov": null,
+      "region_cov": null,
+      "file_recall": null,
+      "content_file_recall": null,
+      "commit_recall": null,
+      "answer_cov": null,
+      "bytes": null,
+      "brief_made": 0,
+      "pooled_line_cov": null,
+      "types": {
+        "definition": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        },
+        "usage": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        },
+        "tests": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        },
+        "config": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        },
+        "docs": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        },
+        "git": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        },
+        "list": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        }
+      },
+      "latency": {
+        "n": 0,
+        "p95_ms": null,
+        "max_ms": null,
+        "cut": 0,
+        "cut_rate": null,
+        "shares": {
+          "search_ms": null,
+          "rank_ms": null,
+          "render_ms": null,
+          "probe_ms": null
+        }
+      }
+    },
+    "all": {
+      "n": 56,
+      "line_cov": 0.1299348468349418,
+      "inline_cov": 0.10667660829077638,
+      "region_cov": 0.09585887884766144,
+      "file_recall": 0.45660886153667224,
+      "content_file_recall": 0.45660886153667224,
+      "commit_recall": 1.0,
+      "answer_cov": null,
+      "bytes": 10615.517857142857,
+      "brief_made": 56,
+      "pooled_line_cov": 0.09203079590067813,
+      "types": {
+        "definition": {
+          "lines": 26395,
+          "covered": 2497,
+          "inline": 2043,
+          "sessions": 42,
+          "sessions_half": 4
+        },
+        "usage": {
+          "lines": 1999,
+          "covered": 126,
+          "inline": 77,
+          "sessions": 39,
+          "sessions_half": 1
+        },
+        "tests": {
+          "lines": 6365,
+          "covered": 393,
+          "inline": 376,
+          "sessions": 34,
+          "sessions_half": 0
+        },
+        "config": {
+          "lines": 979,
+          "covered": 225,
+          "inline": 225,
+          "sessions": 19,
+          "sessions_half": 0
+        },
+        "docs": {
+          "lines": 3488,
+          "covered": 369,
+          "inline": 361,
+          "sessions": 41,
+          "sessions_half": 6
+        },
+        "git": {
+          "lines": 2,
+          "covered": 2,
+          "inline": 0,
+          "sessions": 2,
+          "sessions_half": 2
+        },
+        "list": {
+          "lines": 0,
+          "covered": 0,
+          "inline": 0,
+          "sessions": 0,
+          "sessions_half": 0
+        }
+      },
+      "latency": {
+        "n": 56,
+        "p95_ms": 3008,
+        "max_ms": 3766,
+        "cut": 0,
+        "cut_rate": 0.0,
+        "shares": {
+          "search_ms": 0.2354853032590356,
+          "rank_ms": 0.0778438859781547,
+          "render_ms": 1.7760412041559363e-05,
+          "probe_ms": 0.6856229464523577
+        }
+      }
+    }
+  }
+}
