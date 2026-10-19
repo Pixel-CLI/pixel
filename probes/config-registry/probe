@@ -438,6 +438,13 @@ def source_range(path, source, start, end, note):
     return [f"### {path}:{lo}-{hi} — {note}"] + [f"{i}| {lines[i-1][:150]}" for i in range(lo, hi+1)]
 
 
+def redact_source_range(lines, subject):
+    """Preserve coordinates while masking secret-named subjects and lines."""
+    if not lines: return lines
+    return [line if index == 0 or not (SECRETISH.search(subject) or SECRETISH.search(line))
+            else line.split("|", 1)[0] + "| <masked>" for index, line in enumerate(lines)]
+
+
 def cli_setting_evidence(clone, prompt):
     """Find a prompt-named CLI setting and its function-scoped runtime derivation."""
     if not re.search(r"\b(config\w*|settings?|flags?|options?|defaults?|overrid\w+|where do i set|set (that|this|it))\b", prompt, re.I):
@@ -475,7 +482,13 @@ def cli_setting_evidence(clone, prompt):
                         short_char = short_match.group(2).lower()
                         break
             short_match = short_char in requested_short if short_char else False
-            if not overlap and not short_match: continue
+            # An explicit short option is stronger identity than nearby prose.
+            # In particular, "command-line" must not select --line-buffered
+            # when the prompt explicitly asks about -j.
+            if requested_short:
+                if not short_match: continue
+            elif not overlap:
+                continue
             update_text = body[update_method[2]:update_method[1]-1]
             field = re.search(r"\bargs\.([a-z_][a-z0-9_]*)\s*=", update_text)
             if not field: continue
@@ -615,12 +628,16 @@ def compiled_setting_evidence(clone, prompt, rows):
     if not settings: return ""
 
     deadline = time.monotonic() + SCOPED_SCAN_MAX_MS / 1000
+    bytes_read = 0
     for _negative_overlap, _word_count, setting_path, setting in sorted(set(settings))[:3]:
+        if time.monotonic() >= deadline: break
         setting_file = root / setting_path
         try:
             if setting_file.is_symlink() or not setting_file.resolve().is_relative_to(root): continue
             if not setting_file.is_file() or setting_file.stat().st_size > SCAN_MAX_FILE_BYTES: continue
             setting_source = setting_file.read_text(errors="replace")
+            bytes_read += setting_file.stat().st_size
+            if bytes_read > TRACKED_PATHS_MAX_BYTES: break
         except OSError:
             continue
         compiler_binding = None
@@ -668,6 +685,10 @@ def compiled_setting_evidence(clone, prompt, rows):
                 rel = target.relative_to(root).as_posix()
                 if rel not in tracked_inventory or not target.is_file() or target.stat().st_size > SCAN_MAX_FILE_BYTES: continue
                 compiler_source = target.read_text(errors="replace")
+                bytes_read += target.stat().st_size
+                if bytes_read > TRACKED_PATHS_MAX_BYTES:
+                    compiler_source = None
+                    break
                 compiler_path = rel
                 break
             except (OSError, ValueError):
@@ -687,6 +708,10 @@ def compiled_setting_evidence(clone, prompt, rows):
         for consumer_rel, consumer_file in consumer_files:
             if time.monotonic() >= deadline: break
             try:
+                if consumer_file.is_symlink() or not consumer_file.resolve().is_relative_to(root): continue
+                if not consumer_file.is_file() or consumer_file.stat().st_size > SCAN_MAX_FILE_BYTES: continue
+                bytes_read += consumer_file.stat().st_size
+                if bytes_read > TRACKED_PATHS_MAX_BYTES: break
                 source = consumer_file.read_text(errors="replace")
             except OSError:
                 continue
@@ -704,11 +729,12 @@ def compiled_setting_evidence(clone, prompt, rows):
                     lambda match: match.group(2) == compiled_key)
                 if not key_access: continue
                 getter_span = (getter.start(), fn_end)
-                lines = source_range(consumer_rel, source, *getter_span, "named getter reads the matching compiled setting")
-                setter_lines = source_range(setting_path, setting_source, *setter_span,
-                                             "setting branch installs a compiled function")
-                compiler_lines = source_range(compiler_path, compiler_source, compiler_start, compiler_end,
-                                               "exact imported setting compiler implementation")
+                lines = redact_source_range(source_range(consumer_rel, source, *getter_span,
+                                                          "named getter reads the matching compiled setting"), setting)
+                setter_lines = redact_source_range(source_range(setting_path, setting_source, *setter_span,
+                                                                 "setting branch installs a compiled function"), setting)
+                compiler_lines = redact_source_range(source_range(compiler_path, compiler_source, compiler_start, compiler_end,
+                                                                   "exact imported setting compiler implementation"), setting)
                 return "\n".join(setter_lines + compiler_lines + lines) + "\n"
     return ""
 

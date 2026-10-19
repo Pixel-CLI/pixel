@@ -357,6 +357,11 @@ fn resolve(low: LowArgs) -> usize {
     def test_cli_setting_resolves_an_explicit_short_option_to_its_runtime_value(self):
         source = '''
 trait Flag {}
+struct LineBuffered;
+impl Flag for LineBuffered {
+    fn name_long(&self) -> &'static str { "line-buffered" }
+    fn update(&self, args: &mut LowArgs) { args.buffer = BufferMode::Line; }
+}
 struct Threads;
 impl Flag for Threads {
     fn name_short(&self) -> Option<u8> { Some(b'j') }
@@ -375,6 +380,7 @@ fn resolve(low: LowArgs) -> usize {
         self.assertIn('name_long', out)
         self.assertIn('available_parallelism()', out)
         self.assertIn('low.threads', out)
+        self.assertNotIn('LineBuffered', out, 'the prose token "command-line" cannot outrank explicit -j')
 
     def test_cli_setting_short_option_does_not_match_a_different_flag(self):
         source = '''
@@ -406,6 +412,7 @@ app.set = function set(setting, val) {
 ''',
             'lib/utils.js': '''
 exports.compileTrust = function(val) {
+  const API_TOKEN = "compiler-secret-sentinel";
   if (typeof val === 'function') return val;
   if (typeof val === 'number') return function(a, i){ return i < val };
   return proxyaddr.compile(val || []);
@@ -422,6 +429,7 @@ defineGetter(req, 'ip', function ip(){
         for evidence in ["case 'trust proxy'", "compileTrust(val)", 'exports.compileTrust',
                          "defineGetter(req, 'ip'", "get('trust proxy fn')", 'proxyaddr(this, trust)']:
             self.assertIn(evidence, out)
+        self.assertNotIn('compiler-secret-sentinel', out)
 
     def test_compiled_setting_does_not_join_a_different_getter_or_comment_decoy(self):
         root = self.repo({
