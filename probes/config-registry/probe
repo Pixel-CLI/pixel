@@ -52,7 +52,7 @@ def tracked(clone, rel):
 
 def scan(clone):
     """[(path, line, text)] of every line that may define or read a config key; .env* admitted only as templates."""
-    cmd = ["rg", "-n", "--no-heading", "--no-messages", "--max-columns", "300", "--hidden", "-g", "!.git", "-g", "!.pixel", "--max-filesize", "400K"]
+    cmd = ["rg", "-n", "--no-heading", "--no-messages", "--max-columns", "300", "--hidden", "-g", "!.git", "-g", "!.pixel", "-g", "!.env*", "-g", "!*.env", "--max-filesize", "400K"]
     for g in RG_EXCL: cmd += ["-g", g]
     for p in PATTERNS: cmd += ["-e", p]
     try:
@@ -60,6 +60,16 @@ def scan(clone):
     except (OSError, subprocess.SubprocessError):
         return []   # no ripgrep, or too slow: no registry
     rows = []
+    # Exclude all env files from rg before opening them; templates also require tracking.
+    for rel in git(clone, "ls-files", "-z").split("\0"):
+        base = os.path.basename(rel)
+        if not (TEMPLATE_ENV.fullmatch(base) or re.fullmatch(r"\.env\.(development|production|local\.example)", base)):
+            continue
+        path = Path(clone) / rel
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 400_000:
+            continue
+        for n, text in enumerate(path.read_text(errors="replace").splitlines(), 1):
+            if len(text) <= 300 and ENV_LINE.match(text): rows.append((rel, n, text))
     for l in out.splitlines():
         m = re.match(r"\./(.+?):(\d+):(.*)$", l)
         if not m: continue
@@ -168,6 +178,26 @@ def block(clone, path, n, ctx_before=0, ctx_after=0):
     return [f"### {path}:{lo}-{hi}"] + [f"{i}| {lines[i - 1][:150]}" for i in range(lo, hi + 1)]
 
 
+def evidence_block(clone, key, path, n, before=0, after=0):
+    """Keep coordinates, but never copy a secret-bearing source line into the brief."""
+    lines = block(clone, path, n, before, after)
+    return [line if i == 0 or not (SECRETISH.search(key) or SECRETISH.search(line))
+            else line.split("|", 1)[0] + "| <masked>" for i, line in enumerate(lines)]
+
+
+def declaration_candidates(clone, key, defs):
+    """A source coordinate identifies a declaration; a shared spelling proves no binding or precedence."""
+    heads = [f"- {key} | {len(defs)} distinct declaration candidates; lexical binding and override precedence unknown"]
+    blocks = []
+    for path, n, _text, value in defs[:4]:
+        heads.append(f"  - {key} @ {path}:{n} | candidate value {mask(key, value) or 'unknown'}")
+        # Context preserves the surrounding scope as evidence, not a guessed resolution.
+        blocks += evidence_block(clone, key, path, n, 2, 2)
+    if len(defs) > 4:
+        heads.append(f"  - {len(defs) - 4} additional candidates omitted; no unique default established")
+    return heads, blocks
+
+
 def mask(key, val):
     """A value of a key whose name looks like a secret is never printed, whatever its length."""
     return "<masked>" if val and SECRETISH.search(key) else val
@@ -189,9 +219,16 @@ def emit(clone, prompt, brief):
     for k in keys:
         e = reg[k]
         defs = sorted(e["defs"], key=lambda d: (not os.path.basename(d[0]).startswith(".env"), d[0]))
+        if len(defs) > 1:
+            candidate_heads, candidate_blocks = declaration_candidates(clone, k, defs)
+            head += candidate_heads
+            blocks += candidate_blocks
+            for r in e["reads"][:2]:
+                blocks += evidence_block(clone, k, r[0], r[1], 1, 2)
+            continue
         d0 = defs[0] if defs else None
         fileval = next(((d[0], d[1], mask(k, d[3])) for d in defs if os.path.basename(d[0]).startswith(".env") and d[3]), None)
-        fallback = next((r[3] for r in e["reads"] if r[3]), "") or next((d[3] for d in defs if d[3] and not os.path.basename(d[0]).startswith(".env")), "")
+        fallback = mask(k, next((r[3] for r in e["reads"] if r[3]), "") or next((d[3] for d in defs if d[3] and not os.path.basename(d[0]).startswith(".env")), ""))
         isenv = bool(e["reads"]) or any(d[0].endswith("env.d.ts") or os.path.basename(d[0]).startswith(".env") for d in defs)
         val = f"set in {fileval[0]}:{fileval[1]} = {fileval[2]}" + (f" (code fallback {fallback})" if fallback else "") if fileval else \
               ((f"code fallback {fallback}; an env file may override" if isenv else f"constant default {fallback}") if fallback else "no value in indexed files")
@@ -203,13 +240,13 @@ def emit(clone, prompt, brief):
         for d in [x for x in shown if x]:
             span = comment_above(clone, d[0], d[1]).count("//") + comment_above(clone, d[0], d[1]).count("#")
             if (d[0], d[1]) not in seen:
-                seen.add((d[0], d[1])); b = block(clone, d[0], d[1], min(span, 3), 0)
-                if k == "dev-server port": b = block(clone, d[0], d[1], 1, 1)
+                seen.add((d[0], d[1])); b = evidence_block(clone, k, d[0], d[1], min(span, 3), 0)
+                if k == "dev-server port": b = evidence_block(clone, k, d[0], d[1], 1, 1)
                 if os.path.basename(d[0]).startswith(".env"): b = [re.sub(r"=(.*)$", lambda m: "=<masked>" if SECRETISH.search(x.split("=")[0].split("|")[-1]) or SECRETISH.search(k) else m.group(0), x) for x in b]
                 blocks += b
         for r in e["reads"][:2]:
             if (r[0], r[1]) not in seen:
-                seen.add((r[0], r[1])); blocks += block(clone, r[0], r[1], 1, 2)
+                seen.add((r[0], r[1])); blocks += evidence_block(clone, k, r[0], r[1], 1, 2)
     if envfiles: head.append("env files in the repo (names only; local .env* are never indexed): " + ", ".join(sorted(envfiles)[:6]))
     return "\n".join(head + blocks)[:9000] + "\n"
 

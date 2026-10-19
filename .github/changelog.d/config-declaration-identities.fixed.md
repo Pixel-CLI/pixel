@@ -1,0 +1,1 @@
+**brief:** Keep homonymous configuration declarations as separate source candidates, report unresolved scope and override precedence, and preserve tracked-only environment evidence with masked values.

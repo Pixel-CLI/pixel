@@ -209,6 +209,13 @@ on the saved hook briefs of #1198's head, before the docs pack). It moved only
 count not at all: not worth a fifteenth probe running on every prompt that names
 a setting.
 
+Follow-up #1233, 2026-10-19: [declaration identities](../config-identities-1233/README.md)
+preserve homonymous keys as separate located candidates, with binding and loader
+precedence explicitly unresolved. The earlier registry description above is not
+proof of a unique default or resolved scope. On the corrected v4 scorer, the
+config-oracle baseline is 225/979; the bounded identity fix leaves all 56 coverage
+scores unchanged while fixing the synthetic homonym control. #1199 stays closed.
+
 ## Remaining work
 
 The next bounded prototypes should target the recorded failures, then be
