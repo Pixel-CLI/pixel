@@ -68,9 +68,12 @@ class Admission(unittest.TestCase):
         self.assertIn('5| Second setting.\n', text)
 
     def test_a_fully_quoted_section_is_not_replaced_by_a_lower_ranked_section(self):
-        quoted = '### docs/guide.md:1-6 — native excerpt\n' + '\n'.join(
+        quoted = ''.join('### ' + name + ':1-6 — native excerpt\n' + '\n'.join(
             f'{n}| {line}' for n, line in enumerate(GUIDE.splitlines(), 1)) + '\n'
-        self.assertEqual(output('environment variables configure loading', brief=quoted), '')
+            for name in ('docs/a.md', 'docs/b.md'))
+        files = {'docs/a.md': GUIDE, 'docs/b.md': GUIDE,
+                 'docs/c.md': '# Environment variables\n\nAnother setting.\n'}
+        self.assertEqual(output('environment variables configure loading', files, brief=quoted), '')
 
     def test_a_pointer_without_quoted_rows_does_not_prevent_inline_documentation(self):
         text = output('environment variables configure loading', brief='read: docs/guide.md:1-6\n')
