@@ -88,20 +88,36 @@ class DeclarationIdentity(unittest.TestCase):
                           'export const MIN_ZOOM = 0.1;\nexport const MAX_ZOOM = 30;\n'})
         out = self.emit(root, 'where is the maximum zoom level defined and what is its value')
         self.assertIn('MAX_ZOOM | constant default 30 | packages/common/src/constants.ts:2', out)
+        self.assertNotIn('MIN_ZOOM', out)
         self.assertIn('2| export const MAX_ZOOM = 30;', out)
+
+    def test_a_maximum_pool_question_matches_the_pool_bound(self):
+        root = self.repo({'packages/common/src/constants.ts':
+                          'export const MAX_POOL_SIZE = 64;\nexport const MAX_IMAGE_SIZE = 8192;\n'})
+        out = self.emit(root, 'where is the maximum pool size defined and what is its value')
+        self.assertIn('MAX_POOL_SIZE | constant default 64 | packages/common/src/constants.ts:1', out)
+        self.assertNotIn('MAX_IMAGE_SIZE', out)
 
     def test_a_maximum_question_does_not_match_an_unrelated_bound(self):
         root = self.repo({'packages/common/src/constants.ts':
-                          'export const MIN_ZOOM = 0.1;\nexport const MAX_ZOOM = 30;\n'
-                          'export const MAX_CACHE = 256;\n'})
+                          'export const REMOTE_MODEL = "local";\n'
+                          'export const MAX_IMAGE_SIZE = 8192;\n'
+                          '// database cache tracks used size between measurements\n'
+                          'export const EVICT_STEP = 25;\n'})
         for prompt in ('where is the maximum remote database pool size defined',
                        'where is the max remote database pool size defined',
                        'where is the minimum remote database pool size defined',
                        'where is the min remote database pool size defined'):
             with self.subTest(prompt=prompt):
                 out = self.emit(root, prompt)
-                self.assertNotIn('MAX_ZOOM', out)
-                self.assertNotIn('MAX_CACHE', out)
+                self.assertNotIn('REMOTE_MODEL', out)
+                self.assertNotIn('MAX_IMAGE_SIZE', out)
+                self.assertNotIn('EVICT_STEP', out)
+
+    def test_existing_config_intent_keeps_matching_remote_setting(self):
+        root = self.repo({'packages/common/src/constants.ts': 'export const REMOTE_MODEL = "local";\n'})
+        out = self.emit(root, 'where is the remote model setting configured')
+        self.assertIn('REMOTE_MODEL | constant default "local"', out)
 
     def test_the_manifest_routes_a_maximum_bound_lookup_without_config_words(self):
         worktree = PROBE.parents[2]

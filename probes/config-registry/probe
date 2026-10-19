@@ -128,13 +128,12 @@ def registry(clone, rows=None):
 
 
 IDS_WORDS = []
-_COMMENT_LINES_CACHE = {}
 
 def stems(words):
     return {(w[:6] if len(w) >= 6 else w) for w in words}
 
 
-BOUND_WORDS = stems(["max", "maximum", "min", "minimum", "bound", "bounds"])
+BOUND_WORDS = stems(["max", "maximum", "min", "minimum", "bound", "bounds", "limit", "limited"])
 
 
 def words_of(prompt):
@@ -154,12 +153,8 @@ def key_tokens(key):
 
 
 def comment_above(clone, path, n, back=3):
-    key = (str(Path(clone).resolve()), path)
-    if key not in _COMMENT_LINES_CACHE:
-        try: _COMMENT_LINES_CACHE[key] = (Path(clone) / path).read_text(errors="replace").splitlines()
-        except OSError: _COMMENT_LINES_CACHE[key] = None
-    lines = _COMMENT_LINES_CACHE[key]
-    if lines is None: return ""
+    try: lines = (Path(clone) / path).read_text(errors="replace").splitlines()
+    except OSError: return ""
     out = []
     for i in range(n - 2, max(-1, n - 2 - back), -1):
         if re.match(r"\s*(#|//|\*|/\*)", lines[i]): out.append(lines[i])
@@ -173,7 +168,7 @@ def rank(clone, reg, prompt):
     for k, e in reg.items():
         toks = key_tokens(k) if k != "dev-server port" else ["dev", "server", "port"]
         ktoks = stems(toks)
-        strong = st - WEAK - BOUND_WORDS
+        strong = st - WEAK
         s = 3 * len(strong & ktoks) + len((st & ktoks) - strong)
         hay = ""
         for d in e["defs"][:2]: hay += " " + comment_above(clone, d[0], d[1]) + " " + d[2]
@@ -184,6 +179,34 @@ def rank(clone, reg, prompt):
         if (strong & ktoks) or (strong & hs): scored.append((s, len(e["defs"]) + len(e["reads"]), k))
     scored.sort(reverse=True)
     return [k for _, _, k in scored[:4]]
+
+
+BOUND_QUERY = re.compile(r"\b(max(?:imum)?|min(?:imum)?|bounds?)\b", re.I)
+EXISTING_CONFIG_INTENT = re.compile(r"\b(config\w*|settings?|env(ironment)?(\s+var\w*)?|variables?|flags?|options?|defaults?|ports?|overrid\w+|where do i set|set (that|this|it))\b", re.I)
+BOUND_VALUE_WORDS = stems(["defined", "definition", "level", "size", "value", "number", "amount"])
+MAX_WORDS = stems(["max", "maximum"])
+MIN_WORDS = stems(["min", "minimum"])
+
+
+def rank_bound(clone, reg, prompt):
+    """Require a bound declaration and a prompt-specific subject for bound-only questions."""
+    prompt_words = stems(words_of(prompt))
+    subject = prompt_words - WEAK - BOUND_WORDS - BOUND_VALUE_WORDS
+    if not subject: return []
+    requested_max = bool(re.search(r"\bmax(?:imum)?\b", prompt, re.I))
+    requested_min = bool(re.search(r"\bmin(?:imum)?\b", prompt, re.I))
+    eligible = {}
+    for key, entry in reg.items():
+        key_words = stems(key_tokens(key))
+        declarations = " ".join(row[2] for row in entry["defs"][:2])
+        declaration_words = stems(re.findall(r"[a-z]+", declarations.lower()))
+        has_bound = bool((key_words | declaration_words) & BOUND_WORDS)
+        has_max = bool((key_words | declaration_words) & MAX_WORDS)
+        has_min = bool((key_words | declaration_words) & MIN_WORDS)
+        has_direction = not (requested_max or requested_min) or (requested_max and has_max) or (requested_min and has_min)
+        if has_bound and has_direction and subject & (key_words | declaration_words):
+            eligible[key] = entry
+    return rank(clone, eligible, prompt)
 
 
 def block(clone, path, n, ctx_before=0, ctx_after=0):
@@ -392,7 +415,8 @@ def emit(clone, prompt, brief):
     loader = loader_evidence(clone, prompt)
     rows = scan(clone)
     reg = registry(clone, rows)
-    keys = rank(clone, reg, prompt)
+    bound_only = bool(BOUND_QUERY.search(prompt)) and not EXISTING_CONFIG_INTENT.search(prompt)
+    keys = rank_bound(clone, reg, prompt) if bound_only else rank(clone, reg, prompt)
     setters = setter_evidence(clone, rows, prompt)
     prefix = (loader + setters)[:9000]
     if not keys: return prefix
