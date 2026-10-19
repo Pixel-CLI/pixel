@@ -24,6 +24,7 @@ NOISE = {"walk", "through", "happens", "happen", "someone", "until", "from", "sh
          "with", "what", "into"}
 ENTRY_LINES, BODY_LINES, MAX_RANKED, MIN_SCORE = 160, 130, 12, 1.0
 SHORTCUT_SCAN_BYTES, SHORTCUT_FILE_BYTES, SHORTCUT_FILES, SHORTCUT_SCAN_MS = 24_000_000, 600_000, 3000, 950
+EVENT_MAPPING = re.compile(r"(?:Self::|::)([A-Z][A-Za-z0-9_]*)\s*=>\s*['\"]([^'\"]+)['\"]")
 
 
 def prioritized_source_paths(listing, prompt, suffixes):
@@ -197,9 +198,11 @@ def shortcut_evidence(root, prompt):
         if "test" in path.lower() or "spec" in path.lower():
             continue
         for i, line in enumerate(lines):
+            if not re.search(r"keyTest", line):
+                continue
             region = lines[max(0, i - 15):min(len(lines), i + 65)]
             executes = any(re.search(r"executeAction\s*\(|\.perform\s*\(", x) for x in region)
-            if re.search(r"keyTest", line) and any("actions" in x for x in region) and executes:
+            if any("actions" in x for x in region) and executes:
                 execute_at = next((j for j in range(i, min(len(lines), i + 65))
                                    if re.search(r"executeAction\s*\(|\.perform\s*\(", lines[j])), None)
                 dispatch = (path, lines, i, execute_at)
@@ -352,9 +355,29 @@ def event_delivery_evidence(root, prompt):
     for path, lines in rows:
         if "test" in path.lower() or "spec" in path.lower():
             continue
+        # Most files cannot carry the exact query-named mapping. Avoid
+        # character-by-character masking of those files; comments and strings
+        # are still masked before any candidate is accepted below.
+        has_candidate = False
+        for line in lines:
+            candidate = EVENT_MAPPING.search(line)
+            if not candidate:
+                continue
+            candidate_variant, candidate_literal = candidate.groups()
+            if event_match:
+                if candidate_variant == event_variant and candidate_literal == event_literal:
+                    has_candidate = True
+                    break
+            else:
+                parts = [part.lower() for part in re.findall(r"[A-Z][a-z0-9]*", candidate_variant)]
+                if "prompt" in parts and "submit" in parts:
+                    has_candidate = True
+                    break
+        if not has_candidate:
+            continue
         masked_lines = rust_code_mask("\n".join(lines)).splitlines()
         for i, (line, active) in enumerate(zip(lines, masked_lines)):
-            mapping = re.search(r"(?:Self::|::)([A-Z][A-Za-z0-9_]*)\s*=>\s*['\"]([^'\"]+)['\"]", line)
+            mapping = EVENT_MAPPING.search(line)
             if not mapping:
                 continue
             active_variant = re.search(r"(?:Self::|::)([A-Z][A-Za-z0-9_]*)\s*=>", active)
@@ -458,7 +481,7 @@ def rust_code_mask(source):
             if source[i] in "rb" and (i == 0 or not (source[i - 1].isalnum() or source[i - 1] == "_")):
                 raw = raw_string_start.match(source, i)
             if raw:
-                end = i + raw.end()
+                end = raw.end()
                 for pos in range(i, end):
                     out[pos] = " "
                 raw_end = '"' + raw.group(1)

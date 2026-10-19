@@ -17,7 +17,9 @@ from pathlib import Path
 
 PROBE = Path(__file__).resolve().parents[1] / "probe"
 MANIFEST = Path(__file__).resolve().parents[1] / "pixel-plugin.toml"
-SOURCE_PATH_ORDER = runpy.run_path(str(PROBE))["prioritized_source_paths"]
+_PROBE_HELPERS = runpy.run_path(str(PROBE))
+SOURCE_PATH_ORDER = _PROBE_HELPERS["prioritized_source_paths"]
+RUST_CODE_MASK = _PROBE_HELPERS["rust_code_mask"]
 
 FAKE = r'''#!/usr/bin/env python3
 import json, sys
@@ -225,6 +227,15 @@ class NamedEntry(unittest.TestCase):
         source += '  writeln!(stdout, "{output}");\n}\n'
         files = {"src/task_hook.rs": source, "src/main.rs": "fn main() { task_hook::run(event); }\n"}
         self.assertEqual(run(prompt, files=files), "")
+
+
+class RustSourceMask(unittest.TestCase):
+    def test_late_raw_string_masks_without_recomputing_absolute_match_offset(self):
+        source = "// filler\n" * 100 + 'const DOC: &str = r#"fake event"#;\nfn after() {}\n'
+        masked = RUST_CODE_MASK(source)
+        self.assertEqual(len(masked), len(source))
+        self.assertNotIn("fake event", masked)
+        self.assertIn("fn after() {}", masked)
 
 
 class ManifestAdmission(unittest.TestCase):
