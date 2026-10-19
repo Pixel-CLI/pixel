@@ -53,6 +53,23 @@ def terms(prompt):
     return list(dict.fromkeys(out))
 
 
+def requested_option(prompt):
+    """Return an explicitly named option, including its exact hyphenated spelling."""
+    match = re.search(r"--([a-z][a-z0-9]*(?:-[a-z0-9]+)*)", prompt, re.I)
+    if not match:
+        match = re.search(r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\s+option\b", prompt, re.I)
+    return match.group(1).lower().replace("-", "_") if match else None
+
+
+def exact_option_case(name, option):
+    """Match the case title to the exact option name; sibling suffixes remain distinct."""
+    if not option:
+        return False
+    normalized = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    normalized = re.sub(r"^(?:test|spec)_", "", normalized)
+    return normalized == option
+
+
 def tokens(text):
     """The words of code or prose, split at case changes, underscores and punctuation, lowercased."""
     return {t.lower() for t in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", text)}
@@ -159,6 +176,7 @@ def main():
         if len(files) == 16:
             break
     have = quoted_ranges(brief)
+    exact_option = requested_option(prompt)
     cands = []
     df = {w: 0 for w in words}
     parsed = {}
@@ -181,15 +199,22 @@ def main():
         for name, a, b in us:
             if any(x <= a and b <= y for x, y in have.get(rel, [])):
                 continue
+            exact_option_match = exact_option_case(name, exact_option)
             body, title = tokens(" ".join(lines[a - 1:b])), tokens(name)
             support = [w for w in words if carries(title, w) or carries(body, w)]
-            if len(support) < min(2, len(words)):
+            if len(support) < min(2, len(words)) and not exact_option_match:
                 continue
             score = sum(idf[w] * (3 * carries(title, w) + carries(body, w)) for w in words)
+            if exact_option_match:
+                score = max(score, 1.0)
             if score <= 0:
                 continue
             cands.append((-score, rank, rel, a, b, name))
     cands.sort()
+    if exact_option is not None:
+        exact = [candidate for candidate in cands if exact_option_case(candidate[5], exact_option)]
+        if exact:
+            cands = exact
     if cands:
         best = -cands[0][0]
         cands = [c for c in cands if -c[0] >= 0.5 * best]   # the subject's tests, not every test that says "prompt"

@@ -112,6 +112,44 @@ class TestBodies(unittest.TestCase):
         brief = "### tests/test_client.py:1-12 — tests\n1| import pytest\n"
         self.assertEqual(run(root, "where are the tests for redirect handling", brief), "")
 
+    def test_an_exact_option_name_does_not_select_a_sibling_option_case(self):
+        root = repo({"tests/options.rs": '''
+#[test]
+fn test_exec() {
+    run(&["--exec", "echo", "{}"]).assert_stdout("one.txt");
+    run(&["--exec", "echo", "{/.}"]).assert_stdout("one");
+}
+
+#[test]
+fn test_exec_batch() {
+    run(&["--exec-batch", "echo", "{}"]).assert_stdout("one.txt");
+}
+'''})
+        exact = run(root, "where are the integration tests for the exec option and what behaviours do they cover")
+        self.assertEqual(headers(exact), ["### tests/options.rs:2-6 — test test_exec"])
+        self.assertIn('--exec", "echo"', exact)
+        self.assertNotIn("test_exec_batch", exact)
+
+        batch = run(root, "where are the integration tests for the --exec-batch option")
+        self.assertEqual(headers(batch), ["### tests/options.rs:8-11 — test test_exec_batch"])
+        self.assertIn('--exec-batch', batch)
+        self.assertNotIn("test_exec()", batch)
+
+    def test_exact_option_selector_generalizes_to_other_option_names(self):
+        root = repo({"tests/options.rs": '''
+#[test]
+fn test_search_depth() {
+    run(&["--search-depth", "4"]).assert_depth(4);
+}
+
+#[test]
+fn test_search_depth_default() {
+    run(&["--search-depth"]).assert_depth(8);
+}
+'''})
+        out = run(root, "where are the integration tests for the --search-depth option")
+        self.assertEqual(headers(out), ["### tests/options.rs:2-5 — test test_search_depth"])
+
     def test_a_js_case_ends_at_its_closing_line_and_the_spec_file_is_found_by_its_path(self):
         spec = ("describe('undo', () => {\n  it('restores the deleted shape on undo', () => {\n    del(shape);\n"
                 "    undo();\n    expect(shapes()).toContain(shape);\n    // The observable behaviours stay stable.\n  });\n\n  it('keeps the colour', () => {\n"
