@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 """Source identities must survive a shared setting name; never guess a binding."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -81,6 +82,69 @@ class DeclarationIdentity(unittest.TestCase):
         self.assertIn('REQUEST_LIMIT | constant default 37 | only.js:1', out)
         self.assertIn('1| export const REQUEST_LIMIT = 37;', out)
         self.assertNotIn('distinct declaration candidates', out)
+
+    def test_a_maximum_bound_question_matches_a_zoom_constant(self):
+        root = self.repo({'packages/common/src/constants.ts':
+                          'export const MIN_ZOOM = 0.1;\nexport const MAX_ZOOM = 30;\n'})
+        out = self.emit(root, 'where is the maximum zoom level defined and what is its value')
+        self.assertIn('MAX_ZOOM | constant default 30 | packages/common/src/constants.ts:2', out)
+        self.assertIn('2| export const MAX_ZOOM = 30;', out)
+
+    def test_a_maximum_question_does_not_match_an_unrelated_bound(self):
+        root = self.repo({'packages/common/src/constants.ts':
+                          'export const MIN_ZOOM = 0.1;\nexport const MAX_ZOOM = 30;\n'
+                          'export const MAX_CACHE = 256;\n'})
+        for prompt in ('where is the maximum remote database pool size defined',
+                       'where is the max remote database pool size defined',
+                       'where is the minimum remote database pool size defined',
+                       'where is the min remote database pool size defined'):
+            with self.subTest(prompt=prompt):
+                out = self.emit(root, prompt)
+                self.assertNotIn('MAX_ZOOM', out)
+                self.assertNotIn('MAX_CACHE', out)
+
+    def test_the_manifest_routes_a_maximum_bound_lookup_without_config_words(self):
+        worktree = PROBE.parents[2]
+        path = worktree / 'scripts/bench/probe-test.py'
+        spec = importlib.util.spec_from_file_location('probe_test', path)
+        probe_test = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe_test)
+        probe = probe_test.Probe(PROBE.parent)
+        self.assertTrue(probe.applies('lookup', 'where is the maximum zoom level defined and what is its value'))
+
+    def test_literal_setting_calls_are_selected_by_generic_prompt_key(self):
+        root = self.repo({'src/app.js': "app.set('etag', 'weak');\n",
+                          'src/other.js': "app.set('trust proxy', true);\n"})
+        out = self.emit(root, 'where is the default etag setting defined and what is its value')
+        self.assertIn("app.set('etag', 'weak');", out)
+        self.assertIn('### src/app.js:1-1 — literal setting call candidate', out)
+        self.assertNotIn('trust proxy', out)
+
+    def test_literal_setting_calls_require_tracked_non_symlink_source(self):
+        root = self.repo({'src/app.js': "app.set('etag', 'weak');\n"}, tracked=['src/app.js'])
+        (root / 'src/untracked.js').write_text("app.set('etag', 'untracked-sentinel');\n")
+        external = root.parent / (root.name + '-external-setter')
+        external.write_text("app.set('etag', 'symlink-sentinel');\n")
+        self.addCleanup(external.unlink)
+        (root / 'src/linked.js').symlink_to(external)
+        subprocess.run(['git', 'add', '--', 'src/linked.js'], cwd=root, check=True)
+        out = self.emit(root, 'where is the default etag setting defined and what is its value')
+        self.assertIn("app.set('etag', 'weak');", out)
+        self.assertNotIn('untracked-sentinel', out)
+        self.assertNotIn('symlink-sentinel', out)
+
+    def test_literal_setting_calls_keep_the_source_file_size_bound(self):
+        out = self.emit(self.repo({'src/app.js': "app.set('etag', 'weak');\n",
+                                   'src/large.js': "app.set('etag', 'oversize-sentinel');\n" + 'x' * (400 * 1024)}),
+                        'where is the default etag setting defined and what is its value')
+        self.assertIn("app.set('etag', 'weak');", out)
+        self.assertNotIn('oversize-sentinel', out)
+
+    def test_literal_setting_source_masks_secret_values(self):
+        out = self.emit(self.repo({'src/app.js': 'app.set("API_TOKEN", "setter-secret-sentinel");\n'}),
+                        'where is the API_TOKEN environment setting defined')
+        self.assertIn('literal setting call candidate', out)
+        self.assertNotIn('setter-secret-sentinel', out)
 
     def test_an_unrelated_intent_has_no_registry_output(self):
         root = self.repo({'only.js': 'export const REQUEST_LIMIT = 37;\n'})

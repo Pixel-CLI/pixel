@@ -1,0 +1,1 @@
+**brief:** Recover configuration evidence for maximum/minimum questions and literal setting calls. Match the requested setting, retain source context without inferring precedence, and reuse file reads when ranking declarations.
