@@ -37,7 +37,9 @@ class Admission(unittest.TestCase):
     def test_source_navigation_and_unclassified_questions_do_not_receive_matching_docs(self):
         for kind in ('lookup', 'tests', 'impact', 'rationale', None):
             with self.subTest(kind=kind):
-                self.assertEqual(output('where is the environment variable loading constant defined', kind=kind), '')
+                prompt = ('environment variables configure loading' if kind is None
+                          else 'where is the environment variable loading constant defined')
+                self.assertEqual(output(prompt, kind=kind), '')
 
     def test_config_and_overview_keep_documentation_with_exact_source_rows(self):
         for kind in ('config', 'overview', 'flow', 'bugfix'):
