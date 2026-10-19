@@ -133,6 +133,47 @@ class SemanticCallerFallbacks(unittest.TestCase):
         self.assertIn("src/canvas.ts", out)
         self.assertIn("id: makeId()", out)
 
+    def test_id_factory_reexport_cache_does_not_poison_cyclic_barrel(self):
+        out = run("Which modules call the element ID generator?", {
+            "src/random.ts": "export const randomId = () => Math.random();\n",
+            "src/index.ts": "export * from './cycle-a';\n"
+                "export { randomId as makeId } from './random';\n",
+            "src/cycle-a.ts": "export * from './cycle-b';\n",
+            "src/cycle-b.ts": "export * from './cycle-a';\n",
+            "src/canvas-positive.ts": "import { makeId } from './index';\n"
+                "export const createElement = () => ({ id: makeId() });\n",
+            "src/canvas-negative.ts": "import { makeId } from './cycle-b';\n"
+                "export const createElement = () => ({ id: makeId() });\n",
+        })
+        self.assertIn("src/canvas-positive.ts", out)
+        self.assertNotIn("src/canvas-negative.ts", out)
+
+    def test_two_hop_renamed_reexport_prefilter_keeps_only_bound_consumer(self):
+        out = run("Which modules call the element ID generator?", {
+            "src/random.ts": "export const randomId = () => Math.random();\n",
+            "src/index.ts": "export { randomId as makeId } from './random';\n",
+            "src/public.ts": "export { makeId as createId } from './index';\n",
+            "src/consumer.ts": "import { createId } from './public';\n"
+                "export const createElement = () => ({ id: createId() });\n",
+            "src/unrelated.ts": "export const createId = () => 'not-the-factory';\n",
+            "src/wrong-consumer.ts": "import { createId } from './unrelated';\n"
+                "export const unrelated = () => ({ id: createId() });\n",
+            "src/comment-decoy.ts": "// import { createId } from './public';\n"
+                "export const commentOnly = () => ({ id: createId() });\n",
+        })
+        self.assertIn("src/consumer.ts", out)
+        self.assertNotIn("src/wrong-consumer.ts", out)
+        self.assertNotIn("src/comment-decoy.ts", out)
+
+    def test_factory_local_export_alias_is_kept_by_prefilter(self):
+        out = run("Which modules call the element ID generator?", {
+            "src/random.ts": "const randomId = () => Math.random();\n"
+                "export { randomId, randomId as makeId };\n",
+            "src/consumer.ts": "import { makeId } from './random';\n"
+                "export const createElement = () => ({ id: makeId() });\n",
+        })
+        self.assertIn("src/consumer.ts", out)
+
     def test_shadowed_import_is_not_counted_as_factory_call(self):
         out = run("Which modules call the element ID generator?", {
             "src/ids.ts": "export const makeElementId = () => nanoid();\n",

@@ -31,6 +31,7 @@ MAX_SOURCE_FILES = 1_200
 MAX_SOURCE_BYTES = 12 * 1024 * 1024
 MAX_TRACKED_LIST_BYTES = 4 * 1024 * 1024
 MAX_SOURCE_SCAN_MS = 1_000
+MAX_EXPORT_CACHE_ENTRIES = 8_192
 
 
 def pixel(root, *args):
@@ -274,8 +275,19 @@ def resolve_module_import(importer, specifier, texts):
     return list(dict.fromkeys(found))
 
 
-def module_exports_name(path, exported_name, factory_path, texts, factory_name, seen=None):
+def module_exports_name(path, exported_name, factory_path, texts, factory_name, seen=None, cache=None):
     """Follow source export statements until the exact tracked factory file is proven."""
+    if seen is None:
+        # Cache only a completed root walk; a recursive cycle hit is local to
+        # its current stack and must not poison another import's result.
+        key = (path, exported_name, factory_path, factory_name)
+        if cache is not None and key in cache:
+            return cache[key]
+        result = module_exports_name(path, exported_name, factory_path, texts, factory_name,
+                                     set(), cache)
+        if cache is not None and len(cache) < MAX_EXPORT_CACHE_ENTRIES:
+            cache[key] = result
+        return result
     if path == factory_path:
         source = '\n'.join(texts.get(path, []))
         direct = exported_name == factory_name and re.search(
@@ -287,7 +299,6 @@ def module_exports_name(path, exported_name, factory_path, texts, factory_name, 
                 if local == factory_name and public == exported_name:
                     return True
         return bool(direct)
-    seen = set() if seen is None else seen
     state = (path, exported_name)
     if state in seen or path not in texts:
         return False
@@ -300,19 +311,19 @@ def module_exports_name(path, exported_name, factory_path, texts, factory_name, 
             public_name = parts[-1].strip()
             if public_name == exported_name:
                 for target in resolve_module_import(path, match.group(3), texts):
-                    if module_exports_name(target, source_name, factory_path, texts, factory_name, seen):
+                    if module_exports_name(target, source_name, factory_path, texts, factory_name, seen, cache):
                         return True
     for match in re.finditer(r'\bexport\s*\*\s*from\s*([\'\"])([^\'\"]+)\1', source):
         for target in resolve_module_import(path, match.group(2), texts):
-            if module_exports_name(target, exported_name, factory_path, texts, factory_name, seen):
+            if module_exports_name(target, exported_name, factory_path, texts, factory_name, seen, cache):
                 return True
     return False
 
 
-def imported_local_names(path, lines, factory_name, factory_path, texts):
+def imported_local_names(path, lines, factory_name, factory_path, texts, masked_source=None, export_cache=None):
     """Return local import names whose module export resolves to the unique factory."""
     source = '\n'.join(lines)
-    code = javascript_code_mask(source)
+    code = javascript_code_mask(source) if masked_source is None else masked_source
     aliases, import_spans = set(), []
     for match in IMPORT_BLOCK.finditer(source):
         code_import = re.match(r'import\s*\{([^}]+)\}\s*from\s*', code[match.start():])
@@ -325,7 +336,8 @@ def imported_local_names(path, lines, factory_name, factory_path, texts):
             names = re.split(r'\s+as\s+', entry)
             imported = names[0].strip()
             local = names[-1].strip()
-            if any(module_exports_name(target, imported, factory_path, texts, factory_name) for target in targets):
+            if any(module_exports_name(target, imported, factory_path, texts, factory_name,
+                                       cache=export_cache) for target in targets):
                 aliases.add(local)
     if not aliases:
         return set()
@@ -463,6 +475,40 @@ def proven_getter_functions(source, receiver, queried_method):
     return out
 
 
+def export_name_edges(texts):
+    """Parse supported named re-exports once into a lexical rename graph."""
+    edges = {}
+    identifier = re.compile(r'[A-Za-z_$][\w$]*\Z')
+    named_export = re.compile(r'\bexport\s*\{([^}]+)\}', re.S)
+    for path, source in texts.items():
+        if Path(path).suffix.lower() not in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts'):
+            continue
+        if 'export' not in source:
+            continue
+        # Parse raw text here: comments and strings may add false edges, but
+        # this candidate closure is a superset filter only. The later importer
+        # and module-export checks remain responsible for proof.
+        for match in named_export.finditer(source):
+            for entry in match.group(1).split(','):
+                names = re.split(r'\s+as\s+', entry.strip())
+                source_name, public_name = names[0].strip(), names[-1].strip()
+                if identifier.fullmatch(source_name) and identifier.fullmatch(public_name):
+                    edges.setdefault(source_name, set()).add(public_name)
+    return edges
+
+
+def export_name_candidates(factory_name, edges):
+    """Return a lexical superset; final module provenance is checked later."""
+    reachable, pending = {factory_name}, [factory_name]
+    while pending:
+        source_name = pending.pop()
+        for public_name in edges.get(source_name, ()):
+            if public_name not in reachable:
+                reachable.add(public_name)
+                pending.append(public_name)
+    return reachable
+
+
 def semantic_caller_blocks(prompt, texts, partial=False):
     """Recover explicit source-level caller shapes when the graph has no resolvable name."""
     intent = bool(re.search(r'(?i)\b(who|which|what|where|modules?|parts?|code|callers?|calls?|invoke|uses?)\b', prompt))
@@ -531,26 +577,40 @@ def semantic_caller_blocks(prompt, texts, partial=False):
         ranked_factories = []
         factory_by_name = {}
         source_by_path = {path: '\n'.join(lines) for path, lines in texts.items()}
+        masks_by_path = {}
+        export_cache = {}
+        name_edges = export_name_edges(source_by_path)
+
+        def masked_source(path, source):
+            if path not in masks_by_path:
+                masks_by_path[path] = javascript_code_mask(source)
+            return masks_by_path[path]
+
         for name, path, lo, hi in factories:
             factory_by_name.setdefault(name, (path, lo, hi, []))
         for name in list(factory_by_name):
             if len(declarations.get(name, [])) != 1:
                 del factory_by_name[name]
         for name, (path, lo, hi, refs) in factory_by_name.items():
+            candidate_names = export_name_candidates(name, name_edges)
+            candidate_pattern = re.compile(r'(?<![\w$])(?:' + '|'.join(
+                re.escape(candidate) for candidate in sorted(candidate_names, key=len, reverse=True)
+            ) + r')(?![\w$])')
             for caller_path, lines in texts.items():
                 if TESTPATH.search(caller_path):
                     continue
                 caller_source = source_by_path[caller_path]
-                # Skip most tracked files before comment masking and import
-                # parsing. Imports may rename the export in a barrel, so keep
-                # those files eligible even when the factory name is absent.
-                if not re.search(r'\b' + re.escape(name) + r'\b', caller_source) and 'import' not in caller_source:
+                # The lexical closure keeps renamed-barrel consumers eligible,
+                # while avoiding masks/import resolution for unrelated files.
+                # Actual module binding remains proven below.
+                if not candidate_pattern.search(caller_source):
                     continue
-                scan_lines = (javascript_code_mask(caller_source).splitlines()
+                caller_mask = masked_source(caller_path, caller_source)
+                scan_lines = (caller_mask.splitlines()
                               if Path(caller_path).suffix.lower() in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts')
                               else lines)
                 local_names = {name} if caller_path == path else imported_local_names(
-                    caller_path, lines, name, path, texts)
+                    caller_path, lines, name, path, texts, caller_mask, export_cache)
                 for local_name in local_names:
                     call_pattern = re.compile(r'\b' + re.escape(local_name) + r'\s*\(')
                     for i, line in enumerate(scan_lines):
