@@ -1,1 +1,0 @@
-**hooks:** Surface matching installed skills and give bounded recovery hints before broad Claude searches, including sessions outside a repository. Guidance preserves tool permissions and task-gate decisions.

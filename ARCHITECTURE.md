@@ -206,7 +206,9 @@ Machine-wide:
   `~/.pi/agent` and `~/.config/opencode` that exists (`SKILL_ROOTS`); a guided
   run writes only the selected agents' roots, and Pi's copy comes from its
   package step. A differing copy is backed up first; `pixel setup --remove`
-  deletes it.
+  deletes it. Its shared instructions cover choosing direct reads, Pixel graph
+  queries or scoped native searches, locating the project before graph work,
+  and changing scope or evidence source when searches stop making progress.
 - `~/.local/share/pixel/pi-classify/`: the optional classify tools'
   Pi package, written and declared like the one above only when the
   classify helpers are accepted; `pixel setup --remove` removes both.
@@ -821,21 +823,6 @@ sends its own events, and Pixel's Pi package sends only brief-only ones (see
 A project-only native install still relies on the global lifecycle layer.
 Foreign hooks and trust settings are preserved. Doctor distinguishes registered
 hooks from actual observations; neither establishes complete host coverage.
-
-Claude task hooks also provide bounded skill and search guidance independently
-of the repository brief. Prompt-submit can name a uniquely matching installed
-skill, including outside a Git repository. Pre-tool guidance identifies broad
-recursive searches of the home directory or its ancestors and suggests a
-bounded lookup. It reads skill metadata, never executes a skill or shell input,
-and adds advisory context without changing a task-gate decision. Repeated hints
-are suppressed by small per-session state; guidance failures or the 100 ms
-deadline leave the host's normal tool path available. Discovery reads personal `.claude/skills` and
-`.agents/skills` plus the corresponding directories in at most 12 working-directory
-ancestors. Each root contributes at most 128 entries, with at most 512 skills and
-8 KiB per `SKILL.md`; only bounded names and descriptions are used. Cooldowns
-live under `~/.cache/pixel/task-guidance/<session-hash>.json` (30 minutes per
-matched skill and 120 seconds for broad searches). Guidance alone does not count
-as a delivered brief or emit the brief's metrics.
 
 `pixel-task::policy` decides edit/completion eligibility from the contract and
 current source. CLI `task_prepare` bundles scope, bounded impact and test
