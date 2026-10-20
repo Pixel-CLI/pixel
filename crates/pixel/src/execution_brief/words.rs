@@ -511,4 +511,72 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn audited_bm25_should_preserve_exact_scores_document_frequency_and_length_normalization() {
+        let files = vec![
+            file("alpha_beta", vec![]),
+            file("alpha", vec![]),
+            file("gamma", vec![]),
+        ];
+        let hits = rank(&files, &["alpha".into(), "beta".into()], 8);
+        assert_eq!(paths(&hits), ["alpha_beta", "alpha"]);
+        assert!(
+            (hits[0].score - 1.204_465_034_326_949_6).abs() < 1e-12,
+            "{}",
+            hits[0].score
+        );
+        assert!(
+            (hits[1].score - 0.523_548_346_501_579).abs() < 1e-12,
+            "{}",
+            hits[1].score
+        );
+        assert_eq!(rank(&files, &["alpha".into(), "beta".into()], 1).len(), 1);
+        assert_eq!(rank(&files, &["alpha".into(), "beta".into()], 0).len(), 0);
+    }
+
+    #[test]
+    fn audited_document_chunks_should_keep_input_order_and_counts_across_the_parallel_threshold() {
+        for count in [7, 8, 9] {
+            let files = (0..count)
+                .map(|_| file("alpha_beta", vec![]))
+                .collect::<Vec<_>>();
+            let docs = documents(&files, &HashMap::from([("alpha", 0), ("beta", 1)]));
+            assert_eq!(docs.len(), count);
+            for doc in docs {
+                assert_eq!(doc.length, 2);
+                assert_eq!(doc.counts, BTreeMap::from([(0, 1), (1, 1)]));
+            }
+        }
+    }
+
+    #[test]
+    fn audited_symbol_leads_should_ignore_zero_weights_and_keep_the_first_symbol_on_a_tie() {
+        let files = vec![file(
+            "alpha_beta",
+            vec![
+                symbol("unused", "", 1),
+                symbol("alpha_beta", "", 10),
+                symbol("alpha_beta", "", 20),
+            ],
+        )];
+        let hits = rank(&files, &["alpha".into(), "beta".into()], 8);
+        assert_eq!(
+            (
+                hits[0].start_line,
+                hits[0].end_line,
+                hits[0].symbol.as_deref()
+            ),
+            (10, 15, Some("alpha_beta"))
+        );
+        let without = rank(
+            &[file("alpha_beta", vec![symbol("unused", "", 1)])],
+            &["alpha".into(), "beta".into()],
+            8,
+        );
+        assert_eq!(
+            (without[0].start_line, without[0].symbol.as_deref()),
+            (1, None)
+        );
+    }
 }

@@ -788,3 +788,80 @@ impl<'a> Index<'a> {
         })
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+    use crate::ruby::resolve::{fixture::Generation, stubs::Tests};
+
+    #[test]
+    fn model_finders_should_preserve_argument_shape_nil_and_array_contracts() {
+        let generation = Generation::default();
+        let world = generation.world();
+        let index = Index::build(&world, &|_| true, &Tests::Without);
+        for (name, shape, expected) in [
+            ("find", "(1)", Some((false, true))),
+            ("find_by", "(h)", Some((true, false))),
+            ("find_by", "", None),
+            ("find_by!", "(h)", Some((false, false))),
+            ("find_by!", "", None),
+            ("first", "", Some((true, false))),
+            ("first", "(1)", None),
+            ("first!", "", Some((false, false))),
+            ("first!", "(1)", None),
+            ("create!", "", Some((false, false))),
+            ("create!", "(h)", Some((false, false))),
+            ("create!", "(1)", None),
+            ("find_or_create_by", "(h)", Some((false, false))),
+            ("find_or_create_by", "", None),
+            ("where", "", None),
+        ] {
+            let expected = expected.map(|(nil, array)| {
+                Value::Record(Record {
+                    class: "Item",
+                    exact: false,
+                    nil,
+                    array,
+                })
+            });
+            assert_eq!(
+                index.model_value("Item", name, shape),
+                expected,
+                "{name}{shape}"
+            );
+        }
+        assert_eq!(
+            index.model_value("Item", "where", "(h)"),
+            Some(Value::Relation(Relation {
+                model: "Item",
+                extended: false,
+                nil: false
+            }))
+        );
+    }
+
+    #[test]
+    fn nullable_records_should_not_be_typed_as_relations_or_reloaded_with_arguments() {
+        let generation = Generation::default();
+        let world = generation.world();
+        let index = Index::build(&world, &|_| true, &Tests::Without);
+        let plain = Value::Record(Record {
+            class: "Item",
+            exact: true,
+            nil: false,
+            array: false,
+        });
+        let nullable = index.step(plain, (MAYBE_NIL, "")).unwrap();
+        assert_eq!(
+            nullable,
+            Value::Record(Record {
+                class: "Item",
+                exact: true,
+                nil: true,
+                array: false
+            })
+        );
+        assert_eq!(index.step(nullable, ("reload", "(1)")), None);
+        assert_eq!(index.step(nullable, ("to_s", "")), None);
+    }
+}

@@ -205,3 +205,166 @@ impl<'a> Building<'a, '_> {
         self.prepend(Side::Singleton, &unknown, decl);
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::super::Index;
+    use super::*;
+    use crate::ruby::resolve::{fixture::Generation, stubs::Tests};
+
+    fn building<'a, 'i>(index: &'i Index<'a>) -> Building<'a, 'i> {
+        Building {
+            index,
+            owner: "Owner",
+            concern: false,
+            dependencies: Default::default(),
+            maybe: false,
+            replaced: vec![],
+            evaluated: vec![],
+            acting: vec![],
+            running: vec![],
+            instance: Part::new("Owner", Side::Instance, false),
+            singleton: Part::new("Owner", Side::Singleton, false),
+            tail_instance: vec![],
+            tail_singleton: vec![],
+        }
+    }
+
+    fn step(name: &'static str, maybe: bool) -> Step<'static> {
+        Step {
+            maybe,
+            ..Step::new(Node::Known(name, Side::Instance))
+        }
+    }
+
+    fn names<'a>(part: &Part<'a>) -> Vec<Option<&'a str>> {
+        part.steps
+            .iter()
+            .map(|s| match s.node {
+                Node::Known(name, _) => Some(name),
+                Node::Unknown => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn include_should_continue_after_the_duplicate_even_when_it_is_at_the_insertion_point() {
+        let generation = Generation::default();
+        let world = generation.world();
+        let index = Index::build(&world, &|_| true, &Tests::Without);
+        for maybe in [false, true] {
+            let mut b = building(&index);
+            b.instance
+                .steps
+                .extend([step("A", maybe), step("B", false)]);
+            b.include(
+                Side::Instance,
+                &[step("A", false), step("C", false)],
+                Decl {
+                    at: ("a.rb", 1),
+                    uncertain: false,
+                },
+            );
+            assert_eq!(
+                names(&b.instance),
+                [Some("Owner"), Some("A"), Some("C"), Some("B")],
+                "maybe={maybe}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepend_should_keep_order_and_origin_when_skipping_previously_prepended_steps() {
+        let generation = Generation::default();
+        let world = generation.world();
+        let index = Index::build(&world, &|_| true, &Tests::Without);
+        let mut b = building(&index);
+        let decl = Decl {
+            at: ("a.rb", 1),
+            uncertain: false,
+        };
+        b.prepend(Side::Instance, &[step("A", false), step("B", false)], decl);
+        assert_eq!(b.instance.origin, 2);
+        b.prepend(Side::Instance, &[step("A", false), step("C", false)], decl);
+        assert_eq!(
+            names(&b.instance),
+            [Some("A"), Some("C"), Some("B"), Some("Owner")]
+        );
+        assert_eq!(b.instance.origin, 3);
+    }
+
+    #[test]
+    fn uncertain_duplicate_positions_should_add_an_unknown_step_and_shift_the_origin() {
+        let generation = Generation::default();
+        let world = generation.world();
+        let index = Index::build(&world, &|_| true, &Tests::Without);
+        let mut b = building(&index);
+        let decl = Decl {
+            at: ("a.rb", 1),
+            uncertain: false,
+        };
+        b.prepend(Side::Instance, &[step("A", true)], decl);
+        b.prepend(Side::Instance, &[step("A", false), step("C", false)], decl);
+        assert_eq!(
+            names(&b.instance),
+            [None, Some("C"), Some("A"), Some("Owner")]
+        );
+        assert_eq!(b.instance.origin, 3);
+        let mut b = building(&index);
+        b.instance.steps.extend([step("B", false), step("A", true)]);
+        b.include(Side::Instance, &[step("A", false), step("C", false)], decl);
+        assert_eq!(
+            names(&b.instance),
+            [Some("Owner"), None, Some("C"), Some("B"), Some("A")]
+        );
+    }
+
+    #[test]
+    fn has_should_distinguish_definite_possible_and_absent_ancestors() {
+        let generation = Generation::default();
+        let world = generation.world();
+        let index = Index::build(&world, &|_| true, &Tests::Without);
+        let decl = Decl {
+            at: ("a.rb", 1),
+            uncertain: false,
+        };
+        for (tail, maybe, expected) in [
+            (false, false, Some(true)),
+            (false, true, None),
+            (true, false, Some(true)),
+            (true, true, None),
+        ] {
+            let mut b = building(&index);
+            if tail {
+                b.tail_instance.push(step("A", maybe));
+            } else {
+                b.instance.steps.push(step("A", maybe));
+            }
+            assert_eq!(
+                b.has(Side::Instance, "A", decl),
+                expected,
+                "tail={tail} maybe={maybe}"
+            );
+            assert_eq!(b.has(Side::Instance, "missing", decl), Some(false));
+        }
+    }
+
+    #[test]
+    fn cutting_a_singleton_should_not_taint_the_instance_chain() {
+        let generation = Generation::default();
+        let world = generation.world();
+        let index = Index::build(&world, &|_| true, &Tests::Without);
+        let mut b = building(&index);
+        b.cut(
+            Object::SingletonClass,
+            "A",
+            Decl {
+                at: ("a.rb", 1),
+                uncertain: false,
+            },
+        );
+        assert_eq!(b.replaced, [(Side::Singleton, "A")]);
+        assert_eq!(names(&b.instance), [Some("Owner")]);
+        assert_eq!(names(&b.singleton), [None, Some("Owner")]);
+    }
+}

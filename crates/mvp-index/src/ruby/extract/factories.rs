@@ -158,3 +158,105 @@ fn holds_initialize_with(w: &Walker, node: Node) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+    use crate::ruby::extract::testing::rows;
+
+    fn factories(source: &str) -> Vec<Fact> {
+        Fact::decode_all(&rows("spec/factories/items.rb", source).facts)
+            .into_iter()
+            .filter(|fact| matches!(fact, Fact::Factory { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn factory_declarations_should_preserve_hash_options_constant_classes_and_the_nearest_parent() {
+        let source = "FactoryGirl.define do\n factory :outer do\n  factory :middle do\n   factory :inner, { class: Shop::Item, aliases: [:alias] }\n  end\n end\nend";
+        let facts = factories(source);
+        assert_eq!(
+            facts,
+            vec![
+                Fact::Factory {
+                    name: "outer".into(),
+                    class: String::new(),
+                    parent: String::new(),
+                    scope: vec![],
+                    initialized: false
+                },
+                Fact::Factory {
+                    name: "middle".into(),
+                    class: String::new(),
+                    parent: "outer".into(),
+                    scope: vec![],
+                    initialized: false
+                },
+                Fact::Factory {
+                    name: "alias".into(),
+                    class: String::new(),
+                    parent: "inner".into(),
+                    scope: vec![],
+                    initialized: false
+                },
+                Fact::Factory {
+                    name: "inner".into(),
+                    class: "Shop::Item".into(),
+                    parent: "middle".into(),
+                    scope: vec![],
+                    initialized: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn factories_should_not_read_foreign_hosts_or_explicit_receivers() {
+        for source in [
+            "Other.define do; factory :item; end",
+            "FactoryBot.define do; Other.factory :item; end",
+            "factory :item",
+        ] {
+            assert_eq!(factories(source), vec![], "{source}");
+        }
+    }
+
+    #[test]
+    fn factory_values_should_be_unknown_after_custom_initialization_or_modify() {
+        for body in [
+            "initialize_with",
+            "initialize_with { Item.new }",
+            "trait :x do; initialize_with { Item.new }; end",
+        ] {
+            let facts = factories(&format!(
+                "FactoryBot.define do; factory :item do; {body}; end; end"
+            ));
+            assert!(
+                matches!(
+                    &facts[..],
+                    [Fact::Factory {
+                        initialized: true,
+                        ..
+                    }]
+                ),
+                "{body}: {facts:?}"
+            );
+        }
+        let facts = factories("FactoryBot.modify do; factory :item; end");
+        assert!(matches!(
+            &facts[..],
+            [Fact::Factory {
+                initialized: true,
+                ..
+            }]
+        ));
+        let facts = factories("FactoryBot.define do; factory :item do; ignored; end; end");
+        assert!(matches!(
+            &facts[..],
+            [Fact::Factory {
+                initialized: false,
+                ..
+            }]
+        ));
+    }
+}

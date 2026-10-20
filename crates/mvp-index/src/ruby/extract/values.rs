@@ -359,16 +359,8 @@ fn scan<'a>(
         }
         _ => {}
     }
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            let child_field = cursor.field_name();
-            scan(w, child, Some(node), child_field, depth + 1, gate);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for (child, field) in super::children(node) {
+        scan(w, child, Some(node), field, depth + 1, gate);
     }
 }
 
@@ -411,4 +403,159 @@ fn shape(w: &Walker, call: Node) -> Option<&'static str> {
         }
         _ => "(*)",
     })
+}
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::super::{PARSE_BUDGET, parse, rspec::Frame};
+    use super::*;
+
+    fn expression(source: &str, check: impl FnOnce(&Walker<'_>, Node<'_>)) {
+        let tree = parse(source.as_bytes(), PARSE_BUDGET).unwrap();
+        let walker = Walker::new(source.as_bytes());
+        check(&walker, tree.root_node().named_child(0).unwrap());
+    }
+
+    #[test]
+    fn argument_shapes_should_preserve_hashes_arrays_splats_and_blocks() {
+        for (source, expected) in [
+            ("Room.find", Some("")),
+            ("Room.find()", Some("")),
+            ("Room.find(7)", Some("(1)")),
+            ("Room.find(a: 1)", Some("(h)")),
+            ("Room.find({a: 1})", Some("(h)")),
+            ("Room.find(**attrs)", Some("(h)")),
+            ("Room.find(1, 2)", Some("(*)")),
+            ("Room.find([1])", Some("(*)")),
+            ("Room.find(%w[a])", Some("(*)")),
+            ("Room.find(%i[a])", Some("(*)")),
+            ("Room.find(1..2)", Some("(*)")),
+            ("Room.find(*ids)", Some("(*)")),
+            ("Room.find(&block)", None),
+            ("Room.find { work }", None),
+        ] {
+            expression(source, |walker, node| {
+                assert_eq!(shape(walker, node), expected, "{source}")
+            });
+        }
+    }
+
+    #[test]
+    fn call_targets_should_keep_the_method_and_exact_unicode_character_budget() {
+        assert_eq!(call_target("save", None), "save");
+        assert_eq!(call_target("save", Some(" a\n  b ")), "a b.save");
+        let receiver = "é".repeat(text::SIGNATURE_CAP);
+        let result = call_target("save", Some(&receiver));
+        assert_eq!(
+            result,
+            format!("…{}.save", "é".repeat(text::SIGNATURE_CAP - 6))
+        );
+        assert_eq!(result.chars().count(), text::SIGNATURE_CAP);
+    }
+
+    #[test]
+    fn minitest_paths_should_match_a_directory_or_a_test_suffix_independently() {
+        for (path, expected) in [
+            ("test/unit/x.rb", true),
+            ("lib/x_test.rb", true),
+            ("x_test.rb", true),
+            ("tests/x.rb", false),
+            ("testish/x.rb", false),
+            ("lib/x.rb", false),
+        ] {
+            assert_eq!(minitest(path), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn scanning_should_keep_all_siblings_but_not_locals_of_nested_scopes() {
+        let source = "first = Room.new\nsecond = Room.find(1)\ndef nested\n hidden = User.new\nend\nthird = first\n";
+        let tree = parse(source.as_bytes(), PARSE_BUDGET).unwrap();
+        let walker = Walker::new(source.as_bytes());
+        let gate = Gates::open(&walker, tree.root_node());
+        let mut names: Vec<_> = gate.locals.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["first", "second", "third"]);
+        assert_eq!(walker.text(gate.locals["second"].unwrap()), "Room.find(1)");
+        assert!(!gate.opaque);
+    }
+
+    #[test]
+    fn scanning_should_accept_the_depth_cap_and_reject_the_next_depth() {
+        expression("harmless", |walker, node| {
+            for (depth, opaque) in [
+                (super::super::MAX_DEPTH, false),
+                (super::super::MAX_DEPTH + 1, true),
+            ] {
+                let mut gate = Gate::default();
+                scan(walker, node, None, None, depth, &mut gate);
+                assert_eq!(gate.opaque, opaque, "depth {depth}");
+            }
+        });
+    }
+
+    #[test]
+    fn scanning_should_invalidate_reassigned_or_dynamically_evaluated_locals() {
+        for (source, opaque, bound) in [
+            ("x = Room.new\nx = User.new", false, false),
+            ("x = Room.new\neval('x = nil')", true, true),
+            ("x = Room.new\nbinding", true, true),
+            ("x = Room.new\nRoom.class_eval('x')", true, true),
+            ("x = Room.new\nRoom.class_eval { work }", false, true),
+        ] {
+            let tree = parse(source.as_bytes(), PARSE_BUDGET).unwrap();
+            let walker = Walker::new(source.as_bytes());
+            let gate = Gates::open(&walker, tree.root_node());
+            assert_eq!(gate.opaque, opaque, "{source}");
+            assert_eq!(gate.locals["x"].is_some(), bound, "{source}");
+        }
+    }
+
+    #[test]
+    fn group_roots_should_require_an_example_and_no_arguments_or_block() {
+        for (source, expected) in [
+            ("purchase", Some("L:purchase")),
+            ("purchase()", None),
+            ("purchase(1)", None),
+            ("purchase { work }", None),
+            ("it", None),
+        ] {
+            let tree = parse(source.as_bytes(), PARSE_BUDGET).unwrap();
+            let node = tree.root_node().named_child(0).unwrap();
+            let mut walker = Walker::new(source.as_bytes());
+            assert_eq!(group_name(&walker, node), None);
+            walker.rspec = true;
+            walker.frames.push(Frame::Example(1, false));
+            assert_eq!(group_name(&walker, node).as_deref(), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn factory_roots_should_require_a_supported_method_without_a_block() {
+        for (source, expected) in [
+            ("create(:purchase)", Some("Y:purchase")),
+            ("build(:purchase)", Some("Y:purchase")),
+            ("destroy(:purchase)", None),
+            ("create(:purchase) { work }", None),
+        ] {
+            let tree = parse(source.as_bytes(), PARSE_BUDGET).unwrap();
+            let node = tree.root_node().named_child(0).unwrap();
+            let mut walker = Walker::new(source.as_bytes());
+            walker.rspec = true;
+            walker.frames.push(Frame::Example(1, false));
+            assert_eq!(factory(&walker, node).as_deref(), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn value_paths_should_stop_at_the_segment_budget() {
+        expression("Room.where(id: 1).first", |walker, node| {
+            assert_eq!(
+                value_path(walker, node, 0).as_deref(),
+                Some("C:Room.where(h).first")
+            );
+            assert_eq!(value_path(walker, node, MAX_SEGMENTS - 1), None);
+            assert_eq!(value_path(walker, node, MAX_SEGMENTS), None);
+        });
+    }
 }

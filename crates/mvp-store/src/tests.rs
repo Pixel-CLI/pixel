@@ -1670,3 +1670,80 @@ fn c10_word_frequencies_follow_atomic_incremental_publication() {
     assert_eq!(empty.files_with_word("shared").unwrap(), 0);
     assert_eq!(empty.files_with_word("rs").unwrap(), 0);
 }
+
+#[test]
+fn audited_git_index_should_publish_only_a_refreshed_still_current_copy() {
+    for (refresh, holds, expected) in [
+        (true, true, true),
+        (false, true, false),
+        (true, false, false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let base = crate::dir(root.path());
+        std::fs::create_dir(&base).unwrap();
+        std::fs::write(base.join("current"), b"before").unwrap();
+        std::fs::write(base.join("obsolete"), b"old").unwrap();
+        std::fs::write(base.join("user"), b"mine").unwrap();
+        let placed = crate::place_git_index(
+            root.path(),
+            "current",
+            b"new",
+            |temp| {
+                assert_eq!(std::fs::read(temp).unwrap(), b"new");
+                refresh
+            },
+            || holds,
+            |name| name == "current" || name == "obsolete",
+        )
+        .unwrap();
+        assert_eq!(placed, expected);
+        assert_eq!(
+            std::fs::read(base.join("current")).unwrap(),
+            if expected {
+                &b"new"[..]
+            } else {
+                &b"before"[..]
+            }
+        );
+        assert_eq!(std::fs::read(base.join("user")).unwrap(), b"mine");
+        assert!(!base.join("obsolete").exists());
+        let temp = base.join(format!("current.{}.tmp", std::process::id()));
+        assert!(!temp.exists());
+        assert!(
+            !base
+                .join(format!("current.{}.tmp.lock", std::process::id()))
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn audited_git_index_should_not_create_a_missing_state_directory() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(
+        !crate::place_git_index(
+            root.path(),
+            "index",
+            b"bytes",
+            |_| panic!("no owned state"),
+            || panic!("not refreshed"),
+            |_| false
+        )
+        .unwrap()
+    );
+    assert!(!crate::dir(root.path()).exists());
+}
+
+#[test]
+fn audited_callers_should_return_the_resolved_site_and_exclude_unresolved_sites() {
+    let root = tempfile::tempdir().unwrap();
+    published(root.path());
+    let store = Store::open(root.path()).unwrap();
+    let a = symbol("a.rs", "a", 1);
+    let b = symbol("b.rs", "b", 1);
+    assert_eq!(
+        store.callers(&b.uid).unwrap(),
+        vec![call(&a, Some(&b), "b")]
+    );
+    assert_eq!(store.callers("missing").unwrap(), Vec::<Edge>::new());
+}

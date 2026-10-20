@@ -383,10 +383,12 @@ impl Rspec {
         if open {
             let spec = self.files.get(file)?;
             let children = spec.children.as_ref()?;
-            let mut at = 0;
-            while at < found.len() {
-                found.extend(children.get(&found[at]).into_iter().flatten());
-                at += 1;
+            let mut pending = std::collections::VecDeque::from([line]);
+            while let Some(at) = pending.pop_front() {
+                for &child in children.get(&at).into_iter().flatten() {
+                    found.push(child);
+                    pending.push_back(child);
+                }
                 // A group nested in itself: a cycle no file writes.
                 if found.len() > spec.groups.len() {
                     return None;
@@ -553,5 +555,71 @@ impl<'a> Index<'a> {
             return None;
         };
         Some(def)
+    }
+}
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+
+    fn group(parent: u32, nests: bool) -> Option<Group> {
+        Some(Group {
+            parent,
+            described: String::new(),
+            scope: Vec::new(),
+            metadata: false,
+            opaque: false,
+            nests,
+            members: Vec::new(),
+            mixins: Vec::new(),
+        })
+    }
+
+    fn model(children: &[(u32, Vec<u32>)]) -> Rspec {
+        Rspec {
+            files: HashMap::from([(
+                "spec/x_spec.rb".into(),
+                Spec {
+                    groups: HashMap::from([
+                        (1, group(0, false)),
+                        (2, group(1, false)),
+                        (3, group(2, false)),
+                    ]),
+                    children: Some(children.iter().cloned().collect()),
+                },
+            )]),
+            ..Rspec::default()
+        }
+    }
+
+    #[test]
+    fn groups_should_expand_each_nested_group_once_in_breadth_first_order() {
+        let rspec = model(&[(1, vec![2]), (2, vec![3])]);
+        assert_eq!(rspec.groups("spec/x_spec.rb", 1, true), Some(vec![1, 2, 3]));
+        assert_eq!(rspec.groups("spec/x_spec.rb", 1, false), Some(vec![1]));
+        assert_eq!(rspec.groups("spec/missing_spec.rb", 1, true), None);
+        assert_eq!(rspec.groups("spec/x_spec.rb", 99, false), None);
+    }
+
+    #[test]
+    fn groups_should_reject_cycles_and_unknown_nested_groups() {
+        let cyclic = model(&[(1, vec![2]), (2, vec![1])]);
+        assert_eq!(cyclic.groups("spec/x_spec.rb", 1, true), None);
+        let mut ambiguous = model(&[(1, vec![2])]);
+        ambiguous
+            .files
+            .get_mut("spec/x_spec.rb")
+            .unwrap()
+            .groups
+            .insert(2, group(1, true));
+        assert_eq!(ambiguous.groups("spec/x_spec.rb", 1, true), None);
+        assert_eq!(ambiguous.groups("spec/x_spec.rb", 2, false), Some(vec![2]));
+        ambiguous
+            .files
+            .get_mut("spec/x_spec.rb")
+            .unwrap()
+            .groups
+            .insert(2, None);
+        assert_eq!(ambiguous.groups("spec/x_spec.rb", 2, false), None);
     }
 }

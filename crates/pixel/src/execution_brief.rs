@@ -2234,4 +2234,14 @@ mod tests {
         assert_eq!(Signal::Weak.as_str(), "weak");
         assert_eq!(Signal::Prose.as_str(), "prose");
     }
+
+    #[test]
+    fn audited_paste_scanning_should_keep_every_adjacent_body_and_the_unicode_tail() {
+        assert_eq!(
+            pasted_bodies(
+                "<pasted_content>first</pasted_content><pasted_content>déjà</pasted_content><pasted_content kind='log'>third</pasted_content>"
+            ),
+            ["first", "déjà", "third"]
+        );
+    }
 }

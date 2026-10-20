@@ -245,3 +245,18 @@ pub(crate) mod testutil {
             .expect("replace_session")
     }
 }
+
+#[cfg(test)]
+mod audited_path_contract_tests {
+    #[test]
+    fn models_should_live_in_the_shared_user_cache_outside_the_repository() {
+        let actual = super::models_dir();
+        assert!(actual.ends_with(".local/share/pixel/models"));
+        assert_eq!(actual.parent().unwrap().file_name().unwrap(), "pixel");
+        let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+        assert_eq!(
+            actual.strip_prefix(std::path::Path::new(&home)).unwrap(),
+            std::path::Path::new(".local/share/pixel/models")
+        );
+    }
+}

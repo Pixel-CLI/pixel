@@ -4129,4 +4129,128 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn audited_context_shapes_should_read_each_native_host_and_reject_wrong_types() {
+        assert_eq!(
+            context_in_output(TaskProvider::Pi, &json!({"context":"pi"})),
+            Some("pi")
+        );
+        assert_eq!(
+            context_in_output(
+                TaskProvider::Antigravity,
+                &json!({"injectSteps":[{"ephemeralMessage":"agy"}]})
+            ),
+            Some("agy")
+        );
+        assert_eq!(
+            context_in_output(
+                TaskProvider::Claude,
+                &json!({"hookSpecificOutput":{"additionalContext":"claude"}})
+            ),
+            Some("claude")
+        );
+        assert_eq!(
+            context_in_output(TaskProvider::Pi, &json!({"context":false})),
+            None
+        );
+        assert_eq!(
+            context_in_output(TaskProvider::Antigravity, &json!({"injectSteps":[]})),
+            None
+        );
+    }
+
+    #[test]
+    fn audited_metrics_should_follow_only_prompt_delivery_and_the_first_or_recovered_part() {
+        let output = json!({"hookSpecificOutput":{"additionalContext":"brief"}});
+        for (event, index, recovered, expected) in [
+            (TaskHookEvent::PromptSubmit, 1, false, true),
+            (TaskHookEvent::PromptSubmit, 2, false, false),
+            (TaskHookEvent::PromptSubmit, 2, true, true),
+            (TaskHookEvent::SessionStart, 1, false, false),
+        ] {
+            assert_eq!(
+                should_relay_metrics(
+                    TaskProvider::Claude,
+                    event,
+                    Some(part(index, 3)),
+                    recovered,
+                    None,
+                    &output
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn audited_follow_bound_should_include_both_late_and_ordering_grace() {
+        assert_eq!(LATE_GRACE, Duration::from_millis(500));
+        assert_eq!(ORDERING_SLACK, Duration::from_millis(250));
+        for provider in [TaskProvider::Claude, TaskProvider::Codex, TaskProvider::Pi] {
+            assert_eq!(
+                follow_bound(provider).checked_sub(decision_timeout(provider)),
+                Some(Duration::from_millis(750))
+            );
+        }
+    }
+
+    #[test]
+    fn audited_first_slice_detection_should_require_the_matching_nonempty_cached_head() {
+        let (root, raw) = parts_repo("audited-delivery");
+        let path = brief_path(&root, &raw);
+        brief_parts::store(&path, "head", SystemTime::now()).unwrap();
+        let output = json!({"hookSpecificOutput":{"additionalContext":"head"}});
+        assert!(delivered_first_slice(
+            TaskProvider::Claude,
+            &raw,
+            part(1, 2),
+            &output
+        ));
+        for part in [part(2, 2), part(1, 1)] {
+            assert!(!delivered_first_slice(
+                TaskProvider::Claude,
+                &raw,
+                part,
+                &output
+            ));
+        }
+        assert!(!delivered_first_slice(
+            TaskProvider::Claude,
+            &raw,
+            part(1, 2),
+            &json!({"hookSpecificOutput":{"additionalContext":"wrong"}})
+        ));
+        assert!(!delivered_first_slice(
+            TaskProvider::Claude,
+            "broken",
+            part(1, 2),
+            &output
+        ));
+        brief_parts::store(&path, "", SystemTime::now()).unwrap();
+        assert!(!delivered_first_slice(
+            TaskProvider::Claude,
+            &raw,
+            part(1, 2),
+            &json!({"hookSpecificOutput":{"additionalContext":""}})
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn audited_cache_forgetting_should_require_a_split_first_prompt_part() {
+        let (root, raw) = parts_repo("audited-forget");
+        let path = brief_path(&root, &raw);
+        for (event, part, forgotten) in [
+            (TaskHookEvent::SessionStart, part(1, 2), false),
+            (TaskHookEvent::PromptSubmit, part(2, 2), false),
+            (TaskHookEvent::PromptSubmit, part(1, 1), false),
+            (TaskHookEvent::PromptSubmit, part(1, 2), true),
+        ] {
+            brief_parts::store(&path, "cached", SystemTime::now()).unwrap();
+            forget_first_part_cache(TaskProvider::Claude, event, &raw, Some(part));
+            assert_eq!(path.exists(), !forgotten);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

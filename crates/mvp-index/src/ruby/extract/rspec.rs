@@ -619,3 +619,189 @@ pub(super) fn uses_rspec(w: &Walker, call: Node, method: &str) -> bool {
                 && w.text(r).trim_start_matches("::") == "RSpec"
         })
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::super::{PARSE_BUDGET, parse};
+    use super::*;
+
+    fn call(source: &str, check: impl for<'a> FnOnce(&mut Walker<'a>, Node<'a>)) {
+        let tree = parse(source.as_bytes(), PARSE_BUDGET).unwrap();
+        let mut walker = Walker::new(source.as_bytes());
+        check(&mut walker, tree.root_node().named_child(0).unwrap());
+    }
+
+    #[test]
+    fn spec_detection_should_distinguish_spec_files_from_support_and_normal_code() {
+        for (path, file, code) in [
+            ("x_spec.rb", true, true),
+            ("spec/support/x.rb", false, true),
+            ("lib/x.rb", false, false),
+            ("specification/x.rb", false, false),
+        ] {
+            assert_eq!(spec_file(path), file, "{path}");
+            assert_eq!(spec_code(path), code, "{path}");
+        }
+    }
+
+    #[test]
+    fn example_markers_should_require_the_rspec_model_and_the_nearest_example_frame() {
+        let mut walker = Walker::new(b"");
+        walker.frames.push(Frame::Example(12, true));
+        assert_eq!(walker.example_group(), None);
+        walker.rspec = true;
+        assert_eq!(walker.example_group(), Some((12, true)));
+        walker.frames.push(Frame::Other);
+        assert_eq!(walker.example_group(), None);
+    }
+
+    #[test]
+    fn frame_boundaries_should_preserve_lambda_self_but_stop_at_classes_and_singletons() {
+        for (source, expected) in [
+            ("class X; end", Frame::Top),
+            ("module X; end", Frame::Top),
+            ("class << self; end", Frame::Other),
+            ("def self.run; end", Frame::Other),
+            ("-> { work }", Frame::Keep),
+        ] {
+            call(source, |walker, node| {
+                walker.frames.push(Frame::Example(1, false));
+                assert!(enter(walker, node, node.parent()), "{source}");
+                assert_eq!(walker.frames.last(), Some(&expected), "{source}");
+                leave(walker, node);
+                assert_eq!(walker.frames, [Frame::Example(1, false)]);
+            });
+        }
+    }
+
+    #[test]
+    fn group_members_should_distinguish_subject_defaults_named_subjects_and_lets() {
+        for (source, method, expected) in [
+            ("subject", "subject", Some(vec!["subject"])),
+            ("let", "let", None),
+            ("let(:item)", "let", Some(vec!["item"])),
+            ("subject(:item)", "subject", Some(vec!["item", "subject"])),
+            ("subject(dynamic)", "subject", None),
+        ] {
+            call(source, |walker, node| {
+                let names = member_names(walker, node, method);
+                assert_eq!(
+                    names
+                        .as_ref()
+                        .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>()),
+                    expected,
+                    "{source}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn interpolated_literals_should_never_be_recorded_as_static_names() {
+        for (source, expected) in [
+            (":name", Some("name")),
+            ("\"name\"", Some("name")),
+            ("\"#{name}\"", None),
+            ("\"\"", None),
+            ("name", None),
+        ] {
+            call(source, |walker, node| {
+                assert_eq!(literal(walker, node).as_deref(), expected, "{source}")
+            });
+        }
+    }
+
+    #[test]
+    fn group_scanning_should_keep_safe_statements_and_reject_dynamic_definitions() {
+        for (source, nested, opaque, members) in [
+            ("# comment", false, false, 0),
+            ("def self.extra; end", false, false, 0),
+            ("x = 1", false, false, 0),
+            ("@x ||= 1", false, false, 0),
+            ("obj.x = 1", false, true, 0),
+            ("def extra; end", false, false, 1),
+            ("def extra; end", true, true, 0),
+            ("include Known", false, false, 0),
+            ("include Known", true, true, 0),
+            ("include Known do; end", false, true, 0),
+            ("Other.describe 'x' do; end", false, true, 0),
+            ("RSpec.describe 'x' do; end", false, false, 0),
+            ("RSpec.unread 'x'", false, true, 0),
+        ] {
+            call(source, |walker, node| {
+                let mut scan = Scan::default();
+                scan.statement(walker, node, nested);
+                assert_eq!(
+                    (scan.opaque, scan.members.len()),
+                    (opaque, members),
+                    "{source} nested={nested}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn model_switches_should_require_the_exact_host_method_and_spec_context() {
+        for (source, method, context, minitest, prepend, rspec) in [
+            (
+                "require 'minitest/spec'",
+                "require",
+                true,
+                true,
+                false,
+                false,
+            ),
+            ("require 'minitest/spec'", "load", true, false, false, false),
+            (
+                "require 'minitest/spec'",
+                "require",
+                false,
+                false,
+                false,
+                false,
+            ),
+            (
+                "config.prepend Helpers",
+                "prepend",
+                true,
+                false,
+                true,
+                false,
+            ),
+            (
+                "config.prepend Helpers",
+                "include",
+                true,
+                false,
+                false,
+                false,
+            ),
+            (
+                "config.prepend Helpers",
+                "prepend",
+                false,
+                false,
+                false,
+                false,
+            ),
+            ("RSpec.describe Item", "describe", true, false, false, true),
+            ("Other.describe Item", "describe", true, false, false, false),
+            ("RSpec.unread Item", "unread", true, false, false, false),
+        ] {
+            call(source, |walker, node| {
+                walker.spec_code = context;
+                assert_eq!(
+                    loads_minitest_spec(walker, node, method),
+                    minitest,
+                    "{source}"
+                );
+                assert_eq!(
+                    prepends_into_config(walker, node, method),
+                    prepend,
+                    "{source}"
+                );
+                assert_eq!(uses_rspec(walker, node, method), rspec, "{source}");
+            });
+        }
+    }
+}

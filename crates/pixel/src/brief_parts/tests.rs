@@ -691,3 +691,16 @@ fn wait_stored_finds_a_brief_written_after_it_starts_waiting() {
     writer.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn audited_stored_brief_should_not_treat_unreadable_entries_as_a_missing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        wait_stored(dir.path(), Duration::ZERO, Duration::ZERO),
+        None
+    );
+    assert_eq!(
+        wait_stored(&dir.path().join("absent"), Duration::ZERO, Duration::ZERO),
+        None
+    );
+}

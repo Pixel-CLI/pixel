@@ -313,3 +313,20 @@ fn dense_hand_written_source_is_no_blob() {
     }
     assert!(!is_generated_blob(schema.as_bytes()));
 }
+
+#[test]
+fn audited_fixture_sets_should_preserve_nested_project_paths_and_refuse_empty_or_directory_names() {
+    for (path, expected) in [
+        ("test/fixtures/users.yml", Some("users")),
+        (
+            "engines/billing/test/fixtures/admin/users.yml",
+            Some("admin/users"),
+        ),
+        ("test/fixtures/.yml", None),
+        ("test/fixtures/admin/.yml", None),
+        ("test/fixtures/users.yaml", None),
+        ("fixtures/users.yml", None),
+    ] {
+        assert_eq!(fixture_set(path), expected, "{path}");
+    }
+}

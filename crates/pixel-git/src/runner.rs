@@ -1031,3 +1031,37 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod audited_wait_contract_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn observing_exit_should_wait_for_the_child_but_leave_it_reapable() {
+        let mut child = Command::new("sh")
+            .args(["-c", "read value; exit 7"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let (send, receive) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || send.send(wait_for_child_exit(pid)).unwrap());
+        assert!(matches!(
+            receive.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        writeln!(child.stdin.take().unwrap(), "finish").unwrap();
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        observer.join().unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(7));
+    }
+
+    #[test]
+    fn observing_a_nonchild_should_return_the_os_error() {
+        assert!(wait_for_child_exit(u32::MAX).is_err());
+    }
+}

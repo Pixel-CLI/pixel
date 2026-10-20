@@ -289,3 +289,45 @@ mod tests {
         assert!(patch("broken", &json!({})).is_err());
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn edits_should_replace_incompatible_containers_instead_of_treating_them_as_pairs() {
+        for (text, value, expected) in [
+            ("{ \"a\" : 1e2 }", json!([1]), "[1]"),
+            ("[ 1e2 ]", json!({"b":2}), "{\"b\":2}"),
+            ("[ 1e2 ]", json!(true), "true"),
+            ("1e2", json!([1]), "[1]"),
+            ("true", json!({"a":1}), "{\"a\":1}"),
+        ] {
+            assert_eq!(patch(text, &value).unwrap(), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn array_edits_should_consume_duplicates_once_and_preserve_only_adjacent_separators() {
+        for (text, value, expected) in [
+            ("[ 1e2, 2, 3 ]", json!([3, 100.0]), "[ 3,1e2 ]"),
+            ("[ 1, 1, 2 ]", json!([1, 2]), "[ 1,2 ]"),
+            ("[ 1, 2, 3 ]", json!([2, 3]), "[ 2, 3 ]"),
+            ("[ 1, 2 ]", json!([9, 1]), "[ 9,1 ]"),
+            ("[ 1, 2 ]", json!([]), "[  ]"),
+        ] {
+            assert_eq!(patch(text, &value).unwrap(), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn array_edits_should_patch_the_most_similar_unused_object_without_reusing_retained_objects() {
+        let text = r#"[ { "id":1, "v":1e2 }, { "id":2, "v":2e2 } ]"#;
+        let changed = json!([{"id":2,"v":201},{"id":1,"v":100.0}]);
+        assert_eq!(
+            patch(text, &changed).unwrap(),
+            r#"[ { "id":2, "v":201 },{ "id":1, "v":1e2 } ]"#
+        );
+    }
+}
