@@ -43,7 +43,7 @@ jobs:
     # A standard GitHub-hosted runner: this job never checks out the PR's
     # code (a few gh api calls against the PR and the project), so pull_request_target
     # stays safe, and there is no self-hosted runner to keep healthy.
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - name: Sync project 3 status with the PR lifecycle
         env:
