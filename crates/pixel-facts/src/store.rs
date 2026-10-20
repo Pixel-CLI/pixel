@@ -21,6 +21,13 @@ use pixel_git::GitRunner;
 /// SQLite flags of an open of the existing history db: read-write, no
 /// mutex (one connection per thread), and never through a link at the db
 /// file (`SQLITE_OPEN_NOFOLLOW`).
+/// Read-through mapping of the database file, in bytes: a page read is a
+/// load from the mapping instead of a `pread`.
+const MMAP_BYTES: i64 = 256 * 1024 * 1024;
+/// Page cache for this connection, in KiB (a negative `cache_size` means
+/// KiB rather than pages).
+const CACHE_KIB: i64 = 65_536;
+
 const OPEN_EXISTING: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
     .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
     .union(OpenFlags::SQLITE_OPEN_NOFOLLOW);
@@ -445,6 +452,13 @@ impl FactsStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
+        // Reads go through a mapping instead of a `pread` per page and
+        // pages stay cached; the temp b-tree (sorting, grouping) stays off
+        // disk. The cap is per connection, not per database, and 64 MiB is
+        // above anything a single query here touches.
+        conn.pragma_update(None, "mmap_size", MMAP_BYTES)?;
+        conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.execute_batch(DDL)?;
         let stored: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let upgraded = stored == UPGRADES_IN_PLACE_FROM;
@@ -666,6 +680,10 @@ impl FactsStore {
 
     /// Close the connection (flushes WAL).
     pub fn close(self) {
+        // Refresh the planner's statistics if the ingest moved them, then
+        // flush: `optimize` costs a few reads and saves a bad plan on every
+        // later query.
+        let _ = self.conn.execute_batch("PRAGMA optimize;");
         let _ = self.conn.pragma_update(None, "wal_checkpoint", "TRUNCATE");
         drop(self.conn);
     }
