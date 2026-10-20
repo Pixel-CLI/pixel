@@ -329,6 +329,52 @@ fn self_heals_corrupt_database() {
 }
 
 #[test]
+fn rebuilds_a_database_with_another_schema_version() {
+    let state = TempRoot::new();
+    let project = Path::new("/tmp/heal-version");
+    let dir = store_directory(project, state.path());
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("errors-v1.sqlite");
+    let old = rusqlite::Connection::open(&file).unwrap();
+    old.execute_batch("CREATE TABLE stale (x); PRAGMA user_version = 99;")
+        .unwrap();
+    drop(old);
+    let store = Store::open_at(project, state.path()).unwrap();
+    let tables: i64 = rusqlite::Connection::open(&file)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'stale'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0);
+    drop(store);
+}
+
+#[test]
+fn a_busy_database_is_kept_and_reported() {
+    let state = TempRoot::new();
+    let project = Path::new("/tmp/busy");
+    let dir = store_directory(project, state.path());
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("errors-v1.sqlite");
+    let holder = rusqlite::Connection::open(&file).unwrap();
+    holder
+        .execute_batch(
+            "PRAGMA journal_mode = WAL; CREATE TABLE keep (x); INSERT INTO keep VALUES (7);",
+        )
+        .unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(Store::open_at(project, state.path()).is_err());
+    holder.execute_batch("COMMIT").unwrap();
+    let kept: i64 = holder
+        .query_row("SELECT x FROM keep", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, 7);
+}
+
+#[test]
 fn two_handles_share_one_wal_database() {
     let state = TempRoot::new();
     let project = Path::new("/tmp/wal");
