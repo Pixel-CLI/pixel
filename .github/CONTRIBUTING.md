@@ -168,17 +168,21 @@ scripts/dev/pixel-smoke-test.sh     # exercises the installed pixel (command -v 
 The `Cross-build` workflow (`.github/workflows/cross-build.yml`) builds the
 three release lanes (musl x86_64 and aarch64 through `cross`,
 `aarch64-apple-darwin` natively) on every push to `main`, saving the cache
-the tag's build restores, and on pull requests
+the tag's build restores. Ordinary pull requests run only the two Linux lanes;
+maintenance PRs into `release/*` also run macOS. These jobs run for changes
 that touch a Rust-affecting path (`crates/`, `Cargo.*`, `.cargo/`,
 `deny.toml`, the workflow itself); a docs, prompt or script PR skips it, and
 so does a `release-x.y.z` prepare PR into `main`, whose merge commit's push
 run is the one the tag waits for. A pull request into `main` builds the
 `dev-release` profile (no thin LTO, 16 codegen units): it proves the same
 link, features and `--locked` resolution in a fraction of the time, while
-the push to `main` builds both profiles, `release` with release-build.yml's exact
+the push to `main` builds both profiles on Linux and only `release` on macOS, `release` with release-build.yml's exact
 commands, each in its own job and cache entry (`release-<target>`, which
 the tag's build restores, and `dev-release-<target>`, which pull requests
 restore).
+Homebrew source validation runs on Linux for relevant PRs and on both Linux
+and macOS weekly or through manual dispatch. Native macOS failures can therefore
+first surface after an ordinary PR merges; the main release build must pass before tagging.
 To reproduce it locally:
 
 ```bash
