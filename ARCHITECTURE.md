@@ -1629,7 +1629,10 @@ The allocation-budget test bounds allocations while reading request frames.
   `--self-test` exercises the orchestration and verdicts with fixture CLIs.
 - The public `.github/actions/setup-pixel` composite action installs a checksum-verified
   release into runner temporary storage and optionally prepares indexes without a
-  daemon. `setup-pixel.yml` smoke-tests real releases on Linux x64/ARM64 and
+  daemon. Opt-in caching retains only text shards/state and the code graph,
+  refreshed before use and validated before saving. Opt-in global setup installs
+  the pinned binary's agent integrations on disposable runners.
+  `setup-pixel.yml` smoke-tests real releases on Linux x64/ARM64 and
   macOS ARM64; `scripts/test-setup-pixel.py` checks installer failure contracts.
 - After publication, `release.yml`'s `virustotal` job submits the three
   release archives to VirusTotal and appends a link to each report (by

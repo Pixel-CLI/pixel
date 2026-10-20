@@ -334,7 +334,12 @@ Hook commands embed the
 absolute binary path, quoted by `routing::quoted_executable`. The binary
 reaches users through `scripts/release/install.sh` (archive checked against the
 release's `.sha256`), Homebrew, mise, or the `setup-pixel` action (exact
-version, sha256 check).
+version, sha256 check). Its opt-in cache contains only rebuildable text shards,
+state and graph files, with platform/version/path-separated keys. It excludes
+configuration, hooks, plugins and session logs; source content still follows
+GitHub cache access rules. Opt-in hook installation runs global setup using
+the verified binary and is intended for disposable runners, since hooks retain
+the temporary executable's absolute path.
 
 ### 3.10 CI and release (B7)
 
