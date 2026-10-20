@@ -56,6 +56,15 @@ fn merge_hook_entry_should_replace_only_the_marked_entry_when_reinstalling() {
         merged,
         json!([nested("other tool"), nested("pixel run-hook guard")])
     );
+    let existing = json!([nested("pixel run-hook guard --old"), nested("other tool")]);
+    assert_eq!(
+        merge_hook_entry(
+            Some(&existing),
+            "run-hook guard",
+            nested("pixel run-hook guard")
+        ),
+        json!([nested("pixel run-hook guard"), nested("other tool")])
+    );
     assert_eq!(
         merge_hook_entry(None, "m", nested("pixel m")),
         json!([nested("pixel m")])

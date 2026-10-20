@@ -4,6 +4,7 @@
 //! Provider-specific hook configuration. Installation is not proof that a
 //! harness has fired the hooks; doctor reports that boundary separately.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
@@ -224,9 +225,17 @@ pub(crate) fn merge_task_hooks(
     exe: &Path,
     prompt_parts: u8,
 ) -> Result<(), String> {
-    for groups in hooks.values_mut().filter_map(Value::as_array_mut) {
-        for group in groups.iter_mut() {
+    // Codex keys a hook's trust by its group index, so Pixel's new groups go
+    // where its old ones were, not after the user's.
+    let mut slots: HashMap<String, usize> = HashMap::new();
+    for (event, groups) in hooks.iter_mut() {
+        let Some(groups) = groups.as_array_mut() else {
+            continue;
+        };
+        let mut kept = Vec::with_capacity(groups.len());
+        for mut group in std::mem::take(groups) {
             if let Some(inner) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+                let before = inner.len();
                 inner.retain(|hook| {
                     !hook
                         .get("command")
@@ -234,14 +243,16 @@ pub(crate) fn merge_task_hooks(
                         .and_then(|command| pixel_hook_verb(command, exe))
                         .is_some_and(task_hook_verb)
                 });
+                if inner.is_empty() {
+                    if before > 0 {
+                        slots.entry(event.clone()).or_insert(kept.len());
+                    }
+                    continue;
+                }
             }
+            kept.push(group);
         }
-        groups.retain(|group| {
-            group
-                .get("hooks")
-                .and_then(Value::as_array)
-                .is_none_or(|inner| !inner.is_empty())
-        });
+        *groups = kept;
     }
     if provider == Provider::Devin {
         // A previous install wrote the events Devin does not accept; the
@@ -287,6 +298,7 @@ pub(crate) fn merge_task_hooks(
         } else {
             vec![format!("{command}{FAIL_OPEN}")]
         };
+        let mut fresh = Vec::new();
         for command in commands {
             let mut group = hook_group(command, None);
             group["hooks"][0]["timeout"] = json!(if matches!(event, "SessionEnd" | "Interrupt") {
@@ -300,8 +312,14 @@ pub(crate) fn merge_task_hooks(
                 // <command>`, the only on-screen trace that the brief ran.
                 group["hooks"][0]["show_output"] = json!(true);
             }
-            groups.push(group);
+            fresh.push(group);
         }
+        let at = slots
+            .get(event)
+            .copied()
+            .unwrap_or(groups.len())
+            .min(groups.len());
+        groups.splice(at..at, fresh);
     }
     Ok(())
 }
@@ -583,6 +601,39 @@ pub(crate) fn pixel_hooks_running_other_binaries(value: &Value, exe: &Path) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_hooks_should_keep_every_group_index_when_setup_runs_again() {
+        let exe = Path::new("/tmp/pixel");
+        let user = json!({"hooks":[{"type":"command","command":"user-check"}]});
+        for pixel_first in [true, false] {
+            let mut value = json!({"hooks":{}});
+            merge_task_hooks(
+                value["hooks"].as_object_mut().unwrap(),
+                Provider::Codex,
+                exe,
+                1,
+            )
+            .unwrap();
+            let pixel = value["hooks"]["PreToolUse"][0].clone();
+            value["hooks"]["PreToolUse"] = if pixel_first {
+                json!([pixel, user])
+            } else {
+                json!([user, pixel])
+            };
+            let before = value.clone();
+            merge_task_hooks(
+                value["hooks"].as_object_mut().unwrap(),
+                Provider::Codex,
+                exe,
+                1,
+            )
+            .unwrap();
+            assert_eq!(value, before);
+            let user_at = usize::from(pixel_first);
+            assert_eq!(value["hooks"]["PreToolUse"][user_at], user);
+        }
+    }
 
     #[test]
     fn task_hooks_should_replace_only_owned_entries_and_cover_native_boundaries() {
@@ -1083,9 +1134,12 @@ mod tests {
         .unwrap();
         let commands = prompt_commands(&value);
         assert_eq!(commands.len(), 4, "{commands:?}");
-        assert_eq!(commands[0], "other-tool");
+        assert_eq!(
+            commands[3], "other-tool",
+            "the user's group keeps its index"
+        );
         assert!(
-            commands[1..]
+            commands[..3]
                 .iter()
                 .all(|c| c.ends_with(" --part 1/3 || true")
                     || c.ends_with(" --part 2/3 || true")

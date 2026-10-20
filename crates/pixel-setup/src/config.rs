@@ -215,13 +215,26 @@ pub fn merge_hook_entry(
     pixel_marker: &str,
     pixel_entry: serde_json::Value,
 ) -> serde_json::Value {
-    let mut entries: Vec<serde_json::Value> = match existing {
+    let entries: Vec<serde_json::Value> = match existing {
         Some(serde_json::Value::Array(arr)) => arr.clone(),
         Some(other) => vec![other.clone()],
         None => Vec::new(),
     };
-    entries.retain(|entry| !hook_entry_matches_marker(entry, pixel_marker));
-    entries.push(pixel_entry);
+    // Codex keys a hook's trust by its group index: replace in place.
+    let mut placed = false;
+    let mut merged = Vec::with_capacity(entries.len() + 1);
+    for entry in entries {
+        if !hook_entry_matches_marker(&entry, pixel_marker) {
+            merged.push(entry);
+        } else if !placed {
+            placed = true;
+            merged.push(pixel_entry.clone());
+        }
+    }
+    if !placed {
+        merged.push(pixel_entry);
+    }
+    let entries = merged;
     serde_json::Value::Array(entries)
 }
 
