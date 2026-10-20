@@ -27,6 +27,7 @@ use fs2::FileExt;
 use notify::{RecursiveMode, Watcher};
 
 use crate::api::{Request, Response, ServeError, Service, failure_response};
+use crate::wire::{ReadResult, read_capped_line, write_line_split};
 
 mod readers;
 
@@ -1480,8 +1481,7 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
         // Cap requests per connection to prevent starvation.
         if request_count >= MAX_REQUESTS_PER_CONN {
             let resp = failure_response("error", "request limit exceeded");
-            let _ = writer.write_all(serde_json::to_vec(&resp).unwrap_or_default().as_slice());
-            let _ = writer.write_all(b"\n");
+            let _ = write_line_split(&mut writer, &serde_json::to_vec(&resp).unwrap_or_default());
             break;
         }
         line.clear();
@@ -1492,15 +1492,15 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
             ReadResult::Eof => break,
             ReadResult::TooLong => {
                 let resp = failure_response("error", "request line too long");
-                let _ = writer.write_all(serde_json::to_vec(&resp).unwrap_or_default().as_slice());
-                let _ = writer.write_all(b"\n");
+                let _ =
+                    write_line_split(&mut writer, &serde_json::to_vec(&resp).unwrap_or_default());
                 break;
             }
             ReadResult::InvalidUtf8 => {
                 request_count += 1;
                 let resp = failure_response("error", "request is not valid UTF-8");
-                let _ = writer.write_all(serde_json::to_vec(&resp).unwrap_or_default().as_slice());
-                let _ = writer.write_all(b"\n");
+                let _ =
+                    write_line_split(&mut writer, &serde_json::to_vec(&resp).unwrap_or_default());
                 continue;
             }
             ReadResult::TimedOut | ReadResult::Err => break,
@@ -1564,77 +1564,11 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("non-string panic payload")
 }
 
-enum ReadResult {
-    Ok,
-    Eof,
-    TooLong,
-    InvalidUtf8,
-    TimedOut,
-    Err,
-}
-
-/// Read one line into `buf`, returning `TooLong` if it exceeds `max_bytes`
-/// before a newline is found. The trailing newline is consumed but not
-/// included in `buf` (same semantics as `read_line` minus the newline).
-fn read_capped_line(
-    reader: &mut BufReader<std::os::unix::net::UnixStream>,
-    buf: &mut String,
-    max_bytes: usize,
-    deadline: Instant,
-) -> ReadResult {
-    read_capped_line_with(reader, buf, max_bytes, deadline, Instant::now)
-}
-
-/// [`read_capped_line`] over any buffered reader, with the clock passed in.
-/// The line is taken a buffered block at a time, and the deadline is
-/// checked once per block, not once per byte.
-fn read_capped_line_with(
-    reader: &mut impl BufRead,
-    buf: &mut String,
-    max_bytes: usize,
-    deadline: Instant,
-    mut now: impl FnMut() -> Instant,
-) -> ReadResult {
-    let mut bytes = Vec::with_capacity(max_bytes.min(4096));
-    loop {
-        if now() >= deadline {
-            return ReadResult::TimedOut;
-        }
-        let Ok(block) = reader.fill_buf() else {
-            return ReadResult::Err;
-        };
-        if block.is_empty() {
-            if bytes.is_empty() {
-                return ReadResult::Eof;
-            }
-            break;
-        }
-        let newline = block.iter().position(|&b| b == b'\n');
-        let line_part = newline.unwrap_or(block.len());
-        if bytes.len() + line_part > max_bytes {
-            return ReadResult::TooLong;
-        }
-        bytes.extend_from_slice(&block[..line_part]);
-        match newline {
-            Some(at) => {
-                reader.consume(at + 1);
-                break;
-            }
-            None => reader.consume(line_part),
-        }
-    }
-    match String::from_utf8(bytes) {
-        Ok(line) => {
-            *buf = line;
-            ReadResult::Ok
-        }
-        Err(_) => ReadResult::InvalidUtf8,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::wire::read_capped_line_with;
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -1609,6 +1609,11 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
 
 ## Testing and gates
 
+The `pixel-bench` wire benchmark calls the production bounded reader and compares
+split/whole response framing. Normal daemon responses already use one write;
+that comparison measures framing variants, not an end-to-end daemon speedup.
+The allocation-budget test bounds allocations while reading request frames.
+
 - `just ultima-arena` (or `scripts/dev/ultima-arena.sh`) runs the five-CLI
   brief/metrics smoke in the current Herdr operator tab. A fixed seed controls
   start order; all ready panes receive the same prompt before monitoring starts.

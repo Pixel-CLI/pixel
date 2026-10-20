@@ -95,6 +95,10 @@ strip = "symbols"
 inherits = "release"
 lto = false
 codegen-units = 16
+# Keep debug info and symbols so profilers can resolve frames to source lines.
+# This is the local iteration profile, never a shipped one.
+debug = "line-tables-only"
+strip = "none"
 
 # cross reads this instead of a root Cross.toml (workspace.metadata.cross is
 # its documented manifest location). It forwards RUSTFLAGS and the CARGO_*

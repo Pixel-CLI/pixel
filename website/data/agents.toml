@@ -116,7 +116,7 @@ name = "OpenCode"
 logo = "opencode"
 wiring = "install"
 lede = "OpenCode keeps its native tools; `pixel setup` adds a plugin that puts a source-cited evidence brief in front of each code prompt, plus the `pixel` skill for follow-ups."
-global = ["~/.config/opencode/plugins/pixel-brief.js"]
+global = ["~/.config/opencode/plugins/pixel-brief.js", "~/.config/opencode/plugins/pixel-brief-metrics/tui.js"]
 when = "when OpenCode's configuration directory exists (`$XDG_CONFIG_HOME/opencode` when that variable is set)"
 wires = "a per-prompt evidence brief from the auto-loaded `plugins/pixel-brief.js`, and the `pixel` skill in `~/.config/opencode/skills/pixel/`; ordinary searches remain native"
 
