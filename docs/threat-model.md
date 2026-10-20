@@ -346,6 +346,11 @@ the diff. Only fully judged campaigns write checkpoint artifacts; only scheduled
 Actions access. Both instrumented jobs are skipped only after a successful
 scheduled measurement of the same SHA. Coverage is post-merge feedback;
 normal tests and lint still validate the PR head before merge.
+`instruction-counts.yml` executes the PR head and its base on a disposable
+GitHub-hosted Ubuntu runner using `pull_request`, never `pull_request_target`.
+Both checkouts disable persisted credentials; permissions are read-only
+contents, with no secrets or shared build-cache writes. The benchmark inputs
+are fixed local fixtures, and the runner uploads profiles and SHA provenance.
 `perf.yml` runs weekly and on manual dispatch, never on a pull request, with
 read-only contents and no secrets. It fetches one public corpus at the full
 commit ID in `CORPUS_SHA` with a plain `git fetch` (no credentials), and only indexes
