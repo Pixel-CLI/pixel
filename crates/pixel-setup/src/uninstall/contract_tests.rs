@@ -252,7 +252,7 @@ fn remove_pixel_hooks_from_settings_should_leave_a_file_without_hooks_untouched(
 fn remove_classify_skill_should_backup_the_skill_dir_and_keep_foreign_skills() {
     let home = tempfile::tempdir().unwrap();
     let skill = home.path().join(".claude/skills/pixel-classify");
-    write(&skill.join("SKILL.md"), "pixel-classify\n");
+    write(&skill.join("SKILL.md"), CLASSIFY_SKILL);
     let foreign = home.path().join(".claude/skills/other");
     write(&foreign.join("SKILL.md"), "mine\n");
 
@@ -290,10 +290,27 @@ fn remove_classify_skill_should_backup_the_skill_dir_and_keep_foreign_skills() {
 }
 
 #[test]
+fn remove_classify_skill_should_keep_a_users_own_skill_of_the_same_name() {
+    let home = tempfile::tempdir().unwrap();
+    let skill = home.path().join(".claude/skills/pixel-classify");
+    write(&skill.join("SKILL.md"), "my own classifier\n");
+
+    let step = remove_classify_skill(home.path(), false).unwrap();
+
+    assert_eq!(step.summary, "no classify skill found");
+    assert_eq!(step.detail, None);
+    assert_eq!(
+        fs::read_to_string(skill.join("SKILL.md")).unwrap(),
+        "my own classifier\n"
+    );
+    assert!(backups_in(&home.path().join(".claude")).is_empty());
+}
+
+#[test]
 fn remove_classify_skill_should_keep_every_dir_when_dry_run() {
     let home = tempfile::tempdir().unwrap();
     let skill = home.path().join(".claude/skills/pixel-classify");
-    write(&skill.join("SKILL.md"), "pixel-classify\n");
+    write(&skill.join("SKILL.md"), CLASSIFY_SKILL);
 
     let step = remove_classify_skill(home.path(), true).unwrap();
 
