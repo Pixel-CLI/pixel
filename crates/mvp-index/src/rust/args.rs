@@ -35,7 +35,7 @@
 //! may be any type's. A value of an alias the rules cannot expand has
 //! unknown arguments.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use super::modules::ModId;
 use super::resolve::{ANY_CALLER, Def, Impl, Index, Ns, Pos, Res, TraitOf};

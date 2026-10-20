@@ -11,6 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+rustc-hash = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 pixel-git = { path = "../pixel-git" }
 pixel-index = { path = "../pixel-index" }

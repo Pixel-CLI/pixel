@@ -10,7 +10,7 @@
 //! (path, rrf_score, tier) and get back the same list reordered inside each
 //! tier, ties broken by path ascending.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::signals::{SignalBundle, SignalOptions};
 

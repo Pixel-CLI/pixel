@@ -194,7 +194,7 @@ pub(super) struct Walker<'a> {
     src: &'a [u8],
     pub(super) defs: Vec<Def>,
     /// The names of the classes, modules and constants of `defs` (R10-03).
-    constants: std::collections::HashSet<String>,
+    constants: rustc_hash::FxHashSet<String>,
     /// Parallel to `defs`: made by a declaration (`attr_reader`,
     /// `delegate`), not by a `def`.
     pub(super) generated: Vec<bool>,
@@ -233,23 +233,23 @@ pub(super) struct Walker<'a> {
     concerned: Vec<Concerned>,
     /// The constants assigned a literal array of names (`ATTRS = %i[a
     /// b]`), which a splat in a declaration reads (`attr_reader(*ATTRS)`).
-    pub(super) arrays: std::collections::HashMap<String, Vec<String>>,
+    pub(super) arrays: rustc_hash::FxHashMap<String, Vec<String>>,
     /// The constants assigned a literal array of constants (`MODULES =
     /// [A, B]`), with the lexical scopes they were written in, which an
     /// `each` loop including them reads (`MODULES.each { |m| include m }`).
-    pub(super) modules: std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
+    pub(super) modules: rustc_hash::FxHashMap<String, (Vec<String>, Vec<String>)>,
     /// Each hook method (an index in `defs`) whose statements a replay
     /// reads, with its parameter, the object it runs for (D14).
-    pub(super) hook_bases: std::collections::HashMap<usize, String>,
+    pub(super) hook_bases: rustc_hash::FxHashMap<usize, String>,
     /// The methods (indexes in `defs`) whose body passes a block on to one
     /// that runs it with another `self` (R5-11).
-    rebinding: std::collections::HashSet<usize>,
+    rebinding: rustc_hash::FxHashSet<usize>,
     /// The names of this file's methods whose body does so: a block given
     /// to one may run with another `self` (R6-17).
-    rebinders: std::collections::HashSet<String>,
+    rebinders: rustc_hash::FxHashSet<String>,
     /// The nodes that hold an early exit outside a method they define
     /// ([`flow::exits`]).
-    exits: std::collections::HashSet<usize>,
+    exits: rustc_hash::FxHashSet<usize>,
     /// The names each body reads uncalled ([`flow::Uncalled`], R9-01).
     uncalled: flow::Uncalled,
     /// The locals each open scope gate binds once (ADR-0038).
@@ -267,7 +267,7 @@ pub(super) struct Walker<'a> {
     lets: Vec<rspec::LetBlock>,
     /// The `include` calls written in an example group's body that the
     /// group records as its steps ([`Fact::GroupInclude`]).
-    group_mixins: std::collections::HashSet<usize>,
+    group_mixins: rustc_hash::FxHashSet<usize>,
 }
 
 /// `concerning :Topic do` (B6): the module it makes, which the owner
@@ -369,7 +369,7 @@ impl<'a> Walker<'a> {
         Walker {
             src,
             defs: Vec::new(),
-            constants: std::collections::HashSet::new(),
+            constants: rustc_hash::FxHashSet::default(),
             generated: Vec::new(),
             conditional: Vec::new(),
             branches: 0,
@@ -383,12 +383,12 @@ impl<'a> Walker<'a> {
             scopes: Vec::new(),
             locals: Locals::default(),
             concerned: Vec::new(),
-            arrays: std::collections::HashMap::new(),
-            modules: std::collections::HashMap::new(),
-            hook_bases: std::collections::HashMap::new(),
-            rebinding: std::collections::HashSet::new(),
-            rebinders: std::collections::HashSet::new(),
-            exits: std::collections::HashSet::new(),
+            arrays: rustc_hash::FxHashMap::default(),
+            modules: rustc_hash::FxHashMap::default(),
+            hook_bases: rustc_hash::FxHashMap::default(),
+            rebinding: rustc_hash::FxHashSet::default(),
+            rebinders: rustc_hash::FxHashSet::default(),
+            exits: rustc_hash::FxHashSet::default(),
             uncalled: flow::Uncalled::default(),
             values: values::Gates::default(),
             minitest: false,
@@ -396,7 +396,7 @@ impl<'a> Walker<'a> {
             spec_code: false,
             frames: Vec::new(),
             lets: Vec::new(),
-            group_mixins: std::collections::HashSet::new(),
+            group_mixins: rustc_hash::FxHashSet::default(),
         }
     }
 

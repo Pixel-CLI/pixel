@@ -23,7 +23,8 @@
 //! adds a semantic layer on top. NDCG is the gate (see
 //! crates/pixel-bench/benches/ndcg_relevance.rs).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::code_vectors::{ChunkKey, Namespace, Store};
@@ -260,7 +261,7 @@ fn collect_files_within(
         coverage.degraded = true;
         return (Vec::new(), coverage);
     }
-    let mut nested = HashMap::new();
+    let mut nested = HashMap::default();
     let mut eligible = Vec::new();
     for entry in pixel_index::index::policy_walk(root) {
         let Ok(entry) = entry else {
@@ -409,18 +410,34 @@ fn is_code_file(name: &str) -> bool {
 
 /// Cosine similarity between two vectors (defensive normalize on top of the
 /// embedder's built-in L2 normalization).
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+///
+/// Three sums, eight independent lanes each. One accumulator makes every
+/// `f32` add wait on the one before it; on a 384-wide vector that latency,
+/// not the arithmetic, is the cost.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let mut dot = 0.0f32;
-    let mut na = 0.0f32;
-    let mut nb = 0.0f32;
-    for (x, y) in a.iter().zip(b) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
+    let mut lanes = [(0.0f32, 0.0f32, 0.0f32); 8];
+    let (a_blocks, a_rest) = a.as_chunks::<8>();
+    let (b_blocks, b_rest) = b.as_chunks::<8>();
+    for (x, y) in a_blocks.iter().zip(b_blocks) {
+        for ((lane, x), y) in lanes.iter_mut().zip(x).zip(y) {
+            lane.0 += x * y;
+            lane.1 += x * x;
+            lane.2 += y * y;
+        }
     }
+    for (x, y) in a_rest.iter().zip(b_rest) {
+        lanes[0].0 += x * y;
+        lanes[0].1 += x * x;
+        lanes[0].2 += y * y;
+    }
+    let (dot, na, nb) = lanes
+        .iter()
+        .fold((0.0f32, 0.0f32, 0.0f32), |(dot, na, nb), lane| {
+            (dot + lane.0, na + lane.1, nb + lane.2)
+        });
     let denom = (na * nb).sqrt();
     if denom > 0.0 { dot / denom } else { 0.0 }
 }
@@ -800,8 +817,8 @@ fn ask_collected(
     let vectors = chunk_vectors(&corpus, &namespace, embedder, store, &mut coverage)?;
 
     // Per-file best score across its chunks.
-    let mut best: HashMap<String, f32> = HashMap::new();
-    let mut snippet_of: HashMap<String, String> = HashMap::new();
+    let mut best: HashMap<String, f32> = HashMap::default();
+    let mut snippet_of: HashMap<String, String> = HashMap::default();
     for entry in &corpus {
         let vec = &vectors[&entry.key];
         validate_vector(vec, qvec.len())?;
@@ -847,7 +864,7 @@ pub(crate) fn chunk_vectors(
     coverage.vector_cache_errors.extend(errors);
     let mut fresh = Vec::new();
     let mut texts = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for entry in corpus {
         if !vectors.contains_key(&entry.key) && seen.insert(entry.key) {
             fresh.push(entry.key);
@@ -988,7 +1005,7 @@ pub(crate) fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
 
 /// Preserve complete identifiers and split snake_case, camelCase and acronyms.
 fn words(text: &str) -> HashSet<String> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for_each_word(text, |word| {
         out.insert(word);
     });
@@ -1306,7 +1323,7 @@ fn competition_ranks<T: Ord + std::hash::Hash + Copy>(
     for value in values {
         *counts.entry(value).or_insert(0usize) += 1;
     }
-    let mut ranks = HashMap::with_capacity(counts.len());
+    let mut ranks = HashMap::with_capacity_and_hasher(counts.len(), Default::default());
     let mut above = 0;
     for (value, count) in counts.into_iter().rev() {
         ranks.insert(value, 1 + above);
@@ -1361,7 +1378,7 @@ mod tests {
             .iter()
             .map(|(path, _, score)| (path.to_string(), *score))
             .collect();
-        rank_files(query, &lexical, best, HashMap::new(), usize::MAX)
+        rank_files(query, &lexical, best, HashMap::default(), usize::MAX)
     }
 
     fn lexical(score: f64, matches: usize) -> Lexical {
@@ -1374,10 +1391,14 @@ mod tests {
     #[test]
     fn competition_ranks_share_ties_and_skip_past_them() {
         let ranks = competition_ranks([3, 1, 3, 0, 2, 1, 3].into_iter());
-        let expected: HashMap<usize, usize> = [(3, 1), (2, 4), (1, 5), (0, 7)].into();
+        let expected: HashMap<usize, usize> =
+            [(3, 1), (2, 4), (1, 5), (0, 7)].into_iter().collect();
         assert_eq!(ranks, expected);
         assert!(competition_ranks(std::iter::empty::<usize>()).is_empty());
-        assert_eq!(competition_ranks([4].into_iter()), [(4, 1)].into());
+        assert_eq!(
+            competition_ranks([4].into_iter()),
+            [(4, 1)].into_iter().collect()
+        );
     }
 
     /// The lexical half of the fused score uses those ranks: two files
@@ -1392,11 +1413,13 @@ mod tests {
             ("d", lexical(0.0, 0)),
         ]
         .map(|(path, value)| (path.to_string(), value))
-        .into();
+        .into_iter()
+        .collect();
         let best: HashMap<String, f32> = [("a", 0.9), ("b", 0.8), ("c", 0.7), ("d", 0.6)]
             .map(|(path, score)| (path.to_string(), score))
-            .into();
-        let hits = rank_files("x y", &coverage, best, HashMap::new(), usize::MAX);
+            .into_iter()
+            .collect();
+        let hits = rank_files("x y", &coverage, best, HashMap::default(), usize::MAX);
         let score = |path: &str| {
             hits.iter()
                 .find(|hit| hit.path == path)
@@ -1562,6 +1585,34 @@ mod tests {
             assert!(!fallback_flag(Some(off)), "{off}");
         }
         assert!(!fallback_flag(None));
+    }
+
+    /// Lane order sums the same products in a different order, so the result
+    /// must stay equal to the sequential one at every length, tails
+    /// included, and not just at multiples of the lane width.
+    #[test]
+    fn cosine_should_match_the_sequential_sum_at_every_length() {
+        let a: Vec<f32> = (0..40).map(|i| (i as f32 * 0.31).sin()).collect();
+        let b: Vec<f32> = (0..40).map(|i| (i as f32 * 0.17).cos()).collect();
+        for len in 1..=a.len() {
+            let want = {
+                let mut dot = 0.0f32;
+                let mut na = 0.0f32;
+                let mut nb = 0.0f32;
+                for (x, y) in a[..len].iter().zip(&b[..len]) {
+                    dot += x * y;
+                    na += x * x;
+                    nb += y * y;
+                }
+                let denom = (na * nb).sqrt();
+                if denom > 0.0 { dot / denom } else { 0.0 }
+            };
+            let got = cosine(&a[..len], &b[..len]);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "len {len}: lanes {got} against sequential {want}"
+            );
+        }
     }
 
     #[test]
@@ -2792,7 +2843,7 @@ mod tests {
         let revision = crate::embed::embedder_revision(model);
         let windows = Namespace::new(model, revision, 1);
         let key = windows.key(text);
-        let vectors = HashMap::from([(key, invoice_vector(text))]);
+        let vectors = HashMap::from_iter([(key, invoice_vector(text))]);
         Store::at(&store_dir(root))
             .save(&windows, 2, &[key], &vectors, 0, false)
             .unwrap();
@@ -3251,8 +3302,10 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let store = Store::at(&store_dir(root.path()));
         let namespace = Namespace::new("m", crate::embed::embedder_revision("m"), CHUNKER_VERSION);
-        let live: HashMap<ChunkKey, Vec<f32>> =
-            [1, 2, 3].map(|key| (key, vec![key as f32; 4])).into();
+        let live: HashMap<ChunkKey, Vec<f32>> = [1, 2, 3]
+            .map(|key| (key, vec![key as f32; 4]))
+            .into_iter()
+            .collect();
         store
             .save(&namespace, 4, &[1, 2, 3], &live, 0, false)
             .unwrap();
@@ -3270,7 +3323,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let store = Store::at(&store_dir(root.path()));
         let namespace = Namespace::new("m", crate::embed::embedder_revision("m"), CHUNKER_VERSION);
-        let live: HashMap<ChunkKey, Vec<f32>> = [(1, vec![0.0f32; 4])].into();
+        let live: HashMap<ChunkKey, Vec<f32>> = [(1, vec![0.0f32; 4])].into_iter().collect();
         store.save(&namespace, 4, &[1], &live, 0, false).unwrap();
         assert!(warm_probe_in(root.path(), models.path()).vectors_present);
         // The manifest file of the store layout, corrupted after the write.

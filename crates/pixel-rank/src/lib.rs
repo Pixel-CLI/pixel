@@ -17,7 +17,8 @@
 //! core (port of serve/targets.rs): signal registry + weighted RRF (K=60),
 //! P0/P1/P2 tiering; slots for recency/churn/session signals."
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -589,7 +590,7 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
     let stop: HashSet<&str> = STOPWORDS.iter().chain(french_stopwords).copied().collect();
     let mut exact_tokens: Vec<String> = Vec::new();
     let mut keywords: Vec<String> = Vec::new();
-    let mut seen_kw: HashSet<String> = HashSet::new();
+    let mut seen_kw: HashSet<String> = HashSet::default();
     let mut keywords_truncated = false;
 
     let push_words = |text: &str,
@@ -1050,7 +1051,7 @@ fn content_rank(
 /// This is the shared fusion primitive used by [`lexical_rank`] and (in Phase
 /// 1c) the full five-channel `compute_targets` path.
 pub fn rrf_fuse(lists_with_weights: &[(&[String], f64)], k: f64) -> Vec<(String, f64)> {
-    let mut scores: HashMap<String, f64> = HashMap::new();
+    let mut scores: HashMap<String, f64> = HashMap::default();
     for (list, w) in lists_with_weights {
         for (rank, path) in list.iter().enumerate() {
             *scores.entry(path.clone()).or_default() += w / (k + rank as f64 + 1.0);
@@ -1181,7 +1182,7 @@ pub fn compute_targets(
     let s6 = &inputs.path_hits;
 
     // Fuse.
-    let mut fused: HashMap<String, Entry> = HashMap::new();
+    let mut fused: HashMap<String, Entry> = HashMap::default();
 
     for (rank, (path, matched)) in s1.iter().enumerate() {
         let e = bump(&mut fused, path, rank, W_FILENAME, 1);

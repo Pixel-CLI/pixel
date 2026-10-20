@@ -7,7 +7,7 @@
 //! `ErrorRecord` shapes, and adversarial candidate sets — rather than
 //! asserting only that the functions run without panicking.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::process::Command;
 
 use pixel_git::GitRunner;
@@ -204,7 +204,7 @@ fn activity_from_git_log_should_name_a_failed_scan_instead_of_an_empty_map() {
         &[],
         None,
         &[],
-        &HashMap::new(),
+        &HashMap::default(),
         &["src/a.rs".to_string()],
         &SignalOptions {
             now_ms: now,
@@ -246,7 +246,7 @@ fn activity_from_git_log_should_name_a_capped_scan_instead_of_an_empty_map() {
         &[],
         None,
         &[],
-        &HashMap::new(),
+        &HashMap::default(),
         &candidates,
         &opts,
     )
@@ -266,7 +266,7 @@ fn activity_from_git_log_should_name_a_capped_scan_instead_of_an_empty_map() {
         &[],
         None,
         &[],
-        &HashMap::new(),
+        &HashMap::default(),
         &candidates,
         &opts,
     )
@@ -308,11 +308,11 @@ fn session_score_weights_edits_2x_reads_at_equal_recency() {
         ..SignalOptions::default()
     };
     let bundle = score_signals(
-        &HashMap::new(),
+        &HashMap::default(),
         &[],
         &events,
         &[],
-        &HashMap::new(),
+        &HashMap::default(),
         &candidates,
         &opts,
     );
@@ -354,11 +354,11 @@ fn session_score_ignores_events_older_than_24h_window() {
         ..SignalOptions::default()
     };
     let bundle = score_signals(
-        &HashMap::new(),
+        &HashMap::default(),
         &[],
         &events,
         &[],
-        &HashMap::new(),
+        &HashMap::default(),
         &candidates,
         &opts,
     );
@@ -376,7 +376,7 @@ fn normalization_is_scoped_to_the_candidate_set_not_the_whole_map() {
     // Regression test for the normalize-over-everything bug: a non-candidate
     // file with a huge raw activity score must not suppress the normalized
     // score of the actual (lower-raw-score) candidate.
-    let mut activity_raw = HashMap::new();
+    let mut activity_raw = HashMap::default();
     activity_raw.insert("not_a_candidate.rs".to_string(), 1000.0);
     activity_raw.insert("src/candidate.rs".to_string(), 0.4);
 
@@ -390,7 +390,7 @@ fn normalization_is_scoped_to_the_candidate_set_not_the_whole_map() {
         &[],
         &[],
         &[],
-        &HashMap::new(),
+        &HashMap::default(),
         &candidates,
         &opts,
     );
@@ -431,11 +431,11 @@ fn error_sink_join_boosts_only_the_matching_candidate() {
         ..SignalOptions::default()
     };
     let bundle = score_signals(
-        &HashMap::new(),
+        &HashMap::default(),
         &[],
         &[],
         &errors,
-        &HashMap::new(),
+        &HashMap::default(),
         &candidates,
         &opts,
     );
@@ -502,14 +502,14 @@ fn rerank_never_lets_a_p2_candidate_outrank_any_p0_candidate() {
         },
     ];
 
-    let mut activity = HashMap::new();
+    let mut activity = HashMap::default();
     activity.insert("src/p2_hot.rs".to_string(), 1.0); // max normalized signal
-    let mut session = HashMap::new();
+    let mut session = HashMap::default();
     session.insert("src/p2_hot.rs".to_string(), 1.0); // max normalized signal
     let signals = pixel_rank::signals::SignalBundle {
         activity,
         session,
-        fan_in: HashMap::new(),
+        fan_in: HashMap::default(),
         session_reasons: vec![],
         error_reasons: vec![],
         activity_unavailable: None,
@@ -563,12 +563,12 @@ fn rerank_reorders_within_a_tier_by_amplified_score() {
             tier: "P1".to_string(),
         },
     ];
-    let mut activity = HashMap::new();
+    let mut activity = HashMap::default();
     activity.insert("src/b.rs".to_string(), 1.0); // only b.rs gets a boost
     let signals = pixel_rank::signals::SignalBundle {
         activity,
-        session: HashMap::new(),
-        fan_in: HashMap::new(),
+        session: HashMap::default(),
+        fan_in: HashMap::default(),
         session_reasons: vec![],
         error_reasons: vec![],
         activity_unavailable: None,
@@ -600,14 +600,14 @@ fn rerank_targets_preserves_tier_non_promotion_on_target_file_shape() {
             symbols: vec![],
         },
     ];
-    let mut activity = HashMap::new();
+    let mut activity = HashMap::default();
     activity.insert("src/p2.rs".to_string(), 1.0);
-    let mut session = HashMap::new();
+    let mut session = HashMap::default();
     session.insert("src/p2.rs".to_string(), 1.0);
     let signals = pixel_rank::signals::SignalBundle {
         activity,
         session,
-        fan_in: HashMap::new(),
+        fan_in: HashMap::default(),
         session_reasons: vec![],
         error_reasons: vec![],
         activity_unavailable: None,

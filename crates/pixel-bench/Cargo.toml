@@ -44,3 +44,7 @@ harness = false
 [[bench]]
 name = "wire"
 harness = false
+
+[[bench]]
+name = "cosine"
+harness = false

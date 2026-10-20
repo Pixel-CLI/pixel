@@ -7,7 +7,7 @@
 //! Freshness: turns newer than the segments' high-water mark are always
 //! candidates, so search never needs a rebuild to see new conversation.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use pixel_index::TrigramExtractor;
 use pixel_index::plan::plan_pattern;
@@ -91,7 +91,7 @@ pub fn search(
     let candidates: Option<HashSet<i64>> = match plan {
         GramQuery::All => None,
         plan => {
-            let mut set = HashSet::new();
+            let mut set = HashSet::default();
             for shard in segments.open_shards() {
                 let ids = resolve_query(&plan, shard.file_count(), &|h| shard.postings(h));
                 for local in ids {

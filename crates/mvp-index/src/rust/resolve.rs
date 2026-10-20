@@ -137,8 +137,8 @@
 //! has each site decided in each; the site resolves only when every crate
 //! agrees.
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 
 use mvp_model::{Edge, EdgeKind, SymbolKind, uid_path};
@@ -270,8 +270,8 @@ pub struct SourceFile<'w> {
 impl<'w> SourceFile<'w> {
     fn new(path: &'w str, facts: Facts) -> SourceFile<'w> {
         let mut module_scope = Vec::with_capacity(facts.scopes.len());
-        let mut trait_scope = HashMap::new();
-        let mut module_item = HashMap::new();
+        let mut trait_scope = HashMap::default();
+        let mut module_item = HashMap::default();
         for (index, scope) in facts.scopes.iter().enumerate() {
             let own = index as u32;
             let module = match (&scope.kind, scope.parent) {
@@ -289,8 +289,8 @@ impl<'w> SourceFile<'w> {
                 _ => {}
             }
         }
-        let mut names: HashMap<u32, HashMap<String, Vec<Entry>>> = HashMap::new();
-        let mut declarations: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut names: HashMap<u32, HashMap<String, Vec<Entry>>> = HashMap::default();
+        let mut declarations: HashMap<u32, Vec<u32>> = HashMap::default();
         // What a provably false `#[cfg]` removes is absent for resolution
         // (F2): it binds no name, provides no associated item or variant.
         for (index, item) in facts.items.iter().enumerate() {
@@ -309,8 +309,8 @@ impl<'w> SourceFile<'w> {
                 .or_default()
                 .push(Entry::Item(index as u32));
         }
-        let mut globs: HashMap<u32, Vec<u32>> = HashMap::new();
-        let mut named_uses: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut globs: HashMap<u32, Vec<u32>> = HashMap::default();
+        let mut named_uses: HashMap<u32, Vec<u32>> = HashMap::default();
         for (index, leaf) in facts.uses.iter().enumerate() {
             if cfg::is_false(&leaf.cfg) {
                 continue;
@@ -329,7 +329,7 @@ impl<'w> SourceFile<'w> {
                 (None, _) => {}
             }
         }
-        let mut assocs: HashMap<u32, HashMap<String, Vec<u32>>> = HashMap::new();
+        let mut assocs: HashMap<u32, HashMap<String, Vec<u32>>> = HashMap::default();
         for (index, assoc) in facts.assocs.iter().enumerate() {
             if cfg::is_false(&assoc.cfg) {
                 continue;
@@ -341,7 +341,7 @@ impl<'w> SourceFile<'w> {
                 .or_default()
                 .push(index as u32);
         }
-        let mut variants: HashMap<u32, HashMap<String, Vec<u32>>> = HashMap::new();
+        let mut variants: HashMap<u32, HashMap<String, Vec<u32>>> = HashMap::default();
         for (index, variant) in facts.variants.iter().enumerate() {
             if cfg::is_false(&variant.cfg) {
                 continue;
@@ -600,26 +600,26 @@ impl<'w> Index<'w> {
                 .map(|(i, s)| (s.uid.as_str(), i))
                 .collect(),
             tree,
-            impls: HashMap::new(),
-            impl_assocs: HashMap::new(),
-            by_ref: HashMap::new(),
-            ref_impls: HashMap::new(),
-            blanket: HashMap::new(),
-            pointer_methods: HashSet::new(),
-            unplaced: HashSet::new(),
-            effective: HashMap::new(),
-            aliased: HashSet::new(),
-            macro_crates: HashSet::new(),
-            in_scope: RefCell::new(HashMap::new()),
-            memo: RefCell::new(HashMap::new()),
-            resolving: RefCell::new(HashSet::new()),
+            impls: HashMap::default(),
+            impl_assocs: HashMap::default(),
+            by_ref: HashMap::default(),
+            ref_impls: HashMap::default(),
+            blanket: HashMap::default(),
+            pointer_methods: HashSet::default(),
+            unplaced: HashSet::default(),
+            effective: HashMap::default(),
+            aliased: HashSet::default(),
+            macro_crates: HashSet::default(),
+            in_scope: RefCell::new(HashMap::default()),
+            memo: RefCell::new(HashMap::default()),
+            resolving: RefCell::new(HashSet::default()),
             file_cfg: Vec::new(),
             caller: RefCell::new((Vec::new(), 0)),
-            callers: RefCell::new(HashMap::from([(Vec::new(), 0)])),
+            callers: RefCell::new(HashMap::from_iter([(Vec::new(), 0)])),
             sensitive: Cell::new(false),
             told_globs: Cell::new(false),
-            every_globs: RefCell::new(HashMap::new()),
-            arg_types: RefCell::new(HashMap::new()),
+            every_globs: RefCell::new(HashMap::default()),
+            arg_types: RefCell::new(HashMap::default()),
         };
         index.file_cfg = (0..index.files.len())
             .map(|file| {

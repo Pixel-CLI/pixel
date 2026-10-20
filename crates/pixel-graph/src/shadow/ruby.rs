@@ -9,7 +9,7 @@
 //! replaces, and pixel-mvp's targets added, for calls, routes, model
 //! associations and other references.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::Path;
 
 use serde::Serialize;
@@ -74,7 +74,7 @@ pub fn compare(
     examples: usize,
 ) -> Result<RubyShadow, BoxErr> {
     let conn = store.conn();
-    let mut names: HashMap<i64, (String, String)> = HashMap::new();
+    let mut names: HashMap<i64, (String, String)> = HashMap::default();
     {
         let mut stmt = conn.prepare(
             "SELECT s.id, s.qualified, f.path FROM symbols s JOIN files f ON f.id = s.file_id",
@@ -116,8 +116,8 @@ pub fn compare(
     // An edge raised to `exact` is removed and added back: neither a
     // replacement nor an addition.
     let at = |e: &EdgeRow| (e.src_id, e.dst_id, e.site_line);
-    let raised: std::collections::HashSet<(i64, i64, u32)> = {
-        let added: std::collections::HashSet<_> = plan.add_edges.iter().map(at).collect();
+    let raised: rustc_hash::FxHashSet<(i64, i64, u32)> = {
+        let added: rustc_hash::FxHashSet<_> = plan.add_edges.iter().map(at).collect();
         removed
             .iter()
             .map(at)

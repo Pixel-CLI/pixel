@@ -7,7 +7,7 @@
 //! phase (files+symbols, then imports, then tiered call resolution).
 //! `update_file`: transactional per-file replacement + re-resolution.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -625,7 +625,7 @@ fn build_graph_with(
     store.begin_write()?;
 
     // Drop files that vanished since the last build.
-    let known: std::collections::HashSet<&str> = all_paths.iter().map(String::as_str).collect();
+    let known: rustc_hash::FxHashSet<&str> = all_paths.iter().map(String::as_str).collect();
     let stale: Vec<String> = store
         .files()?
         .into_iter()
@@ -738,7 +738,7 @@ fn build_graph_with(
 /// first row (#1217). The count follows source order, never the line: an
 /// edit above both definitions leaves their uids unchanged.
 pub fn symbol_uids(rel: &str, symbols: &[RawSymbol]) -> Vec<String> {
-    let mut seen: HashMap<(&str, &str), u32> = HashMap::new();
+    let mut seen: HashMap<(&str, &str), u32> = HashMap::default();
     symbols
         .iter()
         .map(|s| {
@@ -1414,7 +1414,8 @@ fn rows_match_tree(
 /// the raw batch to `write_rows` would apply both, and the signing check
 /// would still count the path as re-extracted after its row was removed.
 fn final_actions<'a>(files: &[(&'a str, bool)]) -> Vec<(&'a str, bool)> {
-    let mut position: HashMap<&str, usize> = HashMap::with_capacity(files.len());
+    let mut position: HashMap<&str, usize> =
+        HashMap::with_capacity_and_hasher(files.len(), Default::default());
     let mut out: Vec<(&'a str, bool)> = Vec::with_capacity(files.len());
     for &(rel, removed) in files {
         match position.get(rel) {
@@ -1584,7 +1585,7 @@ fn write_rows_in(
     let mut names_before = if walled {
         mvp_adapter::names_in(store, files.iter().map(|&(rel, _)| rel))?
     } else {
-        HashMap::new()
+        HashMap::default()
     };
     // A merged graph goes back to this resolver's own Ruby rows first, so
     // every pass below decides as it would without the merge; the merge is
@@ -1596,7 +1597,7 @@ fn write_rows_in(
         // for every file (`ruby_switch::merge_again`).
         (undo, ruby_switch::prints(store)?)
     } else {
-        (ruby_switch::Undo::default(), ruby_switch::Prints::new())
+        (ruby_switch::Undo::default(), ruby_switch::Prints::default())
     };
     // What the batch changed, before and after, for the re-resolution below.
     let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
@@ -2926,7 +2927,7 @@ mod tests {
             "a row for a file the tree no longer has"
         );
         assert!(
-            rows_match_tree(&HashMap::new(), &[], &[]),
+            rows_match_tree(&HashMap::default(), &[], &[]),
             "an empty store matches an empty tree"
         );
     }

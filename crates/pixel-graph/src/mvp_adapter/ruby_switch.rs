@@ -21,7 +21,8 @@
 //! antiwork/gumroad that is one plan of a few files instead of one of
 //! about 970 000 sites.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use mvp_model::Graph;
@@ -396,7 +397,7 @@ fn print_row(
 /// this resolver.
 pub fn prints(store: &GraphStore) -> Result<Prints, StoreError> {
     let conn = store.conn();
-    let mut prints = Prints::new();
+    let mut prints = Prints::default();
     let mut buf = Vec::new();
     for sql in [
         "SELECT s.file_id, 'e', e.src_id, e.dst_id, e.kind, e.tier, e.site_line, e.receiver, e.callee

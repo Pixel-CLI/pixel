@@ -44,7 +44,7 @@ jobs:
             os: ubuntu-26.04
             features: --no-default-features --features model2vec
           - target: aarch64-apple-darwin
-            os: blacksmith-12vcpu-macos-15
+            os: macos-15
             features: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -78,7 +78,9 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: release-${{ matrix.target }}
+          # Must match cross-build.yml's key: it is what the tag's build restores
+          # (see the `-pabort` note there).
+          shared-key: release-${{ matrix.target }}-pabort
           save-if: false
 
       # Prebuilt binary instead of `cargo install cross`. cross compiles inside
@@ -167,7 +169,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false

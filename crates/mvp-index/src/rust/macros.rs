@@ -83,7 +83,7 @@
 //! not shadow std's `thread_local!` (E0659), but may define a
 //! `lazy_static!` the lazy_static crate is not there to take.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use super::cfg;
 use super::modules::{Target, applies};
@@ -146,7 +146,7 @@ impl Index<'_> {
     /// other lookup is kept: the memos of those it made are dropped.
     pub fn read_macros(&mut self) {
         let defined = self.macros_defined();
-        let mut counted: HashMap<Option<usize>, Counted> = HashMap::new();
+        let mut counted: HashMap<Option<usize>, Counted> = HashMap::default();
         let mut marks: Vec<(usize, u32)> = Vec::new();
         // The calls by a name of the statics macros whose name and path
         // are theirs, by instance: (file, scope, crate, `#[cfg]`s).
@@ -290,7 +290,7 @@ impl Index<'_> {
         // (`use pm::add_get as traced;`, through re-exports too), matched
         // by name as the macro is: each name is followed once along the
         // renames of it.
-        let mut renames: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut renames: HashMap<&str, Vec<&str>> = HashMap::default();
         for leaf in self.files.iter().flat_map(|source| &source.facts.uses) {
             if let Some((from, to)) = renamed(leaf) {
                 renames.entry(from).or_default().push(to);
@@ -391,7 +391,7 @@ impl Index<'_> {
         for &krate in &pending {
             reaching[krate] = true;
         }
-        let mut libs: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut libs: HashMap<usize, Vec<usize>> = HashMap::default();
         // By library, the crates depending on it: `u32`s, as a workspace
         // may declare many dependencies.
         let mut dependents: Vec<Vec<u32>> = vec![Vec::new(); crates.len()];

@@ -170,8 +170,9 @@ mod rspec;
 mod stubs;
 mod values;
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::{OnceCell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use mvp_model::{Edge, EdgeKind, Symbol, SymbolKind};
@@ -427,32 +428,32 @@ impl<'a> Index<'a> {
         let symbols = world.symbols;
         let mut index = Index {
             symbols,
-            by_uid: HashMap::with_capacity(symbols.len()),
-            constants: HashMap::new(),
-            classes: HashMap::new(),
-            methods: [HashMap::new(), HashMap::new()],
-            functions: HashMap::new(),
-            files: HashMap::new(),
-            requires: HashMap::new(),
-            loaded: RefCell::new(HashMap::new()),
+            by_uid: HashMap::with_capacity_and_hasher(symbols.len(), Default::default()),
+            constants: HashMap::default(),
+            classes: HashMap::default(),
+            methods: [HashMap::default(), HashMap::default()],
+            functions: HashMap::default(),
+            files: HashMap::default(),
+            requires: HashMap::default(),
+            loaded: RefCell::new(HashMap::default()),
             mixins: Vec::new(),
-            mixins_of: HashMap::new(),
-            hooks_of: HashMap::new(),
-            mixin_at: HashMap::new(),
-            concerns: HashSet::new(),
-            spread: HashSet::new(),
+            mixins_of: HashMap::default(),
+            hooks_of: HashMap::default(),
+            mixin_at: HashMap::default(),
+            concerns: HashSet::default(),
+            spread: HashSet::default(),
             modules: Vec::new(),
             walks: Walks::default(),
             projects: Projects::build(world.files),
-            consts: HashSet::new(),
-            nested: HashMap::new(),
-            by_name: HashMap::new(),
-            aliases: HashMap::new(),
+            consts: HashSet::default(),
+            nested: HashMap::default(),
+            by_name: HashMap::default(),
+            aliases: HashMap::default(),
             facts: Facts::read(world.files, symbols, visible),
             rails: values::Rails::default(),
             rspec: rspec::Rspec::read(world.files, visible),
-            unowned: HashMap::new(),
-            spread_by: RefCell::new(HashMap::new()),
+            unowned: HashMap::default(),
+            spread_by: RefCell::new(HashMap::default()),
             bringing: OnceCell::new(),
             loaders: Vec::new(),
         };
@@ -662,7 +663,7 @@ impl<'a> Index<'a> {
     /// those nested in it (`ClassMethods`), read from the declarations and
     /// facts alone, so before any chain is walked.
     fn brought(&self, mixed: Vec<&'a str>) -> HashSet<&'a str> {
-        let mut spread = HashSet::new();
+        let mut spread = HashSet::default();
         if mixed.is_empty() {
             return spread;
         }
@@ -706,7 +707,7 @@ impl<'a> Index<'a> {
     /// the modules, the ancestor declarations and the mixins written are
     /// all read: none of them changes once the index is built.
     fn bringing(&self) -> Bringing<'a> {
-        let mut nested: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
+        let mut nested: HashMap<&'a str, Vec<&'a str>> = HashMap::default();
         for &module in &self.modules {
             let mut end = module.len();
             while let Some(at) = module[..end].rfind("::") {
@@ -714,7 +715,7 @@ impl<'a> Index<'a> {
                 end = at;
             }
         }
-        let mut declared: HashMap<&'a str, Vec<usize>> = HashMap::new();
+        let mut declared: HashMap<&'a str, Vec<usize>> = HashMap::default();
         for (at, mixin) in self.mixins.iter().enumerate() {
             if mixin.name.is_empty() {
                 continue;
@@ -726,7 +727,7 @@ impl<'a> Index<'a> {
             };
             declared.entry(by).or_default().push(at);
         }
-        let mut written: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut written: HashMap<String, Vec<usize>> = HashMap::default();
         for (at, (_, scope)) in self.facts.mixins_written().0.iter().enumerate() {
             if let Some(innermost) = scope.first() {
                 written.entry(innermost.clone()).or_default().push(at);
@@ -1133,7 +1134,7 @@ impl<'a> Index<'a> {
         if let Some(loaded) = self.loaded.borrow().get(file) {
             return Rc::clone(loaded);
         }
-        let mut loaded = HashSet::from([file]);
+        let mut loaded = HashSet::from_iter([file]);
         let mut next = vec![file];
         while let Some(path) = next.pop() {
             for &(_, required) in self.requires.get(path).into_iter().flatten() {

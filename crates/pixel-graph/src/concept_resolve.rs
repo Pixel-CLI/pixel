@@ -21,7 +21,7 @@
 //! on pixel-graph), so the daemon adapts `pixel_rank::rerank::rerank` into the
 //! trait; the default is a deterministic lexical fallback.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use rusqlite::params;
 use serde::Serialize;
@@ -565,7 +565,8 @@ fn finish(
 ) -> Result<ResolveOutcome, StoreError> {
     let limit = opts.limit.max(1);
     let mut candidates: Vec<RankedCandidate> = Vec::with_capacity(rows.len());
-    let mut by_id: HashMap<u64, ConceptMatch> = HashMap::with_capacity(rows.len());
+    let mut by_id: HashMap<u64, ConceptMatch> =
+        HashMap::with_capacity_and_hasher(rows.len(), Default::default());
     for row in rows {
         let id = row.id as u64;
         let path = file_path(store, row.file_id)?;
@@ -610,7 +611,7 @@ fn finish(
             .into_iter()
             .map(|(id, m)| (m.path.clone(), (id, m)))
             .collect();
-        let existing_paths: std::collections::HashSet<String> = candidates
+        let existing_paths: rustc_hash::FxHashSet<String> = candidates
             .iter()
             .map(|candidate| candidate.path.clone())
             .collect();
@@ -840,7 +841,8 @@ fn finish_symbols(
         Confidence::Ranked
     };
     let mut candidates: Vec<RankedCandidate> = Vec::with_capacity(rows.len());
-    let mut by_id: HashMap<u64, ConceptMatch> = HashMap::with_capacity(rows.len());
+    let mut by_id: HashMap<u64, ConceptMatch> =
+        HashMap::with_capacity_and_hasher(rows.len(), Default::default());
     let reason = if tier == Tier::Ident {
         "exact symbol name match"
     } else {
@@ -1144,9 +1146,9 @@ const CONCEPT_SCAN_ORDER: &str = "ORDER BY norm, id";
 /// misspelling or two.
 const TRIGRAM_MIN_OVERLAP: f64 = 0.34;
 
-fn trigram_set(s: &str) -> std::collections::HashSet<(char, char, char)> {
+fn trigram_set(s: &str) -> rustc_hash::FxHashSet<(char, char, char)> {
     let chars: Vec<char> = s.chars().collect();
-    let mut out = std::collections::HashSet::new();
+    let mut out = rustc_hash::FxHashSet::default();
     if chars.len() < 3 {
         return out;
     }
@@ -1160,8 +1162,8 @@ fn trigram_set(s: &str) -> std::collections::HashSet<(char, char, char)> {
 /// contained in a longer target still scores 1.0 (the substring case),
 /// while otherwise rewarding real character-level similarity.
 fn trigram_overlap(
-    a: &std::collections::HashSet<(char, char, char)>,
-    b: &std::collections::HashSet<(char, char, char)>,
+    a: &rustc_hash::FxHashSet<(char, char, char)>,
+    b: &rustc_hash::FxHashSet<(char, char, char)>,
 ) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;

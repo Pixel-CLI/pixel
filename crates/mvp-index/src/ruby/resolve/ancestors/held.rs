@@ -5,8 +5,8 @@
 //! method must find the same definition from each of them (F1, R4), and
 //! one whose chain was cut may hold any step past the cut (R5-01).
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
@@ -302,8 +302,8 @@ impl<'a> Index<'a> {
         let home = shares.of.get(&(owner, side)).map(|&(i, _)| i);
         // Whether each share's steps past its own lists hold this step,
         // and the objects of the others that do.
-        let mut whole: HashMap<usize, bool> = HashMap::new();
-        let mut some: HashMap<usize, HashSet<u32>> = HashMap::new();
+        let mut whole: HashMap<usize, bool> = HashMap::default();
+        let mut some: HashMap<usize, HashSet<u32>> = HashMap::default();
         let mut single = Vec::new();
         let contained = self.contained();
         for &(object, on) in contained.holding(owner, side) {
@@ -369,7 +369,7 @@ impl<'a> Index<'a> {
             // not being walked; and then whether lookup through it proves
             // what it finds for every name but a tainted one, or which
             // facts may leave it unsure of some ([`Share`]).
-            let mut plain_steps: HashMap<(&'a str, Side), Option<Quiet>> = HashMap::new();
+            let mut plain_steps: HashMap<(&'a str, Side), Option<Quiet>> = HashMap::default();
             let mut plain = |owner: &'a str, side: Side| {
                 *plain_steps.entry((owner, side)).or_insert_with(|| {
                     let walks = &self.walks;
@@ -424,16 +424,16 @@ impl<'a> Index<'a> {
             }
             // How many objects have steps of each hash: one alone is
             // looked up alone, and no share is kept for it.
-            let mut counts: HashMap<u64, usize> = HashMap::new();
+            let mut counts: HashMap<u64, usize> = HashMap::default();
             for (_, _, _, hash) in &keyed {
                 *counts.entry(*hash).or_default() += 1;
             }
             let mut shares = Shares::default();
             // The hash of the steps past an object's own list → the shares
             // with such steps.
-            let mut tails: HashMap<u64, Vec<usize>> = HashMap::new();
+            let mut tails: HashMap<u64, Vec<usize>> = HashMap::default();
             // Each share's steps → their place there.
-            let mut places: HashMap<usize, HashMap<(&'a str, Side), u32>> = HashMap::new();
+            let mut places: HashMap<usize, HashMap<(&'a str, Side), u32>> = HashMap::default();
             for ((object, on), chain, rest, hash) in keyed {
                 if counts[&hash] < 2 {
                     continue;
@@ -449,7 +449,7 @@ impl<'a> Index<'a> {
                     shares.shares.push(Share {
                         members: Vec::new(),
                         steps: Vec::new(),
-                        defining: HashMap::new(),
+                        defining: HashMap::default(),
                         touched: Vec::new(),
                         blocked: Vec::new(),
                         holding: Vec::new(),
@@ -539,7 +539,7 @@ impl<'a> Index<'a> {
         }
         let outer = self.walks.capped.replace(false);
         let mut index = Opaque::default();
-        let mut quiet: HashMap<(&'a str, Side), bool> = HashMap::new();
+        let mut quiet: HashMap<(&'a str, Side), bool> = HashMap::default();
         for &(object, on) in self.contained().opaque.iter() {
             let chain = self.chain(object, on);
             for (at, step) in chain.steps.iter().enumerate() {
@@ -647,7 +647,7 @@ impl<'a> Index<'a> {
                     .filter(|&&m| !self.classes.contains_key(m))
                     .flat_map(|&m| [(m, Side::Instance), (m, Side::Singleton)]),
             );
-        let mut map: Containers<'a> = HashMap::new();
+        let mut map: Containers<'a> = HashMap::default();
         let mut opaque = Vec::new();
         let mut truncated = Vec::new();
         let outer = self.walks.capped.replace(false);

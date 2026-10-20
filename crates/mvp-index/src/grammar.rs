@@ -33,8 +33,9 @@
 //! Comparisons of source text (`text == "def"`, an operator's text) are not
 //! kinds and are not read.
 
+use rustc_hash::FxHashMap as HashMap;
+use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use tree_sitter::{Language, Node, Parser, Tree};
@@ -202,10 +203,10 @@ impl<'a> Scan<'a> {
         let mut scan = Scan {
             lang,
             files,
-            lets: HashMap::new(),
-            functions: HashMap::new(),
-            constants: HashMap::new(),
-            roles: HashMap::new(),
+            lets: HashMap::default(),
+            functions: HashMap::default(),
+            constants: HashMap::default(),
+            roles: HashMap::default(),
             changed: false,
             names: Names::default(),
         };

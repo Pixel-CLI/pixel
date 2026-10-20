@@ -296,12 +296,12 @@ pub(super) fn drop_overridden(w: &mut Walker) {
     if w.generated.is_empty() {
         return;
     }
-    let generated: std::collections::HashSet<usize> = w.generated.iter().copied().collect();
+    let generated: rustc_hash::FxHashSet<usize> = w.generated.iter().copied().collect();
     // One pass over the symbols (walk order is source order): per
     // qualified name and kind, whether a generated method is among them, and
     // the last definition.
-    let mut owners: std::collections::HashMap<(&str, &str), (bool, usize)> =
-        std::collections::HashMap::new();
+    let mut owners: rustc_hash::FxHashMap<(&str, &str), (bool, usize)> =
+        rustc_hash::FxHashMap::default();
     for (i, symbol) in w.symbols.iter().enumerate() {
         let entry = owners
             .entry((symbol.qualified.as_str(), symbol.kind.as_str()))

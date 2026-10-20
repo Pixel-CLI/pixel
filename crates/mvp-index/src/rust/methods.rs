@@ -16,8 +16,8 @@
 //! (a derive, a blanket impl, an impl for `&T`) at a step before it makes
 //! the call unresolved.
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
 
 use super::args::{Args, Effective, Fit};
 use super::cfg;
@@ -343,14 +343,14 @@ impl Index<'_> {
     /// names of the methods of blanket impls, of impls for `&T`, of impls
     /// on pointers, and of impls the rules cannot place on one type.
     pub fn attach_impls(&mut self) {
-        let mut impls: HashMap<(usize, u32), Vec<Impl>> = HashMap::new();
-        let mut by_ref: HashMap<(usize, u32), HashSet<String>> = HashMap::new();
-        let mut ref_impls: HashMap<((usize, u32), bool), Vec<Impl>> = HashMap::new();
-        let mut blanket: HashMap<String, Vec<SelfKind>> = HashMap::new();
-        let mut pointer_methods = HashSet::new();
-        let mut unplaced = HashSet::new();
-        let mut effective = HashMap::new();
-        let mut aliased = HashSet::new();
+        let mut impls: HashMap<(usize, u32), Vec<Impl>> = HashMap::default();
+        let mut by_ref: HashMap<(usize, u32), HashSet<String>> = HashMap::default();
+        let mut ref_impls: HashMap<((usize, u32), bool), Vec<Impl>> = HashMap::default();
+        let mut blanket: HashMap<String, Vec<SelfKind>> = HashMap::default();
+        let mut pointer_methods = HashSet::default();
+        let mut unplaced = HashSet::default();
+        let mut effective = HashMap::default();
+        let mut aliased = HashSet::default();
         for (file, source) in self.files.iter().enumerate() {
             for (index, scope) in source.facts.scopes.iter().enumerate() {
                 let ScopeKind::Impl {
@@ -508,7 +508,7 @@ impl Index<'_> {
                 impls.entry((tf, ti)).or_default().push(attached);
             }
         }
-        let mut impl_assocs: HashMap<(usize, u32), NamedImpls> = HashMap::new();
+        let mut impl_assocs: HashMap<(usize, u32), NamedImpls> = HashMap::default();
         for (ty, attached) in &impls {
             for (index, imp) in attached.iter().enumerate() {
                 let Some(by_name) = self.files[imp.file].assocs.get(&imp.scope) else {

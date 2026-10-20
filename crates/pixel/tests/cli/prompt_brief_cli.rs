@@ -153,6 +153,30 @@ fn a_delivered_brief_carries_the_metrics_line_as_a_system_message() {
     );
 }
 
+#[test]
+fn a_devin_brief_should_ask_the_model_to_relay_the_metrics_line_it_cannot_draw() {
+    let root = indexed("devin-metrics-line");
+    let output = hook(&root, "devin", RENAME, &[("PIXEL_METRICS", "")]);
+    let line = output["systemMessage"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no systemMessage in {output}"));
+    assert!(line.starts_with("🟩 pixel prompt-submit ❀ "), "{line}");
+    assert!(
+        context(&output).ends_with(&format!(
+            "\n\nEnd your answer with this line, verbatim: {line}"
+        )),
+        "{output}"
+    );
+    // Claude and Codex draw the line themselves: their brief stays as it was.
+    let claude = hook(&root, "claude", RENAME, &[("PIXEL_METRICS", "")]);
+    assert!(!context(&claude).contains("End your answer"), "{claude}");
+    let silenced = hook(&root, "devin", RENAME, &[("PIXEL_METRICS", "0")]);
+    assert!(
+        !context(&silenced).contains("End your answer"),
+        "{silenced}"
+    );
+}
+
 fn stamp(path: &Path) -> (u64, SystemTime) {
     let meta = std::fs::metadata(path).unwrap();
     (meta.len(), meta.modified().unwrap())
@@ -181,6 +205,7 @@ fn rename_prompt_should_carry_files_definition_and_callers_in_the_hook_context()
                 "read: packages/ui/handleError.ts:1-3 — handleError",
                 "also: apps/web/page.tsx:2-4 — Page",
                 "Read these ranges (in parallel, one turn) before any search. If they don't answer, search as usual.",
+                "Any search beyond these lines: use the `pixel` skill (`pixel find-code`, `pixel who-calls`, `pixel search-content`) before grep, rg, find or ls.",
             ]
             .join("\n"),
             "{provider}"

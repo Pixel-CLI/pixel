@@ -664,7 +664,7 @@ fn c10_ruby_a_function_caller_is_top_level_code() {
 #[test]
 fn audited_hook_mixins_should_be_brought_under_the_declaring_module_not_the_hook_method_name() {
     use super::{Index, stubs::Tests};
-    use std::collections::HashSet;
+    use rustc_hash::FxHashSet as HashSet;
     let mut g = Generation::default();
     g.def("hooks.rb", Module, "Hook", 1, 5)
         .def("hooks.rb", Method, "Hook.included", 2, 4)
@@ -681,6 +681,6 @@ fn audited_hook_mixins_should_be_brought_under_the_declaring_module_not_the_hook
     let index = Index::build(&world, &|_| true, &Tests::Without);
     assert_eq!(
         index.brought(vec!["Hook"]),
-        HashSet::from(["Hook", "Inside"])
+        HashSet::from_iter(["Hook", "Inside"])
     );
 }

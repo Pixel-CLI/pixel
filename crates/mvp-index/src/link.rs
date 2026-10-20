@@ -6,7 +6,8 @@
 //! against the whole generation (`link`). Deciding every site each time
 //! makes an incremental run store exactly what a full run stores.
 
-use std::collections::{BTreeSet, HashMap};
+use rustc_hash::FxHashMap as HashMap;
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mvp_model::hash::{Hash, Hasher};

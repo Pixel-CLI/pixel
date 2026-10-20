@@ -30,7 +30,7 @@
 //! RSpec's DSL ([`Fact::RspecOff`]); otherwise a group's `def` taints its
 //! name for test callers as before.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use super::ancestors::Lookup;
 use super::{Decision, Index, Side};
@@ -122,8 +122,8 @@ impl Rspec {
     pub(super) fn read(files: &[(String, String)], visible: &dyn Fn(&str) -> bool) -> Rspec {
         let mut rspec = Rspec::default();
         let mut off = false;
-        let mut shared: HashMap<String, Vec<Shared>> = HashMap::new();
-        let mut shared_groups: HashMap<(String, u32), Group> = HashMap::new();
+        let mut shared: HashMap<String, Vec<Shared>> = HashMap::default();
+        let mut shared_groups: HashMap<(String, u32), Group> = HashMap::default();
         let mut includes: Vec<(String, u32, String, u32)> = Vec::new();
         for (path, facts) in files.iter().filter(|(path, _)| visible(path)) {
             if !["group", "rspec", "shared", "factory", "FactoryBot"]
@@ -132,9 +132,9 @@ impl Rspec {
             {
                 continue;
             }
-            let mut groups: HashMap<u32, Option<Group>> = HashMap::new();
+            let mut groups: HashMap<u32, Option<Group>> = HashMap::default();
             let mut members: Vec<(u32, Member)> = Vec::new();
-            let mut values: HashMap<(u32, String, u32), String> = HashMap::new();
+            let mut values: HashMap<(u32, String, u32), String> = HashMap::default();
             let mut mixins: Vec<(u32, String)> = Vec::new();
             for fact in Fact::decode_all(facts) {
                 match fact {
@@ -254,7 +254,7 @@ impl Rspec {
                 }
             }
             if !groups.is_empty() {
-                let mut children: Option<HashMap<u32, Vec<u32>>> = Some(HashMap::new());
+                let mut children: Option<HashMap<u32, Vec<u32>>> = Some(HashMap::default());
                 for (&line, group) in &groups {
                     match (group, children.as_mut()) {
                         (Some(group), Some(children)) => {
@@ -290,7 +290,7 @@ impl Rspec {
             group.opaque |= from.opaque;
             group.nests |= from.nests;
             // The last of a name in the shared block, brought at `at`.
-            let mut last: HashMap<&str, &Member> = HashMap::new();
+            let mut last: HashMap<&str, &Member> = HashMap::default();
             for member in &from.members {
                 last.entry(member.name.as_str())
                     .and_modify(|kept| {
@@ -577,10 +577,10 @@ mod audited_contract_tests {
 
     fn model(children: &[(u32, Vec<u32>)]) -> Rspec {
         Rspec {
-            files: HashMap::from([(
+            files: HashMap::from_iter([(
                 "spec/x_spec.rb".into(),
                 Spec {
-                    groups: HashMap::from([
+                    groups: HashMap::from_iter([
                         (1, group(0, false)),
                         (2, group(1, false)),
                         (3, group(2, false)),

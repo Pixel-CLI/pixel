@@ -18,7 +18,7 @@
 //! only; a caller in shared test code, which may run on any example
 //! file's objects, meets them all.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
 
 use mvp_model::{EdgeKind, SymbolKind};
@@ -81,7 +81,7 @@ fn examples(world: &World<'_>, file_of: &HashMap<&str, &str>) -> HashSet<String>
         .collect();
     // The shared groups declared in a group's body, which that group
     // alone sees (ADR-0041), by line: each answers one declaration there.
-    let mut scoped: HashMap<(&str, u32), usize> = HashMap::new();
+    let mut scoped: HashMap<(&str, u32), usize> = HashMap::default();
     for (path, facts) in world.files {
         if path.ends_with("_spec.rb") && facts.contains("shared") {
             for fact in Fact::decode_all(facts) {
@@ -94,8 +94,8 @@ fn examples(world: &World<'_>, file_of: &HashMap<&str, &str>) -> HashSet<String>
             }
         }
     }
-    let mut required = HashSet::new();
-    let mut shared = HashSet::new();
+    let mut required = HashSet::default();
+    let mut shared = HashSet::default();
     let mut mixed: Vec<(String, &str)> = Vec::new();
     for edge in world.edges {
         let file = file_of.get(edge.src.as_str()).copied().unwrap_or_default();
@@ -129,7 +129,7 @@ fn examples(world: &World<'_>, file_of: &HashMap<&str, &str>) -> HashSet<String>
         }
     }
     examples.retain(|path, stem| !required.contains(stem) && !shared.contains(path.as_str()));
-    let mut named: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut named: HashMap<&str, Vec<&str>> = HashMap::default();
     for symbol in world.symbols {
         if matches!(symbol.kind, SymbolKind::Class | SymbolKind::Module)
             && examples.contains_key(&symbol.file)
@@ -184,7 +184,7 @@ pub(super) fn decide<'a>(
     };
     // An example file's own mixins into objects the rules cannot name, as
     // the modules they may bring: `None` where one may be any module.
-    let mut spread: HashMap<&str, Option<HashSet<&'a str>>> = HashMap::new();
+    let mut spread: HashMap<&str, Option<HashSet<&'a str>>> = HashMap::default();
     let (own, every): (Vec<usize>, Vec<usize>) = positions.into_iter().partition(|&position| {
         let file = file(position);
         examples.contains(file)
@@ -314,7 +314,7 @@ mod audited_contract_tests {
     fn stub_selection_should_keep_only_the_requested_examples() {
         assert!(!Tests::Without.any());
         assert!(Tests::All.any());
-        let tests = Tests::Except(Rc::new(HashSet::from(["spec/one_spec.rb".into()])));
+        let tests = Tests::Except(Rc::new(HashSet::from_iter(["spec/one_spec.rb".into()])));
         assert!(tests.any());
         assert!(!tests.keeps("spec/one_spec.rb"));
         assert!(tests.keeps("spec/two_spec.rb"));
@@ -355,7 +355,7 @@ mod audited_contract_tests {
         let examples = examples(&world, &file_of);
         assert_eq!(
             examples,
-            HashSet::from(["spec/one_spec.rb".into(), "test/two_test.rb".into()])
+            HashSet::from_iter(["spec/one_spec.rb".into(), "test/two_test.rb".into()])
         );
     }
 }

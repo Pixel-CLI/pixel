@@ -18,7 +18,8 @@
 //! No I/O, no daemon, no index — pure functions over caller-supplied
 //! [`RegionsInputs`], mirroring the crate's pure-core pattern.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -335,7 +336,7 @@ fn assign_layers(regions: &[Region], inputs: &RegionsInputs) -> Vec<Layer> {
 
     let scc_of = strongly_connected_components(regions, inputs);
     // Component id per region uid; components numbered 0..k in SCC order.
-    let mut comp_of: HashMap<&str, usize> = HashMap::new();
+    let mut comp_of: HashMap<&str, usize> = HashMap::default();
     let mut members: Vec<Vec<&str>> = Vec::new();
     for (uid, comp) in &scc_of {
         while members.len() <= *comp {
@@ -456,16 +457,16 @@ fn strongly_connected_components(
     inputs: &RegionsInputs,
 ) -> BTreeMap<String, usize> {
     let uids: Vec<&str> = regions.iter().map(|r| r.uid.as_str()).collect();
-    let mut index_of: HashMap<&str, i64> = HashMap::new();
-    let mut low: HashMap<&str, i64> = HashMap::new();
-    let mut on_stack: HashSet<&str> = HashSet::new();
+    let mut index_of: HashMap<&str, i64> = HashMap::default();
+    let mut low: HashMap<&str, i64> = HashMap::default();
+    let mut on_stack: HashSet<&str> = HashSet::default();
     let mut stack: Vec<&str> = Vec::new();
     let mut next_index: i64 = 0;
     let mut comp_of: BTreeMap<String, usize> = BTreeMap::new();
     let mut component: usize = 0;
 
     // Adjacency: uid -> sorted callee uids (region symbols only).
-    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::default();
     for e in &inputs.call_edges {
         adj.entry(e.caller.as_str())
             .or_default()

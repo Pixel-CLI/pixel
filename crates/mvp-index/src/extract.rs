@@ -5,7 +5,7 @@
 //! an optional deadline, and turns each extraction into rows: uids, owners,
 //! the `File` symbol.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -107,7 +107,7 @@ fn finish(path: &str, lang: Lang, hash: Hash, lines: u32, extraction: Extraction
         line: 1,
         end_line: lines,
     });
-    let mut seen: HashMap<(String, SymbolKind), u32> = HashMap::new();
+    let mut seen: HashMap<(String, SymbolKind), u32> = HashMap::default();
     for def in &defs {
         let count = seen.entry((def.name.clone(), def.kind)).or_insert(0);
         *count += 1;

@@ -99,8 +99,9 @@ const MAX_CONN_THREADS: usize = 32;
 /// the loop's answer (`handle_conn` calls `Forward::handle`, which hands the
 /// work to the writer), so only `serde_json`'s recursion depth bounds it:
 /// 128 levels of a default parse. The 2 MiB default costs about 1 us more
-/// per connection to create and commits 28x more address space than is used.
-const CONN_STACK: usize = 256 * 1024;
+/// per connection to create in the recorded spawn benchmark. This requests
+/// one eighth of that 2 MiB stack; the OS may enforce a larger minimum.
+const CONN_STACK: usize = 262_144; // 256 KiB
 
 /// $TMPDIR/pixel-<xxh3-of-canonical-root>.sock
 ///

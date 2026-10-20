@@ -27,7 +27,7 @@
 //!   stored edges, each re-read from the store so it is verifiable against
 //!   the snapshot.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -352,7 +352,7 @@ fn find_cycle_witness(
     // Multi-node SCC: DFS from the smallest member uid to find a path
     // back to it. The SCC property guarantees such a path exists.
     let start = *members.iter().min().expect("non-empty");
-    let mut visited: HashSet<i64> = HashSet::new();
+    let mut visited: HashSet<i64> = HashSet::default();
     let mut stack: Vec<(i64, Vec<EdgeRow>)> = vec![(start, Vec::new())];
     visited.insert(start);
 
@@ -435,9 +435,9 @@ pub fn enumerate(
     // Each node gets an index (discovery order) and a lowlink (lowest
     // index reachable). When a node's lowlink equals its index, it's the
     // root of an SCC.
-    let mut index: HashMap<i64, u32> = HashMap::new();
-    let mut lowlink: HashMap<i64, u32> = HashMap::new();
-    let mut on_stack: HashSet<i64> = HashSet::new();
+    let mut index: HashMap<i64, u32> = HashMap::default();
+    let mut lowlink: HashMap<i64, u32> = HashMap::default();
+    let mut on_stack: HashSet<i64> = HashSet::default();
     let mut stack: Vec<i64> = Vec::new();
     let mut idx: u32 = 0;
 
