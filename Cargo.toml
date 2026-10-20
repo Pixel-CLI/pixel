@@ -75,8 +75,8 @@ mutants = "0.0.4"
 openssl = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
-# Fat LTO: one binary, no plugin boundary left for the inliner to respect.
-# Builds cost more; the shipped artefact is the only thing this profile is for.
+# Fat LTO optimizes across the dependency graph. The recorded release
+# experiment traded longer builds for a smaller binary and faster startup.
 lto = "fat"
 codegen-units = 1
 # Ship without the symbol table (~17% of the binary, 76 MB -> 63 MB on
@@ -97,6 +97,10 @@ strip = "symbols"
 inherits = "release"
 lto = false
 codegen-units = 16
+# Keep debug info and symbols so profilers can resolve frames to source lines.
+# This is the local iteration profile, never a shipped one.
+debug = "line-tables-only"
+strip = "none"
 
 # cross reads this instead of a root Cross.toml (workspace.metadata.cross is
 # its documented manifest location). It forwards RUSTFLAGS and the CARGO_*
