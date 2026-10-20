@@ -31,7 +31,9 @@ const NOTICE =
 // The footer's tree at the very end of a text: the identity header, then its
 // savings rows. Anchored at the end, so a `🟩` line quoted by the output (a
 // search hit in Pixel's own sources) is never taken for the call's footer.
-const FOOTER = /(🟩 pixel [^\n]*#[0-9a-f]{6}[^\n]*\n(?:[ \t]*[│├└][^\n]*\n?)*)\s*$/u;
+// Each row ends at a newline or the end of the text, so a row is matched one
+// way only (an optional `\n` let a long `│` row split many ways: ReDoS).
+const FOOTER = /(🟩 pixel [^\n]*#[0-9a-f]{6}[^\n]*\n(?:[ \t]*[│├└][^\n]*(?:\n|$))*)\s*$/u;
 const FRAME_ONLY = /^\s*[│└][─\s]*$/u;
 // `pixel`, `pixel-dev` or a path to either, as a command word of the call.
 const PIXEL_COMMAND = /(^|[\s;&|(])(\S*\/)?pixel(-dev)?(\s|$)/u;
