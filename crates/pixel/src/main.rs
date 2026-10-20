@@ -74,6 +74,7 @@ mod setup_cmd;
 mod task_bridge;
 mod task_commands;
 mod task_config;
+mod task_guidance;
 mod task_hook;
 mod task_prepare;
 mod task_route;

@@ -119,6 +119,15 @@ session fields are agent-controlled. `task-event` gates edits and completion for
 `prompt-submit`, returns the bounded `[PIXEL:BRIEF]` evidence block. It never
 executes `tool_input.command` and never rewrites or approves a command.
 
+Claude's skill/search guidance reads bounded front matter from installed skill
+directories and inspects the tool input as data. Skill descriptions and paths
+are untrusted retrieval metadata, not instructions or permission to execute the
+skill. Guidance may suggest a matching skill or a narrower search, but cannot
+authorize a command, override a gate, or establish task completion. Its
+per-session cooldown state contains no raw prompt, command, or tool result.
+An unavailable skill directory or invalid guidance state fails open for this
+advisory layer without weakening the independent task gate.
+
 The verbs earlier releases registered (`guard`, `composed-guard`,
 `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`)
 no longer parse: `pixel run-hook` prints an error on stderr and exits 0, so a

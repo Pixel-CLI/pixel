@@ -902,3 +902,144 @@ fn brief_stdout_should_be_the_brief_or_nothing() {
         );
     }
 }
+
+/// The deployed Claude entry point must route installed skills and recover
+/// broad searches even when the prompt cwd has no repository.
+#[test]
+fn claude_task_event_should_route_skills_and_nudge_broad_searches_outside_git() {
+    let home = Scratch::for_test("claude-guidance-home", "installed");
+    let cwd = Scratch::for_test("claude-guidance-cwd", "outside-git");
+    let skill = home.join(".claude/skills/herdr-consolidate/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(
+        &skill,
+        "---\nname: herdr-consolidate\ndescription: Consolidate every pane from every tab of the current Herdr workspace into a single tab, ordered so panes of the same project are adjacent.\n---\nbody must remain unread",
+    )
+    .unwrap();
+    let home_text = home.to_string_lossy().into_owned();
+    let cwd_text = cwd.to_string_lossy().into_owned();
+    let prompt = "I was making two changes for Herder. The first one is the possibility to group all the pan across all tabs into a single group by project. Can you find if this is done?";
+    let prompt_payload = json!({
+        "session_id":"herdr-rootless-cli",
+        "cwd":cwd_text,
+        "prompt":prompt,
+        "hook_event_name":"UserPromptSubmit"
+    });
+    let prompt_args = [
+        "run-hook",
+        "task-event",
+        "--provider",
+        "claude",
+        "--event",
+        "prompt-submit",
+    ];
+    let first = run(
+        &cwd,
+        &prompt_args,
+        prompt_payload.to_string().as_bytes(),
+        Duration::ZERO,
+        &[("HOME", &home_text)],
+    );
+    let first = assert_hook_contract(&first, "rootless skill route").unwrap();
+    let guidance_text = context(&first).unwrap();
+    assert!(
+        guidance_text.contains("herdr-consolidate"),
+        "{guidance_text}"
+    );
+    assert!(
+        guidance_text.contains(skill.to_str().unwrap()),
+        "{guidance_text}"
+    );
+    assert!(
+        !guidance_text.contains("body must remain unread"),
+        "skill body leaked: {guidance_text}"
+    );
+    assert!(
+        first.get("systemMessage").is_none(),
+        "skill guidance is not a delivered brief: {first:?}"
+    );
+
+    let repeated = run(
+        &cwd,
+        &prompt_args,
+        prompt_payload.to_string().as_bytes(),
+        Duration::ZERO,
+        &[("HOME", &home_text)],
+    );
+    let repeated = assert_hook_contract(&repeated, "skill route cooldown").unwrap();
+    assert!(
+        context(&repeated).is_none(),
+        "repeated route was not suppressed: {repeated:?}"
+    );
+    assert!(
+        repeated.get("systemMessage").is_none(),
+        "guidance alone emitted brief metrics: {repeated:?}"
+    );
+
+    let broad_payload = json!({
+        "session_id":"herdr-rootless-cli",
+        "cwd":home_text,
+        "tool_name":"Bash",
+        "tool_input":{"command":"rtk rg -l -e 'group panes' $HOME/.config 2>/dev/null"},
+        "hook_event_name":"PreToolUse"
+    });
+    let pretool_args = [
+        "run-hook",
+        "task-event",
+        "--provider",
+        "claude",
+        "--event",
+        "pre-tool-use",
+    ];
+    let broad = run(
+        &cwd,
+        &pretool_args,
+        broad_payload.to_string().as_bytes(),
+        Duration::ZERO,
+        &[("HOME", home_text.as_str())],
+    );
+    let broad = assert_hook_contract(&broad, "rootless broad-search guidance").unwrap();
+    assert!(
+        context(&broad).unwrap().contains("scoped directory"),
+        "{broad:?}"
+    );
+    assert!(
+        broad["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none(),
+        "advice changed the decision: {broad:?}"
+    );
+
+    let repeated_search = run(
+        &cwd,
+        &pretool_args,
+        broad_payload.to_string().as_bytes(),
+        Duration::ZERO,
+        &[("HOME", home_text.as_str())],
+    );
+    let repeated_search = assert_hook_contract(&repeated_search, "search cooldown").unwrap();
+    assert!(
+        context(&repeated_search).is_none(),
+        "repeated scan advice was not suppressed: {repeated_search:?}"
+    );
+
+    let scoped = json!({
+        "session_id":"herdr-rootless-cli",
+        "cwd":home_text,
+        "tool_name":"Bash",
+        "tool_input":{"command":"rtk rg -n -e 'group.*project' crates/herdr/src"},
+        "hook_event_name":"PreToolUse"
+    });
+    let scoped = run(
+        &cwd,
+        &pretool_args,
+        scoped.to_string().as_bytes(),
+        Duration::ZERO,
+        &[("HOME", home_text.as_str())],
+    );
+    let scoped = assert_hook_contract(&scoped, "scoped search control").unwrap();
+    assert!(
+        context(&scoped).is_none(),
+        "scoped search received broad-scan advice: {scoped:?}"
+    );
+}

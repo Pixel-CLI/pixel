@@ -17,6 +17,7 @@ use crate::brief_parts::{self, BriefPart, Limits};
 // first-part recovery, and later parts to observe its done marker.
 const DECISION_TIMEOUT: Duration = Duration::from_secs(8);
 const PI_DECISION_TIMEOUT: Duration = Duration::from_secs(6);
+const GUIDANCE_TIMEOUT: Duration = Duration::from_millis(100);
 const fn decision_timeout(provider: TaskProvider) -> Duration {
     if matches!(provider, TaskProvider::Pi) {
         PI_DECISION_TIMEOUT
@@ -38,6 +39,7 @@ const _: () =
 const _: () = assert!(
     crate::hook_input::STDIN_WAIT.as_millis()
         + DECISION_TIMEOUT.as_millis()
+        + GUIDANCE_TIMEOUT.as_millis()
         + LATE_GRACE.as_millis()
         + ORDERING_SLACK.as_millis()
         < (pixel_setup::config::HOOK_TIMEOUT * 1_000) as u128
@@ -1069,6 +1071,105 @@ fn envelope(provider: TaskProvider, event: TaskHookEvent, decision: &Value) -> V
     }
 }
 
+/// Adds advisory Claude context without changing the permission decision. The
+/// caller keeps the pre-guidance output for brief metrics and feedback.
+fn append_claude_guidance(output: &mut Value, event: TaskHookEvent, guidance: &str) {
+    if guidance.is_empty() {
+        return;
+    }
+    if !output.is_object() {
+        *output = json!({});
+    }
+    let event_name = if event == TaskHookEvent::PromptSubmit {
+        "UserPromptSubmit"
+    } else {
+        event.host_name()
+    };
+    if output.get("hookSpecificOutput").is_none() {
+        output["hookSpecificOutput"] = json!({"hookEventName": event_name});
+    }
+    let hook = &mut output["hookSpecificOutput"];
+    if hook.get("hookEventName").is_none() {
+        hook["hookEventName"] = json!(event_name);
+    }
+    let current = hook
+        .get("additionalContext")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    hook["additionalContext"] = json!(if current.is_empty() {
+        guidance.to_owned()
+    } else {
+        format!("{current}\n\n{guidance}")
+    });
+}
+
+fn advisory_guidance(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    payload: &Value,
+    home: &Path,
+) -> Option<String> {
+    if provider != TaskProvider::Claude {
+        return None;
+    }
+    let session = brief_session(payload);
+    let cwd = payload_cwd(provider, payload);
+    match event {
+        TaskHookEvent::PromptSubmit => {
+            let prompt = string(payload, &["prompt"])?;
+            crate::task_guidance::prompt_context(home, &cwd, prompt, session, pixel_task::now_ms())
+        }
+        TaskHookEvent::PreToolUse => {
+            let tool = string(payload, &["tool_name", "toolName"])?;
+            let input = payload.get("tool_input").or_else(|| payload.get("input"))?;
+            let command = string(input, &["command"])?;
+            crate::task_guidance::search_context(
+                home,
+                &cwd,
+                tool,
+                command,
+                session,
+                pixel_task::now_ms(),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn bounded_advisory_guidance(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    payload: &Value,
+    home: &Path,
+) -> Option<String> {
+    if provider != TaskProvider::Claude
+        || !matches!(
+            event,
+            TaskHookEvent::PromptSubmit | TaskHookEvent::PreToolUse
+        )
+        || (event == TaskHookEvent::PromptSubmit && string(payload, &["prompt"]).is_none())
+        || (event == TaskHookEvent::PreToolUse
+            && string(payload, &["tool_name", "toolName"]) != Some("Bash"))
+    {
+        return None;
+    }
+    let (payload, home) = (payload.clone(), home.to_path_buf());
+    guidance_within(GUIDANCE_TIMEOUT, move || {
+        advisory_guidance(provider, event, &payload, &home)
+    })
+}
+
+fn guidance_within(
+    timeout: Duration,
+    evaluate: impl FnOnce() -> Option<String> + Send + 'static,
+) -> Option<String> {
+    decision_within(timeout, move || {
+        evaluate().map(Value::String).unwrap_or(Value::Null)
+    })?
+    .as_str()
+    .map(str::to_owned)
+}
+
 /// The decision when the ledger cannot answer. It never blocks more than an
 /// answering ledger would: an unenforced session only observes, as in
 /// `task_bridge::handle_hook`; an enforced one keeps edits and completion gated.
@@ -1948,6 +2049,18 @@ fn respond(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
             started.elapsed().as_secs_f64() * 1000.0
         ));
     }
+    let output_for_feedback = output.clone();
+    if provider == TaskProvider::Claude
+        && let (Some(home), Some(payload), Some(output)) = (
+            std::env::var_os("HOME").map(std::path::PathBuf::from),
+            raw.as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
+            output.as_mut(),
+        )
+        && let Some(guidance) = bounded_advisory_guidance(provider, event, &payload, &home)
+    {
+        append_claude_guidance(output, event, &guidance);
+    }
     let first_of_many = part.is_some_and(|part| {
         part.index == 1 && part.count > 1 && event == TaskHookEvent::PromptSubmit
     });
@@ -1977,7 +2090,13 @@ fn respond(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
         let _ = stdout.flush();
     }
     crate::hook_input::test_panic("after-response");
-    note_event(provider, event, part, raw.as_deref(), output.as_ref());
+    note_event(
+        provider,
+        event,
+        part,
+        raw.as_deref(),
+        output_for_feedback.as_ref(),
+    );
 }
 
 #[cfg(test)]
@@ -2001,6 +2120,19 @@ mod tests {
             // SAFETY: same lock as above.
             unsafe { std::env::set_var("DEVIN_PROJECT_DIR", restored) };
         }
+    }
+
+    #[test]
+    fn guidance_deadline_returns_without_waiting_for_slow_filesystem_work() {
+        let (release, waiting) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        let guidance = guidance_within(Duration::from_millis(100), move || {
+            let _ = waiting.recv_timeout(Duration::from_secs(2));
+            Some("late advisory".to_owned())
+        });
+        assert!(guidance.is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let _ = release.send(());
     }
 
     /// A single `|` marks the NEXT segment as piped; `&&`, `||` and a lone
@@ -4252,5 +4384,120 @@ mod tests {
             assert_eq!(path.exists(), !forgotten);
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_prompt_guidance_is_visible_without_a_repository_or_brief_metrics() {
+        let home =
+            std::env::temp_dir().join(format!("pixel-guidance-prompt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let skill = home.join(".claude/skills/herdr-consolidate/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(
+            &skill,
+            "---\nname: herdr-consolidate\ndescription: Consolidate every pane from every tab of the current Herdr workspace into a single tab, ordered so panes of the same project are adjacent.\n---\nbody stays unread",
+        ).unwrap();
+        let payload = json!({
+            "session_id":"guidance-prompt-test",
+            "cwd":home,
+            "prompt":"I was making two changes for Herder. The first one is the possibility to group all the pan across all tabs into a single group by project. Can you find if this is done?"
+        });
+        let guidance = advisory_guidance(
+            TaskProvider::Claude,
+            TaskHookEvent::PromptSubmit,
+            &payload,
+            &home,
+        )
+        .unwrap();
+        let mut output = json!({});
+        append_claude_guidance(&mut output, TaskHookEvent::PromptSubmit, &guidance);
+
+        assert_eq!(
+            output["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        assert!(
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains(skill.to_str().unwrap())
+        );
+        assert!(output["systemMessage"].is_null());
+        assert!(
+            !output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("body stays unread")
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn claude_pretool_search_guidance_is_advisory_and_leaves_scoped_searches_alone() {
+        let home =
+            std::env::temp_dir().join(format!("pixel-guidance-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let command = format!(
+            "rg -l 'group panes' {} {}",
+            home.join(".config").display(),
+            home.join("Documents").display()
+        );
+        let payload = json!({
+            "session_id":"guidance-search-test",
+            "cwd":home,
+            "tool_name":"Bash",
+            "tool_input":{"command":command}
+        });
+        let guidance = advisory_guidance(
+            TaskProvider::Claude,
+            TaskHookEvent::PreToolUse,
+            &payload,
+            &home,
+        )
+        .unwrap();
+        let mut output = json!({});
+        append_claude_guidance(&mut output, TaskHookEvent::PreToolUse, &guidance);
+        assert!(
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("scoped directory")
+        );
+        assert!(output["hookSpecificOutput"]["permissionDecision"].is_null());
+
+        let mut gated = json!({"hookSpecificOutput": {
+            "hookEventName":"PreToolUse",
+            "permissionDecision":"deny",
+            "permissionDecisionReason":"protected"
+        }});
+        append_claude_guidance(&mut gated, TaskHookEvent::PreToolUse, &guidance);
+        assert_eq!(gated["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            gated["hookSpecificOutput"]["permissionDecisionReason"],
+            "protected"
+        );
+
+        let mut scoped = payload.clone();
+        scoped["tool_input"]["command"] = json!("rg -n 'group.*project' crates/herdr/src");
+        assert!(
+            advisory_guidance(
+                TaskProvider::Claude,
+                TaskHookEvent::PreToolUse,
+                &scoped,
+                &home
+            )
+            .is_none()
+        );
+        assert!(
+            advisory_guidance(
+                TaskProvider::Codex,
+                TaskHookEvent::PreToolUse,
+                &payload,
+                &home
+            )
+            .is_none()
+        );
+        let _ = std::fs::remove_dir_all(home);
     }
 }
