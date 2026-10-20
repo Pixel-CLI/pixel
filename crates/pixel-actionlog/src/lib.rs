@@ -303,6 +303,9 @@ impl Drop for ActionLog {
 }
 
 fn writer_loop(path: PathBuf, rx: mpsc::Receiver<ActionEvent>, done_tx: Sender<()>) {
+    // A CLI run logs about one event, so the periodic check below never fires
+    // for it: rotate once before the first append (a stat, under the cap).
+    let _ = rotate_if_needed(&path);
     let mut file = open_log_file(&path);
     let mut since_rotate_check: u32 = 0;
     while let Ok(event) = rx.recv() {
@@ -739,22 +742,21 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), body);
     }
 
-    /// The writer checks rotation every `ROTATE_CHECK_EVERY` events, not on
-    /// the first one: a single event appended to an oversized log leaves
-    /// every older line in place.
+    /// A writer rotates an oversized log once when it starts, so a
+    /// one-event CLI run still bounds the file: the kept tail plus the new line.
     #[test]
-    fn writer_should_not_rotate_before_the_check_interval() {
+    fn writer_should_rotate_an_oversized_log_at_start() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("actions.jsonl");
         let line = format!("{}\n", "y".repeat(1024));
-        let lines = MAX_KEPT_LINES + 1500;
-        fs::write(&path, line.repeat(lines)).unwrap();
+        fs::write(&path, line.repeat(MAX_KEPT_LINES + 1500)).unwrap();
         assert!(fs::metadata(&path).unwrap().len() > MAX_LOG_BYTES);
         let mut log = ActionLog::spawn_at(path.clone());
         log.log(ActionEvent::new("search", "one"));
         log.finish_flush();
         let text = fs::read_to_string(&path).unwrap();
-        assert_eq!(text.lines().count(), lines + 1);
+        assert_eq!(text.lines().count(), MAX_KEPT_LINES + 1);
+        assert!(text.lines().last().unwrap().contains("\"args\":\"one\""));
     }
 }
 
