@@ -1667,7 +1667,8 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   by default). Only scheduled CI executes mutations; there is no manual,
   local or pull-request campaign. The pre-push hook is a no-op; local validation is optional.
   Other lanes include
-  `cross-build.yml` (the three release lanes),
+  `cross-build.yml` (Linux on relevant PRs; all three release targets on main,
+  with macOS only in `release`; maintenance release PRs retain macOS),
   `perf.yml` (Mondays at 04:23 UTC and on demand: `pixel prepare-repo
   --json` on the pinned `excalidraw/excalidraw` corpus from nothing, then
   after one appended line, each receipt judged by `scripts/ci/check-perf.py`
@@ -1704,7 +1705,7 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
   signed Sigstore bundle ships as the release asset `pixel-<tag>.intoto.jsonl`,
   the suffix Scorecard's Signed-Releases check reads as provenance, and the
   smoke test verifies it, the archive and its SBOM with `gh attestation
-  verify`, with and without `--bundle`), `homebrew-core.yml` (that formula
+  verify`, with and without `--bundle`), `homebrew-core.yml` (Linux on relevant PRs, macOS and Linux weekly/on demand; that formula
   built from source, `brew test`, `brew audit --strict --new`, on macOS and
   Linux),
   `release-prepare-scope.yml`, `pages.yml` (the website) and `scorecard.yml`

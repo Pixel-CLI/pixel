@@ -340,6 +340,11 @@ version, sha256 check).
 
 Pull requests run `ci.yml`, `cross-build.yml`, `codeql.yml`,
 `fuzz.yml` and the others listed in ARCHITECTURE.md, "Testing and gates".
+Ordinary PRs use Linux cross-build and Homebrew checks. Native macOS release
+validation runs on main before tagging and on maintenance release PRs; native
+Homebrew validation runs weekly or manually. A macOS-specific regression in an
+ordinary PR can therefore be detected only after merge. The release build and
+its native packaging checks remain in place; permissions and secrets are unchanged.
 The `ci.yml` pull-request path filter excludes most documentation but includes
 `docs/bench/**`, so benchmark-report changes still receive the required CI
 status checks through the existing `pull_request` workflow and permissions.

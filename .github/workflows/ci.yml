@@ -599,6 +599,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-build-env.py
 
+      - name: macOS CI cadence contract
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-macos-ci-cadence.py
+
       # clean.sh removes whole directories. The cases that matter are the ones
       # asserting what it leaves alone: a file git tracks, a tree behind a
       # symlink, the index under `just clean`, the daemon sockets beside the
