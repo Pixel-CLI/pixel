@@ -1263,6 +1263,11 @@ of `.pixel/brief-decisions.jsonl` (see "On-disk state"), with `receipt`,
 `PIXEL_BRIEF=0|false|off` or `brief: false` in `.pixel/config.yaml`
 switches the brief off.
 
+Whatever its tier, every brief then ends on `SKILL_LINE` (`execution_brief/chain.rs`): any search past the
+brief goes through the `pixel` skill (`pixel find-code`, `pixel who-calls`, `pixel search-content`) before grep,
+rg, find or ls. Agents otherwise treated the skill as optional once a brief had arrived. The line is appended in
+`Pending::finish_with_record`, after the part budget and the probes.
+
 **The region pack** (`execution_brief/region_pack.rs`, built by `pack_evidence`
 after the packet is complete) replaces the packet with the source an agent
 reads before it answers, as line-numbered blocks of exact lines under one
