@@ -289,6 +289,67 @@ class Wiring(unittest.TestCase):
         self.assertEqual(builds, [expected, expected])
         self.assertIn("TARGET: x86_64-unknown-linux-musl", repro)
 
+    def test_release_verify_matches_ci_debug_cache_environment(self):
+        release = (WORKFLOWS / "release.yml").read_text()
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        value = re.search(r"(?m)^\s+CARGO_PROFILE_DEV_DEBUG: (\S+)$", ci).group(1)
+        verify = release.split("  verify:\n", 1)[1].split("\n  # Dynamic analysis", 1)[0]
+        self.assertRegex(verify, rf"(?m)^\s+CARGO_PROFILE_DEV_DEBUG: {re.escape(value)}$")
+        self.assertLess(verify.index("CARGO_PROFILE_DEV_DEBUG"), verify.index("Swatinem/rust-cache"))
+
+
+class ReleaseSystemDependencies(unittest.TestCase):
+    """Run release.yml's dependency guard with only the required commands stubbed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.calls = self.root / "sudo-calls"
+        sudo = self.bin / "sudo"
+        sudo.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SUDO_CALLS"\n'
+            'case "$*" in *install*) [ "${SUDO_FAIL:-0}" = 0 ] ;; esac\n'
+        )
+        sudo.chmod(0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_guard(self, *, dependencies: bool, fail_sudo: bool = False) -> subprocess.CompletedProcess:
+        if dependencies:
+            for name in ("perl", "make"):
+                command = self.bin / name
+                command.write_text("#!/bin/sh\nexit 0\n")
+                command.chmod(0o755)
+        env = dict(
+            os.environ, PATH=str(self.bin), SUDO_CALLS=str(self.calls),
+            SUDO_FAIL="1" if fail_sudo else "0",
+        )
+        return subprocess.run(
+            ["/bin/bash", "-e", "-c", run_block("release.yml", "Install system dependencies")],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_dependencies_already_present_skip_apt(self):
+        result = self.run_guard(dependencies=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_missing_dependency_installs_both_packages(self):
+        result = self.run_guard(dependencies=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ["apt-get update", "apt-get install -y perl make"])
+
+    def test_failed_install_fails_the_step(self):
+        result = self.run_guard(dependencies=False, fail_sudo=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            self.calls.read_text().splitlines(),
+            ["apt-get update", "apt-get install -y perl make"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

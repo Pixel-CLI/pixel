@@ -15,11 +15,11 @@ on:
   pull_request:
     types: [closed]
   # The close event is a point-in-time snapshot: a post-close push to a
-  # deleted branch (or a superseded queue entry) fires no new event. A
-  # periodic sweep catches those, so the runner queue never grows on runs
-  # whose PR is already closed.
+  # deleted branch (or a superseded queue entry) fires no new event. An
+  # hourly sweep catches those, so the runner queue never grows on runs
+  # whose PR is already closed. Minute 17 avoids the busiest hour boundary.
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '17 * * * *'
 
 # Read-only at the top: the write scope belongs to the one job that cancels
 # runs, so a job added later does not inherit it (OpenSSF Scorecard
@@ -30,6 +30,7 @@ permissions:
 jobs:
   cancel:
     runs-on: ubuntu-26.04
+    timeout-minutes: 5
     permissions:
       # actions/checkout of main.
       contents: read

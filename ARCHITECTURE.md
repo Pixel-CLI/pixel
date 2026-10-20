@@ -1639,6 +1639,11 @@ The allocation-budget test bounds allocations while reading request frames.
   paths did not change skips its steps, then runs in parallel:
   Its pull-request path filter also includes `docs/bench/**` so benchmark
   reports receive the required status checks.
+  The classifier fetches full history for a PR's merge-base diff; main pushes
+  use a shallow checkout and still select every lane.
+  - **Linux installer smoke**: both release architectures when the installer,
+    its release workflows, or its contract tests change; unrelated script edits
+    skip these downloads. Every main push still runs both architectures.
   - **Test + Format**: action-pin verification (`scripts/ci/verify-action-pins.py`),
     the SPDX header check (`scripts/ci/check-spdx.py`, on every diff),
     `cargo fmt --check`, `cargo nextest run --profile ci`
@@ -1649,7 +1654,7 @@ The allocation-budget test bounds allocations while reading request frames.
     release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
     nightly diff checkpoints, coverage selection, mutants
-    config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, embedding-model pin, release symbols split, public-claims check, harness-grid dispatch input,
+    config, action pins, advisory ignores, SPDX headers, clean, CI input selection, cancel-stale sweep, embedding-model pin, release symbols split, public-claims check, harness-grid dispatch input,
     reproducible release build environment, the brief-gate bench, excavation counter and live brief A/B driver self-tests with the `eval/brief-gate/` prompt set's schema check, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
     (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`);
@@ -1710,7 +1715,8 @@ The allocation-budget test bounds allocations while reading request frames.
   environment, `Cargo.lock`, a `Cargo.toml`, `crates/pixel/build.rs` or
   `release-build.yml`, on pushes to `main` touching any of them or
   `crates/**`, weekly and on demand), `release.yml`
-  (on a tag: `verify`, then publication, the tap and the post-publish smoke
+  (on a tag: `verify`, restoring main's `linux-debug` cache with the same
+  job-level `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, then publication, the tap and the post-publish smoke
   test) and `release-build.yml`, the reusable workflow it calls to build the
   archives, write the formula and the Linux bottles with
   `scripts/release/homebrew-formula.py` and the homebrew-core formula with
@@ -1726,6 +1732,8 @@ The allocation-budget test bounds allocations while reading request frames.
   verify`, with and without `--bundle`), `homebrew-core.yml` (Linux on relevant PRs, macOS and Linux weekly/on demand; that formula
   built from source, `brew test`, `brew audit --strict --new`, on macOS and
   Linux),
+  `cancel-stale.yml` (immediate cleanup when a PR closes, plus an hourly
+  fallback at minute 17; a sweep is limited to five minutes),
   `release-prepare-scope.yml`, `pages.yml` (the website) and `scorecard.yml`
   (OpenSSF Scorecard on every push to `main` and weekly: publishes the score
   to `api.scorecard.dev` and the findings to code scanning) and `codeql.yml`

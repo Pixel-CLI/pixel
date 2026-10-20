@@ -348,6 +348,14 @@ its native packaging checks remain in place; permissions and secrets are unchang
 The `ci.yml` pull-request path filter excludes most documentation but includes
 `docs/bench/**`, so benchmark-report changes still receive the required CI
 status checks through the existing `pull_request` workflow and permissions.
+CI's Linux installer smoke selects installer/release inputs on PRs and runs
+on every main push; the remaining script contracts retain their own selection.
+`cancel-stale.yml` keeps its PR-close trigger and checks out trusted `main`,
+with job-scoped `actions: write` solely for cancellation. Its fallback sweep
+runs hourly at minute 17 with a five-minute timeout. Runs missed by the close
+event can therefore remain queued or running until a later sweep; scheduled
+execution may be delayed by GitHub. Open PRs, main runs and board sync are
+excluded from cancellation by the existing script.
 `board-sync.yml` runs on `pull_request_target` to move the project board.
 `mutants.yml` runs the cumulative main diff nightly, with read-only contents
 and Actions metadata access. It accepts checkpoint metadata only from its
@@ -930,6 +938,9 @@ retention remain those described below.
   only successful main analyses save executable build-script/proc-macro
   outputs, while manual branch analyses may restore them. A cache hit never
   replaces an analysis.
+  Stale-run cleanup executes the script from `main`, passes branch names
+  through environment variables, and skips the PR-close cancellation step
+  for foreign repositories; changing its fallback cadence grants no new access.
 - **Status**: Partial.
 - **Residual**: Rust CodeQL findings may be discovered after merge; triage
   them before the next release. Any pull request can link an issue with a
