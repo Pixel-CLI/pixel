@@ -11,7 +11,9 @@ each weighted by how few cases carry it; cases under half the best score, and ra
 left out. Read-only, deterministic, at most 9 000 bytes. Issue #1196."""
 import json
 import math
+import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -147,6 +149,22 @@ def quoted_ranges(brief):
     return got
 
 
+MAX_BYTES = 2_000_000
+
+
+def regular_lines(path, limit):
+    """Lines of a regular file read without following a symlink; None for anything else or past `limit` bytes."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = source.read(limit + 1)
+    return None if len(raw) > limit else raw.decode("utf-8", errors="replace").splitlines()
+
+
 def main():
     req = json.load(sys.stdin)
     root, prompt, brief = Path(req["repo_root"]), req["prompt"], req.get("brief", "")
@@ -174,7 +192,8 @@ def main():
     pool += carrying(root, sorted(tests), pathy)
     files = []
     for p in dict.fromkeys(pool):
-        if p in tests or "#[test]" in (root / p).read_text(errors="replace"):
+        body = regular_lines(root / p, MAX_BYTES)
+        if body is not None and (p in tests or any("#[test]" in line for line in body)):
             files.append(p)
         if len(files) == 16:
             break
@@ -184,9 +203,8 @@ def main():
     df = {w: 0 for w in words}
     parsed = {}
     for rel in files:
-        try:
-            lines = (root / rel).read_text(errors="replace").splitlines()
-        except OSError:
+        lines = regular_lines(root / rel, MAX_BYTES)
+        if lines is None:
             continue
         us = units(lines, rel)
         parsed[rel] = (lines, us)
