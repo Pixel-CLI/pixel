@@ -93,5 +93,26 @@ class TestModuleReferences(unittest.TestCase):
         self.assertIn("### src/worker.rs:", output)
 
 
+class TestFileStems(unittest.TestCase):
+    FILES = {
+        "src/model.rs": "pub struct Model;\n",
+        "src/relay.rs": "pub fn ask_model_to_relay() {}\n",
+    }
+    BRIEF = "[PIXEL:BRIEF]\n### src/relay.rs:1 — ask_model_to_relay definition (function)\n1| pub fn ask_model_to_relay() {}\n"
+
+    def stems_run(self, prompt):
+        request = {"prompt": prompt, "repo_root": str(repo(self.FILES)), "brief": self.BRIEF, "kind": "impact",
+                   "session_files": []}
+        return subprocess.run([str(PROBE)], input=json.dumps(request), capture_output=True, text=True,
+                              check=True).stdout
+
+    def test_a_word_inside_an_identifier_names_no_file(self):
+        self.assertNotIn("src/model.rs", self.stems_run("what breaks if I change ask_model_to_relay"))
+
+    def test_a_whole_word_still_names_its_file(self):
+        self.assertIn("### src/model.rs:1-1 — file named 'model' (a word of the prompt)",
+                      self.stems_run("what breaks if I change the model"))
+
+
 if __name__ == "__main__":
     unittest.main()
