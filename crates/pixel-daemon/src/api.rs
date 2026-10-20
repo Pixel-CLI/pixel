@@ -908,6 +908,10 @@ impl Service {
         // A watcher batch means the working tree changed: the cached dirty
         // list is stale as of right now. HEAD and the branch are not.
         self.git_state.dirty = None;
+        // Stage the envelope alongside the index, outside the publication
+        // lock. Every batch publishes it so a subsequent batch can serve
+        // replicas without an intervening writer request to warm a snapshot.
+        let snapshot = self.repo_snapshot().compact();
         let staged = self.index.read_or_recover().stage_refresh(files);
         let graph_files: Vec<(String, bool)> = staged
             .outcomes()
@@ -966,6 +970,10 @@ impl Service {
         }
         let state = swap.open();
         state.publish();
+        *self.published_snapshot.write_or_recover() = Some(PublishedSnapshot {
+            generation: state.generation,
+            snapshot,
+        });
         self.meaning.nudge(state.generation);
     }
 
@@ -6742,8 +6750,8 @@ mod tests {
 
     /// A replica's answer carries the snapshot the writer published with
     /// the generation it read, and the replica runs no git for it; with no
-    /// snapshot for that generation (a new batch, a HEAD move, a repository
-    /// write) the read goes back to the writer (#1151).
+    /// snapshot for that generation (a HEAD move or repository write), the
+    /// read goes back to the writer (#1151). Watcher batches publish their own.
     #[test]
     fn a_replica_should_attach_the_published_snapshot_and_run_no_git() {
         let root = login_repo("published-snapshot");
@@ -6769,16 +6777,18 @@ mod tests {
         assert_eq!(read.snapshot, Some(published.snapshot.clone()));
         assert_eq!(reader.git_state.lookups, 0, "a replica spawned git");
 
-        // A watcher batch publishes a new generation: the old snapshot does
-        // not describe it.
+        // A watcher batch publishes its snapshot with the new generation;
+        // no writer request is needed before a replica can answer.
         std::fs::write(root.join("login.rs"), "pub fn login_v3() {}\n").unwrap();
         writer.refresh_file("login.rs");
-        assert!(
+        assert_eq!(
             reader
                 .read_answer(&search_request("login_v3"), &|| None)
-                .is_none()
+                .expect("the batch published its snapshot")
+                .snapshot
+                .and_then(|s| s.dirty_count),
+            Some(1)
         );
-        assert!(writer.handle(search_request("login_v3")).ok);
         let next = reader
             .read_answer(&search_request("login_v3"), &|| None)
             .unwrap();
@@ -6917,6 +6927,48 @@ mod tests {
             json!("resolved"),
             "the committed rows: {resolved:?}"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A second edit must not need an intervening writer request to make
+    /// the previous generation available to a deadline-bound brief.
+    #[test]
+    fn stale_brief_should_answer_during_a_second_batch_without_a_writer_read() {
+        let root = login_repo("consecutive-stale-brief");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        assert!(writer.handle(search_request("login")).ok);
+        let mut reader = writer.read_replica();
+        std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
+        writer.refresh_file("login.rs");
+        let generation = writer.publication_generation();
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        writer.before_swap = Some(Box::new(move || {
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        }));
+        std::fs::write(root.join("login.rs"), "pub fn login_v3() {}\n").unwrap();
+        let batch = std::thread::spawn(move || {
+            writer.refresh_file("login.rs");
+            writer
+        });
+        held.recv_timeout(Duration::from_secs(10)).unwrap();
+        let started = Instant::now();
+        let response = reader.read_answer(&relevance_request(true), &|| {
+            Some(Duration::from_millis(1000))
+        });
+        let elapsed = started.elapsed();
+        release.send(()).unwrap();
+        let _writer = batch.join().unwrap();
+        let response =
+            response.expect("the second batch must leave the previous snapshot readable");
+        assert!(elapsed < Duration::from_secs(1), "brief waited {elapsed:?}");
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.data()["inputs"]["graph_generation"], generation);
+        assert_eq!(response.snapshot.and_then(|s| s.dirty_count), Some(1));
+        assert_eq!(response.epistemics.and_then(|e| e.staleness_ms), Some(1000));
+        assert_eq!(reader.git_state.lookups, 0, "replicas never spawn git");
         std::fs::remove_dir_all(root).unwrap();
     }
 

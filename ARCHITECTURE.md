@@ -302,8 +302,10 @@ checks it before and after, inside one read transaction on the graph); it
 never builds the graph, adds no git churn signals and no semantic fallback,
 and runs no git: its `snapshot` is the compact `PublishedSnapshot` the
 writer published with that generation (from the snapshot it attached to an
-answer, or computed before a repository write starts). A watcher batch, a
-HEAD move or a repository write withdraws it, and `Job::refreshes` keeps
+answer, staged by a watcher batch, or computed before a repository write
+starts). Each successful watcher batch publishes a compact snapshot with its
+new generation, so consecutive edits need no intervening writer request.
+A HEAD move or a repository write withdraws it, and `Job::refreshes` keeps
 reads from overtaking the batch or the HEAD move. The replica hands the
 request back to the writer when the graph is missing or lags, no snapshot
 describes its generation, or the generation moved. A `targets_facts`, `search`, `resolve`, `meaning`, `symbol`, `skeleton`, `context`, `uses`, `impact`,
