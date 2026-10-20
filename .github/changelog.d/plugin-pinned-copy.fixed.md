@@ -1,1 +1,0 @@
-**plugins:** Pin source directories while installing a plugin, refusing directory substitutions and reading files and link text relative to verified parent descriptors. A directory renamed after entry cannot redirect the copy to a symlink target.

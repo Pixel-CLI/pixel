@@ -1,1 +1,0 @@
-**daemon:** while a long request runs (a `sync`, a `rebase`), `search`, `targets`, `resolve`, `impact` and `meaning` are answered by read replicas from the last published index instead of waiting: during a 30 s `sync` they answered in 52 to 86 ms instead of about 29 s. A read queued behind a watcher batch still waits for it.

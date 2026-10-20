@@ -1,1 +1,0 @@
-**daemon, facts:** facts and status requests reuse the history store the daemon already opened: no `.pixel` trust-check spawn or DDL per request. The store is reopened, and re-checked, when `history.db` is another file. `status` reads the refs once and recounts commits only when they moved.

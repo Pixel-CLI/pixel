@@ -1,1 +1,0 @@
-**hooks:** Codex's metrics relay now requires a unique matching invocation header in the current tool result, so a failed call cannot display an earlier agent's metrics. Missing or ambiguous attribution stays silent.

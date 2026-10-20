@@ -1,1 +1,0 @@
-**graph:** every `git` command the indexer runs is now killed after 120 s or once it writes more than 64 MiB, so a hung git (a credential helper, a network filesystem, a long `index.lock` wait) can no longer freeze a graph refresh. The error names the command and the limit it hit.

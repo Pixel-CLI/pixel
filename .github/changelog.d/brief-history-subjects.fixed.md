@@ -1,1 +1,0 @@
-**brief:** Prefer matching commit subjects over incidental words in long message bodies for history questions. Both history probes preserve exact version and quoted-title precedence, retain short topic words, and require multiple matching subject terms.

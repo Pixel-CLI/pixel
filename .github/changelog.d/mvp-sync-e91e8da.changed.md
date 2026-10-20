@@ -1,1 +1,0 @@
-**graph:** the vendored pixel-mvp moves to `e91e8da`. Its Ruby rules decide the same edges in less time, and its index is about a third of its size (an edge names its site's symbol by id, schema 8): `.pixel/.pixel-mvp/` on antiwork/gumroad 346 → 133 MB. A graph built from pixel-mvp, and its index, rebuild once.

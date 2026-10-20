@@ -1,1 +1,0 @@
-**daemon:** A repository that lives under a directory named like an ignored one (`~/.cache/…`, `~/code/build/…`, a `vendor/` checkout) gets its edits again. The watcher dropped every event whose absolute path crossed such a name; it now judges only the components below the root, as the watch registration already did.

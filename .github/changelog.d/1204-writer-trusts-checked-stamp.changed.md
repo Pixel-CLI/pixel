@@ -1,1 +1,0 @@
-**graph:** With `PIXEL_GRAPH_SOURCE_RUBY=hybrid` or a Rust root, a watcher update no longer checks pixel-mvp's whole index each time it opens it. The writer now trusts the `checked` stamp while the full check behind it is under a day old, and forgets the stamp after any failed run, which saves about 1.3–1.9 s per update on gumroad.

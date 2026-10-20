@@ -1,1 +1,0 @@
-**hooks:** a corrupt or unwritable `.pixel/task-hook-observations.json` no longer fails a task hook, and an unchanged observation under 60 s old is not rewritten. `pixel impact a 2>&1` (or `> f`, `&> f`) now matches the logged `impact a`, and `cd /r && pixel impact a` followed by a newline keeps its first letter.

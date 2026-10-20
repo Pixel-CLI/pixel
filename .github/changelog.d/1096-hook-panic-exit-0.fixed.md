@@ -1,1 +1,0 @@
-**hooks:** a panic inside `run-hook task-event` or `run-hook metrics` now exits 0 instead of 101. The response already printed stays and nothing is added, so a host never sees a failed hook or a second JSON object.

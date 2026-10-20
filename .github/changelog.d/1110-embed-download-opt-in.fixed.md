@@ -1,1 +1,0 @@
-**daemon:** A `--scope hybrid` search no longer downloads the code embedding model in the background unasked: it prints how to opt in and ranks without it. Set `PIXEL_EMBED_DOWNLOAD=1` to allow the download; every potion download now prints the model, revision and destination before it starts.

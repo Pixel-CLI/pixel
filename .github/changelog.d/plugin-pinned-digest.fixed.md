@@ -1,1 +1,0 @@
-**plugins:** Hash trusted plugin trees through pinned directory descriptors, including leaf-file and symlink-text reads after sorting. Replaced directories cannot redirect trust hashing outside the source tree; unchanged plugins keep the same digest.

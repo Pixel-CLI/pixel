@@ -1,1 +1,0 @@
-**daemon, index:** a watcher batch no longer walks the whole tree: it keeps the ignore-policy verdict and rebuilds it only when `.gitignore`, `.ignore` or `.git/info/exclude` changes. A one-file batch on a 25 000-file repository went from 37 ms to 0.02 ms (median).

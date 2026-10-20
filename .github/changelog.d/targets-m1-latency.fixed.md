@@ -1,1 +1,0 @@
-**daemon, index:** `scope-task` no longer spawns its `git log` activity scan twice per call, its keyword probes share one index scan and one compiled matcher, and the M1 service-time bench runs in CI. `targets` on the bench fixture drops from ~1.5 ms to ~0.62 ms; the fixture now pins its own git config, so it measures the same thing on every machine.

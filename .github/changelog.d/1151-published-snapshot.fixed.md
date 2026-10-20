@@ -1,1 +1,0 @@
-**daemon:** an answer given by a read replica carries the `snapshot` the writer published with the index generation it read, instead of running git itself: its HEAD, branch and dirty count can no longer be newer than the index it answered from.

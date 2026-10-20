@@ -1,1 +1,0 @@
-**brief:** a French prompt is now read in the English words code uses by default (`PIXEL_BRIEF_FRENCH=0` turns it off): on `eval/brief-gate/`, 21 of 37 French on-topic prompts get a brief instead of 10, 8 of 22 name an expected file with the daemon instead of 0, one French off-topic prompt of 27 now fires, and English briefs are byte-identical.

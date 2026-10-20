@@ -1,1 +1,0 @@
-**brief:** The `error-origin` probe now also finds a message the question describes without quoting it ("the error about working outside of application context"): the short string literal carrying most of the question's rarest words, or the code naming a message catalogue key. On the 56-question bench, `error-origin` file recall rises from 0.186 to 0.244.

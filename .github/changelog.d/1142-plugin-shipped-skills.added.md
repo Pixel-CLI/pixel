@@ -1,1 +1,0 @@
-**plugin:** a `pixel-plugin.toml` may declare `skill = "skills/<plugin>/SKILL.md"`: `pixel install` copies that file into every configured agent's skills dir (`.claude` plus the agents already configured), printing each destination, and `pixel uninstall` removes the copies it delivered while keeping one you edited.

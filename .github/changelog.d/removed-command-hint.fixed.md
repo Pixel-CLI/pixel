@@ -1,1 +1,0 @@
-**cli:** a command name 0.8.0 removed (the 41 pre-rename aliases: `ready`, `uses`, `history`, …) now says what replaced it, ``pixel: 'ready' was removed in 0.8.0; use `pixel prepare-repo` ``, with the plugin install command when the replacement moved to a plugin, instead of clap's "a similar subcommand exists: 'rename'". It still exits 2 and runs nothing.

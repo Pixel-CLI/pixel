@@ -1,1 +1,0 @@
-**graph:** graph rebuilds, incremental updates and watcher batches now take a `.pixel/graph.lock` file lock. A `--no-daemon` run beside a live daemon (or two rebuilds at once) no longer deletes the other one's WAL or swaps the database file under it.

@@ -1,1 +1,0 @@
-**recall:** Code search always selects its 16M code model, independently of transcript model preferences. Offline code searches read local model bytes and report incomplete caches without silently downloading replacements.

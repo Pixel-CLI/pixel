@@ -1,1 +1,0 @@
-**install:** `pixel setup --remove` restores original files, deletes unchanged files setup created (including global YAML and hooks), and prunes only setup-created empty directories. Files edited afterward stay in place and are reported. Recovery copies preserve the original permission bits.

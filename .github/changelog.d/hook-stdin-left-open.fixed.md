@@ -1,1 +1,0 @@
-**hooks:** a `pixel run-hook` hook whose host leaves stdin open now answers within a second, with the payload when it arrived whole, instead of waiting until the host's 10 s timeout kills it. New tests hold every hook entry point to exit 0 with one JSON object on one line, or nothing, on stdout over hostile payloads, broken `.pixel/` state and argument errors.

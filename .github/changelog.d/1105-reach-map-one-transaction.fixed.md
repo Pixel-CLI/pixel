@@ -1,1 +1,0 @@
-**facts:** after a ref move, history ingestion records reach bits only for commits it does not know yet, in one transaction instead of one per commit. Re-enumerating 20 000 known commits went from 647–861 ms to 100–106 ms.

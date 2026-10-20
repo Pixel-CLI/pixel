@@ -1,1 +1,0 @@
-**brief:** an Antigravity prompt is briefed on what the user typed. Antigravity CLI 1.4 stores each turn as `<USER_REQUEST>…</USER_REQUEST>` followed by its own `<ADDITIONAL_METADATA>` and `<USER_SETTINGS_CHANGE>` blocks, and the brief used to look up `USER_REQUEST`, the local time and the model name as symbols.

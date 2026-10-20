@@ -1,1 +1,0 @@
-**telemetry:** Local action, brief-decision and brief-feedback JSONL records now identify the producing Pixel build and share an invocation ID, with pseudonymous host/session context when available. Retrospectives can join events and compare versions while older records remain readable.

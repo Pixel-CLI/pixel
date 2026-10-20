@@ -1,1 +1,0 @@
-**brief:** The `flow-rank` probe now starts a walkthrough's call chain from the entry the question names in code form (`requests.get`, `wsgi_app`) instead of the brief's guess, follows a narrow chain even when its callees' names miss the question's words, and runs for "walk me through" prompts. On the 56-question bench, `flow` line coverage rises from 6.8% to 16.8%.

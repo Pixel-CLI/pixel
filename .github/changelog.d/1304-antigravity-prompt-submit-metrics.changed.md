@@ -1,1 +1,0 @@
-**brief:** an Antigravity brief now ends by asking the model to repeat its `🟩 pixel prompt-submit` line, as Devin's does. Antigravity draws no hook output, and its `injectSteps` envelope never counted as a delivered brief, so a brief left nothing on screen.

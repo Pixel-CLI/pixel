@@ -1,1 +1,0 @@
-**brief:** an off-topic score is overruled by coverage only when one file holds three of the prompt's keywords, not two: two words a repository uses (`replay`, `fini`) are what a status question or a steer of the agent shares with it. On the labelled replay, precision 60 % → 65 % on the reference window and 55 % → 59 % on a held-out one; project recall unchanged.

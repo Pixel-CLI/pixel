@@ -1,1 +1,0 @@
-**dev:** Run the five-CLI Ultima Arena with `just ultima-arena`: one Herdr grid, fixed seed, prompts dispatched together, evidence-based early stops, and dated local receipts with commit provenance. Preserve Pi evidence even when its terminal viewport is stale.

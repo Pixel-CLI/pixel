@@ -1,1 +1,0 @@
-**brief:** a prompt that only asks to merge pull requests, close an issue or steer the agent ("Merge les PRs", "go next", "stop"), in English or French, no longer gets a brief, nor does an acknowledgement under Codex's `## My request:` heading. On the labelled #1032 replay, precision rises from 53 % to 61 % with project and follow-up recall unchanged.

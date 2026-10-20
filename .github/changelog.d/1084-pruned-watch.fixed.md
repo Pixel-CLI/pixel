@@ -1,1 +1,0 @@
-**daemon:** on Linux the file watch skips ignored directories (`node_modules`, `target`, …): 2 216 inotify watches instead of 15 825 on a tree with 13 609 ignored directories, so a repository past `max_user_watches` keeps live updates. `pixel status` reports the watch (`watched_dirs`, `registration_ms`).

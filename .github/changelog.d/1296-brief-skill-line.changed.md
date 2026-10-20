@@ -1,1 +1,0 @@
-**brief:** Every brief now ends on one line that sends any further search to the `pixel` skill (`pixel find-code`, `pixel who-calls`, `pixel search-content`) before grep, rg, find or ls, whatever the brief answered. Agents treated the skill as optional once the brief had arrived.

@@ -1,1 +1,0 @@
-**graph:** With the Rust source on, an unresolved Rust call whose name no symbol of the graph carries (a `std` method, a macro, another crate) is counted on its enclosing symbol instead of stored per site; `uses … callees` still reports it as an unresolved outgoing site. On this repository the Rust `unresolved_calls` rows drop from 58,142 to 35,075; graphs rebuild once.

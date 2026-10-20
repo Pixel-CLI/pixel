@@ -1,1 +1,0 @@
-**brief:** secrets glued to a name are now masked in logged prompts and git errors: `ANTHROPIC_API_KEY=sk-ant-…`, `export X=ghp_…`, `{"key":"sk-…"}`, `GITHUB_TOKEN=…` and `DB_PASSWORD=…` were kept in clear.

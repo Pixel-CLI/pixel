@@ -1,1 +1,0 @@
-**graph:** `graph.v2.db` now gives freed pages back to the file system after a full build, as `history.db` does after an eviction: a db is created with `auto_vacuum = INCREMENTAL`, an older one is converted by one `VACUUM` at its next full build, and each graph write ends with SQLite's bounded `PRAGMA optimize`.

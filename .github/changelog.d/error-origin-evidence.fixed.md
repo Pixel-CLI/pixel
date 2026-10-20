@@ -1,1 +1,0 @@
-**brief:** Qualify error-origin matches and lexical callers instead of claiming documentary or homonymous occurrences prove a cause; quote matching Python conversion handlers and their import boundary.

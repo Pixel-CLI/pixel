@@ -1,1 +1,0 @@
-**brief:** A `test-bodies` probe quotes the test cases a tests question asks about (Python `def test_*`, JS `it`/`test`, Rust `#[test]`, inline modules included), from the test files the brief names or whose path or text names the subject, best first. On the 56-question bench, test oracle lines covered rise from 8.1% to 17.8%.

@@ -1,1 +1,0 @@
-**graph:** with `PIXEL_GRAPH_SOURCE_RUBY=hybrid`, an incremental update merges pixel-mvp's Ruby answer again only into the files whose merge may have moved, instead of re-reading all of its sites: a one-file edit then a graph command on antiwork/gumroad goes from 8.1 s to 4.4 s. A hybrid graph rebuilds once.

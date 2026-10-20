@@ -1,1 +1,0 @@
-**brief:** a Devin brief now ends by asking the model to repeat its `🟩 pixel prompt-submit` line. Devin draws neither `systemMessage` nor hook output, so a turn answered from the brief alone showed no metrics.

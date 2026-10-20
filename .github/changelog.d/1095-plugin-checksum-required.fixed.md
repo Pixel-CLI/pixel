@@ -1,1 +1,0 @@
-**plugin:** `pixel install github:…` no longer installs a release asset whose release publishes no `.sha256`: pass `--allow-unverified` to accept it (reported as UNVERIFIED with its sha256). `--json` prints the asset URL, digest and `verified`.

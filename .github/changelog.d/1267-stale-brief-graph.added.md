@@ -1,1 +1,0 @@
-**daemon:** Allow opt-in stale reads for the brief’s graph operations during watcher updates, stating the served generation and lag. Snapshot evaluation stays read-only and context still omits excerpts whose source changed.
