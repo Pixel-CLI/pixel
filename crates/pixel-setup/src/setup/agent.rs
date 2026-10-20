@@ -64,6 +64,21 @@ impl AgentTarget {
         Self::AgentMd,
     ];
 
+    /// Stable spelling accepted by `pixel setup --agent`.
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude",
+            Self::Codex => "codex",
+            Self::Devin => "devin",
+            Self::Cursor => "cursor",
+            Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
+            Self::OpenCode => "opencode",
+            Self::Pi => "pi",
+            Self::AgentMd => "agents-md",
+        }
+    }
+
     /// The 1-based index the non-interactive `--selected-agents` flag uses.
     pub fn index(self) -> usize {
         Self::ALL
@@ -301,5 +316,19 @@ mod tests {
             "a repository CLAUDE.md is the one unambiguous per-repository marker"
         );
         assert!(!AgentTarget::AgentMd.in_use(machine.path(), Scope::Global));
+    }
+}
+
+impl std::str::FromStr for AgentTarget {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|agent| agent.cli_name() == value)
+            .ok_or_else(|| {
+                let names = Self::ALL.map(Self::cli_name).join(", ");
+                format!("unknown agent {value:?}; expected one of: {names}")
+            })
     }
 }

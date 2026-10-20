@@ -40,6 +40,13 @@ class CacheConfiguration(unittest.TestCase):
             configure.configure()
         return self.output.read_text()
 
+    def test_agent_list_syntax_is_bounded_before_setup(self):
+        for agents in ('all', 'claude', 'codex', 'claude,codex', 'agents-md'):
+            self.config(PIXEL_ACTION_HOOKS_AGENT=agents)
+        for agents in ('', 'claude,', 'claude codex', '--remove', 'claude\n'):
+            with self.subTest(agents=agents), self.assertRaises(ValueError):
+                self.config(PIXEL_ACTION_HOOKS_AGENT=agents)
+
     def test_cache_keys_separate_incompatible_indexes(self):
         base = self.config().split('cache-key=')[1].splitlines()[0]
         (self.root / 'nested').mkdir()

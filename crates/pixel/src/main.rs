@@ -815,10 +815,11 @@ enum Command {
     /// pixel setup --remove
     /// ```
     Setup {
-        /// Install only Claude integrations, without touching other agent configs.
-        #[arg(long, value_parser = ["claude"], requires = "yes",
+        /// Install only these agents (repeat the flag or use a comma-separated list).
+        /// Targets: claude, codex, devin, cursor, gemini, antigravity, opencode, pi, agents-md.
+        #[arg(long, value_delimiter = ',', requires = "yes",
               conflicts_with_all = ["repo", "remove", "print", "selected_agents"])]
-        agent: Option<String>,
+        agent: Vec<pixel_setup::setup::AgentTarget>,
         #[arg(long)]
         json: bool,
         /// Set up this repository instead of the machine, skipping every
@@ -4325,7 +4326,11 @@ fn run() -> Result<(), String> {
 
 /// `pixel setup`: deploy the agent integrations (globally, or into one
 /// repository with `--repo`) and report what changed.
-fn setup_install(json: bool, repo: Option<PathBuf>, claude_only: bool) -> Result<(), String> {
+fn setup_install(
+    json: bool,
+    repo: Option<PathBuf>,
+    agents: Vec<pixel_setup::setup::AgentTarget>,
+) -> Result<(), String> {
     let is_global_install = repo.is_none();
     let config_root = repo.clone();
     let stdout_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
@@ -4341,10 +4346,11 @@ fn setup_install(json: bool, repo: Option<PathBuf>, claude_only: bool) -> Result
         ..Default::default()
     };
     let receipt = pixel_setup::receipt::Snapshot::begin(&install).map_err(|e| e.to_string())?;
-    let selection = claude_only.then(|| pixel_setup::install::InstallSelection {
-        agents: vec![pixel_setup::setup::AgentTarget::ClaudeCode],
+    let selection = (!agents.is_empty()).then_some(pixel_setup::install::InstallSelection {
+        agents,
         task_hooks: true,
-        ..Default::default()
+        codex_hooks: true,
+        pi_extension: true,
     });
     let report = pixel_setup::install::install_selected(&install, selection.as_ref())
         .map_err(|e| e.to_string())?;
@@ -5443,7 +5449,7 @@ fn run_command(
                     None if print || setup_cmd::is_guided(&options, yes, json) => {
                         setup_cmd::run(options)
                     }
-                    None => setup_install(json, options.repo, agent.is_some()),
+                    None => setup_install(json, options.repo, agent),
                 }
             }
         }

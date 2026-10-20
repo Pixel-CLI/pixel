@@ -789,6 +789,8 @@ envelope talks to the daemon socket directly.
 
 ## Agent integration
 
+`setup --agent` selects one or more `AgentTarget` values by stable name (comma-separated or repeated), with `--yes`. The CLI enables each selected target's existing integrations through `InstallSelection`; unselected targets stay untouched. The CI action forwards `hooks-agent` lists to that interface; `all` preserves automatic setup. Its isolated smoke executes installed Claude and Codex commands separately and together, checking task-bridge receipts and brief output.
+
 Setup and removal edit JSON settings by key, retaining untouched values and their
 formatting. Codex hook writes use the shared atomic settings writer; setup reads
 Codex TOML review state without rewriting it. Gemini and Antigravity use this
@@ -1876,5 +1878,3 @@ homebrew-core formula (`scripts/release/homebrew-core-formula.py`) builds with i
 with `--no-default-features --features model2vec`, since homebrew-core builds
 from source, owns updates, and refuses the prebuilt ONNX Runtime `fastembed`
 downloads; every other build keeps the check.
-
-The CI setup action can select Claude via `hooks-agent: claude`, forwarded to `setup --agent claude --yes` and the existing InstallSelection. Its isolated hook smoke executes installed commands and checks task-bridge receipts and brief output.

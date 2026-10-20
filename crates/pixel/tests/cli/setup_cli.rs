@@ -112,6 +112,94 @@ fn claude_selection_should_preserve_other_agents_and_existing_settings() {
     assert!(!refused.status.success());
 }
 
+/// Every public target reaches its existing installer; selecting one cannot
+/// accidentally retain the old unconditional Claude/Codex deployment.
+#[test]
+fn agent_selection_should_install_each_target_without_writing_other_harnesses() {
+    let targets = [
+        ("claude", ".claude"),
+        ("codex", ".codex"),
+        ("devin", ".devin"),
+        ("cursor", ".cursor"),
+        ("gemini", ".gemini"),
+        ("antigravity", ".gemini"),
+        ("opencode", ".config/opencode"),
+        ("pi", ".pi/agent"),
+        ("agents-md", ".agents"),
+    ];
+    for (name, selected_root) in targets {
+        let home = Scratch::for_test("setup", &format!("selected-{name}-home"));
+        let repo = Scratch::for_test("setup", &format!("selected-{name}-repo"));
+        for (_, root) in targets {
+            fs::create_dir_all(home.join(root)).unwrap();
+            fs::write(home.join(root).join("settings.json"), "{\"sentinel\":true}").unwrap();
+        }
+        let out = run(&home, &repo, &["setup", "--agent", name, "--yes", "--json"]);
+        let report: serde_json::Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+        assert_eq!(report["ok"], true, "{name}: {report}");
+        assert!(
+            home.join(selected_root)
+                .join("skills/pixel/SKILL.md")
+                .is_file(),
+            "{name}"
+        );
+        assert_eq!(
+            home.join(".codex/hooks.json").exists(),
+            name == "codex",
+            "{name}"
+        );
+        for (_, root) in targets {
+            if root != selected_root {
+                assert_eq!(
+                    fs::read_dir(home.join(root)).unwrap().count(),
+                    1,
+                    "{name} touched {root}"
+                );
+                assert_eq!(
+                    fs::read_to_string(home.join(root).join("settings.json")).unwrap(),
+                    "{\"sentinel\":true}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn agent_selection_should_accept_lists_and_repeated_flags_and_refuse_invalid_lists() {
+    for (case, args) in [
+        (
+            "list",
+            vec!["setup", "--yes", "--json", "--agent", "claude,codex"],
+        ),
+        (
+            "repeat",
+            vec![
+                "setup", "--yes", "--json", "--agent", "claude", "--agent", "codex",
+            ],
+        ),
+    ] {
+        let home = Scratch::for_test("setup", &format!("{case}-home"));
+        let repo = Scratch::for_test("setup", &format!("{case}-repo"));
+        stdout_of(&run(&home, &repo, &args));
+        assert!(home.join(".claude/skills/pixel/SKILL.md").is_file());
+        assert!(home.join(".codex/skills/pixel/SKILL.md").is_file());
+        assert!(home.join(".codex/hooks.json").is_file());
+    }
+    for invalid in ["claude,unknown", "claude,", "all", ""] {
+        let home = Scratch::for_test("setup", "invalid-list-home");
+        let repo = Scratch::for_test("setup", "invalid-list-repo");
+        assert!(
+            !run(&home, &repo, &["setup", "--yes", "--agent", invalid])
+                .status
+                .success()
+        );
+        assert!(
+            !home.join(".claude").exists(),
+            "invalid list must be rejected before writes"
+        );
+    }
+}
+
 // TEMPORARY (dev-flags): drives the wizard with the two selection flags.
 #[test]
 fn print_is_the_same_skill_a_machine_wide_run_writes() {

@@ -1,0 +1,1 @@
+**setup:** `pixel setup --agent <name>[,<name>...] --yes` selects agent integrations by name, preserving other configurations. Repeat `--agent` to combine targets. The CI action exposes the same selection through `hooks-agent`; omission keeps automatic setup ([#1317](https://github.com/Pixel-CLI/pixel/pull/1317)).

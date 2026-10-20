@@ -95,5 +95,8 @@ jobs:
           key: setup-pixel-hooks
       - name: Build the candidate CLI
         run: cargo build --locked -p pixel-cli --no-default-features --features model2vec
-      - name: Execute Claude-only hooks from the action installer
-        run: python3 scripts/test-setup-pixel-hooks.py --bin target/debug/pixel --agent claude
+      - name: Execute selected hooks from the action installer
+        run: |
+          for agents in claude codex claude,codex; do
+            python3 scripts/test-setup-pixel-hooks.py --bin target/debug/pixel --agent "$agents"
+          done
