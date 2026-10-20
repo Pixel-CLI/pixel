@@ -181,6 +181,7 @@ fn rename_prompt_should_carry_files_definition_and_callers_in_the_hook_context()
                 "read: packages/ui/handleError.ts:1-3 — handleError",
                 "also: apps/web/page.tsx:2-4 — Page",
                 "Read these ranges (in parallel, one turn) before any search. If they don't answer, search as usual.",
+                "Any search beyond these lines: use the `pixel` skill (`pixel find-code`, `pixel who-calls`, `pixel search-content`) before grep, rg, find or ls.",
             ]
             .join("\n"),
             "{provider}"

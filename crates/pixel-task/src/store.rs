@@ -4,9 +4,11 @@
 //! Locked task transactions with an authoritative append-only journal.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,41 @@ impl Commit {
 pub struct Store {
     root: PathBuf,
     limits: StoreLimits,
+    journal_cache: Arc<Mutex<std::collections::HashMap<String, JournalCacheEntry>>>,
+    #[cfg(test)]
+    journal_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JournalFingerprint {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+impl From<&std::fs::Metadata> for JournalFingerprint {
+    fn from(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            len: metadata.len(),
+            mtime: metadata.mtime(),
+            mtime_nsec: metadata.mtime_nsec(),
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct JournalCacheEntry {
+    fingerprint: Option<JournalFingerprint>,
+    committed_len: u64,
+    commits: Vec<Commit>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +115,9 @@ impl Store {
         Ok(Self {
             root: root.canonicalize()?,
             limits: StoreLimits::default(),
+            journal_cache: Arc::default(),
+            #[cfg(test)]
+            journal_reads: std::sync::Arc::default(),
         })
     }
 
@@ -107,14 +147,37 @@ impl Store {
 
     fn read_commits(&self, task_id: &str) -> Result<Vec<Commit>> {
         let path = self.directory(task_id)?.join("journal.jsonl");
-        let mut file = match File::open(path) {
+        let mut file = match File::open(&path) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.journal_cache
+                    .lock()
+                    .map_err(|_| Error::Unavailable("task journal cache poisoned".into()))?
+                    .remove(task_id);
+                return Ok(Vec::new());
+            }
             Err(error) => return Err(error.into()),
         };
-        if file.metadata()?.len() > self.limits.journal_bytes {
+        let metadata = file.metadata()?;
+        let fingerprint = JournalFingerprint::from(&metadata);
+        if metadata.len() > self.limits.journal_bytes {
             return Err(Error::Corrupt("task journal exceeds supported size".into()));
         }
+        if let Some(cached) = self
+            .journal_cache
+            .lock()
+            .map_err(|_| Error::Unavailable("task journal cache poisoned".into()))?
+            .get(task_id)
+            && cached.fingerprint == Some(fingerprint)
+        {
+            if cached.commits.len() > self.limits.events {
+                return Err(Error::Corrupt("task journal event limit exceeded".into()));
+            }
+            return Ok(cached.commits.clone());
+        }
+        #[cfg(test)]
+        self.journal_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         let mut commits: Vec<Commit> = Vec::new();
@@ -144,6 +207,21 @@ impl Store {
         if !bytes.is_empty() && commits.is_empty() {
             return Err(Error::Corrupt("no complete task journal record".into()));
         }
+        let committed_len = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |offset| offset as u64 + 1);
+        self.journal_cache
+            .lock()
+            .map_err(|_| Error::Unavailable("task journal cache poisoned".into()))?
+            .insert(
+                task_id.into(),
+                JournalCacheEntry {
+                    fingerprint: Some(fingerprint),
+                    committed_len,
+                    commits: commits.clone(),
+                },
+            );
         Ok(commits)
     }
 
@@ -284,28 +362,75 @@ impl Store {
             if !entry.file_type()?.is_dir() {
                 continue;
             }
-            let id = entry.file_name().to_string_lossy().into_owned();
-            if !entry.path().join("task.json").exists()
-                && !entry.path().join("journal.jsonl").exists()
-            {
+            let task_id = entry.file_name().to_string_lossy().into_owned();
+            let directory = entry.path();
+            if !directory.join("task.json").exists() && !directory.join("journal.jsonl").exists() {
                 continue;
             }
-            let task = self.status(&id)?;
-            if task.provider == provider && task.session_id.as_deref() == Some(session) {
-                if found.as_ref().is_some_and(|old| {
-                    old.updated_ms == task.updated_ms && old.task_id != task.task_id
-                }) {
-                    return Err(Error::Blocked("ambiguous active session task".into()));
+            let header = if directory.join("journal.jsonl").exists() {
+                match self.first_journal_task(&task_id) {
+                    Ok(task) => task,
+                    // A damaged header is not a negative filter: retain the
+                    // old full validation behavior for malformed journals.
+                    Err(_) => self.status(&task_id)?,
                 }
-                if found
-                    .as_ref()
-                    .is_none_or(|old| task.updated_ms.cmp(&old.updated_ms).is_gt())
-                {
-                    found = Some(task);
-                }
+            } else {
+                self.status(&task_id)?
+            };
+            if header.provider != provider || header.session_id.as_deref() != Some(session) {
+                continue;
+            }
+            let task = self.status(&task_id)?;
+            if task.provider != provider || task.session_id.as_deref() != Some(session) {
+                return Err(Error::Corrupt(
+                    "task session identity changed in journal".into(),
+                ));
+            }
+            if found
+                .as_ref()
+                .is_some_and(|old| old.updated_ms == task.updated_ms && old.task_id != task.task_id)
+            {
+                return Err(Error::Blocked("ambiguous active session task".into()));
+            }
+            if found
+                .as_ref()
+                .is_none_or(|old| task.updated_ms.cmp(&old.updated_ms).is_gt())
+            {
+                found = Some(task);
             }
         }
         Ok(found)
+    }
+
+    fn first_journal_task(&self, task_id: &str) -> Result<Task> {
+        let path = self.directory(task_id)?.join("journal.jsonl");
+        let file = File::open(path)?;
+        if file.metadata()?.len() > self.limits.journal_bytes {
+            return Err(Error::Corrupt("task journal exceeds supported size".into()));
+        }
+        let reader = std::io::BufReader::new(file);
+        let mut reader = reader.take(self.limits.journal_bytes.saturating_add(1));
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line)?;
+        if line.len() as u64 > self.limits.journal_bytes {
+            return Err(Error::Corrupt("task journal exceeds supported size".into()));
+        }
+        if line.last() != Some(&b'\n') {
+            return Err(Error::Corrupt(
+                "task journal has no complete first record".into(),
+            ));
+        }
+        let record: Commit =
+            serde_json::from_slice(&line).map_err(|error| Error::Corrupt(error.to_string()))?;
+        if record.task.task_id != task_id
+            || record.task.version != SCHEMA_VERSION
+            || record.task.revision != 1
+            || !record.previous.is_empty()
+            || record.checksum != record.checksum()?
+        {
+            return Err(Error::Corrupt("task journal first record mismatch".into()));
+        }
+        Ok(record.task)
     }
 
     pub fn begin(
@@ -762,21 +887,48 @@ impl Store {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(directory.join("journal.jsonl"))?;
-        let mut prior = Vec::new();
-        journal.read_to_end(&mut prior)?;
-        let committed_len = prior
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |offset| offset + 1);
-        if committed_len as u64 + line.len() as u64 > self.limits.journal_bytes {
+        let current_fingerprint = JournalFingerprint::from(&journal.metadata()?);
+        let cached_len = self
+            .journal_cache
+            .lock()
+            .map_err(|_| Error::Unavailable("task journal cache poisoned".into()))?
+            .get(&task.task_id)
+            .filter(|cached| cached.fingerprint == Some(current_fingerprint))
+            .map(|cached| cached.committed_len);
+        let committed_len = if let Some(cached_len) = cached_len {
+            cached_len
+        } else {
+            let mut prior = Vec::new();
+            journal.seek(SeekFrom::Start(0))?;
+            journal.read_to_end(&mut prior)?;
+            prior
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |offset| offset as u64 + 1)
+        };
+        if committed_len + line.len() as u64 > self.limits.journal_bytes {
             return Err(Error::Unavailable(
                 "task journal byte limit exceeded".into(),
             ));
         }
-        journal.set_len(committed_len as u64)?;
+        journal.set_len(committed_len)?;
         journal.seek(SeekFrom::End(0))?;
         journal.write_all(&line)?;
         journal.sync_all()?;
+        let mut next_commits = commits.to_vec();
+        next_commits.push(record);
+        let fingerprint = JournalFingerprint::from(&journal.metadata()?);
+        self.journal_cache
+            .lock()
+            .map_err(|_| Error::Unavailable("task journal cache poisoned".into()))?
+            .insert(
+                task.task_id.clone(),
+                JournalCacheEntry {
+                    fingerprint: Some(fingerprint),
+                    committed_len: fingerprint.len,
+                    commits: next_commits,
+                },
+            );
         File::open(&directory)?.sync_all()?;
         // Journal is authoritative: this view may be rebuilt after a crash.
         pixel_ops::durable::write_durably(
@@ -1225,5 +1377,126 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.phase, Phase::Incomplete);
         assert!(recovered.running.is_none());
+    }
+
+    #[test]
+    fn repeated_reads_should_reuse_the_verified_journal_until_it_changes() {
+        use std::sync::atomic::Ordering;
+
+        let root = repo();
+        let writer = Store::open(root.path()).unwrap();
+        let task = begin(&writer, "begin");
+        let reader = Store::open(root.path()).unwrap();
+        reader.journal_reads.store(0, Ordering::Relaxed);
+
+        assert_eq!(
+            reader.status(&task.task_id).unwrap().revision,
+            task.revision
+        );
+        assert_eq!(reader.events(&task.task_id).unwrap().len(), 1);
+        assert_eq!(
+            reader.status(&task.task_id).unwrap().revision,
+            task.revision
+        );
+        assert_eq!(reader.journal_reads.load(Ordering::Relaxed), 1);
+
+        let mut journal = OpenOptions::new()
+            .append(true)
+            .open(
+                reader
+                    .directory(&task.task_id)
+                    .unwrap()
+                    .join("journal.jsonl"),
+            )
+            .unwrap();
+        journal.write_all(b"{partial").unwrap();
+        assert_eq!(
+            reader.status(&task.task_id).unwrap().revision,
+            task.revision
+        );
+        assert_eq!(reader.journal_reads.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn session_lookup_should_not_replay_journals_for_unrelated_sessions() {
+        use std::sync::atomic::Ordering;
+
+        let root = repo();
+        let writer = Store::open(root.path()).unwrap();
+        for index in 0..8 {
+            let session = format!("unrelated-{index}");
+            writer
+                .begin(
+                    contract(),
+                    "pi",
+                    Some(&session),
+                    &format!("request-{index}"),
+                )
+                .unwrap();
+        }
+        let target = writer
+            .begin(contract(), "pi", Some("target-session"), "target-request")
+            .unwrap();
+        let reader = Store::open(root.path()).unwrap();
+        reader.journal_reads.store(0, Ordering::Relaxed);
+
+        assert_eq!(
+            reader
+                .find_session("pi", "target-session")
+                .unwrap()
+                .unwrap()
+                .task_id,
+            target.task_id
+        );
+        assert_eq!(reader.journal_reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn session_lookup_uses_journal_identity_not_task_view() {
+        let root = repo();
+        let writer = Store::open(root.path()).unwrap();
+        let target = begin(&writer, "target");
+        let view_path = writer.directory(&target.task_id).unwrap().join("task.json");
+        let mut view: Value = serde_json::from_slice(&fs::read(&view_path).unwrap()).unwrap();
+        view["provider"] = json!("tampered-provider");
+        view["session_id"] = json!("tampered-session");
+        fs::write(&view_path, serde_json::to_vec(&view).unwrap()).unwrap();
+        let reader = Store::open(root.path()).unwrap();
+        assert_eq!(
+            reader
+                .find_session("pi", "session")
+                .unwrap()
+                .unwrap()
+                .task_id,
+            target.task_id
+        );
+        assert!(
+            reader
+                .find_session("tampered-provider", "tampered-session")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn first_journal_record_rejects_oversized_file_before_scanning_it() {
+        let root = repo();
+        let mut store = Store::open(root.path()).unwrap();
+        let directory = store.directory("oversized").unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        let journal_path = directory.join("journal.jsonl");
+        File::create(&journal_path).unwrap();
+        store.limits.journal_bytes = 16;
+        OpenOptions::new()
+            .write(true)
+            .open(&journal_path)
+            .unwrap()
+            .set_len(17)
+            .unwrap();
+
+        assert!(matches!(
+            store.first_journal_task("oversized"),
+            Err(Error::Corrupt(message)) if message == "task journal exceeds supported size"
+        ));
     }
 }

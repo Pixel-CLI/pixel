@@ -206,7 +206,9 @@ Machine-wide:
   `~/.pi/agent` and `~/.config/opencode` that exists (`SKILL_ROOTS`); a guided
   run writes only the selected agents' roots, and Pi's copy comes from its
   package step. A differing copy is backed up first; `pixel setup --remove`
-  deletes it.
+  deletes it. Its shared instructions cover choosing direct reads, Pixel graph
+  queries or scoped native searches, locating the project before graph work,
+  and changing scope or evidence source when searches stop making progress.
 - `~/.local/share/pixel/pi-classify/`: the optional classify tools'
   Pi package, written and declared like the one above only when the
   classify helpers are accepted; `pixel setup --remove` removes both.
@@ -848,6 +850,12 @@ commands, migration and operational limits.
 
 Task trajectory events live in the durable task journal. `actions.jsonl` remains
 best-effort invocation accounting, with optional explicit task correlation.
+Session lookup reads each journal's bounded, checksummed first transaction to
+locate candidate tasks, then validates the matching tasks' complete journals.
+Rebuildable `task.json` views cannot hide a session binding. Within one store
+instance, validated journal transactions are reused only while file identity,
+size and modification/change timestamps match; writes invalidate or refresh
+that cache. No persistent lookup index or journal-format migration is required.
 Blocked/retried model requests count as work; coordinator and classifier calls
 are separate. Missing host/child coverage produces a lower bound, never zero
 work. `task replay` reads frozen policy frames without execution. Empirical regret
@@ -1254,6 +1262,11 @@ of `.pixel/brief-decisions.jsonl` (see "On-disk state"), with `receipt`,
 `answer` and `excerpt_bytes` for what the block carried.
 `PIXEL_BRIEF=0|false|off` or `brief: false` in `.pixel/config.yaml`
 switches the brief off.
+
+Whatever its tier, every brief then ends on `SKILL_LINE` (`execution_brief/chain.rs`): any search past the
+brief goes through the `pixel` skill (`pixel find-code`, `pixel who-calls`, `pixel search-content`) before grep,
+rg, find or ls. Agents otherwise treated the skill as optional once a brief had arrived. The line is appended in
+`Pending::finish_with_record`, after the part budget and the probes.
 
 **The region pack** (`execution_brief/region_pack.rs`, built by `pack_evidence`
 after the packet is complete) replaces the packet with the source an agent
@@ -1664,7 +1677,8 @@ The allocation-budget test bounds allocations while reading request frames.
   by default). Only scheduled CI executes mutations; there is no manual,
   local or pull-request campaign. The pre-push hook is a no-op; local validation is optional.
   Other lanes include
-  `cross-build.yml` (the three release lanes),
+  `cross-build.yml` (Linux on relevant PRs; all three release targets on main,
+  with macOS only in `release`; maintenance release PRs retain macOS),
   `perf.yml` (Mondays at 04:23 UTC and on demand: `pixel prepare-repo
   --json` on the pinned `excalidraw/excalidraw` corpus from nothing, then
   after one appended line, each receipt judged by `scripts/ci/check-perf.py`
@@ -1701,7 +1715,7 @@ The allocation-budget test bounds allocations while reading request frames.
   signed Sigstore bundle ships as the release asset `pixel-<tag>.intoto.jsonl`,
   the suffix Scorecard's Signed-Releases check reads as provenance, and the
   smoke test verifies it, the archive and its SBOM with `gh attestation
-  verify`, with and without `--bundle`), `homebrew-core.yml` (that formula
+  verify`, with and without `--bundle`), `homebrew-core.yml` (Linux on relevant PRs, macOS and Linux weekly/on demand; that formula
   built from source, `brew test`, `brew audit --strict --new`, on macOS and
   Linux),
   `release-prepare-scope.yml`, `pages.yml` (the website) and `scorecard.yml`
