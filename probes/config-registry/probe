@@ -164,10 +164,17 @@ def registry(clone, rows=None):
 IDS_WORDS = []
 
 def stems(words):
-    return {(w[:6] if len(w) >= 6 else w) for w in words}
+    # Truncate to 6 chars and strip a trailing s so byte matches bytes, file matches files.
+    out = set()
+    for w in words:
+        s = w[:6]
+        if len(s) >= 4 and s.endswith("s") and not s.endswith("ss"):
+            s = s[:-1]
+        out.add(s)
+    return out
 
 
-BOUND_WORDS = stems(["max", "maximum", "min", "minimum", "bound", "bounds", "limit", "limited"])
+BOUND_WORDS = stems(["max", "maximum", "min", "minimum", "bound", "bounds", "limit", "limited", "cap", "caps"])
 
 
 def words_of(prompt):
@@ -218,7 +225,7 @@ def rank(clone, reg, prompt):
 BOUND_QUERY = re.compile(r"\b(max(?:imum)?|min(?:imum)?|bounds?)\b", re.I)
 EXISTING_CONFIG_INTENT = re.compile(r"\b(config\w*|settings?|env(ironment)?(\s+var\w*)?|variables?|flags?|options?|defaults?|ports?|overrid\w+|where do i set|set (that|this|it))\b", re.I)
 BOUND_VALUE_WORDS = stems(["defined", "definition", "level", "size", "value", "number", "amount"])
-MAX_WORDS = stems(["max", "maximum"])
+MAX_WORDS = stems(["max", "maximum", "cap", "caps"])
 MIN_WORDS = stems(["min", "minimum"])
 
 
@@ -233,7 +240,11 @@ def rank_bound(clone, reg, prompt):
     for key, entry in reg.items():
         key_words = stems(key_tokens(key))
         declarations = " ".join(row[2] for row in entry["defs"][:2])
-        declaration_words = stems(re.findall(r"[a-z]+", declarations.lower()))
+        # Include the comment above each declaration, as rank() does: a bound word
+        # ("cap", "limit") in the doc comment above a constant is a bound declaration
+        # even when the constant's name carries none (e.g. BRIEF_BYTES, "Rendered size cap").
+        comments = " ".join(comment_above(clone, d[0], d[1]) for d in entry["defs"][:2])
+        declaration_words = stems(re.findall(r"[a-z]+", (declarations + " " + comments).lower()))
         has_bound = bool((key_words | declaration_words) & BOUND_WORDS)
         has_max = bool((key_words | declaration_words) & MAX_WORDS)
         has_min = bool((key_words | declaration_words) & MIN_WORDS)

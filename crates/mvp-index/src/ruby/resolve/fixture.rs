@@ -10,7 +10,7 @@
 //! path for the `File` symbol); a site's context is the [`Context`] of the
 //! contract in `ruby/mod.rs`.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use mvp_model::{Edge, EdgeKind, Symbol, SymbolKind};
 

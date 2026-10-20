@@ -387,7 +387,7 @@ pub fn extract_file(path_rel: &str, content: &[u8]) -> Option<FileExtraction> {
 /// reference per declaration line and handler (`resources` declares several
 /// routes to one action, `update` twice).
 fn push_route_references(extraction: &mut FileExtraction, content: &[u8]) {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     for route in ruby_routes::routes(content) {
         let (Some(action), Some(controller)) = (route.action.clone(), route.controller_constant())
         else {
@@ -439,7 +439,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         jsx_elements: Vec::new(),
         stack: Vec::new(),
         in_trait_impl: false,
-        use_scopes: std::collections::HashMap::new(),
+        use_scopes: rustc_hash::FxHashMap::default(),
         generated: Vec::new(),
         mixins: Vec::new(),
     };
@@ -520,7 +520,7 @@ struct Walker<'a> {
     in_trait_impl: bool,
     /// Rust `use` scopes already computed, by scope node id: every `use` of a
     /// file's top level shares one walk of the file.
-    use_scopes: std::collections::HashMap<usize, Vec<(u32, u32)>>,
+    use_scopes: rustc_hash::FxHashMap<usize, Vec<(u32, u32)>>,
     /// Indices in `symbols` of the Ruby methods a declaration generated
     /// (`attr_reader`, `delegate`, ...), for `ruby_generated::drop_overridden`.
     generated: Vec<usize>,

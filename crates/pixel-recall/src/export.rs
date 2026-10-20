@@ -9,7 +9,7 @@
 //! silently drop timestamp-less sessions instead reports them in
 //! `skipped_unresolvable_ts`.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::model::{TsSource, format_ms};
@@ -117,7 +117,7 @@ pub fn export(
 
     std::fs::create_dir_all(out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
 
-    let mut used_names: HashSet<String> = HashSet::new();
+    let mut used_names: HashSet<String> = HashSet::default();
     let mut sessions_exported = 0usize;
     let mut turns_total = 0usize;
     for session in &selected {

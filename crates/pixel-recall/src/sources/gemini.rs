@@ -8,7 +8,7 @@
 //! conversations, so appended parses emit `SessionOp::Append` (the store
 //! inserts the session when missing).
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -89,7 +89,7 @@ impl SourceAdapter for Adapter {
         };
 
         // conversationId → index into `sessions`, preserving first-seen order.
-        let mut by_conv: HashMap<String, usize> = HashMap::new();
+        let mut by_conv: HashMap<String, usize> = HashMap::default();
         let mut sessions: Vec<ParsedSession> = Vec::new();
 
         let mut skipped_records = 0usize;

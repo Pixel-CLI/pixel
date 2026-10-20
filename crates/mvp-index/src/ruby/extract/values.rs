@@ -12,7 +12,7 @@
 //! (a local, a method's return value, a literal) has none: such a
 //! receiver keeps its text, which no rule types.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use tree_sitter::Node;
 

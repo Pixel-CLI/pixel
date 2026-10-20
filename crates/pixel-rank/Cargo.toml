@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+rustc-hash = "1"
 pixel-graph = { path = "../pixel-graph" }
 pixel-git = { path = "../pixel-git" }
 pixel-session = { path = "../pixel-session" }

@@ -26,7 +26,8 @@
 //! (edge kinds `calls` + `has_method`, the selected tiers); the caller adds
 //! the snapshot identity and the extraction limits that bound that claim.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use rusqlite::params;
@@ -367,7 +368,7 @@ fn import_premises(
 
 /// Unresolved call sites named like any of `names` (deduplicated).
 fn unresolved_same_name(store: &GraphStore, names: &[&str]) -> Result<u64, StoreError> {
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: HashSet<&str> = HashSet::default();
     let mut total = 0u64;
     for name in names {
         if seen.insert(*name) {
@@ -464,8 +465,8 @@ pub fn evaluate(
     }
 
     // parent[node] = (previous node, edge that reached it)
-    let mut parent: HashMap<i64, (i64, EdgeRow)> = HashMap::new();
-    let mut depth_of: HashMap<i64, u32> = HashMap::new();
+    let mut parent: HashMap<i64, (i64, EdgeRow)> = HashMap::default();
+    let mut depth_of: HashMap<i64, u32> = HashMap::default();
     let mut queue: VecDeque<i64> = VecDeque::new();
     for &s in &sources {
         depth_of.insert(s, 0);
@@ -566,7 +567,7 @@ pub fn evaluate(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use rustc_hash::FxHashSet as HashSet;
     use std::time::Duration;
 
     use super::*;

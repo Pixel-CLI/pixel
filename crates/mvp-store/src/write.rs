@@ -27,6 +27,13 @@ const LOCK_POLL: Duration = Duration::from_millis(10);
 /// How long a statement waits for a lock SQLite holds.
 const BUSY: Duration = Duration::from_secs(5);
 
+/// Read-through mapping of the database file, in bytes: a page read is a
+/// load from the mapping instead of a `pread`.
+const MMAP_BYTES: i64 = 256 * 1024 * 1024;
+/// Page cache for this connection, in KiB (a negative `cache_size` means
+/// KiB rather than pages).
+const CACHE_KIB: i64 = 65_536;
+
 /// What the next run plans against: the current generation's files, the
 /// extractor version it was built with and the files its run left stale.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -525,6 +532,13 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    // Reads go through a mapping instead of a `pread` per page and
+    // pages stay cached; the temp b-tree (sorting, grouping) stays off
+    // disk. The cap is per connection, not per database, and 64 MiB is
+    // above anything a single query here touches.
+    conn.pragma_update(None, "mmap_size", MMAP_BYTES)?;
+    conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     conn.busy_timeout(BUSY)
 }
 

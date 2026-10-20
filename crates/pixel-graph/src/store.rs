@@ -509,6 +509,13 @@ pub(crate) const DELETE_FILE_UNRESOLVED_CALLS: &str =
 /// holds all of them (rusqlite keeps 16 by default).
 const STATEMENT_CACHE: usize = 64;
 
+/// Read-through mapping of the database file, in bytes: a page read is a
+/// load from the mapping instead of a `pread`.
+const MMAP_BYTES: i64 = 256 * 1024 * 1024;
+/// Page cache for this connection, in KiB (a negative `cache_size` means
+/// KiB rather than pages).
+const CACHE_KIB: i64 = 65_536;
+
 /// `execute` through the connection's statement cache. The build loops run
 /// the same statements hundreds of thousands of times; `Connection::execute`
 /// parses and plans the SQL again on every call.
@@ -582,6 +589,13 @@ impl GraphStore {
         // connection; pinning the same budget pixel-facts uses keeps it
         // explicit and independent of that default.
         conn.pragma_update(None, "busy_timeout", 5000)?;
+        // Reads go through a mapping instead of a `pread` per page and
+        // pages stay cached; the temp b-tree (sorting, grouping) stays off
+        // disk. The cap is per connection, not per database, and 64 MiB is
+        // above anything a single query here touches.
+        conn.pragma_update(None, "mmap_size", MMAP_BYTES)?;
+        conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;

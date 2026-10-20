@@ -8,7 +8,8 @@
 //! useful lexical/structural evidence before completion, and never permits a
 //! slow client to consume more than its small in-flight allotment.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use rustc_hash::FxHashMap as HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -414,7 +415,7 @@ fn serve_bounded<R: BufRead, W: Write + Send + 'static>(
     let master: Arc<Mutex<Option<Master>>> = Arc::new(Mutex::new(None));
     let root: PathBuf = root.to_path_buf();
     let writer = Arc::new(Mutex::new(writer));
-    let active: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
+    let active: ActiveRequests = Arc::new(Mutex::new(HashMap::default()));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
@@ -617,7 +618,7 @@ mod tests {
 
     #[test]
     fn active_request_ids_cannot_replace_a_cancellation_handle() {
-        let active = Arc::new(Mutex::new(HashMap::new()));
+        let active = Arc::new(Mutex::new(HashMap::default()));
         let first = Arc::new(AtomicBool::new(false));
         assert!(register_active(&active, "bundle-1", Arc::clone(&first)).unwrap());
         assert!(!register_active(&active, "bundle-1", Arc::new(AtomicBool::new(false))).unwrap());
@@ -866,7 +867,7 @@ mod tests {
     #[test]
     fn the_queue_slot_is_free_before_the_client_can_see_complete() {
         let in_flight = Arc::new(AtomicUsize::new(1));
-        let active: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
+        let active: ActiveRequests = Arc::new(Mutex::new(HashMap::default()));
         let cancelled = Arc::new(AtomicBool::new(false));
         assert!(register_active(&active, "bundle-1", Arc::clone(&cancelled)).unwrap());
         let seen = Arc::new(Mutex::new(None));
@@ -900,7 +901,7 @@ mod tests {
     #[test]
     fn a_panicking_worker_gives_its_queue_slot_back() {
         let in_flight = Arc::new(AtomicUsize::new(1));
-        let active: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
+        let active: ActiveRequests = Arc::new(Mutex::new(HashMap::default()));
         assert!(register_active(&active, "bundle-1", Arc::new(AtomicBool::new(false))).unwrap());
         let slot = QueueSlot {
             in_flight: Arc::clone(&in_flight),

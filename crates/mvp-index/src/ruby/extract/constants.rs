@@ -5,7 +5,7 @@
 //! or assigned constant (D09, D11, R2, R8, B10), and the classes a
 //! constructor assigned to a constant makes (D01).
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 use std::rc::Rc;
 
 use mvp_model::{EdgeKind, SymbolKind};
@@ -543,7 +543,7 @@ impl<'a> Walker<'a> {
     /// the modules it includes, then its superclass and that one's; each
     /// constant read where it is written (B10).
     pub(in crate::ruby) fn ancestors_in_file(&self, scope: &str) -> Vec<String> {
-        self.ancestors_of(scope, 0, &mut HashSet::from([scope.to_owned()]))
+        self.ancestors_of(scope, 0, &mut HashSet::from_iter([scope.to_owned()]))
     }
 
     /// [`Self::ancestors_in_file`] from `depth` levels down, each ancestor

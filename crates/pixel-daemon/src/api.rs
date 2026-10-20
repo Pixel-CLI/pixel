@@ -7,8 +7,8 @@
 //! centralized in the `bridge` module at the bottom so integration drift is
 //! a one-line fix per call site.
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::{BTreeMap, BTreeSet};
-use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -408,7 +408,7 @@ pub struct Service {
     /// `engine_signals`. The decay weights shift negligibly over the TTL;
     /// only successful scans are cached so a transient git failure still
     /// reports `activity_unavailable` on the next call.
-    activity_cache: Option<(Instant, std::collections::HashMap<String, f64>)>,
+    activity_cache: Option<(Instant, rustc_hash::FxHashMap<String, f64>)>,
     /// Per-file stat→hash memo for `tree_delta`: after a watcher batch
     /// drops the graph handle, the re-walk hashes only files whose
     /// (mtime, len) changed instead of the whole tree.
@@ -1369,7 +1369,7 @@ impl Service {
         self.ensure_embedder();
         let embedder = self.embedder.as_deref_mut()?;
         // Group matched lines by file.
-        let mut by_file: HashMap<String, String> = HashMap::new();
+        let mut by_file: HashMap<String, String> = HashMap::default();
         for m in matches {
             by_file.entry(m.path.clone()).or_default().push_str(&m.line);
             by_file.entry(m.path.clone()).or_default().push('\n');
@@ -2190,7 +2190,7 @@ impl Service {
                 }
             }
 
-            let mut seen: HashSet<String> = HashSet::new();
+            let mut seen: HashSet<String> = HashSet::default();
             for (path, reason) in graph_targets::neighbor_files(store, &seed_symbol_ids)
                 .map_err(|e| e.to_string())?
                 .into_iter()
@@ -2640,7 +2640,7 @@ impl Service {
         // Verify only files whose source will be returned, once per request.
         // Reuse these exact bytes for excerpts; never pair fresh file contents
         // with stale graph spans or stored Crux. No repository freshness sweep.
-        let mut sources = HashMap::new();
+        let mut sources = HashMap::default();
         let stale_response = |mut response: Value| -> Result<Value, String> {
             response["truncated"] = json!(true);
             response["caps"] = json!([
@@ -2694,7 +2694,7 @@ impl Service {
         );
         source_remaining = source_remaining.saturating_sub(target.snippet.len());
         items.push(target);
-        let mut seen_context = std::collections::HashSet::from([sym.id]);
+        let mut seen_context = rustc_hash::FxHashSet::from_iter([sym.id]);
         let neighbors = incoming
             .iter()
             .map(|edge| edge.src_id)
@@ -4304,7 +4304,7 @@ impl Service {
                     if profile {
                         eprintln!("TGTSIG activity_err {e}");
                     }
-                    (std::collections::HashMap::new(), Some(e.to_string()))
+                    (rustc_hash::FxHashMap::default(), Some(e.to_string()))
                 }
             },
         };
@@ -4325,11 +4325,11 @@ impl Service {
                 }
                 fan_in_counts(store.conn(), candidates)
             }
-            _ => Ok(std::collections::HashMap::new()),
+            _ => Ok(rustc_hash::FxHashMap::default()),
         };
         let (fan_in_raw, fan_in_error) = match counted {
             Ok(counts) => (counts, None),
-            Err(error) => (std::collections::HashMap::new(), Some(error)),
+            Err(error) => (rustc_hash::FxHashMap::default(), Some(error)),
         };
         if profile {
             eprintln!("TGTSIG fan_in {}us", siglast.elapsed().as_micros());
@@ -4409,13 +4409,13 @@ const FAN_IN_SQL: &str = "SELECT f.path, COUNT(*) AS fan_in \
 fn fan_in_counts(
     conn: &rusqlite::Connection,
     candidates: &[String],
-) -> Result<std::collections::HashMap<String, u64>, String> {
+) -> Result<rustc_hash::FxHashMap<String, u64>, String> {
     let read = |r: &rusqlite::Row<'_>| {
         // COUNT(*) is an integer; rusqlite has no `FromSql` for `u64`, so
         // read it as `i64` and cast (counts are non-negative).
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
     };
-    let mut out = std::collections::HashMap::new();
+    let mut out = rustc_hash::FxHashMap::default();
     if candidates.is_empty() {
         return Ok(out);
     }
@@ -4432,7 +4432,7 @@ fn fan_in_counts(
         }
         return Ok(out);
     }
-    let wanted: std::collections::HashSet<&str> = candidates.iter().map(String::as_str).collect();
+    let wanted: rustc_hash::FxHashSet<&str> = candidates.iter().map(String::as_str).collect();
     let mut statement = conn
         .prepare(&format!("{FAN_IN_SQL} GROUP BY f.path"))
         .map_err(fan_in_error)?;
@@ -5096,7 +5096,7 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
         let pr_signals = pixel_rank::signals::SignalBundle {
             activity: signals.activity.clone(),
             session: signals.session.clone(),
-            fan_in: std::collections::HashMap::new(),
+            fan_in: rustc_hash::FxHashMap::default(),
             session_reasons: signals.session_reasons.clone(),
             error_reasons: signals.error_reasons.clone(),
             // `op_resolve` mirrors the activity maps out of the bundle
@@ -5488,7 +5488,7 @@ fn compact_edges(
     limit: usize,
 ) -> Result<Value, String> {
     let mut grouped: BTreeMap<&'static str, Vec<Value>> = BTreeMap::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for e in edges {
         if seen.len() >= limit {
             break;
@@ -6321,7 +6321,7 @@ fn rank_search_matches(
     density_rank.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     let bm25_terms: Vec<String> = {
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::default();
         tokenize_words(pattern)
             .into_iter()
             .filter(|w| seen.insert(w.clone()))
@@ -7774,7 +7774,7 @@ mod tests {
             );
         }
         // Spot-check: the struct and fn are both signatures, not bodies.
-        let names: std::collections::HashSet<&str> =
+        let names: rustc_hash::FxHashSet<&str> =
             syms.iter().filter_map(|s| s["name"].as_str()).collect();
         assert!(
             names.contains("bootstrap"),
@@ -8210,7 +8210,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter_map(|edge| edge["symbol"]["uid"].as_str().map(str::to_string))
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<rustc_hash::FxHashSet<_>>()
         };
         let first_uids = edge_uids(&first);
         let second_uids = edge_uids(&second);
@@ -8260,7 +8260,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter_map(|symbol| symbol["uid"].as_str().map(str::to_string))
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<rustc_hash::FxHashSet<_>>()
         };
         let first_uids = symbol_uids(&first);
         let second_uids = symbol_uids(&second);
@@ -8647,7 +8647,7 @@ mod tests {
             .get("matches")
             .and_then(Value::as_array)
             .unwrap();
-        let unranked_set: std::collections::HashSet<(String, u64)> = unranked_matches
+        let unranked_set: rustc_hash::FxHashSet<(String, u64)> = unranked_matches
             .iter()
             .map(|m| {
                 (
@@ -8681,7 +8681,7 @@ mod tests {
             .get("matches")
             .and_then(Value::as_array)
             .unwrap();
-        let ranked_set: std::collections::HashSet<(String, u64)> = ranked_matches
+        let ranked_set: rustc_hash::FxHashSet<(String, u64)> = ranked_matches
             .iter()
             .map(|m| {
                 (
@@ -9109,7 +9109,7 @@ mod tests {
             );
         }
 
-        let unique: std::collections::HashSet<&String> = seen.iter().collect();
+        let unique: rustc_hash::FxHashSet<&String> = seen.iter().collect();
         assert_eq!(
             seen.len(),
             unique.len(),
@@ -10149,8 +10149,7 @@ mod tests {
 
         // The walk itself must cover the registry exactly — a new retrieval
         // op added to RETRIEVAL_OPS without a row here fails loudly.
-        let walked: std::collections::HashSet<&str> =
-            requests.iter().map(|(name, _)| *name).collect();
+        let walked: rustc_hash::FxHashSet<&str> = requests.iter().map(|(name, _)| *name).collect();
         for op in super::RETRIEVAL_OPS {
             assert!(
                 walked.contains(op),
@@ -11383,7 +11382,7 @@ mod tests {
     #[test]
     fn engine_reranker_preserves_candidates_and_applies_live_weights() {
         let signals = SignalBundle {
-            activity: HashMap::from([("hot.rs".to_string(), 1.0)]),
+            activity: HashMap::from_iter([("hot.rs".to_string(), 1.0)]),
             ..SignalBundle::default()
         };
         let candidates = vec![
@@ -12227,7 +12226,7 @@ mod context_crux_coordinate_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
         let crux = vec![(2, "if flag {".to_owned()), (3, "return 1;".to_owned())];
-        let files = HashMap::from([(1, "sample.rs".to_owned())]);
+        let files = HashMap::from_iter([(1, "sample.rs".to_owned())]);
         for padding in [10, 20] {
             let source = format!("{}{body}", "// padding\n".repeat(padding));
             std::fs::write(dir.join("sample.rs"), &source).unwrap();
@@ -12250,7 +12249,7 @@ mod context_crux_coordinate_tests {
 
     #[test]
     fn context_crux_rejects_zero_out_of_span_and_overflow_coordinates() {
-        let files = HashMap::new();
+        let files = HashMap::default();
         let crux = vec![
             (0, "invalid".to_owned()),
             (2, "valid".to_owned()),

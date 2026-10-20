@@ -189,7 +189,11 @@ def main():
     out += [l[:LINE_CHARS] for l in message(root, sha)]
     out += ["files in the commit:"] + [l[:LINE_CHARS] for l in stat]
     used = sum(len(l) + 1 for l in out)
+    left_out = 0
     for path, body in sorted(diff, key=rank):
+        if used >= PATCH_BYTES + 1500:
+            left_out += 1  # the stat above already names it
+            continue
         if LOCKS.search(path):
             edits = [l for l in body if l[:1] in "+-"]
             out.append(f"@@ {path} (lockfile, {len(edits)} edited lines; first ones)")
@@ -202,6 +206,8 @@ def main():
             cost = sum(len(l) + 1 for l in chunk)
         used += cost
         out += chunk
+    if left_out:
+        out.append(f"... hunks of {left_out} more files cut (named in the list above)")
     discarded = [header for header in re.findall(r"^### (.+)$", brief, re.M)
                  if not header.startswith(("history", "commit "))]
     if discarded:

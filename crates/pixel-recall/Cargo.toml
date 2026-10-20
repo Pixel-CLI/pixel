@@ -16,6 +16,7 @@ fastembed = ["dep:fastembed", "dep:openssl"]
 model2vec = ["dep:model2vec-rs", "dep:hf-hub"]
 
 [dependencies]
+rustc-hash = "1"
 mutants = { workspace = true }
 # Default features minus `image-models`: pixel never embeds images, and
 # that feature alone pulls the `image` crate with every codec (rav1e, exr,

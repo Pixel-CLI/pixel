@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 use std::rc::Rc;
 
 use mvp_model::SymbolKind::{Class, Method, Module};
@@ -32,7 +32,7 @@ fn a_walk_past_the_cap_keeps_one_chain_per_owner() {
     let chains = &index.walks.chains;
     let whole = chains.whole.borrow();
     let capped = chains.capped.borrow();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let steps: usize = whole
         .values()
         .map(|(chain, _)| chain)
