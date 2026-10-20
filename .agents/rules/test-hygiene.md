@@ -65,3 +65,8 @@ Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
   build and one through each incremental route that re-derives it
   (`change-propagation.md`); the full build alone passed on #262 while the
   incremental update lost the edge.
+- **Exercise consecutive publications without a warm-up read.** A stale-read
+  test must include a second watcher batch with no writer request between
+  batches: the first batch must publish both its generation and envelope
+  snapshot. Verified 2026-10-20 (#1203): single-batch tests passed while the
+  second batch could still return no brief because its snapshot was missing.
