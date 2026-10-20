@@ -198,6 +198,9 @@ impl Words<'_> {
 /// Each file's document, in the order of `files`, counted on up to
 /// [`THREADS`] threads: the corpus is read whole on every call.
 fn documents(files: &[FileRow], wanted: &HashMap<&str, usize>) -> Vec<Document> {
+    if files.is_empty() {
+        return Vec::new();
+    }
     let count = |part: &[FileRow]| {
         let mut words = Words {
             wanted,
@@ -221,7 +224,7 @@ fn documents(files: &[FileRow], wanted: &HashMap<&str, usize>) -> Vec<Document> 
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(THREADS);
-    if threads < 2 || files.len() < 2 * THREADS {
+    if !parallel_counting_worthwhile(threads, files.len()) {
         return count(files);
     }
     let size = files.len().div_ceil(threads);
@@ -235,6 +238,12 @@ fn documents(files: &[FileRow], wanted: &HashMap<&str, usize>) -> Vec<Document> 
             .flat_map(|part| part.join().unwrap_or_default())
             .collect()
     })
+}
+
+/// Scheduling only: either branch counts and merges the same nonempty documents.
+#[cfg_attr(test, mutants::skip)]
+fn parallel_counting_worthwhile(threads: usize, files: usize) -> bool {
+    threads >= 2 && files >= 2 * THREADS
 }
 
 /// The files ranked by BM25 for `wanted` (distinct terms), a test file at
@@ -537,7 +546,7 @@ mod tests {
 
     #[test]
     fn audited_document_chunks_should_keep_input_order_and_counts_across_the_parallel_threshold() {
-        for count in [7, 8, 9] {
+        for count in [0, 7, 8, 9] {
             let files = (0..count)
                 .map(|_| file("alpha_beta", vec![]))
                 .collect::<Vec<_>>();

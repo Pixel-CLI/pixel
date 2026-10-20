@@ -1781,6 +1781,7 @@ checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
 name = "mvp-index"
 version = "0.8.0"
 dependencies = [
+ "mutants",
  "mvp-model",
  "proptest",
  "tempfile",

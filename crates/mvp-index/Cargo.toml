@@ -24,6 +24,7 @@ tree-sitter = "0.27"
 tree-sitter-ruby = "0.23"
 tree-sitter-rust = "0.24"
 mvp-model = { path = "../mvp-model" }
+mutants = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

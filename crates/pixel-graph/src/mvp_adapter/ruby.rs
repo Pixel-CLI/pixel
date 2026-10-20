@@ -1121,4 +1121,54 @@ mod audited_contract_tests {
             2
         );
     }
+
+    #[test]
+    fn mvp_sites_should_pair_real_ruby_calls_and_ignore_files_absent_from_the_graph() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        crate::testutil::init_repo(
+            &root,
+            &[
+                (
+                    "app/a.rb",
+                    "class A\n def save; end\n def run; save; end\nend\n",
+                ),
+                ("orphan.rb", "def other; other; end\n"),
+            ],
+        );
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let file = store.replace_file("app/a.rb", "oid", "ruby").unwrap();
+        let save = store
+            .insert_symbol(
+                file,
+                "save",
+                "save",
+                "A#save",
+                crate::store::SymbolKind::Method,
+                2,
+                2,
+                "def save; end",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                file,
+                "run",
+                "run",
+                "A#run",
+                crate::store::SymbolKind::Method,
+                3,
+                3,
+                "def run; save; end",
+            )
+            .unwrap();
+        let mvp = super::super::refresh(&root, &root.join(".pixel")).unwrap();
+        let sites = mvp_sites(&store, &mvp).unwrap();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(
+            (sites[0].file_id, sites[0].line, sites[0].name.as_str()),
+            (file, 3, "save")
+        );
+        assert!(matches!(sites[0].target,Target::Resolved(Some(id)) if id==save));
+    }
 }

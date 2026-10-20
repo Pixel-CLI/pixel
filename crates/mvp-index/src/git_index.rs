@@ -140,6 +140,8 @@ fn key(source: &Path) -> Option<String> {
 /// No inode or ctime to tell versions of git's index apart: no copy is
 /// made or read.
 #[cfg(not(unix))]
+// No supported release/test target compiles this fallback, which only disables index copying.
+#[cfg_attr(test, mutants::skip)]
 fn key(_: &Path) -> Option<String> {
     None
 }
@@ -302,5 +304,30 @@ mod tests {
         assert_ne!(Copy::of(dir.path(), &source), Some(copy));
         // No index file, no copy.
         assert_eq!(Copy::of(dir.path(), &dir.path().join("absent")), None);
+    }
+
+    #[test]
+    fn audited_refresh_should_report_failure_when_git_cannot_be_started() {
+        let root = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "git_index::tests::audited_refresh_child",
+                "--nocapture",
+            ])
+            .env("PIXEL_TEST_REFRESH_ROOT", root.path())
+            .env("PATH", root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn audited_refresh_child() {
+        let Some(root) = std::env::var_os("PIXEL_TEST_REFRESH_ROOT") else {
+            return;
+        };
+        let root = std::path::Path::new(&root);
+        assert!(!refresh(root, &root.join("index")));
     }
 }

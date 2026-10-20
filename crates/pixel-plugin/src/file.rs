@@ -10,6 +10,7 @@
 
 use std::fs::{File, Metadata, OpenOptions};
 use std::io;
+use std::ops::BitOr as _;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
@@ -25,7 +26,7 @@ use std::path::Path;
 pub(crate) fn open_regular(path: &Path, seen: Option<&Metadata>) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .custom_flags(libc::O_NOFOLLOW.bitor(libc::O_NONBLOCK))
         .open(path)
         .map_err(|e| {
             if e.raw_os_error() == Some(libc::ELOOP) {

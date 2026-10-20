@@ -804,4 +804,57 @@ mod audited_contract_tests {
             });
         }
     }
+
+    #[test]
+    fn group_metadata_should_distinguish_descriptions_from_metadata_and_dynamic_described_classes()
+    {
+        for (source, described, metadata) in [
+            ("describe Item do; end", "Item", false),
+            ("describe 'item' do; end", "", false),
+            ("describe :item do; end", "", false),
+            ("describe item do; end", "?", false),
+            ("describe :tag do; end", "", false),
+            ("describe Item, :tag do; end", "Item", true),
+            ("describe Item, 'description' do; end", "Item", false),
+        ] {
+            call(source, |walker, node| {
+                group(walker, node, node.child_by_field_name("block").unwrap(), 0);
+                assert!(
+                    matches!(&walker.facts[0],Fact::Group {described:actual,metadata:actual_meta,..} if actual==described && *actual_meta==metadata),
+                    "{source}: {:?}",
+                    walker.facts
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn shared_groups_should_be_read_only_with_a_literal_name_at_the_top_level() {
+        for (source, around, expected) in [
+            (
+                "shared_examples 'shared' do; end",
+                Frame::Top,
+                Frame::Group(1),
+            ),
+            ("shared_examples dynamic do; end", Frame::Top, Frame::Other),
+            (
+                "shared_examples 'shared' do; end",
+                Frame::Group(5),
+                Frame::Other,
+            ),
+        ] {
+            call(source, |walker, node| {
+                assert_eq!(
+                    shared(
+                        walker,
+                        node,
+                        node.child_by_field_name("block").unwrap(),
+                        around,
+                        false
+                    ),
+                    expected
+                );
+            });
+        }
+    }
 }

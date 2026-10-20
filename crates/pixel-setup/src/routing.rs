@@ -1106,9 +1106,9 @@ mod audited_contract_tests {
     fn alternate_hook_binaries_should_require_both_difference_and_first_occurrence() {
         let own = Path::new("/missing/own/pixel");
         let value = serde_json::json!({"hooks":{"Start":[{"hooks":[
-            {"command":"'/missing/own/pixel' run-hook metrics"},
-            {"command":"'/missing/other/pixel' run-hook metrics"},
-            {"command":"'/missing/other/pixel' run-hook task-event"}
+            {"command":"'/missing/own/pixel' run-hook metrics --provider claude"},
+            {"command":"'/missing/other/pixel' run-hook metrics --provider claude"},
+            {"command":"'/missing/other/pixel' run-hook task-event --provider claude --event session-start"}
         ]}]}});
         assert_eq!(
             pixel_hooks_running_other_binaries(&value, own),

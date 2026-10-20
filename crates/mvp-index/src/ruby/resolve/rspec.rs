@@ -663,4 +663,76 @@ mod audited_contract_tests {
             Found::Nowhere
         ));
     }
+
+    #[test]
+    fn shared_group_reading_should_keep_the_latest_member_and_propagate_opaque_nested_groups() {
+        let group = |line, parent, nests| Fact::Group {
+            line,
+            parent,
+            described: String::new(),
+            scope: vec![],
+            metadata: false,
+            opaque: false,
+            nests,
+        };
+        let specs = Fact::encode_all(&[
+            Fact::Rspec,
+            group(1, 0, false),
+            Fact::Include {
+                group: 1,
+                name: "shared".into(),
+                line: 4,
+            },
+        ]);
+        let shared = Fact::encode_all(&[
+            Fact::Shared {
+                name: "shared".into(),
+                line: 1,
+                scoped: false,
+                metadata: false,
+            },
+            group(1, SHARED_GROUP, false),
+            Fact::Member {
+                group: 1,
+                name: "helper".into(),
+                line: 2,
+                def: true,
+            },
+            Fact::Member {
+                group: 1,
+                name: "helper".into(),
+                line: 7,
+                def: false,
+            },
+        ]);
+        let model = Rspec::read(
+            &[
+                ("spec/x_spec.rb".into(), specs.clone()),
+                ("spec/shared.rb".into(), shared.clone()),
+            ],
+            &|_| true,
+        );
+        match model.find("spec/x_spec.rb", 1, "helper", &|_, _| true) {
+            Found::Member(member, _) => assert_eq!(
+                (member.line, member.def, member.shared.as_ref().map(|s| s.1)),
+                (4, false, Some(7))
+            ),
+            _ => panic!("shared members must be brought at the include site"),
+        }
+        let mut nested = Fact::decode_all(&shared);
+        for fact in &mut nested {
+            if let Fact::Group { nests, .. } = fact {
+                *nests = true;
+            }
+        }
+        let shared = Fact::encode_all(&nested);
+        let model = Rspec::read(
+            &[
+                ("spec/x_spec.rb".into(), specs),
+                ("spec/shared.rb".into(), shared),
+            ],
+            &|_| true,
+        );
+        assert_eq!(model.groups("spec/x_spec.rb", 1, true), None);
+    }
 }

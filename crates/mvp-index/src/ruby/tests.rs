@@ -18,6 +18,7 @@
 //! give another answer, the comment names the decision that changed it.
 
 mod ancestors;
+mod audited;
 mod calls;
 mod constants;
 mod definers;

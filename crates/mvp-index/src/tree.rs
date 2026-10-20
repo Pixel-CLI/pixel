@@ -989,7 +989,7 @@ fn resolve(path: &Path, with_index: bool) -> Result<Repository, TreeError> {
         let (Some(git_path), Some(rest)) = (lines.next(), lines.next()) else {
             return Err(failed(detail()));
         };
-        if rest.contains(&b'\n') || git_path.is_empty() || rest.is_empty() {
+        if !usable_index_root(git_path, rest) {
             return resolve(path, false);
         }
         // Relative to the directory git ran in; made absolute, and the
@@ -1002,6 +1002,11 @@ fn resolve(path: &Path, with_index: bool) -> Result<Repository, TreeError> {
         commit,
         index,
     })
+}
+
+/// A combined Git answer has one nonempty index path and one nonempty root line.
+fn usable_index_root(index: &[u8], root: &[u8]) -> bool {
+    !index.is_empty() && !root.is_empty() && !root.contains(&b'\n')
 }
 
 /// A path git printed, byte for byte where the platform allows.
@@ -1494,5 +1499,17 @@ mod tests {
         assert_eq!(new_path("\"b/\\377.rb\""), None, "not UTF-8");
         assert_eq!(lengths("-3,0 +4,2 @@ fn x"), Some((0, 2)));
         assert_eq!(lengths("-3 +4 @@"), Some((1, 1)));
+    }
+
+    #[test]
+    fn audited_combined_git_answers_should_require_both_nonempty_paths_and_one_root_line() {
+        for (index, root, expected) in [
+            (&b"index"[..], &b"root"[..], true),
+            (b"", b"root", false),
+            (b"index", b"", false),
+            (b"index", b"root\nextra", false),
+        ] {
+            assert_eq!(usable_index_root(index, root), expected);
+        }
     }
 }

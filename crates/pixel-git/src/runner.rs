@@ -8,6 +8,7 @@
 //! wrappers in this workspace enforces either bound today.
 
 use std::io::Read;
+use std::ops::BitOr as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -528,15 +529,16 @@ fn wait_for_child_exit(pid: u32) -> std::io::Result<()> {
                 libc::P_PID,
                 pid as libc::id_t,
                 info.as_mut_ptr(),
-                libc::WEXITED | libc::WNOWAIT,
+                libc::WEXITED.bitor(libc::WNOWAIT),
             )
         };
         if result == 0 {
             return Ok(());
         }
         let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error);
+        match error.kind() {
+            std::io::ErrorKind::Interrupted => {}
+            _ => return Err(error),
         }
     }
 }

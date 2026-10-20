@@ -2754,4 +2754,57 @@ mod tests {
             "src/log.rs#Hasher::finish#method"
         );
     }
+
+    #[test]
+    fn audited_word_leads_should_use_the_selected_local_or_already_open_snapshot() {
+        use pixel_graph::store::SymbolKind;
+        let root = scratch("audited-word-snapshot");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/rename.rs"), "pub fn rename_symbol() {}\n").unwrap();
+        let dir = root.join(pixel_index::index::SHARD_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = GraphStore::open(&dir.join(pixel_daemon::api::GRAPH_DB_FILE)).unwrap();
+        store
+            .meta_set(EXTRACTOR_VERSION_KEY, EXTRACTOR_VERSION)
+            .unwrap();
+        let file = store.replace_file("src/rename.rs", "oid", "rust").unwrap();
+        store
+            .insert_symbol(
+                file,
+                "src/rename.rs#rename_symbol#function",
+                "rename_symbol",
+                "rename_symbol",
+                SymbolKind::Function,
+                1,
+                1,
+                "pub fn rename_symbol() {}",
+            )
+            .unwrap();
+        let cached_failure = Live::new(&root, Route::Daemon);
+        assert_eq!(
+            cached_failure.with_graph(|_| Ok(())).unwrap_err(),
+            "the graph freshness is unknown"
+        );
+        let signature = freshness_signature_trusting_stat(&root, &store).unwrap();
+        store.meta_set(FRESHNESS_KEY, &signature).unwrap();
+        drop(store);
+        let local = Live::new(&root, Route::Local);
+        let hits = local
+            .graph_word_leads("renaming symbols", 8, Instant::now() + WINDOW)
+            .unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.path.as_str(), h.start_line))
+                .collect::<Vec<_>>(),
+            [("src/rename.rs", 1)]
+        );
+        assert!(local.graph.lock().unwrap().is_some());
+        assert_eq!(
+            cached_failure
+                .graph_word_leads("renaming symbols", 8, Instant::now() + WINDOW)
+                .unwrap_err(),
+            "the graph freshness is unknown"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -354,8 +354,10 @@ pub(crate) fn wait_stored(path: &Path, bound: Duration, poll: Duration) -> Optio
                     .ok()?;
                 return Some(stored);
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return None,
+            Err(error) => match error.kind() {
+                io::ErrorKind::NotFound => {}
+                _ => return None,
+            },
         }
         if Instant::now() >= deadline {
             return None;

@@ -367,4 +367,32 @@ mod audited_contract_tests {
         assert_eq!(names(&b.instance), [Some("Owner")]);
         assert_eq!(names(&b.singleton), [None, Some("Owner")]);
     }
+
+    #[test]
+    fn include_should_keep_correlated_regions_and_not_duplicate_a_definite_superclass_step() {
+        let generation = Generation::default();
+        let world = generation.world();
+        let index = Index::build(&world, &|_| true, &Tests::Without);
+        let decl = Decl {
+            at: ("a.rb", 1),
+            uncertain: false,
+        };
+        for (maybe, region, inserted) in [
+            (false, None, false),
+            (true, None, true),
+            (false, Some(("Tail", Side::Instance, false)), true),
+        ] {
+            let mut b = building(&index);
+            b.tail_instance.push(Step {
+                region,
+                ..step("A", maybe)
+            });
+            b.include(Side::Instance, &[step("A", false)], decl);
+            assert_eq!(b.instance.steps.len(), if inserted { 2 } else { 1 });
+            if inserted {
+                assert_eq!(b.instance.steps[1].region, region);
+                assert_eq!(b.instance.steps[1].maybe, maybe);
+            }
+        }
+    }
 }

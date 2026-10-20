@@ -728,3 +728,38 @@ fn c10_ruby_an_ancestor_is_the_module_its_nesting_names_never_a_same_tail_one() 
         Some("admin/order/trackable.rb#Admin::Order::Trackable#track#method")
     );
 }
+
+#[test]
+fn audited_lookup_should_consider_unknown_steps_after_the_hit_only_in_the_same_own_list() {
+    use super::{At, Lookup, Node, Step};
+    let mut g = Generation::default();
+    g.def("a.rb", Module, "A", 1, 2)
+        .def("a.rb", Method, "A#hit", 2, 2)
+        .def("a.rb", Module, "B", 3, 4);
+    g.facts(
+        "a.rb",
+        &[Fact::Unknown {
+            owner: "B".into(),
+            side: '#',
+            name: Some("hit".into()),
+        }],
+    );
+    let world = g.world();
+    let index = Index::build(&world, &|_| true, &Tests::Without);
+    let a = Step::new(Node::Known("A", Side::Instance));
+    let b = Step::new(Node::Known("B", Side::Instance));
+    let found = index.lookup_in(&[a, b], "hit");
+    match found {
+        Lookup::Found(at) => assert_eq!(index.symbols[at].name, "A#hit"),
+        _ => panic!("a later unrelated step cannot precede the known hit"),
+    }
+    let prepended = Step {
+        at: Some(At {
+            file: "a.rb",
+            line: 3,
+            by: "B",
+        }),
+        ..a
+    };
+    assert_eq!(index.lookup_in(&[prepended, b], "hit"), Lookup::Abstain);
+}

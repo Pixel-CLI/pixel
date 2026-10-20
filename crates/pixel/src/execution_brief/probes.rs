@@ -238,12 +238,12 @@ fn in_own_group(command: &mut Command) {
     let _ = command;
 }
 
-/// Sends SIGKILL to the process group `group`. A group already gone is not an
-/// error, and Pixel's own group, or init's, is never one.
+/// Whether signalling a group would target init or Pixel itself.
 fn protected_group(pid: libc::pid_t, own: libc::pid_t) -> bool {
     pid <= 1 || pid == own
 }
 
+/// Sends SIGKILL only to a foreign process group; an absent group is harmless.
 fn kill_group(group: u32) {
     #[cfg(unix)]
     {
@@ -787,10 +787,15 @@ mod tests {
 
     #[test]
     fn audited_reaping_should_return_none_after_the_deadline_even_while_the_leader_is_alive() {
-        let child = std::process::Command::new("sh")
+        let mut child = std::process::Command::new("sh")
             .args(["-c", "sleep 0.2"])
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
         assert!(reap(child, Instant::now() - Duration::from_secs(1)).is_none());
+        let mut output = Vec::new();
+        std::io::Read::read_to_end(&mut stdout, &mut output).unwrap();
+        assert!(output.is_empty());
     }
 }

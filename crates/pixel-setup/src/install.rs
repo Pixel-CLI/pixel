@@ -868,6 +868,7 @@ mod audited_contract_tests {
             let options = InstallOptions {
                 home: Some(home.path().into()),
                 executable_path: Some("/tmp/pixel".into()),
+                dry_run: !exists && selected,
                 ..Default::default()
             };
             let selection = InstallSelection {
@@ -879,7 +880,11 @@ mod audited_contract_tests {
                 task_hooks: true,
                 ..Default::default()
             };
-            install_selected(&options, Some(&selection)).unwrap();
+            let report = install_selected(&options, Some(&selection)).unwrap();
+            assert!(report.steps.iter().all(|step| !matches!(
+                step.id.as_str(),
+                "opencode-brief" | "hooks.antigravity-brief" | "install.antigravity-plugin"
+            )));
             assert!(
                 !opencode.join("plugins/pixel-brief.js").exists(),
                 "exists={exists} selected={selected}"

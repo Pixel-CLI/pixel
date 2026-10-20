@@ -660,3 +660,27 @@ fn c10_ruby_a_function_caller_is_top_level_code() {
     assert_eq!(dst[bare].as_deref(), Some("lib.rb#helper#function"));
     assert_eq!(dst[on_self].as_deref(), Some("lib.rb#helper#function"));
 }
+
+#[test]
+fn audited_hook_mixins_should_be_brought_under_the_declaring_module_not_the_hook_method_name() {
+    use super::{Index, stubs::Tests};
+    use std::collections::HashSet;
+    let mut g = Generation::default();
+    g.def("hooks.rb", Module, "Hook", 1, 5)
+        .def("hooks.rb", Method, "Hook.included", 2, 4)
+        .def("inside.rb", Module, "Inside", 1, 2);
+    g.mixin(
+        "hooks.rb",
+        "Hook.included",
+        3,
+        "hook:include",
+        "Inside",
+        &["Hook"],
+    );
+    let world = g.world();
+    let index = Index::build(&world, &|_| true, &Tests::Without);
+    assert_eq!(
+        index.brought(vec!["Hook"]),
+        HashSet::from(["Hook", "Inside"])
+    );
+}
