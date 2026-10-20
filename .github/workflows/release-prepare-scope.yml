@@ -30,7 +30,7 @@ jobs:
     outputs:
       release-prepare: ${{ steps.check.outputs.release-prepare }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: github.event_name == 'pull_request' && github.base_ref == 'main' && startsWith(github.head_ref, 'release-')
         with:
           fetch-depth: 0

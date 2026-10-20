@@ -197,6 +197,9 @@ const ZERO_LINE: &str = "Answer from these lines; open a file only if they don't
 /// The ONE-READ step: the ranges are the next, single action.
 const READ_LINE: &str = "Read these ranges (in parallel, one turn) before any search. If they don't answer, search as usual.";
 const FOOTER: &str = "Answer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.";
+/// The last line of every brief, whatever it answered: the skill is otherwise
+/// one entry among many, and an agent past the brief searches without it.
+pub(crate) const SKILL_LINE: &str = "Any search beyond these lines: use the `pixel` skill (`pixel find-code`, `pixel who-calls`, `pixel search-content`) before grep, rg, find or ls.";
 
 static QUOTED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"([`'"])([\w./:-]+)(?:\(\))?([`'"])"#)
@@ -2882,6 +2885,10 @@ impl Pending {
         let render_ms = millis(render_started.elapsed());
         let probe_started = Instant::now();
         let (text, probe_runs) = self.probe_stage(&brief, text);
+        // shortcut: appended after the part budget, so a brief that fills its last
+        // part exactly loses this line to an undelivered part; reserve room in
+        // `fit` if that shows up.
+        let text = text.map(|text| format!("{}\n{SKILL_LINE}", text.trim_end_matches('\n')));
         let probe_ms = (!probe_runs.is_empty()).then(|| millis(probe_started.elapsed()));
         let recovered = matches!(brief.admission, Admission::Closed(_)) && text.is_some();
         let elapsed_ms = millis(self.started.elapsed());
@@ -5601,7 +5608,7 @@ mod tests {
             text.contains("\ntargets: src/new/route.ts src/new/handler.ts\n"),
             "{text}"
         );
-        assert!(text.ends_with(FOOTER), "{text}");
+        assert!(text.ends_with(&format!("{FOOTER}\n{SKILL_LINE}")), "{text}");
     }
 
     #[test]
@@ -6491,6 +6498,7 @@ mod tests {
                     MEDIUM_FILES_CONFIDENCE,
                     "coverage: 2/2 ops answered",
                     UNCORROBORATED_FOOTER,
+                    SKILL_LINE,
                 ]
                 .join("\n")
                 .as_str()
@@ -6731,7 +6739,7 @@ mod tests {
         assert!(text.contains("\nfiles: src/login.ts:3\n"), "{text}");
         assert!(!text.contains("unresolved"), "{text}");
         assert!(!text.contains("confidence"), "{text}");
-        assert!(text.ends_with(FOOTER), "{text}");
+        assert!(text.ends_with(&format!("{FOOTER}\n{SKILL_LINE}")), "{text}");
         assert_eq!(finished.record.gate, "unjudged");
     }
 
@@ -7779,6 +7787,7 @@ mod tests {
                     "[PIXEL:BRIEF]",
                     "files: crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready() {; crates/pixel-daemon/src/api.rs:40 — fn op_status; crates/pixel-daemon/src/x.rs:1 — x",
                     LOW_CONFIDENCE,
+                    SKILL_LINE,
                 ]
                 .join("\n")
                 .as_str()
@@ -7845,13 +7854,16 @@ mod tests {
         assert!(text.starts_with("[PIXEL:BRIEF]\nregion pack"), "{text}");
         assert!(text.contains("2| fn watch_ready() {"), "{text}");
         assert!(
-            text.ends_with(region_pack::LEAD),
+            text.ends_with(&format!("{}\n{SKILL_LINE}", region_pack::LEAD)),
             "a maybe is a lead: {text}"
         );
         assert!(!text.contains(region_pack::DIRECTIVE));
         assert_eq!(finished.record.tier, Some("low"));
         assert_eq!(finished.record.pack_parts, 1);
-        assert_eq!(finished.record.pack_bytes, text.len());
+        assert_eq!(
+            finished.record.pack_bytes,
+            text.len() - SKILL_LINE.len() - 1
+        );
     }
 
     #[test]
@@ -7862,7 +7874,10 @@ mod tests {
         let log = Arc::clone(&fake.log);
         let finished = briefed_with("how does the login flow work", fake, no_verdict, model_low);
         let text = finished.text.unwrap();
-        assert!(text.ends_with(LOW_CONFIDENCE), "{text}");
+        assert!(
+            text.ends_with(&format!("{LOW_CONFIDENCE}\n{SKILL_LINE}")),
+            "{text}"
+        );
         assert!(!text.contains("src/login.ts"), "{text}");
         assert!(!text.contains("kind:"), "{text}");
         assert!(
@@ -8410,7 +8425,10 @@ mod tests {
             text.contains("\nread: crates/pixel-daemon/src/daemon.rs:279-286 — watch_ready\n"),
             "{text}"
         );
-        assert!(text.ends_with(READ_LINE), "{text}");
+        assert!(
+            text.ends_with(&format!("{READ_LINE}\n{SKILL_LINE}")),
+            "{text}"
+        );
         assert!(text.contains(MEDIUM_CONFIDENCE), "{text}");
         assert!(text.len() <= PROSE_BRIEF_BYTES, "{} bytes", text.len());
         assert!(!finished.record.answer);
@@ -9447,7 +9465,10 @@ mod tests {
             text.contains("3|   return handleError(e as Error);"),
             "{text}"
         );
-        assert!(text.ends_with(region_pack::DIRECTIVE), "{text}");
+        assert!(
+            text.ends_with(&format!("{}\n{SKILL_LINE}", region_pack::DIRECTIVE)),
+            "{text}"
+        );
         for gone in [
             "\nfiles:",
             "\nread:",
@@ -9466,7 +9487,7 @@ mod tests {
                 record.pack_targets,
                 record.fallback
             ),
-            (text.len(), 1, 1, false)
+            (text.len() - SKILL_LINE.len() - 1, 1, 1, false)
         );
     }
 
@@ -9506,7 +9527,10 @@ mod tests {
             text.contains("### src/ui.ts:1-3 — handleError definition (function)"),
             "{text}"
         );
-        assert!(text.ends_with(region_pack::DIRECTIVE), "{text}");
+        assert!(
+            text.ends_with(&format!("{}\n{SKILL_LINE}", region_pack::DIRECTIVE)),
+            "{text}"
+        );
         assert!(!text.contains("find-symbol"), "{text}");
         assert!(!text.contains("packet partial"), "{text}");
         assert!(finished.record.fallback);
@@ -9814,7 +9838,10 @@ mod tests {
             text.contains("### README.md:1-2 — readme\n1| # Pixel"),
             "{text}"
         );
-        assert!(text.ends_with(region_pack::DIRECTIVE), "{text}");
+        assert!(
+            text.ends_with(&format!("{}\n{SKILL_LINE}", region_pack::DIRECTIVE)),
+            "{text}"
+        );
         let record = finished.record;
         assert_eq!(
             (
@@ -10405,7 +10432,7 @@ mod tests {
             if expected {
                 assert_eq!(
                     finished.text.as_deref(),
-                    Some("[PIXEL:BRIEF]\n### source.rs:1-1 — evidence\n1| pub struct Library;\n"),
+                    Some(format!("[PIXEL:BRIEF]\n### source.rs:1-1 — evidence\n1| pub struct Library;\n{SKILL_LINE}").as_str()),
                     "{label}"
                 );
                 assert_eq!(finished.record.probes.len(), 1, "{label}");

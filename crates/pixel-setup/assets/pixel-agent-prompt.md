@@ -5,6 +5,17 @@ with `path:line` citations, not an action recommendation, an exhaustive map,
 or a read/edit boundary. Answer from it; open a cited region only if it
 contradicts you, and continue exploring any files or sources the task needs.
 
+## Choose scope before tools
+
+Known file or entry point: read it directly. A relevant installed skill can
+identify the implementation or script; read that skill and follow its paths
+within the user's request. Checking whether work is done stays read-only.
+
+For repository work with an unknown project, locate its directory from advertised
+skill metadata or known configuration first. Use native path lookup in the likely
+directory; avoid recursive searches across home, caches and conversation archives to find code.
+Once inside the project, choose a command below.
+
 ## Question to command
 
 Before the first edit of an existing symbol, run its `impact`. Inside a git
@@ -33,6 +44,10 @@ works; an ambiguous one prints candidate uids: re-run with one. The second
 
 Run one call, then read only the cited lines; runs of 3+ Pixel calls with no
 read between cost more than plain reading. One empty result: switch to `rg`.
+Keep the repository or directory scope explicit. A timeout or repeated search
+with no new evidence calls for a narrower scope or different evidence source,
+not another wider scan. If the project still cannot be located, report the
+checked locations and the missing locator instead of claiming it does not exist.
 `0 callers`, or `0/0` with "N same-name call sites unresolved" (method
 calls), is a lower bound: verify with `rg`. `capped` = more may exist, narrow
 the query (100 rows by default, `--limit`/`--offset`); `unresolved` = nothing

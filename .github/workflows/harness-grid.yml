@@ -33,7 +33,7 @@ permissions:
 
 jobs:
   grid:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       # git push of the recordings to the harness-recordings-media branch.
@@ -41,7 +41,7 @@ jobs:
       # gh pr view / gh pr edit of the PR body that carries the grid.
       pull-requests: write
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Shoot the four harnesses and publish the grid
