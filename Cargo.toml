@@ -95,6 +95,11 @@ strip = "symbols"
 inherits = "release"
 lto = false
 codegen-units = 16
+# Line tables for the profilers named in docs/bench/profiling.md. The
+# `strip = "symbols"` inherited from `release` removes the symbol table,
+# not the debug info, so samples still land on a file and a line. This is
+# the local iteration profile, never a shipped one.
+debug = "line-tables-only"
 
 # cross reads this instead of a root Cross.toml (workspace.metadata.cross is
 # its documented manifest location). It forwards RUSTFLAGS and the CARGO_*

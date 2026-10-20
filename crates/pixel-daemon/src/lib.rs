@@ -13,6 +13,7 @@ mod meaning;
 mod plane;
 pub mod recall_service;
 pub mod relevance;
+pub mod wire;
 
 pub use api::{Request, Response, ServeError, Service};
 pub use daemon::{pid_path, run, socket_path};

@@ -1,0 +1,108 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
+//! Cost of the daemon's NDJSON frame: one bounded request line in, one
+//! response line out.
+//!
+//! Four lanes, each over the production functions in `pixel_daemon::wire`:
+//!
+//! - `write/split` — payload write then newline write (the original shape);
+//! - `write/whole` — newline appended, one write;
+//! - `read/short` — a 120-byte request line, the common size;
+//! - `read/long` — an 8 KiB line, so the newline scan is not a rounding error.
+//!
+//! Writes go to a `UnixStream::pair` with a thread draining the far end,
+//! so the numbers carry the syscall cost and not a `Vec` sink's memcpy.
+//! Reads run over a `Cursor` at the same `MAX_REQUEST_LINE` cap the daemon
+//! uses, with a deadline far enough out to never trip.
+//!
+//! Run with: cargo bench -p pixel-bench --bench wire
+
+use std::io::{BufReader, Cursor, Read};
+use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
+
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use pixel_daemon::wire::{read_capped_line_with, write_line_split, write_line_whole};
+
+/// The daemon's own cap (`MAX_REQUEST_LINE` in `daemon.rs`).
+const MAX_REQUEST_LINE: usize = 1 << 20;
+
+/// A response envelope of the size the daemon usually sends.
+fn envelope() -> Vec<u8> {
+    let value = serde_json::json!({
+        "ok": true,
+        "op": "locate",
+        "protocol": 1,
+        "result": {
+            "candidates": [
+                {"path": "crates/pixel-daemon/src/daemon.rs", "line": 1471, "why": "handler"},
+                {"path": "crates/pixel-daemon/src/wire.rs", "line": 60, "why": "frame"},
+            ],
+            "evidence": ["the accept loop hands each connection to a thread"],
+        }
+    });
+    serde_json::to_vec(&value).expect("fixture serializes")
+}
+
+fn request_line(padding: usize) -> Vec<u8> {
+    let mut line = br#"{"op":"targets","protocol":1,"query":"daemon request loop"}"#.to_vec();
+    line.extend(std::iter::repeat_n(b' ', padding));
+    line.push(b'\n');
+    line
+}
+
+fn bench_write(c: &mut Criterion) {
+    let payload = envelope();
+    let mut group = c.benchmark_group("write");
+    group.throughput(Throughput::Bytes(payload.len() as u64));
+
+    let drain = |stream: UnixStream| {
+        std::thread::spawn(move || {
+            let mut sink = [0u8; 4096];
+            let mut stream = stream;
+            while stream.read(&mut sink).is_ok_and(|n| n > 0) {}
+        })
+    };
+
+    let (mut split, far) = UnixStream::pair().expect("socketpair");
+    let _reader = drain(far);
+    group.bench_function("split", |b| {
+        b.iter(|| write_line_split(&mut split, &payload).expect("write"));
+    });
+    drop(split);
+    drop(_reader);
+
+    let (mut whole, far) = UnixStream::pair().expect("socketpair");
+    let _reader = drain(far);
+    group.bench_function("whole", |b| {
+        b.iter(|| write_line_whole(&mut whole, &payload).expect("write"));
+    });
+    group.finish();
+}
+
+fn bench_read(c: &mut Criterion) {
+    let mut group = c.benchmark_group("read");
+    for (name, line) in [("short", request_line(0)), ("long", request_line(8 * 1024))] {
+        group.throughput(Throughput::Bytes(line.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(name), &line, |b, line| {
+            b.iter_batched(
+                || (BufReader::new(Cursor::new(line.clone())), String::new()),
+                |(mut reader, mut buf)| {
+                    read_capped_line_with(
+                        &mut reader,
+                        &mut buf,
+                        MAX_REQUEST_LINE,
+                        Instant::now() + Duration::from_secs(60),
+                        Instant::now,
+                    )
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_write, bench_read);
+criterion_main!(benches);
