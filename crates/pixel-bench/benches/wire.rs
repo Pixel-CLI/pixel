@@ -127,11 +127,7 @@ fn bench_parse(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("simd_json", name), &line, |b, line| {
             b.iter_batched(
                 || line.clone(),
-                |mut buf| {
-                    // SAFETY: `Request` is a plain serde type; the buffer
-                    // outlives the call and is dropped with it.
-                    unsafe { simd_json::from_slice::<Request>(buf.as_mut_slice()) }
-                },
+                |mut buf| simd_json::from_slice::<Request>(buf.as_mut_slice()),
                 criterion::BatchSize::SmallInput,
             );
         });
