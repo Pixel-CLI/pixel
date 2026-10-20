@@ -1580,7 +1580,6 @@ mod tests {
         assert!(!fallback_flag(None));
     }
 
-    #[test]
     /// Lane order sums the same products in a different order, so the result
     /// must stay equal to the sequential one at every length, tails
     /// included, and not just at multiples of the lane width.
@@ -1609,6 +1608,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn cosine_should_normalize_both_vectors() {
         let c = cosine(&[1.0, 2.0], &[3.0, 4.0]);
         assert!((c - 11.0 / 125f32.sqrt()).abs() < 1e-6, "{c}");
