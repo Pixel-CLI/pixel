@@ -3,12 +3,10 @@
 
 //! The OpenCode integration under `~/.config/opencode/`.
 //!
-//! OpenCode keeps its native tools. `pixel setup` writes two files there: the
-//! evidence-brief plugin `plugins/pixel-brief.js` and the TUI plugin
-//! `plugins/pixel-brief-metrics/tui.js` that shows Pixel's metrics blocks to
-//! the user, each recognised by the managed marker it carries
-//! ([`config::MANAGED_BEGIN`]); a file at either path without the marker is
-//! the user's and is never touched.
+//! OpenCode keeps its native tools. `pixel setup` writes one file there, the
+//! evidence-brief plugin `plugins/pixel-brief.js`, recognised by the managed
+//! marker it carries ([`config::MANAGED_BEGIN`]); a file at that path without
+//! the marker is the user's and is never touched.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,10 +18,24 @@ use crate::install::{self, CheckStatus, InstallStep, Result};
 /// directory auto-loads it, so no registration entry is needed.
 const BRIEF_PLUGIN_PATH: &str = "plugins/pixel-brief.js";
 
-/// The TUI plugin that toasts the brief's and each `pixel` call's metrics
-/// block; a directory plugin, which OpenCode loads as a TUI plugin by its
-/// `tui.js` entry.
-const METRICS_PLUGIN_PATH: &str = "plugins/pixel-brief-metrics/tui.js";
+/// The retired TUI plugin that toasted the metrics blocks (#1301); the brief
+/// plugin now posts them as chat messages. Setup and uninstall delete pixel's
+/// copy so the toasts stop; a foreign file there is left alone.
+const RETIRED_METRICS_PLUGIN_PATH: &str = "plugins/pixel-brief-metrics/tui.js";
+
+/// Deletes pixel's copy of the retired metrics plugin and then its directory
+/// when nothing else is in it. Whether a file was deleted.
+fn remove_retired_metrics_plugin(config_dir: &Path) -> Result<bool> {
+    let path = config_dir.join(RETIRED_METRICS_PLUGIN_PATH);
+    if !(path.is_file() && is_managed_plugin(&path)) {
+        return Ok(false);
+    }
+    fs::remove_file(&path)?;
+    if let Some(dir) = path.parent() {
+        let _ = fs::remove_dir(dir);
+    }
+    Ok(true)
+}
 
 /// Whether `path` is a plugin pixel wrote: a file carrying the managed
 /// marker. Anything else under that name belongs to the user, so uninstall
@@ -65,33 +77,28 @@ pub(crate) fn remove_opencode(config_dir: &Path, dry_run: bool) -> Result<Instal
         summary: install::dry_run_summary(dry_run, &summary),
         detail: Some(format!("plugin={}", plugin.display())),
     };
-    let metrics = config_dir.join(METRICS_PLUGIN_PATH);
-    let managed: Vec<&Path> = [&plugin, &metrics]
-        .into_iter()
-        .filter(|path| path.is_file() && is_managed_plugin(path))
-        .map(PathBuf::as_path)
-        .collect();
-    if managed.is_empty() {
+    let retired = config_dir.join(RETIRED_METRICS_PLUGIN_PATH);
+    let managed = |path: &Path| path.is_file() && is_managed_plugin(path);
+    if !managed(&plugin) && !managed(&retired) {
         return Ok(step("no pixel OpenCode plugin — nothing to remove".into()));
     }
     if !dry_run {
-        for path in &managed {
-            fs::remove_file(path)?;
+        if managed(&plugin) {
+            fs::remove_file(&plugin)?;
         }
-        // The metrics plugin's own directory, only once nothing else is in it.
-        if let Some(dir) = metrics.parent() {
-            let _ = fs::remove_dir(dir);
-        }
+        remove_retired_metrics_plugin(config_dir)?;
     }
     Ok(step(format!("removed plugin {}", plugin.display())))
 }
 
 /// The prompt-submission evidence brief for OpenCode: `plugins/` auto-loads
-/// `pixel-brief.js`, a V2 plugin whose `prompt` hook runs `pixel brief` and
-/// whose `context` hook adds the result to the turn's first request as a
-/// system part (the V1 `chat.message` export no longer loads). Written only
-/// where the config directory already exists; a managed earlier copy, V1
-/// included, is replaced, a foreign file under that name is never touched.
+/// `pixel-brief.js`, a V2 plugin whose `prompt` hook runs `pixel brief`, whose
+/// `context` hook adds the result to the turn's first request as a system part,
+/// and whose non-resuming synthetic messages show the brief's and each `pixel`
+/// call's metrics block in chat (the V1 `chat.message` export no longer
+/// loads). Written only where the config directory already exists; a managed
+/// earlier copy, V1 included, is replaced, a foreign file under that name is
+/// never touched. Pixel's copy of the retired toast plugin is deleted.
 pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let plugin = config_dir.join(BRIEF_PLUGIN_PATH);
     let step = |status, summary: String| InstallStep {
@@ -115,37 +122,13 @@ pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Res
             ),
         ));
     }
-    let managed = |asset: &str| {
-        asset
-            .replace("__PIXEL_BIN__", &format!("{:?}", exe.display().to_string()))
-            .replace("__MANAGED_BEGIN__", config::MANAGED_BEGIN)
-            .replace("__MANAGED_END__", config::MANAGED_END)
-    };
-    let metrics = config_dir.join(METRICS_PLUGIN_PATH);
-    if metrics.exists() && !is_managed_plugin(&metrics) {
-        return Ok(step(
-            CheckStatus::Yellow,
-            format!(
-                "{} exists and is not Pixel's; left untouched",
-                metrics.display()
-            ),
-        ));
-    }
-    let files = [
-        (
-            &plugin,
-            managed(include_str!("../assets/opencode-brief.js")),
-        ),
-        (
-            &metrics,
-            managed(include_str!("../assets/opencode-metrics-tui.js")),
-        ),
-    ];
-    let stale: Vec<_> = files
-        .iter()
-        .filter(|(path, source)| fs::read_to_string(path).map_or(true, |text| text != *source))
-        .collect();
-    if stale.is_empty() {
+    let source = include_str!("../assets/opencode-brief.js")
+        .replace("__PIXEL_BIN__", &format!("{:?}", exe.display().to_string()))
+        .replace("__MANAGED_BEGIN__", config::MANAGED_BEGIN)
+        .replace("__MANAGED_END__", config::MANAGED_END);
+    let retired = config_dir.join(RETIRED_METRICS_PLUGIN_PATH);
+    let retired_stale = retired.is_file() && is_managed_plugin(&retired);
+    if !retired_stale && fs::read_to_string(&plugin).is_ok_and(|text| text == source) {
         return Ok(step(
             CheckStatus::Green,
             "the OpenCode prompt brief plugin is current".into(),
@@ -155,20 +138,19 @@ pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Res
         return Ok(step(
             CheckStatus::Green,
             format!(
-                "would write the prompt brief and metrics plugins to {}",
+                "would write the prompt brief plugin to {}",
                 plugin.display()
             ),
         ));
     }
-    for (path, source) in stale {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        install::write_atomically(path, source)?;
+    if let Some(dir) = plugin.parent() {
+        fs::create_dir_all(dir)?;
     }
+    install::write_atomically(&plugin, &source)?;
+    remove_retired_metrics_plugin(config_dir)?;
     Ok(step(
         CheckStatus::Green,
-        "wrote the OpenCode prompt brief and metrics plugins".into(),
+        "wrote the OpenCode prompt brief plugin".into(),
     ))
 }
 
@@ -324,89 +306,100 @@ mod tests {
             source.contains("}, BRIEF_TIMEOUT_MS);"),
             "the timer must fire the named bound, not a literal"
         );
+        assert!(
+            source.contains("\"--metrics\", \"on\"")
+                && source.contains("metricsBlock")
+                && source.contains("ctx.session.synthetic")
+                && source.contains("description: text, resume: false"),
+            "the managed plugin must expose brief and finalized Pixel metrics in chat"
+        );
+        assert!(
+            source.contains("ctx.tool.hook(\"execute.after\"")
+                && source.contains("event.result")
+                && source.contains("event.error"),
+            "the V2 tool hook must relay finalized Pixel metrics"
+        );
+        assert!(
+            !source.contains("session.prompt")
+                && !source.contains("execution-brief")
+                && !source.contains("session.idle"),
+            "evidence must not send a model-directed retry or task-independent retrieval"
+        );
         // Ordering the in-flight briefs is per session. A process-wide counter
         // (the first V2 asset's `seen`) let a prompt in one session discard
         // another session's brief still in flight, so the sequence lives with
         // the session key and the newest prompt's guard reads it back.
         assert!(
             !source.contains("let seen")
-                && source.contains("sessions.get(event.sessionID)?.seq === seq"),
+                && source.contains("sessions.get(event.sessionID)?.seq !== seq"),
             "the newest-prompt guard must be per session, not process-wide"
         );
     }
 
-    /// Install writes the brief plugin and the metrics TUI plugin, both
-    /// marked managed, is idempotent, spares a foreign file at the metrics
-    /// path, and uninstall removes both plus the metrics directory.
+    /// Install writes the brief plugin, marked managed, is idempotent, and
+    /// deletes pixel's copy of the retired toast plugin (#1301) while sparing
+    /// a foreign file at that path; uninstall removes both of pixel's files.
     #[test]
-    fn install_writes_both_plugins_and_uninstall_removes_both() {
+    fn install_writes_the_brief_and_retires_the_toast_plugin() {
         let home = scratch("metrics-install");
         let dir = config_dir(&home);
-        fs::create_dir_all(&dir).unwrap();
+        let retired = dir.join(RETIRED_METRICS_PLUGIN_PATH);
+        fs::create_dir_all(retired.parent().unwrap()).unwrap();
+        fs::write(&retired, format!("// {}\n", config::MANAGED_BEGIN)).unwrap();
         let exe = Path::new("/bin/pixel");
 
         let step = install_brief(&dir, exe, false).unwrap();
-        assert!(step.summary.contains("wrote"), "{}", step.summary);
-        for path in [BRIEF_PLUGIN_PATH, METRICS_PLUGIN_PATH] {
-            let text = fs::read_to_string(dir.join(path)).unwrap();
-            assert!(text.contains(config::MANAGED_BEGIN), "{path} is unmarked");
-            assert!(!text.contains("__MANAGED_"), "{path} kept a placeholder");
-        }
+        assert_eq!(step.summary, "wrote the OpenCode prompt brief plugin");
+        let text = fs::read_to_string(dir.join(BRIEF_PLUGIN_PATH)).unwrap();
+        assert!(
+            text.contains(config::MANAGED_BEGIN),
+            "the brief is unmarked"
+        );
+        assert!(!text.contains("__MANAGED_"), "the brief kept a placeholder");
+        assert!(!retired.exists(), "pixel's toast plugin survived setup");
+        assert!(!dir.join("plugins/pixel-brief-metrics").exists());
         let again = install_brief(&dir, exe, false).unwrap();
-        assert!(again.summary.contains("current"), "{}", again.summary);
+        assert_eq!(again.summary, "the OpenCode prompt brief plugin is current");
 
+        fs::create_dir_all(retired.parent().unwrap()).unwrap();
+        fs::write(&retired, "// mine\n").unwrap();
+        let step = install_brief(&dir, exe, false).unwrap();
+        assert!(matches!(step.status, CheckStatus::Green), "{step:?}");
+        assert_eq!(fs::read_to_string(&retired).unwrap(), "// mine\n");
+
+        fs::write(&retired, format!("// {}\n", config::MANAGED_BEGIN)).unwrap();
         remove_opencode(&dir, false).unwrap();
         assert!(!dir.join(BRIEF_PLUGIN_PATH).exists());
-        assert!(!dir.join(METRICS_PLUGIN_PATH).exists());
-        assert!(!dir.join("plugins/pixel-brief-metrics").exists());
-
-        let foreign = dir.join(METRICS_PLUGIN_PATH);
-        fs::create_dir_all(foreign.parent().unwrap()).unwrap();
-        fs::write(&foreign, "// mine\n").unwrap();
-        let step = install_brief(&dir, exe, false).unwrap();
-        assert!(matches!(step.status, CheckStatus::Yellow), "{step:?}");
-        assert_eq!(fs::read_to_string(&foreign).unwrap(), "// mine\n");
-        assert!(!dir.join(BRIEF_PLUGIN_PATH).exists());
+        assert!(!retired.exists());
     }
 
-    /// The metrics path: the brief plugin leaves its `🟩` block, unfiltered,
-    /// in the directory the TUI plugin reads once per turn, and the TUI
-    /// plugin relays a footer only from a call whose own command ran `pixel`.
+    /// The metrics reach the user as chat messages and never the brief text a
+    /// second time: OpenCode sends a synthetic message to the model as a user
+    /// message. Only a `pixel` call's own trailing footer is relayed.
     #[test]
-    fn metrics_assets_share_the_handoff_and_stay_off_the_model_channel() {
+    fn metrics_go_to_chat_without_repeating_the_brief() {
         let brief = include_str!("../assets/opencode-brief.js");
-        let tui = include_str!("../assets/opencode-metrics-tui.js");
-        let dir = r#"path.join(os.tmpdir(), "pixel-opencode-brief-metrics")"#;
-        assert!(
-            brief.contains(dir) && tui.contains(dir),
-            "both sides must spell the handoff directory the same way"
+        assert_eq!(
+            brief.matches("showEvidence(ctx, event.sessionID,").count(),
+            2,
+            "one message for the brief's metrics, one per pixel call"
         );
         assert!(
-            !brief.contains(r#""--metrics""#),
-            "the brief must keep its metrics block to hand to the user"
+            brief.contains("void showEvidence(ctx, event.sessionID, state.metrics);")
+                && brief.contains("if (footer) await showEvidence(ctx, event.sessionID, footer);"),
+            "only metrics blocks become chat messages"
         );
         assert!(
-            brief.contains(r#"err.indexOf("🟩")"#)
-                && brief.contains("text: `${state.brief}\\n${NOTICE}`"),
-            "the metrics block never joins the system part"
+            brief.contains("text: `${state.brief}\\n${NOTICE}`"),
+            "the brief text reaches the model once, as the system part"
         );
         assert!(
-            tui.contains("export default {")
-                && tui.contains(r#"id: "pixel.metrics""#)
-                && tui.contains("setup(api)")
-                && tui.contains("api.data.listen")
-                && tui.contains("api.ui.toast.show"),
-            "a V2 TUI plugin: default {{ id, setup }}, event listener, toast"
+            brief.contains("PIXEL_COMMAND.test(command)") && brief.contains("\\s*$/u;"),
+            "only a pixel call's own footer, anchored at the end of its output"
         );
         assert!(
-            tui.contains(r#""session.tool.called""#)
-                && tui.contains(r#""session.tool.success""#)
-                && tui.contains("PIXEL_COMMAND.test(command)"),
-            "only a pixel call's own footer is relayed"
-        );
-        assert!(
-            tui.contains("__MANAGED_BEGIN__") && tui.contains("__MANAGED_END__"),
-            "without the marker uninstall would treat the file as the user's"
+            !brief.contains("toast") && !brief.contains("os.tmpdir()"),
+            "no toast handoff remains"
         );
     }
 }
