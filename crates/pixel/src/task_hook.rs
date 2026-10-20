@@ -1727,11 +1727,27 @@ fn antigravity_prompt(payload: &Value) -> Option<String> {
             },
             |text| Some(text.to_string()),
         );
-        if let Some(content) = content.filter(|text| !text.trim().is_empty()) {
+        if let Some(content) = content
+            .map(|text| antigravity_user_request(&text).to_string())
+            .filter(|text| !text.trim().is_empty())
+        {
             last = Some(content);
         }
     }
     last
+}
+
+/// What the user typed in an Antigravity turn. Antigravity CLI 1.4 stores a
+/// turn as `<USER_REQUEST>…</USER_REQUEST>`, then its own
+/// `<ADDITIONAL_METADATA>` (the local time) and, after a model switch, a
+/// `<USER_SETTINGS_CHANGE>` block; briefing the whole text looked up
+/// `USER_REQUEST`, `Gemini` and the time as symbols. Text without the
+/// wrapper is returned as is.
+fn antigravity_user_request(text: &str) -> &str {
+    text.trim_start()
+        .strip_prefix("<USER_REQUEST>")
+        .and_then(|rest| rest.split_once("</USER_REQUEST>"))
+        .map_or(text, |(request, _)| request.trim())
 }
 
 /// `decision` with the brief as its `context`, which the envelope delivers as
@@ -3227,6 +3243,25 @@ mod tests {
                 "content",
                 "first part\nsecond part",
             ),
+            // Antigravity CLI 1.4.2's USER_EXPLICIT turn, verbatim shape.
+            (
+                json!(
+                    [
+                        "<USER_REQUEST>",
+                        "what breaks if I rename renderPosts",
+                        "</USER_REQUEST>",
+                        "<ADDITIONAL_METADATA>",
+                        "The current local time is: 2026-10-20T19:50:30+02:00.",
+                        "</ADDITIONAL_METADATA>",
+                        "<USER_SETTINGS_CHANGE>",
+                        "The user changed setting `Model Selection` from None to Gemini 3.8 Flash (High).",
+                        "</USER_SETTINGS_CHANGE>",
+                    ]
+                    .join("\n")
+                ),
+                "content",
+                "what breaks if I rename renderPosts",
+            ),
         ] {
             let mut user = json!({"role":"user"});
             user[field] = content;
@@ -3245,6 +3280,27 @@ mod tests {
             );
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn antigravity_user_request_should_keep_only_the_typed_request() {
+        assert_eq!(
+            antigravity_user_request(
+                "<USER_REQUEST>\nfix it\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nt\n</ADDITIONAL_METADATA>"
+            ),
+            "fix it"
+        );
+        assert_eq!(
+            antigravity_user_request("<USER_REQUEST>\n\n</USER_REQUEST>"),
+            ""
+        );
+        for plain in [
+            "plain prompt",
+            "<USER_REQUEST>\nunclosed",
+            "quote <USER_REQUEST>x</USER_REQUEST> mid-text",
+        ] {
+            assert_eq!(antigravity_user_request(plain), plain, "{plain}");
+        }
     }
 
     #[test]
