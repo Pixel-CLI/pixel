@@ -87,11 +87,13 @@ pub(crate) fn remove_opencode(config_dir: &Path, dry_run: bool) -> Result<Instal
 }
 
 /// The prompt-submission evidence brief for OpenCode: `plugins/` auto-loads
-/// `pixel-brief.js`, a V2 plugin whose `prompt` hook runs `pixel brief` and
-/// whose `context` hook adds the result to the turn's first request as a
-/// system part (the V1 `chat.message` export no longer loads). Written only
-/// where the config directory already exists; a managed earlier copy, V1
-/// included, is replaced, a foreign file under that name is never touched.
+/// `pixel-brief.js`, a V2 plugin whose `prompt` hook runs `pixel brief`, whose
+/// `context` hook adds the result to the turn's first request as a system part,
+/// and whose synthetic messages show the brief and finalized Pixel metrics in
+/// chat without resuming the model (the V1 `chat.message` export no longer
+/// loads). Written only where the config directory already exists; a managed
+/// earlier copy, V1 included, is replaced, a foreign file under that name is
+/// never touched.
 pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let plugin = config_dir.join(BRIEF_PLUGIN_PATH);
     let step = |status, summary: String| InstallStep {
@@ -323,6 +325,25 @@ mod tests {
         assert!(
             source.contains("}, BRIEF_TIMEOUT_MS);"),
             "the timer must fire the named bound, not a literal"
+        );
+        assert!(
+            source.contains("\"--metrics\", \"on\"")
+                && source.contains("metricsBlock")
+                && source.contains("ctx.session.synthetic")
+                && source.contains("resume: false"),
+            "the managed plugin must expose brief and finalized Pixel metrics in chat"
+        );
+        assert!(
+            source.contains("ctx.tool.hook(\"execute.after\"")
+                && source.contains("event.result")
+                && source.contains("event.error"),
+            "the V2 tool hook must relay finalized Pixel metrics"
+        );
+        assert!(
+            !source.contains("session.prompt")
+                && !source.contains("execution-brief")
+                && !source.contains("session.idle"),
+            "evidence must not send a model-directed retry or task-independent retrieval"
         );
         // Ordering the in-flight briefs is per session. A process-wide counter
         // (the first V2 asset's `seen`) let a prompt in one session discard
