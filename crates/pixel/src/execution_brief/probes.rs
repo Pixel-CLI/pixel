@@ -240,6 +240,10 @@ fn in_own_group(command: &mut Command) {
 
 /// Sends SIGKILL to the process group `group`. A group already gone is not an
 /// error, and Pixel's own group, or init's, is never one.
+fn protected_group(pid: libc::pid_t, own: libc::pid_t) -> bool {
+    pid <= 1 || pid == own
+}
+
 fn kill_group(group: u32) {
     #[cfg(unix)]
     {
@@ -247,7 +251,7 @@ fn kill_group(group: u32) {
             return;
         };
         // SAFETY: `getpgrp` takes no argument and cannot fail.
-        if pid <= 1 || pid == unsafe { libc::getpgrp() } {
+        if protected_group(pid, unsafe { libc::getpgrp() }) {
             return;
         }
         // SAFETY: a negative pid signals the process group `pid`; the call
@@ -767,5 +771,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["ordinary", "recovery"]
         );
+    }
+
+    #[test]
+    fn audited_group_signals_should_protect_init_and_our_group_independently() {
+        for (pid, own, protected) in [
+            (0, 100, true),
+            (1, 100, true),
+            (100, 100, true),
+            (101, 100, false),
+        ] {
+            assert_eq!(protected_group(pid, own), protected);
+        }
+    }
+
+    #[test]
+    fn audited_reaping_should_return_none_after_the_deadline_even_while_the_leader_is_alive() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "sleep 0.2"])
+            .spawn()
+            .unwrap();
+        assert!(reap(child, Instant::now() - Duration::from_secs(1)).is_none());
     }
 }

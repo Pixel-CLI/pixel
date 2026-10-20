@@ -717,3 +717,82 @@ mod tests {
         assert_eq!(fs::read(state).unwrap(), bytes);
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn receipt_reading_should_treat_absence_as_optional_but_propagate_other_io_errors() {
+        let home = tempfile::tempdir().unwrap();
+        let looping = home.path().join("loop");
+        symlink("loop", &looping).unwrap();
+        assert_eq!(read(&home.path().join("missing")).unwrap(), None);
+        assert!(read(&looping).is_err());
+        fs::create_dir(home.path().join(".pixel")).unwrap();
+        symlink("setup-receipt.json", home.path().join(STATE)).unwrap();
+        assert!(remove(home.path(), true, false).is_err());
+        assert!(
+            Snapshot::capture(home.path(), true)
+                .unwrap()
+                .finish()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn snapshot_begin_should_skip_both_preview_and_repository_installs_independently() {
+        let home = tempfile::tempdir().unwrap();
+        for (dry_run, repo, expected) in [
+            (false, false, true),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+        ] {
+            let options = crate::install::InstallOptions {
+                home: Some(home.path().into()),
+                dry_run,
+                repo: repo.then(|| home.path().join("repo")),
+                ..Default::default()
+            };
+            assert_eq!(Snapshot::begin(&options).unwrap().is_some(), expected);
+        }
+    }
+
+    #[test]
+    fn snapshots_should_stop_at_the_selected_home_directory() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        let snap = Snapshot::capture(home.path(), true).unwrap();
+        assert!(snap.entries.contains_key(&home.path().join(".claude")));
+        assert!(!snap.entries.contains_key(home.path()));
+        assert!(snap.entries.keys().all(|p| p.starts_with(home.path())));
+    }
+
+    #[test]
+    fn receipt_validation_should_reject_each_escape_shape_before_removing_any_output() {
+        for escape in ["home", "root", "parent", "outside"] {
+            let home = tempfile::tempdir().unwrap();
+            let home = home.path();
+            let file = match escape {
+                "home" => home.to_path_buf(),
+                "root" => PathBuf::from("/"),
+                "parent" => home.join(".claude/skills/pixel/../mine"),
+                _ => home.join("mine"),
+            };
+            fs::write(home.join("mine"), b"keep").unwrap();
+            let receipt = Receipt::from([(
+                file,
+                Owned {
+                    original: None,
+                    installed: "directory".into(),
+                    location: None,
+                },
+            )]);
+            save(home, &receipt).unwrap();
+            assert!(remove(home, true, false).is_err(), "{escape}");
+            assert_eq!(fs::read(home.join("mine")).unwrap(), b"keep");
+        }
+    }
+}

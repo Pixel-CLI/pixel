@@ -3740,4 +3740,301 @@ mod tests {
             "nothing is sent twice: {second:?} against {first:?}"
         );
     }
+
+    #[test]
+    fn audited_whole_file_chunks_should_preserve_exact_priorities_ranges_and_source_lines() {
+        let source = (1..=121).map(|n| format!("line-{n}")).collect::<Vec<_>>();
+        let blocks = whole_file_blocks(2, "source.rs", &source);
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|c| (c.priority, c.order, block_range(&c.block).unwrap()))
+                .collect::<Vec<_>>(),
+            [
+                (3, (2, 0, 1), ("source.rs".into(), 1, 60)),
+                (10, (2, 0, 61), ("source.rs".into(), 61, 120)),
+                (13, (2, 0, 121), ("source.rs".into(), 121, 121)),
+            ]
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|c| c.block.body.len())
+                .collect::<Vec<_>>(),
+            [60, 60, 1]
+        );
+        assert_eq!(blocks[2].block.body, ["121| line-121"]);
+    }
+
+    #[test]
+    fn audited_selection_should_add_the_chosen_ladders_site_counts_to_base_and_tests() {
+        let candidate = |head: &str| Candidate {
+            priority: 0,
+            order: (0, 0, 0),
+            part: Part::Definition,
+            block: Block::new(head.into(), vec![]),
+        };
+        let base = [candidate("base")];
+        let tests = [candidate("tests")];
+        let levels = vec![
+            vec![
+                Level {
+                    blocks: vec![candidate("a0")],
+                    sites: 2,
+                },
+                Level {
+                    blocks: vec![candidate("a1")],
+                    sites: 5,
+                },
+            ],
+            vec![Level {
+                blocks: vec![candidate("b0")],
+                sites: 3,
+            }],
+        ];
+        let (chosen, sites) = select(&base, &tests, &levels, &[1, 0]);
+        assert_eq!(sites, 8);
+        assert_eq!(
+            chosen
+                .iter()
+                .map(|c| c.block.head.as_str())
+                .collect::<Vec<_>>(),
+            ["base", "tests", "a1", "b0"]
+        );
+    }
+
+    #[test]
+    fn audited_test_bodies_should_deduplicate_by_head_even_when_the_contents_differ() {
+        let body = |head: &str, line: &str| Candidate {
+            priority: 40,
+            order: (0, 3, 1),
+            part: Part::TestBody,
+            block: Block::new(head.into(), vec![line.into()]),
+        };
+        let found = unseen_tests(vec![
+            body("a.rs:1-2 — first", "1| first"),
+            body("a.rs:1-2 — first", "1| changed"),
+            body("a.rs:4-5 — second", "1| first"),
+        ]);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].block.body, ["1| first"]);
+        assert_eq!(found[1].block.head, "a.rs:4-5 — second");
+    }
+
+    #[test]
+    fn audited_test_candidates_should_cap_unique_paths_and_rank_lists_before_exact_test_bodies() {
+        let mut evidence = Repo::default();
+        for n in 0..4 {
+            evidence.sources.push((
+                format!("tests/direct{n}.rs"),
+                lines(&[
+                    "#[test]",
+                    "fn direct() {",
+                    "    assert_eq!(SEARCH_DEFAULT_ROWS, 100);",
+                    "}",
+                ]),
+            ));
+        }
+        for n in 0..3 {
+            evidence.sources.push((
+                format!("tests/hop{n}.rs"),
+                lines(&[
+                    "#[test]",
+                    "fn through() {",
+                    "    assert_eq!(handler(), 100);",
+                    "}",
+                ]),
+            ));
+        }
+        evidence.rows.push((
+            "handler".into(),
+            (0..3)
+                .map(|n| {
+                    row(
+                        &format!("tests/hop{n}.rs"),
+                        3,
+                        "    assert_eq!(handler(), 100);",
+                    )
+                })
+                .collect(),
+        ));
+        let input = input(4);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut files = Files::new(&evidence, deadline);
+        let target = Target {
+            name: "SEARCH_DEFAULT_ROWS".into(),
+            definition: None,
+            region: None,
+            rows: vec![],
+            by_text: false,
+            sites: 8,
+            matches: false,
+            whole_file: false,
+        };
+        let sites = Sites {
+            tests: vec![
+                Site {
+                    path: "tests/direct0.rs".into(),
+                    line: 3,
+                },
+                Site {
+                    path: "tests/direct0.rs".into(),
+                    line: 3,
+                },
+                Site {
+                    path: "tests/direct1.rs".into(),
+                    line: 3,
+                },
+                Site {
+                    path: "tests/direct2.rs".into(),
+                    line: 3,
+                },
+                Site {
+                    path: "tests/direct3.rs".into(),
+                    line: 3,
+                },
+            ],
+            ..Sites::default()
+        };
+        let mut context = Context {
+            input: &input,
+            deadline,
+            files: &mut files,
+        };
+        let found = test_candidates(2, &target, &sites, &[], &["handler".into()], &mut context);
+        assert_eq!(
+            found
+                .iter()
+                .map(|c| (c.priority, c.order, c.part))
+                .collect::<Vec<_>>(),
+            [
+                (5, (2, 2, 0), Part::Tests),
+                (8, (2, 2, 1), Part::Tests),
+                (42, (2, 3, 2), Part::TestBody),
+                (45, (2, 3, 2), Part::TestBody),
+                (48, (2, 3, 2), Part::TestBody)
+            ]
+        );
+        assert_eq!(found[0].block.body.len(), 3);
+        assert_eq!(found[1].block.body.len(), 2);
+        assert!(
+            found[0]
+                .block
+                .body
+                .iter()
+                .all(|entry| !entry.contains("direct3"))
+        );
+        assert!(
+            found[1]
+                .block
+                .body
+                .iter()
+                .all(|entry| !entry.contains("hop2"))
+        );
+        assert_eq!(
+            found[2].block.body,
+            [
+                "2| fn direct() {",
+                "3|     assert_eq!(SEARCH_DEFAULT_ROWS, 100);",
+                "4| }"
+            ]
+        );
+        let refs = found.iter().collect::<Vec<_>>();
+        let text = header(&input, &[target], &refs, 0, false);
+        assert!(text.contains("5 test(s) listed"), "{text}");
+    }
+
+    #[test]
+    fn audited_definition_and_usage_candidates_should_preserve_target_rank_and_display_order() {
+        let evidence = repo();
+        let input = input(4);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let targets = resolve_targets(&input, &evidence, deadline);
+        let target = &targets[0];
+        let mut files = Files::new(&evidence, deadline);
+        let definitions = definition_candidates(2, target, 0, &mut files);
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|c| (c.priority, c.order, c.part))
+                .collect::<Vec<_>>(),
+            [(2, (2, 0, 5), Part::Definition)]
+        );
+        let mut context = Context {
+            input: &input,
+            deadline,
+            files: &mut files,
+        };
+        let (usages, total, _) = usage_candidates(2, target, Detail::Lines, &mut context);
+        assert_eq!(total, 2);
+        assert_eq!(
+            usages.iter().map(|c| c.priority).collect::<Vec<_>>(),
+            [9, 12]
+        );
+        assert!(
+            usages
+                .iter()
+                .all(|c| c.part == Part::Usage && c.order.0 == 2 && c.order.1 == 1)
+        );
+    }
+
+    #[test]
+    fn audited_caller_candidates_should_rank_both_hops_and_skip_the_functions_own_declaration() {
+        let mut evidence = Repo::default();
+        for (path, name) in [("first.rs", "dispatch"), ("second.rs", "serve")] {
+            evidence.sources.push((
+                path.into(),
+                lines(&[&format!("fn {name}() {{"), "    handler();", "}"]),
+            ));
+        }
+        evidence.sources.push((
+            "own.rs".into(),
+            lines(&["fn handler() {", "    work();", "}"]),
+        ));
+        evidence.rows.push((
+            "handler".into(),
+            vec![
+                row("first.rs", 2, "    handler();"),
+                row("second.rs", 2, "    handler();"),
+                row("own.rs", 1, "fn handler() {"),
+            ],
+        ));
+        let input = input(4);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut files = Files::new(&evidence, deadline);
+        let target = Target {
+            name: "target".into(),
+            definition: None,
+            region: None,
+            rows: vec![],
+            by_text: false,
+            sites: 8,
+            matches: false,
+            whole_file: false,
+        };
+        let mut context = Context {
+            input: &input,
+            deadline,
+            files: &mut files,
+        };
+        let found = caller_candidates(
+            2,
+            &target,
+            &["handler".into()],
+            None,
+            Detail::Lines,
+            &mut context,
+        );
+        assert_eq!(
+            found.iter().map(|c| c.priority).collect::<Vec<_>>(),
+            [33, 36]
+        );
+        assert_eq!(
+            found
+                .iter()
+                .map(|c| block_range(&c.block).unwrap().0)
+                .collect::<Vec<_>>(),
+            ["first.rs", "second.rs"]
+        );
+    }
 }

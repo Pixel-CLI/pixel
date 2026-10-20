@@ -558,4 +558,93 @@ mod audited_contract_tests {
             assert_eq!(value_path(walker, node, MAX_SEGMENTS), None);
         });
     }
+
+    #[test]
+    fn fixture_roots_should_require_literal_names_and_instance_test_context() {
+        use crate::ruby::Context;
+        use crate::ruby::extract::testing::rows;
+        for (source, expected) in [
+            (
+                "class Check; def test_run; users(:one).label; end; end",
+                true,
+            ),
+            ("class Check; setup do; users(:one).label; end; end", true),
+            (
+                "class Check; def test_run; [1].each { users(:one).label }; end; end",
+                true,
+            ),
+            ("users(:one).label", false),
+            ("class Check; users(:one).label; end", false),
+            (
+                "class Check; def self.test_run; users(:one).label; end; end",
+                false,
+            ),
+            (
+                "class Check; def test_run; other.instance_eval { users(:one).label }; end; end",
+                false,
+            ),
+            (
+                "class Check; def test_run; users(key).label; end; end",
+                false,
+            ),
+            (
+                "class Check; def test_run; users(:one,:two).label; end; end",
+                false,
+            ),
+            (
+                "class Check; def test_run; users(:one) { work }.label; end; end",
+                false,
+            ),
+        ] {
+            let found = rows("test/check_test.rb", source);
+            let label = found
+                .edges
+                .iter()
+                .map(|edge| Context::decode(&edge.context))
+                .find(|c| c.name == "label")
+                .unwrap();
+            assert_eq!(
+                label.qualifier == ":value F:users",
+                expected,
+                "{source}: {}",
+                label.qualifier
+            );
+        }
+    }
+
+    #[test]
+    fn pattern_scanning_should_bind_shorthand_keys_and_named_captures_without_inventing_explicit_keys()
+     {
+        for (source, expected) in [
+            ("case input; in { name: }; end", vec!["name"]),
+            ("case input; in { name: other }; end", vec!["other"]),
+            ("/(?<name>.+)/ =~ input", vec!["name"]),
+        ] {
+            let tree = parse(source.as_bytes(), PARSE_BUDGET).unwrap();
+            let walker = Walker::new(source.as_bytes());
+            let gate = Gates::open(&walker, tree.root_node());
+            let mut names = gate.locals.keys().map(String::as_str).collect::<Vec<_>>();
+            names.sort_unstable();
+            assert_eq!(names, expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn long_local_alias_chains_should_abstain_instead_of_retyping_forever() {
+        use crate::ruby::Context;
+        use crate::ruby::extract::testing::rows;
+        let mut source = "class Check; def run; a0=Room.new;".to_string();
+        for i in 1..12 {
+            source.push_str(&format!("a{i}=a{};", i - 1));
+        }
+        source.push_str("a11.label; end; end");
+        let found = rows("check.rb", &source);
+        let label = found
+            .edges
+            .iter()
+            .map(|edge| Context::decode(&edge.context))
+            .find(|c| c.name == "label")
+            .unwrap();
+        assert_eq!(label.qualifier, "a11");
+    }
 }

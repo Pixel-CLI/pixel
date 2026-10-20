@@ -90,3 +90,23 @@ pub(super) fn require_path(method: &str, spec: &str) -> String {
         (_, true) => String::new(),
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::super::{PARSE_BUDGET, parse};
+    use super::*;
+
+    #[test]
+    fn unread_imports_should_include_the_depth_boundary_but_not_its_children() {
+        let source = b"require 'one'\nrequire 'two'";
+        let tree = parse(source, PARSE_BUDGET).unwrap();
+        for (depth, count) in [(MAX_DEPTH, 0), (MAX_DEPTH - 1, 2), (MAX_DEPTH + 1, 0)] {
+            let mut walker = Walker::new(source);
+            walker.imports_in(tree.root_node(), depth);
+            assert_eq!(walker.sites.len(), count, "depth={depth}");
+        }
+        let mut walker = Walker::new(source);
+        walker.imports_in(tree.root_node().named_child(0).unwrap(), MAX_DEPTH);
+        assert_eq!(walker.sites.len(), 1);
+    }
+}

@@ -1004,3 +1004,37 @@ mod tests {
         assert!(!home.join(super::CLASSIFY_PACKAGE_DIR).exists());
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+
+    #[test]
+    fn uninstall_should_remove_an_owned_package_even_without_a_settings_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = PiPaths::resolve(home.path(), true);
+        fs::create_dir_all(&paths.package_dir).unwrap();
+        fs::write(paths.package_dir.join("package.json"), "{}").unwrap();
+        uninstall(&paths, false).unwrap();
+        assert!(!paths.package_dir.exists());
+    }
+
+    #[test]
+    fn uninstall_should_remove_a_settings_entry_even_when_the_package_is_already_missing() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = PiPaths::resolve(home.path(), true);
+        fs::create_dir_all(&paths.agent_dir).unwrap();
+        fs::write(
+            &paths.settings,
+            serde_json::to_string(
+                &json!({"packages":[paths.package_source(),"foreign"],"mine":true}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        uninstall(&paths, false).unwrap();
+        let after: Value =
+            serde_json::from_str(&fs::read_to_string(&paths.settings).unwrap()).unwrap();
+        assert_eq!(after, json!({"packages":["foreign"],"mine":true}));
+    }
+}

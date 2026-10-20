@@ -841,3 +841,53 @@ mod report_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+
+    #[test]
+    fn settings_writes_should_propagate_nonmissing_read_errors() {
+        let home = tempfile::tempdir().unwrap();
+        let looped = home.path().join("settings.json");
+        std::os::unix::fs::symlink("settings.json", &looped).unwrap();
+        assert!(write_settings(&looped, &serde_json::json!({"mine":true}), false).is_err());
+        assert!(looped.is_symlink());
+    }
+
+    #[test]
+    fn native_hooks_should_require_both_the_host_directory_and_its_selection() {
+        for (exists, selected) in [(false, true), (true, false), (false, false)] {
+            let home = tempfile::tempdir().unwrap();
+            let opencode = crate::opencode_config::opencode_config_dir(home.path(), true);
+            let agy = crate::antigravity::antigravity_config_dir(home.path());
+            if exists {
+                fs::create_dir_all(&opencode).unwrap();
+                fs::create_dir_all(&agy).unwrap();
+            }
+            let options = InstallOptions {
+                home: Some(home.path().into()),
+                executable_path: Some("/tmp/pixel".into()),
+                ..Default::default()
+            };
+            let selection = InstallSelection {
+                agents: if selected {
+                    vec![AgentTarget::OpenCode, AgentTarget::Antigravity]
+                } else {
+                    vec![AgentTarget::ClaudeCode]
+                },
+                task_hooks: true,
+                ..Default::default()
+            };
+            install_selected(&options, Some(&selection)).unwrap();
+            assert!(
+                !opencode.join("plugins/pixel-brief.js").exists(),
+                "exists={exists} selected={selected}"
+            );
+            assert!(
+                !crate::antigravity::plugin_dir(home.path()).exists(),
+                "exists={exists} selected={selected}"
+            );
+        }
+    }
+}

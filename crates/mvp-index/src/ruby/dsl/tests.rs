@@ -1036,3 +1036,32 @@ end
         ]
     );
 }
+
+#[test]
+fn audited_association_extensions_should_require_a_block_extend_option_or_extending_lambda() {
+    use crate::ruby::{ASSOCIATION_EXTENDED, Context};
+    for (declaration, extended) in [
+        ("has_many :items", false),
+        ("has_many :items, -> { where(open: true) }", false),
+        ("has_many :items, -> { extending Extras }", true),
+        ("has_many :items, extend: Extras", true),
+        ("has_many :items, class_name: 'Item'", false),
+        ("has_many :items do; def recent; end; end", true),
+    ] {
+        let found = rows("model.rb", &format!("class Box; {declaration}; end"));
+        let association = found
+            .edges
+            .iter()
+            .find(|e| e.kind == mvp_model::EdgeKind::Association)
+            .unwrap();
+        let context = Context::decode(&association.context);
+        assert_eq!(
+            context
+                .extra
+                .get(1)
+                .is_some_and(|s| s.contains(ASSOCIATION_EXTENDED)),
+            extended,
+            "{declaration}: {context:?}"
+        );
+    }
+}

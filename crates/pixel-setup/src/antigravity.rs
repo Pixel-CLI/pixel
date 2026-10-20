@@ -1322,4 +1322,18 @@ mod tests {
             Path::new("/home/user/.gemini/config/config.json")
         );
     }
+
+    #[test]
+    fn audited_plugin_check_should_accept_exact_skills_and_reject_modified_skill_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
+        let exe = Path::new("/tmp/pixel");
+        let agy = fake_agy(&home.join("agy"), r#"{"imports":[{"name":"pixel"}]}"#);
+        install_antigravity_plugin_with_agy(home, exe, false, agy.as_os_str()).unwrap();
+        check_antigravity_install_with_agy(home, exe, agy.as_os_str()).unwrap();
+        fs::write(plugin_dir(home).join("skills/pixel/SKILL.md"), "changed").unwrap();
+        let error = check_antigravity_install_with_agy(home, exe, agy.as_os_str()).unwrap_err();
+        assert!(error.contains("IDE skills/pixel/SKILL.md"), "{error}");
+    }
 }

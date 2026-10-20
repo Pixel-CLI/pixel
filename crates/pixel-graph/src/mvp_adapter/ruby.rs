@@ -1082,3 +1082,43 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+
+    #[test]
+    fn file_scopes_should_sort_the_exact_ids_and_keep_an_empty_scope_distinct_from_all() {
+        assert_eq!(Scope::All.ids(), None);
+        assert_eq!(Scope::Files(&HashSet::new()).ids(), Some(vec![]));
+        assert_eq!(
+            Scope::Files(&HashSet::from([7, 2, 4])).ids(),
+            Some(vec![2, 4, 7])
+        );
+    }
+
+    #[test]
+    fn v1_rows_should_read_resolved_and_unresolved_ruby_sites() {
+        let store = GraphStore::open_in_memory().unwrap();
+        store.conn().execute_batch("INSERT INTO files(id,path,blob_oid,lang) VALUES(1,'a.rb','oid','ruby'),(2,'b.rs','oid','rust');
+          INSERT INTO symbols(id,uid,file_id,name,qualified,kind,start_line,end_line) VALUES(1,'a',1,'a','A#a','method',1,5),(2,'b',1,'b','A#b','method',6,8);
+          INSERT INTO edges(src_id,dst_id,kind,tier,site_line,callee) VALUES(1,2,'calls','exact',2,'b');").unwrap();
+        store
+            .insert_unresolved_call(1, "missing", Some(1), 3, None, "references")
+            .unwrap();
+        let rows = v1_rows(&store).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            v1_rows_in(&store, Scope::Files(&HashSet::new()))
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            v1_rows_in(&store, Scope::Files(&HashSet::from([1])))
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+}

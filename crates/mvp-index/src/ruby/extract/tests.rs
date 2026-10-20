@@ -1773,3 +1773,20 @@ end
         assert!(line.starts_with(&symbol.signature), "{symbol:?}");
     }
 }
+
+#[test]
+fn audited_rspec_core_reopenings_should_disable_the_model_for_the_root_and_nested_names_only() {
+    for (source, off) in [
+        ("module RSpec::Core; end", true),
+        ("class RSpec::Core::Example; end", true),
+        ("module Other::Core; end", false),
+    ] {
+        let found = rows("spec/support/core.rb", source);
+        let facts = crate::ruby::Fact::decode_all(&found.facts);
+        assert_eq!(
+            facts.contains(&crate::ruby::Fact::RspecOff),
+            off,
+            "{source}"
+        );
+    }
+}

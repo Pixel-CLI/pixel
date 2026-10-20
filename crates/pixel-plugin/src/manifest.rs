@@ -960,3 +960,16 @@ mode = "lead"
         assert!(err.contains("is larger than 65536 bytes"), "{err}");
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+
+    #[test]
+    fn manifest_io_errors_should_remain_io_errors_instead_of_invalid_manifest_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("not-a-directory");
+        std::fs::write(&file, "content").unwrap();
+        assert!(matches!(load(&file, None), Err(Error::Io { .. })));
+    }
+}

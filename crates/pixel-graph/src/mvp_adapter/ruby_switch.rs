@@ -592,3 +592,91 @@ pub fn switch_ruby(root: &Path, store: &GraphStore, state: &Path) -> Result<(), 
     let mvp = refresh(root, state)?;
     merge_into(store, &mvp)
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+
+    fn store() -> GraphStore {
+        let store = GraphStore::open_in_memory().unwrap();
+        store.conn().execute_batch("INSERT INTO files(id,path,blob_oid,lang) VALUES(1,'a.rb','oid','ruby');
+          INSERT INTO symbols(id,uid,file_id,name,qualified,kind,start_line,end_line) VALUES
+          (1,'a.rb#a',1,'a','A#a','method',1,5),(2,'a.rb#b',1,'b','A#b','method',6,8);
+          INSERT INTO edges(id,src_id,dst_id,kind,tier,site_line,receiver,callee) VALUES(1,1,2,'calls','probable',2,'self','b');").unwrap();
+        store
+            .insert_unresolved_call(1, "missing", Some(1), 3, None, "calls")
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn recorded_merge_should_restore_and_reapply_both_edge_and_unresolved_row_kinds() {
+        let store = store();
+        let original = prints(&store).unwrap();
+        let plan = RubyPlan {
+            remove_edges: vec![1],
+            remove_edge_files: vec![1],
+            remove_unresolved: vec![1],
+            add_edges: vec![EdgeRow {
+                src_id: 1,
+                dst_id: 2,
+                kind: EdgeKind::References,
+                tier: Tier::Exact,
+                site_line: 4,
+                receiver: None,
+                callee: Some("b".into()),
+            }],
+            add_edge_files: vec![1],
+            add_unresolved: vec![super::super::Unresolved {
+                file_id: 1,
+                name: "unknown".into(),
+                enclosing: Some(1),
+                site_line: 5,
+                receiver: Some("other".into()),
+                kind: "references",
+            }],
+            ..RubyPlan::default()
+        };
+        apply(&store, &plan).unwrap();
+        let merged = prints(&store).unwrap();
+        assert_ne!(merged, original);
+        let undo = recorded(&store).unwrap();
+        assert_eq!(
+            undo.edges
+                .iter()
+                .map(|r| (r.added, r.path.as_deref()))
+                .collect::<Vec<_>>(),
+            [(false, Some("a.rb")), (true, Some("a.rb"))]
+        );
+        assert_eq!(
+            undo.unresolved
+                .iter()
+                .map(|r| (r.added, r.row.kind))
+                .collect::<Vec<_>>(),
+            [(false, "calls"), (true, "references")]
+        );
+        let undo = restore(&store).unwrap();
+        assert_eq!(prints(&store).unwrap(), original);
+        reapply(&store, &undo, |_| true).unwrap();
+        assert_eq!(prints(&store).unwrap(), merged);
+        assert_eq!(
+            moved(&store, &original).unwrap(),
+            BTreeSet::from(["a.rb".into()])
+        );
+        assert_eq!(moved(&store, &merged).unwrap(), BTreeSet::new());
+    }
+
+    #[test]
+    fn row_fingerprints_should_count_duplicate_rows_without_collapsing_them() {
+        let store = store();
+        let before = prints(&store).unwrap();
+        assert_eq!(before[&1].0, 2);
+        store.conn().execute_batch("INSERT INTO edges(src_id,dst_id,kind,tier,site_line,receiver,callee) SELECT src_id,dst_id,kind,tier,site_line,receiver,callee FROM edges").unwrap();
+        let after = prints(&store).unwrap();
+        assert_eq!(after[&1].0, 3);
+        assert_eq!(
+            moved(&store, &before).unwrap(),
+            BTreeSet::from(["a.rb".into()])
+        );
+    }
+}

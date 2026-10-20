@@ -42,7 +42,7 @@ const PHASE_A_BATCH: usize = 200;
 /// Fixed phase-B/C commit batch size (25 per PLAN.md bounded batching).
 const PHASE_B_BATCH: usize = 25;
 /// 8MB aggregate output cap for a phase-B/C batch (bounded batching).
-const BATCH_OUTPUT_CAP_BYTES: usize = 8 * 1024 * 1024;
+const BATCH_OUTPUT_CAP_BYTES: usize = 8_388_608;
 
 /// Options controlling one ingest tick.
 #[derive(Debug, Clone)]
@@ -1040,22 +1040,27 @@ fn measure_blob_sizes(
 
 /// Bound argv below platform limits and output below the runner's 1 MiB cap.
 const TREE_BATCH_PATHS: usize = 128;
-const TREE_BATCH_PATH_BYTES: usize = 32 * 1024;
+const TREE_BATCH_PATH_BYTES: usize = 32_768;
+
+/// Number of paths fitting one argv batch; even an oversized first path advances.
+fn tree_batch_count(paths: &[&str]) -> usize {
+    let mut bytes = 0;
+    paths
+        .iter()
+        .take(TREE_BATCH_PATHS)
+        .take_while(|path| {
+            bytes += path.len() + 1;
+            bytes <= TREE_BATCH_PATH_BYTES
+        })
+        .count()
+        .max(1)
+}
 
 fn blob_sizes(runner: &pixel_git::GitRunner, rev: &str, paths: &[&str]) -> HashMap<String, u64> {
     let mut sizes = HashMap::with_capacity(paths.len());
     let mut remaining = paths;
     while !remaining.is_empty() {
-        let mut bytes = 0;
-        let count = remaining
-            .iter()
-            .take(TREE_BATCH_PATHS)
-            .take_while(|path| {
-                bytes += path.len() + 1;
-                bytes <= TREE_BATCH_PATH_BYTES
-            })
-            .count()
-            .max(1);
+        let count = tree_batch_count(remaining);
         let (batch, rest) = remaining.split_at(count);
         let mut args = vec![
             "--literal-pathspecs",
@@ -3282,5 +3287,66 @@ b
         assert_eq!(store.index_state().diff_coverage_since, None);
         let by_message = search(&store, "rescue", SearchFacet::Message, 10).unwrap();
         assert_eq!(by_message.candidates.len(), 1);
+    }
+
+    #[test]
+    fn audited_ingest_timings_should_accumulate_every_phase_instead_of_replacing_it() {
+        let mut total = IngestTimings {
+            metadata: Duration::from_millis(1),
+            blobs: Duration::from_millis(2),
+            diffs: Duration::from_millis(3),
+            retention: Duration::from_millis(4),
+        };
+        total.add(&IngestTimings {
+            metadata: Duration::from_millis(10),
+            blobs: Duration::from_millis(20),
+            diffs: Duration::from_millis(30),
+            retention: Duration::from_millis(40),
+        });
+        assert_eq!(
+            total,
+            IngestTimings {
+                metadata: Duration::from_millis(11),
+                blobs: Duration::from_millis(22),
+                diffs: Duration::from_millis(33),
+                retention: Duration::from_millis(44)
+            }
+        );
+    }
+
+    #[test]
+    fn audited_tree_batches_should_include_exact_byte_and_path_caps_and_always_advance() {
+        let exact = "x".repeat(32_767);
+        let over = "x".repeat(32_768);
+        assert_eq!(tree_batch_count(&[&exact, "next"]), 1);
+        assert_eq!(tree_batch_count(&["a", &exact]), 1);
+        assert_eq!(tree_batch_count(&[&over, "next"]), 1);
+        assert_eq!(tree_batch_count(&vec!["a"; 129]), 128);
+        let first = "x".repeat(16_383);
+        assert_eq!(tree_batch_count(&[&first, &first, "next"]), 2);
+    }
+
+    #[test]
+    fn audited_blob_caps_should_allow_exact_cap_on_both_sides_and_poison_only_overflow() {
+        let dir = init_repo();
+        let exact = vec![b'x'; BLOB_CAP_BYTES];
+        let overflow = vec![b'y'; BLOB_CAP_BYTES + 1];
+        let first = commit(
+            dir.path(),
+            &[("exact", &exact), ("overflow", &overflow)],
+            "sized blobs",
+        );
+        let second = commit(
+            dir.path(),
+            &[("exact", b"small"), ("overflow", b"small")],
+            "small blobs",
+        );
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        assert!(phase_a(&mut store, &far()).unwrap());
+        for oid in [&first, &second] {
+            let cid = commit_id(&store, oid);
+            assert_eq!(measure_commits_blobs(&mut store, &[cid]).unwrap(), 1);
+        }
+        assert_eq!(store.poison_paths().unwrap(), vec!["overflow"]);
     }
 }

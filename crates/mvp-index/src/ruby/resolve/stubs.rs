@@ -303,3 +303,59 @@ fn stubbed_here(
                     .owners()
                     .any(|step| modules.contains(step))))
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::super::fixture::Generation;
+    use super::*;
+    use mvp_model::SymbolKind::Class;
+
+    #[test]
+    fn stub_selection_should_keep_only_the_requested_examples() {
+        assert!(!Tests::Without.any());
+        assert!(Tests::All.any());
+        let tests = Tests::Except(Rc::new(HashSet::from(["spec/one_spec.rb".into()])));
+        assert!(tests.any());
+        assert!(!tests.keeps("spec/one_spec.rb"));
+        assert!(tests.keeps("spec/two_spec.rb"));
+    }
+
+    #[test]
+    fn example_detection_should_exclude_non_test_paths_and_shared_or_required_example_files() {
+        let mut generation = Generation::default();
+        generation
+            .file("spec/one_spec.rb")
+            .file("test/two_test.rb")
+            .file("lib/helper.rb")
+            .file("spec/support.rb")
+            .def("spec/shared_spec.rb", Class, "Shared", 1, 2);
+        generation.facts(
+            "spec/shared_spec.rb",
+            &[Fact::Shared {
+                name: "shared".into(),
+                line: 1,
+                scoped: false,
+                metadata: false,
+            }],
+        );
+        generation.call(
+            "spec/shared_spec.rb",
+            "spec/shared_spec.rb",
+            1,
+            "RSpec",
+            "shared_examples",
+            &[],
+        );
+        let world = generation.world();
+        let file_of = world
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.uid.as_str(), symbol.file.as_str()))
+            .collect();
+        let examples = examples(&world, &file_of);
+        assert_eq!(
+            examples,
+            HashSet::from(["spec/one_spec.rb".into(), "test/two_test.rb".into()])
+        );
+    }
+}

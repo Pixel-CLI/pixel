@@ -1324,3 +1324,35 @@ mod tests {
         assert!(!facts.macro_defines("Mz", singleton, instance, None));
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+
+    #[test]
+    fn loose_associations_should_return_every_declared_name_and_no_sentinel() {
+        let mut facts = Facts::default();
+        facts
+            .loose_associations
+            .extend(["rooms".into(), "messages".into()]);
+        let mut names: Vec<_> = facts.loose_associations().collect();
+        names.sort_unstable();
+        assert_eq!(names, ["messages", "rooms"]);
+    }
+
+    #[test]
+    fn test_taint_should_require_a_matching_file_and_preserve_an_untainted_program() {
+        let mut facts = Facts::default();
+        assert!(!facts.test_tainted());
+        assert!(!facts.stubs_in("spec/a_spec.rb"));
+        assert!(!facts.spreads_in("spec/a_spec.rb"));
+        facts
+            .test_spread
+            .push(("spec/a_spec.rb".into(), "Helpers".into(), vec![]));
+        assert!(facts.test_tainted());
+        assert!(facts.stubs_in("spec/a_spec.rb"));
+        assert!(facts.spreads_in("spec/a_spec.rb"));
+        assert!(!facts.stubs_in("spec/b_spec.rb"));
+        assert!(!facts.spreads_in("spec/b_spec.rb"));
+    }
+}

@@ -622,4 +622,45 @@ mod audited_contract_tests {
             .insert(2, None);
         assert_eq!(ambiguous.groups("spec/x_spec.rb", 2, false), None);
     }
+
+    #[test]
+    fn read_groups_should_preserve_member_lines_parentage_and_agreement_across_nested_examples() {
+        let fact_group = |line, parent, described: &str| Fact::Group {
+            line,
+            parent,
+            described: described.into(),
+            scope: vec![],
+            metadata: false,
+            opaque: false,
+            nests: false,
+        };
+        let facts = Fact::encode_all(&[
+            Fact::Rspec,
+            fact_group(1, 0, "Item"),
+            fact_group(2, 1, ""),
+            Fact::Member {
+                group: 1,
+                name: "helper".into(),
+                line: 7,
+                def: true,
+            },
+        ]);
+        let model = Rspec::read(&[("spec/x_spec.rb".into(), facts)], &|_| true);
+        assert_eq!(model.groups("spec/x_spec.rb", 1, true), Some(vec![1, 2]));
+        assert_eq!(
+            model.described("spec/x_spec.rb", 2).map(|(name, _)| name),
+            Some("Item")
+        );
+        match model.find_in("spec/x_spec.rb", &[1, 2], "helper", &|_, _| true) {
+            Found::Member(member, _) => assert_eq!(
+                (member.name.as_str(), member.line, member.def),
+                ("helper", 7, true)
+            ),
+            _ => panic!("the same inherited member must agree in both groups"),
+        }
+        assert!(matches!(
+            model.find_in("spec/x_spec.rb", &[1, 2], "absent", &|_, _| true),
+            Found::Nowhere
+        ));
+    }
 }

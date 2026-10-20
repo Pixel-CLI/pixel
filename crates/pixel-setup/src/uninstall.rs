@@ -694,3 +694,39 @@ mod roundtrip_tests {
         assert_eq!(fs::read_to_string(toml).unwrap(), text);
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+
+    #[test]
+    fn backup_locations_should_include_global_settings_custom_hosts_and_each_managed_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join("custom-codex");
+        let opencode = home.path().join("custom-opencode");
+        let dirs = global_backup_dirs(home.path(), &codex, &opencode);
+        for expected in [
+            home.path().join(".pixel"),
+            home.path().join(".claude"),
+            home.path().join(".claude/skills/pixel"),
+            codex,
+            opencode,
+        ] {
+            assert!(dirs.contains(&expected), "{}", expected.display());
+        }
+    }
+
+    #[test]
+    fn skill_removal_should_report_only_the_skills_it_actually_finds() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(remove_pixel_skill(home.path(), true).unwrap().detail, None);
+        let dir = home.path().join(".claude/skills/pixel");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), crate::skill::PIXEL_SKILL).unwrap();
+        assert_eq!(
+            remove_pixel_skill(home.path(), true).unwrap().detail,
+            Some(dir.display().to_string())
+        );
+        assert!(dir.exists());
+    }
+}
