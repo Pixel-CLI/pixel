@@ -260,7 +260,9 @@ impl GitRunner {
         Ok(parse_status_z(&out))
     }
 
-    /// `git diff --unified=0 [--end-of-options <base_ref>] -- .`, validating
+    /// `git diff --unified=0 [--end-of-options <base_ref>] -- .` with the
+    /// header shape pinned (`a/`/`b/` prefixes whatever `diff.noprefix` says,
+    /// unquoted non-ASCII paths, no external diff driver or colour), validating
     /// `base_ref` via `validate_ref` first when given (port of
     /// `pixel-graph::changes::detect`'s diff invocation).
     ///
@@ -270,7 +272,16 @@ impl GitRunner {
     /// "empty" — raising the cap keeps that error from firing on
     /// legitimately large (not just pathological) diffs.
     pub fn diff_unified0(&self, base_ref: Option<&str>) -> Result<Vec<u8>, GitError> {
-        let mut args: Vec<&str> = vec!["diff", "--unified=0"];
+        let mut args: Vec<&str> = vec![
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "--unified=0",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--no-ext-diff",
+            "--no-color",
+        ];
         if let Some(r) = base_ref {
             validate_ref(r)?;
             args.push(end_of_options());
