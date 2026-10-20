@@ -348,7 +348,7 @@ its native packaging checks remain in place; permissions and secrets are unchang
 The `ci.yml` pull-request path filter excludes most documentation but includes
 `docs/bench/**`, so benchmark-report changes still receive the required CI
 status checks through the existing `pull_request` workflow and permissions.
-CI's Linux installer smoke selects installer/release inputs on PRs and runs
+CI's Linux installer smoke selects the installer, its contract test and CI wiring on PRs and runs
 on every main push; the remaining script contracts retain their own selection.
 `cancel-stale.yml` keeps its PR-close trigger and checks out trusted `main`,
 with job-scoped `actions: write` solely for cancellation. Its fallback sweep

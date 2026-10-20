@@ -84,8 +84,8 @@ or anything feature-gated, also build with that exact flag set.
 ## Gates (CI required before merge; local optional)
 
 CI selects the two Linux installer smoke jobs independently from the script
-contracts: installer/release workflow changes run them on PRs, while unrelated
-script edits skip the release downloads. Every push to main still runs all
+contracts: installer, installer-test and CI wiring changes run them on PRs,
+while unrelated edits skip the release downloads. Every push to main still runs all
 lanes. `scripts/test-ci-selection.py` exercises the actual diff classifier,
 including merge-base selection and the unconditional main-push path.
 

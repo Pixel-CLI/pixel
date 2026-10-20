@@ -89,14 +89,24 @@ class CiSelection(unittest.TestCase):
             "scripts/release/install.sh",
             "scripts/test-install.py",
             ".github/workflows/ci.yml",
-            ".github/workflows/release.yml",
-            ".github/workflows/release-build.yml",
         ):
             with self.subTest(path=path):
                 self.git("reset", "--hard", self.common)
                 self.git("update-ref", "refs/remotes/origin/main", self.common)
                 self.change(path)
                 self.assertEqual(self.classify()["installer"], "true")
+
+    def test_release_workflows_run_script_checks_without_installer_smoke(self):
+        for path in (
+            ".github/workflows/release.yml",
+            ".github/workflows/release-build.yml",
+        ):
+            with self.subTest(path=path):
+                self.git("reset", "--hard", self.common)
+                self.change(path)
+                flags = self.classify()
+                self.assertEqual(flags["scripts"], "true")
+                self.assertEqual(flags["installer"], "false")
 
     def test_rust_source_keeps_compile_lanes_without_installer_smoke(self):
         self.change("crates/pixel/src/main.rs")

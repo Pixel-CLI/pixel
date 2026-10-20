@@ -270,13 +270,12 @@ jobs:
           ^scripts/check-advisory-ignores\.py$
           EOF
 
-          # The two-architecture smoke installs what release.yml publishes:
-          # install.sh from release-build.yml, plus its contract and this
-          # workflow's own wiring.
+          # This smoke runs the branch installer against the latest published
+          # archive; only the script, its contract and this wiring affect it.
           cat > installer.re <<'EOF'
           ^scripts/release/install\.sh$
           ^scripts/test-install\.py$
-          ^\.github/workflows/(ci|release|release-build)\.yml$
+          ^\.github/workflows/ci\.yml$
           EOF
 
           flag() { grep -Eqf "$1" changed.txt && echo true || echo false; }

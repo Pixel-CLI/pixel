@@ -1642,7 +1642,7 @@ The allocation-budget test bounds allocations while reading request frames.
   The classifier fetches full history for a PR's merge-base diff; main pushes
   use a shallow checkout and still select every lane.
   - **Linux installer smoke**: both release architectures when the installer,
-    its release workflows, or its contract tests change; unrelated script edits
+    its CI wiring, or its contract test changes; unrelated script and workflow edits
     skip these downloads. Every main push still runs both architectures.
   - **Test + Format**: action-pin verification (`scripts/ci/verify-action-pins.py`),
     the SPDX header check (`scripts/ci/check-spdx.py`, on every diff),
