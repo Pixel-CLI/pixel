@@ -544,14 +544,10 @@ impl Op {
 /// The daemon ops a client may send — every real variant's [`Op::op_name`]
 /// except `shutdown` (an internal admin op). These are wire tags, not CLI
 /// commands: the SessionStart hook advertises the parser's subcommands
-/// instead, because several tags name another command or none (`update` is
-/// `fast-forward`, `sync` is `fetch`, `history_op` is `commit-history`). Kept in this file, beside the enum, so adding a
-/// variant is a one-line addition here too; `session_capabilities_track_every_real_op`
-/// below fails loudly if this list and the enum ever drift apart, which is
-/// the specific failure this const exists to make structurally impossible
-/// (a prior hand-maintained copy of this list, kept in the CLI crate with
-/// no link back to `Op`, silently went stale and undermined the exact
-/// anti-false-context guarantee the SessionStart hook is supposed to give).
+/// instead, because several tags name another command (`reindex` is
+/// `build-index`, `update` is `fast-forward`, `sync` is `fetch`, and
+/// `history_op` is `commit-history`). The capability test compares this list
+/// with the wire tags from `Op`'s derived deserializer.
 pub const SESSION_CAPABILITIES: &[&str] = &[
     "ping",
     "recall",
@@ -593,7 +589,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "evaluate",
     "cycles",
     "rename",
-    "flow",
+    "reindex",
 ];
 
 /// The one-paragraph usage doctrine the SessionStart hook injects into every
@@ -1147,6 +1143,7 @@ mod tests {
             (Op::ReviewGate { base: None }, "review_gate"),
             (Op::Graph { if_stale: false }, "graph"),
             (Op::Status {}, "status"),
+            (Op::Reindex {}, "reindex"),
             (
                 Op::Resolve {
                     phrase: "".into(),
@@ -1325,8 +1322,23 @@ mod tests {
                 },
                 "rename",
             ),
+            (
+                Op::Note {
+                    action: "list".into(),
+                    file: None,
+                    target: None,
+                    note: None,
+                },
+                "note",
+            ),
+            (Op::Map { markdown: false }, "map"),
             (Op::Shutdown, "shutdown"),
         ];
+        let mut covered: Vec<_> = cases.iter().map(|(_, tag)| *tag).collect();
+        let mut variants = real_op_tags().to_vec();
+        covered.sort_unstable();
+        variants.sort_unstable();
+        assert_eq!(covered, variants, "every Op needs a serialization case");
         for (op, expected) in cases {
             assert_eq!(op.op_name(), *expected);
             let serialized = serde_json::to_value(op).unwrap();
@@ -1358,76 +1370,49 @@ mod tests {
         );
     }
 
+    /// Serde supplies the enum's wire tags to `unknown_variant`, including
+    /// future variants and renames, without parsing an error message or source.
+    fn real_op_tags() -> &'static [&'static str] {
+        #[derive(Debug)]
+        struct Variants(&'static [&'static str]);
+
+        impl std::fmt::Display for Variants {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "wire variants: {:?}", self.0)
+            }
+        }
+
+        impl std::error::Error for Variants {}
+
+        impl serde::de::Error for Variants {
+            fn custom<T: std::fmt::Display>(message: T) -> Self {
+                panic!("expected an unknown Op variant, got: {message}");
+            }
+
+            fn unknown_variant(_variant: &str, expected: &'static [&'static str]) -> Self {
+                Self(expected)
+            }
+        }
+
+        let input = serde::de::value::MapDeserializer::<_, Variants>::new(
+            [("op", "__unknown_capability_probe__")].into_iter(),
+        );
+        Op::deserialize(input).unwrap_err().0
+    }
+
     #[test]
     fn session_capabilities_track_every_real_op() {
-        // The exhaustive real variant set, independent of SESSION_CAPABILITIES
-        // itself — this must be updated by hand whenever a variant is added,
-        // same as op_name_matches_serde_tag's `cases` above, so the two lists
-        // can't silently drift in the same direction and still agree.
-        let all_real_ops: &[&str] = &[
-            "ping",
-            "recall",
-            "search",
-            "targets",
-            "targets_facts",
-            "meaning",
-            "symbol",
-            "skeleton",
-            "context",
-            "impact",
-            "uses",
-            "trace",
-            "processes",
-            "clusters",
-            "changes",
-            "review_gate",
-            "graph",
-            "status",
-            "resolve",
-            "history",
-            "lifecycle",
-            "excavate",
-            "reconcile",
-            "journal",
-            "inspect",
-            "review",
-            "diff",
-            "history_op",
-            "publish",
-            "push",
-            "ship",
-            "branch_op",
-            "update",
-            "sync",
-            "note",
-            "map",
-            "plan",
-            "evaluate",
-            "cycles",
-            "flow",
-            "rename",
-            "shutdown",
-        ];
-        // Every advertised capability must be a real op.
-        for cap in SESSION_CAPABILITIES {
-            assert!(
-                all_real_ops.contains(cap),
-                "SESSION_CAPABILITIES advertises '{cap}', which is not a real Op variant — \
-                 this is exactly the false-context bug this list exists to prevent"
-            );
-        }
-        // Every real, user-facing op (everything except the internal `shutdown`)
-        // must be advertised — an op silently missing from the capability
-        // block is a quieter version of the same failure.
-        for op in all_real_ops {
-            if *op == "shutdown" {
-                continue;
-            }
-            assert!(
-                SESSION_CAPABILITIES.contains(op),
-                "'{op}' is a real Op variant but missing from SESSION_CAPABILITIES — \
-                 an agent reading the SessionStart block won't know it exists"
-            );
-        }
+        // Shutdown controls the daemon lifecycle, rather than repository work.
+        // Reindex is public: build-index sends it to reuse the daemon's writer.
+        let mut expected: Vec<_> = real_op_tags()
+            .iter()
+            .copied()
+            .filter(|tag| *tag != "shutdown")
+            .collect();
+        let mut advertised = SESSION_CAPABILITIES.to_vec();
+        expected.sort_unstable();
+        advertised.sort_unstable();
+        // Comparing vectors also rejects duplicate advertisements.
+        assert_eq!(advertised, expected);
     }
 }

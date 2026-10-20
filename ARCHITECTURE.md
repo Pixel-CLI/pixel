@@ -427,7 +427,11 @@ Adding an op is one variant on `pixel_proto::Op`, one arm in
 Unit tests in `pixel-proto` check both: `op_name_matches_serde_tag` (the
 `Op::op_name` of every variant is its serde tag) and
 `session_capabilities_track_every_real_op` (the capability list and the enum
-agree).
+agree, using the variants supplied by Serde's derived deserializer).
+The capability registry contains wire tags, including `reindex` (sent by
+`build-index`), and excludes only the internal lifecycle op `shutdown`.
+`flow` is not an `Op` and is not advertised in this registry; SessionStart
+gets its command list from the CLI parser instead.
 
 ## Request path from the CLI
 

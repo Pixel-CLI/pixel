@@ -1,0 +1,1 @@
+**proto:** Correct the daemon capability registry: advertise `reindex` (used by `build-index`) and remove the nonexistent `flow` op. Check capabilities against the variants recognized by the protocol deserializer.

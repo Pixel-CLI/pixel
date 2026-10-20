@@ -227,16 +227,14 @@ mod tests {
     /// `plane` has no wildcard arm, so a new variant does not compile
     /// unclassified; this pins `EXPECTED` to the op list clients see, so
     /// the table cannot silently miss the new op's expected plane.
-    /// `SESSION_CAPABILITIES` lists `flow` (a CLI command, no `Op` variant)
-    /// and leaves out the internal `shutdown` and `reindex`.
+    /// Only the internal daemon-lifecycle op `shutdown` is not advertised.
     #[test]
     fn the_table_covers_every_op_a_client_may_send() {
         let mut classified: Vec<&str> = EXPECTED.iter().map(|(op, _)| *op).collect();
         let mut advertised: Vec<&str> = pixel_proto::op::SESSION_CAPABILITIES
             .iter()
             .copied()
-            .filter(|op| *op != "flow")
-            .chain(["shutdown", "reindex"])
+            .chain(["shutdown"])
             .collect();
         classified.sort_unstable();
         advertised.sort_unstable();
