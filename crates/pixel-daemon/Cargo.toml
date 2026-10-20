@@ -11,6 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+rustc-hash = "1"
 mutants = { workspace = true }
 pixel-index = { path = "../pixel-index" }
 pixel-graph = { path = "../pixel-graph" }

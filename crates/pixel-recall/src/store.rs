@@ -436,7 +436,7 @@ impl RecallStore {
         &self,
         filter_sql: &str,
         args: &[&dyn rusqlite::types::ToSql],
-    ) -> Result<std::collections::HashSet<i64>> {
+    ) -> Result<rustc_hash::FxHashSet<i64>> {
         let sql = format!(
             "SELECT c.chunk_id FROM vector_chunks c
              JOIN turns t ON t.id = c.turn_id

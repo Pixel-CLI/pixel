@@ -18,7 +18,7 @@
 //! `idx_message_nodes_session`. The first full ingest walks the sessions
 //! table (~1k rows) with one indexed per-session fetch each.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::PathBuf;
 
 use rusqlite::Connection;
@@ -83,7 +83,7 @@ struct Node {
 fn linearize(mut nodes: Vec<Node>) -> Vec<Node> {
     nodes.sort_by_key(|n| (n.created_at, n.row_id));
     let known: HashSet<i64> = nodes.iter().map(|n| n.node_id).collect();
-    let mut children: HashMap<Option<i64>, Vec<Node>> = HashMap::new();
+    let mut children: HashMap<Option<i64>, Vec<Node>> = HashMap::default();
     for n in nodes {
         let key = match n.parent {
             Some(p) if known.contains(&p) => Some(p),
@@ -94,7 +94,7 @@ fn linearize(mut nodes: Vec<Node>) -> Vec<Node> {
     let mut out: Vec<Node> = Vec::new();
     let mut stack: Vec<Node> = children.remove(&None).unwrap_or_default();
     stack.reverse(); // pop() yields earliest sibling first
-    let mut visited: HashSet<i64> = HashSet::new();
+    let mut visited: HashSet<i64> = HashSet::default();
     while let Some(n) = stack.pop() {
         if !visited.insert(n.node_id) {
             continue;
@@ -180,7 +180,7 @@ impl SourceAdapter for Adapter {
                 let mut stmt =
                     conn.prepare("SELECT session_id FROM message_nodes WHERE row_id > ?1")?;
                 let rows = stmt.query_map([cursor], |r| r.get::<_, String>(0))?;
-                let mut seen = HashSet::new();
+                let mut seen = HashSet::default();
                 let mut out = Vec::new();
                 for r in rows {
                     let sid = r?;

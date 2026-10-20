@@ -1233,12 +1233,12 @@ mod contract_tests {
             Fact::Definee {
                 name: "Outer.s1".to_owned(),
                 written: "Outer".to_owned(),
-                scope: vec!["Outer".to_owned()].into(),
+                scope: vec!["Outer".to_owned()].into_iter().collect(),
             },
             Fact::Definee {
                 name: "Outer.s2".to_owned(),
                 written: "Outer".to_owned(),
-                scope: vec!["Outer".to_owned()].into(),
+                scope: vec!["Outer".to_owned()].into_iter().collect(),
             },
             Fact::Definee {
                 name: "#<Class:Config>".to_owned(),
@@ -1248,7 +1248,9 @@ mod contract_tests {
             Fact::Definee {
                 name: "Inner.s3".to_owned(),
                 written: "Inner".to_owned(),
-                scope: vec!["A::B".to_owned(), "A".to_owned()].into(),
+                scope: vec!["A::B".to_owned(), "A".to_owned()]
+                    .into_iter()
+                    .collect(),
             },
             Fact::MaybeConstant {
                 segment: "Client".to_owned(),

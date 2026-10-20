@@ -37,7 +37,8 @@
 //! method name's. Anything else stays unpaired, which keeps this graph's
 //! rows.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeSet;
 
 use mvp_model::{Graph, Lang};
 
@@ -230,13 +231,13 @@ pub fn merge(
     enclosing: impl Fn(i64, u32) -> Option<i64>,
 ) -> RubyPlan {
     let mut plan = RubyPlan::default();
-    let mut ours: HashMap<Key, Vec<&V1Row>> = HashMap::new();
+    let mut ours: HashMap<Key, Vec<&V1Row>> = HashMap::default();
     for row in v1 {
         ours.entry(key_of(row.kind, row.file_id, row.line, &row.name))
             .or_default()
             .push(row);
     }
-    let mut theirs: HashMap<Key, MvpGroup> = HashMap::new();
+    let mut theirs: HashMap<Key, MvpGroup> = HashMap::default();
     for site in mvp {
         theirs
             .entry(key_of(site.kind, site.file_id, site.line, &site.name))
@@ -251,7 +252,7 @@ pub fn merge(
         .filter(|k| theirs.contains_key(*k))
         .map(|k| (*k, *k))
         .collect();
-    let mut ours_left: HashMap<Bucket, Vec<u32>> = HashMap::new();
+    let mut ours_left: HashMap<Bucket, Vec<u32>> = HashMap::default();
     for (k, rows) in &ours {
         if let (false, Some(enc)) = (paired.contains_key(k), enclosing_of(rows)) {
             ours_left.entry((k.0, k.1, k.3, enc)).or_default().push(k.2);
@@ -263,7 +264,7 @@ pub fn merge(
         .keys()
         .map(|(kind, file, name, _)| (*kind, *file, *name))
         .collect();
-    let mut theirs_left: HashMap<Bucket, Vec<u32>> = HashMap::new();
+    let mut theirs_left: HashMap<Bucket, Vec<u32>> = HashMap::default();
     for k in theirs.keys().filter(|k| !ours.contains_key(*k)) {
         if !open.contains(&(k.0, k.1, k.3)) {
             continue;
@@ -289,7 +290,7 @@ pub fn merge(
         }
     }
 
-    let mut used: HashSet<&Key> = HashSet::new();
+    let mut used: HashSet<&Key> = HashSet::default();
     let mut keys: Vec<&Key> = ours.keys().collect();
     keys.sort();
     for key in keys {
@@ -749,7 +750,7 @@ pub fn spans_in(
 ) -> Result<impl Fn(i64, u32) -> Option<i64> + use<>, BoxErr> {
     const SQL: &str = "SELECT s.file_id, s.start_line, s.end_line, s.id FROM symbols s
        JOIN files f ON f.id = s.file_id WHERE f.lang = 'ruby'";
-    let mut by_file: HashMap<i64, Vec<(u32, u32, i64)>> = HashMap::new();
+    let mut by_file: HashMap<i64, Vec<(u32, u32, i64)>> = HashMap::default();
     let span = |r: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, u32, u32, i64)> {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
     };
@@ -1090,9 +1091,9 @@ mod audited_contract_tests {
     #[test]
     fn file_scopes_should_sort_the_exact_ids_and_keep_an_empty_scope_distinct_from_all() {
         assert_eq!(Scope::All.ids(), None);
-        assert_eq!(Scope::Files(&HashSet::new()).ids(), Some(vec![]));
+        assert_eq!(Scope::Files(&HashSet::default()).ids(), Some(vec![]));
         assert_eq!(
-            Scope::Files(&HashSet::from([7, 2, 4])).ids(),
+            Scope::Files(&HashSet::from_iter([7, 2, 4])).ids(),
             Some(vec![2, 4, 7])
         );
     }
@@ -1109,13 +1110,13 @@ mod audited_contract_tests {
         let rows = v1_rows(&store).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            v1_rows_in(&store, Scope::Files(&HashSet::new()))
+            v1_rows_in(&store, Scope::Files(&HashSet::default()))
                 .unwrap()
                 .len(),
             0
         );
         assert_eq!(
-            v1_rows_in(&store, Scope::Files(&HashSet::from([1])))
+            v1_rows_in(&store, Scope::Files(&HashSet::from_iter([1])))
                 .unwrap()
                 .len(),
             2

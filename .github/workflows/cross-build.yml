@@ -166,7 +166,11 @@ jobs:
           cache-on-failure: true
           # `release-<target>` for the release profile, the name release-build.yml
           # restores; `dev-release-<target>` for the pull requests' profile.
-          shared-key: ${{ matrix.profile }}-${{ matrix.target }}
+          # `-pabort`: the release profiles set `panic = "abort"`, which changes
+          # the ort-sys build-script hash. A cache keyed without it restores an
+          # OUT_DIR whose onnxruntime static library is not the one this build
+          # looks for, and ort-sys then cannot find `libonnxruntime`.
+          shared-key: ${{ matrix.profile }}-${{ matrix.target }}-pabort
 
       # Prebuilt binary instead of `cargo install cross` (~40 s per run).
       # cross compiles inside its own Docker image, which carries the musl

@@ -5,8 +5,8 @@
 //! the ancestors a class or module declares (`ruby_mixins`), walked in Ruby's
 //! method lookup order.
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::Decision;
@@ -311,7 +311,13 @@ impl Index {
         // What a concern's `included do` extends lands on the includer; the
         // superclass's own concerns come with its singleton chain below.
         let mut instance = Vec::new();
-        self.own_chain(owner, depth, &mut HashSet::new(), uncertain, &mut instance);
+        self.own_chain(
+            owner,
+            depth,
+            &mut HashSet::default(),
+            uncertain,
+            &mut instance,
+        );
         let concerns: Vec<String> = instance
             .iter()
             .filter_map(|step| match step {
@@ -326,7 +332,7 @@ impl Index {
             *uncertain |= multi;
             extends.extend(deferred);
         }
-        let mut modules = HashSet::new();
+        let mut modules = HashSet::default();
         for module in extends.into_iter().rev() {
             self.module_chain(module, depth, &mut modules, uncertain, out);
         }
@@ -353,7 +359,7 @@ impl Index {
         }
         let mut chain = Vec::new();
         let mut uncertain = false;
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         if separator == '.' {
             self.singleton_chain(owner, 0, &mut seen, &mut uncertain, &mut chain);
         } else {
@@ -382,7 +388,7 @@ impl Index {
         }
         let chain = self.chain(owner, separator);
         let (chain, uncertain) = (&chain.0, chain.1);
-        let mut defining = HashSet::new();
+        let mut defining = HashSet::default();
         let hits: Vec<(usize, &str, char)> = chain
             .iter()
             .enumerate()

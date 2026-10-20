@@ -93,10 +93,10 @@ pub(super) fn leaves_early(w: &Walker, node: Node) -> bool {
 /// `LocalJumpError`); `return` its lambda; the others the method. A loop
 /// left is no node left early: it is a branch already. One pass over the
 /// tree, each node marked once per reach.
-pub(super) fn exits(w: &Walker, root: Node) -> std::collections::HashSet<usize> {
+pub(super) fn exits(w: &Walker, root: Node) -> rustc_hash::FxHashSet<usize> {
     // Node → how far the statements marking it leave, the farthest kept:
     // each reach stops wherever a nearer one does.
-    let mut reach: std::collections::HashMap<usize, u8> = std::collections::HashMap::new();
+    let mut reach: rustc_hash::FxHashMap<usize, u8> = rustc_hash::FxHashMap::default();
     // The nodes from the root to the one being read, with their kinds.
     let mut path: Vec<(usize, &str)> = Vec::new();
     let mut stack = vec![(root, 0)];
@@ -233,12 +233,11 @@ fn passed_to(w: &Walker, node: Node) -> Vec<String> {
 /// R7-12). A method `define_method` defines with a literal name is read
 /// as a `def` is (R8-08). One defined in another file is not seen: an
 /// accepted risk, as for a gem's (R5-13).
-pub(super) fn rebinders(w: &Walker, root: Node) -> std::collections::HashSet<String> {
-    let mut names = std::collections::HashSet::new();
+pub(super) fn rebinders(w: &Walker, root: Node) -> rustc_hash::FxHashSet<String> {
+    let mut names = rustc_hash::FxHashSet::default();
     // Each method a body passes a block on to → the methods whose body
     // does: read once, then followed back from the rebinding ones.
-    let mut callers: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    let mut callers: rustc_hash::FxHashMap<String, Vec<String>> = rustc_hash::FxHashMap::default();
     let mut next = Vec::new();
     let mut stack = vec![root];
     while let Some(at) = stack.pop() {
@@ -357,9 +356,9 @@ fn only_called(w: &Walker, local: Node) -> bool {
     }
     let mut bodies = w.uncalled.borrow_mut();
     let uncalled = bodies.entry(scope.id()).or_insert_with(|| {
-        let mut uncalled = std::collections::HashMap::new();
+        let mut uncalled = rustc_hash::FxHashMap::default();
         // The receivers of `call` and `.()`, met before they are.
-        let mut called = std::collections::HashSet::new();
+        let mut called = rustc_hash::FxHashSet::default();
         let mut stack = vec![scope];
         while let Some(at) = stack.pop() {
             match at.kind() {
@@ -383,7 +382,7 @@ fn only_called(w: &Walker, local: Node) -> bool {
 /// `call` or `.()`, each with how often, by the body's node ([`escapes`]):
 /// filled the first time one of its locals is asked about.
 pub(super) type Uncalled =
-    std::cell::RefCell<std::collections::HashMap<usize, std::collections::HashMap<String, usize>>>;
+    std::cell::RefCell<rustc_hash::FxHashMap<usize, rustc_hash::FxHashMap<String, usize>>>;
 
 /// The method `call` runs: its own, or the one it sends by a literal name
 /// (`send(:instance_exec)`, `__send__`, `public_send`), or the one a

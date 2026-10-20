@@ -76,6 +76,13 @@ openssl = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
 lto = "thin"
+# No landing pads: 62,887,792 bytes against 67,307,376 (-6.6%) and 5.10 ms
+# per `--version` against 5.20. The cost is the six `catch_unwind` sites
+# (mvp-index/ruby/extract.rs:146, pixel-graph/src/extract.rs:336/359, and
+# the daemon's `answer`): with abort they no longer recover, so a panicking
+# extractor or handler ends the process instead of returning a default or a
+# failure envelope. The daemon is restarted by the next call's auto-start.
+panic = "abort"
 codegen-units = 1
 # Ship without the symbol table (~17% of the binary, 76 MB -> 63 MB on
 # aarch64-apple-darwin): no DWARF is built in release, so local symbols are

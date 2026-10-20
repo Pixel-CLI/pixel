@@ -26,7 +26,7 @@
 //! place it; on a relation, the same finders and query methods, unless
 //! the association has an extension.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
 
 use mvp_model::{EdgeKind, SymbolKind};

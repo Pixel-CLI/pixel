@@ -95,8 +95,9 @@
 //! that reaches the owner for the names they touch abstain
 //! (`Fact::Unknown`, `Fact::Evaluated`, `Fact::Block`, `Fact::Macro`).
 
+use rustc_hash::FxHashMap as HashMap;
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::hash::Hash;
 use std::rc::Rc;
 
@@ -428,7 +429,7 @@ impl Parts<'_> {
         Parts {
             instance: Part::cut(),
             singleton: Part::cut(),
-            resolved: HashMap::new(),
+            resolved: HashMap::default(),
             dependencies: Vec::new(),
             replaced: Vec::new(),
             evaluated: Vec::new(),
@@ -554,8 +555,8 @@ struct Kept<K, V> {
 impl<K, V> Default for Kept<K, V> {
     fn default() -> Self {
         Kept {
-            whole: RefCell::new(HashMap::new()),
-            capped: RefCell::new(HashMap::new()),
+            whole: RefCell::new(HashMap::default()),
+            capped: RefCell::new(HashMap::default()),
         }
     }
 }
@@ -1295,7 +1296,7 @@ impl<'a> Index<'a> {
             tail_instance: self.tail(owner, Side::Instance),
             tail_singleton: self.tail(owner, Side::Singleton),
         };
-        let mut resolved = HashMap::new();
+        let mut resolved = HashMap::default();
         // `Superclass.inherited(owner)` runs when the class is created.
         let first = self
             .declarations(owner, |kind| kind.op == Op::Superclass)

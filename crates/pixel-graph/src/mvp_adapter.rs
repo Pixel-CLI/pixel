@@ -35,7 +35,8 @@
 //! Ruby is merged, not replaced: [`ruby`] keeps this graph's edge wherever
 //! pixel-mvp abstains (ADR-0037 there).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -329,7 +330,7 @@ pub fn names_in<'a>(
         "SELECT s.name, count(*) FROM symbols s JOIN files f ON f.id = s.file_id
           WHERE f.path = ?1 GROUP BY s.name",
     )?;
-    let mut out: HashMap<String, i64> = HashMap::new();
+    let mut out: HashMap<String, i64> = HashMap::default();
     for path in paths {
         let rows = stmt.query_map([path], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
@@ -374,7 +375,7 @@ fn rust_file_ids(
     let mut stmt = store
         .conn()
         .prepare_cached("SELECT id FROM files WHERE path = ?1 AND lang = 'rust'")?;
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for path in paths {
         let rows = stmt.query_map([path], |r| r.get::<_, i64>(0))?;
         for id in rows {
@@ -605,16 +606,16 @@ fn pair<A: Clone + Eq + std::hash::Hash, B: Clone + Eq + std::hash::Hash>(
     ours: &[Sym<A>],
     theirs: &[Sym<B>],
 ) -> HashMap<B, A> {
-    let mut paired: HashMap<B, A> = HashMap::new();
-    let mut ours_done: HashSet<A> = HashSet::new();
-    let mut by_full: HashMap<(&str, &str, &str), Vec<&Sym<B>>> = HashMap::new();
+    let mut paired: HashMap<B, A> = HashMap::default();
+    let mut ours_done: HashSet<A> = HashSet::default();
+    let mut by_full: HashMap<(&str, &str, &str), Vec<&Sym<B>>> = HashMap::default();
     for t in theirs {
         by_full
             .entry((&t.path, &t.name, &t.kind))
             .or_default()
             .push(t);
     }
-    let mut ours_full: HashMap<(&str, &str, &str), Vec<&Sym<A>>> = HashMap::new();
+    let mut ours_full: HashMap<(&str, &str, &str), Vec<&Sym<A>>> = HashMap::default();
     for o in ours {
         ours_full
             .entry((&o.path, &o.name, &o.kind))
@@ -653,11 +654,11 @@ fn pair<A: Clone + Eq + std::hash::Hash, B: Clone + Eq + std::hash::Hash>(
             .filter(|t| !paired.contains_key(&t.key))
             .collect()
     };
-    let mut theirs_named: HashMap<(&str, &str), Vec<&Sym<B>>> = HashMap::new();
+    let mut theirs_named: HashMap<(&str, &str), Vec<&Sym<B>>> = HashMap::default();
     for t in free(&paired) {
         theirs_named.entry((&t.path, &t.name)).or_default().push(t);
     }
-    let mut ours_named: HashMap<(&str, &str), Vec<&Sym<A>>> = HashMap::new();
+    let mut ours_named: HashMap<(&str, &str), Vec<&Sym<A>>> = HashMap::default();
     for o in ours.iter().filter(|o| !ours_done.contains(&o.key)) {
         ours_named.entry((&o.path, &o.name)).or_default().push(o);
     }
@@ -667,7 +668,7 @@ fn pair<A: Clone + Eq + std::hash::Hash, B: Clone + Eq + std::hash::Hash>(
             ours_done.insert(o.key.clone());
         }
     }
-    let mut theirs_at: HashMap<(&str, &str, u32), Vec<&Sym<B>>> = HashMap::new();
+    let mut theirs_at: HashMap<(&str, &str, u32), Vec<&Sym<B>>> = HashMap::default();
     for t in free(&paired) {
         theirs_at
             .entry((&t.path, leaf(&t.name), t.line))
@@ -783,7 +784,7 @@ pub fn rust_rows_in(
 
     let mut out = RustRows::default();
     // (importing file id, path as written) -> the files it resolved to.
-    let mut imported: HashMap<(i64, String), HashSet<Option<i64>>> = HashMap::new();
+    let mut imported: HashMap<(i64, String), HashSet<Option<i64>>> = HashMap::default();
     for edge in edges {
         let path = uid_file(&edge.src);
         let Some(&file_id) = files.get(&path) else {
@@ -950,7 +951,7 @@ impl Named {
                 let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
                 Named::All(rows.collect::<Result<_, _>>()?)
             }
-            Scope::Files(_) => Named::Lookup(HashMap::new()),
+            Scope::Files(_) => Named::Lookup(HashMap::default()),
         })
     }
 
@@ -1078,7 +1079,9 @@ mod tests {
             sym("m-test", "a.rs", "tests::t", "function", 40),
         ];
         let paired = pair(&ours, &theirs);
-        let expected: HashMap<&str, i64> = [("m-f", 1), ("m-limit", 2), ("m-g", 3)].into();
+        let expected: HashMap<&str, i64> = [("m-f", 1), ("m-limit", 2), ("m-g", 3)]
+            .into_iter()
+            .collect();
         assert_eq!(paired, expected);
     }
 
@@ -1095,14 +1098,14 @@ mod tests {
             sym("second", "a.rs", "S::new", "method", 49),
         ];
         let paired = pair(&ours, &theirs);
-        let expected: HashMap<&str, i64> = [("first", 1), ("second", 2)].into();
+        let expected: HashMap<&str, i64> = [("first", 1), ("second", 2)].into_iter().collect();
         assert_eq!(paired, expected);
         // Equal counts pair in line order.
         let theirs = vec![
             sym("b", "a.rs", "S::new", "method", 52),
             sym("a", "a.rs", "S::new", "method", 9),
         ];
-        let expected: HashMap<&str, i64> = [("a", 1), ("b", 2)].into();
+        let expected: HashMap<&str, i64> = [("a", 1), ("b", 2)].into_iter().collect();
         assert_eq!(pair(&ours, &theirs), expected);
     }
 

@@ -5,8 +5,9 @@
 //! read once per generation: each fact names something a lookup cannot
 //! prove, and the predicates here are where resolution abstains for it.
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use mvp_model::{Symbol, SymbolKind};
@@ -337,12 +338,12 @@ impl Facts {
         visible: &dyn Fn(&str) -> bool,
     ) -> Facts {
         let mut facts = Facts::default();
-        let mut owners_of: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut owners_of: HashMap<&str, Vec<&str>> = HashMap::default();
         // Each constant a constructor's class or module is assigned to,
         // with how many times.
-        let mut constructed: HashMap<String, usize> = HashMap::new();
+        let mut constructed: HashMap<String, usize> = HashMap::default();
         // Each class or module → the bodies a keyword opens it in.
-        let mut bodies: HashMap<&str, Vec<(String, u32, u32)>> = HashMap::new();
+        let mut bodies: HashMap<&str, Vec<(String, u32, u32)>> = HashMap::default();
         for symbol in symbols.iter().filter(|s| visible(&s.file)) {
             if matches!(symbol.kind, SymbolKind::Class | SymbolKind::Module) {
                 owners_of

@@ -6,8 +6,9 @@
 //! processes, the call sites that may be affected, and depth-1 upstream
 //! callers feeding risk.
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
 use serde::Serialize;
@@ -861,7 +862,7 @@ pub(crate) fn detect_diffs(
     let uncovered = scan_uncovered(store, root, &runner, base_ref, file_diffs)?;
     // A deleted symbol has no edges left; its former callers are the
     // unresolved sites that still write its name.
-    let mut file_symbols: HashMap<i64, Vec<SymbolRow>> = HashMap::new();
+    let mut file_symbols: HashMap<i64, Vec<SymbolRow>> = HashMap::default();
     for gone in &uncovered.unanchored {
         for site in store.unresolved_named(&gone.name)? {
             let symbols = match file_symbols.entry(site.file_id) {
@@ -932,7 +933,7 @@ fn suggest_tests(
             record(seed_path.clone(), 0, seed_name, &mut by_file);
         }
         // Source 2: BFS upstream over `calls` edges, depth ≤ 3.
-        let mut visited: HashSet<i64> = HashSet::new();
+        let mut visited: HashSet<i64> = HashSet::default();
         visited.insert(*seed_id);
         let mut queue: VecDeque<(i64, u8)> = VecDeque::new();
         queue.push_back((*seed_id, 0));
@@ -1406,7 +1407,7 @@ mod tests {
 
     #[test]
     fn classify_should_judge_a_modified_file_symbol_against_its_base() {
-        let base: HashMap<String, String> = HashMap::from([(
+        let base: HashMap<String, String> = HashMap::from_iter([(
             "keep#function".to_string(),
             "export function keep(n: number):  number {".to_string(),
         )]);

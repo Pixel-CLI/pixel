@@ -1213,6 +1213,9 @@ fn brief_budget(provider: TaskProvider, payload: &Value, part: Option<BriefPart>
 /// `context`, and only a [`BRIEF_ONLY`] payload counts: a ledger note of a Pi
 /// host that drives the lifecycle itself is not a brief.
 fn delivered_brief(provider: TaskProvider, raw: Option<&str>, output: &Value) -> bool {
+    if provider == TaskProvider::Antigravity {
+        return output.get("injectSteps").is_some();
+    }
     if provider != TaskProvider::Pi {
         return output.get("hookSpecificOutput").is_some();
     }
@@ -1727,11 +1730,46 @@ fn antigravity_prompt(payload: &Value) -> Option<String> {
             },
             |text| Some(text.to_string()),
         );
-        if let Some(content) = content.filter(|text| !text.trim().is_empty()) {
+        if let Some(content) = content
+            .map(|text| antigravity_user_request(&text).to_string())
+            .filter(|text| !text.trim().is_empty())
+        {
             last = Some(content);
         }
     }
     last
+}
+
+/// Devin and Antigravity draw neither `systemMessage` nor a hook's output
+/// (#1031), so the prompt-submit metrics line reaches their user only when
+/// the model repeats it: the brief (Devin's `additionalContext`,
+/// Antigravity's injected `ephemeralMessage`) ends asking for that.
+fn ask_model_to_relay(output: &mut Value, line: &str) {
+    let pointer = if output.get("injectSteps").is_some() {
+        "/injectSteps/0/ephemeralMessage"
+    } else {
+        "/hookSpecificOutput/additionalContext"
+    };
+    if let Some(context) = output.pointer_mut(pointer)
+        && let Some(brief) = context.as_str()
+    {
+        *context = json!(format!(
+            "{brief}\n\nEnd your answer with this line, verbatim: {line}"
+        ));
+    }
+}
+
+/// What the user typed in an Antigravity turn. Antigravity CLI 1.4 stores a
+/// turn as `<USER_REQUEST>…</USER_REQUEST>`, then its own
+/// `<ADDITIONAL_METADATA>` (the local time) and, after a model switch, a
+/// `<USER_SETTINGS_CHANGE>` block; briefing the whole text looked up
+/// `USER_REQUEST`, `Gemini` and the time as symbols. Text without the
+/// wrapper is returned as is.
+fn antigravity_user_request(text: &str) -> &str {
+    text.trim_start()
+        .strip_prefix("<USER_REQUEST>")
+        .and_then(|rest| rest.split_once("</USER_REQUEST>"))
+        .map_or(text, |(request, _)| request.trim())
 }
 
 /// `decision` with the brief as its `context`, which the envelope delivers as
@@ -1943,10 +1981,17 @@ fn respond(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
         )
         && metrics_on(provider, raw.as_deref())
     {
-        output["systemMessage"] = json!(format!(
+        let line = format!(
             "🟩 pixel prompt-submit ❀ {:.1}ms",
             started.elapsed().as_secs_f64() * 1000.0
-        ));
+        );
+        if matches!(provider, TaskProvider::Devin | TaskProvider::Antigravity) {
+            ask_model_to_relay(output, &line);
+        }
+        // Antigravity's envelope is `injectSteps` alone: no top-level key.
+        if provider != TaskProvider::Antigravity {
+            output["systemMessage"] = json!(line);
+        }
     }
     let first_of_many = part.is_some_and(|part| {
         part.index == 1 && part.count > 1 && event == TaskHookEvent::PromptSubmit
@@ -3128,6 +3173,46 @@ mod tests {
             Some(&marked),
             &json!({"decision": "observe", "context": "bare"})
         ));
+        let agy_brief = envelope(
+            TaskProvider::Antigravity,
+            TaskHookEvent::PromptSubmit,
+            &json!({"decision": "observe", "context": "[PIXEL:BRIEF]"}),
+        );
+        assert!(delivered_brief(
+            TaskProvider::Antigravity,
+            Some(&plain),
+            &agy_brief
+        ));
+        assert!(!delivered_brief(
+            TaskProvider::Antigravity,
+            Some(&plain),
+            &claude_brief
+        ));
+        assert!(!delivered_brief(
+            TaskProvider::Antigravity,
+            Some(&plain),
+            &json!({})
+        ));
+    }
+
+    #[test]
+    fn ask_model_to_relay_should_end_the_brief_each_host_injects() {
+        let ask = "\n\nEnd your answer with this line, verbatim: 🟩 L";
+        let mut devin = json!({"hookSpecificOutput": {"additionalContext": "B"}});
+        ask_model_to_relay(&mut devin, "🟩 L");
+        assert_eq!(
+            devin,
+            json!({"hookSpecificOutput": {"additionalContext": format!("B{ask}")}})
+        );
+        let mut agy = json!({"injectSteps": [{"ephemeralMessage": "B"}]});
+        ask_model_to_relay(&mut agy, "🟩 L");
+        assert_eq!(
+            agy,
+            json!({"injectSteps": [{"ephemeralMessage": format!("B{ask}")}]})
+        );
+        let mut none = json!({"decision": "observe"});
+        ask_model_to_relay(&mut none, "🟩 L");
+        assert_eq!(none, json!({"decision": "observe"}));
     }
 
     #[test]
@@ -3227,6 +3312,25 @@ mod tests {
                 "content",
                 "first part\nsecond part",
             ),
+            // Antigravity CLI 1.4.2's USER_EXPLICIT turn, verbatim shape.
+            (
+                json!(
+                    [
+                        "<USER_REQUEST>",
+                        "what breaks if I rename renderPosts",
+                        "</USER_REQUEST>",
+                        "<ADDITIONAL_METADATA>",
+                        "The current local time is: 2026-10-20T19:50:30+02:00.",
+                        "</ADDITIONAL_METADATA>",
+                        "<USER_SETTINGS_CHANGE>",
+                        "The user changed setting `Model Selection` from None to Gemini 3.8 Flash (High).",
+                        "</USER_SETTINGS_CHANGE>",
+                    ]
+                    .join("\n")
+                ),
+                "content",
+                "what breaks if I rename renderPosts",
+            ),
         ] {
             let mut user = json!({"role":"user"});
             user[field] = content;
@@ -3245,6 +3349,27 @@ mod tests {
             );
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn antigravity_user_request_should_keep_only_the_typed_request() {
+        assert_eq!(
+            antigravity_user_request(
+                "<USER_REQUEST>\nfix it\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nt\n</ADDITIONAL_METADATA>"
+            ),
+            "fix it"
+        );
+        assert_eq!(
+            antigravity_user_request("<USER_REQUEST>\n\n</USER_REQUEST>"),
+            ""
+        );
+        for plain in [
+            "plain prompt",
+            "<USER_REQUEST>\nunclosed",
+            "quote <USER_REQUEST>x</USER_REQUEST> mid-text",
+        ] {
+            assert_eq!(antigravity_user_request(plain), plain, "{plain}");
+        }
     }
 
     #[test]

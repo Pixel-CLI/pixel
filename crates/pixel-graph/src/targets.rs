@@ -6,7 +6,8 @@
 //! deterministic order (strength desc, path asc) so fusion upstream is
 //! byte-stable across runs.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use rustc_hash::FxHashSet as HashSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::params;
 
@@ -136,7 +137,7 @@ pub fn neighbor_files(
     store: &GraphStore,
     seed_symbol_ids: &[i64],
 ) -> Result<Vec<(String, String)>, StoreError> {
-    let mut seed_files: HashSet<i64> = HashSet::new();
+    let mut seed_files: HashSet<i64> = HashSet::default();
     let mut seeds: Vec<(i64, String)> = Vec::new();
     for &id in seed_symbol_ids {
         if let Some(sym) = symbol_by_id(store, id)? {
@@ -145,7 +146,7 @@ pub fn neighbor_files(
         }
     }
 
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::default();
     let mut out: Vec<(String, String)> = Vec::new();
     for (id, name) in &seeds {
         for (edges, label) in [
@@ -191,7 +192,7 @@ pub fn import_adjacent_files(
     seed_file_paths: &[String],
 ) -> Result<Vec<(String, String)>, StoreError> {
     let mut seed_ids: Vec<(i64, String)> = Vec::new();
-    let mut seed_set: HashSet<String> = HashSet::new();
+    let mut seed_set: HashSet<String> = HashSet::default();
     for p in seed_file_paths {
         if let Some(f) = store.file_by_path(p)? {
             seed_ids.push((f.id, p.clone()));
@@ -199,7 +200,7 @@ pub fn import_adjacent_files(
         }
     }
 
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::default();
     let mut out: Vec<(String, String)> = Vec::new();
     for (fid, seed_path) in &seed_ids {
         // Files this seed imports.
@@ -241,14 +242,14 @@ pub fn cluster_co_files(
     task_keywords: &[String],
 ) -> Result<Vec<(String, String)>, StoreError> {
     let kw: HashSet<&str> = task_keywords.iter().map(String::as_str).collect();
-    let mut seed_files: HashSet<i64> = HashSet::new();
+    let mut seed_files: HashSet<i64> = HashSet::default();
     for &id in seed_symbol_ids {
         if let Some(sym) = symbol_by_id(store, id)? {
             seed_files.insert(sym.file_id);
         }
     }
 
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::default();
     let mut out: Vec<(String, String)> = Vec::new();
     for &id in seed_symbol_ids {
         let mut stmt = store.conn().prepare(

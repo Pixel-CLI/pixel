@@ -9,7 +9,7 @@
 //! computed (a variable, an interpolation, a splat) names nothing, and the
 //! rule records nothing rather than a guess.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use mvp_model::{EdgeKind, SymbolKind};
 use tree_sitter::Node;
@@ -1933,7 +1933,7 @@ pub(super) fn drop_overridden(w: &mut Walker, unsettled: &[String]) {
     }
     // Per name and kind: whether a generated method is among them, and the
     // last definition (walk order is source order).
-    let mut groups: HashMap<(&str, SymbolKind), (bool, usize)> = HashMap::new();
+    let mut groups: HashMap<(&str, SymbolKind), (bool, usize)> = HashMap::default();
     for (i, def) in w.defs.iter().enumerate() {
         let entry = groups
             .entry((def.name.as_str(), def.kind))

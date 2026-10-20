@@ -78,7 +78,9 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: release-${{ matrix.target }}
+          # Must match cross-build.yml's key: it is what the tag's build restores
+          # (see the `-pabort` note there).
+          shared-key: release-${{ matrix.target }}-pabort
           save-if: false
 
       # Prebuilt binary instead of `cargo install cross`. cross compiles inside
