@@ -140,5 +140,3 @@ exit: 101 (expected test failure)
 ## Limits
 
 No local/PR/manual cargo-mutants campaign was run, no installation was changed, and no merge was requested. The 379 exact historical cases have **no new aggregate mutation verdict** in this PR. Scheduled CI mutates production diffs; unchanged historical sites do not automatically run again merely because their tests changed. Therefore even the next green nightly must be read against its actual listing, not presented as proof that all 379 historical cases were killed.
-
-The Claude tracker could not be read or updated: ArtifactData/ToolSearch was not exposed and plugin discovery returned no matching integration. The requested tracker update remains `issues/1070`: `status=en_revue`, `pr=#1273`, with a short date/proof note after reading the document and passing its fresh version as `if_version`. No version was guessed, and the external tracker was not silently replaced with a local one.

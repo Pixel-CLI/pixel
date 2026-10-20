@@ -527,6 +527,7 @@ mod tests {
             file("alpha_beta", vec![]),
             file("alpha", vec![]),
             file("gamma", vec![]),
+            file("", vec![]),
         ];
         let hits = rank(&files, &["alpha".into(), "beta".into()], 8);
         assert_eq!(paths(&hits), ["alpha_beta", "alpha"]);

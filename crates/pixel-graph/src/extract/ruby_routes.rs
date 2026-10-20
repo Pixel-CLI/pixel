@@ -1023,4 +1023,16 @@ mod audited_contract_tests {
         );
         assert_eq!(walker.routes, vec![]);
     }
+
+    #[test]
+    fn wrapper_arguments_should_not_be_walked_as_executed_route_declarations() {
+        let source=b"constraints(-> { get '/decoy', to: 'items#bad' }) do\n get '/real', to: 'items#show'\nend";
+        assert_eq!(
+            routes(source)
+                .iter()
+                .map(|r| r.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/real"]
+        );
+    }
 }

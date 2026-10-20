@@ -3960,6 +3960,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(2, (2, 0, 5), Part::Definition)]
         );
+        assert!(definitions[0].block.head.ends_with("definition (const)"));
         let mut context = Context {
             input: &input,
             deadline,
@@ -4035,6 +4036,43 @@ mod tests {
                 .map(|c| block_range(&c.block).unwrap().0)
                 .collect::<Vec<_>>(),
             ["first.rs", "second.rs"]
+        );
+    }
+
+    #[test]
+    fn audited_match_candidates_should_take_two_unique_code_files_in_target_rank_order() {
+        let mut evidence = Repo::default();
+        let mut rows = Vec::new();
+        for name in ["first", "second", "third"] {
+            let path = format!("{name}.rs");
+            evidence.sources.push((
+                path.clone(),
+                lines(&["fn caller() {", "    needle();", "}"]),
+            ));
+            rows.push(row(&path, 2, "    needle();"));
+        }
+        rows.insert(1, rows[0].clone());
+        let target = Target {
+            name: "needle".into(),
+            definition: None,
+            region: None,
+            rows,
+            by_text: true,
+            sites: 8,
+            matches: true,
+            whole_file: false,
+        };
+        let mut files = Files::new(&evidence, Instant::now() + Duration::from_secs(5));
+        let found = match_candidates(2, &target, 0, &mut files);
+        assert_eq!(
+            found
+                .iter()
+                .map(|c| (c.priority, c.order, block_range(&c.block).unwrap().0))
+                .collect::<Vec<_>>(),
+            [
+                (2, (2, 0, 1), "first.rs".into()),
+                (3, (2, 0, 1), "second.rs".into())
+            ]
         );
     }
 }
