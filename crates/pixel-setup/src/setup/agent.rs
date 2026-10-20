@@ -221,6 +221,20 @@ pub(crate) fn join(base: &Path, components: &[&str]) -> PathBuf {
         .fold(base.to_path_buf(), |path, component| path.join(component))
 }
 
+impl std::str::FromStr for AgentTarget {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|agent| agent.cli_name() == value)
+            .ok_or_else(|| {
+                let names = Self::ALL.map(Self::cli_name).join(", ");
+                format!("unknown agent {value:?}; expected one of: {names}")
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,19 +330,5 @@ mod tests {
             "a repository CLAUDE.md is the one unambiguous per-repository marker"
         );
         assert!(!AgentTarget::AgentMd.in_use(machine.path(), Scope::Global));
-    }
-}
-
-impl std::str::FromStr for AgentTarget {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|agent| agent.cli_name() == value)
-            .ok_or_else(|| {
-                let names = Self::ALL.map(Self::cli_name).join(", ");
-                format!("unknown agent {value:?}; expected one of: {names}")
-            })
     }
 }
