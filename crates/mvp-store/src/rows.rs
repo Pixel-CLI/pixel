@@ -312,12 +312,6 @@ pub(crate) fn unreadable(conn: &Connection) -> rusqlite::Result<Option<String>> 
             return Ok(Some(format!("edges row from {}", shown(row.get_ref(0)?))));
         }
     }
-    if !crate::words::valid(conn)? {
-        return Ok(Some("words differ from the generation".to_owned()));
-    }
-    if !crate::postings::valid(conn)? {
-        return Ok(Some("postings differ from the generation".to_owned()));
-    }
     Ok(None)
 }
 

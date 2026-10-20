@@ -14,12 +14,11 @@
 //! question-kind seeds still read the meaning leads only, so a brief whose
 //! meaning search answered is the same with or without this module.
 //!
-//! The terms are pixel-mvp's, read from its vendored copy (`mvp-model`, never
-//! edited here): `mvp_model::terms` splits and stems an identifier, a path and
+//! The terms are pixel-mvp's, read from the owned `mvp-model` crate
+//! (`crates/mvp-model/ORIGIN.md`): `mvp_model::terms` splits and stems an identifier, a path and
 //! the prompt alike, so both sides meet on one form. The documents are built
 //! from this repository's own graph (`files`, `symbols`) on each call, read
-//! only: pixel-mvp stores its postings at publication, which v1's graph does
-//! not, and on v1's own repository (543 files, 9 066 symbols) the whole
+//! only: no store keeps postings, and on v1's own repository (543 files, 9 066 symbols) the whole
 //! corpus is read and scored in a few milliseconds.
 //!
 //! Measured on `eval/brief-gate/` before it went on

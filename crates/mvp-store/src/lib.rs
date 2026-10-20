@@ -15,12 +15,10 @@
 
 mod checked;
 pub mod log;
-mod postings;
 mod read;
 mod rows;
 mod schema;
 mod state_file;
-mod words;
 mod write;
 
 use std::fmt;

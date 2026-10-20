@@ -11,8 +11,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use mvp_model::hash::Hash;
-use mvp_model::{Corpus, Edge, FileRow, FileStat, Graph, GraphError, Posting, Provenance, Symbol};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use mvp_model::{Edge, FileRow, FileStat, Graph, GraphError, Provenance, Symbol};
+use rusqlite::{Connection, OpenFlags};
 
 use crate::checked::{self, Stamp};
 use crate::rows::{self, Published, edge_of, symbol_of};
@@ -217,53 +217,6 @@ impl Graph for Store {
         read().map_err(graph_error)
     }
 
-    fn postings(&self, term: &str) -> Result<Vec<Posting>, GraphError> {
-        let read = || -> rusqlite::Result<Vec<Posting>> {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT p.file, p.count, d.length FROM postings p JOIN documents d ON d.file = p.file
-                 WHERE p.term = ?1 ORDER BY p.file",
-            )?;
-            let rows = stmt.query_map([term], |row| {
-                let number = |at: usize| -> rusqlite::Result<u32> {
-                    let value: i64 = row.get(at)?;
-                    u32::try_from(value)
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(at, value))
-                };
-                Ok(Posting {
-                    file: row.get(0)?,
-                    count: number(1)?,
-                    length: number(2)?,
-                })
-            })?;
-            rows.collect()
-        };
-        read().map_err(|err| graph_error(err.into()))
-    }
-
-    fn corpus(&self) -> Result<Corpus, GraphError> {
-        self.conn
-            .prepare_cached("SELECT count(*), coalesce(avg(length), 0.0) FROM documents")
-            .and_then(|mut stmt| {
-                stmt.query_row([], |row| {
-                    let documents: i64 = row.get(0)?;
-                    Ok(Corpus {
-                        documents: usize::try_from(documents).unwrap_or(0),
-                        mean_length: row.get(1)?,
-                    })
-                })
-            })
-            .map_err(|err| graph_error(err.into()))
-    }
-
-    fn files_with_word(&self, word: &str) -> Result<usize, GraphError> {
-        let word = word.to_lowercase();
-        self.conn
-            .prepare_cached("SELECT files FROM words WHERE word = ?1")
-            .and_then(|mut stmt| stmt.query_row([word], crate::words::frequency).optional())
-            .map(|count| count.unwrap_or(0))
-            .map_err(|err| graph_error(err.into()))
-    }
-
     fn callees(&self, uid: &str) -> Result<Vec<Edge>, GraphError> {
         self.edges(
             &format!(
@@ -298,7 +251,7 @@ fn graph_error(err: StoreError) -> GraphError {
 #[cfg(test)]
 mod tests {
     use mvp_model::hash::Hash;
-    use mvp_model::{Delta, FileRow, FileRows, Lang, SymbolKind, sub_words};
+    use mvp_model::{Delta, FileRow, FileRows, Lang, SymbolKind};
 
     use super::*;
     use crate::Writer;
@@ -352,56 +305,6 @@ mod tests {
         Store::open(dir).expect("store")
     }
 
-    // Review of #53, S: a word's document frequency read every file row and
-    // scanned the symbols once per word. It is now counted in one pass;
-    // the count is the one `sub_words` gives, ASCII or not.
-    #[test]
-    fn a_words_document_frequency_is_counted_on_its_sub_words() {
-        let dir = tempfile::tempdir().unwrap();
-        let names: &[(&str, &[&str])] = &[
-            ("lib/a.rs", &["Ünïcode_Name", "x"]),
-            ("src/Parser.rs", &["Parser::parse", "ÜberParser::écrire"]),
-            (
-                "src/http_server.rs",
-                &["HTTPServer::serve", "parse_json2Value"],
-            ),
-            ("src/json.rs", &["to_json", "Value2Json"]),
-        ];
-        let store = store(dir.path(), names);
-        for word in [
-            "http",
-            "server",
-            "serve",
-            "parse",
-            "json",
-            "json2",
-            "value",
-            "parser",
-            "über",
-            "écrire",
-            "ünïcode",
-            "name",
-            "src",
-            "rs",
-            "2",
-            "x",
-            "absent",
-        ] {
-            let expected = names
-                .iter()
-                .filter(|(path, symbols)| {
-                    sub_words(path).contains(&word.to_owned())
-                        || symbols
-                            .iter()
-                            .any(|s| sub_words(s).contains(&word.to_owned()))
-                })
-                .count();
-            assert_eq!(store.files_with_word(word).unwrap(), expected, "{word}");
-        }
-        assert_eq!(store.files_with_word("JSON").unwrap(), 1, "ignoring case");
-        assert_eq!(store.files_with_word("Parse").unwrap(), 2);
-    }
-
     // Review of #60, round 3, m3: a plugin's `languages` are read from the
     // caller's store in one query, the set its files give.
     #[test]
@@ -418,13 +321,12 @@ mod tests {
         assert_eq!(from_files.len(), 1);
     }
 
-    // Review of #53, M8: a word past SQLite's pattern limit failed the
+    // Review of #53, M8: a name past SQLite's pattern limit failed the
     // whole chain ("LIKE or GLOB pattern too complex").
     #[test]
-    fn a_word_of_any_length_is_counted() {
+    fn a_name_of_any_length_is_looked_up() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path(), &[("a.rs", &["a"])]);
-        assert_eq!(store.files_with_word(&"a".repeat(50_010)).unwrap(), 0);
         assert!(store.named(&"a".repeat(50_010)).unwrap().is_empty());
     }
 

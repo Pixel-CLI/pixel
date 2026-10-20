@@ -37,7 +37,7 @@ mod rows;
 mod terms;
 
 pub use generation::{Delta, FileRows, Kept};
-pub use graph::{Corpus, Diff, DiffFile, Graph, GraphError, Posting};
+pub use graph::{Diff, DiffFile, Graph, GraphError};
 pub use pick::PluginPick;
 pub use terms::{Language, Lexicon, fold, language, prompt_terms, stem, terms};
 

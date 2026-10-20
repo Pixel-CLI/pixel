@@ -684,8 +684,6 @@ fn every_publish_keeps_each_files_latest_stat() {
 fn c19_a_row_the_store_cannot_read_back_is_refused_then_rebuilt() {
     for damage in [
         "UPDATE files SET lang = 'python' WHERE path = 'b.rs'",
-        // ADR-0030: a posting the generation does not hold is damage.
-        "UPDATE postings SET count = count + 1 WHERE file = 'a.rs'",
         // ADR-0022 §2: a stat is whole or absent; half of one is damage.
         "UPDATE files SET stat_len = 3 WHERE path = 'a.rs'",
         "UPDATE files SET hash = 'not-hex' WHERE path = 'a.rs'",
@@ -1570,36 +1568,22 @@ fn c18_r4_a_checkout_the_user_cannot_write_in_gets_the_guidance_from_the_writer(
     assert!(err.contains("make the checkout writable"), "{err}");
 }
 
-// The cached counts affect selection: a plausible wrong count must be
-// rejected just like an unreadable graph row, not trusted until rebuild.
+// Schema 8 still carried the `words`, `postings` and `documents` tables:
+// such a file is refused, then rebuilt by the next writer.
 #[test]
-fn c19_word_frequencies_are_checked_against_the_entire_generation() {
-    for sql in [
-        "UPDATE words SET files = 2 WHERE word = 'a'",
-        "DELETE FROM words WHERE word = 'rs'",
-        "INSERT INTO words VALUES ('phantom', 1)",
-        "UPDATE words SET word = 'A' WHERE word = 'a'",
-        "UPDATE words SET files = -1 WHERE word = 'a'",
-        "UPDATE words SET files = 'wrong' WHERE word = 'a'",
-        "UPDATE words SET word = CAST(x'ff' AS TEXT) WHERE word = 'a'",
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        published(dir.path());
-        damage_under_the_writer(dir.path(), sql);
-        refused_then_rebuilt(dir.path(), sql);
-    }
-}
-
-#[test]
-fn c19_schema_five_is_rebuilt_before_reading_word_frequencies() {
+fn c19_schema_eight_is_rebuilt() {
     let dir = tempfile::tempdir().unwrap();
     published(dir.path());
-    damage_under_the_writer(dir.path(), "DROP TABLE words; PRAGMA user_version = 5");
-    refused_then_rebuilt(dir.path(), "schema 5 without words");
+    damage_under_the_writer(
+        dir.path(),
+        "CREATE TABLE words (word TEXT PRIMARY KEY, files INTEGER NOT NULL) WITHOUT ROWID;
+         PRAGMA user_version = 8",
+    );
+    refused_then_rebuilt(dir.path(), "schema 8 with words");
 }
 
 #[test]
-fn c10_word_frequencies_follow_atomic_incremental_publication() {
+fn c10_publication_is_atomic_and_incremental() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let old = file("old.rs", vec![symbol("old.rs", "SharedOld", 1)], vec![]);
@@ -1609,6 +1593,9 @@ fn c10_word_frequencies_follow_atomic_incremental_publication() {
         vec![],
     );
     let added = file("new.rs", vec![symbol("new.rs", "SharedNew", 1)], vec![]);
+    let paths = |store: &Store| -> Vec<String> {
+        store.files().unwrap().into_iter().map(|f| f.path).collect()
+    };
     let mut writer = Writer::open(root, None).unwrap();
     writer
         .publish(&delta(
@@ -1619,7 +1606,6 @@ fn c10_word_frequencies_follow_atomic_incremental_publication() {
         ))
         .unwrap();
     let reader = Store::open(root).unwrap();
-    assert_eq!(reader.files_with_word("shared").unwrap(), 2);
     let mut next = delta(
         "two",
         vec![added.clone()],
@@ -1628,13 +1614,10 @@ fn c10_word_frequencies_follow_atomic_incremental_publication() {
     );
     next.stale = vec!["shared.rs".to_owned()];
     writer.publish(&next).unwrap();
-    // The already open reader stays on the old generation, even if its
-    // first lookup of a word happens after publication.
-    assert_eq!(reader.files_with_word("old").unwrap(), 1);
-    assert_eq!(reader.files_with_word("new").unwrap(), 0);
+    // The already open reader stays on the old generation.
+    assert_eq!(paths(&reader), ["old.rs", "shared.rs"]);
     let current = Store::open(root).unwrap();
-    assert_eq!(current.files_with_word("old").unwrap(), 0);
-    assert_eq!(current.files_with_word("shared").unwrap(), 2);
+    assert_eq!(paths(&current), ["new.rs", "shared.rs"]);
     assert_eq!(current.stale(), &["shared.rs"]);
     let full = tempfile::tempdir().unwrap();
     let mut rebuilt = Writer::open(full.path(), None).unwrap();
@@ -1647,28 +1630,20 @@ fn c10_word_frequencies_follow_atomic_incremental_publication() {
         ))
         .unwrap();
     let full = Store::open(full.path()).unwrap();
-    for word in ["old", "new", "shared", "rs", "absent"] {
-        assert_eq!(
-            current.files_with_word(word).unwrap(),
-            full.files_with_word(word).unwrap(),
-            "{word}"
-        );
-    }
-    // A rejected delta cannot leave counts from a partially applied graph.
+    assert_eq!(paths(&current), paths(&full));
+    // A rejected delta cannot leave a partially applied graph.
     assert!(
         writer
             .publish(&delta("bad", vec![], &["new.rs"], &["new.rs", "shared.rs"]))
             .is_err()
     );
     let after = Store::open(root).unwrap();
-    assert_eq!(after.files_with_word("new").unwrap(), 1);
+    assert_eq!(paths(&after), ["new.rs", "shared.rs"]);
     assert_eq!(after.provenance().unwrap().generation, id("two"));
     writer
         .publish(&delta("empty", vec![], &["new.rs", "shared.rs"], &[]))
         .unwrap();
-    let empty = Store::open(root).unwrap();
-    assert_eq!(empty.files_with_word("shared").unwrap(), 0);
-    assert_eq!(empty.files_with_word("rs").unwrap(), 0);
+    assert!(paths(&Store::open(root).unwrap()).is_empty());
 }
 
 #[test]

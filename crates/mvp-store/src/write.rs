@@ -349,8 +349,6 @@ fn apply(conn: &mut Connection, delta: &Delta) -> Result<(), StoreError> {
     if stored != delta.files {
         return Err(StoreError::Refused(difference(&delta.files, &stored)));
     }
-    crate::words::publish(&tx)?;
-    crate::postings::publish(&tx)?;
     tx.commit()?;
     Ok(())
 }

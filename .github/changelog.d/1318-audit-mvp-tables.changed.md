@@ -1,0 +1,1 @@
+**graph:** the MVP index (`graph.db`, schema 9) no longer builds its unread `words`, `postings` and `documents` tables on every publish, so a refresh does less work; an index of the old schema is rebuilt once on the next refresh.
