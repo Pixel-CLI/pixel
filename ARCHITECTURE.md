@@ -848,6 +848,12 @@ commands, migration and operational limits.
 
 Task trajectory events live in the durable task journal. `actions.jsonl` remains
 best-effort invocation accounting, with optional explicit task correlation.
+Session lookup reads each journal's bounded, checksummed first transaction to
+locate candidate tasks, then validates the matching tasks' complete journals.
+Rebuildable `task.json` views cannot hide a session binding. Within one store
+instance, validated journal transactions are reused only while file identity,
+size and modification/change timestamps match; writes invalidate or refresh
+that cache. No persistent lookup index or journal-format migration is required.
 Blocked/retried model requests count as work; coordinator and classifier calls
 are separate. Missing host/child coverage produces a lower bound, never zero
 work. `task replay` reads frozen policy frames without execution. Empirical regret
