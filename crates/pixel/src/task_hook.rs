@@ -1737,6 +1737,18 @@ fn antigravity_prompt(payload: &Value) -> Option<String> {
     last
 }
 
+/// Devin draws neither `systemMessage` nor a hook's output (#1031), so the
+/// prompt-submit metrics line reaches its user only when the model repeats
+/// it: the brief ends asking for that.
+fn ask_model_to_relay(output: &mut Value, line: &str) {
+    let context = &mut output["hookSpecificOutput"]["additionalContext"];
+    if let Some(brief) = context.as_str() {
+        *context = json!(format!(
+            "{brief}\n\nEnd your answer with this line, verbatim: {line}"
+        ));
+    }
+}
+
 /// What the user typed in an Antigravity turn. Antigravity CLI 1.4 stores a
 /// turn as `<USER_REQUEST>…</USER_REQUEST>`, then its own
 /// `<ADDITIONAL_METADATA>` (the local time) and, after a model switch, a
@@ -1959,10 +1971,14 @@ fn respond(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
         )
         && metrics_on(provider, raw.as_deref())
     {
-        output["systemMessage"] = json!(format!(
+        let line = format!(
             "🟩 pixel prompt-submit ❀ {:.1}ms",
             started.elapsed().as_secs_f64() * 1000.0
-        ));
+        );
+        if provider == TaskProvider::Devin {
+            ask_model_to_relay(output, &line);
+        }
+        output["systemMessage"] = json!(line);
     }
     let first_of_many = part.is_some_and(|part| {
         part.index == 1 && part.count > 1 && event == TaskHookEvent::PromptSubmit
