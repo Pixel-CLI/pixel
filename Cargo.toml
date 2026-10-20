@@ -75,7 +75,9 @@ mutants = "0.0.4"
 openssl = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
-lto = "thin"
+# Fat LTO: one binary, no plugin boundary left for the inliner to respect.
+# Builds cost more; the shipped artefact is the only thing this profile is for.
+lto = "fat"
 codegen-units = 1
 # Ship without the symbol table (~17% of the binary, 76 MB -> 63 MB on
 # aarch64-apple-darwin): no DWARF is built in release, so local symbols are
