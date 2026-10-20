@@ -12,7 +12,8 @@
 //! [`shadow`] builds both into a scratch directory and writes nothing in
 //! the repository.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
@@ -205,7 +206,7 @@ fn overlap<'a>(
 pub fn compare(store: &GraphStore, rows: &RustRows, examples: usize) -> Result<Shadow, BoxErr> {
     let conn = store.conn();
     // symbol id -> (file id, path, qualified name, lang)
-    let mut symbols: HashMap<i64, (i64, String, String, String)> = HashMap::new();
+    let mut symbols: HashMap<i64, (i64, String, String, String)> = HashMap::default();
     {
         let mut stmt = conn.prepare(
             "SELECT s.id, s.file_id, f.path, s.qualified, f.lang FROM symbols s
@@ -344,7 +345,7 @@ pub fn compare(store: &GraphStore, rows: &RustRows, examples: usize) -> Result<S
                 r.get::<_, Option<i64>>(2)?,
             ))
         })?;
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         for row in found {
             let (id, file, target) = row?;
             if rust_files.contains(&file) {

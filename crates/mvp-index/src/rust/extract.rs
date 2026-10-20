@@ -5,7 +5,7 @@
 //! `extract.rs:1092-1198`) that records definitions, call sites, argument
 //! references, `use` leaves, and the facts resolution reads back.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
@@ -115,18 +115,18 @@ impl<'a> Walker<'a> {
         Walker {
             src,
             defs: Vec::new(),
-            repeats: HashMap::new(),
+            repeats: HashMap::default(),
             sites: Vec::new(),
             facts: Facts::default(),
             scopes: Vec::new(),
-            scope_of: HashMap::new(),
+            scope_of: HashMap::default(),
             owners: Vec::new(),
-            enum_items: HashMap::new(),
-            qualifiers: HashMap::new(),
-            poisoned: HashSet::new(),
-            unread_under: HashSet::new(),
-            calls: HashSet::new(),
-            attributes: HashSet::new(),
+            enum_items: HashMap::default(),
+            qualifiers: HashMap::default(),
+            poisoned: HashSet::default(),
+            unread_under: HashSet::default(),
+            calls: HashSet::default(),
+            attributes: HashSet::default(),
             cfg: Vec::new(),
         }
     }

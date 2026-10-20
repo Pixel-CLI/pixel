@@ -55,7 +55,7 @@
 //! Ruby constant receivers use lexical class/module scopes instead of name tiers.
 //! Their unique methods are Exact; Rails dispatch conventions remain Probable.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use rusqlite::params;
 
@@ -245,10 +245,10 @@ impl ResolveIndex {
             })?;
             rows.collect::<Result<HashMap<_, _>, _>>()?
         };
-        let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::new();
-        let mut qualified_of: HashMap<i64, String> = HashMap::new();
-        let mut containers = HashSet::new();
-        let mut carried: HashSet<String> = HashSet::new();
+        let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::default();
+        let mut qualified_of: HashMap<i64, String> = HashMap::default();
+        let mut containers = HashSet::default();
+        let mut carried: HashSet<String> = HashSet::default();
         {
             let mut stmt = conn.prepare(
                 "SELECT name, file_id, id, kind, start_line, trait_impl, qualified FROM symbols",
@@ -278,7 +278,7 @@ impl ResolveIndex {
                 carried.insert(name);
             }
         }
-        let mut bound: HashSet<(i64, String)> = HashSet::new();
+        let mut bound: HashSet<(i64, String)> = HashSet::default();
         {
             let mut stmt = conn.prepare("SELECT file_id, bindings FROM imports")?;
             let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
@@ -289,7 +289,7 @@ impl ResolveIndex {
                 }
             }
         }
-        let mut import_bindings: HashMap<(i64, String), Vec<ImportTarget>> = HashMap::new();
+        let mut import_bindings: HashMap<(i64, String), Vec<ImportTarget>> = HashMap::default();
         {
             let mut stmt = conn.prepare(
                 "SELECT file_id, resolved_file_id, bindings, scope FROM imports
@@ -1282,7 +1282,7 @@ impl Affected {
     /// new symbol ids and lines are the demotion's concern (`write_rows`
     /// moves every incoming edge back and records it in `replayed`).
     pub fn record_changed_definitions(&mut self, before: &[Definition], after: &[Definition]) {
-        let mut count: HashMap<&Definition, i64> = HashMap::new();
+        let mut count: HashMap<&Definition, i64> = HashMap::default();
         for definition in before {
             *count.entry(definition).or_default() -= 1;
         }
@@ -1312,7 +1312,8 @@ impl Affected {
         before: &[(String, usize, crate::extract::RawMixin)],
         after: &[(String, usize, crate::extract::RawMixin)],
     ) -> Result<(), StoreError> {
-        let mut count: HashMap<&(String, usize, crate::extract::RawMixin), i64> = HashMap::new();
+        let mut count: HashMap<&(String, usize, crate::extract::RawMixin), i64> =
+            HashMap::default();
         for mixin in before {
             *count.entry(mixin).or_default() -= 1;
         }
@@ -1472,7 +1473,7 @@ pub fn resolve_affected_in(
     idx: &ResolveIndex,
     affected: &Affected,
 ) -> Result<ResolveStats, StoreError> {
-    let mut rows: HashMap<i64, RetryRow> = HashMap::new();
+    let mut rows: HashMap<i64, RetryRow> = HashMap::default();
     for name in affected.call_names() {
         for row in retry_rows(store, " AND u.name = ?1", Some(&name))? {
             rows.insert(row.id, row);
@@ -3022,7 +3023,7 @@ mod tests {
         );
         for (constant, expected) in [("Delta", 1), ("Gamma", 1), ("Gam", 0), ("Widget", 2)] {
             let affected = Affected {
-                constants: HashSet::from([constant.to_string()]),
+                constants: HashSet::from_iter([constant.to_string()]),
                 ..Affected::default()
             };
             assert_eq!(
@@ -3032,7 +3033,7 @@ mod tests {
             );
         }
         let replayed = Affected {
-            replayed: HashSet::from(["zeta".to_string()]),
+            replayed: HashSet::from_iter(["zeta".to_string()]),
             ..Affected::default()
         };
         assert_eq!(
@@ -3041,7 +3042,7 @@ mod tests {
             "a row the update moved back"
         );
         let files = Affected {
-            files: HashSet::from([file]),
+            files: HashSet::from_iter([file]),
             ..Affected::default()
         };
         assert_eq!(

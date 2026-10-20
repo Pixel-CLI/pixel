@@ -26,7 +26,7 @@
 //! around it.
 //! <https://guides.rubyonrails.org/routing.html>
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use mvp_model::EdgeKind;
 use tree_sitter::Node;
@@ -106,7 +106,7 @@ pub fn app_of(path: &str) -> Option<&str> {
 /// recorded as its path in [`DRAWN`]'s module, for resolution to place.
 pub fn read(root: Node, src: &[u8], path: &str) -> (Vec<Site>, Vec<Fact>) {
     let drawn = drawn_name(path).is_some();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut sites = Vec::new();
     let (routes, draws) = walk(root, src, drawn);
     for route in routes {

@@ -4,7 +4,8 @@
 //! Path tracing — BFS shortest path between two symbols over outgoing
 //! `calls` + `has_method` edges; reports the deepest reachable node on failure.
 
-use std::collections::{HashMap, VecDeque};
+use rustc_hash::FxHashMap as HashMap;
+use std::collections::VecDeque;
 
 use serde::Serialize;
 
@@ -59,8 +60,8 @@ pub fn trace(
         .ok_or(StoreError::Sql(rusqlite::Error::QueryReturnedNoRows))?;
 
     // parent map: node -> (parent, edge_kind used)
-    let mut parent: HashMap<i64, (i64, EdgeKind)> = HashMap::new();
-    let mut depth_of: HashMap<i64, u32> = HashMap::new();
+    let mut parent: HashMap<i64, (i64, EdgeKind)> = HashMap::default();
+    let mut depth_of: HashMap<i64, u32> = HashMap::default();
     depth_of.insert(from.id, 0);
     let mut queue: VecDeque<i64> = VecDeque::new();
     queue.push_back(from.id);

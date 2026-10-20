@@ -25,8 +25,8 @@
 
 use mvp_model::SymbolKind;
 
+use rustc_hash::FxHashMap as HashMap;
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use super::toml::{self, Statement, Value};
 use super::{DepKind, DepSource, Dependency, Manifest};
@@ -178,7 +178,7 @@ pub fn read(text: &str) -> (Manifest, Option<u32>) {
     // `key.path = …` and `[dependencies.key]` fields join the dependency
     // they belong to; its key is given it when the header ends: a
     // manifest may declare thousands.
-    let mut by_key: HashMap<Cow<str>, usize> = HashMap::new();
+    let mut by_key: HashMap<Cow<str>, usize> = HashMap::default();
     let keys = |by_key: &mut HashMap<Cow<str>, usize>, declared: &mut Vec<Declared>| {
         for (key, index) in by_key.drain() {
             declared[index].key = key.into_owned();

@@ -24,7 +24,7 @@
 //! <https://bundler.io/v2.5/man/gemfile.5.html>,
 //! <https://guides.rubygems.org/specification-reference/#require_paths=>
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use super::Fact;
 
@@ -77,7 +77,7 @@ impl<'a> Projects<'a> {
                 .map(|facts| Fact::decode_all(facts))
                 .unwrap_or_default()
         };
-        let mut roots: HashMap<String, Manifest> = HashMap::new();
+        let mut roots: HashMap<String, Manifest> = HashMap::default();
         for path in facts.keys() {
             if is_gemfile(path) || is_gemspec(path) {
                 roots.entry(dir_of(path).to_owned()).or_default();
@@ -236,7 +236,7 @@ fn project(
             local.insert(last.to_owned());
         }
     }
-    let mut external = HashSet::new();
+    let mut external = HashSet::default();
     let declared = manifest
         .gems
         .iter()
@@ -258,7 +258,7 @@ fn project(
     }
     // A root listed twice (`gemspec path: "."`, two path gems on one
     // directory) is one root: keep its first place.
-    let mut listed = HashSet::new();
+    let mut listed = HashSet::default();
     load_roots.retain(|root| listed.insert(root.clone()));
     Project {
         root: dir.to_owned(),

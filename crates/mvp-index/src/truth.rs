@@ -15,7 +15,8 @@
 //! rule file and by the generated trees below, whose right answers are
 //! known by construction, each target by its full identity.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use mvp_model::hash::Hash;
@@ -98,7 +99,7 @@ fn reparse(lang: Lang, content: &str) -> HashMap<u32, Line> {
             parser.parse(content, None).expect("a parse")
         }
     };
-    let mut lines: HashMap<u32, Line> = HashMap::new();
+    let mut lines: HashMap<u32, Line> = HashMap::default();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         if node.is_named() {
@@ -152,7 +153,7 @@ pub fn violations(root: &Path, files: &[FileRows]) -> Vec<String> {
     let mut found = Vec::new();
     // The store's primary key: a uid a second symbol repeats would fail
     // the publish, and a set of uids would hide it.
-    let mut uids: HashSet<&str> = HashSet::new();
+    let mut uids: HashSet<&str> = HashSet::default();
     for symbol in files.iter().flat_map(|rows| &rows.symbols) {
         if !uids.insert(symbol.uid.as_str()) {
             found.push(format!(
@@ -403,7 +404,7 @@ fn ruby_tree(classes: &[RubyClass]) -> (Vec<(String, String)>, Expected) {
             let caller = method(i, *name);
             lines.push(format!("  def {}", POOL[*name]));
             // A name assigned earlier in the body is a local from then on.
-            let mut locals = HashSet::new();
+            let mut locals = HashSet::default();
             for statement in body {
                 let line = lines.len() as u32 + 1;
                 let mut call = |callee: String| {
@@ -555,7 +556,7 @@ fn rust_tree(modules: &[RustModule]) -> (Vec<(String, String)>, Expected) {
             let caller = identity(&path, POOL[*function], SymbolKind::Function);
             lines.push(format!("pub fn {}() {{", POOL[*function]));
             // A name a `let` binds shadows the function for the rest of the body.
-            let mut shadowed = HashSet::new();
+            let mut shadowed = HashSet::default();
             for statement in body {
                 let line = lines.len() as u32 + 1;
                 let mut call = |line: u32, callee: String| {
@@ -754,7 +755,7 @@ fn c10_reference_every_row_is_true_of_the_tree() {
 
     let mut symbols: BTreeMap<String, usize> = BTreeMap::new();
     let mut sites: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-    let mut by_uid = HashMap::new();
+    let mut by_uid = HashMap::default();
     for rows in &delta.add {
         for symbol in &rows.symbols {
             *symbols

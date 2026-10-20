@@ -29,7 +29,7 @@
 //! Embeddings rank, they do not decide relevance: the best cosine of an
 //! unrelated question is within a few hundredths of a related one's.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -378,7 +378,7 @@ impl Resident {
             .map(|(file, (cosine, _))| (file.path.clone(), *cosine))
             .collect();
         Ok(
-            rank_files(query, &lexical_by_path, best_by_path, HashMap::new(), k)
+            rank_files(query, &lexical_by_path, best_by_path, HashMap::default(), k)
                 .into_iter()
                 .filter_map(|hit| {
                     let index = self
@@ -477,7 +477,7 @@ fn load_file(
 
 /// How many times each token occurs in `text`.
 fn token_counts(text: &str) -> HashMap<String, u32> {
-    let mut counts = HashMap::new();
+    let mut counts = HashMap::default();
     for_each_word(text, |token| *counts.entry(token).or_insert(0) += 1);
     counts
 }
@@ -510,7 +510,7 @@ fn embed_parsed(
     }
     let mut coverage = AskCoverage::default();
     let mut vectors: HashMap<ChunkKey, Vec<f32>> = if corpus.is_empty() {
-        HashMap::new()
+        HashMap::default()
     } else {
         chunk_vectors(&corpus, namespace, embedder, store.as_ref(), &mut coverage)?
     };
@@ -518,7 +518,7 @@ fn embed_parsed(
 
     // A text that occurs twice is embedded once: its vector is moved into the
     // last chunk that uses it and copied into the others.
-    let mut uses: HashMap<ChunkKey, usize> = HashMap::new();
+    let mut uses: HashMap<ChunkKey, usize> = HashMap::default();
     for entry in &corpus {
         *uses.entry(entry.key).or_insert(0) += 1;
     }
@@ -1238,7 +1238,7 @@ mod tests {
             .iter()
             .flat_map(|file| &file.chunks)
             .flat_map(|chunk| chunk.terms.iter().map(|&(id, _)| id))
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<rustc_hash::FxHashSet<_>>()
             .len()
     }
 

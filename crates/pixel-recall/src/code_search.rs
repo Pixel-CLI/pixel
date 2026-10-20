@@ -23,7 +23,8 @@
 //! adds a semantic layer on top. NDCG is the gate (see
 //! crates/pixel-bench/benches/ndcg_relevance.rs).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::code_vectors::{ChunkKey, Namespace, Store};
@@ -260,7 +261,7 @@ fn collect_files_within(
         coverage.degraded = true;
         return (Vec::new(), coverage);
     }
-    let mut nested = HashMap::new();
+    let mut nested = HashMap::default();
     let mut eligible = Vec::new();
     for entry in pixel_index::index::policy_walk(root) {
         let Ok(entry) = entry else {
@@ -800,8 +801,8 @@ fn ask_collected(
     let vectors = chunk_vectors(&corpus, &namespace, embedder, store, &mut coverage)?;
 
     // Per-file best score across its chunks.
-    let mut best: HashMap<String, f32> = HashMap::new();
-    let mut snippet_of: HashMap<String, String> = HashMap::new();
+    let mut best: HashMap<String, f32> = HashMap::default();
+    let mut snippet_of: HashMap<String, String> = HashMap::default();
     for entry in &corpus {
         let vec = &vectors[&entry.key];
         validate_vector(vec, qvec.len())?;
@@ -847,7 +848,7 @@ pub(crate) fn chunk_vectors(
     coverage.vector_cache_errors.extend(errors);
     let mut fresh = Vec::new();
     let mut texts = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for entry in corpus {
         if !vectors.contains_key(&entry.key) && seen.insert(entry.key) {
             fresh.push(entry.key);
@@ -988,7 +989,7 @@ pub(crate) fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
 
 /// Preserve complete identifiers and split snake_case, camelCase and acronyms.
 fn words(text: &str) -> HashSet<String> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for_each_word(text, |word| {
         out.insert(word);
     });
@@ -1306,7 +1307,7 @@ fn competition_ranks<T: Ord + std::hash::Hash + Copy>(
     for value in values {
         *counts.entry(value).or_insert(0usize) += 1;
     }
-    let mut ranks = HashMap::with_capacity(counts.len());
+    let mut ranks = HashMap::with_capacity_and_hasher(counts.len(), Default::default());
     let mut above = 0;
     for (value, count) in counts.into_iter().rev() {
         ranks.insert(value, 1 + above);
@@ -1361,7 +1362,7 @@ mod tests {
             .iter()
             .map(|(path, _, score)| (path.to_string(), *score))
             .collect();
-        rank_files(query, &lexical, best, HashMap::new(), usize::MAX)
+        rank_files(query, &lexical, best, HashMap::default(), usize::MAX)
     }
 
     fn lexical(score: f64, matches: usize) -> Lexical {
@@ -1374,10 +1375,14 @@ mod tests {
     #[test]
     fn competition_ranks_share_ties_and_skip_past_them() {
         let ranks = competition_ranks([3, 1, 3, 0, 2, 1, 3].into_iter());
-        let expected: HashMap<usize, usize> = [(3, 1), (2, 4), (1, 5), (0, 7)].into();
+        let expected: HashMap<usize, usize> =
+            [(3, 1), (2, 4), (1, 5), (0, 7)].into_iter().collect();
         assert_eq!(ranks, expected);
         assert!(competition_ranks(std::iter::empty::<usize>()).is_empty());
-        assert_eq!(competition_ranks([4].into_iter()), [(4, 1)].into());
+        assert_eq!(
+            competition_ranks([4].into_iter()),
+            [(4, 1)].into_iter().collect()
+        );
     }
 
     /// The lexical half of the fused score uses those ranks: two files
@@ -1392,11 +1397,13 @@ mod tests {
             ("d", lexical(0.0, 0)),
         ]
         .map(|(path, value)| (path.to_string(), value))
-        .into();
+        .into_iter()
+        .collect();
         let best: HashMap<String, f32> = [("a", 0.9), ("b", 0.8), ("c", 0.7), ("d", 0.6)]
             .map(|(path, score)| (path.to_string(), score))
-            .into();
-        let hits = rank_files("x y", &coverage, best, HashMap::new(), usize::MAX);
+            .into_iter()
+            .collect();
+        let hits = rank_files("x y", &coverage, best, HashMap::default(), usize::MAX);
         let score = |path: &str| {
             hits.iter()
                 .find(|hit| hit.path == path)
@@ -2792,7 +2799,7 @@ mod tests {
         let revision = crate::embed::embedder_revision(model);
         let windows = Namespace::new(model, revision, 1);
         let key = windows.key(text);
-        let vectors = HashMap::from([(key, invoice_vector(text))]);
+        let vectors = HashMap::from_iter([(key, invoice_vector(text))]);
         Store::at(&store_dir(root))
             .save(&windows, 2, &[key], &vectors, 0, false)
             .unwrap();
@@ -3251,8 +3258,10 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let store = Store::at(&store_dir(root.path()));
         let namespace = Namespace::new("m", crate::embed::embedder_revision("m"), CHUNKER_VERSION);
-        let live: HashMap<ChunkKey, Vec<f32>> =
-            [1, 2, 3].map(|key| (key, vec![key as f32; 4])).into();
+        let live: HashMap<ChunkKey, Vec<f32>> = [1, 2, 3]
+            .map(|key| (key, vec![key as f32; 4]))
+            .into_iter()
+            .collect();
         store
             .save(&namespace, 4, &[1, 2, 3], &live, 0, false)
             .unwrap();
@@ -3270,7 +3279,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let store = Store::at(&store_dir(root.path()));
         let namespace = Namespace::new("m", crate::embed::embedder_revision("m"), CHUNKER_VERSION);
-        let live: HashMap<ChunkKey, Vec<f32>> = [(1, vec![0.0f32; 4])].into();
+        let live: HashMap<ChunkKey, Vec<f32>> = [(1, vec![0.0f32; 4])].into_iter().collect();
         store.save(&namespace, 4, &[1], &live, 0, false).unwrap();
         assert!(warm_probe_in(root.path(), models.path()).vectors_present);
         // The manifest file of the store layout, corrupted after the write.

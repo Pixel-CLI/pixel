@@ -1610,7 +1610,7 @@ fn fan_in_counts_should_count_candidates_past_the_sqlite_parameter_cap() {
     let counts = fan_in_counts(&conn, &first_half).unwrap();
     assert_eq!(
         counts,
-        std::collections::HashMap::from([("src/f3.rs".to_string(), 1)]),
+        rustc_hash::FxHashMap::from_iter([("src/f3.rs".to_string(), 1)]),
         "a called file outside the candidates is left out"
     );
 }

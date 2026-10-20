@@ -33,7 +33,8 @@ mod stubs;
 mod typed;
 mod unplaced;
 
-use std::collections::{BTreeSet, HashMap};
+use rustc_hash::FxHashMap as HashMap;
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::path::PathBuf;
 

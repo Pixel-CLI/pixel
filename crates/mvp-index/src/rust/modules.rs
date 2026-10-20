@@ -31,7 +31,7 @@
 //! its own with no name: its items resolve inside it, `crate::` and the
 //! names of other crates do not.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use super::cfg;
 use super::resolve::SourceFile;
@@ -303,7 +303,7 @@ pub fn build(
         by_path: files.iter().enumerate().map(|(i, f)| (f.path, i)).collect(),
         package_of,
         tree: Tree::default(),
-        visited: HashSet::new(),
+        visited: HashSet::default(),
     };
     let mut targets: Vec<(usize, Target, usize)> = Vec::new();
     for (index, file) in files.iter().enumerate() {
@@ -432,7 +432,7 @@ fn externs(
         .enumerate()
         .map(|(i, (path, _))| (parent_dir(path), i))
         .collect();
-    let mut names = HashMap::new();
+    let mut names = HashMap::default();
     // Each package's library and its crate name, and each workspace
     // root's dependencies by key, the first of a repeated one.
     let mut libs: Vec<Option<usize>> = vec![None; manifests.len()];
@@ -464,7 +464,7 @@ fn externs(
     };
     // Each workspace root's dependencies by key, the first of a repeated
     // one, with that package: read once, not once per member.
-    let mut inherited: HashMap<usize, Inherited> = HashMap::new();
+    let mut inherited: HashMap<usize, Inherited> = HashMap::default();
     for (index, (path, manifest)) in manifests.iter().enumerate() {
         for dependency in &manifest.workspace_dependencies {
             let keyed = inherited.entry(index).or_default();
@@ -606,7 +606,7 @@ impl Builder<'_, '_> {
             krate,
             dir,
             base,
-            children: HashMap::new(),
+            children: HashMap::default(),
             cfg,
         });
         self.tree.at.entry((file, scope)).or_default().push(id);
