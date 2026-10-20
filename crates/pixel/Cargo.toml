@@ -25,6 +25,9 @@ model2vec = ["pixel-recall/model2vec"]
 
 [dependencies]
 mutants = { workspace = true }
+# Global allocator; see `main.rs`. `default-features = false` keeps the
+# override and secure features (and their build-time C) off.
+mimalloc = { version = "0.1", default-features = false }
 pixel-index = { path = "../pixel-index" }
 pixel-git = { path = "../pixel-git" }
 pixel-recall = { path = "../pixel-recall", default-features = false }
