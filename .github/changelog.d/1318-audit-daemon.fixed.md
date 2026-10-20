@@ -1,0 +1,1 @@
+**session, actionlog, recall:** the error store is deleted only when it is corrupt or from another schema (a busy or full disk no longer wipes `errors-v1.sqlite`); `.pixel/actions.jsonl` rotates when a writer starts, so one-event CLI runs bound it; the recall daemon merges its trailing small lexical segments instead of growing one per sweep.
