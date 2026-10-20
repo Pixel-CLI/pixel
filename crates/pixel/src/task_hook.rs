@@ -1164,7 +1164,7 @@ fn guidance_within(
     evaluate: impl FnOnce() -> Option<String> + Send + 'static,
 ) -> Option<String> {
     decision_within(timeout, move || {
-        evaluate().map(Value::String).unwrap_or(Value::Null)
+        evaluate().map_or(Value::Null, Value::String)
     })?
     .as_str()
     .map(str::to_owned)
