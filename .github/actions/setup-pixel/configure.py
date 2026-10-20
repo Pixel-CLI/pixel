@@ -22,6 +22,8 @@ def configure():
     for name in ('PREPARE', 'CACHE', 'INSTALL_HOOKS'):
         if os.environ[f'PIXEL_ACTION_{name}'] not in ('true', 'false'):
             raise ValueError(f'{name.lower()} must be true or false')
+    if os.environ.get('PIXEL_ACTION_HOOKS_AGENT', 'all') not in ('all', 'claude'):
+        raise ValueError('hooks-agent must be all or claude')
     version = os.environ['PIXEL_ACTION_VERSION']
     if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', version):
         raise ValueError('version must be an exact release tag: vX.Y.Z')

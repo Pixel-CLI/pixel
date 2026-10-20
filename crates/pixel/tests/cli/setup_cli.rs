@@ -65,6 +65,53 @@ fn print_prints_the_pixel_skill_and_writes_nothing() {
     assert!(!home.join(".pixel").exists(), "--print creates no config");
 }
 
+#[test]
+fn claude_selection_should_preserve_other_agents_and_existing_settings() {
+    let home = Scratch::for_test("setup", "claude-only-home");
+    let repo = Scratch::for_test("setup", "claude-only-repo");
+    for agent in [".codex", ".gemini", ".pi/agent", ".config/opencode"] {
+        fs::create_dir_all(home.join(agent)).unwrap();
+        fs::write(
+            home.join(agent).join("settings.json"),
+            "{\"sentinel\":true}",
+        )
+        .unwrap();
+    }
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(
+        home.join(".claude/settings.json"),
+        "{\"model\":\"keep-me\"}",
+    )
+    .unwrap();
+    let out = run(
+        &home,
+        &repo,
+        &["setup", "--agent", "claude", "--yes", "--json"],
+    );
+    let report: serde_json::Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(report["ok"], true);
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(settings["model"], "keep-me");
+    assert!(settings["hooks"]["UserPromptSubmit"].is_array());
+    assert!(home.join(".claude/skills/pixel/SKILL.md").is_file());
+    assert!(!home.join(".codex/hooks.json").exists());
+    for agent in [".codex", ".gemini", ".pi/agent", ".config/opencode"] {
+        let names: Vec<_> = fs::read_dir(home.join(agent))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["settings.json"], "unexpected write for {agent}");
+        assert_eq!(
+            fs::read_to_string(home.join(agent).join("settings.json")).unwrap(),
+            "{\"sentinel\":true}"
+        );
+    }
+    let refused = run(&home, &repo, &["setup", "--agent", "unknown", "--yes"]);
+    assert!(!refused.status.success());
+}
+
 // TEMPORARY (dev-flags): drives the wizard with the two selection flags.
 #[test]
 fn print_is_the_same_skill_a_machine_wide_run_writes() {

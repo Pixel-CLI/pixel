@@ -96,8 +96,10 @@ Use `cache-version` to recover from a damaged cache. No cache is used when
 
 On an ephemeral runner, add `install-hooks: 'true'` before launching the
 agent. This invokes the pinned CLI's **global** setup: hooks, skills and bundled
-probes, including Claude and Codex and other configured hosts. It is not a
-Claude-only installer. `setup --repo` does not install these hooks. Use a CLI
+probes. By default, it includes Claude, Codex and other configured hosts.
+Set `hooks-agent: claude` to install only Claude integrations. This selection
+requires a release with `pixel setup --agent claude --yes`; v0.8.0 is rejected
+before setup writes any files. `setup --repo` does not install these hooks. Use a CLI
 release supporting `setup --yes --json` (the smoke workflow uses v0.8.0).
 
 ```yaml
@@ -106,6 +108,7 @@ release supporting `setup --yes --json` (the smoke workflow uses v0.8.0).
     version: v0.8.0
     cache: 'true'
     install-hooks: 'true'
+    hooks-agent: all # Use claude with a supporting release
 - uses: anthropics/claude-code-action@v1
   with:
     claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -128,3 +131,5 @@ publication; downstream reporting can still consume `report`.
 Design references: [actions/cache strategies](https://github.com/actions/cache/blob/main/caching-strategies.md),
 [ruby/setup-ruby cache inputs](https://github.com/ruby/setup-ruby/blob/master/action.yml),
 and [Claude settings merge](https://github.com/anthropics/claude-code-base-action/blob/main/src/setup-claude-code-settings.ts).
+
+The smoke workflow executes the installed SessionStart and UserPromptSubmit commands in an isolated home. It verifies task-bridge receipts and brief output, so a fail-open exit code alone cannot pass. The source lane additionally verifies Claude-only installation, preservation of other agent settings and idempotence; no model credentials are needed.

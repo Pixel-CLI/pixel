@@ -25,6 +25,9 @@ inputs:
   install-hooks:
     description: 'Run global pixel setup for agent hooks, skills and bundled probes on this runner.'
     default: 'false'
+  hooks-agent:
+    description: 'Agent integrations to install: all or claude. Claude requires setup --agent support in the CLI release.'
+    default: 'all'
 outputs:
   version:
     description: Installed release tag.
@@ -55,6 +58,7 @@ runs:
         PIXEL_ACTION_CACHE_VERSION: ${{ inputs.cache-version }}
         PIXEL_ACTION_MINIMUM_SYMBOLS: ${{ inputs.minimum-symbols }}
         PIXEL_ACTION_INSTALL_HOOKS: ${{ inputs.install-hooks }}
+        PIXEL_ACTION_HOOKS_AGENT: ${{ inputs.hooks-agent }}
       run: python3 "$GITHUB_ACTION_PATH/configure.py"
     - name: Install verified Pixel release
       id: install
@@ -92,11 +96,8 @@ runs:
       shell: bash
       env:
         PIXEL_ACTION_BIN: ${{ steps.install.outputs.bin }}
-      run: |
-        report=$(mktemp "$RUNNER_TEMP/pixel-setup-report.XXXXXX")
-        "$PIXEL_ACTION_BIN" setup --yes --json > "$report"
-        cat "$report"
-        python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); sys.exit(0 if r.get("ok") is True else "Pixel hook setup failed")' "$report"
+        PIXEL_ACTION_HOOKS_AGENT: ${{ inputs.hooks-agent }}
+      run: bash "$GITHUB_ACTION_PATH/install-hooks.sh"
     - name: Save Pixel indexes
       if: inputs.cache == 'true' && inputs.prepare == 'true' && steps.cache.outputs.cache-hit != 'true'
       continue-on-error: true

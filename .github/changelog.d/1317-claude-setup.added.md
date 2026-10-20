@@ -1,0 +1,1 @@
+**setup:** `pixel setup --agent claude --yes` installs only Claude integrations, preserving other agents. The setup action exposes `hooks-agent: claude` and tests execution of installed hooks ([#1317](https://github.com/Pixel-CLI/pixel/pull/1317)).

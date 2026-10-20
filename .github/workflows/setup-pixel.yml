@@ -4,10 +4,10 @@
 name: Setup Pixel action
 on:
   pull_request:
-    paths: ['.github/actions/setup-pixel/**', '.github/workflows/setup-pixel.yml', 'scripts/test-setup-pixel.py']
+    paths: ['.github/actions/setup-pixel/**', '.github/workflows/setup-pixel.yml', 'scripts/test-setup-pixel*.py', 'crates/pixel/**', 'crates/pixel-setup/**']
   push:
     branches: [main]
-    paths: ['.github/actions/setup-pixel/**', '.github/workflows/setup-pixel.yml', 'scripts/test-setup-pixel.py']
+    paths: ['.github/actions/setup-pixel/**', '.github/workflows/setup-pixel.yml', 'scripts/test-setup-pixel*.py', 'crates/pixel/**', 'crates/pixel-setup/**']
   workflow_dispatch:
 permissions:
   contents: read
@@ -78,3 +78,22 @@ jobs:
           path: ${{ runner.temp }}
           prepare: 'false'
           cache: 'true'
+      - name: Execute released hooks in an isolated home
+        run: python3 scripts/test-setup-pixel-hooks.py --bin "$(command -v pixel)" --agent all
+  source-hooks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: setup-pixel-hooks
+      - name: Build the candidate CLI
+        run: cargo build --locked -p pixel-cli --no-default-features --features model2vec
+      - name: Execute Claude-only hooks from the action installer
+        run: python3 scripts/test-setup-pixel-hooks.py --bin target/debug/pixel --agent claude

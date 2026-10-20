@@ -1860,3 +1860,5 @@ homebrew-core formula (`scripts/release/homebrew-core-formula.py`) builds with i
 with `--no-default-features --features model2vec`, since homebrew-core builds
 from source, owns updates, and refuses the prebuilt ONNX Runtime `fastembed`
 downloads; every other build keeps the check.
+
+The CI setup action can select Claude via `hooks-agent: claude`, forwarded to `setup --agent claude --yes` and the existing InstallSelection. Its isolated hook smoke executes installed commands and checks task-bridge receipts and brief output.
