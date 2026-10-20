@@ -7,7 +7,7 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use iai_callgrind::{LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main};
+use gungraun::{LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main};
 use pixel_daemon::wire::{ReadResult, read_capped_line_with, write_response};
 use pixel_index::{Crc32Weigher, GramExtractor, GramHit, SparseGramExtractor};
 use pixel_recall::code_search::cosine as score_cosine;

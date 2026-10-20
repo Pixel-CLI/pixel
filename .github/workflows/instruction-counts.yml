@@ -52,8 +52,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y valgrind
           test "$(valgrind --version)" = "valgrind-3.22.0"
-      - name: Install matching iai runner
-        run: cargo install --locked --version 0.16.1 iai-callgrind-runner
+      - name: Install matching Gungraun runner
+        run: cargo install --locked --version 0.20.0 gungraun-runner
       - name: Check the gate and opt-in benchmark
         working-directory: candidate
         run: |

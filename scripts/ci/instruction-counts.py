@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
-"""Run the small iai suite, reject incomplete evidence, and prove the gate."""
+"""Run the Callgrind suite, reject incomplete evidence, and prove the gate."""
 
 import argparse
 import hashlib
@@ -90,21 +90,26 @@ def build(root, out, label):
 def measure(executable, root, out, label, repetitions=1):
     home = out / label
     home.mkdir()  # Refuse stale results, including a reused output directory.
-    env = {**os.environ, "IAI_CALLGRIND_HOME": str(home),
+    env = {**os.environ, "GUNGRAUN_HOME": str(home),
            "PIXEL_BENCH_REPETITIONS": str(repetitions)}
     command([executable, "--bench", "--save-summary=json"], root,
             out / f"{label}.log", env)
     counts = {}
     for path in home.rglob("summary.json"):
         record = json.loads(path.read_text())
+        if record["version"] != "7":
+            raise ValueError("unsupported Gungraun summary schema")
         case = f"{record['function_name']}/{record['id']}"
         if case in counts:
             raise ValueError(f"duplicate case: {case}")
         profiles = [p for p in record["profiles"] if p["tool"] == "Callgrind"]
         if len(profiles) != 1:
             raise ValueError(f"expected one Callgrind profile: {case}")
-        # Each phase has a fresh home: only Left (new), never stale Both/Right.
-        counts[case] = profiles[0]["summaries"]["total"]["summary"]["Callgrind"]["Ir"]["metrics"]["Left"]["Int"]
+        # Each phase has a fresh home: only new values, never stale comparisons.
+        values = profiles[0]["data"]["total"]["metrics"]["Ir"]["values"]
+        if set(values) != {"new"}:
+            raise ValueError(f"unexpected stale comparison: {case}")
+        counts[case] = values["new"]
     validate(counts)
     (out / f"{label}.json").write_text(json.dumps(counts, indent=2) + "\n")
     return counts
@@ -121,7 +126,7 @@ def run(base, head, out):
         "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),
         "valgrind": subprocess.check_output(["valgrind", "--version"], text=True).strip(),
         "profile": "bench (release inheritance)", "limit_percent": LIMIT,
-        "iai_callgrind": "0.16.1",
+        "gungraun": "0.20.0",
         "harness_sha256": hashlib.sha256((head / harness).read_bytes()).hexdigest(),
         "bootstrap": not (base / harness).exists(),
     }

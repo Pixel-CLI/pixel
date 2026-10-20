@@ -36,15 +36,16 @@ perf record --call-graph dwarf -- ./target/dev-release/pixel prepare-repo --no-d
 perf script | samply import perf.data
 ```
 
-`iai-callgrind` reports **executed instruction counts**, not the static
+Gungraun is the maintained successor to iai-callgrind (renamed upstream at
+0.17.0). It reports **executed instruction counts**, not the static
 instruction count of a disassembled function. The Linux
-`instruction-counts.yml` PR lane pins Rust 1.99.0, iai-callgrind 0.16.1 and
+`instruction-counts.yml` PR lane pins Rust 1.99.0, gungraun 0.20.0 and
 Valgrind 3.22.0 on Ubuntu 24.04. Its seven cases call the production
 `read_capped_line_with`, `write_response`, `cosine`, and
 `SparseGramExtractor<Crc32Weigher>::grams` implementations:
 
 ```bash
-cargo install --locked --version 0.16.1 iai-callgrind-runner
+cargo install --locked --version 0.20.0 gungraun-runner
 cargo bench --locked -p pixel-bench --bench instructions \
   --no-default-features --features instruction-counts
 # Full comparison; both directories are checkouts, output must not exist.
