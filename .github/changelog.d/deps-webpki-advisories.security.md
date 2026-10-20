@@ -1,0 +1,1 @@
+**deps:** model downloads (`ureq` through `hf-hub`) now verify TLS with `rustls-webpki` 0.103.16 and the `webpki-roots`/`webpki-root-certs` 1.0.10 root sets, which drop the distrusted emSign intermediates (RUSTSEC-2026-0381, RUSTSEC-2026-0382).
