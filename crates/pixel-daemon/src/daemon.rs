@@ -27,7 +27,9 @@ use fs2::FileExt;
 use notify::{RecursiveMode, Watcher};
 
 use crate::api::{Request, Response, ServeError, Service, failure_response};
-use crate::wire::{ReadResult, read_capped_line, write_line_split};
+use crate::wire::{
+    ReadResult, SERIALIZE_FAILURE, encode_line, read_capped_line, write_line_whole, write_response,
+};
 
 mod readers;
 
@@ -93,6 +95,13 @@ const MAX_REQUESTS_PER_CONN: u32 = 64;
 /// to end, and further connections wait in the listener's backlog, as they
 /// did when the loop served one connection at a time.
 const MAX_CONN_THREADS: usize = 32;
+/// Stack for a connection thread. It reads one request line and waits for
+/// the loop's answer (`handle_conn` calls `Forward::handle`, which hands the
+/// work to the writer), so only `serde_json`'s recursion depth bounds it:
+/// 128 levels of a default parse. The 2 MiB default costs about 1 us more
+/// per connection to create in the recorded spawn benchmark. This requests
+/// one eighth of that 2 MiB stack; the OS may enforce a larger minimum.
+const CONN_STACK: usize = 262_144; // 256 KiB
 
 /// $TMPDIR/pixel-<xxh3-of-canonical-root>.sock
 ///
@@ -1177,11 +1186,15 @@ fn spawn_acceptor(
                 root: root.clone(),
                 tx: tx.clone(),
             };
-            std::thread::spawn(move || {
-                let _slot = slot;
-                let mut shutdown = false;
-                handle_conn(&mut forward, stream, &mut shutdown);
-            });
+            // The service call happens on the loop, not here: this thread
+            // only frames a request and waits, so its stack stays shallow.
+            let _ = std::thread::Builder::new()
+                .stack_size(CONN_STACK)
+                .spawn(move || {
+                    let _slot = slot;
+                    let mut shutdown = false;
+                    handle_conn(&mut forward, stream, &mut shutdown);
+                });
         }
     })
 }
@@ -1474,14 +1487,17 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
         Err(_) => return,
     });
     let mut writer = stream;
-    let mut line = String::new();
+    let mut line: Vec<u8> = Vec::with_capacity(1024);
+    // One frame buffer for the life of the connection: the response is
+    // serialized into it and leaves in a single write.
+    let mut frame: Vec<u8> = Vec::with_capacity(1024);
     let mut request_count: u32 = 0;
     let deadline = Instant::now() + CONNECTION_DEADLINE;
     loop {
         // Cap requests per connection to prevent starvation.
         if request_count >= MAX_REQUESTS_PER_CONN {
             let resp = failure_response("error", "request limit exceeded");
-            let _ = write_line_split(&mut writer, &serde_json::to_vec(&resp).unwrap_or_default());
+            let _ = write_response(&mut writer, &mut frame, &resp);
             break;
         }
         line.clear();
@@ -1491,22 +1507,24 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
             ReadResult::Ok => {}
             ReadResult::Eof => break,
             ReadResult::TooLong => {
+                std::hint::cold_path();
                 let resp = failure_response("error", "request line too long");
-                let _ =
-                    write_line_split(&mut writer, &serde_json::to_vec(&resp).unwrap_or_default());
+                let _ = write_response(&mut writer, &mut frame, &resp);
                 break;
             }
-            ReadResult::InvalidUtf8 => {
-                request_count += 1;
-                let resp = failure_response("error", "request is not valid UTF-8");
-                let _ =
-                    write_line_split(&mut writer, &serde_json::to_vec(&resp).unwrap_or_default());
-                continue;
+            ReadResult::TimedOut | ReadResult::Err => {
+                std::hint::cold_path();
+                break;
             }
-            ReadResult::TimedOut | ReadResult::Err => break,
         }
         request_count += 1;
-        let trimmed = line.trim();
+        let Ok(text) = std::str::from_utf8(&line) else {
+            std::hint::cold_path();
+            let resp = failure_response("error", "request is not valid UTF-8");
+            let _ = write_response(&mut writer, &mut frame, &resp);
+            continue;
+        };
+        let trimmed = text.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -1520,15 +1538,16 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
                 false,
             ),
         };
-        let out = serde_json::to_string(&resp).unwrap_or_else(|_| {
-            // Fallback: a minimal failure envelope if serialization itself
-            // fails (should never happen for a Value-typed envelope).
-            r#"{"ok":false,"op":"error","protocol":1,"error":{"code":"INVARIANT_VIOLATION","message":"serialize failure"}}"#
-                .to_string()
-        });
-        let mut out = out;
-        out.push('\n');
-        if writer.write_all(out.as_bytes()).is_err() || writer.flush().is_err() {
+        // A serialization failure (never seen for a `Value`-typed envelope)
+        // still answers with an envelope; a write failure ends the
+        // connection either way.
+        let written = if encode_line(&mut frame, &resp).is_ok() {
+            write_line_whole(&mut writer, &frame).is_ok()
+        } else {
+            std::hint::cold_path();
+            write_line_whole(&mut writer, SERIALIZE_FAILURE).is_ok()
+        };
+        if !written {
             break;
         }
         if is_shutdown {
@@ -1666,15 +1685,17 @@ mod tests {
             // The request arrives after the daemon starts reading.
             std::thread::sleep(Duration::from_millis(100));
             writeln!(client, "{}", serde_json::to_string(&Request::Ping).unwrap()).unwrap();
-            let mut line = String::new();
-            BufReader::new(&client).read_line(&mut line).unwrap();
+            let mut line: Vec<u8> = Vec::with_capacity(1024);
+            BufReader::new(&client)
+                .read_until(b'\n', &mut line)
+                .unwrap();
             line
         });
         let mut corpus = BulkyCorpus(scratch_root("bulky"));
         let mut shutdown = false;
         handle_conn(&mut corpus, server, &mut shutdown);
         let line = client_thread.join().unwrap();
-        let reply: serde_json::Value = serde_json::from_str(&line)
+        let reply: serde_json::Value = serde_json::from_slice(&line)
             .unwrap_or_else(|e| panic!("one complete JSON reply ({e}), got {} bytes", line.len()));
         assert_eq!(
             reply["result"]["blob"].as_str().map(str::len),
@@ -1755,15 +1776,15 @@ mod tests {
                         // client's write instead of waiting for it.
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                        let mut line = String::new();
-                        let Ok(n) = BufReader::new(&stream).read_line(&mut line) else {
+                        let mut line: Vec<u8> = Vec::with_capacity(1024);
+                        let Ok(n) = BufReader::new(&stream).read_until(b'\n', &mut line) else {
                             return;
                         };
                         if n == 0 {
                             return;
                         }
                         assert_eq!(
-                            serde_json::from_str::<Request>(&line).unwrap(),
+                            serde_json::from_slice::<Request>(&line).unwrap(),
                             Request::Ping,
                             "the probe sends a Ping"
                         );
@@ -1912,10 +1933,16 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let mut line = String::new();
-        BufReader::new(&client).read_line(&mut line).unwrap();
-        let answered: Response = serde_json::from_str(&line).unwrap();
-        assert!(answered.ok, "the loop's answer reaches the client: {line}");
+        let mut line: Vec<u8> = Vec::with_capacity(1024);
+        BufReader::new(&client)
+            .read_until(b'\n', &mut line)
+            .unwrap();
+        let answered: Response = serde_json::from_slice(&line).unwrap();
+        assert!(
+            answered.ok,
+            "the loop's answer reaches the client: {}",
+            String::from_utf8_lossy(&line)
+        );
 
         assert!(stop_acceptor(
             &sock,
@@ -2434,7 +2461,7 @@ mod tests {
         let (mut writer, reader) = UnixStream::pair().unwrap();
         writer.write_all("📋\n".as_bytes()).unwrap();
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        let mut line: Vec<u8> = Vec::with_capacity(1024);
         assert!(matches!(
             read_capped_line(
                 &mut reader,
@@ -2444,7 +2471,7 @@ mod tests {
             ),
             ReadResult::Ok
         ));
-        assert_eq!(line, "📋");
+        assert_eq!(std::str::from_utf8(&line).unwrap(), "📋");
     }
 
     #[test]
@@ -2452,7 +2479,7 @@ mod tests {
         let (mut writer, reader) = UnixStream::pair().unwrap();
         writer.write_all(b"0123456789\nnext\n").unwrap();
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        let mut line: Vec<u8> = Vec::with_capacity(1024);
         assert!(matches!(
             read_capped_line(
                 &mut reader,
@@ -2468,7 +2495,7 @@ mod tests {
     fn expired_connection_deadline_stops_frame_read() {
         let (_writer, reader) = UnixStream::pair().unwrap();
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        let mut line: Vec<u8> = Vec::with_capacity(1024);
         assert!(matches!(
             read_capped_line(&mut reader, &mut line, 4, Instant::now()),
             ReadResult::TimedOut
@@ -3238,7 +3265,7 @@ mod tests {
         line.push(b'\n');
         let mut reader = BufReader::new(std::io::Cursor::new(line));
         let mut clock_reads = 0_usize;
-        let mut out = String::new();
+        let mut out = Vec::new();
         let result = read_capped_line_with(
             &mut reader,
             &mut out,
@@ -3254,13 +3281,36 @@ mod tests {
         assert_eq!(clock_reads, 9, "eight 8 KiB blocks, then the newline");
     }
 
+    /// A connection thread's stack must carry the deepest parse the parser
+    /// accepts: `serde_json`'s own nesting limit, on the ignoring path of an
+    /// unknown field. A stack overflow here is a `SIGSEGV`, not an error.
+    #[test]
+    fn a_connection_thread_should_parse_at_the_parser_s_nesting_limit() {
+        let depth = 120;
+        let line = format!(
+            "{{\"op\":\"ping\",\"junk\":{}{}}}",
+            "[".repeat(depth),
+            "]".repeat(depth)
+        );
+        let parsed = std::thread::Builder::new()
+            .stack_size(CONN_STACK)
+            .spawn(move || serde_json::from_str::<Request>(&line))
+            .expect("spawn")
+            .join()
+            .expect("no overflow");
+        assert!(
+            parsed.is_ok(),
+            "120 levels of nesting parse within CONN_STACK: {parsed:?}"
+        );
+    }
+
     /// The cap is exact across block boundaries: a line of `max_bytes` is
     /// read, one more byte is refused.
     #[test]
     fn capped_line_should_admit_exactly_max_bytes_across_blocks() {
         let read = |input: &[u8]| {
             let mut reader = BufReader::with_capacity(2, std::io::Cursor::new(input.to_vec()));
-            let mut out = String::new();
+            let mut out = Vec::new();
             let result = read_capped_line_with(
                 &mut reader,
                 &mut out,
@@ -3272,14 +3322,14 @@ mod tests {
         };
         let (result, out) = read(b"0123\n");
         assert!(matches!(result, ReadResult::Ok));
-        assert_eq!(out, "0123");
+        assert_eq!(out, b"0123");
         assert!(matches!(read(b"01234\n").0, ReadResult::TooLong));
         let (result, out) = read(b"01");
         assert!(
             matches!(result, ReadResult::Ok),
             "a last line without newline"
         );
-        assert_eq!(out, "01");
+        assert_eq!(out, b"01");
         assert!(matches!(read(b"").0, ReadResult::Eof));
     }
 
@@ -3289,8 +3339,8 @@ mod tests {
     fn capped_line_should_leave_the_next_request_in_the_buffer() {
         let mut reader = BufReader::new(std::io::Cursor::new(b"ab\ncd\n".to_vec()));
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut first = String::new();
-        let mut second = String::new();
+        let mut first = Vec::new();
+        let mut second = Vec::new();
         assert!(matches!(
             read_capped_line_with(&mut reader, &mut first, 8, deadline, Instant::now),
             ReadResult::Ok
@@ -3299,7 +3349,10 @@ mod tests {
             read_capped_line_with(&mut reader, &mut second, 8, deadline, Instant::now),
             ReadResult::Ok
         ));
-        assert_eq!((first.as_str(), second.as_str()), ("ab", "cd"));
+        assert_eq!(
+            (first.as_slice(), second.as_slice()),
+            (b"ab".as_slice(), b"cd".as_slice())
+        );
     }
 
     /// A corpus that holds every `status` until the test releases it.

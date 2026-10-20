@@ -409,18 +409,34 @@ fn is_code_file(name: &str) -> bool {
 
 /// Cosine similarity between two vectors (defensive normalize on top of the
 /// embedder's built-in L2 normalization).
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+///
+/// Three sums, eight independent lanes each. One accumulator makes every
+/// `f32` add wait on the one before it; on a 384-wide vector that latency,
+/// not the arithmetic, is the cost.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let mut dot = 0.0f32;
-    let mut na = 0.0f32;
-    let mut nb = 0.0f32;
-    for (x, y) in a.iter().zip(b) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
+    let mut lanes = [(0.0f32, 0.0f32, 0.0f32); 8];
+    let (a_blocks, a_rest) = a.as_chunks::<8>();
+    let (b_blocks, b_rest) = b.as_chunks::<8>();
+    for (x, y) in a_blocks.iter().zip(b_blocks) {
+        for ((lane, x), y) in lanes.iter_mut().zip(x).zip(y) {
+            lane.0 += x * y;
+            lane.1 += x * x;
+            lane.2 += y * y;
+        }
     }
+    for (x, y) in a_rest.iter().zip(b_rest) {
+        lanes[0].0 += x * y;
+        lanes[0].1 += x * x;
+        lanes[0].2 += y * y;
+    }
+    let (dot, na, nb) = lanes
+        .iter()
+        .fold((0.0f32, 0.0f32, 0.0f32), |(dot, na, nb), lane| {
+            (dot + lane.0, na + lane.1, nb + lane.2)
+        });
     let denom = (na * nb).sqrt();
     if denom > 0.0 { dot / denom } else { 0.0 }
 }
@@ -1562,6 +1578,34 @@ mod tests {
             assert!(!fallback_flag(Some(off)), "{off}");
         }
         assert!(!fallback_flag(None));
+    }
+
+    /// Lane order sums the same products in a different order, so the result
+    /// must stay equal to the sequential one at every length, tails
+    /// included, and not just at multiples of the lane width.
+    #[test]
+    fn cosine_should_match_the_sequential_sum_at_every_length() {
+        let a: Vec<f32> = (0..40).map(|i| (i as f32 * 0.31).sin()).collect();
+        let b: Vec<f32> = (0..40).map(|i| (i as f32 * 0.17).cos()).collect();
+        for len in 1..=a.len() {
+            let want = {
+                let mut dot = 0.0f32;
+                let mut na = 0.0f32;
+                let mut nb = 0.0f32;
+                for (x, y) in a[..len].iter().zip(&b[..len]) {
+                    dot += x * y;
+                    na += x * x;
+                    nb += y * y;
+                }
+                let denom = (na * nb).sqrt();
+                if denom > 0.0 { dot / denom } else { 0.0 }
+            };
+            let got = cosine(&a[..len], &b[..len]);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "len {len}: lanes {got} against sequential {want}"
+            );
+        }
     }
 
     #[test]

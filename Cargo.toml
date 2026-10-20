@@ -9,7 +9,7 @@ members = ["crates/pixel-index", "crates/pixel", "crates/pixel-graph", "crates/p
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Pixel-CLI/pixel"
-rust-version = "1.91"
+rust-version = "1.99"
 
 # Lint policy for every workspace member (each crate opts in with
 # `[lints] workspace = true`). CI runs clippy with `-D warnings`, so every

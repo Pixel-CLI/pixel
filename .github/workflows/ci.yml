@@ -679,9 +679,9 @@ jobs:
       # the workspace's own code, so without this job the number drifts
       # (it read 1.85 while the tree needed 1.91). Bump both together.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.91
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.99
         with:
-          toolchain: "1.91"
+          toolchain: "1.99"
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -705,7 +705,7 @@ jobs:
       - name: Toolchain matches Cargo.toml
         run: |
           declared=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
-          test "$declared" = "1.91" || { echo "Cargo.toml says rust-version $declared, this job installs 1.91"; exit 1; }
+          test "$declared" = "1.99" || { echo "Cargo.toml says rust-version $declared, this job installs 1.99"; exit 1; }
 
       # A check, not clippy: lint names are added by newer toolchains and
       # the lint gate runs on stable in the Lint job.

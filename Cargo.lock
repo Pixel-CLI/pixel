@@ -2309,6 +2309,7 @@ name = "pixel-daemon"
 version = "0.8.0"
 dependencies = [
  "fs2",
+ "memchr",
  "mutants",
  "notify",
  "pixel-context",
