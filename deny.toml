@@ -39,6 +39,11 @@ ignore = [
     # <- `model2vec-rs`; pixel never calls it. Goes away when model2vec-rs
     # moves to hf-hub 0.5 and tokenizers 0.23 (0.3.0, the latest, has not).
     { id = "RUSTSEC-2025-0119", reason = "transitive via indicatif 0.17 <- hf-hub 0.4 and tokenizers 0.21 <- model2vec-rs; formatting helper, unused by pixel" },
+    # `webpki-roots` 0.26.11 (via `ureq` 2 <- `hf-hub` 0.4 <- `model2vec-rs`)
+    # is the last 0.26 release and only `pub use parent::TLS_SERVER_ROOTS`
+    # of `webpki-roots` 1, which Cargo.lock pins at 1.0.10, the fixed version:
+    # the roots it ships are the patched set. Goes away with ureq 3.
+    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 re-exports webpki-roots 1.x roots; 1.0.10 (patched) is locked; via ureq 2 <- hf-hub 0.4 <- model2vec-rs" },
 ]
 
 [licenses]
