@@ -692,7 +692,8 @@ jobs:
       # The toolchain here must equal `rust-version` in the root Cargo.toml:
       # cargo only enforces that field on dependency resolution, never on
       # the workspace's own code, so without this job the number drifts
-      # (it read 1.85 while the tree needed 1.91). Bump both together.
+      # (it read 1.85 while the tree needed 1.91, and 1.91 while the tree
+      # needed 1.99). Bump both together.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.99
         with:

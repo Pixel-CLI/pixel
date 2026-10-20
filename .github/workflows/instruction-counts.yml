@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+name: Instruction counts
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.*"
+      - ".cargo/**"
+      - ".github/workflows/instruction-counts.yml"
+      - "scripts/ci/instruction-counts.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: instructions-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kernels:
+    name: Linux instruction counts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_TERM_COLOR: never
+      RUSTFLAGS: "-C target-cpu=x86-64"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Check out comparison base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: baseline
+          persist-credentials: false
+      - name: Pin Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - name: Install and verify Valgrind
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y valgrind
+          test "$(valgrind --version)" = "valgrind-3.22.0"
+      - name: Install matching Gungraun runner
+        run: cargo install --locked --version 0.20.0 gungraun-runner
+      - name: Check the gate and opt-in benchmark
+        working-directory: candidate
+        run: |
+          python3 -I scripts/ci/instruction-counts.py --self-test
+          cargo clippy --locked -p pixel-bench --bench instructions \
+            --no-default-features --features instruction-counts -- -D warnings
+      - name: Compare counts and prove regression detection
+        run: |
+          python3 -I candidate/scripts/ci/instruction-counts.py \
+            --base baseline --head candidate --out "$RUNNER_TEMP/instructions" \
+            2>&1 | tee "$RUNNER_TEMP/instruction-counts.log"
+      - name: Keep raw profiles, counts and build identity
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: instruction-counts
+          path: |
+            ${{ runner.temp }}/instruction-counts.log
+            ${{ runner.temp }}/instructions/*.json
+            ${{ runner.temp }}/instructions/*.log
+            ${{ runner.temp }}/instructions/head/**
+            ${{ runner.temp }}/instructions/base/**
+            ${{ runner.temp }}/instructions/repeat-*/**
+            ${{ runner.temp }}/instructions/deliberate-regression/**
+          if-no-files-found: warn

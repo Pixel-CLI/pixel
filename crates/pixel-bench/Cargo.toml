@@ -11,15 +11,20 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = ["pixel-recall/fastembed", "pixel-recall/model2vec"]
+instruction-counts = ["dep:gungraun"]
+
 [dependencies]
 pixel-index = { path = "../pixel-index" }
+gungraun = { version = "=0.20.0", optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 pixel-daemon = { path = "../pixel-daemon" }
 pixel-graph = { path = "../pixel-graph" }
 pixel-proto = { path = "../pixel-proto" }
-pixel-recall = { path = "../pixel-recall" }
+pixel-recall = { path = "../pixel-recall", default-features = false }
 serde_json = { workspace = true }
 tempfile = "3"
 dhat = "0.3"
@@ -48,3 +53,8 @@ harness = false
 [[bench]]
 name = "cosine"
 harness = false
+
+[[bench]]
+name = "instructions"
+harness = false
+required-features = ["instruction-counts"]

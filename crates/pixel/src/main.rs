@@ -6278,6 +6278,13 @@ fn subcommand_token(argv: &[String]) -> Option<&str> {
     None
 }
 
+/// The system allocator is a general-purpose one; pixel's allocation shape
+/// is not. The daemon answers many small requests from several connection
+/// threads at once, and `prepare-repo` allocates a row per symbol, so the
+/// allocator sits on both hot paths.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,

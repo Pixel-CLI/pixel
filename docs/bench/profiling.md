@@ -36,15 +36,57 @@ perf record --call-graph dwarf -- ./target/dev-release/pixel prepare-repo --no-d
 perf script | samply import perf.data
 ```
 
-`iai-callgrind` runs under valgrind and reports **instruction counts**, which
-is the deterministic number to quote for a codegen change; it needs Linux and
-`valgrind` installed. It is the local counterpart of the wall-clock lanes,
-which are noisy on a shared machine:
+Gungraun is the maintained successor to iai-callgrind (renamed upstream at
+0.17.0). It reports **executed instruction counts**, not the static
+instruction count of a disassembled function. The Linux
+`instruction-counts.yml` PR lane pins Rust 1.99.0, gungraun 0.20.0 and
+Valgrind 3.22.0 on Ubuntu 24.04. Its seven cases call the production
+`read_capped_line_with`, `write_response`, `cosine`, and
+`SparseGramExtractor<Crc32Weigher>::grams` implementations:
 
 ```bash
-cargo install iai-callgrind-runner
-cargo bench -p pixel-bench --bench wire   # under iai when wired for it
+cargo install --locked --version 0.20.0 gungraun-runner
+CARGO_PROFILE_BENCH_STRIP=none CARGO_PROFILE_BENCH_DEBUG=line-tables-only \
+cargo bench --locked -p pixel-bench --bench instructions \
+  --no-default-features --features instruction-counts
+# Full comparison; both directories are checkouts, output must not exist.
+python3 -I scripts/ci/instruction-counts.py \
+  --base /path/to/base --head /path/to/candidate --out /tmp/instruction-run
 ```
+
+The read cases are 64 and 8192 bytes, with an injected fixed clock; writes
+serialize 64/8192-byte JSON payloads into reused memory buffers. Cosine uses
+384 and 769 dimensions (including a tail). Sparse grams use 256 repetitions
+of a fixed source snippet, independent of the extractor's own source.
+Fixtures and buffer capacity are prepared outside collection; the measured
+functions include their loop, output consumption and argument destruction.
+There are no socket syscalls, model inference, or filesystem reads in the
+measured region. These are CPU-work tripwires, not end-to-end latency claims.
+
+`scripts/ci/instruction-counts.py` runs two unchanged repeats (at most 1%
+variation in either direction), then doubles real production work in every
+case. The same checker must exit 1 for that negative control and identify
+all seven regressions. Missing, duplicate, zero or malformed counts fail.
+It then compares the PR base and head, failing on more than 5% Ir growth in
+any case; improvements cannot hide a regression elsewhere. The 5% budget is
+deliberately coarse and does not certify smaller changes as equivalent.
+Each checkout has its own Cargo target and every measurement has a fresh
+iai output directory. `identity.json`, commands/build logs, per-case JSON and
+raw Callgrind profiles are retained as the `instruction-counts` artifact.
+The runner overrides the inherited bench profile's stripping and enables
+line tables: Callgrind needs the benchmark function's symbol to delimit
+collection. A stripped benchmark can exit successfully with zero counts;
+the checker rejects that. The workflow uses explicit Bash with `pipefail`,
+so logging through `tee` cannot turn a failed checker into a green job.
+
+On initial adoption, a base without the benchmark explicitly reports
+`BOOTSTRAP`: only repeatability and negative-control evidence are available.
+Manual dispatch compares the selected revision with itself. Once present on
+the base, a changed harness fails rather than comparing different inputs;
+fixture or tool-version migrations require explicit review of comparability.
+Normal tests do not require Valgrind; only the opt-in feature builds this
+target. Native Criterion and end-to-end timings remain necessary for SIMD,
+I/O, concurrency and release-profile decisions.
 
 ## Allocations
 

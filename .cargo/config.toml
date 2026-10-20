@@ -1,23 +1,13 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-# Link with the `rust-lld` that ships in the toolchain (stable since 1.90)
-# instead of the system linker: a full link of the CLI is 4 s against 56 s
-# with Apple's ld64 on an M-series laptop, which is most of what a release
-# rebuild costs. The crate is one binary with deep LTO, so the link is the
-# whole tail of every release build.
-#
-# Only the host targets are set. The musl targets already default to
-# `rust-lld`, and under `cross` a `-fuse-ld=lld` would point at a binary the
-# container may not have.
-[target.aarch64-apple-darwin]
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]
-
-[target.x86_64-apple-darwin]
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]
-
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]
-
-[target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+# libmimalloc-sys compiles `__DATE__` and `__TIME__` into the allocator's
+# version banner (options.c), so two builds of one commit differed by the
+# minutes between them and reproducible-build.yml failed. Pin both macros
+# for every C dependency, whatever the compiler does with SOURCE_DATE_EPOCH.
+# `cc` splits *FLAGS on whitespace unless told to read them like a shell,
+# which the quoted string literals need. A CFLAGS already in the environment
+# wins over this table (cargo's `[env]` never overrides).
+[env]
+CC_SHELL_ESCAPED_FLAGS = "1"
+CFLAGS = "-Wno-builtin-macro-redefined -D__DATE__='\"Jan  1 1970\"' -D__TIME__='\"00:00:00\"'"

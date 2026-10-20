@@ -75,7 +75,9 @@ mutants = "0.0.4"
 openssl = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
-lto = "thin"
+# Fat LTO optimizes across the dependency graph. The recorded release
+# experiment traded longer builds for a smaller binary and faster startup.
+lto = "fat"
 # No landing pads: 62,887,792 bytes against 67,307,376 (-6.6%) and 5.10 ms
 # per `--version` against 5.20. The cost is the six `catch_unwind` sites
 # (mvp-index/ruby/extract.rs:146, pixel-graph/src/extract.rs:336/359, and
