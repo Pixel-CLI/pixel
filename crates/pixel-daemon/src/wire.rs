@@ -8,11 +8,9 @@
 //! transport loop and the wire benches (`pixel-bench/benches/wire.rs`)
 //! exercise the same code, instead of a bench-shaped copy that drifts.
 //!
-//! The write side carries two shapes on purpose while it is being
-//! measured: [`write_line_split`] writes the payload and the newline
-//! separately (what the loop did first), [`write_line_whole`] appends the
-//! newline before the single write. The losing one goes when the numbers
-//! are in.
+//! Production serializes into a reused buffer and writes the complete frame.
+//! [`write_line_split`] remains a benchmark comparison; it is not the normal
+//! response baseline, which already included the newline in one write.
 
 use std::io::{BufRead, Write};
 use std::os::unix::net::UnixStream;

@@ -21,7 +21,7 @@
 use std::io::BufReader;
 use std::time::{Duration, Instant};
 
-use pixel_daemon::wire::{ReadResult, read_capped_line_with};
+use pixel_daemon::wire::{ReadResult, read_capped_line_with, write_response};
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -47,6 +47,10 @@ fn reading_a_request_line_should_stay_within_its_allocation_ceiling() {
     long.extend(std::iter::repeat_n(b' ', 8 * 1024));
     long.extend(b"\"}\n");
 
+    let first = serde_json::json!({"ok": true, "result": {"value": "first"}});
+    let second = serde_json::json!({"ok": false});
+    let mut frame = Vec::with_capacity(1024);
+    let mut writer = Vec::with_capacity(2048);
     let _profiler = dhat::Profiler::builder().testing().build();
 
     assert_eq!(read_one_line(&short), ReadResult::Ok);
@@ -69,5 +73,16 @@ fn reading_a_request_line_should_stay_within_its_allocation_ceiling() {
     assert!(
         grown <= 6,
         "a line over the 4 KiB start capacity grew the buffer to {grown} blocks in total"
+    );
+
+    // Reusing capacity must remove per-response allocations without retaining
+    // bytes from the larger preceding response or emitting extra newlines.
+    let before = dhat::HeapStats::get().total_blocks;
+    write_response(&mut writer, &mut frame, &first).unwrap();
+    write_response(&mut writer, &mut frame, &second).unwrap();
+    assert_eq!(dhat::HeapStats::get().total_blocks, before);
+    assert_eq!(
+        writer,
+        b"{\"ok\":true,\"result\":{\"value\":\"first\"}}\n{\"ok\":false}\n"
     );
 }

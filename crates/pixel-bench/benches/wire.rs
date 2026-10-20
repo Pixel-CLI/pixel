@@ -4,12 +4,11 @@
 //! Cost of the daemon's NDJSON frame: one bounded request line in, one
 //! response line out.
 //!
-//! Six lanes, each over the production functions in `pixel_daemon::wire`:
+//! Read lanes use the production codec; write lanes compare two framing shapes:
 //!
-//! - `write/split` — payload write then newline write (the original shape);
+//! - `write/split` — payload and newline written separately, for comparison;
 //! - `write/whole` — a pre-encoded frame, one write;
-//! - `write/response` — serialize into a reused buffer, one write (the
-//!   production path since the response-frame change);
+//! - `write/response` — serialize into a reused buffer and write the frame;
 //! - `parse/{serde_json,simd_json}` — the request envelope through both
 //!   parsers: `simd-json` is 25% slower on a 60-byte line and seven times
 //!   slower on an 8 KiB one, which is why the daemon keeps `serde_json`;

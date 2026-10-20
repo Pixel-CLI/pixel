@@ -639,7 +639,9 @@ fn pixel_invocation_in_tokens(tokens: &[&str], env: Option<String>) -> Option<Pi
     for (j, tok) in tokens.iter().enumerate() {
         let prefix = (tok.contains('=') && !tok.starts_with('-'))
             || tok.starts_with('-')
-            || matches!(*tok, "env" | "sudo" | "command" | "time" | "xargs" | "rtk");
+            || matches!(*tok, "env" | "sudo" | "command" | "time" | "xargs" | "rtk")
+            // `rtk proxy <cmd>` runs the command unfiltered; Codex emits it.
+            || (*tok == "proxy" && j > 0 && tokens[j - 1] == "rtk");
         if !prefix {
             break;
         }
@@ -954,6 +956,10 @@ mod tests {
                 "rtk pixel find-code composed guard foreign denial",
                 "find-code composed guard foreign denial",
             ),
+            (
+                "rtk proxy pixel find-code 'TierSelection'",
+                "find-code TierSelection",
+            ),
         ] {
             assert_eq!(
                 pixel_invocation(command).map(|i| i.args).as_deref(),
@@ -966,6 +972,7 @@ mod tests {
             "echo pixel",
             "ls; rm -rf pixel",
             "cd /r && cargo test",
+            "proxy pixel status .",
         ] {
             assert_eq!(pixel_invocation(command), None, "{command}");
         }

@@ -30,7 +30,7 @@ jobs:
       run: ${{ steps.range.outputs.run }}
       diff_range: ${{ steps.range.outputs.diff_range }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -61,7 +61,7 @@ jobs:
       ref: ${{ steps.diff.outputs.ref }}
     steps:
       # Full history so the merge base with the target branch is available.
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
@@ -366,7 +366,7 @@ jobs:
           echo "::error title=Mutation gate failed::the plan job did not list the diff's mutants (${{ needs.plan.result }})"
           exit 1
 
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
