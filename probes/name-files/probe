@@ -373,7 +373,8 @@ def main():
         if Path(rel).suffix.lower() in {ext[1:] for ext in SRC} and safe_source(root, rel):
             tracked_sources.append(rel)
     found += module_evidence(root, prompt, stage_rows, tracked_sources)
-    stems = {w for w in re.findall(r"[a-z]{4,}", prompt.lower()) if w not in STOP and w not in GENERIC}
+    # A whole word only: `model` inside `ask_model_to_relay` names no file.
+    stems = {w for w in re.findall(r"(?<!\w)[a-z]{4,}(?!\w)", prompt.lower()) if w not in STOP and w not in GENERIC}
     near = [h.split(":")[0].split(" ")[0] for h in re.findall(r"^### (\S+)", brief, re.M)]
     candidates = []
     for name in sorted(f.lstrip("./") for f in listing):
