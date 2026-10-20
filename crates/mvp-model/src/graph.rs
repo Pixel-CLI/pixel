@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use crate::rows::{Edge, FileRow, Provenance, Symbol};
+use crate::rows::{FileRow, Provenance, Symbol};
 
 /// Reads one published generation. Unresolved edges are never returned
 /// as callers or callees (C-10); an index that is corrupt or incompatible
@@ -18,23 +18,8 @@ pub trait Graph {
     /// Every indexed file, sorted by path.
     fn files(&self) -> Result<Vec<FileRow>, GraphError>;
 
-    /// The languages of the indexed files, by name (`Lang::as_str`).
-    fn languages(&self) -> Result<std::collections::BTreeSet<String>, GraphError> {
-        Ok(self
-            .files()?
-            .iter()
-            .map(|file| file.lang.as_str().to_owned())
-            .collect())
-    }
-
     /// The symbols of one file, in line order.
     fn symbols(&self, file: &str) -> Result<Vec<Symbol>, GraphError>;
-
-    /// The resolved edges whose target is `uid`.
-    fn callers(&self, uid: &str) -> Result<Vec<Edge>, GraphError>;
-
-    /// The resolved edges whose source is `uid`.
-    fn callees(&self, uid: &str) -> Result<Vec<Edge>, GraphError>;
 
     /// The symbols whose qualified name, or whose last segment
     /// ([`leaf`](crate::leaf)), equals `token` ignoring ASCII case, sorted

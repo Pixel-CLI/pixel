@@ -26,21 +26,6 @@ pub struct Store {
     published: Published,
 }
 
-/// Counts of a generation, for `status`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Stats {
-    pub files: u64,
-    pub symbols: u64,
-    pub edges: u64,
-    /// Sites the rules could not resolve (C-10): kept, counted, never served.
-    pub unresolved: u64,
-    /// Files the last run's deadline left stale (`Delta::stale`): a
-    /// changed one keeps its previous rows; a new one, or one another
-    /// extractor version read, is absent, and no site of its language is
-    /// resolved.
-    pub stale: Vec<String>,
-}
-
 impl Store {
     /// Opens the index of the repository at `root` for reading. The file is
     /// checked whole first (`schema::shape`), unless this version of it is
@@ -93,17 +78,6 @@ impl Store {
         Ok(Store { conn, published })
     }
 
-    pub fn stats(&self) -> Result<Stats, StoreError> {
-        stats(&self.conn, self.published.stale.clone())
-    }
-
-    /// The files the generation's run left stale, as published: what
-    /// [`Store::stats`] holds beside its counts, without counting every
-    /// row (about 60 ms for the 970k edges of `antiwork/gumroad`).
-    pub fn stale(&self) -> &[String] {
-        &self.published.stale
-    }
-
     /// The hash and stat of every file whose stat the generation keeps, by
     /// path: what the index's `scan_with` takes a file's hash from
     /// while its stat holds (ADR-0022 §2).
@@ -153,20 +127,6 @@ impl Store {
     }
 }
 
-/// The counts of the generation `conn` reads, with its stale list.
-pub(crate) fn stats(conn: &Connection, stale: Vec<String>) -> Result<Stats, StoreError> {
-    let count = |sql: &str| -> Result<u64, StoreError> {
-        Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64)
-    };
-    Ok(Stats {
-        files: count("SELECT count(*) FROM files")?,
-        symbols: count("SELECT count(*) FROM symbols")?,
-        edges: count("SELECT count(*) FROM edges")?,
-        unresolved: count("SELECT count(*) FROM edges WHERE resolved = 0")?,
-        stale,
-    })
-}
-
 impl Graph for Store {
     fn provenance(&self) -> Result<Provenance, GraphError> {
         Ok(self.published.provenance.clone())
@@ -174,10 +134,6 @@ impl Graph for Store {
 
     fn files(&self) -> Result<Vec<FileRow>, GraphError> {
         rows::files(&self.conn).map_err(graph_error)
-    }
-
-    fn languages(&self) -> Result<std::collections::BTreeSet<String>, GraphError> {
-        rows::languages(&self.conn).map_err(graph_error)
     }
 
     fn symbols(&self, file: &str) -> Result<Vec<Symbol>, GraphError> {
@@ -196,14 +152,6 @@ impl Graph for Store {
         read().map_err(graph_error)
     }
 
-    fn callers(&self, uid: &str) -> Result<Vec<Edge>, GraphError> {
-        self.edges(
-            &format!("{EDGES} WHERE e.dst = ?1 AND e.resolved = 1 ORDER BY s.uid, e.line"),
-            [uid],
-        )
-        .map_err(graph_error)
-    }
-
     fn named(&self, token: &str) -> Result<Vec<Symbol>, GraphError> {
         let read = || -> Result<Vec<Symbol>, StoreError> {
             let mut stmt = self.conn.prepare_cached(NAMED)?;
@@ -215,17 +163,6 @@ impl Graph for Store {
             Ok(out)
         };
         read().map_err(graph_error)
-    }
-
-    fn callees(&self, uid: &str) -> Result<Vec<Edge>, GraphError> {
-        self.edges(
-            &format!(
-                "{EDGES} WHERE e.src = (SELECT id FROM symbols WHERE uid = ?1) AND e.resolved = 1
-                 ORDER BY e.line, e.dst"
-            ),
-            [uid],
-        )
-        .map_err(graph_error)
     }
 }
 
@@ -303,22 +240,6 @@ mod tests {
             })
             .expect("publish");
         Store::open(dir).expect("store")
-    }
-
-    // Review of #60, round 3, m3: a plugin's `languages` are read from the
-    // caller's store in one query, the set its files give.
-    #[test]
-    fn the_languages_are_those_of_the_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &[("a.rs", &["a"]), ("b.rs", &["b"])]);
-        let from_files: std::collections::BTreeSet<String> = store
-            .files()
-            .unwrap()
-            .iter()
-            .map(|file| file.lang.as_str().to_owned())
-            .collect();
-        assert_eq!(store.languages().unwrap(), from_files);
-        assert_eq!(from_files.len(), 1);
     }
 
     // Review of #53, M8: a name past SQLite's pattern limit failed the

@@ -13,7 +13,7 @@ use mvp_model::{
 
 use crate::checked::{self, seam};
 use crate::schema::FULL_CHECKS;
-use crate::{Indexed, Store, StoreError, Writer, db_path, state};
+use crate::{Indexed, Store, StoreError, Writer, db_path};
 
 fn symbol(file: &str, name: &str, line: u32) -> Symbol {
     Symbol {
@@ -296,15 +296,17 @@ fn a_published_generation_reads_back_with_its_provenance() {
 }
 
 #[test]
-fn c10_unresolved_edges_are_counted_and_never_served() {
+fn c10_unresolved_edges_are_kept_unresolved() {
     let dir = tempfile::tempdir().unwrap();
     published(dir.path());
     let store = Store::open(dir.path()).unwrap();
-    let callees = store.callees("a.rs#a#function").unwrap();
-    assert_eq!(callees.len(), 1);
-    assert_eq!(callees[0].dst.as_deref(), Some("b.rs#b#function"));
-    assert_eq!(store.stats().unwrap().unresolved, 1);
-    assert_eq!(store.all_edges().unwrap().len(), 2);
+    let edges = store.all_edges().unwrap();
+    assert_eq!(edges.len(), 2);
+    assert_eq!(edges.iter().filter(|e| e.dst.is_none()).count(), 1);
+    assert_eq!(
+        edges.iter().find_map(|e| e.dst.as_deref()),
+        Some("b.rs#b#function")
+    );
 }
 
 /// A reader that follows the index one file at a time (v1's Ruby merge
@@ -412,8 +414,7 @@ fn dropping_a_file_takes_its_symbols_and_its_edges() {
     drop(writer);
     let store = Store::open(dir.path()).unwrap();
     assert!(store.symbols("a.rs").unwrap().is_empty());
-    assert_eq!(store.stats().unwrap().edges, 0);
-    assert!(store.callers("b.rs#b#function").unwrap().is_empty());
+    assert!(store.all_edges().unwrap().is_empty());
 }
 
 #[test]
@@ -435,7 +436,10 @@ fn a_failed_publish_leaves_the_last_generation_whole() {
     assert!(failed.is_err(), "a duplicate uid aborts the transaction");
     drop(writer);
     assert_eq!(generation(dir.path()), id("gen-1"));
-    assert_eq!(Store::open(dir.path()).unwrap().stats().unwrap().edges, 2);
+    assert_eq!(
+        Store::open(dir.path()).unwrap().all_edges().unwrap().len(),
+        2
+    );
 }
 
 #[test]
@@ -555,34 +559,12 @@ fn c19_pages_damaged_after_the_header_are_refused_then_rebuilt() {
         *byte = 0xA5;
     }
     std::fs::write(db_path(dir.path()), &bytes).unwrap();
-    let served = Store::open(dir.path()).and_then(|store| store.stats().map(|_| ()));
+    let served = Store::open(dir.path()).and_then(|store| store.known().map(|_| ()));
     assert!(served.is_err(), "a damaged index is never served");
     let mut writer = Writer::open(dir.path(), None).unwrap();
     let indexed = writer.indexed().unwrap();
     assert!(writer.rebuilt().is_some());
     assert_eq!(indexed, Indexed::default());
-}
-
-#[test]
-fn the_state_directory_lists_its_files_with_their_sizes_without_plugins() {
-    let dir = tempfile::tempdir().unwrap();
-    published(dir.path());
-    std::fs::create_dir_all(crate::dir(dir.path()).join("plugins/x")).unwrap();
-    std::fs::write(
-        crate::dir(dir.path()).join("plugins/x/pixel-plugin.toml"),
-        "",
-    )
-    .unwrap();
-    let entries = state(dir.path()).unwrap();
-    let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
-    assert!(paths.contains(&".pixel-mvp/graph.db"));
-    assert!(paths.contains(&".pixel-mvp/.gitignore"));
-    assert!(paths.iter().all(|p| !p.starts_with(".pixel-mvp/plugins")));
-    let db = entries
-        .iter()
-        .find(|e| e.path == ".pixel-mvp/graph.db")
-        .unwrap();
-    assert!(db.bytes > 0);
 }
 
 #[test]
@@ -606,14 +588,14 @@ fn a_reader_keeps_the_generation_it_opened() {
     let dir = tempfile::tempdir().unwrap();
     published(dir.path());
     let reader = Store::open(dir.path()).unwrap();
-    assert_eq!(reader.stats().unwrap().files, 2);
+    assert_eq!(reader.files().unwrap().len(), 2);
     let mut writer = Writer::open(dir.path(), None).unwrap();
     writer
         .publish(&delta("gen-2", vec![], &["a.rs"], &["b.rs"]))
         .unwrap();
     drop(writer);
     assert_eq!(reader.provenance().unwrap().generation, id("gen-1"));
-    assert_eq!(reader.stats().unwrap().files, 2);
+    assert_eq!(reader.files().unwrap().len(), 2);
     assert_eq!(generation(dir.path()), id("gen-2"));
 }
 
@@ -900,8 +882,6 @@ fn c11_the_stale_files_read_back_whole_whatever_their_paths_hold() {
     let mut writer = Writer::open(dir.path(), None).unwrap();
     writer.publish(&next).unwrap();
     drop(writer);
-    let stats = Store::open(dir.path()).unwrap().stats().unwrap();
-    assert_eq!(stats.stale, next.stale);
     // IDX-FINAL2-1: the next run plans against it too.
     let mut writer = Writer::open(dir.path(), None).unwrap();
     assert_eq!(writer.indexed().unwrap().stale, next.stale);
@@ -1361,7 +1341,7 @@ fn a_publish_never_waits_for_an_open_reader() {
     drop(reader);
     assert_eq!(generation(dir.path()), id("gen-2"));
     let store = Store::open(dir.path()).unwrap();
-    assert_eq!(store.stats().unwrap().files, 1);
+    assert_eq!(store.files().unwrap().len(), 1);
 }
 
 // ADR-0022: a file whose stamp matches is not checked again.
@@ -1606,19 +1586,17 @@ fn c10_publication_is_atomic_and_incremental() {
         ))
         .unwrap();
     let reader = Store::open(root).unwrap();
-    let mut next = delta(
+    let next = delta(
         "two",
         vec![added.clone()],
         &["old.rs"],
         &["new.rs", "shared.rs"],
     );
-    next.stale = vec!["shared.rs".to_owned()];
     writer.publish(&next).unwrap();
     // The already open reader stays on the old generation.
     assert_eq!(paths(&reader), ["old.rs", "shared.rs"]);
     let current = Store::open(root).unwrap();
     assert_eq!(paths(&current), ["new.rs", "shared.rs"]);
-    assert_eq!(current.stale(), &["shared.rs"]);
     let full = tempfile::tempdir().unwrap();
     let mut rebuilt = Writer::open(full.path(), None).unwrap();
     rebuilt
@@ -1707,18 +1685,4 @@ fn audited_git_index_should_not_create_a_missing_state_directory() {
         .unwrap()
     );
     assert!(!crate::dir(root.path()).exists());
-}
-
-#[test]
-fn audited_callers_should_return_the_resolved_site_and_exclude_unresolved_sites() {
-    let root = tempfile::tempdir().unwrap();
-    published(root.path());
-    let store = Store::open(root.path()).unwrap();
-    let a = symbol("a.rs", "a", 1);
-    let b = symbol("b.rs", "b", 1);
-    assert_eq!(
-        store.callers(&b.uid).unwrap(),
-        vec![call(&a, Some(&b), "b")]
-    );
-    assert_eq!(store.callers("missing").unwrap(), Vec::<Edge>::new());
 }

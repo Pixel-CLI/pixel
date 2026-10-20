@@ -30,9 +30,7 @@ pub mod classify;
 mod generation;
 mod graph;
 pub mod hash;
-pub mod log;
 mod pick;
-pub mod plugin;
 mod rows;
 mod terms;
 
