@@ -27,7 +27,9 @@ use fs2::FileExt;
 use notify::{RecursiveMode, Watcher};
 
 use crate::api::{Request, Response, ServeError, Service, failure_response};
-use crate::wire::{ReadResult, read_capped_line, write_line_split};
+use crate::wire::{
+    ReadResult, SERIALIZE_FAILURE, encode_line, read_capped_line, write_line_whole, write_response,
+};
 
 mod readers;
 
@@ -1475,13 +1477,16 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
     });
     let mut writer = stream;
     let mut line = String::new();
+    // One frame buffer for the life of the connection: the response is
+    // serialized into it and leaves in a single write.
+    let mut frame: Vec<u8> = Vec::with_capacity(1024);
     let mut request_count: u32 = 0;
     let deadline = Instant::now() + CONNECTION_DEADLINE;
     loop {
         // Cap requests per connection to prevent starvation.
         if request_count >= MAX_REQUESTS_PER_CONN {
             let resp = failure_response("error", "request limit exceeded");
-            let _ = write_line_split(&mut writer, &serde_json::to_vec(&resp).unwrap_or_default());
+            let _ = write_response(&mut writer, &mut frame, &resp);
             break;
         }
         line.clear();
@@ -1492,15 +1497,13 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
             ReadResult::Eof => break,
             ReadResult::TooLong => {
                 let resp = failure_response("error", "request line too long");
-                let _ =
-                    write_line_split(&mut writer, &serde_json::to_vec(&resp).unwrap_or_default());
+                let _ = write_response(&mut writer, &mut frame, &resp);
                 break;
             }
             ReadResult::InvalidUtf8 => {
                 request_count += 1;
                 let resp = failure_response("error", "request is not valid UTF-8");
-                let _ =
-                    write_line_split(&mut writer, &serde_json::to_vec(&resp).unwrap_or_default());
+                let _ = write_response(&mut writer, &mut frame, &resp);
                 continue;
             }
             ReadResult::TimedOut | ReadResult::Err => break,
@@ -1520,13 +1523,15 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
                 false,
             ),
         };
-        let out = serde_json::to_string(&resp).unwrap_or_else(|_| {
-            // Fallback: a minimal failure envelope if serialization itself
-            // fails (should never happen for a Value-typed envelope).
-            r#"{"ok":false,"op":"error","protocol":1,"error":{"code":"INVARIANT_VIOLATION","message":"serialize failure"}}"#
-                .to_string()
-        });
-        if write_line_split(&mut writer, out.as_bytes()).is_err() {
+        // A serialization failure (never seen for a `Value`-typed envelope)
+        // still answers with an envelope; a write failure ends the
+        // connection either way.
+        let written = if encode_line(&mut frame, &resp).is_ok() {
+            write_line_whole(&mut writer, &frame).is_ok()
+        } else {
+            write_line_whole(&mut writer, SERIALIZE_FAILURE).is_ok()
+        };
+        if !written {
             break;
         }
         if is_shutdown {

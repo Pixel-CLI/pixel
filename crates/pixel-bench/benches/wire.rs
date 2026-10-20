@@ -7,7 +7,9 @@
 //! Six lanes, each over the production functions in `pixel_daemon::wire`:
 //!
 //! - `write/split` — payload write then newline write (the original shape);
-//! - `write/whole` — newline appended, one write;
+//! - `write/whole` — a pre-encoded frame, one write;
+//! - `write/response` — serialize into a reused buffer, one write (the
+//!   production path since the response-frame change);
 //! - `parse/{serde_json,simd_json}` — the request envelope through both
 //!   parsers: `simd-json` is 25% slower on a 60-byte line and seven times
 //!   slower on an 8 KiB one, which is why the daemon keeps `serde_json`;
@@ -26,7 +28,9 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use pixel_daemon::wire::{read_capped_line_with, write_line_split, write_line_whole};
+use pixel_daemon::wire::{
+    encode_line, read_capped_line_with, write_line_split, write_line_whole, write_response,
+};
 
 /// The daemon's own cap (`MAX_REQUEST_LINE` in `daemon.rs`).
 const MAX_REQUEST_LINE: usize = 1 << 20;
@@ -76,12 +80,31 @@ fn bench_write(c: &mut Criterion) {
     drop(split);
     drop(_reader);
 
+    let mut framed = payload.clone();
+    framed.push(b'\n');
     let (mut whole, far) = UnixStream::pair().expect("socketpair");
     let _reader = drain(far);
     group.bench_function("whole", |b| {
-        b.iter(|| write_line_whole(&mut whole, &payload).expect("write"));
+        b.iter(|| write_line_whole(&mut whole, &framed).expect("write"));
+    });
+
+    let response = serde_json::from_slice::<serde_json::Value>(&payload).expect("fixture parses");
+    let (mut stream, far) = UnixStream::pair().expect("socketpair");
+    let _reader = drain(far);
+    let mut out = Vec::with_capacity(1024);
+    group.bench_function("response", |b| {
+        b.iter(|| write_response(&mut stream, &mut out, &response).expect("write"));
     });
     group.finish();
+}
+
+fn bench_encode(c: &mut Criterion) {
+    let response =
+        serde_json::from_slice::<serde_json::Value>(&envelope()).expect("fixture parses");
+    let mut out = Vec::with_capacity(1024);
+    c.bench_function("encode/response", |b| {
+        b.iter(|| encode_line(&mut out, &response).expect("encode"));
+    });
 }
 
 /// Parse the same request line with both parsers. `simd-json` needs a
@@ -135,5 +158,5 @@ fn bench_read(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_write, bench_parse, bench_read);
+criterion_group!(benches, bench_write, bench_parse, bench_encode, bench_read);
 criterion_main!(benches);
