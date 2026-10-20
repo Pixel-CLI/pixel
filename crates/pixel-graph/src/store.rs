@@ -697,30 +697,7 @@ impl GraphStore {
             })
             .optional()?;
         let id = if let Some(id) = existing {
-            tx.exec_cached(
-                "DELETE FROM edges WHERE src_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached(
-                "DELETE FROM edges WHERE dst_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached(
-                "DELETE FROM symbol_crux WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM imports WHERE file_id = ?1", params![id])?;
-            tx.exec_cached(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
-            tx.exec_cached(DELETE_FILE_UNRESOLVED_NAMES, params![id])?;
-            tx.exec_cached(
-                "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM ruby_mixins WHERE file_id = ?1", params![id])?;
-            tx.exec_cached(DELETE_FILE_JS_ASSIGNMENTS, params![id])?;
+            delete_file_rows(&tx, id)?;
             tx.exec_cached(
                 "UPDATE files SET blob_oid = ?2, lang = ?3 WHERE id = ?1",
                 params![id, blob_oid, lang],
@@ -747,27 +724,7 @@ impl GraphStore {
             })
             .optional()?
         {
-            tx.exec_cached(
-                "DELETE FROM edges WHERE src_id IN (SELECT id FROM symbols WHERE file_id = ?1)
-                   OR dst_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached(
-                "DELETE FROM symbol_crux WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM imports WHERE file_id = ?1", params![id])?;
-            tx.exec_cached(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
-            tx.exec_cached(DELETE_FILE_UNRESOLVED_NAMES, params![id])?;
-            tx.exec_cached(
-                "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM ruby_mixins WHERE file_id = ?1", params![id])?;
-            tx.exec_cached(DELETE_FILE_JS_ASSIGNMENTS, params![id])?;
+            delete_file_rows(&tx, id)?;
             tx.exec_cached("DELETE FROM files WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
@@ -1904,6 +1861,31 @@ impl GraphStore {
 }
 
 const DELETE_FILE_JS_ASSIGNMENTS: &str = "DELETE FROM js_assignment_facts WHERE file_id = ?1";
+
+/// Every row a file owns, in the order `replace_file` and `remove_file`
+/// delete them (children before the symbols they point at); each takes the
+/// file id as `?1`. The `files` row itself is the caller's.
+const PER_FILE_DELETES: &[&str] = &[
+    "DELETE FROM edges WHERE src_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+    "DELETE FROM edges WHERE dst_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+    "DELETE FROM symbol_crux WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+    "DELETE FROM symbols WHERE file_id = ?1",
+    "DELETE FROM imports WHERE file_id = ?1",
+    DELETE_FILE_UNRESOLVED_CALLS,
+    DELETE_FILE_UNRESOLVED_NAMES,
+    "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
+    "DELETE FROM concepts WHERE file_id = ?1",
+    "DELETE FROM jsx_elements WHERE file_id = ?1",
+    "DELETE FROM ruby_mixins WHERE file_id = ?1",
+    DELETE_FILE_JS_ASSIGNMENTS,
+];
+
+fn delete_file_rows(conn: &Connection, id: i64) -> Result<()> {
+    for sql in PER_FILE_DELETES {
+        conn.exec_cached(sql, params![id])?;
+    }
+    Ok(())
+}
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS js_assignment_facts (
