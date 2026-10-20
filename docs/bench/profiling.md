@@ -46,6 +46,7 @@ Valgrind 3.22.0 on Ubuntu 24.04. Its seven cases call the production
 
 ```bash
 cargo install --locked --version 0.20.0 gungraun-runner
+CARGO_PROFILE_BENCH_STRIP=none CARGO_PROFILE_BENCH_DEBUG=line-tables-only \
 cargo bench --locked -p pixel-bench --bench instructions \
   --no-default-features --features instruction-counts
 # Full comparison; both directories are checkouts, output must not exist.
@@ -72,6 +73,11 @@ deliberately coarse and does not certify smaller changes as equivalent.
 Each checkout has its own Cargo target and every measurement has a fresh
 iai output directory. `identity.json`, commands/build logs, per-case JSON and
 raw Callgrind profiles are retained as the `instruction-counts` artifact.
+The runner overrides the inherited bench profile's stripping and enables
+line tables: Callgrind needs the benchmark function's symbol to delimit
+collection. A stripped benchmark can exit successfully with zero counts;
+the checker rejects that. The workflow uses explicit Bash with `pipefail`,
+so logging through `tee` cannot turn a failed checker into a green job.
 
 On initial adoption, a base without the benchmark explicitly reports
 `BOOTSTRAP`: only repeatability and negative-control evidence are available.

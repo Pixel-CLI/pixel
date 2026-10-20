@@ -16,6 +16,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: instructions-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -64,7 +68,7 @@ jobs:
         run: |
           python3 -I candidate/scripts/ci/instruction-counts.py \
             --base baseline --head candidate --out "$RUNNER_TEMP/instructions" \
-            | tee "$RUNNER_TEMP/instruction-counts.log"
+            2>&1 | tee "$RUNNER_TEMP/instruction-counts.log"
       - name: Keep raw profiles, counts and build identity
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

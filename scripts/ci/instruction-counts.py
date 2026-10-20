@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 CASES = {
     "wire_read/short", "wire_read/long", "wire_write/short", "wire_write/long",
@@ -55,6 +56,17 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("missing/invalid evidence passed")
+    # The negative control relies on exit 1 meaning regression, not bad input.
+    with tempfile.TemporaryDirectory() as directory:
+        base = Path(directory) / "base.json"
+        candidate = Path(directory) / "candidate.json"
+        base.write_text(json.dumps(before))
+        for counts, expected in ((before, 0), (mixed, 1), ({}, 2)):
+            candidate.write_text(json.dumps(counts))
+            result = subprocess.run(
+                [sys.executable, "-I", __file__, "--compare", str(base), str(candidate)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            assert result.returncode == expected, (result.returncode, expected)
     print("PASS checker: threshold, per-case regression, incomplete/invalid evidence")
 
 
@@ -71,7 +83,14 @@ def command(args, cwd, log, env=None):
 
 def build(root, out, label):
     # Separate targets prevent cross-checkout timestamp/cache contamination.
-    env = {**os.environ, "CARGO_TARGET_DIR": str(out / f"target-{label}")}
+    env = {
+        **os.environ,
+        "CARGO_TARGET_DIR": str(out / f"target-{label}"),
+        # Callgrind toggles collection at a named benchmark function. Stripping
+        # that symbol yields a successful Valgrind process with zero counts.
+        "CARGO_PROFILE_BENCH_STRIP": "none",
+        "CARGO_PROFILE_BENCH_DEBUG": "line-tables-only",
+    }
     text = command(
         ["cargo", "bench", "--locked", "--no-default-features", "-p", "pixel-bench", "--bench",
          "instructions", "--features", "instruction-counts", "--no-run",
@@ -125,7 +144,9 @@ def run(base, head, out):
         "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=head, text=True).strip(),
         "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),
         "valgrind": subprocess.check_output(["valgrind", "--version"], text=True).strip(),
-        "profile": "bench (release inheritance)", "limit_percent": LIMIT,
+        "profile": "bench (release inheritance), strip=none, debug=line-tables-only",
+        "rustflags": os.environ.get("RUSTFLAGS", ""),
+        "limit_percent": LIMIT,
         "gungraun": "0.20.0",
         "harness_sha256": hashlib.sha256((head / harness).read_bytes()).hexdigest(),
         "bootstrap": not (base / harness).exists(),
