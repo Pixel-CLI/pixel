@@ -1213,6 +1213,9 @@ fn brief_budget(provider: TaskProvider, payload: &Value, part: Option<BriefPart>
 /// `context`, and only a [`BRIEF_ONLY`] payload counts: a ledger note of a Pi
 /// host that drives the lifecycle itself is not a brief.
 fn delivered_brief(provider: TaskProvider, raw: Option<&str>, output: &Value) -> bool {
+    if provider == TaskProvider::Antigravity {
+        return output.get("injectSteps").is_some();
+    }
     if provider != TaskProvider::Pi {
         return output.get("hookSpecificOutput").is_some();
     }
@@ -1737,12 +1740,19 @@ fn antigravity_prompt(payload: &Value) -> Option<String> {
     last
 }
 
-/// Devin draws neither `systemMessage` nor a hook's output (#1031), so the
-/// prompt-submit metrics line reaches its user only when the model repeats
-/// it: the brief ends asking for that.
+/// Devin and Antigravity draw neither `systemMessage` nor a hook's output
+/// (#1031), so the prompt-submit metrics line reaches their user only when
+/// the model repeats it: the brief (Devin's `additionalContext`,
+/// Antigravity's injected `ephemeralMessage`) ends asking for that.
 fn ask_model_to_relay(output: &mut Value, line: &str) {
-    let context = &mut output["hookSpecificOutput"]["additionalContext"];
-    if let Some(brief) = context.as_str() {
+    let pointer = if output.get("injectSteps").is_some() {
+        "/injectSteps/0/ephemeralMessage"
+    } else {
+        "/hookSpecificOutput/additionalContext"
+    };
+    if let Some(context) = output.pointer_mut(pointer)
+        && let Some(brief) = context.as_str()
+    {
         *context = json!(format!(
             "{brief}\n\nEnd your answer with this line, verbatim: {line}"
         ));
@@ -1975,10 +1985,13 @@ fn respond(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
             "🟩 pixel prompt-submit ❀ {:.1}ms",
             started.elapsed().as_secs_f64() * 1000.0
         );
-        if provider == TaskProvider::Devin {
+        if matches!(provider, TaskProvider::Devin | TaskProvider::Antigravity) {
             ask_model_to_relay(output, &line);
         }
-        output["systemMessage"] = json!(line);
+        // Antigravity's envelope is `injectSteps` alone: no top-level key.
+        if provider != TaskProvider::Antigravity {
+            output["systemMessage"] = json!(line);
+        }
     }
     let first_of_many = part.is_some_and(|part| {
         part.index == 1 && part.count > 1 && event == TaskHookEvent::PromptSubmit
@@ -3160,6 +3173,46 @@ mod tests {
             Some(&marked),
             &json!({"decision": "observe", "context": "bare"})
         ));
+        let agy_brief = envelope(
+            TaskProvider::Antigravity,
+            TaskHookEvent::PromptSubmit,
+            &json!({"decision": "observe", "context": "[PIXEL:BRIEF]"}),
+        );
+        assert!(delivered_brief(
+            TaskProvider::Antigravity,
+            Some(&plain),
+            &agy_brief
+        ));
+        assert!(!delivered_brief(
+            TaskProvider::Antigravity,
+            Some(&plain),
+            &claude_brief
+        ));
+        assert!(!delivered_brief(
+            TaskProvider::Antigravity,
+            Some(&plain),
+            &json!({})
+        ));
+    }
+
+    #[test]
+    fn ask_model_to_relay_should_end_the_brief_each_host_injects() {
+        let ask = "\n\nEnd your answer with this line, verbatim: 🟩 L";
+        let mut devin = json!({"hookSpecificOutput": {"additionalContext": "B"}});
+        ask_model_to_relay(&mut devin, "🟩 L");
+        assert_eq!(
+            devin,
+            json!({"hookSpecificOutput": {"additionalContext": format!("B{ask}")}})
+        );
+        let mut agy = json!({"injectSteps": [{"ephemeralMessage": "B"}]});
+        ask_model_to_relay(&mut agy, "🟩 L");
+        assert_eq!(
+            agy,
+            json!({"injectSteps": [{"ephemeralMessage": format!("B{ask}")}]})
+        );
+        let mut none = json!({"decision": "observe"});
+        ask_model_to_relay(&mut none, "🟩 L");
+        assert_eq!(none, json!({"decision": "observe"}));
     }
 
     #[test]
