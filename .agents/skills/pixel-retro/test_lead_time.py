@@ -11,10 +11,15 @@ while a check still runs, idle time charged to the wrong command.
 """
 
 import datetime
+import contextlib
+import io
+import tempfile
 import json
 import pathlib
 import sys
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import lead_time as lt  # noqa: E402
@@ -207,19 +212,20 @@ class Gaps(unittest.TestCase):
 
 
 class Validation(unittest.TestCase):
-    def check(self, status, completed):
-        return {"__typename": "CheckRun", "name": "Test", "status": status, "completedAt": completed}
+    def check(self, status, completed, conclusion="SUCCESS"):
+        return {"__typename": "CheckRun", "name": "Test", "status": status, "completedAt": completed, "conclusion": conclusion}
 
     def test_an_open_pr_with_a_running_check_is_not_validated(self):
         view = {"mergedAt": None, "statusCheckRollup": [self.check("COMPLETED", at(5)), self.check("IN_PROGRESS", None)]}
         self.assertIsNone(lt.validated_at(view))
 
-    def test_a_merged_pr_ignores_a_review_status_left_pending(self):
+    def test_a_merged_pr_with_a_pending_review_has_unknown_validation(self):
         view = {"mergedAt": at(9), "statusCheckRollup": [
             self.check("COMPLETED", at(5)), self.check("COMPLETED", at(8)),
             {"__typename": "StatusContext", "context": "CodeRabbit", "state": "PENDING", "startedAt": at(1)},
         ]}
-        self.assertEqual(lt.validated_at(view), T0 + datetime.timedelta(minutes=8))
+        self.assertIsNone(lt.validated_at(view))
+        self.assertIsNone(lt.completed_at(view))
 
     def test_a_finished_commit_status_counts_at_its_start_and_no_check_is_no_answer(self):
         view = {"mergedAt": None, "statusCheckRollup": [
@@ -228,6 +234,81 @@ class Validation(unittest.TestCase):
         ]}
         self.assertEqual(lt.validated_at(view), T0 + datetime.timedelta(minutes=7))
         self.assertIsNone(lt.validated_at({"mergedAt": None, "statusCheckRollup": []}))
+
+    def test_failed_checks_finish_but_never_validate_even_after_merge(self):
+        for merged in [None, at(9)]:
+            for conclusion in ["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE", None, ""]:
+                with self.subTest(merged=merged, conclusion=conclusion):
+                    view = {"mergedAt": merged, "statusCheckRollup": [
+                        self.check("COMPLETED", at(5)), self.check("COMPLETED", at(8), conclusion)]}
+                    self.assertEqual(lt.completed_at(view), T0 + datetime.timedelta(minutes=8))
+                    self.assertIsNone(lt.validated_at(view))
+
+    def test_accepted_conclusions_need_completed_checks_and_real_timestamps(self):
+        for conclusion in ["SUCCESS", "NEUTRAL", "SKIPPED"]:
+            with self.subTest(conclusion=conclusion):
+                view = {"statusCheckRollup": [self.check("COMPLETED", at(5), conclusion)]}
+                self.assertEqual(lt.validated_at(view), T0 + datetime.timedelta(minutes=5))
+                for status, done in [("IN_PROGRESS", at(5)), ("COMPLETED", None), ("COMPLETED", "0001-01-01T00:00:00Z")]:
+                    self.assertIsNone(lt.validated_at({"statusCheckRollup": [self.check(status, done, conclusion)]}))
+        self.assertIsNone(lt.validated_at({"statusCheckRollup": [self.check("COMPLETED", at(5)), self.check("IN_PROGRESS", None)]}))
+
+    def test_failed_commit_statuses_are_not_validation(self):
+        for state in ["FAILURE", "ERROR", "PENDING", "EXPECTED", "UNKNOWN"]:
+            with self.subTest(state=state):
+                view = {"mergedAt": at(9), "statusCheckRollup": [
+                    {"state": state, "startedAt": at(5)}]}
+                self.assertIsNone(lt.validated_at(view))
+                expected = T0 + datetime.timedelta(minutes=5) if state in ("FAILURE", "ERROR") else None
+                self.assertEqual(lt.completed_at(view), expected)
+
+
+class Coverage(unittest.TestCase):
+    def test_report_distinguishes_unobserved_prs_from_unvalidated_heads(self):
+        rows = [{"pr": 1, "open_to_green_s": 0}, {"pr": 2, "open_to_green_s": None},
+                {"pr": 1, "open_to_green_s": 0}]
+        self.assertEqual(lt.coverage(rows, {1, 2, 3}), {
+            "local_prs": 2, "validated_prs": 1, "github_prs": 3, "missing_local_prs": [3]})
+        self.assertEqual(lt.coverage([], None), {
+            "local_prs": 0, "validated_prs": 0, "github_prs": None, "missing_local_prs": None})
+
+    def test_json_and_table_keep_failed_completion_out_of_green_median(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            (root / "empty").mkdir()
+            (root / "session.jsonl").write_text("\n".join([
+                assistant(1, ("e1", "Edit", {})), result(2, "e1"),
+                assistant(5, ("p1", "Bash", bash("gh pr create"))),
+                result(6, "p1", "https://github.com/o/r/pull/7")]))
+            view = {"headRefOid": "head-7", "statusCheckRollup": [
+                {"status": "COMPLETED", "conclusion": "FAILURE", "completedAt": at(8)}]}
+            for json_mode in [True, False]:
+                output = io.StringIO()
+                with patch.object(lt, "repo_slug", return_value="o/r"), patch.object(lt, "gh_view", return_value=view), \
+                        patch.object(lt, "github_pr_numbers", return_value={7, 8}), contextlib.redirect_stdout(output):
+                    lt.main(["lead_time.py", at(0), "--projects", str(root), "--codex", str(root / "empty")]
+                            + (["--json"] if json_mode else []))
+                if json_mode:
+                    report = json.loads(output.getvalue())
+                    self.assertEqual(report["units"][0]["open_to_completed_s"], 180)
+                    self.assertIsNone(report["units"][0]["open_to_green_s"])
+                    self.assertEqual(report["units"][0]["head_sha"], "head-7")
+                    self.assertEqual(report["coverage"], {"local_prs": 1, "validated_prs": 0,
+                                                        "github_prs": 2, "missing_local_prs": [8]})
+                else:
+                    self.assertIn("coverage: 0 validated / 1 local PRs; GitHub total: 2", output.getvalue())
+                    self.assertIn("open→done", output.getvalue())
+                    self.assertNotIn("median", output.getvalue())
+
+    def test_listing_failure_and_cap_are_unknown_not_complete_coverage(self):
+        for code, body, expected in [(0, '[{"number": 7}]', {7}), (0, '[]', set()),
+                                     (1, '[]', None), (0, 'invalid', None),
+                                     (0, json.dumps([{"number": n} for n in range(1000)]), None)]:
+            with self.subTest(code=code, expected=expected):
+                with patch.object(lt.subprocess, "run", return_value=SimpleNamespace(returncode=code, stdout=body)) as run:
+                    self.assertEqual(lt.github_pr_numbers("o/r", T0), expected)
+                    self.assertIn("created:>=" + T0.isoformat(), run.call_args.args[0])
+
 
 
 class Keys(unittest.TestCase):

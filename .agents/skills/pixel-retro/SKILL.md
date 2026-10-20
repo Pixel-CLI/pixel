@@ -169,12 +169,20 @@ It reads every Claude Code session (subagents included) and Codex rollout
 directory it ran in (narrow with `--projects <dir>` / `--codex <dir>`), and
 keeps the PRs whose `gh pr create` URL names this repository's `origin`
 slug: a sibling checkout opens PRs here, and a sibling repository's `#33` is
-not this one's. It prints per PR the time from its first edit to `gh pr create`, from there to the last
-check completion on the final head, the pushes in that session, and the
+not this one's. It prints per PR the time from its first edit to `gh pr create`, from there to all-check completion and separately to successful validation
+on the final head (SUCCESS, NEUTRAL or SKIPPED check runs; SUCCESS commit
+statuses), the pushes in that session, and the
 session's time split into tool, model, idle (waiting on a background task)
 and human; then the median lead time and the commands with the most
 blocking time. Read the numbers with their limits:
 
+- **Completed is not validated.** Failed, cancelled, timed-out, unknown or
+  pending results never enter the green median, even after merge. A pending
+  review status on a merged PR leaves validation unknown. The report shows
+  validated/local/GitHub PR counts; a failed or capped GitHub listing reports
+  unknown coverage. JSON retains the observed head SHA, completion duration
+  and missing local PR numbers. This is the observed rollup, not a branch
+  protection audit.
 - **Idle is a ceiling, not a saving.** It is recoverable only where the
   session had an independent unit to advance; the data does not say whether
   it did.

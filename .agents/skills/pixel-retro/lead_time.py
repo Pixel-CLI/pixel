@@ -16,7 +16,7 @@ that for every pull request an agent opened in the window:
   same session (or the session start), so each PR owns its own edits.
 - It ends when the PR is validated: the last check completion on the PR's
   final head commit (`gh pr view <N> --json headRefOid,statusCheckRollup`).
-  Follow-up pushes from later sessions count; that is the real cost. With
+  Follow-up pushes from later sessions count; that is the real cost. Failed checks have a separate completion duration and never count as green. With
   `--no-gh`, or when a check is still running, the end is unknown and only
   the edit-to-open part is reported.
 - Inside the unit's own session, every gap between two events is charged to
@@ -322,26 +322,61 @@ def breakdown(events, start, end):
     return buckets, blocking, pushes
 
 
-def validated_at(view):
-    """Last completion among the checks of the final head. An open PR with an
-    unfinished check is not validated yet (None). Once merged, a check left
-    unfinished no longer holds it: a review status merged over stays
-    `PENDING` forever (verified 2026-09 on #335, CodeRabbit)."""
-    merged = bool(view.get("mergedAt"))
+def completed_at(view):
+    """Last completion of all checks, independent of whether they passed."""
     times = []
     for check in view.get("statusCheckRollup") or []:
-        if "state" in check:  # a commit status: no completion time, only its start
-            finished = check["state"] not in ("PENDING", "EXPECTED")
+        if "state" in check:
+            finished = check["state"] in ("SUCCESS", "FAILURE", "ERROR")
             done = check.get("startedAt")
-        else:  # a check run
+        else:
             finished = check.get("status") == "COMPLETED"
             done = check.get("completedAt")
         if not finished or not done or done.startswith("0001"):
-            if merged:
-                continue
             return None
         times.append(parse_ts(done))
     return max(times) if times else None
+
+
+def validated_at(view):
+    """All reported checks must succeed; merging cannot override a failed check.
+
+    GitHub's neutral and skipped check conclusions are accepted. A pending
+    review status, even on a merged PR, leaves validation unknown. This is
+    the observed rollup, not a reconstruction of branch protection policy.
+    """
+    for check in view.get("statusCheckRollup") or []:
+        if "state" in check:
+            if check["state"] != "SUCCESS":
+                return None
+        elif check.get("conclusion") not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+            return None
+    return completed_at(view)
+
+
+def github_pr_numbers(repo, since):
+    """Bounded coverage audit; a failed or saturated listing is unknown."""
+    if not repo:
+        return None
+    try:
+        out = subprocess.run(["gh", "pr", "list", "--repo", repo, "--state", "all",
+                              "--search", f"created:>={since.isoformat()}",
+                              "--limit", "1000", "--json", "number"],
+                             capture_output=True, text=True, timeout=30)
+        if out.returncode:
+            return None
+        prs = json.loads(out.stdout)
+        return {pr["number"] for pr in prs} if len(prs) < 1000 else None
+    except (subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+        return None
+
+
+def coverage(rows, github_prs):
+    local = {row["pr"] for row in rows}
+    validated = {row["pr"] for row in rows if row["open_to_green_s"] is not None}
+    return {"local_prs": len(local), "validated_prs": len(validated),
+            "github_prs": len(github_prs) if github_prs is not None else None,
+            "missing_local_prs": sorted(github_prs - local) if github_prs is not None else None}
 
 
 def gh_view(pr, repo=None):
@@ -403,24 +438,30 @@ def main(argv):
                 continue
             view = gh_view(unit["pr"], repo) if use_gh else None
             done = validated_at(view) if view else None
-            end = done or unit["opened"]
+            completed = completed_at(view) if view else None
+            end = done or completed or unit["opened"]
             buckets, blocked, pushes = breakdown(events, unit["start"], end)
             for key in BUCKETS:
                 totals[key] += buckets[key]
             blocking.update(blocked)
             rows.append({"pr": unit["pr"], "session": name, "start": unit["start"].isoformat(),
                          "edit_to_open_s": (unit["opened"] - unit["start"]).total_seconds(),
+                         "head_sha": view.get("headRefOid") if view else None,
+                         "open_to_completed_s": (completed - unit["opened"]).total_seconds() if completed else None,
                          "open_to_green_s": (done - unit["opened"]).total_seconds() if done else None,
                          "pushes_in_session": pushes, **{f"{k}_s": v for k, v in buckets.items()}})
+    audit = coverage(rows, github_pr_numbers(repo, since) if use_gh else None)
     if as_json:
         print(json.dumps({"since": since.isoformat(), "units": rows, "totals_s": totals,
-                          "blocking_s": dict(blocking.most_common(15))}, indent=2))
+                          "blocking_s": dict(blocking.most_common(15)), "coverage": audit}, indent=2))
         return
     print(f"{len(rows)} PRs of {repo or 'any repository'} opened since {since:%Y-%m-%d %H:%M}Z, "
           f"read from {len(claude)} Claude and {len(seen)} Codex sessions")
-    print(f"{'PR':>5} {'session':8} {'edit→open':>9} {'open→green':>10} {'push':>4} {'tool':>7} {'model':>7} {'idle':>7} {'human':>7}")
+    print(f"coverage: {audit['validated_prs']} validated / {audit['local_prs']} local PRs; "
+          f"GitHub total: {audit['github_prs'] if audit['github_prs'] is not None else 'unknown (offline, failed or capped listing)'}")
+    print(f"{'PR':>5} {'session':8} {'edit→open':>9} {'open→done':>10} {'open→green':>10} {'push':>4} {'tool':>7} {'model':>7} {'idle':>7} {'human':>7}")
     for r in sorted(rows, key=lambda r: r["pr"]):
-        print(f"{r['pr']:>5} {r['session']:8} {fmt(r['edit_to_open_s']):>9} {fmt(r['open_to_green_s']):>10} "
+        print(f"{r['pr']:>5} {r['session']:8} {fmt(r['edit_to_open_s']):>9} {fmt(r['open_to_completed_s']):>10} {fmt(r['open_to_green_s']):>10} "
               f"{r['pushes_in_session']:>4} " + " ".join(f"{fmt(r[k + '_s']):>7}" for k in BUCKETS))
     leads = [r["edit_to_open_s"] + r["open_to_green_s"] for r in rows if r["open_to_green_s"] is not None]
     if leads:
