@@ -18,6 +18,7 @@ use crate::support::{Scratch, git, pixel_command};
 const PROMPT: &str = "what value is MAX_RETRIES set to and who uses it?";
 const DIRECTIVE: &str =
     "Answer from this context. Use a tool only if something you need is not shown above.";
+const SKILL_LINE: &str = "Any search beyond these lines: use the `pixel` skill (`pixel find-code`, `pixel who-calls`, `pixel search-content`) before grep, rg, find or ls.";
 
 fn fixture(tag: &str) -> Scratch {
     fixture_with(tag, 0)
@@ -169,11 +170,15 @@ fn a_prompt_naming_a_symbol_should_get_its_definition_usage_and_tests_as_source(
         ),
         "{text}"
     );
-    assert!(text.ends_with(DIRECTIVE), "{text}");
+    // Every brief ends on the skill line, whatever its own last line says.
+    assert!(
+        text.ends_with(&format!("{DIRECTIVE}\n{SKILL_LINE}")),
+        "{text}"
+    );
     for old in ["\nfiles:", "\nread:", "\ncoverage:", "\nkind:"] {
         assert!(!text.contains(old), "{old}: {text}");
     }
-    assert_eq!(decision["pack_bytes"], text.len());
+    assert_eq!(decision["pack_bytes"], text.len() - SKILL_LINE.len() - 1);
     assert_eq!(decision["pack_parts"], 1);
     assert_eq!(decision["pack_targets"], 1);
     assert_eq!(decision["fallback"], false);

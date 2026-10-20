@@ -7,9 +7,10 @@ name: Cross-build
 # cross (--locked, model2vec only) and aarch64-apple-darwin natively. The Test job's `cargo check` of that feature
 # set runs on glibc and cannot see a dependency that fails to link against
 # musl or a Cargo.lock that --locked rejects, so this is the only job that
-# proves a change still ships. It runs on every push to main and on the
+# proves the Linux release feature set links. It runs on every push to main and on the
 # pull requests that can change the outcome; a docs, prompt or script PR
-# skips it. The release workflow's build job builds the same lane again
+# skips it. Native macOS runs on main and maintenance release PRs only.
+# The release workflow's build job builds the same lane again
 # from the tag. No branch rule requires this check today; if one is added,
 # the excluded paths need a twin workflow that reports success.
 #
@@ -56,7 +57,7 @@ jobs:
     name: Cross-build ${{ matrix.target }} (${{ matrix.profile }})
     needs: scope
     if: needs.scope.outputs.release-prepare != 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.target == 'aarch64-apple-darwin' && 'macos-15' || 'ubuntu-26.04' }}
     # A pull request into main builds `dev-release` (release without thin LTO
     # and with 16 codegen units): the lane still has to link against musl
     # with the release feature set and a --locked Cargo.lock, which is what
@@ -69,7 +70,7 @@ jobs:
     # release before its tag. A maintenance pull request into `release/x.y`
     # keeps `release`: no push run covers that branch.
     #
-    # The push to main runs both profiles, each as its own job with its own
+    # Linux on main runs both profiles, each as its own job with its own
     # cache key, so each saves the entry its readers restore: `release-<t>`
     # for the tag's build in release-build.yml, `dev-release-<t>` for the pull
     # requests. One key cannot hold both: an entry is immutable, and a push
@@ -81,17 +82,12 @@ jobs:
       fail-fast: true
       matrix:
         profile: ${{ fromJSON(github.event_name == 'push' && '["release", "dev-release"]' || (github.event_name == 'pull_request' && github.base_ref == 'main') && '["dev-release"]' || '["release"]') }}
-        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, aarch64-apple-darwin]
-        # The three release targets, on the runners release-build.yml builds them
-        # on. aarch64-apple-darwin is here so a push to main proves the macOS
-        # lane before a tag does, and saves the cache the tag's build restores.
-        include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-26.04
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-26.04
+        # Ordinary and stacked PRs use Linux. Main and maintenance releases
+        # retain the native macOS proof before tagging; no macOS PR cache to warm.
+        target: ${{ fromJSON((github.event_name == 'push' || startsWith(github.base_ref, 'release/')) && '["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "aarch64-apple-darwin"]' || '["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]') }}
+        exclude:
           - target: aarch64-apple-darwin
-            os: macos-15
+            profile: dev-release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
