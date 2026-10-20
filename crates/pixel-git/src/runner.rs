@@ -39,7 +39,7 @@ pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576;
 /// worst-case memory use.
 pub const ENUMERATION_MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
-/// Cap for blob-content reads (`show_blob`, `show_blob_string`). Must stay
+/// Cap for blob-content reads (`show_blob`). Must stay
 /// equal to `pixel_index::index::MAX_FILE_BYTES` (currently 4 MiB) — that
 /// constant is the contract for "this file is small enough to index", and a
 /// blob-read cap smaller than it silently drops indexable files (observed:
@@ -281,9 +281,8 @@ impl GitRunner {
 
     /// [`GitRunner::merge_file`] with the three `-L` diff3 conflict-marker
     /// labels when `labels` is `Some` (ours, base, theirs, in marker order);
-    /// git's own file-name labels otherwise. The one bounded primitive both
-    /// merge-file entry points go through
-    /// (`plumbing::merge_file_with_labels` is the other), so neither can
+    /// git's own file-name labels otherwise. The bounded primitive behind
+    /// `merge_file`, so it cannot
     /// spawn a git that outlives the deadline or floods a pipe. The merged
     /// text is written into `current`, not stdout, which is why the
     /// runner's default cap leaves ample room here.
