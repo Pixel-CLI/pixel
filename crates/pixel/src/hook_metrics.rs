@@ -723,12 +723,8 @@ fn strip_cd_prefix<'a>(cmd: &'a str, cwd: &Path) -> (PathBuf, &'a str) {
     } else {
         cwd.join(dir_str)
     };
-    let body = rest_after_cd[amp_idx + 2..].trim_start();
-    // Return the body with a reference into the original string.
-    // Find where body starts in the original cmd.
-    let body_offset = cmd.len() - body.len();
-    let body_ref = &cmd[body_offset..];
-    (new_cwd, body_ref)
+    // `trimmed` is a slice of `cmd`, so the body borrows from it.
+    (new_cwd, rest_after_cd[amp_idx + 2..].trim_start())
 }
 
 /// Find the byte index of the first `&&` outside single or double quotes.
@@ -1024,6 +1020,23 @@ mod tests {
             shell_segments("a 2>&1 && b &> f; c"),
             ["a 2>&1 ", "", " b &> f", " c"]
         );
+    }
+
+    #[test]
+    fn strip_cd_prefix_keeps_the_body_whole_around_trailing_whitespace() {
+        let cwd = Path::new("/repo");
+        for cmd in [
+            "cd /r && pixel impact a\n",
+            "cd /r && pixel impact a  ",
+            "  cd /r &&  pixel impact a \n",
+        ] {
+            let (dir, body) = strip_cd_prefix(cmd, cwd);
+            assert_eq!(
+                (dir.as_path(), body),
+                (Path::new("/r"), "pixel impact a"),
+                "{cmd:?}"
+            );
+        }
     }
 
     #[test]
