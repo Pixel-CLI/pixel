@@ -178,6 +178,12 @@ under it are written without following links (`pixel_git::nofollow`,
 `SQLITE_OPEN_NOFOLLOW`; the `build.lock` and `graph.lock` lock files through
 `nofollow::open_lock`), and a path read from a shard or the graph is used only
 inside the repository (`pixel_git::repo_path::confine`); see T6.
+Task session lookup uses a bounded, checksummed first journal transaction as
+an identity locator, then validates the matching task's complete journal.
+The rebuildable task view is not binding authority. Parsed task journals are
+cached only within a store instance and invalidated when device, inode, size,
+modification time or change time differs. A cached parse cannot establish
+validity for a changed or replaced journal.
 The daemon keeps the history store it opened (`Service::cached_facts`) and
 checks the device and inode of `history.db` before every facts or status
 request: the store, and the trust verdict that came with it, are reused only
@@ -334,6 +340,11 @@ version, sha256 check).
 
 Pull requests run `ci.yml`, `cross-build.yml`, `codeql.yml`,
 `fuzz.yml` and the others listed in ARCHITECTURE.md, "Testing and gates".
+Ordinary PRs use Linux cross-build and Homebrew checks. Native macOS release
+validation runs on main before tagging and on maintenance release PRs; native
+Homebrew validation runs weekly or manually. A macOS-specific regression in an
+ordinary PR can therefore be detected only after merge. The release build and
+its native packaging checks remain in place; permissions and secrets are unchanged.
 The `ci.yml` pull-request path filter excludes most documentation but includes
 `docs/bench/**`, so benchmark-report changes still receive the required CI
 status checks through the existing `pull_request` workflow and permissions.
