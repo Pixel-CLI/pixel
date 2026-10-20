@@ -1,0 +1,1 @@
+**opencode:** `pixel setup` now also installs a TUI plugin, `plugins/pixel-brief-metrics/tui.js`, that shows the user the brief's `🟩 pixel brief` block once per turn and the `🟩 pixel <command>` block of each `pixel` call as a toast, as Codex does. The model never sees either; `pixel setup --remove` deletes the plugin it wrote.

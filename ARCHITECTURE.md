@@ -906,7 +906,14 @@ its own extension point:
   `plugins/pixel-brief.js` in `~/.config/opencode` (`$XDG_CONFIG_HOME`
   honoured), whose V2 `session.hook("prompt")` handler runs `pixel brief`
   and whose `context` hook adds the result to the turn's first request as a
-  system part. Devin: the task
+  system part. The brief runs with metrics on; its stderr `🟩 pixel brief`
+  block goes to a per-session file under `$TMPDIR/pixel-opencode-brief-metrics/`,
+  never into the system part. `plugins/pixel-brief-metrics/tui.js` (a V2 TUI
+  plugin, managed marker, removed with the brief plugin) toasts that file at
+  the turn's first `session.step.started`, and the footer a `pixel` call
+  printed at the end of its own output (`session.tool.called` command matched
+  to `session.tool.success` output by call id), through `api.ui.toast.show`:
+  user only, no `actions.jsonl` lookup. Devin: the task
   events in its hooks file, `prompt-submit` among them; that entry alone sets
   `show_output`, because Devin draws neither `systemMessage` nor a hook's
   stdout or stderr, and its `✱ Hook completed: <command>` line is the only
@@ -1600,6 +1607,11 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
 `scripts/bench/probe-chain.py` on the census questions.
 
 ## Testing and gates
+
+The `pixel-bench` wire benchmark calls the production bounded reader and compares
+split/whole response framing. Normal daemon responses already use one write;
+that comparison measures framing variants, not an end-to-end daemon speedup.
+The allocation-budget test bounds allocations while reading request frames.
 
 The `pixel-bench` wire benchmark calls the production bounded reader and compares
 split/whole response framing. Normal daemon responses already use one write;
