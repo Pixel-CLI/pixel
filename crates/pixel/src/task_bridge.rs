@@ -79,7 +79,8 @@ pub(crate) fn handle_hook(
             Ok(json!({"decision":"observe","coverage":"unavailable"}))
         };
     };
-    observed(root, provider, event, session, &payload["coverage"])?;
+    // Best effort: a corrupt marker or a full disk never fails the hook.
+    let _ = observed(root, provider, event, session, &payload["coverage"]);
     let policy = std::env::var("PIXEL_TASK_POLICY").unwrap_or_else(|_| "gates_classifier".into());
     if !matches!(policy.as_str(), "retrieval" | "gates" | "gates_classifier") {
         return Err("invalid PIXEL_TASK_POLICY".into());
@@ -687,6 +688,9 @@ fn export(event: &TelemetryEvent) -> Result<(), String> {
     file.write_all(&line).map_err(error)
 }
 
+/// A stored observation younger than this is not rewritten.
+const OBSERVATION_REFRESH_SECS: u64 = 60;
+
 fn observed(
     root: &Path,
     provider: &str,
@@ -694,7 +698,45 @@ fn observed(
     session: &str,
     coverage: &Value,
 ) -> Result<(), String> {
+    observed_at(
+        root,
+        provider,
+        event,
+        session,
+        coverage,
+        pixel_task::now_ms() / 1000,
+    )
+}
+
+/// Whether `value` already holds this provider/event/session seen under
+/// `OBSERVATION_REFRESH_SECS` before `now`.
+fn observation_is_fresh(value: &Value, provider: &str, event: &str, key: &str, now: u64) -> bool {
+    let stored = &value[provider];
+    stored["event"] == event
+        && stored["session_id"] == key
+        && stored["observed_unix"]
+            .as_u64()
+            .is_some_and(|at| now.saturating_sub(at) < OBSERVATION_REFRESH_SECS)
+}
+
+fn observed_at(
+    root: &Path,
+    provider: &str,
+    event: &str,
+    session: &str,
+    coverage: &Value,
+    now: u64,
+) -> Result<(), String> {
     let path = root.join(".pixel/task-hook-observations.json");
+    let key = session_key(session)?;
+    // Unlocked peek: a race only costs one redundant write.
+    if std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|value| observation_is_fresh(&value, provider, event, &key, now))
+    {
+        return Ok(());
+    }
     pixel_ops::durable::ensure_dir(&root.join(".pixel")).map_err(error)?;
     let lock = pixel_git::nofollow::open_lock(&root.join(".pixel/task-hook-observations.lock"))
         .map_err(error)?;
@@ -707,7 +749,7 @@ fn observed(
     if !value.is_object() {
         return Err("task hook observation marker is corrupt".into());
     }
-    value[provider] = json!({"schema_version":1,"provider":provider,"session_id":session_key(session)?,"event":event,"observed_unix":pixel_task::now_ms()/1000,"coverage":coverage});
+    value[provider] = json!({"schema_version":1,"provider":provider,"session_id":key,"event":event,"observed_unix":now,"coverage":coverage});
     pixel_ops::durable::ensure_dir(&root.join(".pixel")).map_err(error)?;
     pixel_ops::durable::write_durably(&path, &serde_json::to_vec(&value).map_err(error)?)
         .map_err(error)
@@ -1148,6 +1190,39 @@ mod tests {
             assert!(observed(&root.0, "pi", "stop", "s", &json!({})).is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupt);
         }
+    }
+
+    #[test]
+    fn observed_should_not_rewrite_a_fresh_marker_but_refresh_an_old_one() {
+        let root = Scratch::new();
+        let path = root.0.join(".pixel/task-hook-observations.json");
+        let at = |now: u64, event: &str, session: &str| {
+            observed_at(&root.0, "pi", event, session, &json!({}), now).unwrap();
+            std::fs::read_to_string(&path).unwrap()
+        };
+        let first = at(1_000, "pre-tool-use", "s");
+        assert_eq!(at(1_059, "pre-tool-use", "s"), first, "inside the window");
+        let later = at(1_060, "pre-tool-use", "s");
+        assert_ne!(later, first, "at the window");
+        assert!(later.contains("1060"));
+        assert!(at(1_061, "stop", "s").contains("\"stop\""), "another event");
+        assert!(at(1_062, "stop", "t").contains("1062"), "another session");
+    }
+
+    #[test]
+    fn handle_hook_should_answer_when_the_observation_marker_is_corrupt() {
+        let root = Scratch::new();
+        std::fs::create_dir(root.0.join(".pixel")).unwrap();
+        std::fs::write(root.0.join(".pixel/task-hook-observations.json"), "{").unwrap();
+        // No session: the early answer would skip `observed`, so give one.
+        let answer = handle_hook(&root.0, "pi", "pre-tool-use", &json!({"session_id":"s"}));
+        assert!(
+            !answer
+                .as_ref()
+                .err()
+                .is_some_and(|message| message.contains("corrupt") || message.contains("EOF")),
+            "{answer:?}"
+        );
     }
 
     #[test]

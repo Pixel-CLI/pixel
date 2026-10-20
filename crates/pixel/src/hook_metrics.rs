@@ -583,6 +583,10 @@ fn shell_segments(command: &str) -> Vec<&str> {
             Some(q) if c == q => quote = None,
             Some(_) => {}
             None if c == '\'' || c == '"' => quote = Some(c),
+            // `2>&1`, `>&2` and `&>` are redirections, not command separators.
+            None if c == '&'
+                && (command[..idx].ends_with(['>', '<'])
+                    || command[idx + 1..].starts_with('>')) => {}
             None if matches!(c, '&' | ';' | '|' | '\n') => {
                 out.push(&command[start..idx]);
                 start = idx + c.len_utf8();
@@ -627,9 +631,18 @@ fn pixel_invocation_in(command: &str, env: Option<String>) -> Option<PixelInvoca
     None
 }
 
+/// `>f`, `2>/dev/null`, `<in`, `&>f`, `2>&1`: a token that opens a redirection.
+fn is_redirection(token: &str) -> bool {
+    token.starts_with("&>")
+        || token
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .starts_with(['<', '>'])
+}
+
 fn pixel_invocation_in_tokens(tokens: &[&str], env: Option<String>) -> Option<PixelInvocation> {
     // Quote characters arrive attached to tokens (`bash -lc 'cd x && …'`);
     // strip them so the binary and its args match the recorded invocation.
+    let raw = tokens;
     let tokens: Vec<&str> = tokens.iter().map(|t| t.trim_matches(['\'', '"'])).collect();
     // Skip env assignments, flags and launcher words to reach the binary.
     // A `for` keeps every mutation of the index update a wrong value, never
@@ -653,8 +666,12 @@ fn pixel_invocation_in_tokens(tokens: &[&str], env: Option<String>) -> Option<Pi
     let bin = tokens.get(i)?;
     let base = bin.rsplit('/').next().unwrap_or(bin);
     if pixel_setup::config::PIXEL_EXECUTABLES.contains(&base) {
+        // The shell takes the first unquoted redirection and what follows.
+        let end = (i + 1..tokens.len())
+            .find(|&k| is_redirection(raw[k]))
+            .unwrap_or(tokens.len());
         return Some(PixelInvocation {
-            args: tokens[i + 1..].join(" "),
+            args: tokens[i + 1..end].join(" "),
             metrics_env,
         });
     }
@@ -706,12 +723,8 @@ fn strip_cd_prefix<'a>(cmd: &'a str, cwd: &Path) -> (PathBuf, &'a str) {
     } else {
         cwd.join(dir_str)
     };
-    let body = rest_after_cd[amp_idx + 2..].trim_start();
-    // Return the body with a reference into the original string.
-    // Find where body starts in the original cmd.
-    let body_offset = cmd.len() - body.len();
-    let body_ref = &cmd[body_offset..];
-    (new_cwd, body_ref)
+    // `trimmed` is a slice of `cmd`, so the body borrows from it.
+    (new_cwd, rest_after_cd[amp_idx + 2..].trim_start())
 }
 
 /// Find the byte index of the first `&&` outside single or double quotes.
@@ -975,6 +988,54 @@ mod tests {
             "proxy pixel status .",
         ] {
             assert_eq!(pixel_invocation(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn pixel_invocation_cuts_the_args_at_the_first_redirection() {
+        for command in [
+            "pixel impact a 2>&1",
+            "pixel impact a > out.txt",
+            "pixel impact a >out.txt",
+            "pixel impact a 2>/dev/null",
+            "pixel impact a &> f",
+            "pixel impact a < in",
+            "pixel impact a 2>&1 | head",
+            "cd /r && pixel impact a >&2",
+        ] {
+            assert_eq!(
+                pixel_invocation(command).map(|i| i.args).as_deref(),
+                Some("impact a"),
+                "{command}"
+            );
+        }
+        // A quoted `>` is an argument, and a later pipeline stage still splits.
+        assert_eq!(
+            pixel_invocation("pixel search '>' 2>&1")
+                .map(|i| i.args)
+                .as_deref(),
+            Some("search >")
+        );
+        assert_eq!(
+            shell_segments("a 2>&1 && b &> f; c"),
+            ["a 2>&1 ", "", " b &> f", " c"]
+        );
+    }
+
+    #[test]
+    fn strip_cd_prefix_keeps_the_body_whole_around_trailing_whitespace() {
+        let cwd = Path::new("/repo");
+        for cmd in [
+            "cd /r && pixel impact a\n",
+            "cd /r && pixel impact a  ",
+            "  cd /r &&  pixel impact a \n",
+        ] {
+            let (dir, body) = strip_cd_prefix(cmd, cwd);
+            assert_eq!(
+                (dir.as_path(), body),
+                (Path::new("/r"), "pixel impact a"),
+                "{cmd:?}"
+            );
         }
     }
 

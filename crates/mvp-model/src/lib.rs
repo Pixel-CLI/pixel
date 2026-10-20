@@ -30,14 +30,12 @@ pub mod classify;
 mod generation;
 mod graph;
 pub mod hash;
-pub mod log;
 mod pick;
-pub mod plugin;
 mod rows;
 mod terms;
 
 pub use generation::{Delta, FileRows, Kept};
-pub use graph::{Corpus, Diff, DiffFile, Graph, GraphError, Posting};
+pub use graph::{Diff, DiffFile, Graph, GraphError};
 pub use pick::PluginPick;
 pub use terms::{Language, Lexicon, fold, language, prompt_terms, stem, terms};
 

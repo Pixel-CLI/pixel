@@ -50,13 +50,6 @@ pub fn read_to_string(path: &Path) -> io::Result<String> {
     Ok(text)
 }
 
-/// `path` opened to append, made when missing.
-pub fn open_append(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    open(path, &mut options)
-}
-
 /// A lock file at `path`, opened to write without truncating it; made
 /// when missing if `create`.
 pub fn open_lock(path: &Path, create: bool) -> io::Result<File> {
@@ -178,7 +171,6 @@ mod tests {
             std::os::unix::fs::symlink(target, &link).unwrap();
             let err = read_to_string(&link).unwrap_err().to_string();
             assert!(err.contains("is a link"), "{err}");
-            assert!(open_append(&link).is_err());
             assert!(open_lock(&link, true).is_err());
             assert!(open_lock(&link, false).is_err());
             assert!(create_new(&link).is_err());
@@ -206,8 +198,6 @@ mod tests {
         fifo(&path);
         let at = path.clone();
         assert!(within(move || read_to_string(&at).is_err()));
-        let at = path.clone();
-        assert!(within(move || open_append(&at).is_err()));
         let at = path.clone();
         assert!(within(move || open_lock(&at, true).is_err()));
         let at = path.clone();

@@ -166,26 +166,6 @@ pub(crate) fn known(conn: &Connection) -> Result<HashMap<String, (Hash, FileStat
     Ok(out)
 }
 
-/// The distinct languages of `files`: one pass over the table, no row
-/// kept.
-pub(crate) fn languages(
-    conn: &Connection,
-) -> Result<std::collections::BTreeSet<String>, StoreError> {
-    let mut stmt = conn.prepare_cached("SELECT DISTINCT lang FROM files")?;
-    let mut rows = stmt.query([])?;
-    let mut out = std::collections::BTreeSet::new();
-    while let Some(row) = rows.next()? {
-        let lang: String = row.get(0)?;
-        let Some(lang) = Lang::parse(&lang) else {
-            return Err(damaged(format!(
-                "a file's language `{lang}` is not one Pixel knows"
-            )));
-        };
-        out.insert(lang.as_str().to_owned());
-    }
-    Ok(out)
-}
-
 /// A `files` row whose first columns are `path, hash, lang`.
 pub(crate) fn file_of(row: &Row<'_>) -> Result<FileRow, StoreError> {
     let path: String = row.get(0)?;
@@ -311,12 +291,6 @@ pub(crate) fn unreadable(conn: &Connection) -> rusqlite::Result<Option<String>> 
         if !readable {
             return Ok(Some(format!("edges row from {}", shown(row.get_ref(0)?))));
         }
-    }
-    if !crate::words::valid(conn)? {
-        return Ok(Some("words differ from the generation".to_owned()));
-    }
-    if !crate::postings::valid(conn)? {
-        return Ok(Some("postings differ from the generation".to_owned()));
     }
     Ok(None)
 }

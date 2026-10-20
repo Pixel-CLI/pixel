@@ -139,13 +139,15 @@ pub(crate) fn install(home: &Path, dry_run: bool) -> Result<InstallStep> {
             continue;
         }
         fs::create_dir_all(&dir)?;
-        let mut touched = write_if_changed(&dir.join("pixel-plugin.toml"), manifest, 0o644)?;
-        touched |= write_if_changed(&dir.join("probe"), program, 0o755)?;
-        touched |= write_if_changed(
+        // The marker goes first: an install cut short after it is still Pixel's
+        // and the next run completes it, rather than leaving a "user" plugin.
+        let mut touched = write_if_changed(
             &dir.join(MARKER),
             "first-party probe shipped with pixel; `pixel setup` keeps it current\n",
             0o644,
         )?;
+        touched |= write_if_changed(&dir.join("pixel-plugin.toml"), manifest, 0o644)?;
+        touched |= write_if_changed(&dir.join("probe"), program, 0o755)?;
         if touched {
             changed += 1;
         } else {
@@ -295,6 +297,25 @@ mod tests {
             fs::read_to_string(own.join("pixel-plugin.toml")).unwrap(),
             "mine"
         );
+    }
+
+    #[test]
+    fn a_probe_dir_holding_only_the_marker_is_pixels_and_the_next_install_completes_it() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(PLUGINS_REL).join("flow-rank");
+        // What an install cut short after its first write leaves behind.
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(MARKER), "first-party probe\n").unwrap();
+
+        let step = install(home.path(), false).unwrap();
+
+        assert!(!step.summary.contains("left alone"), "{}", step.summary);
+        let (_, manifest, program) = BUNDLED.iter().find(|b| b.0 == "flow-rank").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("pixel-plugin.toml")).unwrap(),
+            *manifest
+        );
+        assert_eq!(fs::read_to_string(dir.join("probe")).unwrap(), *program);
     }
 
     #[test]

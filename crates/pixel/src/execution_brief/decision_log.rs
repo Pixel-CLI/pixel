@@ -204,10 +204,30 @@ fn mask_keys(text: &str) -> String {
                 out.push(space);
             }
         } else {
-            out.push_str(word);
+            mask_pieces(word, &mut out);
         }
     }
     out
+}
+
+/// Characters that glue a name to its value (`X=ghp_…`, `{"key":"sk-…"}`).
+const VALUE_SEPARATORS: [char; 8] = ['=', ':', '"', '\'', ',', ';', '(', ')'];
+
+/// Pushes `word` with each key-shaped piece between separators masked and the
+/// separators kept, so `X=ghp_…` becomes `X=<redacted>`.
+fn mask_pieces(word: &str, out: &mut String) {
+    let is_separator = |ch: char| ch.is_whitespace() || VALUE_SEPARATORS.contains(&ch);
+    for piece in word.split_inclusive(is_separator) {
+        let (body, separator) = piece
+            .strip_suffix(is_separator)
+            .map_or((piece, ""), |body| (body, &piece[body.len()..]));
+        out.push_str(if looks_like_a_key(body) {
+            "<redacted>"
+        } else {
+            body
+        });
+        out.push_str(separator);
+    }
 }
 
 /// The typed text as a log line carries it: the paste tail only, credential
@@ -672,6 +692,31 @@ mod tests {
         assert_eq!(
             mask_keys("how does the daemon start"),
             "how does the daemon start"
+        );
+    }
+
+    #[test]
+    fn mask_keys_should_mask_the_value_glued_to_a_name() {
+        let anthropic = format!("sk-ant-api03-{}", "a".repeat(40));
+        let ghp = format!("ghp_{}", "b".repeat(36));
+        assert_eq!(
+            mask_keys(&format!("ANTHROPIC_API_KEY={anthropic} next")),
+            "ANTHROPIC_API_KEY=<redacted> next"
+        );
+        assert_eq!(mask_keys(&format!("export X={ghp}")), "export X=<redacted>");
+        assert_eq!(
+            mask_keys(&format!("{{\"key\":\"{anthropic}\"}}")),
+            "{\"key\":\"<redacted>\"}"
+        );
+        // Ordinary assignments and prose keep.
+        assert_eq!(mask_keys("a=b x = 1 key: value"), "a=b x = 1 key: value");
+    }
+
+    #[test]
+    fn logged_typed_should_mask_secret_named_assignments() {
+        assert_eq!(
+            logged_typed("GITHUB_TOKEN=abc123 DB_PASSWORD=hunter2 a=b"),
+            "GITHUB_TOKEN=<redacted> DB_PASSWORD=<redacted> a=b"
         );
     }
 

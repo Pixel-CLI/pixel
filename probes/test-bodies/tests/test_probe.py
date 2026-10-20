@@ -199,5 +199,28 @@ fn test_uses_command_override() {
                 self.assertEqual("", run(root, prompt, kind="tests"))
 
 
+class Symlinks(unittest.TestCase):
+    def ask(self, link, target):
+        root = Path(tempfile.mkdtemp())
+        (root / link).parent.mkdir(parents=True, exist_ok=True)
+        (root / link).symlink_to(target)
+        for argv in (["init", "-q"], ["add", "."], ["commit", "-q", "-m", "fixture"]):
+            subprocess.run(["git", *argv], cwd=root, env=GIT_ENV, check=True, capture_output=True)
+        request = {"prompt": "which tests cover the redirect location", "repo_root": str(root), "brief": "",
+                   "kind": "tests", "session_files": []}
+        return subprocess.run([str(PROBE)], input=json.dumps(request), capture_output=True, text=True, check=True,
+                              timeout=20).stdout
+
+    def test_a_tracked_symlink_to_a_file_outside_the_repo_is_not_read(self):
+        outside = Path(tempfile.mkdtemp()) / "test_outside.py"
+        outside.write_text("def test_redirect_location():\n    assert SECRET_TOKEN\n")
+        out = self.ask("tests/test_redirect.py", outside)
+        self.assertNotIn("SECRET_TOKEN", out)
+        self.assertEqual(headers(out), [])
+
+    def test_a_tracked_symlink_to_dev_zero_neither_hangs_nor_quotes(self):
+        self.assertEqual(headers(self.ask("tests/test_redirect.py", "/dev/zero")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

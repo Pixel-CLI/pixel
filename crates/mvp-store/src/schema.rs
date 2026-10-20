@@ -21,7 +21,9 @@ use crate::rows;
 /// 8: `edges.src` is the `symbols.id` of the site's symbol, not its uid:
 ///    the uid, written once per site and once more in `edges_src`, was
 ///    300 of the 336 MB of `antiwork/gumroad`'s index.
-pub const SCHEMA_VERSION: i64 = 8;
+/// 9: no `words`, `postings` or `documents`: nothing read them, and every
+///    publish rebuilt all three.
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// The version of the full check of [`shape`], named in every stamp
 /// (`checked`): bumped whenever the check gets stricter, so that no build
@@ -75,20 +77,6 @@ CREATE TABLE edges (
 );
 CREATE INDEX edges_src ON edges(src);
 CREATE INDEX edges_dst ON edges(dst) WHERE dst IS NOT NULL;
-CREATE TABLE words (
-  word TEXT PRIMARY KEY,
-  files INTEGER NOT NULL
-) WITHOUT ROWID;
-CREATE TABLE postings (
-  term TEXT NOT NULL,
-  file TEXT NOT NULL,
-  count INTEGER NOT NULL,
-  PRIMARY KEY (term, file)
-) WITHOUT ROWID;
-CREATE TABLE documents (
-  file TEXT PRIMARY KEY,
-  length INTEGER NOT NULL
-) WITHOUT ROWID;
 CREATE TABLE meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL

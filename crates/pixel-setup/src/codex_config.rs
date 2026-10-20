@@ -918,13 +918,13 @@ mod tests {
         );
         assert_eq!(
             post[0]["hooks"][0]["command"],
-            "'/opt/pixel custom/pixel-next' run-hook task-event --provider codex --event post-tool-use",
-            "task lifecycle command is preserved"
+            "'/opt/pixel custom/pixel-next' run-hook metrics --provider codex",
+            "the metrics relay is re-merged in place under the current executable"
         );
         assert_eq!(
             post[1]["hooks"][0]["command"],
-            "'/opt/pixel custom/pixel-next' run-hook metrics --provider codex",
-            "the metrics relay is re-merged under the current executable"
+            "'/opt/pixel custom/pixel-next' run-hook task-event --provider codex --event post-tool-use",
+            "task lifecycle command is preserved"
         );
         assert!(check_task_hooks(&home, exe).is_ok());
         let _ = fs::remove_dir_all(&home);

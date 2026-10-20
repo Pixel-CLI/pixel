@@ -22,9 +22,11 @@ static CRED_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https://[^/\s@]
 static AUTH_HEADER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(authorization\s*:\s*)(?:bearer\s+)?\S+").unwrap());
 
-/// `token=<value>` / `password=<value>`, case-insensitive.
-static TOKEN_KV: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(token|password)\s*=\s*[^\s&]+").unwrap());
+/// `token=<value>` / `GITHUB_TOKEN=<value>` / `DB_PASSWORD=<value>`: a name
+/// ending in token, password, secret or api_key; case-insensitive.
+static TOKEN_KV: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b([a-z0-9_]*(?:token|password|secret|api_key))\s*=\s*[^\s&]+").unwrap()
+});
 
 /// Scrub credential-shaped substrings out of `text`. Best-effort: this is a
 /// defense-in-depth scrub for logging/error-display, not a security
@@ -79,6 +81,16 @@ mod tests {
         assert!(!out.contains("abcDEF123"));
         assert!(!out.contains("hunter2xyz"));
         assert!(out.contains("other=1"));
+    }
+
+    #[test]
+    fn redact_should_mask_a_value_whose_name_ends_in_a_secret_word() {
+        assert_eq!(
+            redact(
+                "GITHUB_TOKEN=abc123 DB_PASSWORD=hunter2 my_Secret = s3 ANTHROPIC_API_KEY=sk-x a=b x = 1"
+            ),
+            "GITHUB_TOKEN=<redacted> DB_PASSWORD=<redacted> my_Secret=<redacted> ANTHROPIC_API_KEY=<redacted> a=b x = 1"
+        );
     }
 
     #[test]

@@ -103,14 +103,14 @@ const MAX_CONN_THREADS: usize = 32;
 /// one eighth of that 2 MiB stack; the OS may enforce a larger minimum.
 const CONN_STACK: usize = 262_144; // 256 KiB
 
-/// $TMPDIR/pixel-<xxh3-of-canonical-root>.sock
+/// `<runtime dir>/pixel-<xxh3-of-canonical-root>.sock`
 ///
-/// On Linux, `TMPDIR` defaults to world-writable `/tmp`, which allows any
-/// local user to predict the socket path and squat on it before the daemon
-/// binds. We prefer `XDG_RUNTIME_DIR` (per-user, 0700, tmpfs) when available,
-/// falling back to `TMPDIR` only on macOS (where `TMPDIR` is already per-user
-/// 0700). On Linux without `XDG_RUNTIME_DIR`, we use `~/.cache/pixel/sockets/`
-/// created with 0700 permissions.
+/// The runtime dir is the same on every platform and never follows `TMPDIR`:
+/// callers with different `TMPDIR` (a sandboxed agent shell) would otherwise
+/// compute different socket, pid and lock paths and start two daemons for one
+/// repository. It is `XDG_RUNTIME_DIR` when set and present (per-user, 0700),
+/// else `~/.cache/pixel/sockets/` created 0700. A path that would not fit
+/// `sockaddr_un` moves to `/tmp/pixel-<hash of home>/`, see [`fit_sun_path`].
 ///
 /// Deliberately distinct from the legacy gitpixel tool's `gitpixel-*.sock`
 /// prefix: the two daemons speak incompatible response envelopes (gitpixel's
@@ -121,35 +121,77 @@ pub fn socket_path(root: &Path) -> PathBuf {
     let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let h = xxhash_rust::xxh3::xxh3_64(canon.to_string_lossy().as_bytes());
     let sock_name = format!("pixel-{h:016x}.sock");
-    runtime_dir().join(sock_name)
+    let dir = runtime_dir();
+    let home = std::env::var("HOME").unwrap_or_default();
+    fit_sun_path(&dir, &sock_name, &home, Path::new("/tmp"))
 }
 
-/// Return a per-user directory for socket files. On macOS, `TMPDIR` is
-/// already per-user with 0700 permissions. On Linux, prefer
-/// `XDG_RUNTIME_DIR`; if unset, create `~/.cache/pixel/sockets/` with 0700.
-fn runtime_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        std::env::temp_dir()
+/// Longest socket path `bind` accepts: `sun_path` is 104 bytes on macOS (108
+/// on Linux), NUL included.
+const MAX_SOCKET_PATH: usize = 103;
+
+/// `dir/name`, or when that exceeds [`MAX_SOCKET_PATH`] the same name under
+/// `<short_base>/pixel-<hash of home>/` (0700, which `set_permissions` only
+/// grants to its owner; when it is refused the long path is returned and
+/// `bind` reports the real error). Every caller with the same `HOME` lands on
+/// the same fallback, so the daemon and the CLI still agree.
+fn fit_sun_path(dir: &Path, name: &str, home: &str, short_base: &Path) -> PathBuf {
+    let long = dir.join(name);
+    if long.as_os_str().len() <= MAX_SOCKET_PATH {
+        return long;
     }
-    #[cfg(not(target_os = "macos"))]
+    let short = short_base.join(format!(
+        "pixel-{:08x}",
+        xxhash_rust::xxh3::xxh3_64(home.as_bytes()) as u32
+    ));
+    #[cfg(unix)]
     {
-        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR")
-            && !dir.is_empty()
-            && std::path::Path::new(&dir).exists()
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::create_dir_all(&short).is_err()
+            || std::fs::set_permissions(&short, std::fs::Permissions::from_mode(0o700)).is_err()
         {
-            return PathBuf::from(dir);
+            return long;
         }
-        // Fallback: ~/.cache/pixel/sockets/ with 0700 perms.
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let dir = PathBuf::from(home).join(".cache/pixel/sockets");
+    }
+    short.join(name)
+}
+
+/// The per-user directory for socket, pid and lock files.
+fn runtime_dir() -> PathBuf {
+    // Unit tests bind real sockets: keep them out of the user's home.
+    #[cfg(test)]
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+        let dir = std::env::temp_dir().join("pixel-test-sockets");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
+    let dir = runtime_dir_from(
+        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    );
+    if dir.ends_with(".cache/pixel/sockets") {
         let _ = std::fs::create_dir_all(&dir);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
         }
-        dir
+    }
+    dir
+}
+
+/// [`runtime_dir`] over explicit inputs. `TMPDIR` is deliberately not one.
+/// Without a `HOME`, the process temp dir is the last resort.
+fn runtime_dir_from(xdg_runtime_dir: Option<&str>, home: Option<&str>) -> PathBuf {
+    if let Some(dir) = xdg_runtime_dir
+        && !dir.is_empty()
+        && Path::new(dir).exists()
+    {
+        return PathBuf::from(dir);
+    }
+    match home {
+        Some(home) if !home.is_empty() => PathBuf::from(home).join(".cache/pixel/sockets"),
+        _ => std::env::temp_dir(),
     }
 }
 
@@ -3644,6 +3686,58 @@ mod tests {
         );
         assert_eq!(pong.result.unwrap()["pong"], true);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The directory depends on `XDG_RUNTIME_DIR` and `HOME` only: two
+    /// callers that differ in `TMPDIR` (not an input) get one daemon.
+    #[test]
+    fn runtime_dir_should_ignore_tmpdir_and_follow_home() {
+        let home = "/Users/me";
+        let want = PathBuf::from("/Users/me/.cache/pixel/sockets");
+        assert_eq!(runtime_dir_from(None, Some(home)), want);
+        assert_eq!(runtime_dir_from(Some(""), Some(home)), want);
+        assert_eq!(
+            runtime_dir_from(Some("/definitely/not/there"), Some(home)),
+            want
+        );
+        let xdg = std::env::temp_dir();
+        assert_eq!(runtime_dir_from(xdg.to_str(), Some(home)), xdg);
+        assert_eq!(runtime_dir_from(None, None), std::env::temp_dir());
+    }
+
+    #[test]
+    fn fit_sun_path_should_keep_a_short_path_and_shorten_a_long_one() {
+        let base = std::env::temp_dir().join(format!("pxfit-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let name = "pixel-0123456789abcdef.sock";
+        let short_dir = Path::new("/a/b");
+        assert_eq!(
+            fit_sun_path(short_dir, name, "/h", &base),
+            short_dir.join(name)
+        );
+        let long_dir = PathBuf::from(format!("/{}", "d".repeat(100)));
+        let fitted = fit_sun_path(&long_dir, name, "/h", &base);
+        assert!(fitted.as_os_str().len() <= MAX_SOCKET_PATH, "{fitted:?}");
+        assert_eq!(fitted.file_name().unwrap(), name);
+        assert_eq!(fitted, fit_sun_path(&long_dir, name, "/h", &base));
+        assert_ne!(fitted, fit_sun_path(&long_dir, name, "/other", &base));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(fitted.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // exactly at the limit stays put
+        let at_limit = "x".repeat(MAX_SOCKET_PATH - name.len() - 2);
+        let dir = PathBuf::from(format!("/{at_limit}"));
+        assert_eq!(
+            fit_sun_path(&dir, name, "/h", &base).as_os_str().len(),
+            MAX_SOCKET_PATH
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 

@@ -224,6 +224,9 @@ fn rename_as_backup(dir: &Path) -> Result<()> {
 /// Remove the `pixel-classify` skill the install-time helpers proposal can
 /// write into every configured harness's skills dir — the same roots
 /// [`config::SKILL_ROOTS`] installs into, plus Claude's always-present one.
+/// The `pixel-classify` skill text `pixel classify setup` writes.
+const CLASSIFY_SKILL: &str = include_str!("../assets/pixel-classify-skill.md");
+
 fn remove_classify_skill(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let dirs: Vec<PathBuf> = [PathBuf::from(".claude")]
         .into_iter()
@@ -232,7 +235,8 @@ fn remove_classify_skill(home: &Path, dry_run: bool) -> Result<InstallStep> {
         .collect();
     let mut removed = Vec::new();
     for dir in &dirs {
-        if dir.is_dir() {
+        // A user's own skill under the same name stays, as for `skills/pixel`.
+        if fs::read_to_string(dir.join("SKILL.md")).is_ok_and(|text| text == CLASSIFY_SKILL) {
             if !dry_run {
                 rename_as_backup(dir)?;
             }

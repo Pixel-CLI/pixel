@@ -1127,7 +1127,7 @@ fn uninstall_removes_the_classify_helpers_and_keeps_a_backup_of_them() {
     ];
     for file in &skills {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
-        fs::write(file, "shipped content\n").unwrap();
+        fs::write(file, include_str!("../assets/pixel-classify-skill.md")).unwrap();
     }
     let settings = home.join(".pi/agent/settings.json");
     fs::write(&settings, r#"{"theme":"dark","packages":["npm:mine"]}"#).unwrap();

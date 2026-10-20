@@ -65,5 +65,30 @@ class Sections(unittest.TestCase):
                          ["### README.md:8-10 — Environment variables (documentation section)"])
 
 
+def symlink_repo(link, target):
+    root = Path(tempfile.mkdtemp())
+    (root / link).parent.mkdir(parents=True, exist_ok=True)
+    (root / link).symlink_to(target)
+    for argv in (["init", "-q"], ["add", "."], ["commit", "-q", "-m", "fixture"]):
+        subprocess.run(["git", *argv], cwd=root, env=GIT_ENV, check=True, capture_output=True)
+    return root
+
+
+class Symlinks(unittest.TestCase):
+    def ask(self, root):
+        request = {"prompt": "how do environment variables configure loading", "repo_root": str(root), "brief": "",
+                   "kind": "config", "session_files": []}
+        return subprocess.run([str(PROBE)], input=json.dumps(request), capture_output=True, text=True, check=True,
+                              timeout=20).stdout
+
+    def test_a_tracked_symlink_to_a_file_outside_the_repo_is_not_read(self):
+        outside = Path(tempfile.mkdtemp()) / "npmrc.md"
+        outside.write_text("# Environment variables\n\nLoading configuration reads SECRET_TOKEN.\n")
+        self.assertEqual(self.ask(symlink_repo("docs/x.md", outside)), "")
+
+    def test_a_tracked_symlink_to_dev_zero_neither_hangs_nor_quotes(self):
+        self.assertEqual(self.ask(symlink_repo("docs/x.md", "/dev/zero")), "")
+
+
 if __name__ == "__main__":
     unittest.main()

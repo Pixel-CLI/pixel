@@ -3623,12 +3623,13 @@ impl Service {
             "unclaimed_text": plan.unclaimed_text,
         });
         if !dry_run {
-            let written = pixel_graph::rename::apply(&self.root, &plan, &sym.name, new_name)?;
-            out["applied"] = json!(written);
-            // The store is now stale: the renamed files' rows no longer
-            // match disk. Drop the handle so the next op re-syncs via the
-            // tree delta instead of serving pre-rename spans.
+            let applied = pixel_graph::rename::apply(&self.root, &plan, &sym.name, new_name);
+            // The store may be stale whatever `apply` returned (a failed
+            // write can leave earlier files rewritten): drop the handle so
+            // the next op re-syncs via the tree delta instead of serving
+            // pre-rename spans.
             self.graph = None;
+            out["applied"] = json!(applied?);
         }
         merge_build_info(&mut out, built);
         Ok(out)

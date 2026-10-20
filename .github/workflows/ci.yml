@@ -109,11 +109,12 @@ jobs:
   # to what the compile-only lanes (Clippy, MSRV, Ranking) actually compile,
   # so a docs-drift or prompt edit runs Test + Format without paying for
   # the three lanes whose result cannot change (#597); `scripts` covers the
-  # Python and Bun contract tests' inputs; `deps` covers the graph
-  # cargo-deny resolves. A push to main reports all four so every merge
-  # keeps the complete run the concurrency comment promises. Both lists err
-  # toward inclusion: a false negative skips a needed check, a false
-  # positive only costs a minute.
+  # Python and Bun contract tests' inputs; `installer` covers the Linux
+  # install smoke's script, contract, release assets and workflows; `deps`
+  # covers the graph cargo-deny resolves. A push to main reports every flag,
+  # so every merge keeps the complete run the concurrency comment promises.
+  # These matchers err toward inclusion: a false negative skips a needed
+  # check; a false positive only costs a minute.
   changes:
     outputs:
       # On a duplicate (below) every flag is forced false: an identical tree
@@ -124,6 +125,7 @@ jobs:
       cargo: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.cargo || 'false' }}
       rust-source: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.rust-source || 'false' }}
       scripts: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.scripts || 'false' }}
+      installer: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.installer || 'false' }}
       deps: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.deps || 'false' }}
       # The skip guard's finding for this tree, and the key it is stored
       # under (the `verdict` job saves it; #590).
@@ -132,11 +134,11 @@ jobs:
       day: ${{ steps.key.outputs.day }}
     runs-on: ubuntu-26.04
     steps:
-      # Full history so the merge base with the target branch is available.
+      # Pull requests need the target merge base; push runs only need HEAD.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
       # The skip-guard key: the tree of the commit this run checks out (the
       # merge commit on a pull request, the pushed commit on main). Two runs
@@ -191,7 +193,7 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
-            printf 'cargo=true\nrust-source=true\nscripts=true\ndeps=true\n' >> "$GITHUB_OUTPUT"
+            printf 'cargo=true\nrust-source=true\nscripts=true\ninstaller=true\ndeps=true\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
@@ -268,11 +270,20 @@ jobs:
           ^scripts/check-advisory-ignores\.py$
           EOF
 
+          # This smoke runs the branch installer against the latest published
+          # archive; only the script, its contract and this wiring affect it.
+          cat > installer.re <<'EOF'
+          ^scripts/release/install\.sh$
+          ^scripts/test-install\.py$
+          ^\.github/workflows/ci\.yml$
+          EOF
+
           flag() { grep -Eqf "$1" changed.txt && echo true || echo false; }
           {
             echo "cargo=$(flag cargo.re)"
             echo "rust-source=$(flag rust-source.re)"
             echo "scripts=$(flag scripts.re)"
+            echo "installer=$(flag installer.re)"
             echo "deps=$(flag deps.re)"
           } >> "$GITHUB_OUTPUT"
           cat changed.txt
@@ -285,7 +296,7 @@ jobs:
   linux-install:
     name: install.sh (${{ matrix.target }})
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.scripts == 'true' && needs.changes.outputs.duplicate != 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.installer == 'true' && needs.changes.outputs.duplicate != 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -529,6 +540,10 @@ jobs:
       - name: Cancel-stale sweep contract (stubbed gh)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-cancel-stale-runs.py
+
+      - name: CI diff selection contract (disposable Git histories)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-ci-selection.py
 
       # Every public number names the pixel version it was measured with
       # (docs/bench/claims.toml); one more than a minor behind fails unless an

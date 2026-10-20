@@ -11,8 +11,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use mvp_model::hash::Hash;
-use mvp_model::{Corpus, Edge, FileRow, FileStat, Graph, GraphError, Posting, Provenance, Symbol};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use mvp_model::{Edge, FileRow, FileStat, Graph, GraphError, Provenance, Symbol};
+use rusqlite::{Connection, OpenFlags};
 
 use crate::checked::{self, Stamp};
 use crate::rows::{self, Published, edge_of, symbol_of};
@@ -24,21 +24,6 @@ pub struct Store {
     conn: Connection,
     /// `meta`, read and checked when the store was opened.
     published: Published,
-}
-
-/// Counts of a generation, for `status`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Stats {
-    pub files: u64,
-    pub symbols: u64,
-    pub edges: u64,
-    /// Sites the rules could not resolve (C-10): kept, counted, never served.
-    pub unresolved: u64,
-    /// Files the last run's deadline left stale (`Delta::stale`): a
-    /// changed one keeps its previous rows; a new one, or one another
-    /// extractor version read, is absent, and no site of its language is
-    /// resolved.
-    pub stale: Vec<String>,
 }
 
 impl Store {
@@ -93,17 +78,6 @@ impl Store {
         Ok(Store { conn, published })
     }
 
-    pub fn stats(&self) -> Result<Stats, StoreError> {
-        stats(&self.conn, self.published.stale.clone())
-    }
-
-    /// The files the generation's run left stale, as published: what
-    /// [`Store::stats`] holds beside its counts, without counting every
-    /// row (about 60 ms for the 970k edges of `antiwork/gumroad`).
-    pub fn stale(&self) -> &[String] {
-        &self.published.stale
-    }
-
     /// The hash and stat of every file whose stat the generation keeps, by
     /// path: what the index's `scan_with` takes a file's hash from
     /// while its stat holds (ADR-0022 §2).
@@ -153,20 +127,6 @@ impl Store {
     }
 }
 
-/// The counts of the generation `conn` reads, with its stale list.
-pub(crate) fn stats(conn: &Connection, stale: Vec<String>) -> Result<Stats, StoreError> {
-    let count = |sql: &str| -> Result<u64, StoreError> {
-        Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64)
-    };
-    Ok(Stats {
-        files: count("SELECT count(*) FROM files")?,
-        symbols: count("SELECT count(*) FROM symbols")?,
-        edges: count("SELECT count(*) FROM edges")?,
-        unresolved: count("SELECT count(*) FROM edges WHERE resolved = 0")?,
-        stale,
-    })
-}
-
 impl Graph for Store {
     fn provenance(&self) -> Result<Provenance, GraphError> {
         Ok(self.published.provenance.clone())
@@ -174,10 +134,6 @@ impl Graph for Store {
 
     fn files(&self) -> Result<Vec<FileRow>, GraphError> {
         rows::files(&self.conn).map_err(graph_error)
-    }
-
-    fn languages(&self) -> Result<std::collections::BTreeSet<String>, GraphError> {
-        rows::languages(&self.conn).map_err(graph_error)
     }
 
     fn symbols(&self, file: &str) -> Result<Vec<Symbol>, GraphError> {
@@ -196,14 +152,6 @@ impl Graph for Store {
         read().map_err(graph_error)
     }
 
-    fn callers(&self, uid: &str) -> Result<Vec<Edge>, GraphError> {
-        self.edges(
-            &format!("{EDGES} WHERE e.dst = ?1 AND e.resolved = 1 ORDER BY s.uid, e.line"),
-            [uid],
-        )
-        .map_err(graph_error)
-    }
-
     fn named(&self, token: &str) -> Result<Vec<Symbol>, GraphError> {
         let read = || -> Result<Vec<Symbol>, StoreError> {
             let mut stmt = self.conn.prepare_cached(NAMED)?;
@@ -215,64 +163,6 @@ impl Graph for Store {
             Ok(out)
         };
         read().map_err(graph_error)
-    }
-
-    fn postings(&self, term: &str) -> Result<Vec<Posting>, GraphError> {
-        let read = || -> rusqlite::Result<Vec<Posting>> {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT p.file, p.count, d.length FROM postings p JOIN documents d ON d.file = p.file
-                 WHERE p.term = ?1 ORDER BY p.file",
-            )?;
-            let rows = stmt.query_map([term], |row| {
-                let number = |at: usize| -> rusqlite::Result<u32> {
-                    let value: i64 = row.get(at)?;
-                    u32::try_from(value)
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(at, value))
-                };
-                Ok(Posting {
-                    file: row.get(0)?,
-                    count: number(1)?,
-                    length: number(2)?,
-                })
-            })?;
-            rows.collect()
-        };
-        read().map_err(|err| graph_error(err.into()))
-    }
-
-    fn corpus(&self) -> Result<Corpus, GraphError> {
-        self.conn
-            .prepare_cached("SELECT count(*), coalesce(avg(length), 0.0) FROM documents")
-            .and_then(|mut stmt| {
-                stmt.query_row([], |row| {
-                    let documents: i64 = row.get(0)?;
-                    Ok(Corpus {
-                        documents: usize::try_from(documents).unwrap_or(0),
-                        mean_length: row.get(1)?,
-                    })
-                })
-            })
-            .map_err(|err| graph_error(err.into()))
-    }
-
-    fn files_with_word(&self, word: &str) -> Result<usize, GraphError> {
-        let word = word.to_lowercase();
-        self.conn
-            .prepare_cached("SELECT files FROM words WHERE word = ?1")
-            .and_then(|mut stmt| stmt.query_row([word], crate::words::frequency).optional())
-            .map(|count| count.unwrap_or(0))
-            .map_err(|err| graph_error(err.into()))
-    }
-
-    fn callees(&self, uid: &str) -> Result<Vec<Edge>, GraphError> {
-        self.edges(
-            &format!(
-                "{EDGES} WHERE e.src = (SELECT id FROM symbols WHERE uid = ?1) AND e.resolved = 1
-                 ORDER BY e.line, e.dst"
-            ),
-            [uid],
-        )
-        .map_err(graph_error)
     }
 }
 
@@ -298,7 +188,7 @@ fn graph_error(err: StoreError) -> GraphError {
 #[cfg(test)]
 mod tests {
     use mvp_model::hash::Hash;
-    use mvp_model::{Delta, FileRow, FileRows, Lang, SymbolKind, sub_words};
+    use mvp_model::{Delta, FileRow, FileRows, Lang, SymbolKind};
 
     use super::*;
     use crate::Writer;
@@ -352,79 +242,12 @@ mod tests {
         Store::open(dir).expect("store")
     }
 
-    // Review of #53, S: a word's document frequency read every file row and
-    // scanned the symbols once per word. It is now counted in one pass;
-    // the count is the one `sub_words` gives, ASCII or not.
-    #[test]
-    fn a_words_document_frequency_is_counted_on_its_sub_words() {
-        let dir = tempfile::tempdir().unwrap();
-        let names: &[(&str, &[&str])] = &[
-            ("lib/a.rs", &["Ünïcode_Name", "x"]),
-            ("src/Parser.rs", &["Parser::parse", "ÜberParser::écrire"]),
-            (
-                "src/http_server.rs",
-                &["HTTPServer::serve", "parse_json2Value"],
-            ),
-            ("src/json.rs", &["to_json", "Value2Json"]),
-        ];
-        let store = store(dir.path(), names);
-        for word in [
-            "http",
-            "server",
-            "serve",
-            "parse",
-            "json",
-            "json2",
-            "value",
-            "parser",
-            "über",
-            "écrire",
-            "ünïcode",
-            "name",
-            "src",
-            "rs",
-            "2",
-            "x",
-            "absent",
-        ] {
-            let expected = names
-                .iter()
-                .filter(|(path, symbols)| {
-                    sub_words(path).contains(&word.to_owned())
-                        || symbols
-                            .iter()
-                            .any(|s| sub_words(s).contains(&word.to_owned()))
-                })
-                .count();
-            assert_eq!(store.files_with_word(word).unwrap(), expected, "{word}");
-        }
-        assert_eq!(store.files_with_word("JSON").unwrap(), 1, "ignoring case");
-        assert_eq!(store.files_with_word("Parse").unwrap(), 2);
-    }
-
-    // Review of #60, round 3, m3: a plugin's `languages` are read from the
-    // caller's store in one query, the set its files give.
-    #[test]
-    fn the_languages_are_those_of_the_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &[("a.rs", &["a"]), ("b.rs", &["b"])]);
-        let from_files: std::collections::BTreeSet<String> = store
-            .files()
-            .unwrap()
-            .iter()
-            .map(|file| file.lang.as_str().to_owned())
-            .collect();
-        assert_eq!(store.languages().unwrap(), from_files);
-        assert_eq!(from_files.len(), 1);
-    }
-
-    // Review of #53, M8: a word past SQLite's pattern limit failed the
+    // Review of #53, M8: a name past SQLite's pattern limit failed the
     // whole chain ("LIKE or GLOB pattern too complex").
     #[test]
-    fn a_word_of_any_length_is_counted() {
+    fn a_name_of_any_length_is_looked_up() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path(), &[("a.rs", &["a"])]);
-        assert_eq!(store.files_with_word(&"a".repeat(50_010)).unwrap(), 0);
         assert!(store.named(&"a".repeat(50_010)).unwrap().is_empty());
     }
 

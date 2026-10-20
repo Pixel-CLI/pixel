@@ -14,21 +14,18 @@
 //!   (C-10).
 
 mod checked;
-pub mod log;
-mod postings;
 mod read;
 mod rows;
 mod schema;
 mod state_file;
-mod words;
 mod write;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub use read::{Stats, Store};
+pub use read::Store;
 pub use schema::SCHEMA_VERSION;
-pub use write::{Indexed, Writer, writing};
+pub use write::{Indexed, Writer};
 
 /// The directory of a repository's state (C-18).
 pub const DIR: &str = ".pixel-mvp";
@@ -36,8 +33,6 @@ pub const DIR: &str = ".pixel-mvp";
 pub const DB: &str = "graph.db";
 /// The writer's lock file inside it.
 pub const LOCK: &str = "index.lock";
-/// Source a team commits, not state (`design/plugins.md`).
-pub const PLUGINS: &str = "plugins";
 
 /// Keeps everything in `.pixel-mvp/` but `plugins/` out of git
 /// (`design/architecture.md`, "On-disk state").
@@ -148,47 +143,6 @@ fn found(path: &Path) -> std::io::Result<Found> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Found::Nothing),
         Err(err) => Err(err),
     }
-}
-
-/// One entry of the state directory, for `status` (C-18).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Entry {
-    /// Relative to the repository root.
-    pub path: String,
-    pub bytes: u64,
-}
-
-/// Every file of `.pixel-mvp/` with its size, `plugins/` excepted: the
-/// whole on-disk state of the repository (C-18). Empty when the directory
-/// does not exist.
-pub fn state(root: &Path) -> std::io::Result<Vec<Entry>> {
-    let mut entries = Vec::new();
-    let base = dir(root);
-    if matches!(own(root), Ok(true)) {
-        walk(&base, &format!("{DIR}/"), &mut entries)?;
-    }
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(entries)
-}
-
-fn walk(dir: &Path, prefix: &str, out: &mut Vec<Entry>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let path = format!("{prefix}{name}");
-        let meta = entry.metadata()?;
-        if meta.is_dir() {
-            if path != format!("{DIR}/{PLUGINS}") {
-                walk(&entry.path(), &format!("{path}/"), out)?;
-            }
-        } else {
-            out.push(Entry {
-                path,
-                bytes: meta.len(),
-            });
-        }
-    }
-    Ok(())
 }
 
 /// Places a copy of git's index at `name` in the state directory (ADR-0039,

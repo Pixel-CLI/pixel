@@ -17,10 +17,9 @@ use mvp_model::{Delta, FileRow, FileStat, Kept};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::checked::{self, Stamp};
-use crate::read::stats;
 use crate::rows::{self, edge_of, file_of, symbol_of};
 use crate::schema::{self, Shape};
-use crate::{JOURNALS, LOCK, Stats, StoreError, beside, db_path, dir, ensure_dir, existing};
+use crate::{JOURNALS, LOCK, StoreError, beside, db_path, dir, ensure_dir, existing};
 
 /// How often a waiting writer retries the lock.
 const LOCK_POLL: Duration = Duration::from_millis(10);
@@ -194,15 +193,6 @@ impl Writer {
         }
     }
 
-    /// The counts of the generation this writer last published, read on
-    /// its own connection: no second open, no second check of the file.
-    pub fn stats(&mut self) -> Result<Stats, StoreError> {
-        let read = rows::published(&self.conn).and_then(|published| {
-            stats(&self.conn, published.map(|p| p.stale).unwrap_or_default())
-        });
-        self.rebuilt_on_damage(read)
-    }
-
     fn rebuilt_on_damage<T>(&mut self, result: Result<T, StoreError>) -> Result<T, StoreError> {
         match result {
             Err(StoreError::Unusable(reason)) => {
@@ -349,8 +339,6 @@ fn apply(conn: &mut Connection, delta: &Delta) -> Result<(), StoreError> {
     if stored != delta.files {
         return Err(StoreError::Refused(difference(&delta.files, &stored)));
     }
-    crate::words::publish(&tx)?;
-    crate::postings::publish(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -391,20 +379,6 @@ fn difference(named: &[FileRow], stored: &[FileRow]) -> String {
 
 fn path_at(files: &[FileRow], at: usize) -> &str {
     files.get(at).map_or("nothing", |file| file.path.as_str())
-}
-
-/// Whether a writer holds the lock of the repository at `root` now. For a
-/// caller that would start one only when none runs; the answer may be stale
-/// the moment it is given, and a writer started anyway waits its turn.
-pub fn writing(root: &Path) -> bool {
-    if !matches!(crate::own(root), Ok(true)) {
-        return false;
-    }
-    // Never made here, never through a link, never held by a FIFO (C-18).
-    let Ok(file) = crate::state_file::open_lock(&dir(root).join(LOCK), false) else {
-        return false;
-    };
-    matches!(file.try_lock(), Err(TryLockError::WouldBlock))
 }
 
 /// Takes the writer's lock at `path`, a regular file opened never
