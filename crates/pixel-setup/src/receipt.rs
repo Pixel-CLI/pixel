@@ -52,6 +52,8 @@ fn roots(home: &Path, explicit: bool) -> Vec<PathBuf> {
         crate::antigravity::plugin_dir(home),
         crate::antigravity::cli_plugin_dir(home),
         crate::opencode_config::opencode_config_dir(home, explicit).join("plugins/pixel-brief.js"),
+        crate::opencode_config::opencode_config_dir(home, explicit)
+            .join("plugins/pixel-brief-metrics/tui.js"),
         home.join(crate::pi_global::PACKAGE_DIR),
         home.join(crate::CLASSIFY_PACKAGE_DIR),
         home.join(".pixel/config.yaml"),
