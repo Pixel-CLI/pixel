@@ -258,7 +258,9 @@ pub fn apply(
     old_name: &str,
     new_name: &str,
 ) -> Result<Vec<String>, String> {
-    let mut written = Vec::new();
+    // Phase 1: read, verify and splice every file in memory, so a stale
+    // later file fails the rename before any file is rewritten.
+    let mut staged = Vec::with_capacity(plan.files.len());
     for (path, edits) in &plan.files {
         let mut content =
             read_confined(root, path).map_err(|e| format!("rename: cannot read {path}: {e}"))?;
@@ -276,6 +278,11 @@ pub fn apply(
                 new_name.as_bytes().iter().copied(),
             );
         }
+        staged.push((path, content));
+    }
+    // Phase 2: write.
+    let mut written = Vec::with_capacity(staged.len());
+    for (path, content) in staged {
         write_confined(root, path, &content)
             .map_err(|e| format!("rename: cannot write {path}: {e}"))?;
         written.push(path.clone());
@@ -779,6 +786,38 @@ mod tests {
         assert!(apply(&dir, &plan, "foo", "baz").is_err());
         assert_eq!(std::fs::read(dir.join("a.rs")).unwrap(), b"fn qux() {}\n");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stale later file fails the whole rename before any file is written.
+    #[test]
+    fn apply_writes_nothing_when_a_later_file_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let edit = || {
+            vec![RenameEdit {
+                line: 1,
+                start_byte: 3,
+                end_byte: 6,
+                kind: SiteKind::Definition,
+            }]
+        };
+        let mut plan = RenamePlan::default();
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            std::fs::write(dir.path().join(name), b"fn foo() {}\n").unwrap();
+            plan.files.insert(name.to_string(), edit());
+        }
+        std::fs::write(dir.path().join("c.rs"), b"fn qux() {}\n").unwrap();
+        let err = apply(dir.path(), &plan, "foo", "baz").unwrap_err();
+        assert!(err.contains("c.rs:1"), "{err}");
+        for name in ["a.rs", "b.rs"] {
+            assert_eq!(
+                std::fs::read(dir.path().join(name)).unwrap(),
+                b"fn foo() {}\n"
+            );
+        }
+        assert_eq!(
+            std::fs::read(dir.path().join("c.rs")).unwrap(),
+            b"fn qux() {}\n"
+        );
     }
 
     /// Paths in a rename plan come from the graph database, which a hostile
