@@ -10,9 +10,9 @@
 //!
 //! The write side carries two shapes on purpose while it is being
 //! measured: [`write_line_split`] writes the payload and the newline
-//! separately (what the loop did first), [`write_line_whole`] appends the
-//! newline before the single write. The losing one goes when the numbers
-//! are in.
+//! separately (the error-arm shape), [`write_line_whole`] appends the
+//! newline before the single write. Normal responses already append their
+//! newline before writing; the split lane is not their production baseline.
 
 use std::io::{BufRead, Write};
 use std::os::unix::net::UnixStream;

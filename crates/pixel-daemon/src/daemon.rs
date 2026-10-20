@@ -1526,7 +1526,9 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
             r#"{"ok":false,"op":"error","protocol":1,"error":{"code":"INVARIANT_VIOLATION","message":"serialize failure"}}"#
                 .to_string()
         });
-        if write_line_split(&mut writer, out.as_bytes()).is_err() {
+        let mut out = out;
+        out.push('\n');
+        if writer.write_all(out.as_bytes()).is_err() || writer.flush().is_err() {
             break;
         }
         if is_shutdown {
