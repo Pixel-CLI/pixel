@@ -1476,7 +1476,7 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
         Err(_) => return,
     });
     let mut writer = stream;
-    let mut line = String::new();
+    let mut line: Vec<u8> = Vec::with_capacity(1024);
     // One frame buffer for the life of the connection: the response is
     // serialized into it and leaves in a single write.
     let mut frame: Vec<u8> = Vec::with_capacity(1024);
@@ -1500,16 +1500,15 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
                 let _ = write_response(&mut writer, &mut frame, &resp);
                 break;
             }
-            ReadResult::InvalidUtf8 => {
-                request_count += 1;
-                let resp = failure_response("error", "request is not valid UTF-8");
-                let _ = write_response(&mut writer, &mut frame, &resp);
-                continue;
-            }
             ReadResult::TimedOut | ReadResult::Err => break,
         }
         request_count += 1;
-        let trimmed = line.trim();
+        let Ok(text) = std::str::from_utf8(&line) else {
+            let resp = failure_response("error", "request is not valid UTF-8");
+            let _ = write_response(&mut writer, &mut frame, &resp);
+            continue;
+        };
+        let trimmed = text.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -1669,15 +1668,17 @@ mod tests {
             // The request arrives after the daemon starts reading.
             std::thread::sleep(Duration::from_millis(100));
             writeln!(client, "{}", serde_json::to_string(&Request::Ping).unwrap()).unwrap();
-            let mut line = String::new();
-            BufReader::new(&client).read_line(&mut line).unwrap();
+            let mut line: Vec<u8> = Vec::with_capacity(1024);
+            BufReader::new(&client)
+                .read_until(b'\n', &mut line)
+                .unwrap();
             line
         });
         let mut corpus = BulkyCorpus(scratch_root("bulky"));
         let mut shutdown = false;
         handle_conn(&mut corpus, server, &mut shutdown);
         let line = client_thread.join().unwrap();
-        let reply: serde_json::Value = serde_json::from_str(&line)
+        let reply: serde_json::Value = serde_json::from_slice(&line)
             .unwrap_or_else(|e| panic!("one complete JSON reply ({e}), got {} bytes", line.len()));
         assert_eq!(
             reply["result"]["blob"].as_str().map(str::len),
@@ -1758,15 +1759,15 @@ mod tests {
                         // client's write instead of waiting for it.
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                        let mut line = String::new();
-                        let Ok(n) = BufReader::new(&stream).read_line(&mut line) else {
+                        let mut line: Vec<u8> = Vec::with_capacity(1024);
+                        let Ok(n) = BufReader::new(&stream).read_until(b'\n', &mut line) else {
                             return;
                         };
                         if n == 0 {
                             return;
                         }
                         assert_eq!(
-                            serde_json::from_str::<Request>(&line).unwrap(),
+                            serde_json::from_slice::<Request>(&line).unwrap(),
                             Request::Ping,
                             "the probe sends a Ping"
                         );
@@ -1915,10 +1916,16 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let mut line = String::new();
-        BufReader::new(&client).read_line(&mut line).unwrap();
-        let answered: Response = serde_json::from_str(&line).unwrap();
-        assert!(answered.ok, "the loop's answer reaches the client: {line}");
+        let mut line: Vec<u8> = Vec::with_capacity(1024);
+        BufReader::new(&client)
+            .read_until(b'\n', &mut line)
+            .unwrap();
+        let answered: Response = serde_json::from_slice(&line).unwrap();
+        assert!(
+            answered.ok,
+            "the loop's answer reaches the client: {}",
+            String::from_utf8_lossy(&line)
+        );
 
         assert!(stop_acceptor(
             &sock,
@@ -2437,7 +2444,7 @@ mod tests {
         let (mut writer, reader) = UnixStream::pair().unwrap();
         writer.write_all("📋\n".as_bytes()).unwrap();
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        let mut line: Vec<u8> = Vec::with_capacity(1024);
         assert!(matches!(
             read_capped_line(
                 &mut reader,
@@ -2447,7 +2454,7 @@ mod tests {
             ),
             ReadResult::Ok
         ));
-        assert_eq!(line, "📋");
+        assert_eq!(std::str::from_utf8(&line).unwrap(), "📋");
     }
 
     #[test]
@@ -2455,7 +2462,7 @@ mod tests {
         let (mut writer, reader) = UnixStream::pair().unwrap();
         writer.write_all(b"0123456789\nnext\n").unwrap();
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        let mut line: Vec<u8> = Vec::with_capacity(1024);
         assert!(matches!(
             read_capped_line(
                 &mut reader,
@@ -2471,7 +2478,7 @@ mod tests {
     fn expired_connection_deadline_stops_frame_read() {
         let (_writer, reader) = UnixStream::pair().unwrap();
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        let mut line: Vec<u8> = Vec::with_capacity(1024);
         assert!(matches!(
             read_capped_line(&mut reader, &mut line, 4, Instant::now()),
             ReadResult::TimedOut
@@ -3241,7 +3248,7 @@ mod tests {
         line.push(b'\n');
         let mut reader = BufReader::new(std::io::Cursor::new(line));
         let mut clock_reads = 0_usize;
-        let mut out = String::new();
+        let mut out = Vec::new();
         let result = read_capped_line_with(
             &mut reader,
             &mut out,
@@ -3263,7 +3270,7 @@ mod tests {
     fn capped_line_should_admit_exactly_max_bytes_across_blocks() {
         let read = |input: &[u8]| {
             let mut reader = BufReader::with_capacity(2, std::io::Cursor::new(input.to_vec()));
-            let mut out = String::new();
+            let mut out = Vec::new();
             let result = read_capped_line_with(
                 &mut reader,
                 &mut out,
@@ -3275,14 +3282,14 @@ mod tests {
         };
         let (result, out) = read(b"0123\n");
         assert!(matches!(result, ReadResult::Ok));
-        assert_eq!(out, "0123");
+        assert_eq!(out, b"0123");
         assert!(matches!(read(b"01234\n").0, ReadResult::TooLong));
         let (result, out) = read(b"01");
         assert!(
             matches!(result, ReadResult::Ok),
             "a last line without newline"
         );
-        assert_eq!(out, "01");
+        assert_eq!(out, b"01");
         assert!(matches!(read(b"").0, ReadResult::Eof));
     }
 
@@ -3292,8 +3299,8 @@ mod tests {
     fn capped_line_should_leave_the_next_request_in_the_buffer() {
         let mut reader = BufReader::new(std::io::Cursor::new(b"ab\ncd\n".to_vec()));
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut first = String::new();
-        let mut second = String::new();
+        let mut first = Vec::new();
+        let mut second = Vec::new();
         assert!(matches!(
             read_capped_line_with(&mut reader, &mut first, 8, deadline, Instant::now),
             ReadResult::Ok
@@ -3302,7 +3309,10 @@ mod tests {
             read_capped_line_with(&mut reader, &mut second, 8, deadline, Instant::now),
             ReadResult::Ok
         ));
-        assert_eq!((first.as_str(), second.as_str()), ("ab", "cd"));
+        assert_eq!(
+            (first.as_slice(), second.as_slice()),
+            (b"ab".as_slice(), b"cd".as_slice())
+        );
     }
 
     /// A corpus that holds every `status` until the test releases it.

@@ -30,7 +30,7 @@ const MAX_REQUEST_LINE: usize = 1 << 20;
 
 fn read_one_line(line: &[u8]) -> ReadResult {
     let mut reader = BufReader::new(line);
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     read_capped_line_with(
         &mut reader,
         &mut buf,
@@ -51,8 +51,8 @@ fn reading_a_request_line_should_stay_within_its_allocation_ceiling() {
 
     assert_eq!(read_one_line(&short), ReadResult::Ok);
     let stats = dhat::HeapStats::get();
-    // The line buffer the reader fills, and nothing else. `String::from_utf8`
-    // moves that same allocation into the caller, so it is one block.
+    // The reader's own buffer and nothing else: the line buffer is the
+    // caller's and is reused across requests.
     assert!(
         stats.total_blocks <= 3,
         "one request line allocated {} blocks",
@@ -64,10 +64,12 @@ fn reading_a_request_line_should_stay_within_its_allocation_ceiling() {
         stats.total_bytes
     );
 
+    // Cumulative: only the growth of the fresh line buffer counts here, one
+    // block (the reader's allocation is not repeated).
     assert_eq!(read_one_line(&long), ReadResult::Ok);
-    let grown = dhat::HeapStats::get().total_blocks;
+    let grown = dhat::HeapStats::get().total_blocks - stats.total_blocks;
     assert!(
-        grown <= 6,
-        "a line over the 4 KiB start capacity grew the buffer to {grown} blocks in total"
+        grown <= 3,
+        "a line over the 4 KiB start capacity grew the buffer in {grown} blocks"
     );
 }

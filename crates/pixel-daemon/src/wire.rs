@@ -31,8 +31,6 @@ pub enum ReadResult {
     Eof,
     /// The line passed the cap before a newline arrived.
     TooLong,
-    /// The bytes were not UTF-8.
-    InvalidUtf8,
     /// The deadline passed.
     TimedOut,
     /// The underlying read failed.
@@ -42,9 +40,14 @@ pub enum ReadResult {
 /// Read one line into `buf`, returning `TooLong` if it exceeds `max_bytes`
 /// before a newline is found. The trailing newline is consumed but not
 /// included in `buf` (same semantics as `read_line` minus the newline).
+///
+/// `buf` is the caller's buffer: it is cleared on entry and grows as
+/// needed, so a connection reuses one allocation for every request instead
+/// of buying a fresh one per line. The bytes are not validated here; the
+/// caller decodes them, which is where a `InvalidUtf8` answer comes from.
 pub fn read_capped_line(
     reader: &mut std::io::BufReader<UnixStream>,
-    buf: &mut String,
+    buf: &mut Vec<u8>,
     max_bytes: usize,
     deadline: Instant,
 ) -> ReadResult {
@@ -52,16 +55,16 @@ pub fn read_capped_line(
 }
 
 /// [`read_capped_line`] over any buffered reader, with the clock passed in.
-/// The line is taken a buffered block at a time, and the deadline is
-/// checked once per block, not once per byte.
+/// The line is taken a buffered block at a time, the newline is found by
+/// `memchr`, and the deadline is checked once per block, not once per byte.
 pub fn read_capped_line_with(
     reader: &mut impl BufRead,
-    buf: &mut String,
+    buf: &mut Vec<u8>,
     max_bytes: usize,
     deadline: Instant,
     mut now: impl FnMut() -> Instant,
 ) -> ReadResult {
-    let mut bytes = Vec::with_capacity(max_bytes.min(4096));
+    buf.clear();
     loop {
         if now() >= deadline {
             return ReadResult::TimedOut;
@@ -70,17 +73,17 @@ pub fn read_capped_line_with(
             return ReadResult::Err;
         };
         if block.is_empty() {
-            if bytes.is_empty() {
+            if buf.is_empty() {
                 return ReadResult::Eof;
             }
             break;
         }
-        let newline = block.iter().position(|&b| b == b'\n');
+        let newline = memchr::memchr(b'\n', block);
         let line_part = newline.unwrap_or(block.len());
-        if bytes.len() + line_part > max_bytes {
+        if buf.len() + line_part > max_bytes {
             return ReadResult::TooLong;
         }
-        bytes.extend_from_slice(&block[..line_part]);
+        buf.extend_from_slice(&block[..line_part]);
         match newline {
             Some(at) => {
                 reader.consume(at + 1);
@@ -89,13 +92,7 @@ pub fn read_capped_line_with(
             None => reader.consume(line_part),
         }
     }
-    match String::from_utf8(bytes) {
-        Ok(line) => {
-            *buf = line;
-            ReadResult::Ok
-        }
-        Err(_) => ReadResult::InvalidUtf8,
-    }
+    ReadResult::Ok
 }
 
 /// Serialize `value` as one NDJSON frame into `out`: the buffer is
