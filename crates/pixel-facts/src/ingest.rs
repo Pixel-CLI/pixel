@@ -355,7 +355,6 @@ fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
     if !needs_phase_a(store)? {
         return Ok(true);
     }
-    refresh_refs(store)?;
     // Enumerate every commit reachable from any ref, plus stash and reflog.
     let known = known_oids(store);
     let oids = enumerate_all_commits(store, &known)?;
@@ -380,8 +379,7 @@ fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
     }
     // Guaranteed-progress (do-while) loop: the deadline is a soft yield
     // target, not a license to do zero work. Checking it BEFORE the first
-    // batch (as a plain `while`) would let setup cost alone (refresh_refs +
-    // enumerate_all_commits + known_oids — five git subprocess spawns) eat
+    // batch (as a plain `while`) would let setup cost alone (enumerate_all_commits + known_oids — several git subprocess spawns) eat
     // the entire tick budget under load, so the batch body never runs, no
     // commit is ever inserted, and every subsequent tick repeats the exact
     // same expensive-but-fruitless enumeration forever. That is the same
@@ -484,71 +482,10 @@ fn store_phase_a_cursor(store: &mut FactsStore, rest: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn refresh_refs(store: &mut FactsStore) -> Result<()> {
-    let runner = enumeration_runner(store);
-    // heads / remotes / tags
-    let refs = runner.run(&["for-each-ref", "--format=%(refname)%00%(objectname)"])?;
-    let lines = split_nul_lines(&refs);
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        let Some((refname, oid)) = split_ref_record(&line) else {
-            continue;
-        };
-        let kind = if refname.starts_with("refs/heads/") {
-            "branch"
-        } else if refname.starts_with("refs/remotes/") {
-            "remote"
-        } else if refname.starts_with("refs/tags/") {
-            "tag"
-        } else {
-            "other"
-        };
-        store.conn().execute(
-            "INSERT INTO refs (ref, oid, kind, indexed_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (ref) DO UPDATE SET oid = excluded.oid, indexed_at = excluded.indexed_at",
-            params![refname, oid, kind, now_iso()],
-        )?;
-    }
-    // refs/stash + stash reflog (first-class reach).
-    let stash = runner.run(&[
-        "for-each-ref",
-        "--format=%(refname)%00%(objectname)",
-        "refs/stash",
-    ]);
-    if let Ok(out) = stash {
-        for line in split_nul_lines(&out) {
-            if line.is_empty() {
-                continue;
-            }
-            if let Some((refname, oid)) = split_ref_record(&line) {
-                store.conn().execute(
-                    "INSERT INTO refs (ref, oid, kind, indexed_at) VALUES (?1, ?2, 'stash', ?3)
-                     ON CONFLICT (ref) DO UPDATE SET oid = excluded.oid, indexed_at = excluded.indexed_at",
-                    params![refname, oid, now_iso()],
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Reach of a commit listed by `rev-list --branches --remotes --tags`:
 /// `REACH_BRANCH | REACH_REMOTE | REACH_TAG`, spelled as its value because
 /// the three bits are disjoint, so `|`, `^` and `+` agree (a test pins it).
 const REACH_LISTED_REFS: i64 = 0b111;
-
-/// `refname\0oid` from `for-each-ref`, or `None` when either half is empty.
-fn split_ref_record(line: &str) -> Option<(&str, &str)> {
-    let mut parts = line.splitn(2, '\0');
-    let (refname, oid) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-    if refname.is_empty() || oid.is_empty() {
-        None
-    } else {
-        Some((refname, oid))
-    }
-}
 
 /// The store's runner with the cap of a repository-wide enumeration: one
 /// 41-byte line per commit puts `rev-list --branches` past the default 1 MiB
@@ -2158,29 +2095,11 @@ body"
     }
 
     #[test]
-    fn a_fresh_index_should_need_no_phase_a_and_record_its_refs() {
-        let (dir, _, second) = two_commit_repo();
+    fn a_fresh_index_should_need_no_phase_a_and_record_its_reach() {
+        let (dir, _, _) = two_commit_repo();
         let mut store = FactsStore::open(dir.path()).unwrap();
         ingest_within(&mut store);
         assert!(!needs_phase_a(&store).unwrap());
-        let refs: Vec<(String, String, String)> = {
-            let mut stmt = store
-                .conn()
-                .prepare("SELECT ref, oid, kind FROM refs")
-                .unwrap();
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .unwrap();
-            rows.map(|r| r.unwrap()).collect()
-        };
-        assert_eq!(
-            refs,
-            vec![(
-                "refs/heads/develop".to_string(),
-                second,
-                "branch".to_string()
-            )]
-        );
         let reach: Vec<i64> = {
             let mut stmt = store.conn().prepare("SELECT reach FROM commits").unwrap();
             let rows = stmt.query_map([], |r| r.get(0)).unwrap();
@@ -2191,17 +2110,6 @@ body"
             REACH_LISTED_REFS,
             crate::store::REACH_BRANCH | crate::store::REACH_REMOTE | crate::store::REACH_TAG
         );
-    }
-
-    #[test]
-    fn split_ref_record_should_refuse_an_empty_half() {
-        assert_eq!(
-            split_ref_record("refs/heads/a\0abc"),
-            Some(("refs/heads/a", "abc"))
-        );
-        assert_eq!(split_ref_record("refs/heads/a\0"), None);
-        assert_eq!(split_ref_record("refs/heads/a"), None);
-        assert_eq!(split_ref_record("\0abc"), None);
     }
 
     #[test]
