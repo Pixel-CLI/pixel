@@ -46,6 +46,70 @@ fn texts(out: &ParseOutput) -> Vec<(Role, Option<IntentSource>, String)> {
         .collect()
 }
 
+#[test]
+fn ingestion_should_keep_automation_searchable_but_out_of_human_results() {
+    use crate::search::{SearchFilters, search};
+    use crate::segment::SegmentSet;
+    use crate::store::RecallStore;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rollout-automation.jsonl");
+    let inputs = [
+        "  <heartbeat>needle</heartbeat>",
+        "\n<ci-monitor-event>needle</ci-monitor-event>",
+        "Explain the <heartbeat>needle envelope",
+        "<heartbeat-like>needle",
+    ];
+    let mut lines = vec![line("session_meta", json!({"id": "automation"}))];
+    lines.extend(inputs.iter().map(|text| message("user", json!(text))));
+    write_lines(&path, &lines);
+    let unit = unit_for(path).unwrap();
+    let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+    crate::ingest::ingest_units(&mut store, &adapter(tmp.path()), &[unit]).unwrap();
+    let mut segments = SegmentSet::open(&tmp.path().join("segments")).unwrap();
+    segments.index_new(&store).unwrap();
+    let filters = SearchFilters {
+        human_only: true,
+        role: Some("user".into()),
+        ..Default::default()
+    };
+    let hits = search(&store, &segments, "needle", false, &filters, 0, 10).unwrap();
+    let mut texts: Vec<_> = hits.hits.into_iter().map(|hit| hit.snippet).collect();
+    texts.sort();
+    assert_eq!(
+        texts,
+        [
+            "<heartbeat-like>needle",
+            "Explain the <heartbeat>needle envelope"
+        ]
+    );
+    assert_eq!(
+        search(
+            &store,
+            &segments,
+            "needle",
+            false,
+            &SearchFilters::default(),
+            0,
+            10
+        )
+        .unwrap()
+        .hits
+        .len(),
+        4
+    );
+    assert_eq!(store.mark_policy_skips().unwrap(), 2);
+    assert_eq!(
+        store
+            .pending_embed(0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.text)
+            .collect::<Vec<_>>(),
+        inputs[2..]
+    );
+}
+
 // --- discover -------------------------------------------------------------
 
 #[test]

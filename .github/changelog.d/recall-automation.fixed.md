@@ -1,0 +1,1 @@
+**recall:** Exclude Codex heartbeat and CI monitor notifications from human-only results. Opening an existing corpus repairs stored classifications, derived prompts and titles, and embedding mappings without needing the original transcripts.

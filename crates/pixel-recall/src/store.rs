@@ -703,7 +703,70 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
     )?;
     conn.execute("DROP INDEX IF EXISTS idx_turns_unembedded", [])?;
+    repair_codex_intents(conn)?;
     Ok(())
+}
+
+/// Repair stored classifications even when the source transcript no longer exists.
+fn repair_codex_intents(conn: &Connection) -> Result<()> {
+    let done: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'codex_automation_intents_v1')",
+        [],
+        |row| row.get(0),
+    )?;
+    if done {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let candidates = {
+        let mut stmt = tx.prepare(
+            "SELECT t.id, t.session_id, t.text FROM turns t JOIN sessions s ON s.id = t.session_id
+             WHERE s.agent = 'codex' AND t.role = 'user' AND t.intent_source = 'human'",
+        )?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>>>()?
+    };
+    for (id, session_id, text) in candidates {
+        if crate::sources::codex::classify_codex_user(&text)
+            != crate::model::IntentSource::Orchestrator
+        {
+            continue;
+        }
+        tx.execute(
+            "UPDATE turns SET intent_source = 'orchestrator', embedded = 2 WHERE id = ?1",
+            [id],
+        )?;
+        tx.execute("DELETE FROM vector_chunks WHERE turn_id = ?1", [id])?;
+        // Only replace a title derived from the misclassified turn; keep custom titles.
+        tx.execute(
+            "UPDATE sessions SET title = NULL
+             WHERE id = ?1 AND title = substr(replace(trim(?2), char(10), ' '), 1, 120)",
+            params![session_id, text],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET first_user_prompt = (
+                 SELECT text FROM turns WHERE session_id = ?1 AND role = 'user'
+                 AND intent_source = 'human' ORDER BY seq LIMIT 1)
+             WHERE id = ?1",
+            [session_id],
+        )?;
+    }
+    tx.execute(
+        "UPDATE sessions SET title = substr(replace(trim(first_user_prompt), char(10), ' '), 1, 120)
+         WHERE agent = 'codex' AND title IS NULL",
+        [],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO meta(key, value) VALUES ('codex_automation_intents_v1', '1')",
+        [],
+    )?;
+    tx.commit()
 }
 
 #[cfg(test)]
@@ -711,6 +774,94 @@ mod tests {
     use super::*;
     use crate::model::{IntentSource, Role};
     use crate::testutil::{add_session, add_session_with_intents};
+
+    #[test]
+    fn reopening_should_repair_old_codex_automation_without_source_transcripts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("recall.db");
+        let mut store = RecallStore::open(&db).unwrap();
+        let old = [
+            (
+                Role::User,
+                Some(IntentSource::Human),
+                "<heartbeat>needle</heartbeat>",
+            ),
+            (
+                Role::User,
+                Some(IntentSource::Human),
+                "<ci-monitor-event>needle</ci-monitor-event>",
+            ),
+            (Role::User, Some(IntentSource::Human), "human needle"),
+            (Role::Assistant, None, "<heartbeat>assistant needle"),
+        ];
+        let id = add_session_with_intents(&mut store, "codex", "old", &old);
+        let custom = add_session_with_intents(&mut store, "codex", "custom", &old[..1]);
+        let other = add_session_with_intents(&mut store, "claude", "other", &old);
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET title = 'custom title' WHERE id = ?1",
+                [custom],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "DELETE FROM meta WHERE key = 'codex_automation_intents_v1';
+            UPDATE turns SET embedded = 1;
+            INSERT INTO vector_chunks(chunk_id, turn_id, chunk_seq) SELECT id, id, 0 FROM turns;",
+            )
+            .unwrap();
+        drop(store);
+
+        for _ in 0..2 {
+            let store = RecallStore::open(&db).unwrap();
+            let turns = store.turns_for_session(id, None).unwrap();
+            assert_eq!(
+                turns
+                    .iter()
+                    .map(|t| t.intent_source.as_deref())
+                    .collect::<Vec<_>>(),
+                [
+                    Some("orchestrator"),
+                    Some("orchestrator"),
+                    Some("human"),
+                    None
+                ]
+            );
+            assert_eq!(
+                turns.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+                old.iter().map(|t| t.2).collect::<Vec<_>>()
+            );
+            let session = store.session_by_id(id).unwrap().unwrap();
+            assert_eq!(session.first_user_prompt.as_deref(), Some("human needle"));
+            assert_eq!(session.title.as_deref(), Some("human needle"));
+            let session = store.session_by_id(custom).unwrap().unwrap();
+            assert_eq!(session.first_user_prompt, None);
+            assert_eq!(session.title.as_deref(), Some("custom title"));
+            assert_eq!(
+                store.turns_for_session(other, None).unwrap()[0]
+                    .intent_source
+                    .as_deref(),
+                Some("human")
+            );
+            assert_eq!(
+                store
+                    .chunk_turns(&[turns[0].id, turns[1].id, turns[2].id])
+                    .unwrap(),
+                vec![(turns[2].id, turns[2].id, 0)]
+            );
+            let embedded: Vec<i64> = store
+                .conn
+                .prepare("SELECT embedded FROM turns WHERE session_id = ?1 ORDER BY seq")
+                .unwrap()
+                .query_map([id], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_>>()
+                .unwrap();
+            assert_eq!(embedded, [2, 2, 1, 1]);
+        }
+    }
 
     #[test]
     fn total_turns_and_turns_for_indexing_should_read_the_stored_turns() {

@@ -222,6 +222,11 @@ Machine-wide:
   `search-meaning` without restarting. `status.embedding` exposes its model,
   resident state, completed semantic-search count, pending download and
   latest load/download error, including for detached daemons.
+  On corpus open, the `codex_automation_intents_v1` marker in SQLite `meta`
+  gates a transactional repair of Codex harness turns: intent and embedding
+  eligibility, vector mappings, first human prompts and derived titles.
+  Turn text and lexical indexes stay intact; deleted source transcripts are
+  not needed. Custom titles are preserved.
   Code search selects `potion-code-16M-v2` independently of transcript
   preferences. Its offline opener reads cached model bytes directly and
   refuses missing files without contacting Hugging Face.
