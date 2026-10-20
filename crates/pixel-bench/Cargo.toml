@@ -23,6 +23,7 @@ pixel-recall = { path = "../pixel-recall" }
 serde_json = { workspace = true }
 tempfile = "3"
 dhat = "0.3"
+simd-json = "0.14"
 
 [[bench]]
 name = "gram_extraction"

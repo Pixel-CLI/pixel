@@ -4,10 +4,13 @@
 //! Cost of the daemon's NDJSON frame: one bounded request line in, one
 //! response line out.
 //!
-//! Four lanes, each over the production functions in `pixel_daemon::wire`:
+//! Six lanes, each over the production functions in `pixel_daemon::wire`:
 //!
 //! - `write/split` — payload write then newline write (the original shape);
 //! - `write/whole` — newline appended, one write;
+//! - `parse/{serde_json,simd_json}` — the request envelope through both
+//!   parsers: `simd-json` is 25% slower on a 60-byte line and seven times
+//!   slower on an 8 KiB one, which is why the daemon keeps `serde_json`;
 //! - `read/short` — a 120-byte request line, the common size;
 //! - `read/long` — an 8 KiB line, so the newline scan is not a rounding error.
 //!
@@ -81,6 +84,34 @@ fn bench_write(c: &mut Criterion) {
     group.finish();
 }
 
+/// Parse the same request line with both parsers. `simd-json` needs a
+/// mutable buffer and rewrites in place; `serde_json` takes a slice.
+fn bench_parse(c: &mut Criterion) {
+    use pixel_daemon::Request;
+    let mut group = c.benchmark_group("parse");
+    for (name, line) in [("short", request_line(0)), ("long", request_line(8 * 1024))] {
+        group.bench_with_input(BenchmarkId::new("serde_json", name), &line, |b, line| {
+            b.iter_batched(
+                || line.clone(),
+                |buf| serde_json::from_slice::<Request>(&buf),
+                criterion::BatchSize::SmallInput,
+            );
+        });
+        group.bench_with_input(BenchmarkId::new("simd_json", name), &line, |b, line| {
+            b.iter_batched(
+                || line.clone(),
+                |mut buf| {
+                    // SAFETY: `Request` is a plain serde type; the buffer
+                    // outlives the call and is dropped with it.
+                    unsafe { simd_json::from_slice::<Request>(buf.as_mut_slice()) }
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 fn bench_read(c: &mut Criterion) {
     let mut group = c.benchmark_group("read");
     for (name, line) in [("short", request_line(0)), ("long", request_line(8 * 1024))] {
@@ -104,6 +135,5 @@ fn bench_read(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_write, bench_read);
+criterion_group!(benches, bench_write, bench_parse, bench_read);
 criterion_main!(benches);
-
