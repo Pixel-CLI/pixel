@@ -106,3 +106,4 @@ fn bench_read(c: &mut Criterion) {
 
 criterion_group!(benches, bench_write, bench_read);
 criterion_main!(benches);
+
