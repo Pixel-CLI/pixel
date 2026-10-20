@@ -95,6 +95,12 @@ const MAX_REQUESTS_PER_CONN: u32 = 64;
 /// to end, and further connections wait in the listener's backlog, as they
 /// did when the loop served one connection at a time.
 const MAX_CONN_THREADS: usize = 32;
+/// Stack for a connection thread. It reads one request line and waits for
+/// the loop's answer (`handle_conn` calls `Forward::handle`, which hands the
+/// work to the writer), so only `serde_json`'s recursion depth bounds it:
+/// 128 levels of a default parse. The 2 MiB default costs about 1 us more
+/// per connection to create and commits 28x more address space than is used.
+const CONN_STACK: usize = 256 * 1024;
 
 /// $TMPDIR/pixel-<xxh3-of-canonical-root>.sock
 ///
@@ -1179,11 +1185,15 @@ fn spawn_acceptor(
                 root: root.clone(),
                 tx: tx.clone(),
             };
-            std::thread::spawn(move || {
-                let _slot = slot;
-                let mut shutdown = false;
-                handle_conn(&mut forward, stream, &mut shutdown);
-            });
+            // The service call happens on the loop, not here: this thread
+            // only frames a request and waits, so its stack stays shallow.
+            let _ = std::thread::Builder::new()
+                .stack_size(CONN_STACK)
+                .spawn(move || {
+                    let _slot = slot;
+                    let mut shutdown = false;
+                    handle_conn(&mut forward, stream, &mut shutdown);
+                });
         }
     })
 }
@@ -3262,6 +3272,29 @@ mod tests {
         assert!(matches!(result, ReadResult::Ok));
         assert_eq!(out.len(), MAX_REQUEST_LINE);
         assert_eq!(clock_reads, 9, "eight 8 KiB blocks, then the newline");
+    }
+
+    /// A connection thread's stack must carry the deepest parse the parser
+    /// accepts: `serde_json`'s own nesting limit, on the ignoring path of an
+    /// unknown field. A stack overflow here is a `SIGSEGV`, not an error.
+    #[test]
+    fn a_connection_thread_should_parse_at_the_parser_s_nesting_limit() {
+        let depth = 120;
+        let line = format!(
+            "{{\"op\":\"ping\",\"junk\":{}{}}}",
+            "[".repeat(depth),
+            "]".repeat(depth)
+        );
+        let parsed = std::thread::Builder::new()
+            .stack_size(CONN_STACK)
+            .spawn(move || serde_json::from_str::<Request>(&line))
+            .expect("spawn")
+            .join()
+            .expect("no overflow");
+        assert!(
+            parsed.is_ok(),
+            "120 levels of nesting parse within CONN_STACK: {parsed:?}"
+        );
     }
 
     /// The cap is exact across block boundaries: a line of `max_bytes` is
