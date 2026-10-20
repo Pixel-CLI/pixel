@@ -158,6 +158,13 @@ fn fit_sun_path(dir: &Path, name: &str, home: &str, short_base: &Path) -> PathBu
 
 /// The per-user directory for socket, pid and lock files.
 fn runtime_dir() -> PathBuf {
+    // Unit tests bind real sockets: keep them out of the user's home.
+    #[cfg(test)]
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+        let dir = std::env::temp_dir().join("pixel-test-sockets");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
     let dir = runtime_dir_from(
         std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
