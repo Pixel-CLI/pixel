@@ -3,10 +3,12 @@
 
 //! The OpenCode integration under `~/.config/opencode/`.
 //!
-//! OpenCode keeps its native tools. `pixel setup` writes one file there: the
-//! evidence-brief plugin `plugins/pixel-brief.js`, recognised by the managed
-//! marker it carries ([`config::MANAGED_BEGIN`]); a file at that path without
-//! the marker is the user's and is never touched.
+//! OpenCode keeps its native tools. `pixel setup` writes two files there: the
+//! evidence-brief plugin `plugins/pixel-brief.js` and the TUI plugin
+//! `plugins/pixel-brief-metrics/tui.js` that shows Pixel's metrics blocks to
+//! the user, each recognised by the managed marker it carries
+//! ([`config::MANAGED_BEGIN`]); a file at either path without the marker is
+//! the user's and is never touched.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,11 @@ use crate::install::{self, CheckStatus, InstallStep, Result};
 /// The evidence-brief plugin `pixel setup` deploys; the `plugins`
 /// directory auto-loads it, so no registration entry is needed.
 const BRIEF_PLUGIN_PATH: &str = "plugins/pixel-brief.js";
+
+/// The TUI plugin that toasts the brief's and each `pixel` call's metrics
+/// block; a directory plugin, which OpenCode loads as a TUI plugin by its
+/// `tui.js` entry.
+const METRICS_PLUGIN_PATH: &str = "plugins/pixel-brief-metrics/tui.js";
 
 /// Whether `path` is a plugin pixel wrote: a file carrying the managed
 /// marker. Anything else under that name belongs to the user, so uninstall
@@ -58,11 +65,23 @@ pub(crate) fn remove_opencode(config_dir: &Path, dry_run: bool) -> Result<Instal
         summary: install::dry_run_summary(dry_run, &summary),
         detail: Some(format!("plugin={}", plugin.display())),
     };
-    if !(plugin.is_file() && is_managed_plugin(&plugin)) {
+    let metrics = config_dir.join(METRICS_PLUGIN_PATH);
+    let managed: Vec<&Path> = [&plugin, &metrics]
+        .into_iter()
+        .filter(|path| path.is_file() && is_managed_plugin(path))
+        .map(PathBuf::as_path)
+        .collect();
+    if managed.is_empty() {
         return Ok(step("no pixel OpenCode plugin — nothing to remove".into()));
     }
     if !dry_run {
-        fs::remove_file(&plugin)?;
+        for path in &managed {
+            fs::remove_file(path)?;
+        }
+        // The metrics plugin's own directory, only once nothing else is in it.
+        if let Some(dir) = metrics.parent() {
+            let _ = fs::remove_dir(dir);
+        }
     }
     Ok(step(format!("removed plugin {}", plugin.display())))
 }
@@ -96,12 +115,37 @@ pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Res
             ),
         ));
     }
-    let source = include_str!("../assets/opencode-brief.js")
-        .replace("__PIXEL_BIN__", &format!("{:?}", exe.display().to_string()))
-        .replace("__MANAGED_BEGIN__", config::MANAGED_BEGIN)
-        .replace("__MANAGED_END__", config::MANAGED_END);
-    let current = fs::read_to_string(&plugin).is_ok_and(|text| text == source);
-    if current {
+    let managed = |asset: &str| {
+        asset
+            .replace("__PIXEL_BIN__", &format!("{:?}", exe.display().to_string()))
+            .replace("__MANAGED_BEGIN__", config::MANAGED_BEGIN)
+            .replace("__MANAGED_END__", config::MANAGED_END)
+    };
+    let metrics = config_dir.join(METRICS_PLUGIN_PATH);
+    if metrics.exists() && !is_managed_plugin(&metrics) {
+        return Ok(step(
+            CheckStatus::Yellow,
+            format!(
+                "{} exists and is not Pixel's; left untouched",
+                metrics.display()
+            ),
+        ));
+    }
+    let files = [
+        (
+            &plugin,
+            managed(include_str!("../assets/opencode-brief.js")),
+        ),
+        (
+            &metrics,
+            managed(include_str!("../assets/opencode-metrics-tui.js")),
+        ),
+    ];
+    let stale: Vec<_> = files
+        .iter()
+        .filter(|(path, source)| fs::read_to_string(path).map_or(true, |text| text != *source))
+        .collect();
+    if stale.is_empty() {
         return Ok(step(
             CheckStatus::Green,
             "the OpenCode prompt brief plugin is current".into(),
@@ -111,18 +155,20 @@ pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Res
         return Ok(step(
             CheckStatus::Green,
             format!(
-                "would write the prompt brief plugin to {}",
+                "would write the prompt brief and metrics plugins to {}",
                 plugin.display()
             ),
         ));
     }
-    if let Some(dir) = plugin.parent() {
-        fs::create_dir_all(dir)?;
+    for (path, source) in stale {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        install::write_atomically(path, source)?;
     }
-    install::write_atomically(&plugin, &source)?;
     Ok(step(
         CheckStatus::Green,
-        "wrote the OpenCode prompt brief plugin".into(),
+        "wrote the OpenCode prompt brief and metrics plugins".into(),
     ))
 }
 
@@ -286,6 +332,81 @@ mod tests {
             !source.contains("let seen")
                 && source.contains("sessions.get(event.sessionID)?.seq === seq"),
             "the newest-prompt guard must be per session, not process-wide"
+        );
+    }
+
+    /// Install writes the brief plugin and the metrics TUI plugin, both
+    /// marked managed, is idempotent, spares a foreign file at the metrics
+    /// path, and uninstall removes both plus the metrics directory.
+    #[test]
+    fn install_writes_both_plugins_and_uninstall_removes_both() {
+        let home = scratch("metrics-install");
+        let dir = config_dir(&home);
+        fs::create_dir_all(&dir).unwrap();
+        let exe = Path::new("/bin/pixel");
+
+        let step = install_brief(&dir, exe, false).unwrap();
+        assert!(step.summary.contains("wrote"), "{}", step.summary);
+        for path in [BRIEF_PLUGIN_PATH, METRICS_PLUGIN_PATH] {
+            let text = fs::read_to_string(dir.join(path)).unwrap();
+            assert!(text.contains(config::MANAGED_BEGIN), "{path} is unmarked");
+            assert!(!text.contains("__MANAGED_"), "{path} kept a placeholder");
+        }
+        let again = install_brief(&dir, exe, false).unwrap();
+        assert!(again.summary.contains("current"), "{}", again.summary);
+
+        remove_opencode(&dir, false).unwrap();
+        assert!(!dir.join(BRIEF_PLUGIN_PATH).exists());
+        assert!(!dir.join(METRICS_PLUGIN_PATH).exists());
+        assert!(!dir.join("plugins/pixel-brief-metrics").exists());
+
+        let foreign = dir.join(METRICS_PLUGIN_PATH);
+        fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+        fs::write(&foreign, "// mine\n").unwrap();
+        let step = install_brief(&dir, exe, false).unwrap();
+        assert!(matches!(step.status, CheckStatus::Yellow), "{step:?}");
+        assert_eq!(fs::read_to_string(&foreign).unwrap(), "// mine\n");
+        assert!(!dir.join(BRIEF_PLUGIN_PATH).exists());
+    }
+
+    /// The metrics path: the brief plugin leaves its `🟩` block, unfiltered,
+    /// in the directory the TUI plugin reads once per turn, and the TUI
+    /// plugin relays a footer only from a call whose own command ran `pixel`.
+    #[test]
+    fn metrics_assets_share_the_handoff_and_stay_off_the_model_channel() {
+        let brief = include_str!("../assets/opencode-brief.js");
+        let tui = include_str!("../assets/opencode-metrics-tui.js");
+        let dir = r#"path.join(os.tmpdir(), "pixel-opencode-brief-metrics")"#;
+        assert!(
+            brief.contains(dir) && tui.contains(dir),
+            "both sides must spell the handoff directory the same way"
+        );
+        assert!(
+            !brief.contains(r#""--metrics""#),
+            "the brief must keep its metrics block to hand to the user"
+        );
+        assert!(
+            brief.contains(r#"err.indexOf("🟩")"#)
+                && brief.contains("text: `${state.brief}\\n${NOTICE}`"),
+            "the metrics block never joins the system part"
+        );
+        assert!(
+            tui.contains("export default {")
+                && tui.contains(r#"id: "pixel.metrics""#)
+                && tui.contains("setup(api)")
+                && tui.contains("api.data.listen")
+                && tui.contains("api.ui.toast.show"),
+            "a V2 TUI plugin: default {{ id, setup }}, event listener, toast"
+        );
+        assert!(
+            tui.contains(r#""session.tool.called""#)
+                && tui.contains(r#""session.tool.success""#)
+                && tui.contains("PIXEL_COMMAND.test(command)"),
+            "only a pixel call's own footer is relayed"
+        );
+        assert!(
+            tui.contains("__MANAGED_BEGIN__") && tui.contains("__MANAGED_END__"),
+            "without the marker uninstall would treat the file as the user's"
         );
     }
 }
