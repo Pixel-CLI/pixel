@@ -136,8 +136,14 @@ Run the focused scorer against a clean checkout of the fixture SHA recorded in
 python3 scripts/bench/bench-brief-spans.py --pixel <pixel> --repo <fixture> --split all --out spans.json
 ```
 
-Before calling the binary, the scorer verifies the fixture commit and rejects
-tracked edits. It sends `pixel brief --json --parts 1` for each annotated
+Before calling the binary, the scorer verifies the fixture commit, rejects
+tracked edits, and checks every annotation against tracked regular source files:
+paths must exist and inclusive line ranges must fit the file. Invalid labels
+stop the run with their question IDs, rather than becoming retrieval failures.
+These checks establish that a range exists; source review must still establish
+that it answers the question. The output records SHA-256 hashes of both input
+files so results from different annotation versions cannot be confused.
+It sends `pixel brief --json --parts 1` for each annotated
 prompt. Each result records the exact brief text, the numbered source lines
 parsed from `answer` and `### path:line[-line] — label` blocks, UTF-8 brief
 bytes, CLI elapsed milliseconds, and a failure category when the invocation
@@ -164,6 +170,13 @@ remain visible. The JSON retains every per-row `brief_text` and parsed
 the run. The current annotations contain 9 `symbol`, 20 `where-behavior`, 4
 `multi-hop`, and no `edit-set` questions. The empty edit-set category is a
 coverage gap, not a zero score.
+
+The [2026-10-21 source audit](answer-spans-audit.md) retains all 33 questions,
+repairs three references to renamed files, and adds missing callers to two
+answers. Historical scores from the earlier labels must be recomputed from
+their saved briefs with the corrected annotations for both arms. Changing the
+labels does not itself improve retrieval, and these already-inspected questions
+are exploratory evidence rather than an unseen evaluation set.
 
 These are annotated-reference measurements, not exhaustive relevance labels
 or SWE-grep parity. Lines outside a gold range count as false positives even
