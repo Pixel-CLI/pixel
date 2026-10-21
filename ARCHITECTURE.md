@@ -1270,8 +1270,11 @@ skipped unless asked. A code-shaped prompt that resolved `defined:` reads the
 definition's range, then its callers' declarations, then the best chunk of the
 top fused files. Its ZERO step (one unambiguous definition of at most 40 lines shown as the answer, `answer::STRONG_ZERO`) is off: 1 of 2 firings was right on dev. The typed text loses its links (`strip_urls`) before the signal is decided, so a pasted `utm_source` is not a code identifier. Ranges come from lines actually read at HEAD, never from a
 credential-shaped path.
-`scripts/bench/bench-brief-excerpt.py` measures excerpt@1 and `scripts/bench/bench-brief-spans.py` the
-ZERO precision and the share of gold spans inside the `read:` ranges. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
+`scripts/bench/bench-brief-excerpt.py` measures excerpt@1. `scripts/bench/bench-brief-spans.py` retains
+the legacy ZERO/read-range overlap counts and measures annotated-reference file/line precision,
+recall and F0.5 from numbered source actually delivered, overall and by question shape. Suggested
+reads earn no source credit; the pinned annotations are not exhaustive relevance judgments.
+A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
 explicit cue (config, setting, env, flag, option, default), not `install` or
 `hook`. That
 block's cap is `PROSE_BRIEF_BYTES` (3584, under OpenCode's 4000-byte plugin
