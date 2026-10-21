@@ -3185,9 +3185,10 @@ mod tests {
         let heads = heads(&pack);
 
         assert!(
-            heads.contains(&"src/api.rs:2-5 — SEARCH_DEFAULT_ROWS definition (const)".to_string()),
+            heads.contains(&"src/api.rs:1-5 — SEARCH_DEFAULT_ROWS definition (const)".to_string()),
             "{heads:?}"
         );
+        assert!(text.contains("1| //! The wire contract."), "{text}");
         assert!(text.contains("2| /// Rows a search returns when the request names no limit."));
         assert!(text.contains("3| pub const SEARCH_DEFAULT_ROWS: usize ="));
         assert!(text.contains("4|     60 +"));

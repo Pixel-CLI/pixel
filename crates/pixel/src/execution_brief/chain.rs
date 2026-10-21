@@ -1700,7 +1700,12 @@ fn pack_evidence(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, dea
         wants_tests: brief.wants_tests,
         wants_docs: brief.wants_docs,
         locators: located,
-        limit: brief.pack_limit,
+        // `render` appends the skill instruction after the pack is fitted.
+        // Reserve its line and the separating newline in every pack part.
+        limit: region_pack::Limit {
+            parts: brief.pack_limit.parts,
+            chars: brief.pack_limit.chars.saturating_sub(SKILL_LINE.len() + 1),
+        },
         seen: brief.seen.clone(),
     };
     let mut publish = |pack: &region_pack::Pack| {
