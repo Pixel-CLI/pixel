@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Replays every Bash call of the no-pixel arm raw and through `rtk rewrite`, in the
 # arm's own clone, and simulates an RTK arm: same agent behaviour, smaller tool output.
 # shortcut: assumes RTK changes no agent decision (favours RTK), upgrade to a live RTK arm if the margin is thin.

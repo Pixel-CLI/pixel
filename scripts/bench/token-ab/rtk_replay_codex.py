@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Codex variant of rtk_replay.py: same simulation, commands parsed from exec_command({cmd:"..."}) calls.
 # shortcut: plugin-skill reads (plugins/cache) are replayed like any command, as RTK would see them.
 import json, sys, glob, os, re, subprocess, tempfile

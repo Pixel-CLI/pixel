@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Per-arm token breakdown of one `arena.sh run-set --agent claude` set, read from each arm's transcript;
 # asserts the sum equals the receipt's total_tokens.
 import json, sys, glob, os, collections
