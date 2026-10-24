@@ -1,0 +1,1 @@
+**pi:** the prompt-submit brief shows as one line, `[pixel brief] N lines (click or ctrl+o to expand)` and its first row, instead of the whole brief in the transcript; a click or ctrl+o opens it and another closes it. What the model receives is unchanged.
