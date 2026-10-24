@@ -3,7 +3,7 @@
 The README embeds `docs/examples/<name>.webp` (GitHub renders animated images
 inline where it will not play a video). The verified parameters that give
 maximum quality at README size (1600×1000 displayed at 800px, ~7.9 MB for
-PixelScope, 120 frames):
+RTOScope, 120 frames):
 
 ```bash
 cd docs/motion
@@ -27,7 +27,7 @@ img2webp -loop 0 -lossless -m 6 -d 67 "$t"/*.png \
 - Never produce the README webp by transcoding an already-lossy webp; always
   re-render from Remotion.
 - Composition id → file name map lives in `docs/motion/scripts/render.sh`
-  (`name_of`); e.g. `PixelScope` → `pixel-scope-comparison.webp`.
+  (`name_of`); e.g. `RTOScope` → `rto-scope-comparison.webp`.
 - A recording replay (not a Remotion composition) may crop each pane to
   fewer terminal columns and show the pair across the README's full column
   width, so the text renders larger: see

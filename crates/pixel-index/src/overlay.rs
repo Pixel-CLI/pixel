@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! In-memory dirty overlay: gram sets for files newer than any shard.

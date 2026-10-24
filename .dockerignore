@@ -9,8 +9,10 @@ node_modules/
 .codex/
 .claude/
 .pixel/
+.rto/
 .env
 .env.*
 **/.env
 **/.env.*
 **/*.pixel-bak.*
+**/*.rto-bak.*

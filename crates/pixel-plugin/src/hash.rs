@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! The digest a trust record binds to: every file of a plugin directory.

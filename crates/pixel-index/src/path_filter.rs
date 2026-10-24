@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! The path filter behind `pixel search-content -g/--glob` and `-t/--type`:

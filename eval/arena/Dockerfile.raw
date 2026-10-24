@@ -1,6 +1,0 @@
-# raw — the reference arm: codex alone, no retrieval tool.
-FROM pixel-arena-base:latest
-ENV ARM_TOOL=raw
-COPY entrypoint.sh /usr/local/bin/arena-entrypoint
-RUN chmod +x /usr/local/bin/arena-entrypoint
-ENTRYPOINT ["/usr/local/bin/arena-entrypoint"]

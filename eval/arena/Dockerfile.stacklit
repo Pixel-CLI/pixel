@@ -1,6 +1,0 @@
-# stacklit arm — glincker stacklit, index + derived map + MCP server.
-FROM pixel-arena-base:latest
-ENV ARM_TOOL=stacklit
-COPY entrypoint.sh /usr/local/bin/arena-entrypoint
-RUN chmod +x /usr/local/bin/arena-entrypoint
-ENTRYPOINT ["/usr/local/bin/arena-entrypoint"]

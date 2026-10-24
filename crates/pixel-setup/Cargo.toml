@@ -1,11 +1,14 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 [package]
 name = "pixel-setup"
-version = "0.9.0"
+version = "0.0.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "The host table: which agents PIXEL serves, their hook events, payloads and envelopes"
 publish = false
 
 [lints]
@@ -13,18 +16,14 @@ workspace = true
 
 [dependencies]
 mutants = { workspace = true }
-pixel-proto = { path = "../pixel-proto" }
-pixel-daemon = { path = "../pixel-daemon" }
-pixel-index = { path = "../pixel-index" }
-pixel-facts = { path = "../pixel-facts" }
-pixel-git = { path = "../pixel-git" }
+pixel-io = { path = "../pixel-io" }
+pixel-model = { path = "../pixel-model" }
 pixel-plugin = { path = "../pixel-plugin" }
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 serde-saphyr = "2.0"
-serde_json = "1"
-sha2 = { workspace = true }
-thiserror = "2"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 toml_edit = "0.25.15"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

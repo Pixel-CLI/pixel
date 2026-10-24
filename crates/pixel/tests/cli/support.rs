@@ -1,349 +1,128 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
-//! Shared fixture plumbing for the CLI contract tests.
-//!
-//! Two rules every module follows through these helpers:
-//!
-//! 1. The binary under test never auto-starts a repo daemon. A daemon is
-//!    detached from its parent (`process_group(0)`) and lives until its idle
-//!    timeout, so one seed `pixel search-content` per fixture left one
-//!    `target/debug/pixel daemon` behind per test: 18 per run of this binary,
-//!    load average past 70 on 8 cores after a few runs.
-//! 2. Every fixture root checks on drop that no daemon is serving it, and
-//!    fails the test when one is. A test that starts a daemon on purpose
-//!    stops it before the fixture goes out of scope.
-//! 3. The binary never runs from the test's own working directory. Cargo
-//!    starts a test in `crates/pixel`, inside this checkout, and the CLI
-//!    appends every invocation to the action log of the repository around
-//!    its path, falling back to its working directory when the path does not
-//!    resolve: a `pixel classify` or a `check-release --repo <missing dir>`
-//!    spawned from there landed in the checkout's own `.pixel/actions.jsonl`
-//!    and drowned the real errors in `pixel action-log --errors-only`.
-//! 4. The binary never reads the developer's home. `HOME` points at an empty
-//!    directory unless the test sets its own: every command compares the
-//!    prompts `pixel setup` deployed there with its own and warns on
-//!    stderr, so a machine that ran another release's install failed every
-//!    test that reads stderr exactly, while CI, with no install, passed.
+//! Shared fixtures: a committed crate to ask questions of, and a command
+//! that cannot touch the checkout or the user's home.
 
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
-/// The built `pixel` binary with daemon auto-start disabled, started from
-/// [`neutral_cwd`] so its action log never reaches this checkout, with
-/// `HOME` at [`neutral_home`]. A test that needs another working directory
-/// or home sets it after this call (the last `current_dir` or `env` wins).
-pub fn pixel_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pixel"));
-    command
-        .env("PIXEL_DAEMON_AUTO_START", "0")
-        .env("HOME", neutral_home())
-        .current_dir(neutral_cwd());
-    command
+/// A temporary directory with an empty home and runtime dir beside the repo.
+pub struct Fixture {
+    pub dir: tempfile::TempDir,
 }
 
-/// The top-level commands `pixel --help` lists: the commands the core
-/// builds in. A rename or a moved name that points at anything else is
-/// answered by the plugin dispatch, not by clap.
-pub fn built_in_commands() -> std::collections::BTreeSet<String> {
-    let out = pixel_command().arg("--help").output().unwrap();
-    assert!(out.status.success(), "{out:?}");
-    let text = String::from_utf8(out.stdout).unwrap();
-    let block = text
-        .split("Commands:")
-        .nth(1)
-        .and_then(|rest| rest.split("Options:").next())
-        .expect("clap help has Commands: then Options:");
-    let names: std::collections::BTreeSet<String> = block
+impl Fixture {
+    pub fn root(&self) -> PathBuf {
+        self.dir.path().join("repo")
+    }
+
+    pub fn home(&self) -> PathBuf {
+        self.dir.path().join("home")
+    }
+
+    fn runtime(&self) -> PathBuf {
+        self.dir.path().join("run")
+    }
+
+    /// `pixel` with this fixture's home, runtime and cache, working in the repo.
+    pub fn pixel(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pixel"));
+        command
+            .args(args)
+            .current_dir(self.root())
+            .env("HOME", self.home())
+            .env("XDG_RUNTIME_DIR", self.runtime())
+            .env("XDG_CACHE_HOME", self.home().join(".cache"))
+            .env("PIXEL_DAEMON_AUTO_START", "0")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Where hosts keep their configuration follows these variables on a
+            // real machine; a test home must not inherit the runner's.
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("CODEX_HOME")
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env_remove("PIXEL_METRICS")
+            .env_remove("PIXEL_BRIEF")
+            .env_remove("PIXEL_BRIEF_STEPS")
+            .env_remove("PIXEL_EDIT_HOOKS")
+            .env_remove("PIXEL_METRICS_ROUND_TRIP_MS");
+        command
+    }
+
+    pub fn run(&self, args: &[&str]) -> Output {
+        self.pixel(args).output().expect("pixel runs")
+    }
+
+    pub fn git(&self, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(self.root())
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    pub fn write(&self, path: &str, text: &str) {
+        let full = self.root().join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+}
+
+pub fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+pub fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// A committed crate: `b::go` calls `a::run`; `tests/it.rs` calls `go`.
+pub fn project() -> Fixture {
+    let fixture = Fixture {
+        dir: tempfile::tempdir().unwrap(),
+    };
+    std::fs::create_dir_all(fixture.root()).unwrap();
+    std::fs::create_dir_all(fixture.home()).unwrap();
+    std::fs::create_dir_all(fixture.runtime()).unwrap();
+    fixture.git(&["init", "-q"]);
+    fixture.write(
+        "Cargo.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    );
+    fixture.write("src/lib.rs", "pub mod a;\npub mod b;\n");
+    fixture.write("src/a.rs", "pub fn run(x: u32) -> u32 {\n    x\n}\n");
+    fixture.write(
+        "src/b.rs",
+        "use crate::a::run;\n\npub fn go() -> u32 {\n    run(1)\n}\n",
+    );
+    fixture.write(
+        "tests/it.rs",
+        "use demo::b::go;\n\nfn t() {\n    go();\n}\n",
+    );
+    fixture.git(&["add", "-A"]);
+    fixture.git(&["commit", "-qm", "one"]);
+    let prepared = fixture.run(&["prepare"]);
+    assert!(prepared.status.success(), "{}", stderr(&prepared));
+    fixture
+}
+
+/// The action-log lines of the fixture, parsed.
+pub fn action_log(root: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(root.join(".pixel/actions.jsonl"))
+        .unwrap_or_default()
         .lines()
-        .filter_map(|line| line.strip_prefix("  "))
-        .filter(|line| !line.starts_with(' '))
-        .filter_map(|line| line.split_whitespace().next())
-        .map(str::to_string)
-        .collect();
-    assert!(names.len() > 20, "help parsing broke: {names:?}");
-    names
-}
-
-/// An empty home, one per test process and created once, like
-/// [`neutral_cwd`]: nothing `pixel setup` deployed on this machine is in it.
-pub fn neutral_home() -> &'static Path {
-    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-cli-neutral-home-{}", std::process::id()));
-        std::fs::create_dir_all(&dir)
-            .unwrap_or_else(|e| panic!("create neutral home {}: {e}", dir.display()));
-        dir
-    })
-}
-
-/// A directory outside every repository, one per test process and created
-/// once: where a command given no path, or a path that does not exist,
-/// records itself. The process id keeps it from colliding with a file or a
-/// directory another process left at a fixed name. It is not removed: a test
-/// binary has no teardown hook, and under nextest each test is its own
-/// process, so the next one could not know when the last user has exited.
-pub fn neutral_cwd() -> &'static Path {
-    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-cli-neutral-cwd-{}", std::process::id()));
-        std::fs::create_dir_all(&dir)
-            .unwrap_or_else(|e| panic!("create neutral cwd {}: {e}", dir.display()));
-        dir
-    })
-}
-
-/// `ps` lines of every `pixel daemon start <root> --foreground` process whose
-/// root is exactly `root`. Process-table based on purpose: a daemon that is
-/// still opening its index has neither socket nor pid file yet, but it is
-/// already a process this test will leak.
-pub fn daemons_serving(root: &Path) -> Vec<String> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,command="])
-        .output()
-        .expect("ps must be runnable");
-    let root = root.to_string_lossy();
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| {
-            line.split(" daemon start ")
-                .nth(1)
-                .and_then(|rest| rest.split_whitespace().next())
-                == Some(root.as_ref())
-        })
-        .map(str::to_string)
+        .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
-}
-
-/// Fail the calling test when a daemon serves `root`; the daemon is
-/// terminated first so a red test does not also heat the machine.
-pub fn assert_no_daemon(root: &Path) {
-    report_leak(root, daemons_serving(root));
-}
-
-/// Terminate and report the daemons found by an earlier scan. Separate from
-/// the scan because a fixture drop scans before deleting its directory: the
-/// daemon notices the deletion and exits within milliseconds, so a rescan
-/// after the deletion would miss the leak the first scan saw.
-fn report_leak(root: &Path, leaked: Vec<String>) {
-    if leaked.is_empty() {
-        return;
-    }
-    for line in &leaked {
-        if let Some(pid) = line.split_whitespace().next() {
-            let _ = Command::new("kill").arg(pid).status();
-        }
-    }
-    panic!(
-        "a pixel daemon outlived the test for {}:\n{}\nrun the binary through support::pixel_command() or stop the daemon before the fixture drops",
-        root.display(),
-        leaked.join("\n")
-    );
-}
-
-/// A throwaway directory under the system temp dir. Dereferences to `Path`;
-/// removed on drop, after the daemon leak check.
-pub struct Scratch(PathBuf);
-
-impl Scratch {
-    /// Create (or recreate) `<temp_dir>/<name>` and canonicalize it, so that
-    /// the path compares equal to the one an auto-started daemon receives.
-    pub fn create(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir.canonicalize().unwrap())
-    }
-
-    /// Fixture name prefixed with the test process id, so parallel test
-    /// binaries never share a directory.
-    pub fn for_test(module: &str, tag: &str) -> Self {
-        Self::create(&format!("{module}-{tag}-{}", std::process::id()))
-    }
-}
-
-impl Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl AsRef<Path> for Scratch {
-    fn as_ref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        // A test that already failed keeps its own panic message; a second
-        // panic inside drop would abort the whole test binary.
-        let leaked = if std::thread::panicking() {
-            Vec::new()
-        } else {
-            daemons_serving(&self.0)
-        };
-        let _ = std::fs::remove_dir_all(&self.0);
-        report_leak(&self.0, leaked);
-    }
-}
-
-/// The one git fixture helper for this crate's CLI suite. It pins
-/// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` to `/dev/null`, so a
-/// developer's global hooks, commit signing or `init.defaultBranch` cannot
-/// reach into a fixture; a suite that grows its own helper loses that.
-pub(crate) fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .status()
-        .unwrap();
-    assert!(status.success(), "git {args:?}");
-}
-
-fn wait_until(what: &str, secs: u64, mut done: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-    while !done() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-}
-
-/// The leak detector must see a real daemon, otherwise every fixture's drop
-/// check passes vacuously and the leak this module exists for comes back
-/// unnoticed.
-#[test]
-fn leak_guard_sees_a_daemon_serving_the_fixture_and_its_stop() {
-    let repo = Scratch::for_test("pixel-support-leak-guard", "daemon");
-    std::fs::write(repo.join("lib.rs"), "pub fn seed() {}\n").unwrap();
-    git(&repo, &["init", "-q"]);
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-q", "-m", "seed"]);
-    assert!(daemons_serving(&repo).is_empty(), "no daemon before start");
-
-    let start = pixel_command()
-        .args(["daemon", "start"])
-        .arg(&*repo)
-        .output()
-        .unwrap();
-    assert!(
-        start.status.success(),
-        "daemon start: {}",
-        String::from_utf8_lossy(&start.stderr)
-    );
-    let serving = daemons_serving(&repo);
-    assert_eq!(
-        serving.len(),
-        1,
-        "exactly one daemon serves the fixture: {serving:?}"
-    );
-    assert!(
-        serving[0].contains("--foreground"),
-        "the match is the detached daemon process, not the start command: {serving:?}"
-    );
-
-    let stop = pixel_command()
-        .args(["daemon", "stop"])
-        .arg(&*repo)
-        .output()
-        .unwrap();
-    assert!(
-        stop.status.success(),
-        "daemon stop: {}",
-        String::from_utf8_lossy(&stop.stderr)
-    );
-    wait_until("daemon process to exit after stop", 10, || {
-        daemons_serving(&repo).is_empty()
-    });
-}
-
-/// A daemon that outlives its fixture is reported as a test failure with the
-/// offending process, not silently reaped.
-#[test]
-fn leak_guard_fails_the_test_when_a_daemon_outlives_the_fixture() {
-    let repo = Scratch::for_test("pixel-support-leak-guard", "leak");
-    std::fs::write(repo.join("lib.rs"), "pub fn seed() {}\n").unwrap();
-    git(&repo, &["init", "-q"]);
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-q", "-m", "seed"]);
-    let start = pixel_command()
-        .args(["daemon", "start"])
-        .arg(&*repo)
-        .output()
-        .unwrap();
-    assert!(start.status.success());
-
-    let root = repo.to_path_buf();
-    let outcome = std::panic::catch_unwind(|| assert_no_daemon(&root));
-    let message = match outcome {
-        Ok(()) => panic!("assert_no_daemon must fail while a daemon serves the fixture"),
-        Err(payload) => payload
-            .downcast_ref::<String>()
-            .cloned()
-            .unwrap_or_else(|| {
-                payload
-                    .downcast_ref::<&str>()
-                    .map(|s| (*s).to_string())
-                    .unwrap_or_default()
-            }),
-    };
-    assert!(
-        message.contains("outlived the test") && message.contains("daemon start"),
-        "failure names the leak and the process: {message}"
-    );
-    wait_until("leaked daemon to be terminated by the guard", 10, || {
-        daemons_serving(&repo).is_empty()
-    });
-}
-
-/// Rule 3: a command whose path does not resolve records itself in the
-/// neutral directory, never in the checkout the suite runs from. The probe's
-/// unique marker keeps both reads immune to anything else writing either log
-/// meanwhile (other tests, a developer's own `pixel` in this checkout).
-#[test]
-fn action_log_of_an_unresolvable_path_lands_in_the_neutral_cwd_not_the_checkout() {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let marker = format!("pixel-neutral-cwd-probe-{}-{nanos}", std::process::id());
-    let missing = std::env::temp_dir().join(&marker);
-    let out = pixel_command()
-        .args(["check-release", "release-candidate", "--repo"])
-        .arg(&missing)
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1), "{out:?}");
-    let logged = |root: &Path| {
-        std::fs::read_to_string(root.join(".pixel/actions.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| line.contains(&marker))
-            .count()
-    };
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    assert_eq!(
-        logged(neutral_cwd()),
-        1,
-        "the probe is recorded once, in the neutral directory"
-    );
-    assert_eq!(
-        logged(&checkout),
-        0,
-        "the probe leaked into {}",
-        checkout.display()
-    );
 }

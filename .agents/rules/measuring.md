@@ -1,5 +1,7 @@
 # Measurements That Can Be Trusted
 
+> Issue and PR numbers (`#262`, …) in this file refer to Pixel's history, where each lesson was learned.
+
 Always loaded: what a number has to carry before it counts as evidence.
 
 Every rule below was written after a claim that was wrong while looking

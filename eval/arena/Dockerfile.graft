@@ -1,7 +1,0 @@
-# graft arm — trailhq Graft, graph built and wired at container start.
-FROM pixel-arena-base:latest
-RUN npm install -g @nanonets/graft
-ENV ARM_TOOL=graft
-COPY entrypoint.sh /usr/local/bin/arena-entrypoint
-RUN chmod +x /usr/local/bin/arena-entrypoint
-ENTRYPOINT ["/usr/local/bin/arena-entrypoint"]

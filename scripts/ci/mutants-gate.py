@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 """Decide whether a `Mutants` run actually gated anything, and say so.
@@ -46,9 +46,9 @@ CONFIG = REPO / ".cargo/mutants.toml"
 
 #: Mutants one shard is sized for. A shard pays about 40 s of setup and a
 #: baseline (35 to 80 s with the shared cache) before its first mutant, then
-#: about 25 s per `pixel-cli` mutant and 10 to 15 s per library mutant. The
+#: about 25 s per `Pixel-CLI` mutant and 10 to 15 s per library mutant. The
 #: pull request waits for the slowest shard, and runners are free on this
-#: public repository, so 10 mutants keep a `pixel-cli` shard near six
+#: public repository, so 10 mutants keep a `Pixel-CLI` shard near six
 #: minutes where 20 take about ten, for one more baseline per 10 mutants.
 MUTANTS_PER_SHARD = 10
 #: Upper bound on parallel shard jobs. Free accounts run 20 jobs at a time,

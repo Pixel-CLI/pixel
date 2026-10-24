@@ -1,0 +1,1 @@
+**core:** Replace the previous engine with the Pixel rewrite, retain its README/site, adapt Arena, use Pixel attribution for new files, and remove package-manager formula distribution. Module briefs avoid duplicate references. Historical CLI/API compatibility is not guaranteed; comparative acceptance and full CI remain unverified.

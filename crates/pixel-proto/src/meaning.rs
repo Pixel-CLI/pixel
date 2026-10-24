@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Typed outcomes of the `meaning` request: natural-language retrieval over

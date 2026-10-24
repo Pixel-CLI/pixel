@@ -40,7 +40,7 @@ The same script. The second line is for the `install.sh` already published on th
     echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"
 ```
 
-New installs use the script; re-running the same `curl … | sh` line updates an existing one. A binary managed by Homebrew or mise keeps being upgraded by its manager.
+New installs use the script; re-running the same `curl … | sh` line updates an existing one. A binary managed by mise keeps being upgraded by its manager.
 
 To build from source, see [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/.github/CONTRIBUTING.md).
 
@@ -48,7 +48,7 @@ Then let your agents use it, and check the result:
 
 ```bash
 pixel setup         # once, from anywhere
-pixel prepare-repo .  # optional: index now; otherwise your first code prompt starts it
+pixel prepare .       # optional: index now; otherwise your first code prompt starts it
 pixel doctor .        # optional: health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
@@ -63,13 +63,13 @@ The index, the code graph and the optional history data live in `.pixel/` at the
 
 Each agent's page under [For your agent](../for/) names the files, the check and the removal, including the agents `pixel setup` writes nothing for. Restart the agent after `pixel setup`; Codex also asks you to review the new hooks with `/hooks`.
 
-Indexing needs no command: a code prompt in a repository with no index starts `pixel prepare-repo` in the background, and the next prompt is briefed. Run `pixel brief "<your question>" .` to see what your agent receives.
+Indexing needs no command: a code prompt in a repository with no index starts `pixel prepare` in the background, and the next prompt is briefed. Run `pixel brief "<your question>" .` to see what your agent receives.
 
-`pixel setup --remove` removes everything `pixel setup` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it; `--dry-run` lists it first. A package manager removes its own copy: uninstall with the manager that owns it (`mise uninstall pixel`, or the Homebrew equivalent).
+`pixel setup --remove` removes everything `pixel setup` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it; `--dry-run` lists it first. A mise-managed copy is removed with `mise uninstall pixel`.
 
 ### Per repository
 
-`pixel setup --repo <path>` skips every global step and creates `<repo>/.pixel/config.yaml`, a commented template for the settings that may differ in that repository; the global file is `~/.pixel/config.yaml`, and `pixel config` shows each effective value and the file it comes from. Pixel registers no hook or guard inside a repository, so nothing else is written under it.
+Repository settings live in `<repo>/.pixel/config.yaml`; global defaults live in `~/.pixel/config.yaml`. Run `pixel config` in the repository to inspect the effective settings. `pixel setup` installs host integrations globally; it has no `--repo` mode.
 
 Retrieval stays native: nothing Pixel registers answers, rewrites or denies a search or a read. [Pi integration](https://github.com/Pixel-CLI/pixel/blob/main/docs/pi-harness.md) describes the `/pixel-impact` package. `pixel doctor <repo>` checks the install and this repository's index.
 

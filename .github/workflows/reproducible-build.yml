@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 name: Reproducible build
@@ -67,7 +67,7 @@ env:
 jobs:
   twice:
     name: Build twice and compare
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -89,7 +89,7 @@ jobs:
 
       # The version release-build.yml pins.
       - name: Install cross
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cross@0.2.5
 
@@ -100,7 +100,7 @@ jobs:
           env_lines=$(scripts/release/release-build-env.sh)
           eval "$env_lines"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=$RUSTFLAGS"
-          cross build --release --locked --no-default-features --features model2vec --target "$TARGET" -p pixel-cli
+          cross build --release --locked --target "$TARGET" -p pixel
           sha256sum "target/$TARGET/release/pixel" | cut -d' ' -f1 > "$RUNNER_TEMP/first.sha256"
 
       - name: Build in the second checkout
@@ -109,7 +109,7 @@ jobs:
           env_lines=$(scripts/release/release-build-env.sh)
           eval "$env_lines"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=$RUSTFLAGS"
-          cross build --release --locked --no-default-features --features model2vec --target "$TARGET" -p pixel-cli
+          cross build --release --locked --target "$TARGET" -p pixel
           sha256sum "target/$TARGET/release/pixel" | cut -d' ' -f1 > "$RUNNER_TEMP/second.sha256"
 
       - name: Compare

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! The response envelope: "Envelope v2" from `PLAN.md`'s Part A design,

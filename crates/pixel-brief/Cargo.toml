@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: The RTO contributors
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "pixel-brief"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The prompt brief: gate, route, recipe, region pack and render, over an Evidence trait"
+
+[lints]
+workspace = true
+
+[dependencies]
+mutants = { workspace = true }
+libc = "0.2"
+regex = "1"
+pixel-io = { path = "../pixel-io" }
+pixel-metrics = { path = "../pixel-metrics" }
+pixel-model = { path = "../pixel-model" }
+pixel-plugin = { path = "../pixel-plugin" }
+serde_json = { workspace = true }
+toml_edit = "0.25.15"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile = { workspace = true }

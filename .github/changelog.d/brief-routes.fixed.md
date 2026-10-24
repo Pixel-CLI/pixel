@@ -1,0 +1,1 @@
+**brief:** routes a quoted commit title to history, `what does the code do with X` to a lookup, `which crates … depend on` to the overview and an upper-case env-var token to config; a review that names its commit reads that commit.

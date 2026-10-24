@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Index orchestration for Phase 1: walk a tree, build a shard, search it.
@@ -21,16 +21,15 @@ use crate::posting::resolve_query;
 use crate::shard::{Shard, ShardBuilder, ShardError};
 use crate::verify::{MatchLine, Verifier, VerifyError};
 
-/// Pixel's per-repository state directory (`pixel_git::sidecar`).
-pub const SHARD_DIR: &str = pixel_git::sidecar::DIR_NAME;
+/// PIXEL's per-repository state directory (`pixel_io::sidecar`).
+pub const SHARD_DIR: &str = pixel_io::sidecar::DIR_NAME;
 pub const SHARD_FILE: &str = "base.shard";
 pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Directory names never walked for indexing: version-control internals,
 /// pixel's own sidecar, and dependency/build-output trees. These are the
 /// dirs we never want to burn CPU on — committed vendored deps (`Pods`,
-/// `vendor`) and gitless trees (no `.gitignore` anchoring) included. Set
-/// `PIXEL_INDEX_NO_DEFAULT_IGNORES=1` to index them anyway.
+/// `vendor`) and gitless trees (no `.gitignore` anchoring) included.
 pub const DEFAULT_IGNORED_DIRS: &[&str] = &[
     ".git",
     SHARD_DIR,
@@ -63,61 +62,6 @@ pub fn is_ignored_dir_name(name: &str) -> bool {
     DEFAULT_IGNORED_DIRS.contains(&name)
 }
 
-/// Path-safety predicate shared by every consumer that surfaces an indexed
-/// file's contents (search daemon, guard's native-command rewrite):
-/// a tracked, non-ignored `.env` / `id_rsa` / `*.pem` is a
-/// place the user almost certainly does not want echoed back. Eligibility
-/// is metadata-only — content stays for the execution side — and a positive
-/// answer here never claims to detect every secret.
-///
-/// A `pub fn` in the index crate is the only home the workspace has that
-/// every reader already imports: `pixel` (CLI) and `pixel-daemon` both
-/// depend on `pixel-index`, and `pixel-daemon` cannot depend on `pixel`
-/// (circular). Suffix/name based by design; `search_compat::credential_path`
-/// delegates here.
-pub fn credential_path(path: &Path) -> bool {
-    if path.components().any(|part| {
-        part.as_os_str()
-            .to_str()
-            .is_some_and(|s| s.eq_ignore_ascii_case("secrets"))
-    }) {
-        return true;
-    }
-    let name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    name.starts_with(".env")
-        || name.ends_with(".env")
-        || name.starts_with("credentials.")
-        // `~/.aws/credentials`, `~/.netrc`, git's credential store.
-        || matches!(
-            name.as_str(),
-            "credentials" | ".netrc" | "_netrc" | ".git-credentials"
-        )
-        // Extensionless too: `secret_token` or `client_secret` holds the
-        // value itself as often as `app_secret.yaml` does.
-        || name.contains("secret")
-        || name == "serviceaccountkey.json"
-        || name.ends_with("-credentials.json")
-        || [
-            ".pem",
-            ".key",
-            ".p12",
-            ".pfx",
-            ".jks",
-            ".keystore",
-            ".truststore",
-            "_rsa",
-            "_dsa",
-            "_ecdsa",
-            "_ed25519",
-        ]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
-}
-
 /// The single walk policy shared by every indexing/freshness walk (shard
 /// build, plain-tree signature, graph collect/freshness): hidden entries are
 /// included, default-ignored dirs are pruned, and `.gitignore`/`.ignore`
@@ -141,10 +85,6 @@ fn policy_builder(
     start: &Path,
     keep: impl Fn(&ignore::DirEntry) -> bool + Send + Sync + 'static,
 ) -> ignore::WalkBuilder {
-    let prune_default = !matches!(
-        std::env::var("PIXEL_INDEX_NO_DEFAULT_IGNORES").as_deref(),
-        Ok("1") | Ok("true")
-    );
     let mut builder = ignore::WalkBuilder::new(start);
     builder
         .hidden(false)
@@ -155,7 +95,7 @@ fn policy_builder(
             if name == ".git" || name == SHARD_DIR {
                 return false;
             }
-            !(prune_default && is_ignored_dir_name(&name)) && keep(e)
+            !is_ignored_dir_name(&name) && keep(e)
         });
     builder
 }
@@ -208,29 +148,27 @@ pub fn indexable_subset(root: &Path, files: &HashSet<String>) -> HashSet<String>
         .collect()
 }
 
-/// Time budget for the un-anchored plain-walk build (see [`build_with_budget`]).
+/// Time budget for the un-anchored plain-walk build (see [`build_with`]).
 pub const DEFAULT_BUILD_BUDGET_MS: u64 = 5_000;
 /// Total extracted-bytes budget for the same path (memory bound).
 pub const DEFAULT_BUILD_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
-fn env_u64(name: &str) -> Option<u64> {
-    std::env::var(name).ok()?.trim().parse().ok()
+/// The limits of a plain-walk build. A value, never read from the process
+/// environment: the caller (the daemon, from its config) decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexConfig {
+    /// Wall-clock budget; `None` disables it.
+    pub budget: Option<std::time::Duration>,
+    /// Cap on the total bytes extracted; `None` disables it.
+    pub max_total_bytes: Option<u64>,
 }
 
-/// Plain-walk build budget: `PIXEL_INDEX_BUDGET_MS` (`0` disables) or 5s.
-pub fn build_budget_from_env() -> Option<std::time::Duration> {
-    match env_u64("PIXEL_INDEX_BUDGET_MS") {
-        Some(0) => None,
-        Some(ms) => Some(std::time::Duration::from_millis(ms)),
-        None => Some(std::time::Duration::from_millis(DEFAULT_BUILD_BUDGET_MS)),
-    }
-}
-
-fn build_max_bytes_from_env() -> Option<u64> {
-    match env_u64("PIXEL_INDEX_MAX_BYTES") {
-        Some(0) => None,
-        Some(n) => Some(n),
-        None => Some(DEFAULT_BUILD_MAX_BYTES),
+impl Default for IndexConfig {
+    fn default() -> Self {
+        IndexConfig {
+            budget: Some(std::time::Duration::from_millis(DEFAULT_BUILD_BUDGET_MS)),
+            max_total_bytes: Some(DEFAULT_BUILD_MAX_BYTES),
+        }
     }
 }
 
@@ -241,8 +179,7 @@ fn budget_time_error(
 ) -> IndexError {
     IndexError::Budget(format!(
         "index build exceeded its time budget: stopped after {:.1}s (budget {:.1}s), {} files walked, no shard written. \
-         Scope pixel at a git repo (a `.git` bounds the file set), raise the budget with \
-         PIXEL_INDEX_BUDGET_MS=<ms> (0 disables), or set PIXEL_INDEX_NO_DEFAULT_IGNORES=1 if default-ignored dirs were the cause.",
+         Scope pixel at a git repo (a `.git` bounds the file set) or raise `index.budget_ms` in the pixel config.",
         elapsed.as_secs_f32(),
         budget.as_secs_f32(),
         files
@@ -252,7 +189,7 @@ fn budget_time_error(
 fn budget_bytes_error(files: usize, bytes: u64, cap: u64) -> IndexError {
     IndexError::Budget(format!(
         "index build exceeded its total-size cap: {} files / {:.2} GB > cap {:.2} GB, no shard written. \
-         Raise PIXEL_INDEX_MAX_BYTES=<bytes> (0 disables) or scope pixel at a git repo.",
+         Raise `index.max_bytes` in the pixel config or scope pixel at a git repo.",
         files,
         bytes as f32 / 1e9,
         cap as f32 / 1e9
@@ -353,26 +290,26 @@ pub fn shard_path(root: &Path) -> PathBuf {
 /// Walk `root` (policy_walk: default-ignored dirs pruned, gitignore honored
 /// even in gitless trees), extract grams in parallel, write the shard.
 ///
-/// The plain-walk build runs under the time budget from
-/// [`build_budget_from_env`] and the total-bytes cap from
-/// [`build_max_bytes_from_env`] — with no commit OID bounding the file set,
-/// a huge or mis-rooted tree would otherwise walk and extract for minutes
-/// and eat gigabytes. On budget exhaustion it fails with
-/// [`IndexError::Budget`] instead of writing a partial shard.
+/// The plain-walk build runs under `config`'s time budget and total-bytes
+/// cap: with no commit OID bounding the file set, a huge or mis-rooted tree
+/// would otherwise walk and extract for minutes and eat gigabytes. On budget
+/// exhaustion it fails with [`IndexError::Budget`] instead of writing a
+/// partial shard.
 pub fn build(root: &Path, extractor: &dyn GramExtractor) -> Result<BuildStats, IndexError> {
-    build_with_budget(root, extractor, build_budget_from_env())
+    build_with(root, extractor, &IndexConfig::default())
 }
 
-pub fn build_with_budget(
+/// [`build`] under the limits of `config`.
+pub fn build_with(
     root: &Path,
     extractor: &dyn GramExtractor,
-    budget: Option<std::time::Duration>,
+    config: &IndexConfig,
 ) -> Result<BuildStats, IndexError> {
-    build_with_caps(root, extractor, budget, build_max_bytes_from_env())
+    build_with_caps(root, extractor, config.budget, config.max_total_bytes)
 }
 
-/// [`build_with_budget`] with the total-size cap passed in rather than read
-/// from `PIXEL_INDEX_MAX_BYTES` (`None` disables it).
+/// [`build`] with the budget and the total-size cap passed apart (`None`
+/// disables either).
 fn build_with_caps(
     root: &Path,
     extractor: &dyn GramExtractor,
@@ -598,8 +535,7 @@ pub fn search(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gram::SparseGramExtractor;
-    use crate::weights::Crc32Weigher;
+    use crate::gram::TrigramExtractor;
 
     /// `GIT_CONFIG_GLOBAL` is process-global: the one test that points it at a
     /// private git config holds this lock, and the `ignore` crate only reads
@@ -620,7 +556,7 @@ mod tests {
         std::fs::write(dir.join("note.txt"), "no calls here\n").unwrap();
         std::fs::write(dir.join("blob.bin"), b"handleClick\x00").unwrap();
 
-        let ex = SparseGramExtractor::new(Crc32Weigher);
+        let ex = TrigramExtractor;
         let stats = build(&dir, &ex).unwrap();
         assert_eq!(stats.files, 3, "binary file must be excluded");
 
@@ -655,7 +591,7 @@ mod tests {
         std::fs::write(dir.join("Pods/ZoomSDK/p.m"), "vendoredPodUniqueFn();\n").unwrap();
         std::fs::write(dir.join("target/debug/x.rs"), "vendoredTargetUniqueFn();\n").unwrap();
 
-        let ex = SparseGramExtractor::new(Crc32Weigher);
+        let ex = TrigramExtractor;
         let stats = build(&dir, &ex).unwrap();
         assert_eq!(
             stats.files, 1,
@@ -685,7 +621,7 @@ mod tests {
         std::fs::write(dir.join("keep.rs"), "fn keptFunction() {}\n").unwrap();
         std::fs::write(dir.join("secrets.txt"), "gitlessIgnoredUniqueToken()\n").unwrap();
 
-        let ex = SparseGramExtractor::new(Crc32Weigher);
+        let ex = TrigramExtractor;
         // `.gitignore` itself is hidden-but-indexed content, so 2 files.
         let stats = build(&dir, &ex).unwrap();
         assert_eq!(
@@ -708,8 +644,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.rs"), "fn budgetTripFn() {}\n").unwrap();
 
-        let ex = SparseGramExtractor::new(Crc32Weigher);
-        let err = match build_with_budget(&dir, &ex, Some(std::time::Duration::ZERO)) {
+        let ex = TrigramExtractor;
+        let zero = IndexConfig {
+            budget: Some(std::time::Duration::ZERO),
+            ..IndexConfig::default()
+        };
+        let err = match build_with(&dir, &ex, &zero) {
             Err(e) => e,
             Ok(_) => panic!("zero budget must trip"),
         };
@@ -811,73 +751,6 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// `credential_path` is the single predicate the daemon filter and the
-    /// search-compat guard share. Every name
-    /// listed here must have a sibling test that would FAIL if the
-    /// predicate silently grew a typo or lost a suffix — a positive answer
-    /// here decides whether an `.env` byte reaches the caller's stdout.
-    #[test]
-    fn credential_path_matches_every_shape_in_the_predicate() {
-        let positives = [
-            ".env",
-            ".env.local",
-            "config/.env",
-            "production.env",
-            "credentials.json",
-            "credentials.prod.json",
-            "config/secrets/db.json",
-            "nested/secrets/x.json",
-            "serviceAccountKey.json",
-            "service-account-credentials.json",
-            "tls.pem",
-            "tls.key",
-            "keystore.p12",
-            "trust.pfx",
-            "trust.jks",
-            "server.keystore",
-            "client.truststore",
-            "id_rsa",
-            "id_dsa",
-            "id_ecdsa",
-            "id_ed25519",
-            "deploy_key_rsa",
-            "config/app_secret.yaml",
-            // Extensionless secret-named files carry the value itself.
-            "secret_token",
-            "deploy/client_secret",
-            ".aws/credentials",
-            "credentials",
-            ".netrc",
-            "home/_netrc",
-            ".git-credentials",
-            "SECRET",
-        ];
-        for path in positives {
-            assert!(
-                credential_path(Path::new(path)),
-                "expected `credential_path({path:?}) == true`"
-            );
-        }
-        let negatives = [
-            "src/main.rs",
-            "src/credentials_helper.rs",
-            "src/credentials_store/mod.rs",
-            "netrc.md",
-            ".git-credentials-helper.sh",
-            "Cargo.toml",
-            "config.yaml",
-            "deploy/notes.md",
-            "keymap.json",
-            "src/server.pem.bak",
-        ];
-        for path in negatives {
-            assert!(
-                !credential_path(Path::new(path)),
-                "expected `credential_path({path:?}) == false`"
-            );
-        }
-    }
-
     #[test]
     fn regular_bounded_reads_accept_a_file_of_exactly_the_cap() {
         let dir = std::env::temp_dir().join(format!("gpx-index-bounded-{}", std::process::id()));
@@ -914,7 +787,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.rs"), "fn byteCapFn() {}\n").unwrap();
         let len = std::fs::metadata(dir.join("a.rs")).unwrap().len();
-        let ex = SparseGramExtractor::new(Crc32Weigher);
+        let ex = TrigramExtractor;
         let stats = build_with_caps(&dir, &ex, None, Some(len)).unwrap();
         assert_eq!(stats.files, 1);
         let err = match build_with_caps(&dir, &ex, None, Some(len - 1)) {

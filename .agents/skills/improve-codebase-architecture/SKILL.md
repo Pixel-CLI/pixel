@@ -104,7 +104,7 @@ Every card carries its **cost in this repo**, measured, not guessed:
 
 - **Mutants**: `cargo mutants --list -f <file> | wc -l` per file the
   refactor rewrites (about 2 s, builds nothing). A rewrite re-mutates every
-  function it touches; CI pays about 25 s per `pixel-cli` mutant and 10 to
+  function it touches; CI pays about 25 s per `Pixel-CLI` mutant and 10 to
   15 s per library-crate mutant (`.agents/rules/test-campaigns.md`).
 - **Size**: an estimated diff; over roughly 400 lines it is a PR stack, and
   the card says how it splits.

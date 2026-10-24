@@ -1,0 +1,1 @@
+A question like "which tests cover validations in the Purchase model?" no longer anchors the region pack on a name that spells "cover" (`coverUrlForThumbnail`): the words that only say what is asked stay out of the names the pack spells.

@@ -1,0 +1,1 @@
+**pi:** `/skill:name <text>` no longer briefs the skill's own body: pi hands extensions the expanded `<skill …>…</skill>` block followed by the text, and the brief now searches only the text (a bare `/skill:name` gets no brief).

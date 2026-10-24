@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Delta-layer state sidecar (`.pixel/state.json`).
@@ -57,7 +57,7 @@ impl DeltaState {
     }
 
     pub fn save(&self, gitpixel_dir: &Path) -> std::io::Result<()> {
-        pixel_git::sidecar::private_dir(gitpixel_dir)?;
+        pixel_io::sidecar::private_dir(gitpixel_dir)?;
         let tmp = state_path(gitpixel_dir).with_extension("json.tmp");
         match std::fs::remove_file(&tmp) {
             Ok(()) => {}

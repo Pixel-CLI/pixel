@@ -1,7 +1,7 @@
 Closes #<issue number>
 
 <!-- `Closes #<n>` links this PR to its issue: GitHub closes the issue on
-merge and board-sync.yml moves it on project 3. Use `Refs #<n>` when this
+merge. Use `Refs #<n>` when this
 PR does only part of the issue. Only a typo fix, a CI rerun or an
 emergency revert goes without an issue: then replace the line with why.
 Keep prose brief; delete these comments. See .github/CONTRIBUTING.md,

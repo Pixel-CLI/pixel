@@ -36,7 +36,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement, the maintainers listed in [GOVERNANCE.md](GOVERNANCE.md), privately through the contact details on their GitHub profiles ([@LivioGama](https://github.com/LivioGama), [@navidemad](https://github.com/navidemad)). Do not report it in a public issue; a report about one maintainer can go to the other alone. All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement, the maintainers listed in [GOVERNANCE.md](GOVERNANCE.md), privately through the contact details on their GitHub profiles ([@Pixel-CLI](https://github.com/Pixel-CLI), [@navidemad](https://github.com/navidemad)). Do not report it in a public issue; a report about one maintainer can go to the other alone. All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 

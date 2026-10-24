@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! `pixel workspace` — a named set of repositories that graph ops can fan
@@ -14,11 +14,12 @@
 
 use std::path::{Path, PathBuf};
 
-use pixel_index::index::SHARD_DIR;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use pixel_daemon::api::Request;
+use pixel_daemon::Request;
+
+use crate::commands::Done;
 
 const WORKSPACE_FILE: &str = "workspace.json";
 
@@ -29,7 +30,7 @@ struct Registry {
 }
 
 fn registry_path(root: &Path) -> PathBuf {
-    root.join(SHARD_DIR).join(WORKSPACE_FILE)
+    root.join(pixel_io::sidecar::DIR_NAME).join(WORKSPACE_FILE)
 }
 
 fn load(root: &Path) -> Result<Registry, String> {
@@ -46,12 +47,12 @@ fn load(root: &Path) -> Result<Registry, String> {
 fn save(root: &Path, registry: &Registry) -> Result<(), String> {
     let path = registry_path(root);
     if let Some(dir) = path.parent() {
-        pixel_git::sidecar::private_dir(dir).map_err(|e| format!("workspace dir: {e}"))?;
+        pixel_io::sidecar::private_dir(dir).map_err(|e| format!("workspace dir: {e}"))?;
     }
     let bytes = serde_json::to_vec_pretty(registry).map_err(|e| e.to_string())?;
     // A fresh temporary file renamed over the name: a link committed at
     // either name is replaced, never written through.
-    pixel_git::nofollow::write_replace(&path, &bytes, pixel_git::nofollow::PRIVATE_MODE)
+    pixel_io::nofollow::write_replace(&path, &bytes, pixel_io::nofollow::PRIVATE_MODE)
         .map_err(|e| format!("workspace write: {e}"))
 }
 
@@ -62,16 +63,20 @@ pub fn members(root: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Every member's answer to the same op, in registry order. A failing
-/// member is captured as an error entry — one broken checkout must not
-/// hide the rest of the workspace.
-pub fn fan_out(root: &Path, op: &dyn Fn() -> Request) -> Result<Vec<Value>, String> {
+/// member is captured as an error entry: one broken checkout must not hide
+/// the rest of the workspace.
+pub fn fan_out(
+    root: &Path,
+    op: &dyn Fn() -> Request,
+    ask: &dyn Fn(&Path, Request) -> Result<Value, String>,
+) -> Result<Vec<Value>, String> {
     let members = members(root)?;
     if members.is_empty() {
-        return Err("no workspace members — `pixel workspace add <repo>` first".to_string());
+        return Err("no workspace members: `pixel workspace add <repo>` first".to_string());
     }
     Ok(members
         .iter()
-        .map(|member| match crate::execute(member, op(), false) {
+        .map(|member| match ask(member, op()) {
             Ok(data) => json!({"repo": member.display().to_string(), "ok": true, "data": data}),
             Err(e) => {
                 json!({"repo": member.display().to_string(), "ok": false, "error": e})
@@ -80,80 +85,79 @@ pub fn fan_out(root: &Path, op: &dyn Fn() -> Request) -> Result<Vec<Value>, Stri
         .collect())
 }
 
-/// Merged output for a fanned-out op: text prints one section per member,
-/// json emits the structured envelope.
-pub fn print_fan_out(results: &[Value], json: bool) -> Result<(), String> {
-    if json {
-        let out = json!({"results": results});
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
-        );
-        return Ok(());
-    }
+/// Merged output for a fanned-out op: text prints one section per member
+/// (`render` shows a member's data), json emits the structured envelope.
+pub fn fan_out_done(results: &[Value], json: bool, render: &dyn Fn(&Value) -> String) -> Done {
+    let value = json!({"results": results});
+    let mut text = String::new();
     for result in results {
         let repo = result["repo"].as_str().unwrap_or("?");
-        println!("== {repo} ==");
+        text.push_str(&format!("== {repo} ==\n"));
         match result["ok"].as_bool() {
-            Some(true) => println!(
-                "{}",
-                serde_json::to_string_pretty(&result["data"]).map_err(|e| e.to_string())?
-            ),
-            _ => println!("error: {}", result["error"].as_str().unwrap_or("unknown")),
+            Some(true) => text.push_str(&render(&result["data"])),
+            _ => text.push_str(&format!(
+                "error: {}\n",
+                result["error"].as_str().unwrap_or("unknown")
+            )),
         }
     }
-    Ok(())
+    Done::new(value, text, json)
 }
 
-pub fn run(cmd: WorkspaceCmd) -> Result<(), String> {
+/// The repository holding the registry: the one `path` is in, else `path`.
+pub(crate) fn root_of(path: &Path) -> PathBuf {
+    crate::client::discover_root(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub(crate) fn run(cmd: &WorkspaceCmd) -> Result<Done, String> {
+    let said = |text: String| {
+        Ok(Done::new(
+            json!({"workspace": text}),
+            format!("{text}\n"),
+            false,
+        ))
+    };
     match cmd {
         WorkspaceCmd::Add { member, path } => {
             let member = member
                 .canonicalize()
                 .map_err(|e| format!("workspace add: {}: {e}", member.display()))?;
-            let mut registry = load(&path)?;
+            let mut registry = load(&root_of(path))?;
             if !registry.members.contains(&member) {
                 registry.members.push(member.clone());
-                save(&path, &registry)?;
+                save(&root_of(path), &registry)?;
             }
-            println!("workspace: added {}", member.display());
-            Ok(())
+            said(format!("workspace: added {}", member.display()))
         }
         WorkspaceCmd::Remove { member, path } => {
             let member = member
                 .canonicalize()
                 .map_err(|e| format!("workspace remove: {}: {e}", member.display()))?;
-            let mut registry = load(&path)?;
+            let mut registry = load(&root_of(path))?;
             let before = registry.members.len();
             registry.members.retain(|m| m != &member);
             if registry.members.len() == before {
                 return Err(format!("workspace: {} is not a member", member.display()));
             }
-            save(&path, &registry)?;
-            println!("workspace: removed {}", member.display());
-            Ok(())
+            save(&root_of(path), &registry)?;
+            said(format!("workspace: removed {}", member.display()))
         }
         WorkspaceCmd::List { path, json } => {
-            let members = members(&path)?;
-            if json {
-                let out = json!({"members": members.iter().map(|m| m.display().to_string()).collect::<Vec<_>>()});
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
-                );
-            } else if members.is_empty() {
-                println!("workspace: no members — `pixel workspace add <repo>`");
+            let members = members(&root_of(path))?;
+            let value = json!({"members": members.iter().map(|m| m.display().to_string()).collect::<Vec<_>>()});
+            let text = if members.is_empty() {
+                "workspace: no members; `pixel workspace add <repo>`\n".to_owned()
             } else {
-                for m in &members {
-                    println!("{}", m.display());
-                }
-            }
-            Ok(())
+                members
+                    .iter()
+                    .map(|m| format!("{}\n", m.display()))
+                    .collect()
+            };
+            Ok(Done::new(value, text, *json))
         }
         WorkspaceCmd::Clear { path } => {
-            save(&path, &Registry::default())?;
-            println!("workspace: cleared");
-            Ok(())
+            save(&root_of(path), &Registry::default())?;
+            said("workspace: cleared".to_owned())
         }
     }
 }
@@ -202,12 +206,12 @@ mod tests {
     fn add_dedups_and_remove_reports_non_members() {
         let root = scratch("members");
         let member = scratch("member");
-        run(WorkspaceCmd::Add {
+        run(&WorkspaceCmd::Add {
             member: member.clone(),
             path: root.clone(),
         })
         .unwrap();
-        run(WorkspaceCmd::Add {
+        run(&WorkspaceCmd::Add {
             member: member.clone(),
             path: root.clone(),
         })
@@ -215,13 +219,13 @@ mod tests {
         assert_eq!(members(&root).unwrap().len(), 1);
         let stranger = scratch("stranger");
         assert!(
-            run(WorkspaceCmd::Remove {
+            run(&WorkspaceCmd::Remove {
                 member: stranger,
                 path: root.clone(),
             })
             .is_err()
         );
-        run(WorkspaceCmd::Remove {
+        run(&WorkspaceCmd::Remove {
             member,
             path: root.clone(),
         })
@@ -233,7 +237,7 @@ mod tests {
     #[test]
     fn empty_workspace_fans_out_to_an_error() {
         let root = scratch("empty");
-        let result = fan_out(&root, &|| Request::Status {});
+        let result = fan_out(&root, &|| Request::Status {}, &|_, _| Ok(json!({})));
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 name: Cancel stale runs
@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   cancel:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       # actions/checkout of main.

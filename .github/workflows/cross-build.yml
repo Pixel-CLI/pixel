@@ -1,11 +1,11 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 name: Cross-build
 
 # The release lanes, built exactly as release-build.yml builds them: musl through
-# cross (--locked, model2vec only) and aarch64-apple-darwin natively. The Test job's `cargo check` of that feature
-# set runs on glibc and cannot see a dependency that fails to link against
+# cross (--locked) and aarch64-apple-darwin natively. The Test job's `cargo check` of the default features
+# runs on glibc and cannot see a dependency that fails to link against
 # musl or a Cargo.lock that --locked rejects, so this is the only job that
 # proves the Linux release feature set links. It runs on every push to main and on the
 # pull requests that can change the outcome; a docs, prompt or script PR
@@ -57,7 +57,7 @@ jobs:
     name: Cross-build ${{ matrix.target }} (${{ matrix.profile }})
     needs: scope
     if: needs.scope.outputs.release-prepare != 'true'
-    runs-on: ${{ matrix.target == 'aarch64-apple-darwin' && 'macos-15' || 'ubuntu-26.04' }}
+    runs-on: ${{ matrix.target == 'aarch64-apple-darwin' && 'macos-15' || 'ubuntu-latest' }}
     # A pull request into main builds `dev-release` (release without thin LTO
     # and with 16 codegen units): the lane still has to link against musl
     # with the release feature set and a --locked Cargo.lock, which is what
@@ -157,7 +157,7 @@ jobs:
       # run can read the default branch's caches, never another tag's.
       - name: Cache Rust build
         if: steps.dup.outputs.duplicate != 'true'
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # PRs read the cache but never write it: only merges into main
           # refresh the shared entries, so one PR cannot thrash
@@ -177,24 +177,22 @@ jobs:
       # toolchain, so no host musl-tools/perl/make are needed.
       - name: Install cross
         if: runner.os == 'Linux' && steps.dup.outputs.duplicate != 'true'
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           # The version release-build.yml pins.
           tool: cross@0.2.5
 
       # Must match release-build.yml exactly, but for the profile (see the
-      # job comment): fastembed (ONNX) has no musl build, but model2vec is pure
-      # Rust and ships in the Linux release. Building without it here would
-      # leave the released feature set untested.
-      - name: Cross-build (model2vec only — ort-sys has no musl prebuilts)
+      # job comment).
+      - name: Cross-build
         if: runner.os == 'Linux' && steps.dup.outputs.duplicate != 'true'
-        run: cross build --profile ${{ matrix.profile }} --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
+        run: cross build --profile ${{ matrix.profile }} --locked --target ${{ matrix.target }} -p pixel
 
       # Must match release-build.yml's macOS step exactly, but for the profile:
       # default features, native.
       - name: Build (macOS native)
         if: runner.os == 'macOS' && steps.dup.outputs.duplicate != 'true'
-        run: cargo build --profile ${{ matrix.profile }} --locked --target ${{ matrix.target }} -p pixel-cli
+        run: cargo build --profile ${{ matrix.profile }} --locked --target ${{ matrix.target }} -p pixel
 
       # release-build.yml's packaging split, on every lane: the release tag is
       # the only run of the Package step, so a strip tool that is missing, a

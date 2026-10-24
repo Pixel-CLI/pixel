@@ -22,7 +22,7 @@ Always loaded: how to run the long gates without losing an afternoon.
   lists zero mutants, which reads like good news. Commit first, then write
   the diff.
 - **Do not throttle the CLI suite.** `RUST_TEST_THREADS=4` made the
-  process-spawning `pixel-cli` tests four times slower per mutant; the
+  process-spawning `Pixel-CLI` tests four times slower per mutant; the
   default thread count is right, and a flaky baseline is re-run, not
   worked around.
 - **Watch the disk.** Every mutant rebuilds incrementally; `target/debug`

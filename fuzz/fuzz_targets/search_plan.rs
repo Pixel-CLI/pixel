@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The RTO contributors
+// SPDX-License-Identifier: MIT
+
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
@@ -14,8 +17,7 @@
 //! seeds under `fuzz/seeds/search_plan/` hold a few shapes the planner
 //! treats differently (literals, alternations, classes, repetitions).
 //!
-//! Invariants, for both gram extractors (`TrigramExtractor`, the one the
-//! daemon builds, and `SparseGramExtractor`):
+//! Invariants, for the trigram extractor the daemon builds:
 //! - planning never panics, whatever the pattern;
 //! - soundness: when the verifier's matcher (`grep_regex::RegexMatcher`)
 //!   matches the document, the plan resolved over the document's grams
@@ -29,7 +31,7 @@ use grep_regex::RegexMatcherBuilder;
 use libfuzzer_sys::fuzz_target;
 use pixel_index::plan::plan_pattern;
 use pixel_index::posting::resolve_query;
-use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtractor};
+use pixel_index::{GramExtractor, TrigramExtractor};
 
 /// Compiled-program cap for the oracle's matcher. Planning is unaffected;
 /// a pattern over it only loses the soundness check, which keeps each run
@@ -45,12 +47,8 @@ fuzz_target!(|data: &[u8]| {
     };
     let document = &data[newline + 1..];
 
-    let sparse = SparseGramExtractor::new(Crc32Weigher);
-    let extractors: [&dyn GramExtractor; 2] = [&TrigramExtractor, &sparse];
-    let plans: Vec<_> = extractors
-        .iter()
-        .map(|extractor| plan_pattern(pattern, *extractor))
-        .collect();
+    let extractor = TrigramExtractor;
+    let plan = plan_pattern(pattern, &extractor);
 
     let Ok(matcher) = RegexMatcherBuilder::new()
         .size_limit(MATCHER_SIZE_LIMIT)
@@ -61,27 +59,25 @@ fuzz_target!(|data: &[u8]| {
     if !matches!(matcher.is_match(document), Ok(true)) {
         return;
     }
-    for (extractor, plan) in extractors.iter().zip(&plans) {
-        // A pattern the planner rejects is an error the search reports,
-        // not a dropped file.
-        let Ok(plan) = plan else {
-            continue;
-        };
-        let mut hits = Vec::new();
-        extractor.grams(document, &mut hits);
-        let grams: HashSet<u64> = hits.iter().map(|hit| hit.hash).collect();
-        let candidates = resolve_query(plan, 1, &|gram| {
-            if grams.contains(&gram) {
-                vec![0]
-            } else {
-                Vec::new()
-            }
-        });
-        assert_eq!(
-            candidates,
-            [0],
-            "{} plan {plan:?} drops a document {pattern:?} matches",
-            extractor.id(),
-        );
-    }
+    // A pattern the planner rejects is an error the search reports, not a
+    // dropped file.
+    let Ok(plan) = plan else {
+        return;
+    };
+    let mut hits = Vec::new();
+    extractor.grams(document, &mut hits);
+    let grams: HashSet<u64> = hits.iter().map(|hit| hit.hash).collect();
+    let candidates = resolve_query(&plan, 1, &|gram| {
+        if grams.contains(&gram) {
+            vec![0]
+        } else {
+            Vec::new()
+        }
+    });
+    assert_eq!(
+        candidates,
+        [0],
+        "{} plan {plan:?} drops a document {pattern:?} matches",
+        extractor.id(),
+    );
 });

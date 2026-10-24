@@ -1,0 +1,1153 @@
+{
+  "source_repository": "https://github.com/rto-cli/rto",
+  "source_pr": "https://github.com/rto-cli/rto/pull/70",
+  "source_commit": "39040563a3a01b4d39df2c635c23b39394f20fc4",
+  "source_tree": "c1f4787d78b35e9caa92c1e403dd62c7ce31646e",
+  "pixel_baseline": "1490b54df3cf67cf16f7c217e707ce7aad4ebf54",
+  "preservation_roots": [
+    "README.md",
+    "website/",
+    "docs/examples/",
+    "docs/motion/prompt-submit/",
+    ".github/workflows/pages.yml"
+  ],
+  "preserved_files": [
+    {
+      "path": ".github/workflows/pages.yml",
+      "mode": "100644",
+      "baseline_blob": "ad5ad59ae725092631efadc8e45b26ef62279272",
+      "current_blob": "ad5ad59ae725092631efadc8e45b26ef62279272",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "baseline_blob": "273528d66474dc3af35c63272edb820c5aa5fd26",
+      "current_blob": "1b17badf732ea1aa568071207d3ab113c76c6ecf",
+      "status": "authorized_modified",
+      "reason": "Aligned optional prepare command and build-documentation anchor with the current Pixel CLI."
+    },
+    {
+      "path": "docs/examples/01-resolve-impact.svg",
+      "mode": "100644",
+      "baseline_blob": "a5c9f6ec1ced89dd4da9d9e02f3c2918510ed409",
+      "current_blob": "a5c9f6ec1ced89dd4da9d9e02f3c2918510ed409",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/02-task-map.svg",
+      "mode": "100644",
+      "baseline_blob": "b89f2004a6cf7b244b1ae245797e4ebedf098666",
+      "current_blob": "b89f2004a6cf7b244b1ae245797e4ebedf098666",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/03-review-changes.svg",
+      "mode": "100644",
+      "baseline_blob": "22f44a88fea3389235185200687cd12e87969d2e",
+      "current_blob": "22f44a88fea3389235185200687cd12e87969d2e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/04-history-recovery.svg",
+      "mode": "100644",
+      "baseline_blob": "f65b060029b22b387bcd026f9feddf299742a8f9",
+      "current_blob": "f65b060029b22b387bcd026f9feddf299742a8f9",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-agent-demo-start.jpg",
+      "mode": "100644",
+      "baseline_blob": "4bc5e249c1ef50a8a797e2bde27cdb60fe11a5f1",
+      "current_blob": "4bc5e249c1ef50a8a797e2bde27cdb60fe11a5f1",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-agent-demo.jpg",
+      "mode": "100644",
+      "baseline_blob": "cdb38bce8e7ded4f2658419ded3608ecc0627498",
+      "current_blob": "cdb38bce8e7ded4f2658419ded3608ecc0627498",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-agent-demo.mp4",
+      "mode": "100644",
+      "baseline_blob": "bae118f2b709f3eb85115a861bd69375e801c2ce",
+      "current_blob": "bae118f2b709f3eb85115a861bd69375e801c2ce",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-agent-demo.webp",
+      "mode": "100644",
+      "baseline_blob": "09f0c397b158125d21fffd6b65afc6ee1a18e429",
+      "current_blob": "09f0c397b158125d21fffd6b65afc6ee1a18e429",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-brief-comparison.webp",
+      "mode": "100644",
+      "baseline_blob": "66c2528103f9ee24b469b83116d84c7f4277e8a4",
+      "current_blob": "66c2528103f9ee24b469b83116d84c7f4277e8a4",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-impact-comparison.jpg",
+      "mode": "100644",
+      "baseline_blob": "f6352e58ce12925195c1c798fa53017e2267b8f2",
+      "current_blob": "f6352e58ce12925195c1c798fa53017e2267b8f2",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-impact-comparison.mp4",
+      "mode": "100644",
+      "baseline_blob": "4dee894c9ee42ac3a30417350a24bafc75ff22e8",
+      "current_blob": "4dee894c9ee42ac3a30417350a24bafc75ff22e8",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-impact-comparison.webp",
+      "mode": "100644",
+      "baseline_blob": "a24bf11ae3b76b728d636fae2c72c3653dce55b1",
+      "current_blob": "a24bf11ae3b76b728d636fae2c72c3653dce55b1",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-measured-comparison.jpg",
+      "mode": "100644",
+      "baseline_blob": "32e0e06317c21e428f5c8ba8acd4df8ab9d0f668",
+      "current_blob": "32e0e06317c21e428f5c8ba8acd4df8ab9d0f668",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-measured-comparison.mp4",
+      "mode": "100644",
+      "baseline_blob": "774a13f79b8f009dbfabb904c21c58bfe3d35eec",
+      "current_blob": "774a13f79b8f009dbfabb904c21c58bfe3d35eec",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-measured-comparison.webp",
+      "mode": "100644",
+      "baseline_blob": "5569e814bdcc2d283381a2489cfc4ab66d9d2d93",
+      "current_blob": "5569e814bdcc2d283381a2489cfc4ab66d9d2d93",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-prompt-submit-comparison.webp",
+      "mode": "100644",
+      "baseline_blob": "d61455ec73ad1fa73f86f9d21b37ae6d651929d3",
+      "current_blob": "d61455ec73ad1fa73f86f9d21b37ae6d651929d3",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-rewrite-comparison.jpg",
+      "mode": "100644",
+      "baseline_blob": "2129b14c7acc504c51076e42ddce70cd221ed10e",
+      "current_blob": "2129b14c7acc504c51076e42ddce70cd221ed10e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-rewrite-comparison.mp4",
+      "mode": "100644",
+      "baseline_blob": "038ffe2d1670e7c723fd992b54e989d5bb0ca68f",
+      "current_blob": "038ffe2d1670e7c723fd992b54e989d5bb0ca68f",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-rewrite-comparison.webp",
+      "mode": "100644",
+      "baseline_blob": "555a01f4472084e1a27e4ce4c2023c33b721cdc1",
+      "current_blob": "555a01f4472084e1a27e4ce4c2023c33b721cdc1",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-scope-comparison.jpg",
+      "mode": "100644",
+      "baseline_blob": "ccaf5f6b259debb26aecfcd871bf5f78b0d151a2",
+      "current_blob": "ccaf5f6b259debb26aecfcd871bf5f78b0d151a2",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-scope-comparison.mp4",
+      "mode": "100644",
+      "baseline_blob": "fce035e21142496f140787ce1adb42090e1a325d",
+      "current_blob": "fce035e21142496f140787ce1adb42090e1a325d",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/pixel-scope-comparison.webp",
+      "mode": "100644",
+      "baseline_blob": "42b8750cff369adc39e474f42cf8d07d55a4b7f4",
+      "current_blob": "42b8750cff369adc39e474f42cf8d07d55a4b7f4",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/examples/real-measurements.md",
+      "mode": "100644",
+      "baseline_blob": "e528538dfbe9c6d0a76c5f3b9c04bb74831f06f2",
+      "current_blob": "e528538dfbe9c6d0a76c5f3b9c04bb74831f06f2",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/motion/prompt-submit/README.md",
+      "mode": "100644",
+      "baseline_blob": "8f7dd0120ca0d5708c658054873aeeb79fba40d5",
+      "current_blob": "8f7dd0120ca0d5708c658054873aeeb79fba40d5",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "docs/motion/prompt-submit/render-recording.ts",
+      "mode": "100644",
+      "baseline_blob": "234daef00f76e758578de50ee356624a47b93fc7",
+      "current_blob": "234daef00f76e758578de50ee356624a47b93fc7",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/.gitignore",
+      "mode": "100644",
+      "baseline_blob": "1c3fa7397fcb77d73cff8cf465ca2bf8a53dabb7",
+      "current_blob": "1c3fa7397fcb77d73cff8cf465ca2bf8a53dabb7",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/README.md",
+      "mode": "100644",
+      "baseline_blob": "b8e3336835fff3e9d5fd8bb869c142cbf7a0f04a",
+      "current_blob": "d908b9589d2b33811126cb1e57a25eab5c071828",
+      "status": "authorized_modified",
+      "reason": "Removed active Homebrew install channel references."
+    },
+    {
+      "path": "website/assets/css/main.css",
+      "mode": "100644",
+      "baseline_blob": "f6f3c023de112741b57b2bdb52b55942bc50721a",
+      "current_blob": "f6f3c023de112741b57b2bdb52b55942bc50721a",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/logos/antigravity.svg",
+      "mode": "100644",
+      "baseline_blob": "9895f073122d8e00a345ef33d812baccd734e9cc",
+      "current_blob": "9895f073122d8e00a345ef33d812baccd734e9cc",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/logos/claude.svg",
+      "mode": "100644",
+      "baseline_blob": "6b25060a0becb2ee004038f8940bd796ca44e353",
+      "current_blob": "6b25060a0becb2ee004038f8940bd796ca44e353",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/logos/codex.svg",
+      "mode": "100644",
+      "baseline_blob": "fc780758785f6a59b991bdd8095b3d62ba86c2e7",
+      "current_blob": "fc780758785f6a59b991bdd8095b3d62ba86c2e7",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/logos/copilot.svg",
+      "mode": "100644",
+      "baseline_blob": "4863c7f2449153aa5e3d5b9ad9c0569abd7fcb7a",
+      "current_blob": "4863c7f2449153aa5e3d5b9ad9c0569abd7fcb7a",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/logos/cursor.svg",
+      "mode": "100644",
+      "baseline_blob": "0507d98088c1f8eda49d98c2a1b063b7998c36eb",
+      "current_blob": "0507d98088c1f8eda49d98c2a1b063b7998c36eb",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/logos/devin.svg",
+      "mode": "100644",
+      "baseline_blob": "7ae6d190e5adb414bc94b3c0b54bbc59522ca344",
+      "current_blob": "7ae6d190e5adb414bc94b3c0b54bbc59522ca344",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/logos/gemini.svg",
+      "mode": "100644",
+      "baseline_blob": "12d4430f14ed449e8ec9d82109d14b1f961b1705",
+      "current_blob": "12d4430f14ed449e8ec9d82109d14b1f961b1705",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/logos/opencode.svg",
+      "mode": "100644",
+      "baseline_blob": "b94b58e7575498eec377a02ed83472b38e4e96ff",
+      "current_blob": "b94b58e7575498eec377a02ed83472b38e4e96ff",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/logos/pi.svg",
+      "mode": "100644",
+      "baseline_blob": "9cace2e040facade8daa674f1bd105d5e153e3a1",
+      "current_blob": "9cace2e040facade8daa674f1bd105d5e153e3a1",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/logos/windsurf.svg",
+      "mode": "100644",
+      "baseline_blob": "f121ab681ebc5488724342604c13a1656b9b1777",
+      "current_blob": "f121ab681ebc5488724342604c13a1656b9b1777",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/assets/og.png",
+      "mode": "100644",
+      "baseline_blob": "d48bb314b949246317d51228324157dfdbd9c101",
+      "current_blob": "d48bb314b949246317d51228324157dfdbd9c101",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/_index.md",
+      "mode": "100644",
+      "baseline_blob": "7ee6e4e40ad5d805494b2b822dc7a1e27d3d31d8",
+      "current_blob": "7ee6e4e40ad5d805494b2b822dc7a1e27d3d31d8",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/about.md",
+      "mode": "100644",
+      "baseline_blob": "30fb3ed2b0ea0f701ec57ffe63b310be563c35e6",
+      "current_blob": "30fb3ed2b0ea0f701ec57ffe63b310be563c35e6",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/answers/_index.md",
+      "mode": "100644",
+      "baseline_blob": "72856f7783c0d0ebf6d6a36753c16a180a10b0b1",
+      "current_blob": "72856f7783c0d0ebf6d6a36753c16a180a10b0b1",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/answers/grep-or-code-index.md",
+      "mode": "100644",
+      "baseline_blob": "8cefeb57b37c88a0492d8e5b0520e1d40fbc4b4e",
+      "current_blob": "8cefeb57b37c88a0492d8e5b0520e1d40fbc4b4e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/answers/mcp-or-cli-context-cost.md",
+      "mode": "100644",
+      "baseline_blob": "3e3a13fe8332fde70bfa3ee5bdb97d703849c442",
+      "current_blob": "3e3a13fe8332fde70bfa3ee5bdb97d703849c442",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/answers/reduce-claude-code-tokens.md",
+      "mode": "100644",
+      "baseline_blob": "f5d69112be1149990c6dbe4dcbe9c4c14a4f8fab",
+      "current_blob": "f5d69112be1149990c6dbe4dcbe9c4c14a4f8fab",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/answers/what-will-a-change-break.md",
+      "mode": "100644",
+      "baseline_blob": "1f95a744072be4315b312200f72247c44f4aad91",
+      "current_blob": "1f95a744072be4315b312200f72247c44f4aad91",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/answers/why-agents-read-whole-files.md",
+      "mode": "100644",
+      "baseline_blob": "f108873ee24c9e2756f2b7a1a1ccc5bb85200a32",
+      "current_blob": "f108873ee24c9e2756f2b7a1a1ccc5bb85200a32",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/answers/will-my-agent-use-the-tool.md",
+      "mode": "100644",
+      "baseline_blob": "3a34ecabbdb5ad28e51584a9bcc7963b4077224b",
+      "current_blob": "3a34ecabbdb5ad28e51584a9bcc7963b4077224b",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/benchmarks.md",
+      "mode": "100644",
+      "baseline_blob": "4845f4094989af898af25992d730eb22efc402bf",
+      "current_blob": "4845f4094989af898af25992d730eb22efc402bf",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/classify.md",
+      "mode": "100644",
+      "baseline_blob": "0fead8f86c653c55b42f2a3e1ce1acd534cb6ba2",
+      "current_blob": "0fead8f86c653c55b42f2a3e1ce1acd534cb6ba2",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/docs.md",
+      "mode": "100644",
+      "baseline_blob": "2e22197e8f34c6a0f913fbeb8ea87217e510b589",
+      "current_blob": "d712c836c9e069b6b072e6ad091474a25ed39b30",
+      "status": "authorized_modified",
+      "reason": "Removed Homebrew instructions and aligned prepare/setup repository guidance with current CLI contracts."
+    },
+    {
+      "path": "website/content/for/_index.md",
+      "mode": "100644",
+      "baseline_blob": "770ee2d4dd8da8bffb14f985e70f850827041c39",
+      "current_blob": "770ee2d4dd8da8bffb14f985e70f850827041c39",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/for/antigravity.md",
+      "mode": "100644",
+      "baseline_blob": "5d31a7deaa4cb13a9e738ab8331f2f02cd9c178f",
+      "current_blob": "5d31a7deaa4cb13a9e738ab8331f2f02cd9c178f",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/for/claude-code.md",
+      "mode": "100644",
+      "baseline_blob": "c202fcec16194062cac27dfb9acce1fe7d01c6f7",
+      "current_blob": "c202fcec16194062cac27dfb9acce1fe7d01c6f7",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/for/codex.md",
+      "mode": "100644",
+      "baseline_blob": "3ded48063ed82396101ecf9bd976b2005b3e1a86",
+      "current_blob": "3ded48063ed82396101ecf9bd976b2005b3e1a86",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/for/copilot-cli.md",
+      "mode": "100644",
+      "baseline_blob": "c038a2823fe3cb1518c3e683cebb1fadde11e59d",
+      "current_blob": "c038a2823fe3cb1518c3e683cebb1fadde11e59d",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/for/cursor.md",
+      "mode": "100644",
+      "baseline_blob": "66fef3f31d1c4950715d43192b59f421e89c155e",
+      "current_blob": "66fef3f31d1c4950715d43192b59f421e89c155e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/for/devin.md",
+      "mode": "100644",
+      "baseline_blob": "06590132ebf35f13d9036f1ffe33a7c7d03b583e",
+      "current_blob": "06590132ebf35f13d9036f1ffe33a7c7d03b583e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/for/gemini-cli.md",
+      "mode": "100644",
+      "baseline_blob": "734c559fe7a9942a28c568cc1927e6277ac2c1c5",
+      "current_blob": "734c559fe7a9942a28c568cc1927e6277ac2c1c5",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/for/opencode.md",
+      "mode": "100644",
+      "baseline_blob": "c414a39b646e69346626962d5ea4e725246cd177",
+      "current_blob": "c414a39b646e69346626962d5ea4e725246cd177",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/for/pi.md",
+      "mode": "100644",
+      "baseline_blob": "11800e21199a4083797173e6b26d59e82e558ddf",
+      "current_blob": "11800e21199a4083797173e6b26d59e82e558ddf",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/legal/_index.md",
+      "mode": "100644",
+      "baseline_blob": "6db6e5efb9a9a3a4d6810adec81e7456045fb71c",
+      "current_blob": "6db6e5efb9a9a3a4d6810adec81e7456045fb71c",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/legal/privacy-policy.md",
+      "mode": "100644",
+      "baseline_blob": "dd192c410339c1b8ffec61e27a7fee1218afff59",
+      "current_blob": "dd192c410339c1b8ffec61e27a7fee1218afff59",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/legal/terms-of-use.md",
+      "mode": "100644",
+      "baseline_blob": "7977578035c60e4b5b041a8c6646b0446254a245",
+      "current_blob": "7977578035c60e4b5b041a8c6646b0446254a245",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/savings.md",
+      "mode": "100644",
+      "baseline_blob": "4d4d78ca558be2dba69e679b51a86dfbb4c60e45",
+      "current_blob": "4d4d78ca558be2dba69e679b51a86dfbb4c60e45",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/teams.md",
+      "mode": "100644",
+      "baseline_blob": "2088ce14ebce20cbfe5a030f0f32a9e74622aae8",
+      "current_blob": "2088ce14ebce20cbfe5a030f0f32a9e74622aae8",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/_index.md",
+      "mode": "100644",
+      "baseline_blob": "f3172898e0b297eb755b83e22da1f0cf86a8962d",
+      "current_blob": "f3172898e0b297eb755b83e22da1f0cf86a8962d",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/claude-context.md",
+      "mode": "100644",
+      "baseline_blob": "1db1673cb788f81178ca883086252bf7dad8a7ff",
+      "current_blob": "1db1673cb788f81178ca883086252bf7dad8a7ff",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/code-graph-rag.md",
+      "mode": "100644",
+      "baseline_blob": "e7c961558e63b8cfe518aafbd3e6e330a9146686",
+      "current_blob": "e7c961558e63b8cfe518aafbd3e6e330a9146686",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/codegraphcontext.md",
+      "mode": "100644",
+      "baseline_blob": "b3b9ef214d91d4e2eb911e0dcbc54e2cd546b2bc",
+      "current_blob": "b3b9ef214d91d4e2eb911e0dcbc54e2cd546b2bc",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/editor-index.md",
+      "mode": "100644",
+      "baseline_blob": "1391b115cff27bcd48de19d8806816e32f565faf",
+      "current_blob": "1391b115cff27bcd48de19d8806816e32f565faf",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/gitnexus.md",
+      "mode": "100644",
+      "baseline_blob": "b748618109b27faaf91c1379dbbd51174a3ccba3",
+      "current_blob": "b748618109b27faaf91c1379dbbd51174a3ccba3",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/graphify.md",
+      "mode": "100644",
+      "baseline_blob": "265ef786640856c072bed471c8b908a77b2fbc17",
+      "current_blob": "265ef786640856c072bed471c8b908a77b2fbc17",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/grep.md",
+      "mode": "100644",
+      "baseline_blob": "1d25f810299d98c5fd55609764a7aade2ab20798",
+      "current_blob": "1d25f810299d98c5fd55609764a7aade2ab20798",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/jev.md",
+      "mode": "100644",
+      "baseline_blob": "b0ffb07d64435204ed28713461483e2a642f19dd",
+      "current_blob": "b0ffb07d64435204ed28713461483e2a642f19dd",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/language-server.md",
+      "mode": "100644",
+      "baseline_blob": "34e7312ac53dccc14726103178ca359df8facb0b",
+      "current_blob": "34e7312ac53dccc14726103178ca359df8facb0b",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/rtk.md",
+      "mode": "100644",
+      "baseline_blob": "ff95deedff13b80e714de6ed7e55d1b2c8b498f1",
+      "current_blob": "ff95deedff13b80e714de6ed7e55d1b2c8b498f1",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/semble.md",
+      "mode": "100644",
+      "baseline_blob": "ec3d54289af8b4c048cdf8b612ba831f945f2c63",
+      "current_blob": "ec3d54289af8b4c048cdf8b612ba831f945f2c63",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/serena.md",
+      "mode": "100644",
+      "baseline_blob": "e58c70c13e9eaff665d1885457310c4d012fd262",
+      "current_blob": "e58c70c13e9eaff665d1885457310c4d012fd262",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/shunt.md",
+      "mode": "100644",
+      "baseline_blob": "8b709332d214fe172285875dd1f4badc8d1db556",
+      "current_blob": "8b709332d214fe172285875dd1f4badc8d1db556",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/vs/warpgrep.md",
+      "mode": "100644",
+      "baseline_blob": "06a8412aca7e13b18443f7624c2579d4b6c1ba5f",
+      "current_blob": "06a8412aca7e13b18443f7624c2579d4b6c1ba5f",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/content/why-rust.md",
+      "mode": "100644",
+      "baseline_blob": "89da677d81d4dce65846d35f60892fe9354a9ea7",
+      "current_blob": "89da677d81d4dce65846d35f60892fe9354a9ea7",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/agents.toml",
+      "mode": "100644",
+      "baseline_blob": "491631b98a95d7a79f498cfd5cf066d251b16b79",
+      "current_blob": "491631b98a95d7a79f498cfd5cf066d251b16b79",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/alternatives.toml",
+      "mode": "100644",
+      "baseline_blob": "3bbe0a9f79629bfec0d8f76b9cb21475710a8c10",
+      "current_blob": "3bbe0a9f79629bfec0d8f76b9cb21475710a8c10",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/answers.toml",
+      "mode": "100644",
+      "baseline_blob": "ed0feb85db0140b12f6f321e2651d41e9a87df79",
+      "current_blob": "ed0feb85db0140b12f6f321e2651d41e9a87df79",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/hero_session.toml",
+      "mode": "100644",
+      "baseline_blob": "8e04c43ea60afca0d885ae8aa7f736052e4c1a21",
+      "current_blob": "8e04c43ea60afca0d885ae8aa7f736052e4c1a21",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/jobs.toml",
+      "mode": "100644",
+      "baseline_blob": "5a3315156633cd4795e5ea2040236b9f3cdf09b6",
+      "current_blob": "5a3315156633cd4795e5ea2040236b9f3cdf09b6",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/objections.toml",
+      "mode": "100644",
+      "baseline_blob": "bf272589e504055a1a1ab3318b915e4382b1d1b3",
+      "current_blob": "9bd5c07eee7a54fbb32bdf3993055a01e9e96b88",
+      "status": "authorized_modified",
+      "reason": "Removed active Homebrew channel objection copy."
+    },
+    {
+      "path": "website/data/problem_trace.toml",
+      "mode": "100644",
+      "baseline_blob": "cc9499585ba108768d7e0fdbf2f5f65b62f7146e",
+      "current_blob": "cc9499585ba108768d7e0fdbf2f5f65b62f7146e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/read_savings.toml",
+      "mode": "100644",
+      "baseline_blob": "8d057701172a6b6d53a084977ba061207db7f90e",
+      "current_blob": "8d057701172a6b6d53a084977ba061207db7f90e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/savings.toml",
+      "mode": "100644",
+      "baseline_blob": "34a05d58ea803ec1f5e92c0e47c72a268980104b",
+      "current_blob": "34a05d58ea803ec1f5e92c0e47c72a268980104b",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/scope.toml",
+      "mode": "100644",
+      "baseline_blob": "f33164fc14edec0b4916173e14678ef16a8108e0",
+      "current_blob": "f33164fc14edec0b4916173e14678ef16a8108e0",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/team.toml",
+      "mode": "100644",
+      "baseline_blob": "d21d31462645fefddce857fbd5b6f9e031e74da7",
+      "current_blob": "d21d31462645fefddce857fbd5b6f9e031e74da7",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/toolbox.toml",
+      "mode": "100644",
+      "baseline_blob": "a6b3b61f2a84476d9aefb1a78ceab6101438108a",
+      "current_blob": "a6b3b61f2a84476d9aefb1a78ceab6101438108a",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/data/voices.toml",
+      "mode": "100644",
+      "baseline_blob": "21e13a05114226970417ab40f641e1ab779eb522",
+      "current_blob": "21e13a05114226970417ab40f641e1ab779eb522",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/hugo.toml",
+      "mode": "100644",
+      "baseline_blob": "9ee7eac312b049531987f4cb8b4dd1dd7bf3b8a4",
+      "current_blob": "9ee7eac312b049531987f4cb8b4dd1dd7bf3b8a4",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/404.html",
+      "mode": "100644",
+      "baseline_blob": "619edd21dbda7c19d9fbed905908db9f1a54296d",
+      "current_blob": "619edd21dbda7c19d9fbed905908db9f1a54296d",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/_default/_markup/render-codeblock.html",
+      "mode": "100644",
+      "baseline_blob": "7509d8b899d2df54bb6e97ba7a0995b523fe4de5",
+      "current_blob": "7509d8b899d2df54bb6e97ba7a0995b523fe4de5",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/_default/_markup/render-link.html",
+      "mode": "100644",
+      "baseline_blob": "e81df76e4905b830d89490523484aede62c16867",
+      "current_blob": "e81df76e4905b830d89490523484aede62c16867",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/_default/_markup/render-table.html",
+      "mode": "100644",
+      "baseline_blob": "bf79988cdb061d6f04aef23b997fd5c061d0f21d",
+      "current_blob": "bf79988cdb061d6f04aef23b997fd5c061d0f21d",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/_default/savings.html",
+      "mode": "100644",
+      "baseline_blob": "4711f0aeab312331a4f1d44c21c67eff7cdd3e60",
+      "current_blob": "4711f0aeab312331a4f1d44c21c67eff7cdd3e60",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/_default/single.html",
+      "mode": "100644",
+      "baseline_blob": "9298fd96f0698ae84bd2516f247f19733af96086",
+      "current_blob": "9298fd96f0698ae84bd2516f247f19733af96086",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/answers/list.html",
+      "mode": "100644",
+      "baseline_blob": "f126a25370549f11122f78c4d502753806f9c5df",
+      "current_blob": "f126a25370549f11122f78c4d502753806f9c5df",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/answers/single.html",
+      "mode": "100644",
+      "baseline_blob": "220d334c85a0cbaefdc80467156025aad2deae1e",
+      "current_blob": "220d334c85a0cbaefdc80467156025aad2deae1e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/for/list.html",
+      "mode": "100644",
+      "baseline_blob": "d3445b09028b9aa702882e6daaa9a7d8ff7efe14",
+      "current_blob": "d3445b09028b9aa702882e6daaa9a7d8ff7efe14",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/for/single.html",
+      "mode": "100644",
+      "baseline_blob": "60459c3b9d6307b40e39d99aa063761ef7c6c32c",
+      "current_blob": "60459c3b9d6307b40e39d99aa063761ef7c6c32c",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/index.html",
+      "mode": "100644",
+      "baseline_blob": "d69e9f8e98989b6cfbf1092d322aecd7953aa9de",
+      "current_blob": "d69e9f8e98989b6cfbf1092d322aecd7953aa9de",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/alternatives.html",
+      "mode": "100644",
+      "baseline_blob": "0c9e381ecfebacd687f4c9865bda54f18bf08bcd",
+      "current_blob": "0c9e381ecfebacd687f4c9865bda54f18bf08bcd",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/answers.html",
+      "mode": "100644",
+      "baseline_blob": "72ec00472d93fb28335c6636ee9ffd6c297b52c6",
+      "current_blob": "72ec00472d93fb28335c6636ee9ffd6c297b52c6",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/backdrop.html",
+      "mode": "100644",
+      "baseline_blob": "00a0469cf4b168017008d9d3c6eee45b5a4af09e",
+      "current_blob": "00a0469cf4b168017008d9d3c6eee45b5a4af09e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/comparison-matrix.html",
+      "mode": "100644",
+      "baseline_blob": "5be5a46f30608001abc315bd24e7fecdd164ca6a",
+      "current_blob": "5be5a46f30608001abc315bd24e7fecdd164ca6a",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/context-share.html",
+      "mode": "100644",
+      "baseline_blob": "2d797c493c75e443884574f31adb293cd71a9600",
+      "current_blob": "2d797c493c75e443884574f31adb293cd71a9600",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/figures.html",
+      "mode": "100644",
+      "baseline_blob": "816a3efee60ebaa8ef3f9ad26b2242a53e38d8bf",
+      "current_blob": "816a3efee60ebaa8ef3f9ad26b2242a53e38d8bf",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/footer.html",
+      "mode": "100644",
+      "baseline_blob": "4bb1d4aeba3e927ea5cb5e78fbba5abe9eab45e8",
+      "current_blob": "4bb1d4aeba3e927ea5cb5e78fbba5abe9eab45e8",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/head.html",
+      "mode": "100644",
+      "baseline_blob": "86c2786f51d8287ef4de3b6fe8ba4aa426c27e62",
+      "current_blob": "d8b9f2b2812fbc5316069ab2b9d6d91b020d4f36",
+      "status": "authorized_modified",
+      "reason": "Removed stale Homebrew channel metadata/reference."
+    },
+    {
+      "path": "website/layouts/partials/icon.html",
+      "mode": "100644",
+      "baseline_blob": "46f68ed796d522dd75dac38ef90306afefb7589e",
+      "current_blob": "46f68ed796d522dd75dac38ef90306afefb7589e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/kept-rates.html",
+      "mode": "100644",
+      "baseline_blob": "c62a1e494a1c6541395baf7a31c7838c5f5076db",
+      "current_blob": "c62a1e494a1c6541395baf7a31c7838c5f5076db",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/languages.html",
+      "mode": "100644",
+      "baseline_blob": "42762f0da64eb6023b36e58ea8608c0c569d6a22",
+      "current_blob": "42762f0da64eb6023b36e58ea8608c0c569d6a22",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/nav.html",
+      "mode": "100644",
+      "baseline_blob": "63a4b65638b123a358d5f646cae5337dca24a25a",
+      "current_blob": "63a4b65638b123a358d5f646cae5337dca24a25a",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/objections.html",
+      "mode": "100644",
+      "baseline_blob": "b42e6fbabcc32ee0f4eccc8a8f24e71a75088cad",
+      "current_blob": "b42e6fbabcc32ee0f4eccc8a8f24e71a75088cad",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/savings-format.html",
+      "mode": "100644",
+      "baseline_blob": "e5fdbf9b672604c7592ba6bfcc06e9dbe01270db",
+      "current_blob": "e5fdbf9b672604c7592ba6bfcc06e9dbe01270db",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/splash.html",
+      "mode": "100644",
+      "baseline_blob": "5f5a78b45e1a0f8f1cbb93f342f51ff0bfbfbf60",
+      "current_blob": "5f5a78b45e1a0f8f1cbb93f342f51ff0bfbfbf60",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/toc-current.html",
+      "mode": "100644",
+      "baseline_blob": "6f6c936bc09427b241539fd723016487b87141f5",
+      "current_blob": "6f6c936bc09427b241539fd723016487b87141f5",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/trace-call.html",
+      "mode": "100644",
+      "baseline_blob": "8527364a69f835518cda7ce5f8ca43307fd00ebb",
+      "current_blob": "8527364a69f835518cda7ce5f8ca43307fd00ebb",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/vs-measure.html",
+      "mode": "100644",
+      "baseline_blob": "0ee339d59bb8f2ebe81c600cb6edf0a973d45398",
+      "current_blob": "0ee339d59bb8f2ebe81c600cb6edf0a973d45398",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/partials/wall-row.html",
+      "mode": "100644",
+      "baseline_blob": "8fb6360f968775a87ede2c646352e0814ff14bb6",
+      "current_blob": "8fb6360f968775a87ede2c646352e0814ff14bb6",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/robots.txt",
+      "mode": "100644",
+      "baseline_blob": "6b4c001c43e105d7c70e4afb933faccd92e89339",
+      "current_blob": "6b4c001c43e105d7c70e4afb933faccd92e89339",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/shortcodes/agent-setup.html",
+      "mode": "100644",
+      "baseline_blob": "92eaa1aad34c67da81cf889fe699bcea3b762d95",
+      "current_blob": "92eaa1aad34c67da81cf889fe699bcea3b762d95",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/shortcodes/agents-install.html",
+      "mode": "100644",
+      "baseline_blob": "50e22914a27e9494bf22c9bcb38a2c4737669847",
+      "current_blob": "50e22914a27e9494bf22c9bcb38a2c4737669847",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/shortcodes/classify-example.html",
+      "mode": "100644",
+      "baseline_blob": "0ac28f193762cb1056e18dc53a316c3c6cc55313",
+      "current_blob": "0ac28f193762cb1056e18dc53a316c3c6cc55313",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/shortcodes/read-savings.html",
+      "mode": "100644",
+      "baseline_blob": "1ef5ef50787cc7eb90fa19420354f05708815a25",
+      "current_blob": "1ef5ef50787cc7eb90fa19420354f05708815a25",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/shortcodes/team.html",
+      "mode": "100644",
+      "baseline_blob": "a95d92c88504ccc8b787d77bab47b8173340ae6e",
+      "current_blob": "a95d92c88504ccc8b787d77bab47b8173340ae6e",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/shortcodes/workflow-jobs.html",
+      "mode": "100644",
+      "baseline_blob": "34f2945a69898ad2e05166baf63293018a0b2f5c",
+      "current_blob": "34f2945a69898ad2e05166baf63293018a0b2f5c",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/vs/list.html",
+      "mode": "100644",
+      "baseline_blob": "4a1a49b9692049586f73dedf9071b042770ac4c7",
+      "current_blob": "4a1a49b9692049586f73dedf9071b042770ac4c7",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/layouts/vs/single.html",
+      "mode": "100644",
+      "baseline_blob": "73192bbbd06e8e7b9b310b2721b9ea24bc62cf04",
+      "current_blob": "73192bbbd06e8e7b9b310b2721b9ea24bc62cf04",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/mise.toml",
+      "mode": "100644",
+      "baseline_blob": "552cecbf5f5add09d4e7c2ee69850737086fedea",
+      "current_blob": "552cecbf5f5add09d4e7c2ee69850737086fedea",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/og/card.html",
+      "mode": "100644",
+      "baseline_blob": "4bd90f9bf0336dfccabba85f4de5fe45e1810996",
+      "current_blob": "4bd90f9bf0336dfccabba85f4de5fe45e1810996",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/og/render.sh",
+      "mode": "100755",
+      "baseline_blob": "8b2a1f1f29fe860a362b98e040848bbf3a588027",
+      "current_blob": "8b2a1f1f29fe860a362b98e040848bbf3a588027",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/static/cursor-link.svg",
+      "mode": "100644",
+      "baseline_blob": "6dd08573157bdbe275faa54f0b529c949eb46a7f",
+      "current_blob": "6dd08573157bdbe275faa54f0b529c949eb46a7f",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/static/cursor.svg",
+      "mode": "100644",
+      "baseline_blob": "77976183abb86dd9a0c0b05c009994a02d65d22f",
+      "current_blob": "77976183abb86dd9a0c0b05c009994a02d65d22f",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/static/favicon.svg",
+      "mode": "100644",
+      "baseline_blob": "e255148639c222e3bdfbfcd34b29a0a97f3cf67c",
+      "current_blob": "e255148639c222e3bdfbfcd34b29a0a97f3cf67c",
+      "status": "baseline_exact"
+    },
+    {
+      "path": "website/static/llms.txt",
+      "mode": "100644",
+      "baseline_blob": "d5d92d9090028a9dde816ffbc0fbdade41623c9a",
+      "current_blob": "8815425f30e41355867ca7c1c91acccd8b18ffe3",
+      "status": "authorized_modified",
+      "reason": "Removed active Homebrew installation channel references."
+    }
+  ],
+  "import_metadata_paths": [
+    ".github/changelog.d/1342-rto-replacement.changed.md",
+    "docs/imports/rto-pixel-2026-10-24.json",
+    "docs/imports/rto-pixel-2026-10-24.md",
+    "scripts/test-preserved-spdx.py"
+  ],
+  "integration_adjustments": [
+    {
+      "path": "scripts/ci/check-spdx.py",
+      "reason": "Defaults new Pixel files to Pixel attribution and recognizes historical RTO provenance from the earliest import-manifest commit, including after squash."
+    }
+  ],
+  "source_file_count": 633,
+  "imported_source_file_count": 560,
+  "note": "Source counts above are historical import inventory figures. Follow-up exactness is measured against the initial Pixel candidate snapshot because the external source object database is not retained.",
+  "preserved_exact_count": 138,
+  "preserved_authorized_modified_count": 6,
+  "followup_snapshot": {
+    "comparison_base": "b42415bc6c11f89d0a1321ba083cb3e9373d38aa",
+    "changed_paths": [
+      ".agents/rules/project-task.md",
+      ".agents/skills/arena/SKILL.md",
+      ".agents/skills/arena/arena.sh",
+      ".agents/skills/arena/holdout.tsv",
+      ".agents/skills/arena/holdout2.tsv",
+      ".agents/skills/arena/hook-wrap.py",
+      ".agents/skills/arena/offline-protocol-test.py",
+      ".agents/skills/arena/session-digest.py",
+      ".agents/skills/arena/single.tsv",
+      ".agents/skills/docker-setup-smoke/SKILL.md",
+      ".agents/skills/docker-setup-smoke/scripts/Dockerfile",
+      ".agents/skills/release/SKILL.md",
+      ".github/CONTRIBUTING.md",
+      ".github/GOVERNANCE.md",
+      ".github/ISSUE_TEMPLATE/bug_report.yml",
+      ".github/SECURITY.md",
+      ".github/changelog.d/1342-rto-replacement.changed.md",
+      ".github/changelog.d/rename-rto.changed.md",
+      ".github/workflows/ci.yml",
+      ".github/workflows/release-build.yml",
+      ".github/workflows/release.yml",
+      "ARCHITECTURE.md",
+      "README.md",
+      "crates/pixel-brief/src/region_pack.rs",
+      "crates/pixel-plugin/src/hash.rs",
+      "crates/pixel-setup/src/antigravity.rs",
+      "crates/pixel-setup/src/doctor/tests.rs",
+      "crates/pixel/src/classify_setup.rs",
+      "crates/pixel/tests/cli/setup.rs",
+      "docs/imports/rto-pixel-2026-10-24.json",
+      "docs/imports/rto-pixel-2026-10-24.md",
+      "docs/maintainer-runbook.md",
+      "docs/motion/README.md",
+      "docs/motion/scripts/render.sh",
+      "docs/pixel-identity.md",
+      "docs/threat-model.md",
+      "scripts/ci/check-spdx.py",
+      "scripts/fixtures/homebrew/pixel.rb.template",
+      "scripts/release/homebrew-formula.py",
+      "scripts/test-pixel-homebrew-formula.py",
+      "scripts/test-preserved-spdx.py",
+      "specs/roadmap.md",
+      "specs/thesis.md",
+      "website/README.md",
+      "website/content/docs.md",
+      "website/data/objections.toml",
+      "website/layouts/partials/head.html",
+      "website/static/llms.txt"
+    ],
+    "added_paths": [
+      ".agents/skills/arena/SKILL.md",
+      ".agents/skills/arena/arena.sh",
+      ".agents/skills/arena/holdout.tsv",
+      ".agents/skills/arena/holdout2.tsv",
+      ".agents/skills/arena/hook-wrap.py",
+      ".agents/skills/arena/offline-protocol-test.py",
+      ".agents/skills/arena/session-digest.py",
+      ".agents/skills/arena/single.tsv"
+    ],
+    "removed_paths": [
+      ".github/changelog.d/rename-rto.changed.md",
+      "scripts/fixtures/homebrew/pixel.rb.template",
+      "scripts/release/homebrew-formula.py",
+      "scripts/test-pixel-homebrew-formula.py"
+    ],
+    "preserved_exact_count": 138,
+    "preserved_authorized_modified_count": 6,
+    "imported_source_paths_exact_to_initial_candidate": 530,
+    "imported_source_paths_modified": 26,
+    "imported_source_paths_removed": 3,
+    "source_paths_with_followup_changes": [
+      ".agents/rules/project-task.md",
+      ".agents/skills/docker-setup-smoke/SKILL.md",
+      ".agents/skills/docker-setup-smoke/scripts/Dockerfile",
+      ".agents/skills/release/SKILL.md",
+      ".github/CONTRIBUTING.md",
+      ".github/GOVERNANCE.md",
+      ".github/ISSUE_TEMPLATE/bug_report.yml",
+      ".github/SECURITY.md",
+      ".github/workflows/ci.yml",
+      ".github/workflows/release-build.yml",
+      ".github/workflows/release.yml",
+      "ARCHITECTURE.md",
+      "crates/pixel-brief/src/region_pack.rs",
+      "crates/pixel-plugin/src/hash.rs",
+      "crates/pixel-setup/src/antigravity.rs",
+      "crates/pixel-setup/src/doctor/tests.rs",
+      "crates/pixel/src/classify_setup.rs",
+      "crates/pixel/tests/cli/setup.rs",
+      "docs/maintainer-runbook.md",
+      "docs/motion/README.md",
+      "docs/motion/scripts/render.sh",
+      "docs/pixel-identity.md",
+      "docs/threat-model.md",
+      "scripts/ci/check-spdx.py",
+      "scripts/fixtures/homebrew/pixel.rb.template",
+      "scripts/release/homebrew-formula.py",
+      "scripts/test-pixel-homebrew-formula.py",
+      "specs/roadmap.md",
+      "specs/thesis.md"
+    ]
+  },
+  "initial_candidate_source_cohort_count": 559
+}

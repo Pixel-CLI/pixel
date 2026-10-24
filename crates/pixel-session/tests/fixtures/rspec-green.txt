@@ -1,8 +1,0 @@
-Randomized with seed 61003
-....................................
-
-Finished in 1.42 seconds (files took 1.9 seconds to load)
-36 examples, 0 failures, 1 pending
-
-Randomized with seed 61003
-

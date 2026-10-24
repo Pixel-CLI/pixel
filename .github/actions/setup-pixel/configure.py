@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 """Bound the cache to rebuildable indexes, never agent configuration or logs."""
@@ -12,10 +12,10 @@ import re
 import subprocess
 import sys
 
-# prepare-repo's text shards and graph; include SQLite journals for consistency.
-# History, vectors and the auxiliary MVP index can be rebuilt on demand.
-INDEX_FILES = ('base.shard', 'delta.shard', 'state.json', 'graph.v2.db',
-               'graph.v2.db-wal', 'graph.v2.db-shm')
+# `pixel prepare`'s text shards and graph; include SQLite journals for consistency.
+# History and vectors can be rebuilt on demand.
+INDEX_FILES = ('base.shard', 'delta.shard', 'state.json', 'graph.db',
+               'graph.db-wal', 'graph.db-shm')
 
 
 def configure():
@@ -28,9 +28,9 @@ def configure():
     version = os.environ['PIXEL_ACTION_VERSION']
     if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', version):
         raise ValueError('version must be an exact release tag: vX.Y.Z')
-    minimum = os.environ['PIXEL_ACTION_MINIMUM_SYMBOLS']
+    minimum = os.environ['PIXEL_ACTION_MINIMUM_FILES']
     if not re.fullmatch(r'[0-9]+', minimum):
-        raise ValueError('minimum-symbols must be a non-negative integer')
+        raise ValueError('minimum-files must be a non-negative integer')
     workspace = Path(os.environ['GITHUB_WORKSPACE']).resolve()
     path = (workspace / os.environ['PIXEL_ACTION_PATH']).resolve(strict=True)
     if not path.is_dir() or any(c in str(path) for c in '\r\n*?[]!'):
@@ -60,10 +60,10 @@ def configure():
 def validate_report(filename):
     with open(filename) as source:
         report = json.load(source)
-    symbols = report.get('graph', {}).get('symbols')
-    minimum = int(os.environ['PIXEL_ACTION_MINIMUM_SYMBOLS'])
-    if type(symbols) is not int or symbols < minimum:
-        raise ValueError(f'graph has {symbols!r} symbols; requires at least {minimum}')
+    files = report.get('graph', {}).get('files')
+    minimum = int(os.environ['PIXEL_ACTION_MINIMUM_FILES'])
+    if type(files) is not int or files < minimum:
+        raise ValueError(f'graph has {files!r} files; requires at least {minimum}')
 
 
 if __name__ == '__main__':

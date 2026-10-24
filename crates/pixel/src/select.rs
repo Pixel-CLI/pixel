@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! The TTY option picker: arrow keys move a `❯` marker over a rendered
@@ -120,6 +120,7 @@ pub(crate) fn terminal_width() -> usize {
 
 /// Visible width of a string containing ANSI sequences: `ESC [ … letter`
 /// runs count as zero columns.
+#[cfg(test)] // only the tests drive the pick without a terminal
 pub(crate) fn visible_len(text: &str) -> usize {
     let mut len = 0;
     let mut escape = false;
@@ -188,6 +189,7 @@ fn repaint(
 /// input is a live TTY: on one a digit must select immediately, while piped
 /// input that is already buffered must have its trailing newline drained so
 /// the scripted answer does not leak into the next prompt.
+#[cfg(test)] // only the tests drive the pick without a terminal
 pub fn pick(
     options: &[&str],
     keys: &mut dyn BufRead,

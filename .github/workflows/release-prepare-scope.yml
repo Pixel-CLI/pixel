@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 name: Release-prepare scope
@@ -9,7 +9,7 @@ name: Release-prepare scope
 # deleted fragments). The branch name alone would let any code change
 # skip the gates. Any other event, or a failed check, keeps every job.
 #
-# Called by ci.yml, mutants.yml, cross-build.yml and homebrew-core.yml as
+# Called by ci.yml, mutants.yml and cross-build.yml as
 # their `scope` job: one definition, so the workflows cannot disagree on what
 # a release-prepare pull request is.
 on:
@@ -25,7 +25,7 @@ permissions:
 jobs:
   check:
     name: Release-prepare scope
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       release-prepare: ${{ steps.check.outputs.release-prepare }}

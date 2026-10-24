@@ -1,6 +1,6 @@
 ---
 name: section-redesign
-description: Redesign one or two sections of the pixel-cli.dev home (website/layouts/index.html) with the loop the hero went through for task #401 — critique as a visitor, an artifact of 2–3 mocked variants with votable points, the user's vote, synthesis iterations, every claim checked against the code and the benchmarks, then the Hugo implementation with desktop and mobile captures. Use when the user says "/section-redesign", "on itère sur la section …", "refais la section #problem", "même méthode que le hero", or names a home section (#problem, #scope, #toolbox, #how, #agents, #faq, #install and its #your-number checks; the page has no closing chapter) to rework.
+description: Redesign one or two sections of the Pixel home page (website/layouts/index.html) with the loop the hero went through for task #401 — critique as a visitor, an artifact of 2–3 mocked variants with votable points, the user's vote, synthesis iterations, every claim checked against the code and the benchmarks, then the Hugo implementation with desktop and mobile captures. Use when the user says "/section-redesign", "on itère sur la section …", "refais la section #problem", "même méthode que le hero", or names a home section (#problem, #scope, #toolbox, #how, #agents, #faq, #install and its #your-number checks; the page has no closing chapter) to rework.
 ---
 
 # Section redesign
@@ -15,7 +15,7 @@ Argument: the section anchors, e.g. `#problem #scope`. Written `$S` below.
 ## Step 0 — Task and ground truth
 
 1. **Task first** (`.agents/rules/project-task.md`): find or open the issue
-   for `$S` on project 3 and add it to the board before any edit.
+   for `$S` in this repository's issues before any edit.
 2. **Branch from `main`**, one branch per section unit (the hero lives on
    `codex/401-*`; do not stack on it unless the user asks).
 3. **Read the section as shipped**: its markup in `website/layouts/index.html`
@@ -126,7 +126,7 @@ reserved space, a badge over text).
 
 ## Gates and pull request
 
-- `cargo test -p pixel-cli --test cli docs_drift::` (it reads
+- `cargo test -p Pixel-CLI --test cli docs_drift::` (it reads
   `index.html`, `agents.toml` and `objections.toml`).
 - No `.github/changelog.d/` fragment: website-only changes ship nothing in the tool
   (CONTRIBUTING.md, "Definition of done").

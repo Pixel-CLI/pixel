@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 # libmimalloc-sys compiles `__DATE__` and `__TIME__` into the allocator's

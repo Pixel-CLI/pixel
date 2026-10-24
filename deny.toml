@@ -18,8 +18,7 @@ targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
 ]
-# Both embedding back ends (`fastembed`, `model2vec`) are default features of
-# the CLI; checking with everything on covers the union of the release lanes.
+# Checking with everything on covers the union of the release lanes.
 all-features = true
 
 [advisories]
@@ -29,21 +28,11 @@ yanked = "deny"
 # file and not this one; scripts/ci/check-advisory-ignores.py (the `deny` CI
 # job) fails when the two lists differ.
 ignore = [
-    # `paste` is archived upstream (proc-macro only, no runtime code). It
-    # reaches the tree through `tokenizers`, both majors of it: 0.21 pulled
-    # by `model2vec-rs` and 0.23 by `fastembed`. The fix is upstream's:
-    # tokenizers 0.23.2, the latest release, still depends on `paste`.
-    { id = "RUSTSEC-2024-0436", reason = "transitive via tokenizers 0.21 <- model2vec-rs and 0.23 <- fastembed; proc-macro, no runtime surface" },
-    # `number_prefix` (byte-size formatting) is unmaintained. Pulled by
-    # `indicatif` 0.17, through both `hf-hub` 0.4 and `tokenizers` 0.21, each
-    # <- `model2vec-rs`; pixel never calls it. Goes away when model2vec-rs
-    # moves to hf-hub 0.5 and tokenizers 0.23 (0.3.0, the latest, has not).
-    { id = "RUSTSEC-2025-0119", reason = "transitive via indicatif 0.17 <- hf-hub 0.4 and tokenizers 0.21 <- model2vec-rs; formatting helper, unused by pixel" },
-    # `webpki-roots` 0.26.11 (via `ureq` 2 <- `hf-hub` 0.4 <- `model2vec-rs`)
-    # is the last 0.26 release and only `pub use parent::TLS_SERVER_ROOTS`
-    # of `webpki-roots` 1, which Cargo.lock pins at 1.0.10, the fixed version:
-    # the roots it ships are the patched set. Goes away with ureq 3.
-    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 re-exports webpki-roots 1.x roots; 1.0.10 (patched) is locked; via ureq 2 <- hf-hub 0.4 <- model2vec-rs" },
+    # `paste` (a proc-macro, compile time only) is pulled in by `tokenizers`,
+    # which `model2vec-rs` needs to embed text for `pixel search-meaning`: the
+    # optional `semantic` feature, off in the default build. No safe upgrade
+    # exists; the crate is unmaintained, not vulnerable.
+    { id = "RUSTSEC-2024-0436", reason = "paste is a compile-time macro under tokenizers (optional semantic feature); unmaintained, no known vulnerability" },
 ]
 
 [licenses]
@@ -63,22 +52,12 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "CC0-1.0",
-    # webpki-roots / webpki-root-certs: Mozilla's CA bundle data, permissive.
+    # webpki-roots: the Mozilla root certificate list `pixel classify` and
+    # `pixel index unpack` trust for https (through ureq/rustls).
     "CDLA-Permissive-2.0",
-    # option-ext (via dirs): file-level copyleft that never reaches pixel's
-    # sources; it is the only MPL crate in the tree.
-    "MPL-2.0",
 ]
 # Unrecognised licence texts count as a failure below this confidence.
 confidence-threshold = 0.8
-
-# model2vec-rs ships `license-file = "LICENSE"` (MIT text, verified) instead
-# of an SPDX `license` field, so cargo-deny cannot classify it alone. The
-# hash pins the text: a relicensed release fails the check.
-[[licenses.clarify]]
-crate = "model2vec-rs"
-expression = "MIT"
-license-files = [{ path = "LICENSE", hash = 0x6fd19d50 }]
 
 # libfuzzer-sys vendors LLVM's libFuzzer, under the University of
 # Illinois/NCSA licence (`(MIT OR Apache-2.0) AND NCSA`). Only the fuzz/
@@ -100,17 +79,20 @@ wildcards = "allow"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
-# The two embedding back ends pin different generations of the same
-# Hugging Face stack (fastembed: hf-hub 0.5, tokenizers 0.23, ndarray
-# 0.17, ureq 3; model2vec-rs: hf-hub 0.4, tokenizers 0.21, ndarray 0.15,
-# ureq 2). Both are needed: fastembed has no musl build, model2vec is the
-# Linux release's only channel. Everything below either root is skipped
-# wholesale; a duplicate anywhere else still fails.
-skip-tree = [
-    { crate = "fastembed", reason = "ONNX embedding stack, pins its own hf-hub/tokenizers/ndarray generation" },
-    { crate = "model2vec-rs", reason = "pure-Rust embedding stack on the previous hf-hub/tokenizers/ndarray generation" },
+skip = [
+    # ring (rustls, under ureq) is on getrandom 0.2; proptest and tempfile are
+    # on 0.4. Neither side can move from here.
+    { crate = "getrandom@0.2.17", reason = "ring 0.17 pins getrandom 0.2" },
+    # yaml-edit's rowan pins hashbrown 0.14; rusqlite's hashlink and indexmap
+    # use 0.17.
+    { crate = "hashbrown@0.14.5", reason = "rowan (yaml-edit) pins hashbrown 0.14" },
+    # The optional `semantic` feature pulls in tokenizers (through model2vec-rs),
+    # which is on older majors of these than the rest of the tree.
+    { crate = "base64@0.13.1", reason = "spm_precompiled (tokenizers) pins base64 0.13" },
+    { crate = "getrandom@0.3.4", reason = "ahash and rand 0.9 (tokenizers) are on getrandom 0.3" },
+    { crate = "rand_core@0.9.5", reason = "rand 0.9 (tokenizers) is on rand_core 0.9; proptest is on 0.10" },
+    { crate = "syn@2.0.119", reason = "derive_builder, monostate and zerocopy-derive (tokenizers) are on syn 2" },
 ]
-skip = []
 
 [sources]
 unknown-registry = "deny"

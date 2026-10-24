@@ -1,0 +1,181 @@
+# pixel-model and pixel-minimap take values and do no I/O. Clippy
+# refuses every item below after macro expansion and name resolution, so a
+# rename, a glob import, a macro or a module read from elsewhere does not
+# hide it; each crate root forbids lifting the three lints. Clippy takes
+# functions, types and macros here, not modules: a module that reaches the
+# world is listed item by item, and an item missing from the list is not
+# refused. Each pure crate holds a copy of this file, and
+# `crates/pixel/tests/workspace.rs` fails when an entry it carries is
+# missing from either. A path that no longer resolves after a toolchain
+# bump is only a warning, which `-D warnings` does not turn into an error:
+# read the lint job's output on that pull request.
+disallowed-methods = [
+    # std::fs
+    "std::fs::canonicalize",
+    "std::fs::copy",
+    "std::fs::create_dir",
+    "std::fs::create_dir_all",
+    "std::fs::exists",
+    "std::fs::hard_link",
+    "std::fs::metadata",
+    "std::fs::read",
+    "std::fs::read_dir",
+    "std::fs::read_link",
+    "std::fs::read_to_string",
+    "std::fs::remove_dir",
+    "std::fs::remove_dir_all",
+    "std::fs::remove_file",
+    "std::fs::rename",
+    "std::fs::set_permissions",
+    "std::fs::soft_link",
+    "std::fs::symlink_metadata",
+    "std::fs::write",
+    # std::path: the calls that read the file system (`PathBuf` derefs to
+    # `Path`, so its calls are these)
+    "std::path::absolute",
+    "std::path::Path::canonicalize",
+    "std::path::Path::exists",
+    "std::path::Path::is_dir",
+    "std::path::Path::is_file",
+    "std::path::Path::is_symlink",
+    "std::path::Path::metadata",
+    "std::path::Path::read_dir",
+    "std::path::Path::read_link",
+    "std::path::Path::symlink_metadata",
+    "std::path::Path::try_exists",
+    # std::os::unix::fs
+    "std::os::unix::fs::chown",
+    "std::os::unix::fs::chroot",
+    "std::os::unix::fs::fchown",
+    "std::os::unix::fs::lchown",
+    "std::os::unix::fs::mkfifo",
+    "std::os::unix::fs::symlink",
+    # std::net: resolving a name asks the resolver
+    "std::net::ToSocketAddrs::to_socket_addrs",
+    # std::process
+    "std::process::abort",
+    "std::process::exit",
+    "std::process::id",
+    "std::os::unix::process::parent_id",
+    # std::env
+    "std::env::args",
+    "std::env::args_os",
+    "std::env::current_dir",
+    "std::env::current_exe",
+    "std::env::home_dir",
+    "std::env::remove_var",
+    "std::env::set_current_dir",
+    "std::env::set_var",
+    "std::env::temp_dir",
+    "std::env::var",
+    "std::env::var_os",
+    "std::env::vars",
+    "std::env::vars_os",
+    # std::io: the standard streams and pipes (`_print` and `_eprint` are
+    # what the print macros call)
+    "std::io::_eprint",
+    "std::io::_print",
+    "std::io::IsTerminal::is_terminal",
+    "std::io::pipe",
+    "std::io::stderr",
+    "std::io::stdin",
+    "std::io::stdout",
+    # std::thread
+    "std::thread::available_parallelism",
+    "std::thread::Builder::spawn",
+    "std::thread::Builder::spawn_scoped",
+    "std::thread::scope",
+    "std::thread::Scope::spawn",
+    "std::thread::sleep",
+    "std::thread::spawn",
+    # std::time: the clock
+    "std::time::Instant::elapsed",
+    "std::time::Instant::now",
+    "std::time::SystemTime::elapsed",
+    "std::time::SystemTime::now",
+    # std::panic: a caught panic has printed its message to stderr; a hook
+    # is process state
+    "std::panic::catch_unwind",
+    "std::panic::set_hook",
+    "std::panic::take_hook",
+    # std::backtrace: a capture reads the environment and the executable
+    "std::backtrace::Backtrace::capture",
+    "std::backtrace::Backtrace::force_capture",
+]
+disallowed-types = [
+    # std::fs
+    "std::fs::DirBuilder",
+    "std::fs::DirEntry",
+    "std::fs::File",
+    "std::fs::FileTimes",
+    "std::fs::FileType",
+    "std::fs::Metadata",
+    "std::fs::OpenOptions",
+    "std::fs::Permissions",
+    "std::fs::ReadDir",
+    "std::fs::TryLockError",
+    # std::net, every type
+    "std::net::AddrParseError",
+    "std::net::Incoming",
+    "std::net::IpAddr",
+    "std::net::Ipv4Addr",
+    "std::net::Ipv6Addr",
+    "std::net::Shutdown",
+    "std::net::SocketAddr",
+    "std::net::SocketAddrV4",
+    "std::net::SocketAddrV6",
+    "std::net::TcpListener",
+    "std::net::TcpStream",
+    "std::net::ToSocketAddrs",
+    "std::net::UdpSocket",
+    # std::os
+    "std::os::fd::BorrowedFd",
+    "std::os::fd::OwnedFd",
+    "std::os::unix::net::Incoming",
+    "std::os::unix::net::SocketAddr",
+    "std::os::unix::net::UnixDatagram",
+    "std::os::unix::net::UnixListener",
+    "std::os::unix::net::UnixStream",
+    # std::process
+    "std::process::Child",
+    "std::process::ChildStderr",
+    "std::process::ChildStdin",
+    "std::process::ChildStdout",
+    "std::process::Command",
+    "std::process::CommandArgs",
+    "std::process::CommandEnvs",
+    "std::process::ExitCode",
+    "std::process::ExitStatus",
+    "std::process::Output",
+    "std::process::Stdio",
+    # std::env
+    "std::env::Args",
+    "std::env::ArgsOs",
+    "std::env::Vars",
+    "std::env::VarsOs",
+    # std::io
+    "std::io::IsTerminal",
+    "std::io::PipeReader",
+    "std::io::PipeWriter",
+    "std::io::Stderr",
+    "std::io::StderrLock",
+    "std::io::Stdin",
+    "std::io::StdinLock",
+    "std::io::Stdout",
+    "std::io::StdoutLock",
+    # std::thread, std::backtrace
+    "std::thread::Builder",
+    "std::backtrace::Backtrace",
+]
+disallowed-macros = [
+    # the terminal
+    "std::dbg",
+    "std::eprint",
+    "std::eprintln",
+    "std::print",
+    "std::println",
+    # a file read at compile time (`include!` is not listed: clippy does not
+    # see it, and the code it includes is checked like the crate's own)
+    "std::include_bytes",
+    "std::include_str",
+]

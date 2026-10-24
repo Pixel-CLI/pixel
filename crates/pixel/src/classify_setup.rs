@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! The classify-engine install step and configuration.
@@ -69,7 +69,7 @@ const OLLAYA_ROOT: &str = ".local/share/pixel/ollaya";
 const CLASSIFY_SKILL: &str = include_str!("../../pixel-setup/assets/pixel-classify-skill.md");
 /// The bundled pi extension: `ask_pixel_file_bool/choice/score`,
 /// `ask_pixel_files`, `pick_pixel_file` — file-level classify calls whose
-/// file text never enters the agent's context. It ships as Pixel's classify
+/// file text never enters the agent's context. It ships as PIXEL's classify
 /// Pi package ([`pixel_setup::ClassifyPiPackage`]), declared in Pi's
 /// settings like the impact package, never copied into Pi's `extensions/`.
 const PI_CLASSIFY_EXTENSION: &str = include_str!("../../pixel-setup/assets/pi-classify-files.ts");
@@ -79,13 +79,13 @@ const CLASSIFY_SKILL_NAME: &str = "pixel-classify";
 /// The stored engine preference, if any: `local`, `remote`, or `auto`.
 #[cfg_attr(test, mutants::skip)] // Thin config adapter; policy is tested through injected settings.
 pub fn stored_engine() -> Option<String> {
-    crate::config_cmd::classify_engine()
+    crate::classify_config::classify_engine()
 }
 
 /// The recorded local-daemon launch, if a local install completed.
 #[cfg_attr(test, mutants::skip)] // Thin config adapter; launch validation is tested without user config.
 pub fn ollaya_launch() -> Option<Value> {
-    crate::config_cmd::ollaya_launch()
+    crate::classify_config::ollaya_launch()
 }
 
 /// The engine `pixel classify` resolves to: the explicit flag wins; then
@@ -220,7 +220,7 @@ pub fn install_step(
         stdin,
         stdout,
         stored_engine(),
-        crate::config_cmd::classify_remote_preset(),
+        crate::classify_config::classify_remote_preset(),
         setup_local,
         propose_remote_key,
         propose_openai_key,
@@ -380,7 +380,7 @@ where
 /// What a "yes" to the helpers proposal writes: the `pixel-classify` skill
 /// into every configured harness's skills dir — the skill is
 /// harness-agnostic, not pi-only; [`pixel_setup::config::SKILL_ROOTS`] is
-/// the single list of roots — and, when pi is set up, Pixel's classify Pi
+/// the single list of roots — and, when pi is set up, PIXEL's classify Pi
 /// package with its `packages` entry. `.claude` is a target unconditionally
 /// (`pixel setup` writes its hooks there before this step runs); the rest
 /// join only when configured.
@@ -510,9 +510,9 @@ fn propose_remote_key(
 ) -> Result<(), String> {
     propose_remote_key_with(stdin, stdout, |preset, key, model, base| {
         if let Some(key) = key {
-            crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+            crate::classify_config::run_remote_key(preset, Some(key.to_string()), false)?;
         }
-        crate::config_cmd::set_classify_remote_model(preset, model, base)
+        crate::classify_config::set_classify_remote_model(preset, model, base)
     })
 }
 
@@ -569,9 +569,9 @@ fn propose_remote_key_with(
 fn propose_jev_key(stdin: &mut dyn BufRead, stdout: &mut dyn std::io::Write) -> Result<(), String> {
     propose_jev_key_with(stdin, stdout, |preset, key, model, base| {
         if let Some(key) = key {
-            crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+            crate::classify_config::run_remote_key(preset, Some(key.to_string()), false)?;
         }
-        crate::config_cmd::set_classify_remote_model(preset, model, base)
+        crate::classify_config::set_classify_remote_model(preset, model, base)
     })
 }
 
@@ -658,9 +658,9 @@ fn propose_openai_key(
         stdout,
         |preset, key, model, base| {
             if let Some(key) = key {
-                crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+                crate::classify_config::run_remote_key(preset, Some(key.to_string()), false)?;
             }
-            crate::config_cmd::set_classify_remote_model(preset, model, base)
+            crate::classify_config::set_classify_remote_model(preset, model, base)
         },
     )
 }
@@ -670,9 +670,9 @@ fn propose_clef_key(
 ) -> Result<(), String> {
     propose_clef_key_with(stdin, stdout, |preset, key, model, base| {
         if let Some(key) = key {
-            crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+            crate::classify_config::run_remote_key(preset, Some(key.to_string()), false)?;
         }
-        crate::config_cmd::set_classify_remote_model(preset, model, base)
+        crate::classify_config::set_classify_remote_model(preset, model, base)
     })
 }
 
@@ -726,7 +726,7 @@ fn propose_clef_key_with(
             let key = prompt_line(
                 stdin,
                 stdout,
-                "OLLAMA_API_KEY (only for a remote Ollama host, stored in the global Pixel config, never printed; blank for none)> ",
+                "OLLAMA_API_KEY (only for a remote Ollama host, stored in the global PIXEL config, never printed; blank for none)> ",
             )?;
             let preset = crate::decide_remote::Preset::ClefOllama;
             store(
@@ -762,7 +762,7 @@ fn propose_clef_key_with(
             let key = prompt_line(
                 stdin,
                 stdout,
-                "Cloudflare API token with Workers AI access (stored in the global Pixel config, never printed)> ",
+                "Cloudflare API token with Workers AI access (stored in the global PIXEL config, never printed)> ",
             )?;
             let preset = crate::decide_remote::Preset::ClefCloudflare;
             let base = format!("{CLOUDFLARE_DEFAULT_BASE}/accounts/{account}");
@@ -821,7 +821,7 @@ fn propose_key_for(
     };
     write!(
         stdout,
-        "API key (stored in the global Pixel config, never printed)> "
+        "API key (stored in the global PIXEL config, never printed)> "
     )
     .map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;
@@ -939,12 +939,12 @@ impl LocalSetupRuntime for SystemLocalSetup {
 
     #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
     fn record_launch(&mut self, launch: &Value) -> Result<(), String> {
-        crate::config_cmd::set_ollaya_launch(launch)
+        crate::classify_config::set_ollaya_launch(launch)
     }
 
     #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
     fn set_engine(&mut self) -> Result<(), String> {
-        crate::config_cmd::set_classify_engine("local")
+        crate::classify_config::set_classify_engine("local")
     }
 }
 
@@ -1144,7 +1144,6 @@ const UNPACK_INSTALLERS: &[(&[&str], &[&str])] = &[
 /// an os outside the table).
 fn unpack_support_install(env: &UnpackEnvironment) -> Option<Vec<String>> {
     match env.os {
-        "macos" => Some(vec!["brew".into(), "install".into(), "zstd".into()]),
         "linux" => {
             let release = env.os_release.as_deref()?;
             let id = os_release_field(release, "ID");
@@ -2068,11 +2067,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            crate::config_cmd::classify_remote_preset(),
+            crate::classify_config::classify_remote_preset(),
             Some(crate::decide_remote::Preset::Openai)
         );
         assert_eq!(
-            crate::config_cmd::remote_key(crate::decide_remote::Preset::Openai).as_deref(),
+            crate::classify_config::remote_key(crate::decide_remote::Preset::Openai).as_deref(),
             Some(key)
         );
     }
@@ -2120,7 +2119,7 @@ mod tests {
         );
         // A harness root that does not exist is skipped, not created.
         assert!(!home.join(".devin").exists());
-        // The tools ship as Pixel's own Pi package, declared beside the
+        // The tools ship as PIXEL's own Pi package, declared beside the
         // user's packages; nothing lands in Pi's `extensions/`.
         let package = home.join(pixel_setup::CLASSIFY_PACKAGE_DIR);
         assert_eq!(
@@ -2617,7 +2616,7 @@ mod tests {
                 "{release}"
             );
         }
-        assert_eq!(install(&absent(None, "macos")), "brew install zstd");
+        assert_eq!(unpack_support_install(&absent(None, "macos")), None);
     }
 
     #[test]

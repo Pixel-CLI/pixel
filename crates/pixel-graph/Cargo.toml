@@ -1,55 +1,44 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 [package]
 name = "pixel-graph"
-version = "0.9.0"
+version = "0.0.0"
 edition.workspace = true
 license.workspace = true
+publish = false
+description = "The PIXEL code graph: one store, one pipeline, one parse per file"
 
 [lints]
 workspace = true
 
 [dependencies]
-rustc-hash = "1"
+pixel-model = { path = "../pixel-model" }
+pixel-io = { path = "../pixel-io" }
 rusqlite = { version = "0.40", features = ["bundled"] }
-pixel-git = { path = "../pixel-git" }
-pixel-index = { path = "../pixel-index" }
-# pixel-mvp's index, imported (crates/mvp-*/ORIGIN.md): the adapter in
-# `mvp_adapter` reads it.
-mvp-index = { path = "../mvp-index" }
-mvp-model = { path = "../mvp-model" }
-mvp-store = { path = "../mvp-store" }
-# `shadow` builds both graphs in a scratch directory.
-tempfile = "3"
+regex = "1"
+rustc-hash = "1"
 tree-sitter = "0.27"
+tree-sitter-ruby = "0.23"
+tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.25"
-tree-sitter-rust = "0.24"
-tree-sitter-c-sharp = "0.23"
+tree-sitter-python = "0.25"
 tree-sitter-go = "0.25"
 tree-sitter-java = "0.23"
-tree-sitter-python = "0.25"
-tree-sitter-ruby = "0.23"
-# Generic-extractor expansion grammars (heuristic node-kind walker). Php, C,
-# Swift, Elixir, Lua and Kotlin ship `LANGUAGE: LanguageFn` constants that
-# tree-sitter 0.27 loads through `tree-sitter-language`. Kotlin is
-# `tree-sitter-kotlin-ng` (MIT, tree-sitter-grammars/tree-sitter-kotlin): the
-# older `tree-sitter-kotlin` crate pins tree-sitter `>= 0.21, < 0.23`.
+tree-sitter-c-sharp = "0.23"
 tree-sitter-php = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-swift = "0.7"
 tree-sitter-elixir = "0.3"
 tree-sitter-lua = "0.5"
 tree-sitter-kotlin-ng = "1.1"
-rayon = "1"
-xxhash-rust = { workspace = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-unicode-normalization = "0.1"
 mutants = { workspace = true }
+# `O_NOFOLLOW` and `O_NONBLOCK` as the target defines them: their values
+# differ between Linux architectures.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
 
 [dev-dependencies]
+proptest = { workspace = true }
 tempfile = "3"
-# `trace`: a test counts the statements one update runs on its connection.
-rusqlite = { version = "0.40", features = ["bundled", "trace"] }

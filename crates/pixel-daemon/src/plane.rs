@@ -1,31 +1,27 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
-//! Which side of the daemon may answer a request (#1087).
+//! Which side of the daemon may answer an op (`specs/ops.md`).
 //!
-//! The writer owns the only writable `Service`: it applies watcher batches,
-//! builds and updates `graph.v2.db`, ingests `history.db` and runs git. A
-//! read replica ([`crate::api::Service::read_replica`]) shares the published
-//! text index and opens the graph read-only, so it may answer only what a
-//! published generation already holds. [`plane`] is the one place that
-//! says which is which; the evidence bridge's allowlist and the git-state
-//! invalidation after a mutation both derive from it.
+//! The writer owns the only writable [`Service`](crate::Service): it applies
+//! watcher batches, refreshes the graph, ingests history and runs git. A read
+//! replica shares the published text index and opens the graph read-only, so
+//! it may answer only what a published generation already holds. [`plane`] is
+//! the one place that says which is which.
 
-use crate::api::Request;
+use pixel_proto::Op;
 
-/// The plane a request is served on.
+/// The plane an op is served on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Plane {
-    /// A read replica may answer it from the published index, graph and
-    /// vectors: no write, no build, no history ingest, no git subprocess
-    /// beyond what a replica allows. The writer may answer it too.
+    /// A replica may answer from the published index and graph: no write, no
+    /// build, no history ingest. The writer may answer it too.
     Read,
-    /// Only the writer: the op may build or update the graph, ingest
-    /// history, download a model, write under `.pixel/` or run git.
+    /// Only the writer: the op may refresh the graph, ingest history, write
+    /// session state under `.pixel/` or run git.
     Write,
-    /// Only the writer, and the op moves HEAD, a branch, the working tree or
-    /// the whole index: the cached HEAD/branch/dirty triple is stale the
-    /// moment it returns.
+    /// Only the writer, and the op rebuilds the whole index: the cached
+    /// HEAD, branch and dirty state are stale the moment it returns.
     RepoWrite,
 }
 
@@ -36,257 +32,134 @@ impl Plane {
     }
 }
 
-/// The plane `req` is served on. No wildcard arm: a new `Request` variant
-/// does not compile until it is classified here.
-pub(crate) fn plane(req: &Request) -> Plane {
-    match req {
-        // `targets` is the execution brief; `impact` and `targets` read the
-        // graph a replica opens read-only (the writer builds it first).
-        Request::Ping
-        | Request::Search { .. }
-        | Request::Targets { .. }
-        | Request::Resolve { .. }
-        | Request::Impact { .. }
-        | Request::Meaning { .. } => Plane::Read,
-        Request::Publish { .. }
-        | Request::Push { .. }
-        | Request::Ship { .. }
-        | Request::BranchOp { .. }
-        | Request::Update { .. }
-        | Request::Sync { .. }
-        | Request::Rename { .. }
-        | Request::Reindex {} => Plane::RepoWrite,
-        // Graph ops build the graph when it is missing or drifted; history,
-        // lifecycle and excavate run a lazy ingest unless `read_only`; the
-        // git ops spawn git; `status` probes the stores; `shutdown` must
-        // stay ordered behind every write.
-        Request::Recall { .. }
-        | Request::TargetsFacts { .. }
-        | Request::Symbol { .. }
-        | Request::Skeleton { .. }
-        | Request::Context { .. }
-        | Request::Uses { .. }
-        | Request::Trace { .. }
-        | Request::Processes { .. }
-        | Request::Clusters { .. }
-        | Request::Changes { .. }
-        | Request::ReviewGate { .. }
-        | Request::Graph { .. }
-        | Request::Status {}
-        | Request::History { .. }
-        | Request::Lifecycle { .. }
-        | Request::Excavate { .. }
-        | Request::Reconcile { .. }
-        | Request::Journal { .. }
-        | Request::Inspect { .. }
-        | Request::Review { .. }
-        | Request::Diff { .. }
-        | Request::HistoryOp { .. }
-        | Request::Note { .. }
-        | Request::Map { .. }
-        | Request::Plan { .. }
-        | Request::Evaluate { .. }
-        | Request::Cycles { .. }
-        | Request::Shutdown => Plane::Write,
+/// The plane `op` is served on. No wildcard arm: a new [`Op`] variant does
+/// not compile until it is classified here.
+pub(crate) fn plane(op: &Op) -> Plane {
+    match op {
+        Op::Ping
+        | Op::Search { .. }
+        | Op::Symbol { .. }
+        | Op::Callers { .. }
+        | Op::Impact { .. }
+        | Op::Changes { .. }
+        | Op::Meaning { .. }
+        | Op::Map { .. }
+        // A brief reads the stores like `stale_ok` and writes only the
+        // session's sent ranges, a file of its own: it never holds the writer.
+        | Op::Brief { .. } => Plane::Read,
+        // `history` answers a read-only query from the db as it stands;
+        // otherwise it runs a bounded lazy ingest first.
+        Op::History {
+            read_only: true, ..
+        } => Plane::Read,
+        // The hooks write the session's state files; `status` probes the
+        // stores; `shutdown` must stay ordered behind every write.
+        Op::History { .. }
+        | Op::Status {}
+        | Op::EditCheck { .. }
+        | Op::StopCheck { .. }
+        | Op::Shutdown => Plane::Write,
+        Op::Reindex {} => Plane::RepoWrite,
     }
 }
 
-/// A read replica may answer `req`: a read-plane op, or a brief graph
-/// read or `targets_facts` that sets `stale_ok`. Those stay [`Plane::Write`] for every
-/// other purpose (the evidence bridge, the git-state invalidation): only the
-/// caller that accepts the published generation lets a replica serve them.
-pub(crate) fn replica_may_answer(req: &Request) -> bool {
-    plane(req) == Plane::Read || req.stale_ok()
-}
-
-/// The request an evidence-bridge query kind stands for, `None` for a kind
-/// the bridge does not know. The bridge serves it only when its [`plane`] is
-/// [`Plane::Read`].
-pub(crate) fn evidence_request(kind: &str, query: &str, limit: usize) -> Option<Request> {
-    let text = query.to_string();
-    Some(match kind {
-        "execution_brief" => Request::Targets {
-            task: text,
-            limit: Some(limit),
-            max_tier: Some("P1".into()),
-            precision: false,
-            regions: false,
-        },
-        "search" => Request::Search {
-            pattern: text,
-            json: false,
-            limit: Some(limit),
-            offset: None,
-            paths: None,
-            scope: None,
-            globs: Vec::new(),
-            types: Vec::new(),
-
-            stale_ok: false,
-        },
-        "resolve" => Request::Resolve {
-            phrase: text,
-            limit: Some(limit),
-
-            stale_ok: false,
-        },
-        "impact" => Request::Impact {
-            uid_or_name: text,
-            direction: "upstream".into(),
-            depth: Some(2),
-
-            stale_ok: false,
-        },
-        "meaning" => Request::Meaning {
-            query: text,
-            limit: Some(limit),
-
-            stale_ok: false,
-        },
-        "reindex" => Request::Reindex {},
-        _ => return None,
-    })
+/// Whether a replica implements `op` (a replica may still give the request
+/// back when it has nothing published to read).
+pub(crate) fn replica_may_answer(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Search { .. }
+            | Op::Symbol { .. }
+            | Op::Callers { .. }
+            | Op::Impact { .. }
+            | Op::Changes { .. }
+            | Op::Map { .. }
+            | Op::Brief { .. }
+            | Op::History {
+                read_only: true,
+                ..
+            }
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    /// Every required field of every variant, so one object deserializes
-    /// into any of them (an internally tagged enum ignores the rest).
-    fn any_request(op: &str) -> Request {
-        let mut value = json!({
-            "action": "a", "params": null, "pattern": "p", "task": "t",
-            "query": "q", "name": "n", "file": "f", "uid": "u",
-            "uid_or_name": "u", "direction": "upstream", "role": "r",
-            "from": "a", "to": "b", "phrase": "p", "kind": "k",
-            "message": "m", "files": [], "request_id": "r", "remote": "o",
-            "refspec": "s", "expected_head": "h", "target_oid": "t",
-            "new_name": "n2",
-        });
-        value["op"] = json!(op);
-        serde_json::from_value(value).unwrap_or_else(|e| panic!("{op}: {e}"))
+    /// One sample of every op, from the wire form: a variant added to
+    /// [`Op`] without a sample here fails `every_op_is_sampled`.
+    fn samples() -> Vec<Op> {
+        Op::NAMES
+            .iter()
+            .map(|name| {
+                let json = match *name {
+                    "brief" => {
+                        r#"{"op":"brief","prompt":"p","session":"s","host":"claude"}"#.to_owned()
+                    }
+                    "edit_check" => r#"{"op":"edit_check","path":"a.rs","session":"s"}"#.to_owned(),
+                    "stop_check" => r#"{"op":"stop_check","session":"s"}"#.to_owned(),
+                    "search" => r#"{"op":"search","pattern":"x"}"#.to_owned(),
+                    "symbol" => r#"{"op":"symbol","name":"n"}"#.to_owned(),
+                    "callers" => {
+                        r#"{"op":"callers","uid_or_name":"n","role":"callers"}"#.to_owned()
+                    }
+                    "impact" => {
+                        r#"{"op":"impact","uid_or_name":"n","direction":"upstream"}"#.to_owned()
+                    }
+                    "history" => r#"{"op":"history","query":"q"}"#.to_owned(),
+                    "meaning" => r#"{"op":"meaning","query":"q"}"#.to_owned(),
+                    other => format!(r#"{{"op":"{other}"}}"#),
+                };
+                serde_json::from_str(&json).unwrap_or_else(|err| panic!("{name}: {err}"))
+            })
+            .collect()
     }
 
-    /// The expected plane of every op, by wire name.
-    const EXPECTED: &[(&str, Plane)] = &[
-        ("ping", Plane::Read),
-        ("search", Plane::Read),
-        ("targets", Plane::Read),
-        ("resolve", Plane::Read),
-        ("impact", Plane::Read),
-        ("meaning", Plane::Read),
-        ("publish", Plane::RepoWrite),
-        ("push", Plane::RepoWrite),
-        ("ship", Plane::RepoWrite),
-        ("branch_op", Plane::RepoWrite),
-        ("update", Plane::RepoWrite),
-        ("sync", Plane::RepoWrite),
-        ("rename", Plane::RepoWrite),
-        ("reindex", Plane::RepoWrite),
-        ("recall", Plane::Write),
-        ("targets_facts", Plane::Write),
-        ("symbol", Plane::Write),
-        ("skeleton", Plane::Write),
-        ("context", Plane::Write),
-        ("uses", Plane::Write),
-        ("trace", Plane::Write),
-        ("processes", Plane::Write),
-        ("clusters", Plane::Write),
-        ("changes", Plane::Write),
-        ("review_gate", Plane::Write),
-        ("graph", Plane::Write),
-        ("status", Plane::Write),
-        ("history", Plane::Write),
-        ("lifecycle", Plane::Write),
-        ("excavate", Plane::Write),
-        ("reconcile", Plane::Write),
-        ("journal", Plane::Write),
-        ("inspect", Plane::Write),
-        ("review", Plane::Write),
-        ("diff", Plane::Write),
-        ("history_op", Plane::Write),
-        ("note", Plane::Write),
-        ("map", Plane::Write),
-        ("plan", Plane::Write),
-        ("evaluate", Plane::Write),
-        ("cycles", Plane::Write),
-        ("shutdown", Plane::Write),
-    ];
+    #[test]
+    fn every_op_is_sampled() {
+        assert_eq!(samples().len(), Op::NAMES.len());
+    }
 
     #[test]
-    fn every_op_has_its_plane() {
-        for (op, expected) in EXPECTED {
-            let req = any_request(op);
-            assert_eq!(req.op_name(), *op);
-            assert_eq!(plane(&req), *expected, "{op}");
+    fn reads_are_what_a_replica_may_answer_or_hand_back() {
+        let planes: Vec<(&str, Plane)> = samples()
+            .iter()
+            .map(|op| (op.op_name(), plane(op)))
+            .collect();
+        for (name, plane) in &planes {
+            let expected = match *name {
+                "ping" | "search" | "symbol" | "callers" | "impact" | "changes" | "meaning"
+                | "map" | "brief" => Plane::Read,
+                "reindex" => Plane::RepoWrite,
+                _ => Plane::Write,
+            };
+            assert_eq!(*plane, expected, "{name}");
+        }
+        for op in samples() {
+            if replica_may_answer(&op) {
+                assert_eq!(plane(&op), Plane::Read, "{}", op.op_name());
+            }
         }
     }
 
-    /// `plane` has no wildcard arm, so a new variant does not compile
-    /// unclassified; this pins `EXPECTED` to the op list clients see, so
-    /// the table cannot silently miss the new op's expected plane.
-    /// Only the internal daemon-lifecycle op `shutdown` is not advertised.
     #[test]
-    fn the_table_covers_every_op_a_client_may_send() {
-        let mut classified: Vec<&str> = EXPECTED.iter().map(|(op, _)| *op).collect();
-        let mut advertised: Vec<&str> = pixel_proto::op::SESSION_CAPABILITIES
-            .iter()
-            .copied()
-            .chain(["shutdown"])
-            .collect();
-        classified.sort_unstable();
-        advertised.sort_unstable();
-        assert_eq!(classified, advertised);
+    fn a_history_query_is_a_read_only_when_it_asks_not_to_ingest() {
+        let ask = |read_only: bool| Op::History {
+            query: "q".to_owned(),
+            facet: None,
+            limit: None,
+            read_only,
+        };
+        assert_eq!(plane(&ask(true)), Plane::Read);
+        assert_eq!(plane(&ask(false)), Plane::Write);
+        assert!(replica_may_answer(&ask(true)));
+        assert!(!replica_may_answer(&ask(false)));
     }
 
-    /// Only the ops that move HEAD, a branch or the tree drop the cached git
-    /// state: a read clearing it would cost three git spawns per request.
     #[test]
-    fn only_repo_writes_mutate_the_repo() {
+    fn only_a_reindex_mutates_the_repo_state() {
         assert!(Plane::RepoWrite.mutates_repo());
         assert!(!Plane::Write.mutates_repo());
         assert!(!Plane::Read.mutates_repo());
-    }
-
-    #[test]
-    fn evidence_kinds_are_the_read_plane_ops_they_name() {
-        let cases = [
-            ("execution_brief", "targets"),
-            ("search", "search"),
-            ("resolve", "resolve"),
-            ("impact", "impact"),
-            ("meaning", "meaning"),
-        ];
-        for (kind, op) in cases {
-            let req = evidence_request(kind, "login", 4).expect(kind);
-            assert_eq!(req.op_name(), op);
-            assert_eq!(plane(&req), Plane::Read, "{kind}");
-        }
-        assert_eq!(
-            evidence_request("execution_brief", "login", 4),
-            Some(Request::Targets {
-                task: "login".into(),
-                limit: Some(4),
-                max_tier: Some("P1".into()),
-                precision: false,
-                regions: false,
-            })
-        );
-        assert_eq!(
-            evidence_request("impact", "login", 4),
-            Some(Request::Impact {
-                uid_or_name: "login".into(),
-                direction: "upstream".into(),
-                depth: Some(2),
-
-                stale_ok: false,
-            })
-        );
-        // Known to the wire but refused by the plane; unknown altogether.
-        let reindex = evidence_request("reindex", "login", 4).expect("reindex");
-        assert_eq!(plane(&reindex), Plane::RepoWrite);
-        assert_eq!(evidence_request("telepathy", "login", 4), None);
     }
 }

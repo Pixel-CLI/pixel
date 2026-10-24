@@ -1,80 +1,93 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
-//! pixel-graph — symbols, imports, tiered call resolution, analyses.
+//! The PIXEL code graph (`specs/graph.md`): one store, one pipeline, one parse
+//! per file.
 //!
-//! Module ownership (parallel development contract — do not fold modules
-//! into each other):
-//! - `store`: SQLite persistence + shared row types (THE schema contract)
-//! - `extract`: tree-sitter per-file symbol/import/call-site extraction
-//! - `imports`: import-spec → file resolution
-//! - `resolve`: tiered edge resolution + epistemic envelope
-//! - `build`: whole-repo build/update orchestration
-//! - `impact`, `trace`, `process`, `cluster`, `changes`: analyses
-//! - `predicate`: bounded reachability with witnesses (`pixel evaluate`)
-//! - `mvp_adapter`: pixel-mvp's Rust index in this graph's rows (vendored
-//!   `mvp-*` crates), and `mvp_adapter::ruby`, its Ruby answer merged site
-//!   by site with this graph's; `shadow`: this graph's Rust edges against it
+//! Each language is one grammar and one rule module (`ruby`, `rust`). The
+//! indexer returns rows and writes nothing: the daemon hands them to the
+//! [`store`]. A run is `tree::scan`, then `link::plan` against the current
+//! generation, `extract::extract` of the planned files within an optional
+//! deadline, and `link::link`, which decides every site of the generation
+//! again so that an incremental run stores exactly what a full run stores.
 
-pub mod build;
-pub mod changes;
-pub mod cluster;
-pub mod concept;
-pub mod concept_resolve;
-pub mod cycles;
+pub mod analysis;
+pub mod codec;
+pub mod edit;
 pub mod extract;
-pub mod impact;
-pub mod imports;
-pub mod mvp_adapter;
-pub mod plan;
-pub mod predicate;
-pub mod process;
+pub mod git_index;
+pub mod guard;
+pub mod lang;
+pub mod link;
+pub mod names;
+pub mod refresh;
 pub mod rename;
-pub mod resolve;
-pub mod review;
-pub mod shadow;
+pub mod ruby;
+pub mod rust;
+pub mod shape;
 pub mod store;
-pub mod targets;
-pub mod trace;
+pub mod text;
+pub mod tree;
 
-pub use impact::split_ident_words;
-pub use store::{
-    EdgeKind, EdgeRow, Envelope, FileRow, GraphStore, StoreError, SymbolKind, SymbolRow, Tier,
+pub use extract::{Extracted, extract};
+pub use lang::extractor;
+pub use link::{Plan, link, plan};
+pub use refresh::{RefreshError, Refreshed, refresh};
+pub use tree::{
+    Known, Repository, Tree, TreeError, TreeFile, changes, diff, discover, root, scan,
+    scan_discovered, scan_discovered_in, scan_with,
 };
 
 #[cfg(test)]
+mod grammar;
+#[cfg(test)]
+mod truth;
+
+#[cfg(test)]
 pub(crate) mod testutil {
-    //! The crate's git fixture helpers: real `git` in a temporary directory,
-    //! with a fixed identity and no global configuration.
+    //! Git fixtures for this crate's tests: real `git`, run directly (test
+    //! code is exempt from the single-runner boundary).
 
     use std::path::Path;
+    use std::process::Command;
 
-    /// Runs `git -C root args…`, and fails the test when git does.
-    pub(crate) fn git(root: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "t")
-            .env("GIT_AUTHOR_EMAIL", "t@t")
-            .env("GIT_COMMITTER_NAME", "t")
-            .env("GIT_COMMITTER_EMAIL", "t@t")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?}: {out:?}");
+    /// `git -C dir` that never takes `.git/index.lock`, as the scan runs it.
+    pub(crate) fn git_in(dir: &Path) -> Command {
+        let mut command = Command::new("git");
+        command.arg("--no-optional-locks").arg("-C").arg(dir);
+        command
     }
 
-    /// A repository at `root` whose one commit holds `files`, each written with
-    /// its content.
-    pub(crate) fn init_repo(root: &Path, files: &[(&str, &str)]) {
-        git(root, &["init", "-q"]);
-        for (rel, content) in files {
-            let path = root.join(rel);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, content).unwrap();
+    /// Runs git in `dir` with an identity and no signing, as a test sets a
+    /// repository up.
+    pub(crate) fn run_git(dir: &Path, args: &[&str]) {
+        let status = git_in(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// Writes `files` (path, content) under `dir` and commits everything.
+    pub(crate) fn commit(dir: &Path, files: &[(&str, &str)], message: &str) {
+        for (path, content) in files {
+            let full = dir.join(path);
+            std::fs::create_dir_all(full.parent().expect("a parent")).expect("directories");
+            std::fs::write(full, content).expect("written");
         }
-        git(root, &["add", "."]);
-        git(root, &["commit", "-qm", "fixture"]);
+        run_git(dir, &["add", "-A"]);
+        run_git(dir, &["commit", "-qm", message]);
+    }
+
+    /// A fresh repository holding `files`, committed.
+    pub(crate) fn repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        run_git(dir.path(), &["init", "-q"]);
+        commit(dir.path(), files, "one");
+        dir
     }
 }

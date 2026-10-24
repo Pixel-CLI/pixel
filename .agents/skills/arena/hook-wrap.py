@@ -24,7 +24,7 @@ CONFIG = json.load(open(os.path.join(HERE, "hook-wrap.json")))
 REAL, EXTRA, CAP = CONFIG["real"], CONFIG.get("extra", []), 9500
 MARK = "@@REPLACE@@"
 args = sys.argv[1:]
-if not (args[:2] == ["run-hook", "task-event"] and "prompt-submit" in args):
+if not (args[:2] == ["hook", "prompt-submit"] and "--host" in args):
     os.execv(REAL, [REAL] + args)
 stdin = sys.stdin.read()
 try:

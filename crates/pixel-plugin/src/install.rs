@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Managing plugins: install (`add`), uninstall (`remove`), enable, trust.
@@ -8,7 +8,7 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use pixel_git::{GitOptions, GitRunner};
+use pixel_io::{GitOptions, GitRunner};
 
 use crate::Error;
 use crate::directory::Directory;
@@ -248,7 +248,7 @@ fn clone_repo(url: &str, reference: Option<&str>, shown: &str) -> Result<tempfil
         clone.path(),
         GitOptions {
             timeout: Some(CLONE_TIMEOUT),
-            max_output_bytes: Some(pixel_git::DEFAULT_MAX_OUTPUT_BYTES),
+            max_output_bytes: Some(pixel_io::DEFAULT_MAX_OUTPUT_BYTES),
         },
     );
     let mut args = vec!["clone", "--depth", "1"];
@@ -256,14 +256,14 @@ fn clone_repo(url: &str, reference: Option<&str>, shown: &str) -> Result<tempfil
         args.extend(["--branch", reference]);
     }
     args.extend(["--", url, "clone"]);
-    let failed = |e: pixel_git::GitError| {
+    let failed = |e: pixel_io::GitError| {
         // Git echoes the URL it was given, userinfo included.
         let reason = e.to_string().replace(url, shown);
         Error::Source(format!("cannot clone {shown}: {reason}"))
     };
     let output = runner.run_output(&args, &CLONE_ENV).map_err(failed)?;
     if !output.success() {
-        return Err(failed(pixel_git::GitError::NonZeroExit {
+        return Err(failed(pixel_io::GitError::NonZeroExit {
             args: args.iter().map(ToString::to_string).collect(),
             code: output.code,
             stderr: output.stderr,
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn url_schemes_are_a_whitelist() {
         for ok in [
-            "https://github.com/Pixel-CLI/pixel-plugins",
+            "https://github.com/PIXEL-CLI/pixel-plugins",
             "ssh://git@host/x.git",
             "file:///tmp/x",
             "git@github.com:a/b.git",
@@ -1157,7 +1157,7 @@ mod tests {
         .unwrap();
     }
 
-    /// The shape of the Pixel-CLI plugins: `run` = `bin/tool` is committed,
+    /// The shape of the PIXEL-CLI plugins: `run` = `bin/tool` is committed,
     /// a launcher that only finds a binary built elsewhere.
     const LAUNCHER: &str = "#!/bin/sh\necho 'no tool binary installed' >&2\nexit 1\n";
 

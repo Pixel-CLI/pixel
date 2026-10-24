@@ -1,7 +1,0 @@
-# gortex arm — zzet/gortex, daemon-indexed knowledge graph + MCP.
-FROM pixel-arena-base:latest
-RUN curl -fsSL https://get.gortex.dev | sh
-ENV ARM_TOOL=gortex
-COPY entrypoint.sh /usr/local/bin/arena-entrypoint
-RUN chmod +x /usr/local/bin/arena-entrypoint
-ENTRYPOINT ["/usr/local/bin/arena-entrypoint"]

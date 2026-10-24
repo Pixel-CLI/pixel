@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 # pixel install script — downloads the latest release binary from GitHub.
@@ -144,11 +144,10 @@ TMP_DEST="${STAGE_DIR}/.pixel.tmp.$$"
 cp "$BINARY" "$TMP_DEST"
 chmod +x "$TMP_DEST"
 
-# Prove the file we are about to put on PATH actually starts. stdin is not a
-# terminal, and the update check is off, so this cannot prompt to upgrade.
-# A failure leaves the previous install in place.
+# Prove the file we are about to put on PATH actually starts. A failure leaves
+# the previous install in place.
 echo "Checking that the binary runs..."
-if PIXEL_NO_UPDATE_CHECK=1 "$TMP_DEST" --version </dev/null; then
+if "$TMP_DEST" --version </dev/null; then
     :
 else
     rm -f "$TMP_DEST"

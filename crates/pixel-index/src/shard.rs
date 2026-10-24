@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Immutable on-disk gram shard.
@@ -179,7 +179,7 @@ impl ShardBuilder {
         if let Some(parent) = dest.parent() {
             // Owner-only (0700), and never created or chmodded through a
             // link.
-            pixel_git::sidecar::private_dir(parent)?;
+            pixel_io::sidecar::private_dir(parent)?;
         }
         match fs::remove_file(&tmp) {
             Ok(()) => {}
@@ -283,7 +283,7 @@ pub struct Shard {
 impl Shard {
     pub fn open(path: &Path) -> Result<Self, ShardError> {
         // Never through a link: a repository can commit one at the name.
-        let file = pixel_git::nofollow::open_read(path)?;
+        let file = pixel_io::nofollow::open_read(path)?;
         // SAFETY: Mmap::map is unsafe because the file could change under the
         // mapping. Shards are written to a temp path and renamed into place
         // (`Shard::write`), so a mapped file is never modified; every offset
@@ -383,7 +383,7 @@ impl Shard {
                 .map_err(|_| ShardError::Corrupt("path not utf8"))?;
             // Search joins every path to the root and reads it: a path that
             // could leave the repository makes the whole shard untrusted.
-            if !pixel_git::repo_path::is_normal_relative(path) {
+            if !pixel_io::repo_path::is_normal_relative(path) {
                 return Err(ShardError::Corrupt("file path leaves the repository"));
             }
             files.push(path.to_string());
@@ -516,13 +516,12 @@ mod tests {
         assert_eq!(h.finish(), 42, "the last key replaces the state");
     }
     use super::*;
-    use crate::gram::{GramExtractor, SparseGramExtractor};
-    use crate::weights::Crc32Weigher;
+    use crate::gram::{GramExtractor, TrigramExtractor};
     use proptest::prelude::*;
     use std::collections::{HashMap, HashSet};
 
     fn build_and_open(files: &[(&str, &[u8])], dir: &Path) -> (Shard, HashMap<u64, Vec<u32>>) {
-        let ex = SparseGramExtractor::new(Crc32Weigher);
+        let ex = TrigramExtractor;
         let mut builder = ShardBuilder::new(&ex.id());
         builder.set_commit_oid("0123456789abcdef0123456789abcdef01234567");
         let mut expected: HashMap<u64, Vec<u32>> = HashMap::new();
@@ -550,7 +549,7 @@ mod tests {
         let files: Vec<(&str, &[u8])> = vec![
             ("src/a.rs", b"fn handleClick() { openMenu(); }" as &[u8]),
             ("src/b.rs", b"fn openMenu() { let x = MAX_FILE_SIZE; }"),
-            ("README.md", b"gitpixel handleClick docs"),
+            ("README.md", b"gitrto handleClick docs"),
         ];
         let (shard, expected) = build_and_open(&files, &dir);
 
@@ -560,7 +559,7 @@ mod tests {
             shard.commit_oid(),
             Some("0123456789abcdef0123456789abcdef01234567")
         );
-        assert!(shard.extractor_id().starts_with("sparse-crc32"));
+        assert!(shard.extractor_id().starts_with("trigram"));
         assert_eq!(shard.gram_count(), expected.len() as u64);
 
         for (h, ids) in &expected {
@@ -580,7 +579,7 @@ mod tests {
             ("c", b"more handleClick usage in this one"),
         ];
         let (shard, _) = build_and_open(&files, &dir);
-        let ex = SparseGramExtractor::new(Crc32Weigher);
+        let ex = TrigramExtractor;
 
         let covering = ex.covering(b"handleClick");
         let q = crate::posting::GramQuery::And(

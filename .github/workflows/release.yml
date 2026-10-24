@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 name: Release
@@ -24,7 +24,7 @@ jobs:
   # not run on tag pushes, so this is the only check a release goes through.
   verify:
     name: Verify tag and tests
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     # Match ci.yml's Test job so the linux-debug cache key is identical.
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -44,7 +44,7 @@ jobs:
       # Restores the debug cache ci.yml's Test job saves on main (shared key
       # linux-debug); never saves: a tag's cache is unreadable by the next tag.
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: linux-debug
           save-if: false
@@ -63,8 +63,8 @@ jobs:
       # A stale lock used to surface only in the build job, after the tests.
       # No --locked here on purpose: with it cargo would refuse before the
       # report names the stale member; the build job stays --locked.
-      - name: Release consistency (pixel check-release)
-        run: cargo run -q -p pixel-cli -- check-release "$GITHUB_REF" --repo .
+      - name: Release consistency (scripts/release/check-release.py)
+        run: python3 scripts/release/check-release.py "$GITHUB_REF" --repo .
 
       # The dependency policy again, on the tag: CI only runs cargo-deny when
       # Cargo.lock or deny.toml changes, while RustSec keeps publishing
@@ -72,7 +72,7 @@ jobs:
       # release here, before anything is built, until it is fixed or accepted
       # with its reason in deny.toml and osv-scanner.toml.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-deny
 
@@ -109,21 +109,12 @@ jobs:
     uses: ./.github/workflows/release-build.yml
 
   release:
-    name: Publish release + formula
+    name: Publish release
     needs: assets
-    runs-on: ubuntu-26.04
-    # Whether the tap was updated, for the smoke job: a plain flag, so the tap
-    # token itself never reaches the job that runs the published artefacts.
-    outputs:
-      tap: ${{ steps.tap.outputs.published }}
+    runs-on: ubuntu-latest
     # Publication only: the signing permissions stay with release-build.yml.
     permissions:
       contents: write
-    env:
-      # Fine-grained PAT with Contents: read/write on LivioGama/homebrew-tap.
-      # When unset, the formula is still attached to the release but the tap
-      # is not updated (a warning is emitted instead of failing the release).
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -131,8 +122,8 @@ jobs:
           persist-credentials: false
 
       # The files release-build.yml built and attested: archives, their
-      # .sha256 and SBOMs (.cdx.json), the Linux bottles, pixel.rb,
-      # pixel-core.rb and install.sh, plus the attestation's Sigstore bundle
+      # .sha256 files and SBOMs (.cdx.json), install.sh, and the attestation's
+      # Sigstore bundle
       # (pixel-<tag>.intoto.jsonl).
       - name: Download the release assets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -164,64 +155,24 @@ jobs:
           # ahead of the latest release, and the documented one-liner reads
           # releases/latest/download/install.sh, so it always runs the
           # script of the release it installs.
-          # assets/pixel-*.tar.gz matches the archives and the Linux
-          # bottles (pixel-*.bottle.tar.gz) alike. pixel-*.intoto.jsonl is
+          # assets/pixel-*.tar.gz matches the archives. pixel-*.intoto.jsonl is
           # the provenance bundle, the file Scorecard's Signed-Releases
           # check looks for. pixel-*.cdx.json is each archive's SBOM, and
           # pixel-*.symbols.tar.xz each binary before stripping.
           files: |
             assets/pixel-*.tar.gz
             assets/pixel-*.tar.gz.sha256
-            assets/pixel.rb
-            assets/pixel-core.rb
             assets/install.sh
             assets/pixel-*.intoto.jsonl
             assets/pixel-*.cdx.json
             assets/pixel-*.symbols.tar.xz
-
-      - name: Check out the Homebrew tap
-        if: env.HOMEBREW_TAP_TOKEN != ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: LivioGama/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
-
-      - name: Publish formula to the tap
-        if: env.HOMEBREW_TAP_TOKEN != ''
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          cp assets/pixel.rb homebrew-tap/Formula/pixel.rb
-          cd homebrew-tap
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/pixel.rb
-          if git diff --staged --quiet; then
-            echo "Formula/pixel.rb already up to date for ${VERSION}"
-            exit 0
-          fi
-          git commit -m "pixel ${VERSION#v}"
-          git push
-
-      - name: Tap not updated (no token)
-        if: env.HOMEBREW_TAP_TOKEN == ''
-        run: echo "::warning::HOMEBREW_TAP_TOKEN is not set; update Formula/pixel.rb in LivioGama/homebrew-tap by hand from the pixel.rb release asset."
-
-      - name: Record whether the tap was published
-        id: tap
-        run: |
-          if [ -n "$HOMEBREW_TAP_TOKEN" ]; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
 
   # Post-publish smoke test: installs what was just published, the ways the
   # README installs it, on each target's own runner, and checks it is the
   # tagged build. `pixel --version` must print `pixel x.y.z` and `commit:
   # <the tag's commit>` (build.rs embeds it, `-dirty` included) from an empty
   # HOME. Nothing before this job ran the aarch64-apple-darwin binary, and
-  # nothing ran install.sh or the tap formula at all. A failure here comes
+  # nothing ran install.sh. A failure here comes
   # after publication: it cannot unpublish, it says the next patch is due.
   smoke:
     name: Smoke ${{ matrix.target }}
@@ -233,9 +184,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-26.04
+            os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
-            os: ubuntu-26.04-arm
+            os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-15
     env:
@@ -306,108 +257,3 @@ jobs:
           curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.sh" \
             | PIXEL_INSTALL_DIR="$RUNNER_TEMP/install-sh" sh
           "$RUNNER_TEMP/check-version.sh" "$RUNNER_TEMP/install-sh/pixel" "install.sh"
-
-      # On Linux the tap must pour the release's bottle: installed from its
-      # url instead, the formula counts as a build from source and needs a C
-      # compiler. A runner image without Homebrew skips the check.
-      - name: Homebrew tap (Linux bottle)
-        if: runner.os == 'Linux' && needs.release.outputs.tap == 'true'
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: |
-          brew=/home/linuxbrew/.linuxbrew/bin/brew
-          if [ ! -x "$brew" ]; then
-            echo "::notice::no Homebrew on this runner image; the Linux bottle is not checked"
-            exit 0
-          fi
-          "$brew" tap LivioGama/tap
-          "$brew" install LivioGama/tap/pixel
-          poured="$("$brew" info --json=v2 LivioGama/tap/pixel \
-            | python3 -c 'import json, sys; print(json.load(sys.stdin)["formulae"][0]["installed"][0]["poured_from_bottle"])')"
-          if [ "$poured" != True ]; then
-            echo "::error::brew installed pixel without pouring its bottle (poured_from_bottle: $poured)"
-            exit 1
-          fi
-          "$brew" deps --installed LivioGama/tap/pixel
-          "$RUNNER_TEMP/check-version.sh" "$("$brew" --prefix)/bin/pixel" "brew install LivioGama/tap/pixel (bottle)"
-
-      # macOS is the one target with no other install path than the tap for
-      # most users; it has no bottle and installs from its archive.
-      - name: Homebrew tap
-        if: runner.os == 'macOS' && needs.release.outputs.tap == 'true'
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: |
-          brew tap LivioGama/tap
-          brew install LivioGama/tap/pixel
-          brew test LivioGama/tap/pixel
-          "$RUNNER_TEMP/check-version.sh" "$(brew --prefix)/bin/pixel" "brew install LivioGama/tap/pixel"
-
-  # VirusTotal: submits each release archive and appends a link to its report
-  # to the release notes, so a user can check the scan of the exact file they
-  # download (a static "0/N" badge would go stale with the next release).
-  # Reports are linked by sha256, so a link stays valid as engines re-scan.
-  # Runs only when the VT_API_KEY secret is set; the free API allows 4
-  # requests a minute, hence the pause between calls. A failure here comes
-  # after publication and unpublishes nothing.
-  virustotal:
-    name: VirusTotal scan
-    needs: release
-    runs-on: ubuntu-26.04
-    permissions:
-      # Append the report links to the release notes.
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      VT_API_KEY: ${{ secrets.VT_API_KEY }}
-    steps:
-      - name: No VirusTotal key
-        if: env.VT_API_KEY == ''
-        run: echo "::notice::VT_API_KEY is not set; the release archives were not submitted to VirusTotal."
-
-      - name: Submit the archives and link their reports
-        if: env.VT_API_KEY != ''
-        run: |
-          set -eu
-          DIR="$RUNNER_TEMP/virustotal"
-          mkdir -p "$DIR" && cd "$DIR"
-          # pixel-v*: the three archives; the bottles (pixel-<version>.*)
-          # carry the same binaries as the Linux archives.
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern 'pixel-v*.tar.gz'
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json body --jq .body > notes.md
-          if grep -Fqx '### VirusTotal' notes.md; then
-            echo "::notice::the release notes already link VirusTotal reports; nothing appended"
-            exit 0
-          fi
-          printf '\n\n### VirusTotal\n\n' > links.md
-          # The key goes to curl through a mode-0600 header file, never as an
-          # argument another process could read from the process list
-          # (printf is a shell builtin, so writing it spawns nothing).
-          hdr="$(umask 077 && mktemp)"
-          trap 'rm -f "$hdr"' EXIT
-          printf 'x-apikey: %s\n' "$VT_API_KEY" > "$hdr"
-          for f in pixel-v*.tar.gz; do
-            # 32 MB is the direct upload limit; larger files take an upload URL.
-            url="https://www.virustotal.com/api/v3/files"
-            if [ "$(wc -c < "$f")" -gt 32000000 ]; then
-              url="$(curl -fsS --retry 3 -H "@$hdr" \
-                https://www.virustotal.com/api/v3/files/upload_url | jq -r .data)"
-              sleep 16
-            fi
-            # The key and the archive only ever travel over HTTPS.
-            case "$url" in
-              https://*) ;;
-              *) echo "::error::VirusTotal returned a non-HTTPS upload URL; $f not submitted"; exit 1 ;;
-            esac
-            curl -fsS --retry 3 -H "@$hdr" -F "file=@$f" "$url" > /dev/null
-            sha="$(shasum -a 256 "$f" | cut -d' ' -f1)"
-            # shellcheck disable=SC2016 # the backticks are Markdown, not a command
-            printf -- '- [`%s`](https://www.virustotal.com/gui/file/%s)\n' "$f" "$sha" >> links.md
-            echo "submitted $f ($sha)"
-            sleep 16
-          done
-          cat notes.md links.md > notes-with-scan.md
-          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file notes-with-scan.md
-          cat links.md

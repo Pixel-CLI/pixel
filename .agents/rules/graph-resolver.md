@@ -5,6 +5,8 @@ paths:
 
 # Graph Extraction and Resolution
 
+> Issue and PR numbers (`#262`, …) in this file refer to Pixel's history, where each lesson was learned.
+
 Loaded when `pixel-graph` is in play. A change to what an import, a call or
 a symbol means has to hold on every path below, and on the language rule it
 models, not only on the path the fix started from.

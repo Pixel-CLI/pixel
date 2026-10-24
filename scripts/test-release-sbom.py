@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 """Contract of scripts/release/release-sbom.py, the step release-build.yml runs to
@@ -7,7 +7,7 @@ write the SBOM published beside each release archive, checked without a tag.
 
 What must hold for the SBOM to describe the archive (OSPS-QA-02.02):
 
-- a crate cargo-cyclonedx lists but `cargo tree -p pixel-cli` does not compile
+- a crate cargo-cyclonedx lists but `cargo tree -p pixel` does not compile
   is gone, with every dependency edge to it: a scanner reading the Linux SBOM
   must not report OpenSSL in a binary that has none;
 - every crate the build compiles stays, matched by name *and* version, so a
@@ -27,7 +27,7 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parent / "release" / "release-sbom.py"
 TAG = "v9.8.7"
 TARGET = "x86_64-unknown-linux-musl"
-ROOT_REF = "path+file:///work/crates/pixel#pixel-cli@9.8.7"
+ROOT_REF = "path+file:///work/crates/pixel#pixel@9.8.7"
 
 
 def ref(name, version):
@@ -77,7 +77,7 @@ def raw_bom(version="9.8.7", target=TARGET, name="pixel"):
 # `cargo tree --prefix none --format '{p}'` as the release job runs it: the
 # root with its path, repeated crates marked `(*)`, a proc-macro marker.
 TREE = """\
-pixel-cli v9.8.7 (/work/crates/pixel)
+pixel v9.8.7 (/work/crates/pixel)
 clap v4.6.7
 hashbrown v0.15.5
 serde v1.0.228
@@ -154,7 +154,7 @@ class ReleaseSbomContract(unittest.TestCase):
             "tag": (self.with_proc_macro(), "v9.8.8", TARGET),
             "target": (self.with_proc_macro(target="aarch64-apple-darwin"), TAG, TARGET),
             "requested target": (self.with_proc_macro(), TAG, "aarch64-unknown-linux-musl"),
-            "binary": (self.with_proc_macro(name="pixel-cli"), TAG, TARGET),
+            "binary": (self.with_proc_macro(name="pixel-extras"), TAG, TARGET),
         }
         for case, (bom, tag, target) in cases.items():
             with self.subTest(case):
@@ -166,8 +166,8 @@ class ReleaseSbomContract(unittest.TestCase):
     def test_an_empty_or_unreadable_tree_fails(self):
         cases = {
             "empty": "\n",
-            "root only": "pixel-cli v9.8.7 (/work/crates/pixel)\n",
-            "unreadable": "error: package `pixel-cli` not found\n",
+            "root only": "pixel v9.8.7 (/work/crates/pixel)\n",
+            "unreadable": "error: package `pixel` not found\n",
         }
         for case, tree in cases.items():
             with self.subTest(case):

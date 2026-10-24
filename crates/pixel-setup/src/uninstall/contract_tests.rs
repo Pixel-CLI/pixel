@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Contract tests for the uninstall steps: what each step removes, what it
@@ -14,21 +14,10 @@ fn group(matcher: &str, command: &str) -> serde_json::Value {
     json!({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
 }
 
-/// The `.pixel-bak.` copies present in `dir`.
-fn backups_in(dir: &Path) -> Vec<PathBuf> {
-    find_backups(&[dir.to_path_buf()])
-}
-
 fn write(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, text).unwrap();
 }
-
-// -- zcode -------------------------------------------------------------------
-
-// -- pi ------------------------------------------------------------------------
-
-// -- rule source and agent prompt ----------------------------------------------
 
 // -- binary --------------------------------------------------------------------
 
@@ -206,7 +195,7 @@ fn remove_pixel_hooks_from_settings_should_drop_the_hooks_key_once_every_event_i
     let path = dir.path().join("settings.json");
     install::write_settings(
         &path,
-        &json!({"keep": 1, "hooks": {"Stop": [group("", "pixel run-hook task-event --provider claude --event stop")]}}),
+        &json!({"keep": 1, "hooks": {"Stop": [group("", "pixel hook stop --host claude")]}}),
         false,
     )
     .unwrap();
@@ -221,7 +210,7 @@ fn remove_pixel_hooks_from_settings_should_drop_the_hooks_key_once_every_event_i
 fn remove_pixel_hooks_from_settings_should_count_but_not_write_when_dry_run() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
-    let original = json!({"hooks": {"Stop": [group("", "pixel run-hook task-event --provider claude --event stop")]}});
+    let original = json!({"hooks": {"Stop": [group("", "pixel hook stop --host claude")]}});
     install::write_settings(&path, &original, false).unwrap();
     let (removed, backup) =
         remove_pixel_hooks_from_settings(&path, Path::new("/opt/pixel"), true).unwrap();
@@ -241,85 +230,3 @@ fn remove_pixel_hooks_from_settings_should_leave_a_file_without_hooks_untouched(
     );
     assert_eq!(fs::read_to_string(&path).unwrap(), "{\"model\":\"x\"}");
 }
-
-// -- agent configs and search roots ------------------------------------------------
-
-// -- whole runs --------------------------------------------------------------------
-
-// -- classify skill ------------------------------------------------------------
-
-#[test]
-fn remove_classify_skill_should_backup_the_skill_dir_and_keep_foreign_skills() {
-    let home = tempfile::tempdir().unwrap();
-    let skill = home.path().join(".claude/skills/pixel-classify");
-    write(&skill.join("SKILL.md"), CLASSIFY_SKILL);
-    let foreign = home.path().join(".claude/skills/other");
-    write(&foreign.join("SKILL.md"), "mine\n");
-
-    let step = remove_classify_skill(home.path(), false).unwrap();
-
-    assert_eq!(step.id, "classify.skill");
-    assert_eq!(step.summary, "removed 1 classify skill dir(s)");
-    assert_eq!(
-        step.detail,
-        Some(skill.display().to_string()),
-        "removed dirs are named in the detail"
-    );
-    assert!(!skill.exists());
-    // The backup leaves `skills/`, where the harness would still load it.
-    let skills: Vec<PathBuf> = fs::read_dir(home.path().join(".claude/skills"))
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.path())
-        .collect();
-    assert_eq!(skills, vec![foreign.clone()]);
-    let renamed: Vec<PathBuf> = fs::read_dir(home.path().join(".claude"))
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_dir()
-                && path
-                    .file_name()
-                    .is_some_and(|name| is_backup_name(&name.to_string_lossy()))
-        })
-        .collect();
-    assert_eq!(renamed.len(), 1);
-    assert!(renamed[0].join("SKILL.md").is_file());
-    assert!(foreign.join("SKILL.md").is_file());
-}
-
-#[test]
-fn remove_classify_skill_should_keep_a_users_own_skill_of_the_same_name() {
-    let home = tempfile::tempdir().unwrap();
-    let skill = home.path().join(".claude/skills/pixel-classify");
-    write(&skill.join("SKILL.md"), "my own classifier\n");
-
-    let step = remove_classify_skill(home.path(), false).unwrap();
-
-    assert_eq!(step.summary, "no classify skill found");
-    assert_eq!(step.detail, None);
-    assert_eq!(
-        fs::read_to_string(skill.join("SKILL.md")).unwrap(),
-        "my own classifier\n"
-    );
-    assert!(backups_in(&home.path().join(".claude")).is_empty());
-}
-
-#[test]
-fn remove_classify_skill_should_keep_every_dir_when_dry_run() {
-    let home = tempfile::tempdir().unwrap();
-    let skill = home.path().join(".claude/skills/pixel-classify");
-    write(&skill.join("SKILL.md"), CLASSIFY_SKILL);
-
-    let step = remove_classify_skill(home.path(), true).unwrap();
-
-    assert_eq!(
-        step.summary,
-        "[dry-run] would report: removed 1 classify skill dir(s)"
-    );
-    assert!(skill.join("SKILL.md").is_file());
-    assert!(backups_in(&home.path().join(".claude")).is_empty());
-}
-
-// -- pixel setup blocks ------------------------------------------------------

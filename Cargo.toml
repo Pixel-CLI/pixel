@@ -1,15 +1,16 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 [workspace]
 resolver = "3"
-members = ["crates/pixel-index", "crates/pixel", "crates/pixel-graph", "crates/pixel-context", "crates/pixel-daemon", "crates/pixel-recall", "crates/pixel-bench", "crates/pixel-session", "crates/pixel-proto", "crates/pixel-git", "crates/pixel-rank", "crates/pixel-ops", "crates/pixel-facts", "crates/pixel-setup", "crates/pixel-actionlog", "crates/pixel-release", "crates/pixel-task", "crates/pixel-plugin", "crates/mvp-model", "crates/mvp-store", "crates/mvp-index"]
+members = ["crates/pixel", "crates/pixel-brief", "crates/pixel-io", "crates/pixel-model", "crates/pixel-proto", "crates/pixel-metrics", "crates/pixel-graph", "crates/pixel-index", "crates/pixel-daemon", "crates/pixel-setup", "crates/pixel-plugin"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Pixel-CLI/pixel"
-rust-version = "1.99"
+# The container and CI both run stable; raise this only when a crate needs it.
+rust-version = "1.97"
 
 # Lint policy for every workspace member (each crate opts in with
 # `[lints] workspace = true`). CI runs clippy with `-D warnings`, so every
@@ -47,73 +48,37 @@ items_after_statements = "warn"             # items exist for the whole scope: d
 map_unwrap_or = "warn"                      # `map_or`/`map_or_else`/`is_some_and` over `map().unwrap_or()`
 redundant_closure_for_method_calls = "warn" # `map(str::trim)`, not `map(|s| s.trim())`
 uninlined_format_args = "warn"              # `format!("{name}")`, not `format!("{}", name)`
-# Evaluated and not enabled (site counts on 2026-09, lib+tests): the
-# documentation trio (missing_errors_doc 496, must_use_candidate 450,
-# doc_markdown 367), the numeric-cast family (cast_possible_truncation 199,
-# cast_precision_loss 142, cast_possible_wrap 96, cast_sign_loss 74: sizes,
-# counts and metric ratios cast on purpose), and the remaining style
-# rewrites (format_push_string 277, since moved by clippy to the
-# `restriction` group; needless_pass_by_value 98, signature changes across
-# crates; too_many_lines 82). Each would be a hundred-site churn PR with no
-# behaviour change; add one here when every crate has been brought to zero.
 
 [workspace.dependencies]
-crc32fast = "1.4"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-proptest = "1.6"
-criterion = "0.8"
-rusqlite = { version = "0.40", features = ["bundled"] }
+# Attribute crate for `#[cfg_attr(test, mutants::skip)]` (cargo-mutants).
+mutants = "0.0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.11"
 thiserror = "2"
-# Attribute crate for `#[cfg_attr(test, mutants::skip)]` (cargo-mutants).
-# Opt a crate in with `mutants = { workspace = true }` before its first skip.
-mutants = "0.0.4"
-# Vendored OpenSSL: lets musl static builds compile without a system
-# OpenSSL. Pulled in transitively via fastembed → hf-hub → native-tls.
-openssl = { version = "0.10", features = ["vendored"] }
+proptest = "1.6"
+crc32fast = "1.4"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+tempfile = "3"
 
 [profile.release]
-# Fat LTO optimizes across the dependency graph. The recorded release
-# experiment traded longer builds for a smaller binary and faster startup.
 lto = "fat"
-# No landing pads: 62,887,792 bytes against 67,307,376 (-6.6%) and 5.10 ms
-# per `--version` against 5.20. The cost is the six `catch_unwind` sites
-# (mvp-index/ruby/extract.rs:146, pixel-graph/src/extract.rs:336/359, and
-# the daemon's `answer`): with abort they no longer recover, so a panicking
-# extractor or handler ends the process instead of returning a default or a
-# failure envelope. The daemon is restarted by the next call's auto-start.
-panic = "abort"
 codegen-units = 1
-# Ship without the symbol table (~17% of the binary, 76 MB -> 63 MB on
-# aarch64-apple-darwin): no DWARF is built in release, so local symbols are
-# the only weight. The release pipeline builds unstripped instead
-# (CARGO_PROFILE_RELEASE_STRIP=none in scripts/release/release-build-env.sh),
-# publishes that copy as `pixel-<tag>-<target>.symbols.tar.xz` and strips the
-# shipped one with scripts/release/split-symbols.sh, so a backtrace from a
-# released binary can still be symbolized.
 strip = "symbols"
 
-# Local iteration profile for `pixel upgrade`: same optimisation level as
-# release, minus the two settings that dominate an incremental rebuild
-# (thin LTO and a single codegen unit). Measured on an 8-core M-series,
-# touching only the CLI crate: 55 s under `release`, 9 s here. Shipped
-# binaries keep using `release`.
+# Local iteration profile: the release optimisation level without fat LTO and
+# a single codegen unit, so an incremental rebuild takes seconds.
 [profile.dev-release]
 inherits = "release"
 lto = false
 codegen-units = 16
-# Keep debug info and symbols so profilers can resolve frames to source lines.
-# This is the local iteration profile, never a shipped one.
 debug = "line-tables-only"
 strip = "none"
 
 # cross reads this instead of a root Cross.toml (workspace.metadata.cross is
 # its documented manifest location). It forwards RUSTFLAGS and the CARGO_*
 # variables into its container by itself, not SOURCE_DATE_EPOCH:
-# crates/pixel/build.rs reads it for the build date `pixel --version`
-# prints, which scripts/release/release-build-env.sh pins to the commit's time so a
+# crates/pixel/build.rs reads it for the build date `pixel --version` prints,
+# which scripts/release/release-build-env.sh pins to the commit's time so a
 # release build is reproducible.
 [workspace.metadata.cross.build.env]
 passthrough = ["SOURCE_DATE_EPOCH"]

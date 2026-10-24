@@ -1,8 +1,9 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
-//! Idempotent provider integration: safe shell routing and lifecycle context.
-//! Unknown overlapping hooks are preserved rather than double-rewritten.
+//! Idempotent host integration: the hook registrations of every configured
+//! host, the pi package, OpenCode's plugin and the `pixel` skill. Unknown
+//! overlapping hooks are preserved rather than double-rewritten.
 //! Configuration alone is not proof that an agent has executed the hooks.
 
 use std::fs;
@@ -16,17 +17,29 @@ use serde::Serialize;
 
 use crate::InstallError;
 use crate::config;
+use crate::hosts::Host;
 use crate::setup::AgentTarget;
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
-/// Per-check status for the install report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Per-check status for the install and doctor reports, ordered from healthy
+/// to broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     Green,
     Yellow,
     Red,
+}
+
+impl std::fmt::Display for CheckStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Red => "red",
+        })
+    }
 }
 
 /// One install action and its outcome.
@@ -82,18 +95,15 @@ pub struct InstallOptions {
 /// What a guided `pixel setup` run asked the installer to deploy; see
 /// [`install_selected`].
 ///
-/// An agent that is not selected is not touched; a selected agent gets the hook group its feature names, and only that.
+/// An agent that is not selected is not touched; a selected agent gets its
+/// hooks only when the hooks feature is on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstallSelection {
     /// The agents selected.
     pub agents: Vec<AgentTarget>,
-    /// Register the task-event hooks of Claude Code, Devin, Gemini CLI,
-    /// Antigravity and OpenCode, including the Claude and Antigravity metrics relays.
-    pub task_hooks: bool,
-    /// Register Codex's task hooks.
-    pub codex_hooks: bool,
-    /// Install the pi impact extension.
-    pub pi_extension: bool,
+    /// Register the hooks of the selected agents: Claude Code, Codex, Devin,
+    /// Gemini CLI and Antigravity entries, OpenCode's plugin and pi's package.
+    pub hooks: bool,
 }
 
 impl InstallSelection {
@@ -109,19 +119,9 @@ impl InstallSelection {
 struct Wants<'a>(Option<&'a InstallSelection>);
 
 impl Wants<'_> {
-    /// The task-event hooks of `agent`.
-    fn task_hooks(self, agent: AgentTarget) -> bool {
-        self.0.is_none_or(|s| s.selected(agent) && s.task_hooks)
-    }
-    /// Codex's task hooks.
-    fn codex_hooks(self) -> bool {
-        self.0
-            .is_none_or(|s| s.selected(AgentTarget::Codex) && s.codex_hooks)
-    }
-    /// The pi impact extension.
-    fn pi_extension(self) -> bool {
-        self.0
-            .is_none_or(|s| s.selected(AgentTarget::Pi) && s.pi_extension)
+    /// The hooks (or package, or plugin) of `agent`.
+    fn hooks(self, agent: AgentTarget) -> bool {
+        self.0.is_none_or(|s| s.selected(agent) && s.hooks)
     }
 }
 
@@ -155,10 +155,9 @@ pub(crate) fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBu
 
 /// Run `pixel setup`. Idempotent: safe to re-run.
 ///
-/// Global install deploys the `pixel` skill and keeps task-lifecycle
-/// accounting hooks for configured hosts. It installs Pi's explicit impact
-/// command only when the standard `~/.pi/agent` configuration directory
-/// already exists; a machine without Pi is left untouched.
+/// Global install deploys the `pixel` skill and registers the hooks of every
+/// configured host. A host whose configuration directory does not exist is
+/// left untouched. Foreign hooks and settings remain intact.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     install_selected(options, None)
 }
@@ -166,8 +165,8 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 /// [`install`], limited to what a guided `pixel setup` run picked.
 ///
 /// `None` is the unattended install: every configured host. With a selection,
-/// an agent that was not picked is not touched, and a picked agent gets the
-/// hook group its feature names, and only that. `options.dry_run` makes it the
+/// an agent that was not picked is not touched, and a picked agent gets its
+/// hooks only when the selection asks for them. `options.dry_run` makes it the
 /// preview the guided review prints.
 pub fn install_selected(
     options: &InstallOptions,
@@ -185,87 +184,68 @@ pub fn install_selected(
     let exe = stable_exe_path(executable_path);
 
     let dry_run = options.dry_run;
-    let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
+    let explicit_home = options.home.is_some();
+    let codex_home = crate::codex_config::codex_home(&home, explicit_home);
     let wants = Wants(selection);
     if let Some(repo) = &options.repo {
         return Ok(install_report(&exe, repo, dry_run, Vec::new()));
     }
     // How many hooks carry the prompt brief: a host caps what each injects.
     let prompt_parts = crate::config::brief_parts(&home, None);
-    // The pixel skill is the retrieval workflow every harness reads as a
-    // skill: a guided run writes the selected agents' roots, the unattended
-    // install every configured one.
-    let mut steps = vec![crate::skill::install(&home, selection, dry_run)?];
-    if wants.pi_extension() {
+    let mut steps = Vec::new();
+    // Every step below runs only where that host's configuration exists, so a
+    // machine without it is left untouched.
+    if wants.hooks(AgentTarget::Pi) {
         steps.push(crate::pi_global::install(
-            &crate::pi_global::PiPaths::resolve(&home, options.home.is_some()),
+            &crate::pi_global::PiPaths::resolve(&home, explicit_home),
             &exe,
-            options.home.is_none() && crate::pi_global::pi_on_path(),
+            !explicit_home && crate::pi_global::pi_on_path(),
             dry_run,
         )?);
     }
-    // Keep task accounting, configured task gates and metrics available to
-    // every Claude session.
-    if wants.task_hooks(AgentTarget::ClaudeCode) {
-        steps.push(crate::routing::install_task_events(
-            &crate::routing::Provider::Claude.path(&home),
+    if wants.hooks(AgentTarget::ClaudeCode) {
+        steps.push(crate::routing::install_hooks(
+            &crate::routing::settings_path(Host::Claude, &home)
+                .expect("Claude has a settings file"),
             &exe,
-            crate::routing::Provider::Claude,
+            Host::Claude,
             prompt_parts,
             dry_run,
         )?);
     }
-    if wants.codex_hooks() {
-        steps.push(crate::codex_config::install_task_hooks(
+    if wants.hooks(AgentTarget::Codex) {
+        steps.push(crate::codex_config::install_hooks(
             &codex_home,
             &exe,
             prompt_parts,
             dry_run,
         )?);
     }
-    // The first-party brief probes the prompt-submit brief runs: with Claude's
-    // or Codex's brief hook, the probes that make it complete come along.
-    if wants.task_hooks(AgentTarget::ClaudeCode)
-        || wants.codex_hooks()
-        || wants.task_hooks(AgentTarget::Gemini)
-        || wants.task_hooks(AgentTarget::Devin)
-        || wants.task_hooks(AgentTarget::OpenCode)
-        || wants.task_hooks(AgentTarget::Antigravity)
-        || wants.pi_extension()
-    {
-        steps.push(crate::bundled_probes::install(&home, dry_run)?);
-    }
-    // The Gemini CLI brief hook: BeforeAgent in ~/.gemini/settings.json,
-    // only where the file already exists.
-    if wants.task_hooks(AgentTarget::Gemini) {
-        steps.push(crate::antigravity::install_gemini_brief(
+    if wants.hooks(AgentTarget::Gemini) {
+        steps.push(crate::antigravity::install_gemini_hooks(
             &home, &exe, dry_run,
         )?);
     }
-    // Every other host keeps its native retrieval. Each step runs only where
-    // that host's configuration exists, so a machine without it is left
-    // untouched.
-    let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
-    if opencode_dir.is_dir() && wants.task_hooks(AgentTarget::OpenCode) {
+    let opencode_dir = crate::opencode_config::opencode_config_dir(&home, explicit_home);
+    if opencode_dir.is_dir() && wants.hooks(AgentTarget::OpenCode) {
         steps.push(crate::opencode_config::install_brief(
             &opencode_dir,
             &exe,
             dry_run,
         )?);
     }
-    // Devin shares Claude's hook schema and reads every configured hooks
-    // file; its task events include prompt-submit, which carries the brief.
-    if home.join(crate::config::DEVIN_CONFIG_DIR).is_dir() && wants.task_hooks(AgentTarget::Devin) {
-        steps.push(crate::routing::install_task_events(
-            &crate::routing::Provider::Devin.path(&home),
+    // Devin shares Claude's hook schema and reads every configured hooks file.
+    if home.join(crate::config::DEVIN_CONFIG_DIR).is_dir() && wants.hooks(AgentTarget::Devin) {
+        steps.push(crate::routing::install_hooks(
+            &crate::routing::settings_path(Host::Devin, &home).expect("Devin has a settings file"),
             &exe,
-            crate::routing::Provider::Devin,
+            Host::Devin,
             1,
             dry_run,
         )?);
     }
     if crate::antigravity::antigravity_config_dir(&home).is_dir()
-        && wants.task_hooks(AgentTarget::Antigravity)
+        && wants.hooks(AgentTarget::Antigravity)
     {
         steps.push(crate::antigravity::install_antigravity_brief(
             &home, &exe, dry_run,
@@ -274,6 +254,11 @@ pub fn install_selected(
             &home, &exe, dry_run,
         )?);
     }
+
+    // The skill is the fallback every harness reads: a guided run writes the
+    // selected agents' roots, the unattended install every configured one. It
+    // goes last, so a harness directory the steps above created is a root too.
+    steps.push(crate::skill::install(&home, selection, dry_run)?);
 
     Ok(install_report(&exe, &home, dry_run, steps))
 }
@@ -610,11 +595,11 @@ mod path_tests {
         std::fs::write(second.join("tool"), b"#!/bin/sh\n").unwrap();
         std::fs::set_permissions(second.join("tool"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
-        std::fs::create_dir_all(first.join("dirtool")).unwrap();
+        std::fs::create_dir_all(first.join("dipixelol")).unwrap();
         let path = std::env::join_paths([&first, &second]).unwrap();
         assert_eq!(find_in_paths("tool", &path), Some(second.join("tool")));
         assert_eq!(
-            find_in_paths("dirtool", &path),
+            find_in_paths("dipixelol", &path),
             None,
             "a directory is not a binary"
         );
@@ -877,8 +862,7 @@ mod audited_contract_tests {
                 } else {
                     vec![AgentTarget::ClaudeCode]
                 },
-                task_hooks: true,
-                ..Default::default()
+                hooks: true,
             };
             let report = install_selected(&options, Some(&selection)).unwrap();
             assert!(report.steps.iter().all(|step| !matches!(

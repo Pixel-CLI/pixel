@@ -1,13 +1,13 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! `pixel setup --remove` — the inverse of `pixel setup`.
 //!
 //! Removes every trace pixel setup wrote:
-//!   - pixel run-hook entries from the Claude, Devin, Codex and Gemini
-//!     settings files
+//!   - `pixel hook` entries from the Claude, Devin, Codex and Gemini settings
+//!     files
 //!   - the OpenCode, Antigravity and Pi integrations
-//!   - the `pixel` skill and the first-party brief probes
+//!   - the `pixel` skill
 //!   - the pixel binary (~/.local/bin/pixel by default)
 //!
 //! Idempotent: safe to re-run. Each step reports what was removed (or that
@@ -78,24 +78,21 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         return Ok(install::install_report(&binary_path, &home, dry_run, steps));
     }
     let steps = vec![
-        // 1. Remove pixel run-hook entries from every tool's settings file.
+        // 1. Remove this install's pixel hook entries from every tool's settings file.
         remove_claude_hooks(&home, &exe, dry_run)?,
         remove_devin_hooks(&home, &exe, dry_run)?,
         remove_codex_hooks(&home, &exe, dry_run)?,
         remove_gemini_hooks(&home, &exe, dry_run)?,
         // 2. Remove the skills and the Pi package.
-        remove_classify_skill(&home, dry_run)?,
         remove_pixel_skill(&home, dry_run)?,
         crate::pi_global::uninstall(&pi_paths, dry_run)?,
         crate::pi_global::uninstall_classify_package(&pi_paths, &home, dry_run)?,
         // 3. Remove the Antigravity plugin and hooks, and OpenCode's brief plugin.
         crate::antigravity::remove_antigravity(&home, &exe, dry_run)?,
         crate::opencode_config::remove_opencode(&opencode_dir, dry_run)?,
-        // 4. Remove the first-party brief probes setup wrote.
-        crate::bundled_probes::remove(&home, dry_run)?,
-        // 5. Remove the pixel binary.
+        // 4. Remove the pixel binary.
         remove_binary(&target, dry_run)?,
-        // 6. Name the backups install and uninstall kept, and how to drop them.
+        // 5. Name the backups install and uninstall kept, and how to drop them.
         backups_step(
             &find_backups(&global_backup_dirs(&home, &codex_home, &opencode_dir)),
             dry_run,
@@ -104,10 +101,6 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
 
     Ok(install::install_report(&binary_path, &home, dry_run, steps))
 }
-
-// -------------------------------------------------------------------------
-// Step 1: strip managed blocks from agent-config Markdown files
-// -------------------------------------------------------------------------
 
 // -------------------------------------------------------------------------
 // Step 2: remove Claude hooks (settings.json entries + hook scripts)
@@ -187,25 +180,13 @@ fn remove_gemini_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Install
     })
 }
 
-// -------------------------------------------------------------------------
-// Step 3d: remove zcode hooks + AGENTS.md managed block
-// -------------------------------------------------------------------------
-
-// -------------------------------------------------------------------------
-// Step 3e: remove Cursor hooks (flat schema)
-// -------------------------------------------------------------------------
-
-// -------------------------------------------------------------------------
-// Step 3f: remove pi guard extension + AGENTS.md managed block
-// -------------------------------------------------------------------------
-
 /// Rename the skill `dir` (`<root>/skills/<name>`) to
 /// `<root>/<name>.pixel-bak.<nanos>-<seq>` — the directory counterpart of
 /// [`config::backup_if_changing`], so a user-edited copy survives an
 /// uninstall instead of being deleted outright. The backup leaves `skills/`:
 /// a harness loads every `skills/*/SKILL.md`, so a backup beside the skill
 /// would keep it active after the uninstall.
-fn rename_as_backup(dir: &Path) -> Result<()> {
+pub(crate) fn rename_as_backup(dir: &Path) -> Result<()> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -215,47 +196,6 @@ fn rename_as_backup(dir: &Path) -> Result<()> {
     let root = dir.parent().and_then(Path::parent).unwrap_or(dir);
     fs::rename(dir, root.join(format!("{name}.pixel-bak.{nanos}-0")))?;
     Ok(())
-}
-
-// -------------------------------------------------------------------------
-// Step 4b: remove the classify helpers' skill dirs from every harness
-// -------------------------------------------------------------------------
-
-/// Remove the `pixel-classify` skill the install-time helpers proposal can
-/// write into every configured harness's skills dir — the same roots
-/// [`config::SKILL_ROOTS`] installs into, plus Claude's always-present one.
-/// The `pixel-classify` skill text `pixel classify setup` writes.
-const CLASSIFY_SKILL: &str = include_str!("../assets/pixel-classify-skill.md");
-
-fn remove_classify_skill(home: &Path, dry_run: bool) -> Result<InstallStep> {
-    let dirs: Vec<PathBuf> = [PathBuf::from(".claude")]
-        .into_iter()
-        .chain(config::SKILL_ROOTS.iter().map(PathBuf::from))
-        .map(|root| home.join(root).join("skills/pixel-classify"))
-        .collect();
-    let mut removed = Vec::new();
-    for dir in &dirs {
-        // A user's own skill under the same name stays, as for `skills/pixel`.
-        if fs::read_to_string(dir.join("SKILL.md")).is_ok_and(|text| text == CLASSIFY_SKILL) {
-            if !dry_run {
-                rename_as_backup(dir)?;
-            }
-            removed.push(dir.display().to_string());
-        }
-    }
-    Ok(InstallStep {
-        id: "classify.skill".into(),
-        status: CheckStatus::Green,
-        summary: install::dry_run_summary(
-            dry_run,
-            &if removed.is_empty() {
-                "no classify skill found".to_string()
-            } else {
-                format!("removed {} classify skill dir(s)", removed.len())
-            },
-        ),
-        detail: (!removed.is_empty()).then(|| removed.join(" ")),
-    })
 }
 
 // -------------------------------------------------------------------------
@@ -290,18 +230,6 @@ fn remove_pixel_skill(home: &Path, dry_run: bool) -> Result<InstallStep> {
         detail: (!removed.is_empty()).then(|| removed.join(" ")),
     })
 }
-
-// -------------------------------------------------------------------------
-// Step 4: remove pixel hooks from project-level .codex/hooks.json files
-// -------------------------------------------------------------------------
-
-// -------------------------------------------------------------------------
-// Step 5: remove the pixel rule source file
-// -------------------------------------------------------------------------
-
-// -------------------------------------------------------------------------
-// Step 6: remove the pixel agent system prompt
-// -------------------------------------------------------------------------
 
 // -------------------------------------------------------------------------
 // Step 7: remove the pixel binary
@@ -519,7 +447,7 @@ fn backups_step(backups: &[PathBuf], dry_run: bool) -> InstallStep {
 }
 
 // -------------------------------------------------------------------------
-// Shared helper: remove pixel run-hook entries from a settings file with a
+// Shared helper: remove pixel hook entries from a settings file with a
 // top-level `hooks` object (Claude/Devin/Codex/Gemini schema).
 // -------------------------------------------------------------------------
 
@@ -557,7 +485,7 @@ fn remove_pixel_hooks_from_settings(
 mod routing_tests {
     use super::*;
 
-    /// Settings without a Pixel hook are left byte for byte: no rewrite.
+    /// Settings without a PIXEL hook are left byte for byte: no rewrite.
     #[test]
     fn remove_claude_hooks_leaves_settings_without_pixel_hooks_untouched() {
         let home = tempfile::tempdir().unwrap();
@@ -678,7 +606,7 @@ mod roundtrip_tests {
             let text = "{\n  \"theme\" : \"dark\", \"number\": 1e2\n}\n";
             fs::write(&path, text).unwrap();
             let mut value: serde_json::Value = serde_json::from_str(text).unwrap();
-            value["hooks"] = serde_json::json!({"SessionStart":[{"hooks":[{"command":"pixel run-hook task-event --provider claude --event session-start"}]}]});
+            value["hooks"] = serde_json::json!({"SessionStart":[{"hooks":[{"command":"pixel hook session-start --host claude"}]}]});
             install::write_settings(&path, &value, false).unwrap();
             assert!(
                 fs::read_to_string(&path)
@@ -691,8 +619,7 @@ mod roundtrip_tests {
         let toml = home.path().join(".codex/config.toml");
         let text = "# my model\nmodel  = 'o3'\n";
         fs::write(&toml, text).unwrap();
-        crate::codex_config::install_task_hooks(&home.path().join(".codex"), exe, 1, false)
-            .unwrap();
+        crate::codex_config::install_hooks(&home.path().join(".codex"), exe, 1, false).unwrap();
         remove_pixel_hooks_from_settings(&home.path().join(config::CODEX_HOOKS_FILE), exe, false)
             .unwrap();
         assert_eq!(fs::read_to_string(toml).unwrap(), text);

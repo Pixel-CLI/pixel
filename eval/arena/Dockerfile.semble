@@ -1,7 +1,0 @@
-# semble arm — MinishLab semble, wired to codex via `semble install` (MCP).
-FROM pixel-arena-base:latest
-RUN pip3 install --break-system-packages semble uv
-ENV ARM_TOOL=semble
-COPY entrypoint.sh /usr/local/bin/arena-entrypoint
-RUN chmod +x /usr/local/bin/arena-entrypoint
-ENTRYPOINT ["/usr/local/bin/arena-entrypoint"]

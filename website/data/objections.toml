@@ -65,7 +65,7 @@ check = '''<code>pixel config</code> every setting and the file it comes from'''
 question = "How do I remove it?"
 audience = "team"
 answer = [
-  '''<code>pixel setup --remove</code> removes every hook, skill and file <code>pixel setup</code> wrote, then the binary (a Homebrew or mise copy stays: use the manager). The index is the <code>.pixel/</code> folder: delete it.''',
+  '''<code>pixel setup --remove</code> removes every hook, skill and file <code>pixel setup</code> wrote, then the binary. A mise copy stays: remove it with mise. The index is the <code>.pixel/</code> folder: delete it.''',
 ]
 check = '''<code>pixel setup --remove --dry-run</code> the list, before anything is removed'''
 

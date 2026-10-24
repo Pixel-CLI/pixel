@@ -1,0 +1,1 @@
+**brief:** `cand-j-stop-cause` answers "why does X stop, skip or ignore …" with the lines where the question's rare words meet and the tests that pin them down; `--without cand-j-stop-cause` leaves it out.

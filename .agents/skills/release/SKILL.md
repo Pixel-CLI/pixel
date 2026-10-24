@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a pixel release end to end — pick the version, prepare the release commit (changelog cut, lockstep version bump, Cargo.lock, check-release) with prepare.sh in a pull request into main, tag vX.Y.Z on its merge to trigger .github/workflows/release.yml, and verify the published release, the install.sh asset and the Homebrew tap with evidence. Also covers resuming an interrupted release, patch releases while main is not releasable, and recovering from a failed Release run. Use when asked to release, publish, tag or ship a new pixel version, bump the version, cut the changelog, check a published release, or when the Release workflow failed.
+description: Cut a pixel release end to end — pick the version, prepare the release commit (changelog cut, lockstep version bump, Cargo.lock, check-release) with prepare.sh in a pull request into main, tag vX.Y.Z on its merge to trigger .github/workflows/release.yml, and verify the published release assets with evidence. Also covers resuming an interrupted release, patch releases while main is not releasable, and recovering from a failed Release run. Use when asked to release, publish, tag or ship a new pixel version, bump the version, cut the changelog, check a published release, or when the Release workflow failed.
 ---
 
 # Releasing pixel
@@ -20,9 +20,9 @@ The dependency graph is `verify` → `fuzz` → `assets` → `release`, then
 | --- | --- | --- |
 | `verify` | `check-release $GITHUB_REF` (CLI version, every workspace member in Cargo.lock, released heading and empty Unreleased), `cargo deny check`, then locked workspace tests | nothing built or published |
 | `fuzz` | `fuzz.yml` called with 120 s per target: every cargo-fuzz target on nightly, `cargo deny` on `fuzz/` first | a crash or a target that ran nothing: nothing built; the reproducer is the run's `fuzz-artifacts-*` artifact |
-| `assets` | calls `release-build.yml`: three target builds (musl x86_64/aarch64 with model2vec only, native Apple arm64), checksums and feature-specific CycloneDX SBOMs; `attest` makes formulas and Linux bottles, signs archives/bottles/install.sh/SBOMs, stages the provenance bundle | nothing published |
-| `release` | publishes the staged assets with the tag's changelog section, then updates `LivioGama/homebrew-tap` using `HOMEBREW_TAP_TOKEN` | publication may already be immutable; classify in Recovery |
-| `smoke` (×3, `fail-fast: false`) | verifies provenance, runs the downloaded asset and one-liner in an empty HOME; checks macOS tap install/test and Linux bottle pouring when available; version and commit must match the tag | already published; distinguish code failure from infrastructure |
+| `assets` | calls `release-build.yml`: three target builds (musl x86_64/aarch64 with model2vec only, native Apple arm64), checksums and feature-specific CycloneDX SBOMs; signs archives, symbols, install.sh and SBOMs, and stages the provenance bundle | nothing published |
+| `release` | publishes the staged assets with the tag's changelog section | publication may already be immutable; classify in Recovery |
+| `smoke` (×3, `fail-fast: false`) | verifies provenance, runs the downloaded asset and one-liner in an empty HOME; version and commit must match the tag | already published; distinguish code failure from infrastructure |
 | `virustotal` | submits the three archives and appends report links to the notes when `VT_API_KEY` exists | already published; missing key is a notice, not a scan pass |
 
 Three facts shape everything below:
@@ -83,7 +83,7 @@ missing or contradicts itself:
 
 Whatever the path, these always wait for their own go, even inside a release
 the user asked for: deleting or moving a tag (an Admin bypass of the tag
-ruleset), force-pushing, retagging, editing the tap by hand, and deleting a
+ruleset), force-pushing, retagging, and deleting a
 release or its assets.
 
 Identify the PR author, eligible reviewer and merge operator before
@@ -117,7 +117,7 @@ of reconstructing the release from `gh` output:
 - equivalence: merge parent == base; merge tree == prepare tree
 - tag: vx.y.z → <sha> (pushed | not yet)
 - release run: <run-id> <url>; verify ✓/✗, assets ✓/✗, release ✓/✗, smoke ✓/✗, virustotal ✓/notice/✗
-- publication: assets ✓/✗, install.sh ✓/✗, body ✓/✗, tap ✓/✗, binary ✓/✗
+- publication: assets ✓/✗, install.sh ✓/✗, body ✓/✗, binary ✓/✗
 - advisory: GHSA / validated private and imported patch SHAs / patched version / published_at
 - exceptions: check / reason / maintainer decision / protection restoration evidence
 - follow-ups: PR / open|merged|closed / owner / closure condition
@@ -142,7 +142,6 @@ gh run list --branch main --workflow ci.yml --status completed -L 1           # 
 gh run list --branch main --workflow cross-build.yml --status completed -L 1  # success
 git merge-base --is-ancestor "$LAST" origin/main && echo "$LAST is on main"
 git log --oneline "$LAST"..origin/main | head      # something to release
-gh secret list | grep HOMEBREW_TAP_TOKEN
 ```
 
 - Pick the last tag by version sort, not `git describe`: v0.2.4's commit is
@@ -161,8 +160,6 @@ gh secret list | grep HOMEBREW_TAP_TOKEN
   `cargo nextest`). Check `df -h .` first; `target/debug`,
   `target/dev-release` and `target/release` are rebuildable, and
   `CARGO_INCREMENTAL=0` keeps a one-off gate run from growing the cache.
-- Without `HOMEBREW_TAP_TOKEN` the tap is not updated (a warning, not a
-  failure).
 - `main` holds work that must not ship yet? Stop and read "Patch release while
   `main` is not releasable" below.
 
@@ -239,7 +236,7 @@ carries a bullet of its own. Otherwise it:
    inventory is collected before any writes, using GitHub's canonical repo
    name (an old transferred remote may search empty). A failed, capped or
    contradictory lookup refuses the cut; repair it before rerunning;
-5. runs `cargo run -q -p pixel-cli -- check-release vx.y.z --repo .`, the
+5. runs `python3 scripts/release/check-release.py vx.y.z --repo .`, the
    verify job's command, from the tree. It uses the tree's CLI on purpose: an
    installed 0.2.4 binary only knows the old `release-check` name.
 
@@ -307,18 +304,11 @@ inspect the exact merge SHA's push CI and Cross-build runs. An absent required
 run is missing evidence, never a successful skip. Avoid foreground sleep loops.
 
 A healthy prepare PR shows four `scope / Release-prepare scope` checks
-passing (one per workflow: CI, Mutants, Cross-build, Homebrew core) and every
-other CI job
-skipping (Test + Format, Lint, MSRV, Ranking gates, cargo-deny, Mutants plan and gate,
-Cross-build, brew install --build-from-source); CodeRabbit skips on the title (`ignore_title_keywords`). The
-diff holds no code, and step 3's local gates plus the push run on its merge
-commit, which step 4 waits for, cover it. If Test + Format or Mutants runs,
-`scope` refused the diff: stop and read its log, do not wait for green. A
-maintenance release into `release/x.y` keeps every job, and there green is
-the bar. Homebrew skips the source audit for a normal prepare PR, whose
-tag URL cannot exist before merge. Weekly or later PR checks still audit
-released source formulas; the skip is not a claim that the future tag URL
-was audited.
+passing Release-prepare scope checks in CI, Mutants and Cross-build. A
+recognized prepare change skips code gates because the helper admits only
+release metadata changes; the merged commit's push run is still required
+before tagging. If a scope check fails or is absent, the normal workflow runs.
+No tap publishing workflow is configured.
 
 Immediately before merging, fetch the target and run the candidate guard
 with the recorded SHAs and the selected target. For maintenance, append
@@ -389,10 +379,10 @@ must show all three green, and each job log names what it installed and
 the `--version` it read. Skipped steps inside `build` and `smoke` are the other
 target's lane (each matrix entry skips the cross or native build it does not
 use), not a caveat. A step that printed a `::notice::` (install.sh on a
-tag that is not the latest) or was skipped (Homebrew without the token) is a
+tag that is not the latest) or was skipped is a
 caveat to report, not a pass.
 
-`smoke` does not see the release body or the formula hashes against the tap.
+`smoke` does not inspect the release body.
 Check those from the published state, never the local checkout, downloading
 into a fresh directory so nothing local vouches for the release. The binary
 lines repeat `smoke` by hand: run them when a `smoke` job failed, was
@@ -403,27 +393,21 @@ V=vx.y.z; D=$(mktemp -d); cd "$D"
 gh release view $V --repo Pixel-CLI/pixel --json isDraft,isPrerelease,isImmutable,body \
   --jq '{isDraft, isPrerelease, isImmutable, body: .body[0:200]}'   # false, false, true, the changelog section (not "See [CHANGELOG.md]")
 gh release download $V --repo Pixel-CLI/pixel
-ls                                                     # 15 assets: 3 archives, 3 checksums, 3 SBOMs, 2 bottles, 2 formulas, installer, bundle
-for f in pixel-v*.tar.gz pixel-v*.cdx.json pixel-*.bottle.tar.gz install.sh; do
+ls                                                     # 14 assets: 3 archives, 3 checksums, 3 SBOMs, 3 symbols, installer, bundle
+for f in pixel-v*.tar.gz pixel-v*.cdx.json pixel-*.symbols.tar.xz install.sh; do
   gh attestation verify "$f" --repo Pixel-CLI/pixel --signer-workflow Pixel-CLI/pixel/.github/workflows/release-build.yml || exit "$?"
   gh attestation verify "$f" --repo Pixel-CLI/pixel --signer-workflow Pixel-CLI/pixel/.github/workflows/release-build.yml --bundle "pixel-$V.intoto.jsonl" || exit "$?"
 done
 shasum -a 256 -c ./*.sha256                            # 3 × OK
-for f in ./*.sha256; do grep -c "$(awk '{print $1}' "$f")" pixel.rb; done   # darwin 2, each musl 1: the formula carries the real hashes (darwin is also the formula's top-level url)
-for b in ./*.bottle.tar.gz; do grep -c "$(shasum -a 256 "$b" | awk '{print $1}')" pixel.rb; done   # 1 each: the bottle block names the published bottles
-curl -fsSL "https://github.com/Pixel-CLI/pixel/archive/refs/tags/$V.tar.gz" | shasum -a 256 | awk '{print $1}' | xargs -I{} grep -c {} pixel-core.rb   # 1: the core formula names the tag's source archive
 git -C <repo> show "${V}:scripts/release/install.sh" | diff - install.sh && echo "install.sh == tag's"
-gh api repos/LivioGama/homebrew-tap/contents/Formula/pixel.rb --jq .content \
-  | base64 -d | diff - pixel.rb && echo "tap == release formula"
 tar xzf pixel-$V-aarch64-apple-darwin.tar.gz
 HOME="$D/home" ./pixel-$V-aarch64-apple-darwin/bin/pixel --version
 git -C <repo> rev-list -n 1 $V                         # must equal the `commit:` line above
-gh run view <run-id> --repo Pixel-CLI/pixel         # no ANNOTATIONS section = no no-token/no-changelog warning
+gh run view <run-id> --repo Pixel-CLI/pixel         # inspect any workflow annotations
 ```
 
-Verify the asset names, not only the count: `release-build.yml` stages 15
-files (3 archives + 3 checksums + 3 SBOMs + 2 bottles + 2 formulas + installer
-+ provenance bundle). Read each SBOM's metadata against its target and
+Verify the asset names, not only the count: `release-build.yml` stages 14
+files (3 archives + 3 checksums + 3 SBOMs + 3 symbols + installer + provenance bundle). Read each SBOM's metadata against its target and
 version; a bundle file alone is not a successful provenance verification.
 Read the full published body against the released changelog section, allowing
 the workflow's VirusTotal addition and recorded editorial corrections. Check
@@ -435,7 +419,7 @@ does not. The run in an empty `HOME` proves it starts without this machine's
 config. Read warnings from the run summary's annotations, not from
 `--log | grep '::warning::'`: the log echoes each step's script, so that grep
 matches the workflow's own `echo "::warning::…"` line on every run. The Linux
-tarballs cannot run here; their hashes and the formula are the evidence for
+tarballs cannot run here; their hashes and SBOMs are the evidence for
 them.
 
 Report in this shape, and copy it into the record:
@@ -443,10 +427,9 @@ Report in this shape, and copy it into the record:
 ```text
 Release vx.y.z: published and verified | NOT verified
 - run <url>: verify ✓, assets (builds + attest) ✓, release ✓, smoke ✓✓✓, virustotal ✓ | notice
-- smoke: asset ✓✓✓, install.sh ✓✓✓ | notice, brew macOS ✓ | skipped, brew Linux bottle ✓✓ | notice
-- assets: 15, 3 SBOMs, provenance online + bundle verified with release-build.yml, 3 checksums OK, formula, bottle and source-archive hashes match, install.sh == tag's, immutable
+- smoke: asset ✓✓✓, install.sh ✓✓✓ | notice
+- assets: 14, 3 SBOMs, 3 symbol archives, provenance online + bundle verified with release-build.yml, 3 checksums OK, install.sh == tag's, immutable
 - body: CHANGELOG ## [x.y.z] section + VirusTotal links when enabled + recorded corrections
-- tap: Formula/pixel.rb == release pixel.rb (commit "pixel x.y.z")
 - binary: aarch64-apple-darwin prints pixel x.y.z, commit <sha> == tag
 Caveats: <anything not checked, and why>
 ```
@@ -459,7 +442,7 @@ Classify the failure before touching anything, from the failed step's log
 | Class | Looks like | Retry? |
 | --- | --- | --- |
 | **infra** | runner lost, network or registry timeout, GitHub 5xx, rate limit | `gh run rerun <run-id> --failed` once; a second identical failure is not infra |
-| **tooling** | an action or `cross` image broke, an expired `HOMEBREW_TAP_TOKEN`, a toolchain change | a rerun cannot help: it replays the workflow file and commit of the tag. Fix on `main`, then re-tag (unpublished) or next patch (published) |
+| **tooling** | an action or `cross` image broke, a toolchain change | a rerun cannot help: it replays the workflow file and commit of the tag. Fix on `main`, then re-tag (unpublished) or next patch (published) |
 | **code** | `check-release` or a test fails, a target does not compile or link | fix on `main` through a PR, then re-tag (unpublished) or next patch (published) |
 
 Then by how far the run got:
@@ -468,10 +451,9 @@ Then by how far the run got:
 | --- | --- | --- |
 | `verify`, `fuzz` or `assets` | tag pushed, nothing published | with the user's go, delete the tag (`git push origin :refs/tags/vx.y.z && git tag -d vx.y.z`; the tag ruleset lets only an Admin do it) and re-tag the fixed commit. No release exists, so reusing the version is safe. A musl failure should have shown on `main`'s `Cross-build`: find out why it was green. |
 | `release`, before or during "Upload release assets" | nothing published (the action uploads into a draft and publishes last; a leftover draft is reused by a rerun) | as above, or a rerun for infra |
-| `release`, tap steps only | GitHub release published and immutable, tap stale | do not rerun the job: it replays "Upload release assets", which an immutable release refuses. Copy the `pixel.rb` release asset into `Formula/pixel.rb` of `LivioGama/homebrew-tap` by hand, commit `pixel x.y.z`. |
 | `smoke`, install.sh only | binaries fine, the published script is broken | the script ships with the release and cannot be replaced: fix it on `main` through a PR and release the next patch |
-| `smoke`, asset or brew, infra | unknown | `gh run rerun <run-id> --failed` reruns only the failed `smoke` jobs |
-| `smoke`, asset or brew, code (wrong version or commit, crash, `brew test` fails) — or any later report of a bad binary | users may have it | never move the tag: fix on `main`, release `x.y.z+1`, say in its changelog what was wrong with `x.y.z`. |
+| `smoke`, asset, infra | unknown | `gh run rerun <run-id> --failed` reruns only the failed `smoke` jobs |
+| `smoke`, asset, code (wrong version or commit, crash) — or any later report of a bad binary | users may have it | never move the tag: fix on `main`, release `x.y.z+1`, say in its changelog what was wrong with `x.y.z`. |
 
 ## Patch release while `main` is not releasable
 

@@ -1,7 +1,0 @@
-# gitnexus arm — abhigyanpatwari GitNexus, graph analyzed and MCP wired by setup.
-FROM pixel-arena-base:latest
-RUN npm install -g gitnexus
-ENV ARM_TOOL=gitnexus
-COPY entrypoint.sh /usr/local/bin/arena-entrypoint
-RUN chmod +x /usr/local/bin/arena-entrypoint
-ENTRYPOINT ["/usr/local/bin/arena-entrypoint"]

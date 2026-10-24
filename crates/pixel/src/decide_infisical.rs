@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Remote classify API keys fetched from an Infisical project.
@@ -9,7 +9,7 @@
 //! env variable (`TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`, …) is read once
 //! per invocation through the v4 read-secret API and held like any other
 //! key value — never logged, never written to a document, never stored in
-//! the Pixel config.
+//! the PIXEL config.
 //!
 //! Configuration (all environment, all optional; the source is off when
 //! both `INFISICAL_TOKEN` and `PIXEL_INFISICAL_PROJECT_ID` are absent):

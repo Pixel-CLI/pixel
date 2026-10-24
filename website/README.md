@@ -6,7 +6,7 @@ The Hugo site published at <https://pixel-cli.dev/> by
 the JSON-LD states).
 
 The domain lives in three places that change together (and is spelled as
-the homepage in the Homebrew formula `release.yml` writes): `baseURL` in
+the homepage in the JSON-LD): `baseURL` in
 `hugo.toml`, the custom domain in the repository's Pages settings (the
 workflow deploys an artifact, so a `static/CNAME` file would be ignored),
 and the DNS records at Cloudflare: four `A` and four `AAAA` records to

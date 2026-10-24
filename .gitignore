@@ -2,6 +2,8 @@
 **/*.rs.bk
 .DS_Store
 .pixel/
+# Legacy RTO repository state stays ignored during the identity transition.
+.rto/
 .pixel-graph-head
 .pi-ultimate/
 .devin/

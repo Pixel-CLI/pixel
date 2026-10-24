@@ -1,28 +1,27 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
-//! pixel-index — sparse n-gram text index for the pixel sidecar.
+//! pixel-index: the git-anchored trigram text index (`specs/index-history.md`).
 //!
-//! Phase 0 surface: gram extraction (`gram`), window weighting (`weights`),
-//! and posting-list algebra (`posting`). Shards, git anchoring, overlay,
-//! planner, and verification land in later phases (see the project plan).
+//! A base shard at a pinned commit, a delta shard for the files changed
+//! since, and an in-memory overlay for the dirty tree; mmapped shards;
+//! regexes planned into trigram queries and every candidate verified.
 
 pub mod cache;
-pub mod gram;
-pub mod lock;
-pub mod posting;
-pub mod weights;
-
-pub use gram::{GramExtractor, GramHit, SparseGramExtractor, TrigramExtractor};
-pub use lock::BuildLock;
-pub use posting::GramQuery;
-pub use weights::{Crc32Weigher, Weigher};
 pub mod delta;
-pub mod gitsync;
+pub mod gram;
+pub mod history;
 pub mod index;
 pub mod indexset;
+pub mod lock;
 pub mod overlay;
 pub mod path_filter;
 pub mod plan;
+pub mod posting;
+pub mod semantic;
 pub mod shard;
 pub mod verify;
+
+pub use gram::{GramExtractor, GramHit, TrigramExtractor};
+pub use lock::BuildLock;
+pub use posting::GramQuery;

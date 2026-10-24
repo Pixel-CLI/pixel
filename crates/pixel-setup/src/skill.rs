@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! The `pixel` skill, deployed to every configured harness.
@@ -27,8 +27,8 @@ type Result<T> = std::result::Result<T, InstallError>;
 /// The skill content: one front matter and prompt shared by every harness
 /// that reads a skill, so they all read one source.
 pub const PIXEL_SKILL: &str = concat!(
-    "---\nname: pixel\ndescription: >\n  Finds where a symbol is defined, who calls it, and what breaks if it changes,\n  via the `pixel` CLI code graph. Use before renaming, changing a signature or\n  deleting a function or type; when asked who calls or uses X, where X is\n  defined, or where some behaviour lives without a known name; instead of\n  grepping for `name(` or `fn name`. Also use when repository searches repeat\n  or time out and tool choice or scope needs correcting. Outlines big files,\n  packs one symbol's source and scopes tasks. Graph commands need `pixel` on\n  PATH and a git repo (`pixel prepare-repo` builds the index once); locate\n  the project first when outside one.\nlicense: MIT\n---\n\n",
-    include_str!("../assets/pixel-agent-prompt.md"),
+    "---\nname: pixel\ndescription: >\n  Facts about this repository that PIXEL's hooks inject before your first tool\n  call ([PIXEL:BRIEF], [PIXEL:EDIT], [PIXEL:STALE-CALLERS]), and the `pixel` code-graph\n  commands for what they did not: where a symbol is defined, who calls it,\n  what breaks if it changes, what the working tree touches. Use before\n  renaming or changing a signature, and instead of grepping for `name(`.\nlicense: MIT\n---\n\n",
+    include_str!("../assets/pixel-skill.md"),
 );
 
 /// The install step's id in a report.
@@ -61,7 +61,7 @@ fn skill_root(agent: AgentTarget) -> Option<&'static str> {
 /// configured, so the directory is created when absent. The unattended
 /// install adds no directory of its own: `.claude` always (its hooks land
 /// there regardless) and every `SKILL_ROOTS` entry that already exists.
-fn skill_dirs(home: &Path, selection: Option<&InstallSelection>) -> Vec<PathBuf> {
+pub(crate) fn skill_dirs(home: &Path, selection: Option<&InstallSelection>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = match selection {
         Some(selection) => selection
             .agents
@@ -152,7 +152,7 @@ pub(crate) fn managed_skill_dirs(home: &Path) -> Vec<PathBuf> {
 }
 
 // -------------------------------------------------------------------------
-// Plugin-shipped skills (#1142)
+// Plugin-shipped skills
 // -------------------------------------------------------------------------
 
 /// The skill names `pixel setup` and the classify helpers manage: a plugin

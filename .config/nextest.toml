@@ -31,12 +31,3 @@ final-status-level = "flaky"
 
 [profile.ci.junit]
 path = "junit.xml"
-
-# The upgrade tests drive a fake daemon over a Unix socket with 1.5 s
-# client timeouts (`upgrade_daemon_request`). Under nextest's default
-# parallelism on a 4-core runner the server thread can be starved past
-# that, which failed CI once with "daemon control timed out". Reserve
-# every test thread for them so they run alone.
-[[profile.default.overrides]]
-filter = 'package(pixel-cli) & test(upgrade_cli::)'
-threads-required = "num-cpus"

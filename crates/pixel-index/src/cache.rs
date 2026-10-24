@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Shared cache for commit-anchored base shards.
@@ -30,11 +30,12 @@ pub const DEFAULT_CACHE_CAP_BYTES: u64 = 5_000_000_000; // 5 GB
 /// version bump invalidates the cache (prevents cross-version ping-pong).
 const CACHE_SHARD_VERSION: u32 = 1;
 
-/// Resolve the cache directory (`$XDG_CACHE_HOME/pixel/shards` or
-/// `$HOME/.cache/pixel/shards`), creating it if needed. Returns `None` when
-/// no cache directory can be determined (e.g. no `HOME`), which disables
-/// the cache entirely.
-fn cache_base_dir() -> Option<PathBuf> {
+/// The root of everything PIXEL caches: `$XDG_CACHE_HOME/pixel`, else
+/// `$HOME/.cache/pixel`. Not created here. `None` when no absolute cache
+/// location can be determined (no `HOME`, an empty or relative
+/// `XDG_CACHE_HOME`): a relative cache is worse than none (it pollutes the
+/// working directory and is not shared across worktrees).
+pub fn cache_root() -> Option<PathBuf> {
     let base = if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
         if xdg.is_empty() {
             return None;
@@ -48,12 +49,17 @@ fn cache_base_dir() -> Option<PathBuf> {
     } else {
         return None;
     };
-    // Reject relative paths — a relative cache is worse than no cache
-    // (pollutes the CWD and is not shared across worktrees).
     if !base.is_absolute() {
         return None;
     }
-    Some(base.join("pixel").join("shards"))
+    Some(base.join("pixel"))
+}
+
+/// Resolve the shard cache directory (`<cache root>/shards`). Returns `None`
+/// when no cache directory can be determined, which disables the cache
+/// entirely.
+fn cache_base_dir() -> Option<PathBuf> {
+    cache_root().map(|root| root.join("shards"))
 }
 
 /// Returns the shard cache directory, creating it (0700) if needed.

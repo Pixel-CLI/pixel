@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 # Split a release binary into what users download and what a backtrace needs:

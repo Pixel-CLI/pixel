@@ -1,13 +1,17 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
-//! pixel-setup — idempotent `pixel setup`, `pixel setup --remove` and
-//! `pixel doctor`. pixel is a CLI + lifecycle integration tool: install keeps
-//! Claude and Codex task lifecycle hooks, the `pixel` skill, the prompt-brief
-//! hooks of Devin, Gemini CLI, Antigravity and OpenCode, and gives Pi a
-//! local package: the explicit impact command, the prompt-submit brief and
-//! the metrics relay. It deploys no prompt and
-//! wires no retrieval guard.
+//! pixel-setup: what PIXEL knows about each agent host (`specs/hosts.md`) and
+//! the idempotent `pixel setup` / `pixel setup --remove` that registers it
+//! (`specs/setup-migration.md`).
+//!
+//! The host table is pure: the hook events a host fires and what they are
+//! called there (`hosts`), the payload fields PIXEL reads (`payload`), and the
+//! envelope a host accepts back (`envelope`), so every host × event contract
+//! is a golden test. The installers write the hook entries of Claude Code,
+//! Codex, Devin, Gemini CLI and Antigravity, OpenCode's plugin, pi's package
+//! and the `pixel` skill, and keep a receipt of what they wrote. PIXEL deploys
+//! no prompt and wires no guard.
 
 use std::io;
 use std::path::PathBuf;
@@ -15,23 +19,33 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 pub mod antigravity;
-pub mod banner;
-pub mod bundled_probes;
 pub mod codex_config;
+pub mod codex_review;
 pub mod config;
 pub mod doctor;
+pub mod edit_input;
+mod envelope;
+mod hosts;
 pub mod install;
 mod json_edit;
 pub mod opencode_config;
+mod payload;
 mod pi_global;
-pub use pi_global::{CLASSIFY_PACKAGE_DIR, ClassifyPiPackage};
 pub mod receipt;
+mod relay;
 mod routing;
+pub mod settings;
 pub mod setup;
 pub mod skill;
 pub mod uninstall;
 
-/// Shared error type for the install/doctor surface.
+pub use envelope::{attach_line, block_envelope, context_envelope, context_of};
+pub use hosts::{Event, Host};
+pub use payload::{Payload, last_user_request, normalize};
+pub use pi_global::{CLASSIFY_PACKAGE_DIR, ClassifyPiPackage};
+pub use relay::{footer, footers, relay_response};
+
+/// Shared error type for the install surface.
 #[derive(Debug, Error)]
 pub enum InstallError {
     #[error("io: {0}")]
@@ -42,11 +56,6 @@ pub enum InstallError {
     NoHome,
     #[error("cannot resolve current executable: {0}")]
     CurrentExe(io::Error),
-    #[error(
-        "the shell profile holds a `# >>> pixel-managed >>>` block with no \
-         `# <<< pixel-managed <<<` end marker; close or delete that block, then re-run"
-    )]
-    UnterminatedManagedBlock,
     #[error("invalid settings.json at {path}: {reason}")]
     InvalidSettings { path: PathBuf, reason: String },
     #[error("setup: {0}")]

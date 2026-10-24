@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 """Contract of the reproducible release build (scripts/release/release-build-env.sh).
@@ -277,13 +277,7 @@ class Wiring(unittest.TestCase):
     def test_reproducible_build_uses_the_release_command(self):
         release = (WORKFLOWS / "release-build.yml").read_text()
         cmd = re.search(r"run: (cross build --release .*)", release).group(1)
-        matrix = re.search(
-            r"- target: x86_64-unknown-linux-musl\n\s+os: \S+\n\s+features: (.*)", release
-        ).group(1)
-        expected = (
-            cmd.replace("${{ matrix.features }}", matrix)
-            .replace("${{ matrix.target }}", '"$TARGET"')
-        )
+        expected = cmd.replace("${{ matrix.target }}", '"$TARGET"')
         repro = (WORKFLOWS / "reproducible-build.yml").read_text()
         builds = re.findall(r"^\s*(cross build .*)$", repro, re.M)
         self.assertEqual(builds, [expected, expected])

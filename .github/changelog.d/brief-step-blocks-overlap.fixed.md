@@ -1,0 +1,1 @@
+A question like "which flags control whether ripgrep follows symlinks?" keeps the flag's own definition in the brief: a block a recipe step found is no longer removed because a symbol's region overlaps it, so the `--follow` flag at `defs.rs:2416` and its use in `incremental.rs` stay.

@@ -29,6 +29,4 @@ paid several times.
 - **Not for bug fixes with a known cause.** A defect whose fix is already
   clear goes straight to a test and the fix; this rule is for changes whose
   benefit is a bet.
-- **A prototype that works becomes a probe.** A brief heuristic proven by a script is shipped as
-  `probes/<name>/` (a generic script plus its manifest), judged by `scripts/bench/probe-test.py` and written with the
-  `probe` skill (`.agents/skills/probe/SKILL.md`); not as a Rust change to the brief.
+- **A prototype that works becomes a recipe step.** A brief heuristic proven by a script is ported to a typed step of `pixel-brief` (`specs/brief.md`) with the prototype's cases as its tests, and ablated by its step flag; never shipped as a script.

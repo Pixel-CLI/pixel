@@ -1,8 +1,0 @@
-ref=v0.6.1 (ca1ce9e807c075b8c1f777e73ee4d7277a45dcc0)
-model=claude-opus-5-5 effort=medium
-claude=2.1.286 (Claude Code)
-pixel=pixel 0.6.1 commit: ca1ce9e807c075b8c1f777e73ee4d7277a45dcc0 
-prompt_sha256=8f4c3df8916b966583a32403e17155b386e1c3e9c87fb48a04c59d285eb35493
-isolation=fresh repository with REF's history only, one copy and daemon per run, per-run PIXEL_SESSION_ID
-task=Task: retry a leased push when the remote branch moved. Before anyone edits anything, find the files that would need to change and list them, most important first, with one line each on why. Do not edit any file.
-arms=vanilla pixel reps=11 started=2026-09-30T22:37:53Z

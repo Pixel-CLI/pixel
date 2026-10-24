@@ -7,7 +7,7 @@ Claude integration still described as the retired `claude()` wrapper, the
 graph file under the name it had before `graph.v2.db`, and two `.pixel/`
 files nothing writes.
 
-Tests hold part of the map (`cargo test -p pixel-cli --test cli
+Tests hold part of the map (`cargo test -p pixel --test cli
 docs_drift::`):
 
 - `## Command surface`: one row per subcommand, in `pixel --help` order;

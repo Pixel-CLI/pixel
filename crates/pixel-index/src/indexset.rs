@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Git-anchored 3-layer index: base shard + delta shard + dirty overlay.
@@ -18,12 +18,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-use pixel_git::BatchObject;
+use pixel_io::BatchObject;
 use rayon::prelude::*;
 
 use crate::cache;
 use crate::delta::{DeltaState, delta_shard_path};
 use crate::gram::GramExtractor;
+use crate::index;
 use crate::index::{MAX_FILE_BYTES, SHARD_DIR, SHARD_FILE, SearchStats, read_regular_bounded};
 use crate::lock::{BuildLock, is_pixel_only_gitignore, is_pixel_only_gitignore_text};
 use crate::overlay::Overlay;
@@ -31,7 +32,7 @@ use crate::plan::plan_pattern;
 use crate::posting::{GramQuery, resolve_query};
 use crate::shard::{Shard, ShardBuilder, ShardError};
 use crate::verify::{MatchLine, Verifier, VerifyError};
-use crate::{gitsync, index};
+use pixel_io::GitRunner;
 
 /// Compiled verifiers, keyed by pattern.
 ///
@@ -362,11 +363,11 @@ fn load_plain_sig(gpx_dir: &Path) -> Option<String> {
 }
 
 fn save_plain_sig(gpx_dir: &Path, sig: &str) {
-    if pixel_git::sidecar::private_dir(gpx_dir).is_ok() {
-        let _ = pixel_git::nofollow::write_replace(
+    if pixel_io::sidecar::private_dir(gpx_dir).is_ok() {
+        let _ = pixel_io::nofollow::write_replace(
             &plain_sig_path(gpx_dir),
             sig.as_bytes(),
-            pixel_git::nofollow::PRIVATE_MODE,
+            pixel_io::nofollow::PRIVATE_MODE,
         );
     }
 }
@@ -392,7 +393,7 @@ impl Containment {
     }
 
     fn admits(&mut self, rel: &str) -> bool {
-        if !pixel_git::repo_path::is_normal_relative(rel) {
+        if !pixel_io::repo_path::is_normal_relative(rel) {
             return false;
         }
         let Some(parent) = Path::new(rel).parent() else {
@@ -440,13 +441,13 @@ fn extract_blob(
     rel: &str,
     extractor: &dyn GramExtractor,
 ) -> BlobExtraction {
-    let Some(size) = gitsync::blob_size(root, commit_oid, rel) else {
+    let Some(size) = GitRunner::new(root).blob_size(commit_oid, rel) else {
         return BlobExtraction::Unreadable;
     };
     if size > MAX_FILE_BYTES {
         return BlobExtraction::Skipped;
     }
-    let Some(content) = gitsync::show_blob(root, commit_oid, rel) else {
+    let Some(content) = GitRunner::new(root).show_blob(commit_oid, rel) else {
         return BlobExtraction::Unreadable;
     };
     extract_content(rel, &content, extractor)
@@ -458,7 +459,7 @@ fn extract_content(rel: &str, content: &[u8], extractor: &dyn GramExtractor) -> 
         return BlobExtraction::Skipped;
     }
     // A `.gitignore` carrying *only* pixel's housekeeping `.pixel/` entry
-    // (created from scratch by an earlier `ensure_pixel_gitignored`) is not real
+    // (created from scratch by an earlier `ensure_pixel_ioignored`) is not real
     // tracked project content — keep it out of the file universe just like
     // `.pixel/` itself. Judged on the committed blob, so the shard stays a
     // function of the commit and can be shared across worktrees.
@@ -485,7 +486,7 @@ fn extract_blobs(
     extractor: &dyn GramExtractor,
 ) -> Vec<BlobExtraction> {
     extract_blobs_via(root, commit_oid, rels, extractor, |specs, visit| {
-        gitsync::cat_file_blobs(root, specs, MAX_FILE_BYTES, visit)
+        GitRunner::new(root).cat_file_blobs(specs, MAX_FILE_BYTES, visit)
     })
 }
 
@@ -499,7 +500,7 @@ fn extract_blobs_via<R>(
     read_batch: R,
 ) -> Vec<BlobExtraction>
 where
-    R: FnOnce(&[String], &mut dyn FnMut(usize, BatchObject<'_>)) -> Result<(), pixel_git::GitError>,
+    R: FnOnce(&[String], &mut dyn FnMut(usize, BatchObject<'_>)) -> Result<(), pixel_io::GitError>,
 {
     let mut outcomes: Vec<Option<BlobExtraction>> = rels.iter().map(|_| None).collect();
     let specs: Vec<String> = rels
@@ -538,29 +539,6 @@ const MIN_PATHS_PER_BATCH: usize = 64;
 /// batch per worker, never fewer than [`MIN_PATHS_PER_BATCH`] paths each.
 fn batch_len(paths: usize, threads: usize) -> usize {
     paths.div_ceil(threads.max(1)).max(MIN_PATHS_PER_BATCH)
-}
-
-/// True unless `PIXEL_INDEX_NO_DEFAULT_IGNORES` asks to index the default
-/// ignored directories (`node_modules`, `vendor`, …) too.
-#[cfg_attr(test, mutants::skip)] // one-line adapter over the environment; `prunes_default_ignores` is tested
-fn default_ignores_pruned() -> bool {
-    prunes_default_ignores(
-        std::env::var("PIXEL_INDEX_NO_DEFAULT_IGNORES")
-            .ok()
-            .as_deref(),
-    )
-}
-
-/// Whether a `PIXEL_INDEX_NO_DEFAULT_IGNORES` value keeps the default
-/// ignored directories out of the index: only `1` and `true` let them in.
-fn prunes_default_ignores(value: Option<&str>) -> bool {
-    !matches!(value, Some("1" | "true"))
-}
-
-/// The shared-cache key suffix for a base shard: the same commit indexed
-/// with and without the default ignores yields different shards.
-fn cache_variant(default_ignores_pruned: bool) -> &'static str {
-    if default_ignores_pruned { "" } else { ".all" }
 }
 
 /// A shard built from git, and how many of its blobs git could not read.
@@ -616,7 +594,7 @@ fn build_shard_from(
 /// fetched; `git diff base..HEAD` fails on it, so the base is rebuilt.
 fn delta_anchor_held(root: &Path, base: &Shard) -> bool {
     base.commit_oid()
-        .is_some_and(|oid| gitsync::commit_exists(root, oid))
+        .is_some_and(|oid| GitRunner::new(root).commit_exists(oid))
 }
 
 impl IndexSet {
@@ -650,10 +628,10 @@ impl IndexSet {
         // A `.pixel/` that is a link or that git tracks came from the
         // repository: its shards, extractor id and anchor included, are not
         // pixel's to trust.
-        pixel_git::sidecar::check(root)?;
+        pixel_io::sidecar::check(root)?;
         let gpx_dir = root.join(SHARD_DIR);
         let base_path = gpx_dir.join(SHARD_FILE);
-        let head = gitsync::rev_parse_head(root);
+        let head = GitRunner::new(root).rev_parse_head();
         let mut source = BaseSource::Reused;
 
         // --- base layer (fast path: no lock if shard is valid) ---
@@ -705,8 +683,8 @@ impl IndexSet {
                 std::fs::remove_file(delta_shard_path(&gpx_dir)).ok();
                 std::fs::remove_file(crate::delta::state_path(&gpx_dir)).ok();
                 let extractor_id = extractor.id();
-                let prune_default = default_ignores_pruned();
-                let cache_key = format!("{extractor_id}{}", cache_variant(prune_default));
+                let prune_default = true;
+                let cache_key = extractor_id.clone();
                 // When bypassing the cache (reindex), also remove the cached
                 // entry so the rebuild produces fresh bytes, not a relink.
                 if bypass_cache && let Some(oid) = head.as_deref() {
@@ -738,7 +716,7 @@ impl IndexSet {
                             // The commit's tree, not the worktree index: the base
                             // shard must be a pure function of (commit, extractor,
                             // ignore variant) to be shared across worktrees.
-                            let tracked = gitsync::ls_tree_blobs(root, oid).map_err(|e| {
+                            let tracked = GitRunner::new(root).ls_tree_blobs(oid).map_err(|e| {
                                 IndexSetError::Io(std::io::Error::other(format!(
                                     "git ls-tree {oid}: {e}"
                                 )))
@@ -833,12 +811,12 @@ impl IndexSet {
             set.open_timings.delta_ms = millis(clock.elapsed());
             let clock = Instant::now();
             // Dirty working tree -> overlay.
-            for (xy, path) in gitsync::status_porcelain(root) {
+            for (xy, path) in GitRunner::new(root).status_porcelain() {
                 if is_internal(&path) {
                     continue;
                 }
                 // A `.gitignore` carrying *only* pixel's housekeeping `.pixel/` entry
-                // (created from scratch by an earlier `ensure_pixel_gitignored`) is not real
+                // (created from scratch by an earlier `ensure_pixel_ioignored`) is not real
                 // project content — keep it out of the file/search universe just
                 // like `.pixel/` itself. A real user `.gitignore` with any other
                 // ignore rule is fully indexed.
@@ -918,8 +896,9 @@ impl IndexSet {
         // Cumulative diff base..HEAD — simple and correct however HEAD moved.
         // A failed diff is not "nothing changed": recording it as HEAD's
         // delta would serve the base commit's text as HEAD's.
-        let diff =
-            gitsync::diff_name_status_or_err(&self.root, base_oid, head_oid).map_err(|e| {
+        let diff = GitRunner::new(&self.root)
+            .diff_name_status_or_err(base_oid, head_oid)
+            .map_err(|e| {
                 IndexSetError::Io(std::io::Error::other(format!(
                     "git diff {base_oid}..{head_oid}: {e}"
                 )))
@@ -951,7 +930,7 @@ impl IndexSet {
                     self.extractor.as_ref(),
                     head_oid,
                     &delta_path,
-                    default_ignores_pruned(),
+                    true,
                 )?
                 .shard,
             )
@@ -1117,7 +1096,6 @@ impl IndexSet {
         filter: Option<&crate::path_filter::PathFilter>,
     ) -> Result<(Vec<MatchLine>, SearchStats), IndexSetError> {
         let started = std::time::Instant::now();
-        let probe = std::env::var_os("PIXEL_TARGETS_PROFILE").is_some();
         let query = plan_pattern(pattern, self.extractor.as_ref())
             .map_err(|e| IndexSetError::Pattern(e.to_string()))?;
         let scanned_all = matches!(query, GramQuery::All);
@@ -1163,14 +1141,6 @@ impl IndexSet {
         }
         let mut contained = Containment::new(&self.root);
         candidates.retain(|rel| contained.admits(rel));
-        if probe {
-            eprintln!(
-                "IDX cand {} pattern={:?} {}us",
-                candidates.len(),
-                &pattern[..pattern.len().min(24)],
-                started.elapsed().as_micros()
-            );
-        }
         let verifier = verifier_for(pattern)?;
 
         let mut matches: Vec<MatchLine> = Vec::new();
@@ -1231,14 +1201,6 @@ impl IndexSet {
             elapsed_us: started.elapsed().as_micros(),
             truncated,
         };
-        if probe {
-            eprintln!(
-                "IDX done cand={} matches={} {}us",
-                stats.candidates,
-                stats.matches,
-                started.elapsed().as_micros()
-            );
-        }
         Ok((matches, stats))
     }
 
@@ -1284,8 +1246,7 @@ impl IndexSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gram::SparseGramExtractor;
-    use crate::weights::Crc32Weigher;
+    use crate::gram::TrigramExtractor;
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -1379,7 +1340,7 @@ mod tests {
     }
 
     fn ex() -> Box<dyn GramExtractor> {
-        Box::new(SparseGramExtractor::new(Crc32Weigher))
+        Box::new(TrigramExtractor)
     }
 
     fn git_out(dir: &Path, args: &[&str]) -> String {
@@ -1455,19 +1416,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cache_variant_separates_indexes_built_with_and_without_default_ignores() {
-        assert_eq!(cache_variant(true), "");
-        assert_eq!(cache_variant(false), ".all");
-        assert!(prunes_default_ignores(None));
-        assert!(prunes_default_ignores(Some("0")));
-        assert!(prunes_default_ignores(Some("yes")));
-        assert!(!prunes_default_ignores(Some("1")));
-        assert!(!prunes_default_ignores(Some("true")));
-    }
-
-    /// The size cap is inclusive: a blob of exactly `MAX_FILE_BYTES` is
-    /// indexed, one byte more is skipped, and a real `.gitignore` is content.
     #[test]
     fn extract_blob_caps_size_inclusively_and_indexes_a_real_gitignore() {
         let dir = scratch("extract-blob-cap");
@@ -1658,7 +1606,7 @@ mod tests {
         let outcomes = extract_blobs_via(&dir, &head, &refs, extractor.as_ref(), |_, visit| {
             // Not the committed bytes: the grams must come from the answer.
             visit(0, BatchObject::Blob(b"fn batch_only_needle() {}\n"));
-            Err(pixel_git::GitError::Timeout {
+            Err(pixel_io::GitError::Timeout {
                 args: vec!["cat-file".to_string()],
             })
         });

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 # Renders every composition into docs/examples/, in two forms:
@@ -9,7 +9,7 @@
 #
 # Set README_WEBP_ONLY=1 to update only the README image; README_RENDER_CRF
 # (default 26) tunes the intermediate video used to extract its frames.
-# Needs ffmpeg and img2webp (brew install ffmpeg webp).
+# Needs ffmpeg and img2webp on PATH.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,18 +25,14 @@ trap 'rm -rf "$tmp"' EXIT
 
 name_of() {
   case $1 in
-    AgentDemo) echo pixel-agent-demo ;;
-    PixelComparison) echo pixel-measured-comparison ;;
-    PixelImpact) echo pixel-impact-comparison ;;
-    PixelScope) echo pixel-scope-comparison ;;
-    PixelBrief) echo pixel-brief-comparison ;;
-    PixelRewrite) echo pixel-rewrite-comparison ;;
+    PIXELvsRTK) echo pixel-vs-rtk ;;
+    EditGuard) echo pixel-edit-guard ;;
     *) echo "unknown composition $1" >&2; exit 1 ;;
   esac
 }
 
 ids=("$@")
-[ ${#ids[@]} -gt 0 ] || ids=(AgentDemo PixelScope PixelBrief PixelComparison PixelImpact PixelRewrite)
+[ ${#ids[@]} -gt 0 ] || ids=(PIXELvsRTK EditGuard)
 
 for id in "${ids[@]}"; do
   name=$(name_of "$id")
@@ -47,11 +43,6 @@ for id in "${ids[@]}"; do
     # The poster is the last frame: the finished state, for reduced motion and
     # for the moment before the video starts.
     ffmpeg -loglevel error -y -sseof -0.1 -i "$tmp/$name.mp4" -frames:v 1 -q:v 3 "$examples/$name.jpg"
-    # The agent demo waits on a Play button, so the site shows its first frame
-    # (both clocks at 0:00) until the visitor starts it.
-    if [ "$id" = AgentDemo ]; then
-      ffmpeg -loglevel error -y -i "$tmp/$name.mp4" -frames:v 1 -q:v 3 "$examples/$name-start.jpg"
-    fi
   fi
   mkdir -p "$tmp/$name"
   ffmpeg -loglevel error -y -i "$tmp/$name.mp4" -vf "fps=15,scale=$((800 * readme_scale)):$((500 * readme_scale)):flags=lanczos" "$tmp/$name/%04d.png"

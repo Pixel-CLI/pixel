@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! The plugin host, API 1: one capability, `command`.
@@ -19,7 +19,6 @@
 //! field of [`Host`]; the CLI fills it from the process, tests from a
 //! scratch directory.
 
-mod available;
 mod directory;
 mod discover;
 mod error;
@@ -33,10 +32,6 @@ mod probe;
 mod source;
 mod state;
 
-pub use available::{
-    Available, Status, command_status, install_command, read_only_invocation, repo_of,
-    stays_in_core,
-};
 pub use discover::{
     Host, Place, Resolved, Row, contained_program, find_on_path, list, render, resolve,
 };
@@ -47,10 +42,7 @@ pub use install::{
     Added, Binary, Enabled, add, add_with, cargo_install_command, disable, enable, installed_skill,
     looks_like_git_url, redact_source, remove, trust,
 };
-pub use invoke::{
-    Env, HINT_EXIT, MOVED_COMMANDS, PIXEL_API, PLUGINS_ORG, command, command_word, is_moved,
-    moved_hint, os_args,
-};
+pub use invoke::{Env, PIXEL_API, command, command_word, os_args};
 pub use manifest::{
     API_VERSION, Capability, MANIFEST_FILE, MAX_PROBE_BUDGET_MS, Manifest, ProbeMode, ProbeSpec,
     valid_name,

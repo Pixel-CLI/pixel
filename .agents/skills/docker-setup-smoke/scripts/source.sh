@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 set -eu
@@ -14,8 +14,8 @@ rustc --version
 cargo --version
 # Match the shipped Linux feature set; omit debug info for a smaller smoke build.
 export CARGO_PROFILE_DEV_DEBUG=0
-echo 'Building: cargo build --locked -j 4 -p pixel-cli --no-default-features --features model2vec'
-cargo build --locked -j 4 -p pixel-cli --no-default-features --features model2vec
+echo 'Building: cargo build --locked -j 4 -p Pixel-CLI --no-default-features --features model2vec'
+cargo build --locked -j 4 -p Pixel-CLI --no-default-features --features model2vec
 install -o tester -g tester -m 755 target/debug/pixel /home/tester/.local/bin/pixel
 /home/tester/.local/bin/pixel --version > /evidence/binary-version.txt
 cat /evidence/binary-version.txt

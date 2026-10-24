@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 set -eu
@@ -8,9 +8,9 @@ set -eu
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
     GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
 if [ "${1:-}" = --help ]; then
-    echo "Usage: sh $0 [--agents] [vX.Y.Z | --source main | --source SHA | --pr NUMBER | --installer | --brew]"
+    echo "Usage: sh $0 [--agents] [vX.Y.Z | --source main | --source SHA | --pr NUMBER | --installer]"
     echo 'Default: v0.6.1. Source builds use the fetched commit, not the PR merge ref.'
-    echo '--installer and --brew install the latest published release through install.sh or the tap.'
+    echo '--installer installs the latest published release through install.sh.'
     echo '--agents then runs Claude Code, Codex and pi sessions against a scripted fake model.'
     exit 0
 fi
@@ -45,12 +45,12 @@ elif [ $# -eq 2 ] && [ "$1" = --source ] && is_sha "$2"; then
 elif [ $# -eq 2 ] && [ "$1" = --pr ] && is_pr "$2"; then
     mode=source
     source_ref="refs/pull/$2/head"
-elif [ $# -eq 1 ] && { [ "$1" = --installer ] || [ "$1" = --brew ]; }; then
+elif [ $# -eq 1 ] && [ "$1" = --installer ]; then
     mode=${1#--}
 elif [ $# -eq 1 ] && is_tag "$1"; then
     release=$1
 elif [ $# -ne 0 ]; then
-    echo 'Expected a release tag, --source main/SHA, --pr NUMBER, --installer or --brew' >&2
+    echo 'Expected a release tag, --source main/SHA, --pr NUMBER or --installer' >&2
     exit 2
 fi
 scripts=$(cd "$(dirname "$0")" && pwd)
@@ -74,15 +74,6 @@ case $mode in
     installer)
         release=latest
         bootstrap=installer.sh
-        ;;
-    brew)
-        release=latest
-        base='homebrew/brew@sha256:b0072bfdebf5934ae24b93b44a1928a88057399b3283ffa0177bb86084fdedfd'
-        # Its GitHub CLI apt source fails `apt-get update` once the key rotates.
-        apt_source_parts=/nonexistent
-        bootstrap=brew.sh
-        budget=900
-        user=linuxbrew
         ;;
 esac
 image="pixel-setup-smoke:$mode"

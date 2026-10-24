@@ -1,9 +1,10 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Antigravity integration module.
 //!
-//! Installs Antigravity prompt hooks and the Pixel metrics plugin.
+//! Installs the hook entries of Gemini CLI and Antigravity, which share
+//! `~/.gemini`, and Antigravity's PIXEL plugin.
 
 use serde_json::{Value, json};
 use std::ffi::OsStr;
@@ -11,6 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::hosts::{Event, Host};
 use crate::install::{self, CheckStatus, InstallStep, Result};
 
 pub(crate) fn antigravity_config_dir(home: &Path) -> PathBuf {
@@ -39,12 +41,23 @@ fn run_agy_plugin_with(
     action: &str,
     plugin_dir: Option<&Path>,
 ) -> Result<bool> {
+    run_agy_named_plugin(executable, home, action, plugin_dir, "pixel")
+}
+
+/// `agy plugin <action>` on `plugin_dir`, or on the plugin called `name`.
+pub(crate) fn run_agy_named_plugin(
+    executable: &OsStr,
+    home: &Path,
+    action: &str,
+    plugin_dir: Option<&Path>,
+    name: &str,
+) -> Result<bool> {
     let mut command = Command::new(executable);
     command.env("HOME", home).arg("plugin").arg(action);
     if let Some(path) = plugin_dir {
         command.arg(path);
     } else {
-        command.arg("pixel");
+        command.arg(name);
     }
     let output = match command.output() {
         Ok(output) => output,
@@ -62,6 +75,15 @@ fn run_agy_plugin_with(
 }
 
 fn agy_pixel_registered_with(executable: &OsStr, home: &Path) -> Result<Option<bool>> {
+    agy_registered_with(executable, home, "pixel")
+}
+
+/// Whether `agy` lists a plugin called `name`; `None` when it cannot say.
+pub(crate) fn agy_registered_with(
+    executable: &OsStr,
+    home: &Path,
+    name: &str,
+) -> Result<Option<bool>> {
     let output = match Command::new(executable)
         .env("HOME", home)
         .args(["plugin", "list"])
@@ -95,7 +117,7 @@ fn agy_pixel_registered_with(executable: &OsStr, home: &Path) -> Result<Option<b
             .is_some_and(|imports| {
                 imports
                     .iter()
-                    .any(|entry| entry.get("name").and_then(Value::as_str) == Some("pixel"))
+                    .any(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
             }),
     ))
 }
@@ -119,7 +141,7 @@ fn read_json_object(path: &Path) -> Result<Value> {
     Ok(value)
 }
 
-/// Whether `path` is a plugin directory Pixel wrote: its `plugin.json`
+/// Whether `path` is a plugin directory PIXEL wrote: its `plugin.json`
 /// says `managedBy: "pixel"`. Anything else under that name is the user's.
 fn is_pixel_plugin(path: &Path) -> bool {
     fs::read_to_string(path.join("plugin.json"))
@@ -128,7 +150,7 @@ fn is_pixel_plugin(path: &Path) -> bool {
         .is_some_and(|manifest| manifest.get("managedBy").and_then(Value::as_str) == Some("pixel"))
 }
 
-/// The plugin directories under Pixel's name that Pixel did not write.
+/// The plugin directories under PIXEL's name that PIXEL did not write.
 fn foreign_plugins(dirs: [&Path; 2]) -> Vec<&Path> {
     dirs.into_iter()
         .filter(|dir| dir.exists() && !is_pixel_plugin(dir))
@@ -163,19 +185,19 @@ fn global_entry_commands(entry: &Value) -> Option<Vec<(&str, &str)>> {
     Some(commands)
 }
 
-/// Whether `entry` is the Antigravity prompt brief hook Pixel registered.
+/// Whether `entry` is the Antigravity prompt brief hook PIXEL registered.
 pub(crate) fn is_pixel_brief(entry: &Value, exe: &Path) -> bool {
     global_entry_commands(entry).is_some_and(|commands| {
         commands.len() == 1
             && commands.iter().all(|(event, command)| {
                 *event == "PreInvocation"
-                    && crate::routing::pixel_run_hook_verb(command, exe)
-                        == Some("task-event --provider antigravity --event prompt-submit")
+                    && crate::routing::pixel_hook_verb(command, exe)
+                        == Some("prompt-submit --host antigravity")
             })
     })
 }
 
-/// Remove the prompt brief hook Pixel registered in the global `hooks.json`;
+/// Remove the prompt brief hook PIXEL registered in the global `hooks.json`;
 /// a `pixel-brief` entry the user wrote is kept. The file is read and
 /// validated in a dry run too, so a dry run fails where the real run would.
 fn remove_brief_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
@@ -200,7 +222,7 @@ fn remove_brief_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallSt
         .get("pixel-brief")
         .is_some_and(|entry| is_pixel_brief(entry, exe))
     {
-        return Ok(step("no Pixel Antigravity hooks found to remove".into()));
+        return Ok(step("no PIXEL Antigravity hooks found to remove".into()));
     }
     if dry_run {
         return Ok(step(format!(
@@ -215,15 +237,15 @@ fn remove_brief_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallSt
     ))
 }
 
-/// The prompt-submission evidence brief for Gemini CLI: a `BeforeAgent`
-/// entry in `~/.gemini/settings.json` (Claude's group schema, `matcher`
-/// groups), whose stdout `additionalContext` carries the brief. Registered
-/// only where the settings file already exists; re-running replaces Pixel's
-/// earlier entries, never the user's.
-pub fn install_gemini_brief(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+/// Gemini CLI's hooks: an entry per event in `~/.gemini/settings.json`
+/// (Claude's group schema, `matcher` groups; the timeout is in milliseconds),
+/// whose stdout `additionalContext` carries the brief. Registered only where
+/// the settings file already exists; re-running replaces this install's entries
+/// and leaves the user's hooks intact.
+pub fn install_gemini_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let path = home.join(".gemini/settings.json");
     let step = |status, summary: String| InstallStep {
-        id: "hooks.gemini-brief".into(),
+        id: "hooks.gemini".into(),
         status,
         summary,
         detail: Some(format!("path={}", path.display())),
@@ -231,7 +253,7 @@ pub fn install_gemini_brief(home: &Path, exe: &Path, dry_run: bool) -> Result<In
     if !path.is_file() {
         return Ok(step(
             CheckStatus::Green,
-            "Gemini CLI is not configured; skipped the prompt brief hook".into(),
+            "Gemini CLI is not configured; skipped its hooks".into(),
         ));
     }
     let mut root_val = read_json_object(&path)?;
@@ -248,56 +270,44 @@ pub fn install_gemini_brief(home: &Path, exe: &Path, dry_run: bool) -> Result<In
             path: path.clone(),
             reason: "settings.json `hooks` is not an object".into(),
         })?;
-    let command = format!(
-        "{} run-hook task-event --provider gemini --event prompt-submit",
-        crate::routing::quoted_executable(exe)
-    );
-    let groups = hooks
-        .entry("BeforeAgent")
-        .or_insert_with(|| json!([]))
-        .as_array_mut()
-        .ok_or_else(|| crate::InstallError::InvalidSettings {
-            path: path.clone(),
-            reason: "hooks.BeforeAgent is not an array".into(),
-        })?;
-    for group in groups.iter_mut() {
-        if let Some(inner) = group.get_mut("hooks").and_then(Value::as_array_mut) {
-            inner.retain(|hook| {
-                !hook
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|cmd| {
-                        crate::routing::pixel_run_hook_verb(cmd, exe)
-                            == Some("task-event --provider gemini --event prompt-submit")
-                    })
-            });
-        }
-    }
-    groups.retain(|group| {
-        group
-            .get("hooks")
-            .and_then(Value::as_array)
-            .is_none_or(|inner| !inner.is_empty())
+    crate::routing::remove_matching_hooks(hooks, |command| {
+        crate::routing::is_pixel_hook(command, exe)
     });
     if dry_run {
         return Ok(step(
             CheckStatus::Green,
-            format!("would register the prompt brief hook in {}", path.display()),
+            format!("would register the hooks in {}", path.display()),
         ));
     }
-    groups.push(json!({
-        "matcher": "*",
-        "hooks": [{
-            "name": "pixel-brief",
+    for event in crate::routing::REGISTERED {
+        let Some(host_event) = Host::Gemini.registration(event) else {
+            continue;
+        };
+        let groups = hooks
+            .entry(host_event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| crate::InstallError::InvalidSettings {
+                path: path.clone(),
+                reason: format!("hooks.{host_event} is not an array"),
+            })?;
+        let mut group = json!({"hooks": [{
+            "name": format!("pixel-{}", event.as_str()),
             "type": "command",
-            "command": command,
-            "timeout": 10000
-        }]
-    }));
+            "command": crate::routing::hook_command(exe, event, Host::Gemini, None),
+            "timeout": crate::routing::hook_timeout(event) * 1_000,
+        }]});
+        // The prompt entry's `*` is the measured shape; the tool events match
+        // every tool. The lifecycle events take no matcher.
+        if matches!(event, Event::PromptSubmit | Event::PostTool) {
+            group["matcher"] = json!("*");
+        }
+        groups.push(group);
+    }
     install::write_settings(&path, &root_val, false)?;
     Ok(step(
         CheckStatus::Green,
-        "registered the prompt brief hook for Gemini CLI".into(),
+        "registered the hooks for Gemini CLI".into(),
     ))
 }
 
@@ -305,7 +315,7 @@ pub fn install_gemini_brief(home: &Path, exe: &Path, dry_run: bool) -> Result<In
 /// entry in `~/.gemini/config/hooks.json` running on `PreInvocation`. The
 /// hook gates on `invocationNum == 0` (the first model call of each turn)
 /// and answers `injectSteps[].ephemeralMessage`. Registered only where the
-/// file already exists; a re-run rewrites only an entry Pixel registered.
+/// file already exists; a re-run rewrites only an entry PIXEL registered.
 pub fn install_antigravity_brief(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let path = hooks_path(home);
     let step = |status, summary: String| InstallStep {
@@ -349,8 +359,8 @@ pub fn install_antigravity_brief(home: &Path, exe: &Path, dry_run: bool) -> Resu
         "enabled": true,
         "PreInvocation": [{
             "type": "command",
-            "command": format!("{} run-hook task-event --provider antigravity --event prompt-submit", crate::routing::quoted_executable(exe)),
-            "timeout": 10
+            "command": crate::routing::hook_command(exe, Event::PromptSubmit, Host::Antigravity, None),
+            "timeout": crate::config::HOOK_TIMEOUT
         }]
     });
     install::write_settings(&path, &root_val, false)?;
@@ -360,7 +370,7 @@ pub fn install_antigravity_brief(home: &Path, exe: &Path, dry_run: bool) -> Resu
     ))
 }
 
-/// Install Pixel's Antigravity plugin with its deferred metrics relay.
+/// Install PIXEL's Antigravity plugin with its hooks.
 pub fn install_antigravity_plugin(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     install_antigravity_plugin_with_agy(home, exe, dry_run, OsStr::new("agy"))
 }
@@ -378,7 +388,7 @@ fn install_antigravity_plugin_with_agy(
             id: "install.antigravity-plugin".into(),
             status: CheckStatus::Green,
             summary: format!(
-                "would deploy Antigravity metrics plugin to {} and {}",
+                "would deploy the Antigravity plugin to {} and {}",
                 ide_dir.display(),
                 cli_dir.display()
             ),
@@ -391,7 +401,7 @@ fn install_antigravity_plugin_with_agy(
             id: "install.antigravity-plugin".into(),
             status: CheckStatus::Yellow,
             summary: format!(
-                "kept the user's own plugin at {}; Antigravity metrics relay not installed",
+                "kept the user's own plugin at {}; Antigravity plugin not installed",
                 foreign.display()
             ),
             detail: Some(format!("kept_plugin_path={}", foreign.display())),
@@ -415,12 +425,12 @@ fn install_antigravity_plugin_with_agy(
     let manifest = json!({
         "$schema": "https://antigravity.google/schemas/v1/plugin.json",
         "name": "pixel",
-        "displayName": "Pixel Code Intelligence",
-        "description": "Deterministic AST code retrieval and code-graph navigation layer for Antigravity.",
+        "displayName": "PIXEL",
+        "description": "Deterministic evidence PIXEL injects into Antigravity at the moment it removes a model turn.",
         "version": env!("CARGO_PKG_VERSION"),
         "managedBy": "pixel"
     });
-    let hooks = antigravity_metrics_plugin_hooks(exe);
+    let hooks = antigravity_plugin_hooks(exe);
     let manifest_text = serde_json::to_string_pretty(&manifest)? + "\n";
     let hooks_text = serde_json::to_string_pretty(&hooks)? + "\n";
     for path in [&ide_dir, &cli_dir] {
@@ -454,7 +464,7 @@ fn install_antigravity_plugin_with_agy(
         id: "install.antigravity-plugin".into(),
         status,
         summary: format!(
-            "deployed Antigravity metrics plugin to IDE {} and CLI {}{}",
+            "deployed the Antigravity plugin to IDE {} and CLI {}{}",
             ide_dir.display(),
             cli_dir.display(),
             registration_summary
@@ -467,32 +477,29 @@ fn install_antigravity_plugin_with_agy(
     })
 }
 
-fn antigravity_metrics_plugin_hooks(exe: &Path) -> Value {
-    let command = format!(
-        "{} run-hook metrics --provider antigravity",
-        crate::routing::quoted_executable(exe)
-    );
+fn antigravity_plugin_hooks(exe: &Path) -> Value {
     json!({
-        "pixel-guard": {
+        "pixel-hooks": {
             "enabled": true,
             "PostToolUse": [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": command,
-                    "timeout": 10
+                    "command": crate::routing::hook_command(exe, Event::PostTool, Host::Antigravity, None),
+                    "timeout": crate::config::QUICK_HOOK_TIMEOUT
                 }]
             }],
             "PostInvocation": [{
                 "type": "command",
-                "command": format!("{command} --event post-invocation"),
-                "timeout": 10
+                "command": crate::routing::hook_command(exe, Event::Stop, Host::Antigravity, None),
+                "timeout": crate::config::QUICK_HOOK_TIMEOUT
             }]
         }
     })
 }
 
-/// `pixel doctor` check: verify both deferred-relay events and plugin setup.
+/// `pixel doctor` check: the plugin directories, their hooks and skill, the config entry and
+/// the CLI registration.
 /// Green-skips when Antigravity is not configured.
 pub fn check_antigravity_install(
     home: &Path,
@@ -526,17 +533,17 @@ fn check_antigravity_install_with_agy(
     let has_managed_plugin = plugin_dirs.iter().any(|dir| is_pixel_plugin(dir));
     if !has_managed_plugin {
         return Ok((
-            "no Pixel plugin or hook; Antigravity keeps its native tools".into(),
+            "no PIXEL plugin or hook; Antigravity keeps its native tools".into(),
             detail,
         ));
     }
 
     let mut missing = Vec::new();
-    let expected_hooks = antigravity_metrics_plugin_hooks(exe);
+    let expected_hooks = antigravity_plugin_hooks(exe);
     for (surface, dir) in [("IDE", &p_dir), ("CLI", &cli_dir)] {
         let managed = is_pixel_plugin(dir);
         if !managed {
-            missing.push(format!("{surface} plugin is not managed by Pixel"));
+            missing.push(format!("{surface} plugin is not managed by PIXEL"));
             continue;
         }
         if fs::read_to_string(dir.join("skills/pixel/SKILL.md"))
@@ -559,9 +566,9 @@ fn check_antigravity_install_with_agy(
         if installed_hooks.as_ref() != Some(&expected_hooks) {
             missing.push(
                 if surface == "IDE" {
-                    "IDE hooks.json (metrics relay)"
+                    "IDE hooks.json"
                 } else {
-                    "CLI hooks.json (metrics relay)"
+                    "CLI hooks.json"
                 }
                 .into(),
             );
@@ -576,18 +583,37 @@ fn check_antigravity_install_with_agy(
         missing.push("config.json (pixel plugin enabled)".into());
     }
     if agy_pixel_registered_with(agy, home).map_err(|error| error.to_string())? == Some(false) {
-        missing.push("Antigravity CLI Pixel plugin registration".into());
+        missing.push("Antigravity CLI PIXEL plugin registration".into());
     }
     if !missing.is_empty() {
         return Err(format!(
-            "Antigravity Pixel metrics plugin incomplete: {} — run `pixel setup`",
+            "Antigravity PIXEL plugin incomplete: {} — run `pixel setup`",
             missing.join(", ")
         ));
     }
     Ok((
-        "Antigravity Pixel deferred metrics relay configured; native tools preserved".into(),
+        "Antigravity PIXEL plugin and hooks configured; native tools preserved".into(),
         detail,
     ))
+}
+
+/// The keys missing or altered in the global `hooks.json` entry setup writes:
+/// `pixel-brief` is expected to be exactly what [`install_antigravity_brief`]
+/// writes for `exe`, unless the user's own entry stands in its place.
+pub fn brief_drift(hooks: &Value, exe: &Path) -> Vec<&'static str> {
+    let expected = json!({
+        "enabled": true,
+        "PreInvocation": [{
+            "type": "command",
+            "command": crate::routing::hook_command(exe, Event::PromptSubmit, Host::Antigravity, None),
+            "timeout": crate::config::HOOK_TIMEOUT
+        }]
+    });
+    match hooks.get("pixel-brief") {
+        None => vec!["pixel-brief"],
+        Some(entry) if is_pixel_brief(entry, exe) && entry != &expected => vec!["pixel-brief"],
+        Some(_) => Vec::new(),
+    }
 }
 
 /// Remove Antigravity integration during `pixel setup --remove`.
@@ -620,7 +646,7 @@ fn remove_antigravity_with_agy(
 
     let mut removed_items = Vec::new();
     // A user's own plugin named `pixel` keeps its directory, its
-    // registration and its config entry: none of them is Pixel's.
+    // registration and its config entry: none of them is PIXEL's.
     let foreign = foreign_plugins([&p_dir, &cli_dir]);
     let kept = foreign
         .iter()
@@ -643,7 +669,7 @@ fn remove_antigravity_with_agy(
         }
     }
 
-    // Only the brief hook Pixel wrote; a user-defined `pixel-brief` stays.
+    // Only the brief hook PIXEL wrote; a user-defined `pixel-brief` stays.
     let global = remove_brief_hook(home, exe, false)?;
     if global.summary.starts_with("removed") {
         removed_items.push("hooks.json entry");
@@ -693,7 +719,7 @@ mod tests {
             fs::write(&path, original).unwrap();
             let exe = Path::new("/usr/local/bin/pixel");
             let install = if gemini {
-                install_gemini_brief
+                install_gemini_hooks
             } else {
                 install_antigravity_brief
             };
@@ -760,7 +786,7 @@ mod tests {
             let exe = Path::new("/tmp/pixel");
             let install = || {
                 if gemini {
-                    install_gemini_brief(home.path(), exe, false)
+                    install_gemini_hooks(home.path(), exe, false)
                 } else {
                     install_antigravity_brief(home.path(), exe, false)
                 }
@@ -804,27 +830,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn check_should_report_incomplete_pixel_managed_plugin_without_legacy_hooks() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
-        let exe = Path::new("/usr/local/bin/pixel");
-        let absent_agy = tmp.path().join("missing-agy");
-        install_antigravity_plugin_with_agy(home, exe, false, absent_agy.as_os_str()).unwrap();
-        fs::remove_file(cli_plugin_dir(home).join("hooks.json")).unwrap();
-
-        let error =
-            check_antigravity_install_with_agy(home, exe, absent_agy.as_os_str()).unwrap_err();
-
-        assert!(
-            error.contains("Antigravity Pixel metrics plugin incomplete"),
-            "{error}"
-        );
-        assert!(error.contains("CLI hooks.json (metrics relay)"), "{error}");
-    }
-
     #[test]
     fn install_should_replace_a_pixel_managed_brief_from_an_old_executable() {
         let tmp = tempfile::tempdir().unwrap();
@@ -833,7 +838,7 @@ mod tests {
         let exe = PathBuf::from("/usr/local/bin/pixel");
         let old_entry = json!({"enabled": true, "PreInvocation": [{
             "type": "command",
-            "command": "/opt/pixel/bin/pixel run-hook task-event --provider antigravity --event prompt-submit",
+            "command": "/opt/pixel/bin/pixel hook prompt-submit --host antigravity",
             "timeout": 10
         }]});
         fs::write(
@@ -849,7 +854,7 @@ mod tests {
         assert_eq!(
             hooks["pixel-brief"]["PreInvocation"][0]["command"],
             format!(
-                "{} run-hook task-event --provider antigravity --event prompt-submit",
+                "{} hook prompt-submit --host antigravity || true",
                 crate::routing::quoted_executable(&exe)
             )
         );
@@ -864,7 +869,7 @@ mod tests {
         let brief = json!({"enabled": true, "PreInvocation": [{
             "type": "command",
             "command": format!(
-                "{} run-hook task-event --provider antigravity --event prompt-submit",
+                "{} hook prompt-submit --host antigravity",
                 crate::routing::quoted_executable(&exe)
             ),
             "timeout": 10
@@ -876,7 +881,7 @@ mod tests {
         }]});
         let text = serde_json::to_string_pretty(&json!({
             "pixel-brief": brief,
-            "pixel-guard": foreign_guard
+            "user-audit": foreign_guard
         }))
         .unwrap();
         fs::write(hooks_path(home), &text).unwrap();
@@ -890,7 +895,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn antigravity_plugin_should_install_deferred_post_tool_metrics_relay() {
+    fn antigravity_plugin_should_install_the_post_tool_and_stop_hooks() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         fs::create_dir_all(antigravity_config_dir(home)).unwrap();
@@ -906,16 +911,16 @@ mod tests {
 
         assert_eq!(step.status, CheckStatus::Green);
         assert!(step.summary.contains("registered it with agy"));
-        let expected = json!({"pixel-guard": {"enabled": true, "PostToolUse": [{
+        let expected = json!({"pixel-hooks": {"enabled": true, "PostToolUse": [{
             "matcher": "*", "hooks": [{
                 "type": "command",
-                "command": "'/opt/pixel tools/pixel' run-hook metrics --provider antigravity",
-                "timeout": 10
+                "command": "'/opt/pixel tools/pixel' hook post-tool --host antigravity || true",
+                "timeout": 5
             }]
         }], "PostInvocation": [{
             "type": "command",
-            "command": "'/opt/pixel tools/pixel' run-hook metrics --provider antigravity --event post-invocation",
-            "timeout": 10
+            "command": "'/opt/pixel tools/pixel' hook stop --host antigravity || true",
+            "timeout": 5
         }]}});
         for dir in [plugin_dir(home), cli_plugin_dir(home)] {
             assert!(is_pixel_plugin(&dir));
@@ -1024,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_brief_should_replace_only_pixel_owned_hooks_and_quote_executable() {
+    fn gemini_hooks_should_replace_only_pixel_owned_hooks_and_quote_executable() {
         let home = tempfile::tempdir().unwrap();
         let settings = home.path().join(".gemini/settings.json");
         fs::create_dir_all(settings.parent().unwrap()).unwrap();
@@ -1035,8 +1040,9 @@ mod tests {
                     "BeforeAgent": [{
                         "matcher": "*",
                         "hooks": [
-                            {"type": "command", "command": "'/opt/pixel/pixel' run-hook task-event --provider gemini --event prompt-submit"},
-                            {"type": "command", "command": "/opt/notpixel run-hook task-event --provider gemini --event prompt-submit"}
+                            {"type": "command", "command": "'/opt/pixel/pixel' hook prompt-submit --host gemini"},
+                            {"type": "command", "command": "/opt/notpixel hook prompt-submit --host gemini"},
+                            {"type": "command", "command": "'/usr/bin/pixel' run-hook task-event --provider gemini --event prompt-submit"}
                         ]
                     }]
                 }
@@ -1045,18 +1051,52 @@ mod tests {
         )
         .unwrap();
 
-        install_gemini_brief(home.path(), Path::new("/opt/pixel's tools/pixel"), false).unwrap();
+        install_gemini_hooks(home.path(), Path::new("/opt/pixel's tools/pixel"), false).unwrap();
 
-        let installed: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+        let installed: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
         let groups = installed["hooks"]["BeforeAgent"].as_array().unwrap();
         assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["matcher"], "*");
+        assert_eq!(groups[0]["hooks"].as_array().unwrap().len(), 2);
         assert_eq!(
             groups[0]["hooks"][0]["command"],
-            "/opt/notpixel run-hook task-event --provider gemini --event prompt-submit"
+            "/opt/notpixel hook prompt-submit --host gemini"
         );
         assert_eq!(
+            groups[0]["hooks"][1]["command"],
+            "'/usr/bin/pixel' run-hook task-event --provider gemini --event prompt-submit"
+        );
+        assert_eq!(groups[1]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(
             groups[1]["hooks"][0]["command"],
-            "'/opt/pixel'\\''s tools/pixel' run-hook task-event --provider gemini --event prompt-submit"
+            "'/opt/pixel'\\''s tools/pixel' hook prompt-submit --host gemini || true"
+        );
+        assert_eq!(groups[1]["matcher"], "*");
+        assert_eq!(groups[1]["hooks"][0]["name"], "pixel-prompt-submit");
+        assert_eq!(groups[1]["hooks"][0]["timeout"], 10_000);
+        let events: Vec<_> = installed["hooks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            events,
+            ["AfterAgent", "AfterTool", "BeforeAgent", "SessionStart"]
+        );
+        assert!(
+            installed["hooks"]["SessionStart"][0]
+                .get("matcher")
+                .is_none()
+        );
+        assert!(installed["hooks"]["AfterAgent"][0].get("matcher").is_none());
+        assert_eq!(installed["hooks"]["AfterTool"][0]["matcher"], "*");
+
+        install_gemini_hooks(home.path(), Path::new("/opt/pixel's tools/pixel"), false).unwrap();
+        let repeated: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+        assert_eq!(
+            repeated, installed,
+            "reinstall preserves foreign and Pixel hooks"
         );
     }
 
@@ -1127,7 +1167,7 @@ mod tests {
     /// Run `probe` again while it fails with ETXTBSY: a script this test just
     /// wrote is "busy" as long as a child another test thread forked in the
     /// meantime still holds a copy of the write descriptor, until that child
-    /// execs. A fresh path does not avoid it; a short retry does (#455).
+    /// execs. A fresh path does not avoid it; a short retry does.
     /// Bounded, so a real error still surfaces within a second.
     #[cfg(unix)]
     fn unless_busy<T>(mut probe: impl FnMut() -> Result<T>) -> Result<T> {
@@ -1265,7 +1305,7 @@ mod tests {
     }
 
     /// A user's own plugin named `pixel` is not a leftover: install keeps it,
-    /// its registration and its config entry, and doctor stays green.
+    /// its registration and its config entry.
     #[cfg(unix)]
     #[test]
     fn cleanup_should_keep_a_users_own_pixel_plugin_and_its_registration() {
@@ -1296,10 +1336,6 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(config_path(home)).unwrap(), config);
         assert!(!agy.with_extension("log").exists(), "agy was called");
-        assert_eq!(
-            check_antigravity_install(home, exe).unwrap().0,
-            "no Pixel plugin or hook; Antigravity keeps its native tools"
-        );
     }
 
     #[test]
@@ -1321,19 +1357,5 @@ mod tests {
             config_path(home),
             Path::new("/home/user/.gemini/config/config.json")
         );
-    }
-
-    #[test]
-    fn audited_plugin_check_should_accept_exact_skills_and_reject_modified_skill_content() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
-        let exe = Path::new("/tmp/pixel");
-        let agy = fake_agy(&home.join("agy"), r#"{"imports":[{"name":"pixel"}]}"#);
-        install_antigravity_plugin_with_agy(home, exe, false, agy.as_os_str()).unwrap();
-        check_antigravity_install_with_agy(home, exe, agy.as_os_str()).unwrap();
-        fs::write(plugin_dir(home).join("skills/pixel/SKILL.md"), "changed").unwrap();
-        let error = check_antigravity_install_with_agy(home, exe, agy.as_os_str()).unwrap_err();
-        assert!(error.contains("IDE skills/pixel/SKILL.md"), "{error}");
     }
 }

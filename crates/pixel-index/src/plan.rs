@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Query planning: regex pattern → boolean gram query.
 //!
 //! A simplified form of Russ Cox's trigram-query algebra (regexp4), with
-//! sparse-gram coverings at the leaves. The plan is *sound, never complete*:
+//! trigram coverings at the leaves. The plan is *sound, never complete*:
 //! it may under-narrow (worst case `All` = full scan) but a document matching
 //! the regex is always in the candidate set, because a requirement is only
 //! emitted for literals that must appear verbatim in any match.
@@ -260,13 +260,12 @@ fn analyze(hir: &Hir, extractor: &dyn GramExtractor) -> Info {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gram::SparseGramExtractor;
+    use crate::gram::TrigramExtractor;
     use crate::posting::resolve_query;
-    use crate::weights::Crc32Weigher;
     use std::collections::HashMap;
 
-    fn ex() -> SparseGramExtractor<Crc32Weigher> {
-        SparseGramExtractor::new(Crc32Weigher)
+    fn ex() -> TrigramExtractor {
+        TrigramExtractor
     }
 
     fn plan(pattern: &str) -> GramQuery {

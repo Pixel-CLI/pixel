@@ -1,25 +1,21 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
-//! `pixel-proto` — the shared contract crate for the `pixel` project.
+//! `pixel-proto`: the shared wire contract (`specs/ops.md`).
 //!
-//! Holds ONLY typed contracts: the response envelope, error codes, the
-//! snapshot token type, and a minimal `Op` enum mirroring the current
-//! daemon wire format. No I/O, no business logic, no daemon/CLI code — see
-//! `PLAN.md`'s Part A1 crate layout for how this fits into the workspace.
-//! Every other pixel crate that needs the wire contract depends on this
-//! one; this crate depends on nothing pixel-internal.
+//! Holds only typed contracts: the response envelope, error codes, the
+//! snapshot token, epistemics, budgets, recovery hints, the brief-gate facts
+//! and meaning results, and the 15-variant `Op` enum. No I/O and no business
+//! logic. It depends on nothing PIXEL-internal.
 
 pub mod budget;
 pub mod envelope;
 pub mod epistemics;
 pub mod error;
-pub mod evaluate;
 pub mod evidence;
 pub mod facts;
 pub mod meaning;
 pub mod op;
-pub mod query;
 pub mod recovery;
 pub mod snapshot;
 pub mod warning;
@@ -34,8 +30,7 @@ pub use facts::{
     TargetsFactsUnavailableReason,
 };
 pub use meaning::{MeaningHit, MeaningPool, MeaningResult, MeaningUnavailableReason};
-pub use op::Op;
-pub use query::{QueryKind, QueryPlan, QueryResult, QueryStatus, compile_query};
+pub use op::{EditPhase, Op};
 pub use recovery::{
     Continuation, NextCall, OnDrift, RecoveryCause, RecoveryHint, SideEffect, SnapshotBinding,
 };

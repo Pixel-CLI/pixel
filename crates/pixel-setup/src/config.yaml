@@ -1,0 +1,49 @@
+# pixel settings. `pixel config` lists them with where each value comes from.
+# Global file: ~/.pixel/config.yaml
+# Repository overrides: <repository>/.pixel/config.yaml
+# Priority: environment overrides > repository settings > global settings > defaults.
+# classify and remote_keys are GLOBAL ONLY; repository copies have no effect.
+#
+# Every example below is commented out: defaults apply until you remove the
+# leading "# ". Change a value with `pixel config <key> <value>`.
+
+# Show the 🟩 lines after commands and hooks (default: on). The accounting
+# stays on. Environment override: PIXEL_METRICS=0
+# metrics: false
+
+# Let a command start the repository's background process (default: on). It
+# does not stop one already running. Environment override: PIXEL_DAEMON_AUTO_START=0
+# daemon_auto_start: false
+
+# Compute the prompt brief (default: on). Environment override: PIXEL_BRIEF=0
+# brief: false
+
+# How many hooks carry the per-prompt brief, 1 to 8 (default: 3). Claude Code
+# and Codex each cap what one hook may inject (about 10,000 characters), per
+# hook, so a larger brief is split over several hooks. Run `pixel setup` after
+# changing it; `pixel doctor` flags a mismatch.
+# brief_parts: 3
+
+# Run the edit-time and stop-time checks (default: off): a card before an edit
+# that changes a called signature, the callers it leaves behind after it, and
+# one block at Stop while they are untouched. Environment override:
+# PIXEL_EDIT_HOOKS=1
+# edit_hooks: true
+
+# Optional AI classification, separate from code search. Global settings only.
+# Disabled by default: nothing in the default path calls a model or the network.
+#   pixel config classify on|off      the global switch (off stops every call)
+#   pixel config classify-engine <auto|local|remote>
+#   pixel config remote-preset <preset> [--model M] [--base URL]
+#   pixel config remote-key <preset> -    (the key is read from stdin)
+# classify:
+#   enabled: false
+#   engine: auto
+#   remote_preset: openrouter
+#   remote_model: <preset's default>
+#   remote_base: <preset's default>
+
+# Provider credentials. Global file only (mode 0600); a provider's environment
+# variable wins. Never commit credentials to a repository.
+# remote_keys:
+#   openrouter: "<your-api-key>"

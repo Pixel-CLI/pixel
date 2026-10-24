@@ -1,12 +1,12 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Ownership receipt for setup: restore unchanged writes and keep later user edits.
 
 use crate::Result;
 use crate::install::{CheckStatus, InstallStep};
+use pixel_model::hash::Hash;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -52,10 +52,7 @@ fn roots(home: &Path, explicit: bool) -> Vec<PathBuf> {
         crate::antigravity::plugin_dir(home),
         crate::antigravity::cli_plugin_dir(home),
         crate::opencode_config::opencode_config_dir(home, explicit).join("plugins/pixel-brief.js"),
-        crate::opencode_config::opencode_config_dir(home, explicit)
-            .join("plugins/pixel-brief-metrics/tui.js"),
         home.join(crate::pi_global::PACKAGE_DIR),
-        home.join(crate::CLASSIFY_PACKAGE_DIR),
         home.join(".pixel/config.yaml"),
     ];
     let pi = crate::pi_global::PiPaths::resolve(home, explicit);
@@ -65,9 +62,6 @@ fn roots(home: &Path, explicit: bool) -> Vec<PathBuf> {
         for skill in ["pixel", "pixel-classify"] {
             roots.push(home.join(harness).join("skills").join(skill));
         }
-    }
-    for name in crate::bundled_probes::names() {
-        roots.push(home.join(".pixel/plugins").join(name));
     }
     roots.sort();
     roots.dedup();
@@ -143,13 +137,7 @@ fn collect_tree(
 fn fingerprint(entry: &Entry) -> String {
     match entry {
         Entry::Directory => "directory".into(),
-        Entry::File { bytes, mode } => format!(
-            "{mode:o}:{}",
-            Sha256::digest(bytes)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        ),
+        Entry::File { bytes, mode } => format!("{mode:o}:{}", Hash::of(bytes).to_hex()),
     }
 }
 
@@ -244,6 +232,21 @@ impl Snapshot {
         }
         if receipt.is_empty() {
             return Ok(());
+        }
+        // The receipt's own directory is setup's output when setup made it, so
+        // removal can prune it once the receipt goes.
+        if let Some(state_dir) = path.parent()
+            && !self.entries.contains_key(state_dir)
+            && !receipt.contains_key(state_dir)
+        {
+            receipt.insert(
+                state_dir.to_path_buf(),
+                Owned {
+                    original: None,
+                    installed: "directory".into(),
+                    location: None,
+                },
+            );
         }
         save(home, &receipt)
     }
@@ -448,8 +451,7 @@ mod tests {
             };
             let selection = crate::install::InstallSelection {
                 agents: vec![crate::setup::AgentTarget::ClaudeCode],
-                task_hooks: true,
-                ..Default::default()
+                hooks: true,
             };
             crate::install::install_selected(&options, Some(&selection)).unwrap();
             before.finish().unwrap();
@@ -518,6 +520,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn setup_should_preserve_old_product_hooks_and_remove_only_its_own_install() {
+        let home = tempfile::tempdir().unwrap();
+        let settings = home.path().join(".claude/settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let original = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old/pixel run-hook task-event --provider claude --event stop"}]}]}}"#;
+        fs::write(&settings, original).unwrap();
+        let options = crate::install::InstallOptions {
+            home: Some(home.path().into()),
+            executable_path: Some("/tmp/pixel".into()),
+            ..Default::default()
+        };
+        let selection = crate::install::InstallSelection {
+            agents: vec![crate::setup::AgentTarget::ClaudeCode],
+            hooks: true,
+        };
+
+        for _ in 0..2 {
+            let before = Snapshot::begin(&options).unwrap().unwrap();
+            crate::install::install_selected(&options, Some(&selection)).unwrap();
+            before.finish().unwrap();
+            let hooks: serde_json::Value =
+                serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+            assert_eq!(
+                hooks["hooks"]["Stop"][0]["hooks"][0]["command"],
+                "/old/pixel run-hook task-event --provider claude --event stop"
+            );
+            assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        }
+
+        crate::uninstall::uninstall(&crate::uninstall::UninstallOptions {
+            home: Some(home.path().into()),
+            binary_path: Some(home.path().join("absent")),
+            executable_path: Some("/tmp/pixel".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(fs::read_to_string(settings).unwrap(), original);
     }
 
     #[test]

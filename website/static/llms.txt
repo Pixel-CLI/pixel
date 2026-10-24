@@ -37,7 +37,7 @@ On GitHub Actions the same script is the Linux install. `ubuntu-latest` receives
     echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"
 ```
 
-New installs use the script; re-running the same `curl … | sh` line updates an existing one. A binary managed by Homebrew or mise keeps being upgraded by its manager. The release workflow builds those three archives; it does not ask the user to download one by hand.
+New installs use the script; re-running the same `curl … | sh` line updates an existing one. A binary managed by mise keeps being upgraded by its manager. The release workflow builds those three archives; it does not ask the user to download one by hand.
 
 ## Start here
 

@@ -1,893 +1,133 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 name: CI
 
 on:
   push:
-    # main is the only long-lived branch: every pull request merges into it
-    # and every release is a tag on it.
     branches: [main]
   pull_request:
-    # A pull request that only touches documentation no test reads -- prose
-    # under docs/, the licence files, a Markdown file outside the list below
-    # -- cannot change a test result, so it skips the two-and-a-half-minute
-    # run; the Hugo site under website/ has its own workflow, pages.yml
-    # (which stays in: scripts/ci/verify-action-pins.py reads every workflow).
-    # Later patterns win: the negations drop the docs first, then the
-    # re-includes put back what the suite actually reads or must validate:
-    #   - crates/**: the bundled agent prompts, checked by the install tests;
-    #   - the files crates/pixel/tests/cli/docs_drift.rs reads: it asserts
-    #     that every `pixel <command>` quoted there exists and that the rule
-    #     ids of the rust-guidelines skill head real guideline sections;
-    #   - .github/changelog.d/**: the fragments scripts/test-prepare.py validates
-    #     against the release script's contract, in the repository itself and
-    #     not only in its fixtures;
-    #   - .agents/skills/release/: prepare.sh, which scripts/test-prepare.py
-    #     runs;
-    #   - .agents/skills/pixel-retro/: lead_time.py and its contract test;
-    #   - .agents/skills/ultima-arena/: ultima_arena.py and its contract test.
-    # Every other skill is excluded: no test reads it.
-    # docs/bench/** also runs CI so benchmark reports receive the required
-    # green-verdict status check even though they do not change Rust code.
-    # Add a path here when a test starts reading one. Pushes to main stay
-    # unfiltered so every merge there keeps a complete run. Paths excluded
-    # here must not be required checks unless another workflow reports them.
-    paths:
-      - "**"
-      - "!**.md"
-      - "!docs/**"
-      - "!website/**"
-      - "!LICENSE"
-      - "!NOTICE"
-      # A skill no test reads is documentation too; the skills the suite
-      # does read are put back below.
-      - "!.agents/skills/**"
-      - "crates/**"
-      # docs_drift.rs:
-      - "README.md"
-      - "ARCHITECTURE.md"
-      - ".github/CONTRIBUTING.md"
-      - "AGENTS.md"
-      - "CHANGELOG.md"
-      - ".github/changelog.d/**"
-      - "docs/manual-setup.md"
-      - "docs/bench/**"
-      - "website/content/docs.md"
-      - "website/content/benchmarks.md"
-      # scripts/ci/check-claims.py: the registry and the docs it binds.
-      - "docs/bench/claims.toml"
-      - "docs/bench/vs-gitnexus.md"
-      - "website/data/read_savings.toml"
-      # docs_drift.rs reads llms.txt (agent pages and answers links):
-      - "website/static/llms.txt"
-      - ".agents/rules/**"
-      - ".agents/skills/rust-guidelines/**"
-      # scripts/test-prepare.py and pixel-release's tests read prepare.sh:
-      - ".agents/skills/release/**"
-      # test_lead_time.py, test_adherence.py:
-      - ".agents/skills/pixel-retro/**"
-      - ".agents/skills/ultima-arena/**"
-      - "scripts/README.md"
 
-# A release-prepare pull request into main (`release-x.y.z` branch whose
-# diff the `scope` job verifies) skips every job, as it skips Cross-build:
-# its diff is version bumps, Cargo.lock
-# and the changelog, `prepare.sh` already ran `check-release` and the gates
-# on it, and the release skill tags only once the push run on the merge
-# commit is green, so the pull request run would test the same tree twice.
-# A maintenance release into `release/x.y` keeps them: no push run covers
-# that branch.
-#
-# A new push to a pull request cancels the run still in flight for its
-# previous commit. A push to main gets a group of its own commit: with one
-# group per ref, GitHub keeps one run in progress and one pending, and each
-# new merge cancelled the pending one (#310's merge lost its run that way)
-# and waited behind the one in progress, a website merge included. Every
-# merge now keeps a complete run, started at once, which is what the
-# release skill waits on before it tags.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# CI only reads the checkout; it never writes to the repository.
-permissions:
-  contents: read
-
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
 
 jobs:
-  # Release-prepare pull request? See release-prepare-scope.yml.
-  scope:
-    uses: ./.github/workflows/release-prepare-scope.yml
-
-  # Which files a pull request touched, so a commit that cannot affect a
-  # step does not pay for it. `cargo` covers the compiled suite AND every
-  # file its tests read (the docs-drift, install and plugin-surface inputs
-  # re-included in the paths filter above); `rust-source` narrows `cargo`
-  # to what the compile-only lanes (Clippy, MSRV, Ranking) actually compile,
-  # so a docs-drift or prompt edit runs Test + Format without paying for
-  # the three lanes whose result cannot change (#597); `scripts` covers the
-  # Python and Bun contract tests' inputs; `installer` covers the Linux
-  # install smoke's script, contract, release assets and workflows; `deps`
-  # covers the graph cargo-deny resolves. A push to main reports every flag,
-  # so every merge keeps the complete run the concurrency comment promises.
-  # These matchers err toward inclusion: a false negative skips a needed
-  # check; a false positive only costs a minute.
-  changes:
-    outputs:
-      # On a duplicate (below) every flag is forced false: an identical tree
-      # cannot classify differently, so every lane skips. The long form
-      # instead of `cond && a || b` because the string 'false' is truthy in
-      # GitHub expressions -- the short form would pass 'false' through as
-      # truthy and defeat the override.
-      cargo: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.cargo || 'false' }}
-      rust-source: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.rust-source || 'false' }}
-      scripts: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.scripts || 'false' }}
-      installer: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.installer || 'false' }}
-      deps: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.deps || 'false' }}
-      # The skip guard's finding for this tree, and the key it is stored
-      # under (the `verdict` job saves it; #590).
-      duplicate: ${{ steps.dup.outputs.duplicate }}
-      tree: ${{ steps.key.outputs.tree }}
-      day: ${{ steps.key.outputs.day }}
-    runs-on: ubuntu-26.04
-    steps:
-      # Pull requests need the target merge base; push runs only need HEAD.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
-
-      # The skip-guard key: the tree of the commit this run checks out (the
-      # merge commit on a pull request, the pushed commit on main). Two runs
-      # of one tree run byte-identical jobs -- the workflow file, the
-      # toolchain config and the tests are all in the tree -- so a green
-      # verdict for one is a green verdict for the other. The UTC day in the
-      # key bounds the reuse: the stable toolchain floats, and a verdict
-      # from another day re-proves itself on today's (#590).
-      - name: Merge-commit tree and UTC day
-        id: key
-        run: |
-          echo "tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
-          echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
-
-      # A completed green run left a marker under ci-verdict-<tree>-<day>
-      # (the verdict job below). A repush with no content change -- an
-      # amend, a rebase that moved no file, a close/reopen -- restores it
-      # and skips every lane instead of re-running them. The Actions cache
-      # makes the key a fact: an entry exists only if a green run of this
-      # exact tree wrote it, and an entry is immutable. A repush while a
-      # run is still in flight finds no verdict (none was recorded yet) and
-      # re-runs: the guard skips what is already judged, it does not
-      # resurrect a cancelled run.
-      - name: Restore a green verdict for this exact tree
-        id: verdict
-        if: github.event_name == 'pull_request'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/verdict
-          key: ci-verdict-${{ steps.key.outputs.tree }}-${{ steps.key.outputs.day }}
-
-      - name: Skip when the tree already has a green verdict
-        id: dup
-        if: steps.verdict.outputs.cache-hit == 'true'
-        run: |
-          if [ ! -f "$RUNNER_TEMP/verdict/green" ]; then
-            echo "the restored cache holds no marker; running"
-            exit 0
-          fi
-          echo "duplicate=true" >> "$GITHUB_OUTPUT"
-          run_url=$(cat "$RUNNER_TEMP/verdict/green")
-          echo "verdict_run=$run_url" >> "$GITHUB_OUTPUT"
-          {
-            echo "### CI skipped: this merge tree already has a green verdict"
-            echo
-            echo "Recorded by $run_url (same UTC day). Nothing re-ran; the next content change re-runs everything."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Classify the diff
-        id: diff
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
-            printf 'cargo=true\nrust-source=true\nscripts=true\ninstaller=true\ndeps=true\n' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
-
-          # Everything that compiles Rust or that a compiled test asserts
-          # on: crates, the workspace manifest and cargo config, the files
-          # docs_drift.rs compares command-for-command, the plugin surfaces
-          # install_tests.rs regenerates, and the scripts those tests run.
-          # This workflow too: a pull request that only edits how the Rust
-          # steps build (a profile variable, a cache key, a nextest flag)
-          # otherwise skips them and reports green having run none (#371).
-          cat > cargo.re <<'EOF'
-          ^crates/
-          ^Cargo\.(toml|lock)$
-          ^\.cargo/
-          ^\.config/
-          ^deny\.toml$
-          ^rust-toolchain
-          ^(README|ARCHITECTURE|AGENTS|CHANGELOG)\.md$
-          ^\.github/CONTRIBUTING\.md$
-          ^docs/manual-setup\.md$
-          ^website/
-          ^\.agents/(rules|skills/(rust-guidelines|release))/
-          ^probes/
-          ^\.github/workflows/ci\.yml$
-          EOF
-
-          # What the compile-only lanes (Clippy, MSRV, Ranking) compile:
-          # Rust source, the manifests and lock that resolve it, cargo's
-          # build config, the toolchain, and this workflow's own build
-          # invocation (#371's lesson). Deliberately narrower than `cargo`:
-          # a docs-drift or prompt edit must run Test + Format but cannot
-          # change a clippy, cargo check or bench result, so those three
-          # lanes skip it (#597). deny.toml is the deny job's input (via
-          # `deps`); .config/ shapes the nextest run the Test lane owns.
-          # The model-pin script sets the bytes the Ranking lane embeds with.
-          cat > rust-source.re <<'EOF'
-          ^crates/.*\.rs$
-          ^scripts/ci/fetch-embedding-model\.sh$
-          ^probes/
-          ^crates/.*/Cargo\.(toml|lock)$
-          ^Cargo\.(toml|lock)$
-          ^\.cargo/
-          ^rust-toolchain
-          ^\.github/workflows/ci\.yml$
-          EOF
-
-          # The contract tests' own inputs: their scripts, the fixtures and
-          # shells they exercise, the workflows verify-action-pins parses,
-          # the fragments test-prepare validates, and prepare.sh under the
-          # release skill.
-          cat > scripts.re <<'EOF'
-          ^scripts/
-          ^probes/
-          ^\.githooks/
-          ^.github/changelog\.d/
-          ^\.github/workflows/
-          ^\.agents/skills/release/
-          ^\.agents/skills/pixel-retro/
-          ^\.agents/skills/ultima-arena/
-          ^eval/
-          ^\.cargo/mutants\.toml$
-          (^|/)Cargo\.toml$
-          ^crates/pixel-install/assets/pi-pixel\.ts$
-          EOF
-
-          # Only the dependency graph feeds cargo-deny; osv-scanner.toml and
-          # its checker feed the advisory-list step of the same job.
-          cat > deps.re <<'EOF'
-          (^|/)Cargo\.toml$
-          ^Cargo\.lock$
-          ^deny\.toml$
-          ^osv-scanner\.toml$
-          ^scripts/check-advisory-ignores\.py$
-          EOF
-
-          # This smoke runs the branch installer against the latest published
-          # archive; only the script, its contract and this wiring affect it.
-          cat > installer.re <<'EOF'
-          ^scripts/release/install\.sh$
-          ^scripts/test-install\.py$
-          ^\.github/workflows/ci\.yml$
-          EOF
-
-          flag() { grep -Eqf "$1" changed.txt && echo true || echo false; }
-          {
-            echo "cargo=$(flag cargo.re)"
-            echo "rust-source=$(flag rust-source.re)"
-            echo "scripts=$(flag scripts.re)"
-            echo "installer=$(flag installer.re)"
-            echo "deps=$(flag deps.re)"
-          } >> "$GITHUB_OUTPUT"
-          cat changed.txt
-
-  # The branch's install.sh, on the two Linux runners the release publishes
-  # a musl archive for. It downloads the latest release (the archives
-  # release-build.yml builds), checks the checksum, runs the binary, and must
-  # leave that binary on PATH for the next step. A script PR that skips
-  # this installs a file the contract tests never executed.
-  linux-install:
-    name: install.sh (${{ matrix.target }})
-    needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.installer == 'true' && needs.changes.outputs.duplicate != 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-26.04
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-26.04-arm
-            target: aarch64-unknown-linux-musl
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: Install the Linux binary
-        env:
-          PIXEL_INSTALL_DIR: ${{ runner.temp }}/pixel
-          PIXEL_NO_UPDATE_CHECK: "1"
-        run: sh scripts/release/install.sh
-
-      - name: Later steps see this target
-        env:
-          PIXEL_NO_UPDATE_CHECK: "1"
-        run: |
-          set -eu
-          pixel --version | tee "$RUNNER_TEMP/version.txt"
-          grep -F "target: ${{ matrix.target }}" "$RUNNER_TEMP/version.txt"
-
-  test:
-    name: Test + Format
-    needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.duplicate != 'true'
-    # GitHub's image by default. PIXEL_RUNNER_LABELS moves the jobs that compile
-    # Rust to a self-hosted runner without a second edit: set it to a JSON array of
-    # labels, e.g. ["self-hosted","linux","arm64","pixel-local"], and a push or a
-    # manual run goes there; delete the variable and it goes back to GitHub. Pull
-    # requests never do: their code is not reviewed yet, and a persistent host is
-    # not isolated by `contents: read` and `persist-credentials: false`. Declared
-    # only when the variable is set, so a stopped runner cannot leave the job
-    # queueing forever.
-    runs-on: ${{ github.event_name != 'pull_request' && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
-    # Line tables instead of full debug info for the dev and test profiles:
-    # a failing test's backtrace keeps its file:line, and the compiler and
-    # linker skip the type and variable info no one reads in CI (the build
-    # was 58 s of the Test step and the cache 1 524 MB, restored in 27 s, on
-    # main run 36584496012). Job-level, not step-level: rust-cache hashes
-    # the job's CARGO_* variables into its key, and every Mutants shard
-    # restores this job's `linux-debug` entry, so mutants.yml sets the same
-    # value the same way; the two drifting apart would give the shards a
-    # key the Test job never writes. Local builds keep full debug info.
+  rust:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Release's verify job sets the same value (release.yml), and rust-cache
+    # hashes it into its key; line tables are all a backtrace needs here.
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
-
-      # First, before anything is installed: a floating tag in release.yml
-      # or release-build.yml would run unreviewed code next to the tap token
-      # or the signing identity. Contract in scripts/test-verify-action-pins.py below.
-      - name: Action pins (every uses on a full commit SHA)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/ci/verify-action-pins.py
-
-      # Every tracked source file carries its SPDX copyright and license
-      # lines (OpenSSF gold); a tenth of a second, so it runs on every diff.
-      - name: SPDX headers (copyright and license in every source file)
-        run: python3 scripts/ci/check-spdx.py
-
-      - name: Install Rust toolchain
-        if: ${{ needs.changes.outputs.cargo == 'true' }}
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          # The SHA pin no longer names the toolchain through the ref, so
-          # it is passed explicitly (same channel as before).
-          toolchain: stable
-          components: rustfmt
-
-      - name: Cache Rust build
-        if: ${{ needs.changes.outputs.cargo == 'true' }}
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          # One key for every job that builds the debug profile on Linux
-          # (this one and mutants.yml), instead of the default per-job key.
-          # The Mutants workflow sets save-if:false, so it can never
-          # save under the main rule below: without a shared key it
-          # started from an empty cache on every PR.
-          shared-key: linux-debug
-          # PRs read the cache but never write it: only merges into main
-          # refresh the shared entries, so one PR cannot thrash
-          # or poison them. A failed build still saves what it compiled.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
-
-      - name: Install system dependencies
-        if: ${{ needs.changes.outputs.cargo == 'true' }}
-        # Vendored OpenSSL needs perl and make. The GitHub Ubuntu images ship
-        # both ("already the newest version" in every log), so the ~7 s of
-        # apt-get update runs only on an image that lacks one of them.
-        run: |
-          if command -v perl >/dev/null && command -v make >/dev/null; then
-            echo "perl and make already installed"
-          else
-            sudo apt-get update
-            sudo apt-get install -y perl make
-          fi
-
-      - name: Check formatting
-        if: ${{ needs.changes.outputs.cargo == 'true' }}
-        run: cargo fmt --all -- --check
-
-      # Prebuilt binary; the profile lives in .config/nextest.toml.
-      - name: Install cargo-nextest
-        if: ${{ needs.changes.outputs.cargo == 'true' }}
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest
-
-      # --locked: fail if Cargo.lock is out of date instead of silently
-      # resolving newer dependency versions than the ones committed.
-      # nextest runs one process per test, retries once and still fails the
-      # run on a flaky result, and kills a test that hangs past 3 minutes.
-      - name: Test
-        if: ${{ needs.changes.outputs.cargo == 'true' }}
-        run: cargo nextest run --workspace --locked --profile ci
-
-      # nextest does not run doctests.
-      - name: Doctests
-        if: ${{ needs.changes.outputs.cargo == 'true' }}
-        run: cargo test --workspace --locked --doc
-
-      # Nothing runs pixel in this checkout before the tests, so any action
-      # log here was written by a test that spawned the binary from its own
-      # working directory (`crates/<crate>`) instead of a fixture. The CLI
-      # suite's `support::pixel_command()` starts every run elsewhere.
-      - name: Tests left the checkout's action log alone
-        if: ${{ needs.changes.outputs.cargo == 'true' }}
+      - run: cargo nextest run --workspace --profile ci --final-status-level all
+      - name: Doctests (only once a library crate exists)
         run: |
-          if [ -e .pixel/actions.jsonl ]; then
-            echo "::error::the test suite wrote $(wc -l < .pixel/actions.jsonl) entries into this checkout's .pixel/actions.jsonl"
-            cat .pixel/actions.jsonl
-            exit 1
+          if cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; sys.exit(0 if any("lib" in t["kind"] for p in json.load(sys.stdin)["packages"] for t in p["targets"]) else 1)'; then
+            cargo test --workspace --doc
           fi
-
-      - name: Installer contracts (isolated release substitutes)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-install.py
-
-      - name: Local gate runner contract (stub cargo, disposable repo)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-gates.py
-
-      - name: Pre-push starts no local validation
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: sh scripts/test-pre-push.sh
-
-      - name: Release prepare contract (stub gh and cargo, disposable repo)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-prepare.py
-
-      - name: Release candidate contract (disposable repo)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-release-candidate.py
-
-      # release.yml writes the tap's formula and the Linux bottles with this
-      # script: it is checked here, on every pull request, not first on a tag.
-      - name: Homebrew formula and bottles contract (synthetic release archives)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-homebrew-formula.py
-
-      # release-build.yml narrows each archive's SBOM with this script: it is
-      # checked here, on every pull request, not first on a tag.
-      - name: Release SBOM contract (synthetic cargo-cyclonedx output and cargo tree)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-release-sbom.py
-
-      # The homebrew-core formula release.yml attaches to every release;
-      # homebrew-core.yml builds and audits it from source.
-      - name: homebrew-core formula contract (build from source, no prebuilt binary)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-homebrew-core-formula.py
-
-      - name: Release-prepare skip contract (disposable repo)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-release-prepare-only.py
-
-      - name: CodeQL scan policy contract
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-codeql-policy.py
-
-      - name: Nightly coverage selection contract
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-coverage-nightly.py
-
-      - name: Nightly diff checkpoint contract
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-mutants-nightly-range.py
-
-      - name: Mutation gate config contract (no module silently excluded)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-mutants-config.py
-      - name: French lexicon is reproducible without the MVP checkout
-        run: python3 -I crates/mvp-lexicon/test_generate.py
-
-      # The agent A/B harness end to end against fixture CLIs: no model call.
-      - name: Agent A/B harness contract (fixture claude/codex/pixel, disposable repo)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-agent-ab-harness.py
-
-      - name: Retro lead-time contract (synthetic transcripts, no network)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 .agents/skills/pixel-retro/test_lead_time.py
-
-      - name: Retro adherence contract (synthetic transcripts, no network)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 .agents/skills/pixel-retro/test_adherence.py
-
-      - name: Ultima arena contract (fake herdr and pixel, no model, no Herdr)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 .agents/skills/ultima-arena/ultima_arena.py --self-test
-
-      - name: Action pin check contract (tags, short SHAs, unparsed forms refused)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-verify-action-pins.py
-
-      - name: Advisory ignore check contract (deny.toml and osv-scanner.toml agree)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-check-advisory-ignores.py
-
-      - name: SPDX header check contract (missing lines fail, --fix keeps a shebang first)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-check-spdx.py
-
-      - name: Uncovered-branch lister contract (synthetic lcov)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-coverage-uncovered-branches.py
-
-      # The sweep cancels moot validation runs; the board sync and its own
-      # run must survive it, or merged tasks stay In Progress.
-      - name: Cancel-stale sweep contract (stubbed gh)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-cancel-stale-runs.py
-
-      - name: CI diff selection contract (disposable Git histories)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-ci-selection.py
-
-      # Every public number names the pixel version it was measured with
-      # (docs/bench/claims.toml); one more than a minor behind fails unless an
-      # issue tracks its re-measure. Unconditional: a version bump, a README
-      # or a website edit can each make a claim stale or unbound.
-      - name: Public claims bound to a version
-        run: python3 scripts/ci/check-claims.py
-
-      - name: Public-claims check contract (stale, tracked, unbound, malformed)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-check-claims.py
-
-      - name: Embedding-model pin contract (file:// hub, sha256 refusal)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-fetch-embedding-model.py
-
-      - name: Release symbols split contract (archive as built, shipped copy stripped)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-split-symbols.py
-
-      # The brief-gate bench parses `pixel brief` output and scores it against
-      # eval/brief-gate/prompts.jsonl; the excerpt and span benches score the
-      # answer blocks of confident briefs; the excavation counter reads agent
-      # transcripts; the live A/B driver reads a headless claude stream-json.
-      # Parsers, metrics and the set's schema and privacy lint.
-      - name: Brief-gate bench and excavation counter (self-tests, prompt set)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: |
-          python3 scripts/bench/bench-brief-gate.py --self-test
-          python3 scripts/bench/bench-brief-gate.py --check-set
-          python3 scripts/bench/bench-graph-edges.py --self-test
-          python3 scripts/bench/bench-brief-excerpt.py --self-test
-          python3 scripts/bench/bench-brief-spans.py --self-test
-          python3 scripts/bench/excavation-count.py --self-test
-          python3 scripts/bench/ab-brief-live.py --self-test
-          python3 scripts/bench/brief-check.py --self-test
-          python3 scripts/bench/probe-test.py --self-test
-          python3 scripts/bench/probe-test.py --check-all
-          # The probes search with ripgrep, which the runner image lacks; their own tests need it.
-          command -v rg >/dev/null || sudo apt-get install -y ripgrep
-          for t in probes/*/tests/test_*.py; do python3 "$t"; done
-          python3 scripts/bench/probe-translate.py --self-test
-          python3 scripts/bench/probe-loop.py --self-test
-          python3 scripts/bench/probe-chain.py --self-test
-          python3 scripts/bench/extract-probes.py --self-test
-          python3 scripts/bench/brief-bench.py --self-test
-          python3 scripts/bench/brief-bench.py check
-          python3 scripts/bench/brief-zero-calls.py --self-test
-          python3 scripts/bench/brief-recall.py --self-test
-          python3 scripts/bench/tool-census/question_source.py
-          python3 scripts/bench/tool-census/score_brief.py --self-test
-          python3 scripts/bench/tool-census/run.py --self-test
-          python3 scripts/bench/tool-census/oracle.py --self-test
-          python3 scripts/bench/tool-census/test_classify.py
-          python3 scripts/bench/tool-census/test_extract.py
-
-      # The workflow's own step, run with a stub script: only a pull request
-      # number reaches the shoot script.
-      - name: Harness-grid dispatch input contract
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-harness-grid-input.py
-
-      # What reproducible-build.yml's proof depends on: the commit's time,
-      # both path remaps, workspace.metadata.cross forwarding SOURCE_DATE_EPOCH, the
-      # environment set before the cache and the build in the three
-      # workflows, one pinned cross, the release command.
-      - name: Reproducible release build contract (disposable repo)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-release-build-env.py
-
-      - name: macOS CI cadence contract
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-macos-ci-cadence.py
-
-      # clean.sh removes whole directories. The cases that matter are the ones
-      # asserting what it leaves alone: a file git tracks, a tree behind a
-      # symlink, the index under `just clean`, the daemon sockets beside the
-      # shard cache.
-      - name: Clean contract (disposable repo with a second worktree)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-clean.py
-
-  # Clippy and the reduced feature lanes, beside the Test job instead of
-  # after it: they read no test result and took 35 s of its critical path
-  # (clippy 17.6 s, the two `cargo check` lanes 8.7 s and 8.1 s, main run
-  # 36584496012). Their check-only artifacts (rmeta, no codegen) live under
-  # a key of their own, so the linux-debug entry the Test job and every
-  # Mutants shard restore holds only what those build.
-  lint:
-    name: Lint (Clippy + feature lanes)
-    needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.rust-source == 'true' && needs.changes.outputs.duplicate != 'true'
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          # The job never pushes: do not leave the token in .git/config.
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
-          components: clippy
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          shared-key: linux-lint
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
-
-      - name: Install system dependencies
-        # Vendored OpenSSL needs perl and make. The GitHub Ubuntu images ship
-        # both ("already the newest version" in every log), so the ~7 s of
-        # apt-get update runs only on an image that lacks one of them.
-        run: |
-          if command -v perl >/dev/null && command -v make >/dev/null; then
-            echo "perl and make already installed"
-          else
-            sudo apt-get update
-            sudo apt-get install -y perl make
-          fi
-
-      - name: Warnings-denied Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Supported CLI feature lanes
-        run: |
-          cargo check -p pixel-cli --no-default-features
-          cargo check -p pixel-cli --no-default-features --features model2vec
 
   msrv:
-    name: MSRV (rust-version in Cargo.toml)
-    needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.rust-source == 'true' && needs.changes.outputs.duplicate != 'true'
-    # Compiles Rust, so it follows the test job's self-hosted switch (pull
-    # requests stay on GitHub's image, as there).
-    runs-on: ${{ github.event_name != 'pull_request' && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
-
-      # The toolchain here must equal `rust-version` in the root Cargo.toml:
-      # cargo only enforces that field on dependency resolution, never on
-      # the workspace's own code, so without this job the number drifts
-      # (it read 1.85 while the tree needed 1.91, and 1.91 while the tree
-      # needed 1.99). Bump both together.
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.99
+      - name: Read rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: "1.99"
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          shared-key: linux-msrv
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
-
-      - name: Install system dependencies
-        # Vendored OpenSSL needs perl and make. The GitHub Ubuntu images ship
-        # both ("already the newest version" in every log), so the ~7 s of
-        # apt-get update runs only on an image that lacks one of them.
-        run: |
-          if command -v perl >/dev/null && command -v make >/dev/null; then
-            echo "perl and make already installed"
-          else
-            sudo apt-get update
-            sudo apt-get install -y perl make
-          fi
-
-      - name: Toolchain matches Cargo.toml
-        run: |
-          declared=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
-          test "$declared" = "1.99" || { echo "Cargo.toml says rust-version $declared, this job installs 1.99"; exit 1; }
-
-      # A check, not clippy: lint names are added by newer toolchains and
-      # the lint gate runs on stable in the Lint job.
-      - name: cargo check on the minimum toolchain
-        run: cargo check --workspace --all-targets --locked
-
-  # The ranking gate, beside the Test job instead of inside it: `cargo bench`
-  # builds the `bench` profile (release's thin LTO and one codegen unit),
-  # which shares no artifact with the debug build, and that compile alone
-  # took 79 s of the Test job's ~290 s on main (run 36584496012; the five
-  # NDCG lanes then ran in 15 s). The bench stays optimized: semantic_ask
-  # embeds every query, which a debug build would slow down more than it
-  # saves. A cache key of its own keeps the bench-profile artifacts out of
-  # the linux-debug entry that the Test job and every Mutants shard restore.
-  ranking:
-    name: Ranking gates (NDCG@10)
-    needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.rust-source == 'true' && needs.changes.outputs.duplicate != 'true'
-    # Compiles Rust, so it follows the test job's self-hosted switch (pull
-    # requests stay on GitHub's image, as there).
-    runs-on: ${{ github.event_name != 'pull_request' && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          # The job never pushes: do not leave the token in .git/config.
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          shared-key: linux-bench
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
-
-      - name: Install system dependencies
-        # Vendored OpenSSL needs perl and make. The GitHub Ubuntu images ship
-        # both ("already the newest version" in every log), so the ~7 s of
-        # apt-get update runs only on an image that lacks one of them.
-        run: |
-          if command -v perl >/dev/null && command -v make >/dev/null; then
-            echo "perl and make already installed"
-          else
-            sudo apt-get update
-            sudo apt-get install -y perl make
-          fi
-
-      # The semantic lane embeds with potion-code-16M-v2. Its bytes are pinned
-      # to one Hugging Face revision by the script (sha256 per file) and kept
-      # in an actions/cache entry keyed by that revision, so a run neither
-      # depends on the hub nor follows an upstream re-upload. The script
-      # keeps the restored files and fetches only on a miss. The paths are
-      # hf-hub's default cache (model2vec-rs ignores HF_HOME) and pixel's
-      # download marker.
-      - name: Cache key of the pinned embedding model
-        id: model
-        run: echo "key=$(bash scripts/ci/fetch-embedding-model.sh --cache-key)" >> "$GITHUB_OUTPUT"
-      - name: Restore the pinned embedding model
-        id: model-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2
-            ~/.local/share/pixel/models/potion-minishlab--potion-code-16M-v2.ok
-          key: ${{ steps.model.outputs.key }}
-      - name: Pin the embedding model in pixel's model cache
-        run: bash scripts/ci/fetch-embedding-model.sh "$HOME"
-      - name: Save the pinned embedding model
-        if: steps.model-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2
-            ~/.local/share/pixel/models/potion-minishlab--potion-code-16M-v2.ok
-          key: ${{ steps.model.outputs.key }}
-
-      # `[[bench]]` targets are `harness = false`: criterion owns `main`, so
-      # nextest never runs them and the ranking assertions inside would gate
-      # nothing. `-- --test` runs the bench bodies once, without criterion's
-      # statistical sampling. Both bench lanes run here: NDCG asserts
-      # relevance floors, and m1_latency asserts each op's median against the
-      # <1ms service-time budget and prints it, so a failure states the
-      # number. The m1 fixture pins its own git identity and config, so the
-      # measurement does not depend on the runner's.
-      # The hub client honours proxy variables (hf-hub sets ureq's
-      # try_proxy_from_env); a closed port as the proxy makes the lane run
-      # from the pinned cache alone, and a lookup that would reach the network
-      # fails the job instead of fetching whatever `main` holds today.
-      - name: Build the ranking bench (fetches crates, so before the proxy)
-        run: cargo bench -p pixel-bench --bench ndcg_relevance --locked --no-run
-      - name: Ranking gates (NDCG@10, bench test mode)
-        env:
-          HTTPS_PROXY: http://127.0.0.1:9
-          ALL_PROXY: http://127.0.0.1:9
-        run: cargo bench -p pixel-bench --bench ndcg_relevance --locked -- --test
-      - name: M1 service-time gates (bench test mode)
-        run: cargo bench -p pixel-bench --bench m1_latency --locked -- --test
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo check --workspace --all-targets
 
   deny:
-    name: Dependency policy (cargo-deny)
-    needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.deps == 'true' && needs.changes.outputs.duplicate != 'true'
-    runs-on: ubuntu-26.04
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
-
-      # cargo-deny resolves the graph through `cargo metadata`; no build.
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
-
-      # Prebuilt binary, same pinned installer as nextest above and cross in
-      # cross-build.yml.
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-deny
+      - run: cargo deny check
+      - run: python3 scripts/ci/check-advisory-ignores.py
 
-      # Policy in deny.toml: RustSec advisories (vulnerable, yanked and
-      # unmaintained crates), an allow-list of permissive licences, no two
-      # majors of one crate outside the two embedding stacks, crates.io as
-      # the only source. Every exception is documented in the file. The
-      # advisory database is fetched by cargo-deny itself.
-      - name: cargo deny check
-        run: cargo deny check
-
-      # Scorecard's Vulnerabilities check reads osv-scanner.toml, not
-      # deny.toml: the two must accept the same advisories.
-      - name: Advisory ignores agree (deny.toml, osv-scanner.toml)
-        run: python3 scripts/ci/check-advisory-ignores.py
-
-  # The green verdict the changes job's skip guard reads (#590): every lane
-  # above ran green on this exact tree, so the tree is recorded in the cache
-  # under ci-verdict-<tree>-<day> and an identical repush skips instead of
-  # re-running. Needs every lane so a failure or a cancellation records
-  # nothing; always() with !failure() && !cancelled() lets the lanes a
-  # diff legitimately skips stay skipped while the ones that ran were green.
-  # Pushes to main record too: their caches are readable by every pull
-  # request, and a pull request whose merge tree equals a merged tree is the
-  # same content the push run judged.
-  verdict:
-    name: Record the green verdict
-    needs: [scope, changes, linux-install, test, lint, msrv, ranking, deny]
-    if: >-
-      always() &&
-      needs.scope.outputs.release-prepare != 'true' &&
-      needs.changes.outputs.duplicate != 'true' &&
-      needs.test.result == 'success' &&
-      !failure() && !cancelled()
-    runs-on: ubuntu-26.04
+  repo-checks:
+    name: SPDX and action pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Write the marker
-        run: |
-          mkdir -p "$RUNNER_TEMP/verdict"
-          printf '%s\n' "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > "$RUNNER_TEMP/verdict/green"
-
-      - name: Save the verdict under the tree-and-day key
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          path: ${{ runner.temp }}/verdict
-          key: ci-verdict-${{ needs.changes.outputs.tree }}-${{ needs.changes.outputs.day }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 scripts/ci/check-spdx.py
+      - run: python3 scripts/ci/verify-action-pins.py
+      # The release and CI scripts hold their own tests (scripts/test-*.py);
+      # the release workflows run only on a tag, so these are what keeps them
+      # working in between.
+      - name: Script tests
+        run: |
+          set -e
+          for test in scripts/test-*.py; do
+            echo "::group::$test"
+            python3 "$test"
+            echo "::endgroup::"
+          done
+
+  site:
+    name: website and motion
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
+        with:
+          working_directory: website
+      - run: mise exec -- hugo --gc --minify -d "$RUNNER_TEMP/site"
+        working-directory: website
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: bun install --frozen-lockfile
+        working-directory: docs/motion
+      - run: bunx @typescript/native-preview --noEmit -p .
+        working-directory: docs/motion
+
+  verdict:
+    name: ci
+    needs: [rust, msrv, deny, repo-checks, site]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo '${{ toJSON(needs) }}'
+          [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = false ]

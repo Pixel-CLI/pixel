@@ -1,5 +1,7 @@
 # Change Propagation
 
+> Issue and PR numbers (`#262`, …) in this file refer to Pixel's history, where each lesson was learned.
+
 Always loaded: a change is finished when every path that produces or reads
 the value it changed agrees with it, not when the path you started from does.
 

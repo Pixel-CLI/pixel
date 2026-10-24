@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 set -euo pipefail
@@ -15,7 +15,7 @@ case "${RUNNER_OS:?}/${RUNNER_ARCH:?}" in
   Linux/X64) target=x86_64-unknown-linux-musl ;;
   Linux/ARM64) target=aarch64-unknown-linux-musl ;;
   macOS/ARM64) target=aarch64-apple-darwin ;;
-  *) fail "No Pixel release for $RUNNER_OS/$RUNNER_ARCH" ;;
+  *) fail "No PIXEL release for $RUNNER_OS/$RUNNER_ARCH" ;;
 esac
 
 # Each invocation owns its directory; no sudo or replacement of a runner's CLI.
@@ -42,5 +42,5 @@ printf 'version=%s\nbin=%s\n' "$version" "$bin" >> "${GITHUB_OUTPUT:?}"
 # Subsequent agent steps also stay daemon-free.
 printf 'PIXEL_DAEMON_AUTO_START=0\n' >> "${GITHUB_ENV:?}"
 # shellcheck disable=SC2016 # Markdown backticks are literal.
-printf '### Pixel\nInstalled `%s` for `%s` (SHA-256 verified).\n' \
+printf '### PIXEL\nInstalled `%s` for `%s` (SHA-256 verified).\n' \
   "$version" "$target" >> "${GITHUB_STEP_SUMMARY:?}"

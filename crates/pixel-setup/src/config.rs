@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Shared configuration constants and file helpers for `pixel setup`:
@@ -11,6 +11,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::settings::{Setting, Settings};
 
 /// Managed-marker begin tag. Everything between this and [`MANAGED_END`] is
 /// owned by pixel and rewritten on every `pixel setup`.
@@ -37,12 +39,16 @@ pub fn is_side_build(exe: &Path) -> bool {
     exe.file_name() == Some(std::ffi::OsStr::new(PIXEL_DEV_EXECUTABLE))
 }
 
-/// Timeout in seconds for pixel run-hook entries written into agent configs.
-/// The pixel binary is ~48MB; a cold start can take a few seconds on first
-/// invocation. Without an explicit timeout, harnesses like Codex apply a
-/// short default and SIGKILL the hook (exit 137), breaking the guard.
-/// 10s is generous enough for cold starts while still bounding hang risk.
+/// Timeout in seconds for the prompt-submit entry written into agent configs.
+/// A cold start can take a few seconds on first invocation, and the brief
+/// itself may use up to its window (`Host::deadline`, 8 s, bounds the work).
+/// Without an explicit timeout, harnesses like Codex apply a short default and
+/// SIGKILL the hook (exit 137). 10 s is generous enough while still bounding
+/// hang risk.
 pub const HOOK_TIMEOUT: u64 = 10;
+/// Timeout in seconds for the entries that never wait on the daemon
+/// (session start, every tool call, stop).
+pub const QUICK_HOOK_TIMEOUT: u64 = 5;
 
 /// Settings key of how many `UserPromptSubmit` hooks carry the prompt brief.
 pub const BRIEF_PARTS_KEY: &str = "brief_parts";
@@ -59,62 +65,37 @@ pub const BRIEF_PARTS_MAX: u8 = 8;
 /// `1..=`[`BRIEF_PARTS_MAX`] is clamped into it and a value that is not a
 /// whole number counts as unset; `1` is the single hook of earlier releases.
 pub fn brief_parts(home: &Path, repo: Option<&Path>) -> u8 {
-    repo.into_iter()
-        .chain([home])
-        .find_map(|dir| {
-            crate::doctor::load_pixel_config(dir)
-                .ok()?
-                .get(BRIEF_PARTS_KEY)?
-                .as_u64()
-        })
-        .map_or(BRIEF_PARTS_DEFAULT, |count| {
-            u8::try_from(count.clamp(1, u64::from(BRIEF_PARTS_MAX))).unwrap_or(BRIEF_PARTS_MAX)
-        })
+    Settings::load(home, repo, &|_| None).count(Setting::BriefParts)
 }
 
-/// Settings key of the time one prompt brief may take.
-pub const BRIEF_WINDOW_KEY: &str = "brief_window_ms";
-/// Environment override of [`BRIEF_WINDOW_KEY`], in milliseconds; it wins over both config layers.
-pub const BRIEF_WINDOW_ENV: &str = "PIXEL_BRIEF_WINDOW_MS";
-/// Milliseconds a prompt-submit hook gives the brief: a loaded machine (a dozen agent sessions on one laptop)
-/// slows every lookup at once, and a brief cut to nothing by a 750 ms window answered nothing at all. The hook
-/// is killed by its host after [`HOOK_TIMEOUT`] seconds; this stays well under it.
-pub const BRIEF_WINDOW_HOOK_DEFAULT_MS: u64 = 3_000;
-/// Milliseconds the `pixel brief` command gives the brief: OpenCode's extension kills the command after 1.2 s.
-pub const BRIEF_WINDOW_COMMAND_DEFAULT_MS: u64 = 750;
-/// Longest window the `brief` command gets whatever the setting says: OpenCode kills the command after 1.2 s.
-pub const BRIEF_WINDOW_COMMAND_MAX_MS: u64 = 1_000;
-/// Shortest window a setting may ask for.
-pub const BRIEF_WINDOW_MIN_MS: u64 = 250;
-/// Longest window a setting may ask for: the shortest hook decision is six seconds
-/// (Pi; `PI_DECISION_TIMEOUT` in `task_hook.rs`), itself under the [`HOOK_TIMEOUT`] the host enforces, and the window
-/// stays 1.5 s below that so the brief can still be printed. Native hooks have an eight-second decision window.
-pub const BRIEF_WINDOW_MAX_MS: u64 = 4_500;
-const _: () = assert!(BRIEF_WINDOW_MAX_MS + 1_500 + 4_000 <= HOOK_TIMEOUT * 1_000);
-const _: () = assert!(BRIEF_WINDOW_MIN_MS <= BRIEF_WINDOW_COMMAND_DEFAULT_MS);
-const _: () = assert!(BRIEF_WINDOW_HOOK_DEFAULT_MS <= BRIEF_WINDOW_MAX_MS);
-
-/// How many milliseconds the brief may take: `env` (the value of [`BRIEF_WINDOW_ENV`]) when it is a whole number,
-/// else `brief_window_ms` in the repository's `.pixel/config.yaml` when `repo` is given and sets it, else the
-/// global one, else `default_ms`. The result is clamped into [`BRIEF_WINDOW_MIN_MS`]..=[`BRIEF_WINDOW_MAX_MS`]
-/// so no setting can outlast the hook that runs the brief; what is not a whole number counts as unset.
-pub fn brief_window_ms(
-    home: &Path,
-    repo: Option<&Path>,
-    env: Option<&str>,
-    default_ms: u64,
-) -> u64 {
-    env.and_then(|text| text.trim().parse::<u64>().ok())
-        .or_else(|| {
-            repo.into_iter().chain([home]).find_map(|dir| {
-                crate::doctor::load_pixel_config(dir)
-                    .ok()?
-                    .get(BRIEF_WINDOW_KEY)?
-                    .as_u64()
-            })
-        })
-        .unwrap_or(default_ms)
-        .clamp(BRIEF_WINDOW_MIN_MS, BRIEF_WINDOW_MAX_MS)
+/// `<dir>/.pixel/config.yaml` parsed (YAML into JSON values), or an empty
+/// document when the file does not exist. A malformed file is an error, not a
+/// silent default: setup and doctor must not hide a config they cannot read.
+///
+/// # Errors
+///
+/// An unreadable file, or one that is not a YAML mapping.
+pub fn load_config(dir: &Path) -> std::result::Result<serde_json::Value, String> {
+    let yaml = dir.join(".pixel/config.yaml");
+    if !yaml.is_file() {
+        return Ok(serde_json::json!({}));
+    }
+    let text =
+        fs::read_to_string(&yaml).map_err(|error| format!("read {}: {error}", yaml.display()))?;
+    let value: serde_json::Value = serde_saphyr::from_str(&text).map_err(|_| {
+        format!(
+            "invalid configuration {}; expected a YAML mapping",
+            yaml.display()
+        )
+    })?;
+    match value {
+        serde_json::Value::Null => Ok(serde_json::json!({})),
+        serde_json::Value::Object(_) => Ok(value),
+        _ => Err(format!(
+            "configuration {} must be a mapping",
+            yaml.display()
+        )),
+    }
 }
 
 /// The Devin config directory (relative to home).
@@ -360,6 +341,31 @@ mod tests {
     }
 
     #[test]
+    fn load_config_should_read_a_mapping_and_refuse_what_is_not_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(load_config(dir.path()).unwrap(), serde_json::json!({}));
+        write_config(dir.path(), "");
+        assert_eq!(load_config(dir.path()).unwrap(), serde_json::json!({}));
+        write_config(dir.path(), "metrics: \"off\"\nbrief_parts: 2\n");
+        assert_eq!(
+            load_config(dir.path()).unwrap(),
+            serde_json::json!({"metrics": "off", "brief_parts": 2})
+        );
+        write_config(dir.path(), "- a\n- b\n");
+        assert!(
+            load_config(dir.path())
+                .unwrap_err()
+                .contains("must be a mapping")
+        );
+        write_config(dir.path(), "a: [\n");
+        assert!(
+            load_config(dir.path())
+                .unwrap_err()
+                .contains("expected a YAML mapping")
+        );
+    }
+
+    #[test]
     fn brief_parts_should_clamp_into_range_and_ignore_what_is_not_a_count() {
         let home = tempfile::TempDir::new().unwrap();
         for (text, expected) in [
@@ -378,70 +384,6 @@ mod tests {
             write_config(home.path(), text);
             assert_eq!(brief_parts(home.path(), None), expected, "{text:?}");
         }
-    }
-
-    #[test]
-    fn brief_window_ms_should_prefer_env_then_repo_then_global_then_the_default_and_clamp() {
-        let home = tempfile::TempDir::new().unwrap();
-        let repo = tempfile::TempDir::new().unwrap();
-        let ask = |env: Option<&str>| brief_window_ms(home.path(), Some(repo.path()), env, 3_000);
-        assert_eq!(ask(None), 3_000);
-        write_config(home.path(), "brief_window_ms: 2000\n");
-        assert_eq!(ask(None), 2_000);
-        assert_eq!(brief_window_ms(home.path(), None, None, 3_000), 2_000);
-        write_config(repo.path(), "brief_window_ms: 1500\n");
-        assert_eq!(ask(None), 1_500);
-        assert_eq!(
-            brief_window_ms(home.path(), None, None, 3_000),
-            2_000,
-            "a repository layer is for a repository only"
-        );
-        assert_eq!(
-            ask(Some("900")),
-            900,
-            "the environment wins over both layers"
-        );
-        assert_eq!(ask(Some(" 4000 ")), 4_000);
-        assert_eq!(
-            ask(Some("soon")),
-            1_500,
-            "a value that is not a number counts as unset"
-        );
-        assert_eq!(ask(Some("-5")), 1_500);
-        write_config(repo.path(), "metrics: \"on\"\n");
-        assert_eq!(
-            ask(None),
-            2_000,
-            "a layer that does not set it defers to the next"
-        );
-    }
-
-    #[test]
-    fn brief_window_ms_should_never_outlast_the_hook_that_runs_the_brief() {
-        let home = tempfile::TempDir::new().unwrap();
-        for (env, expected) in [
-            ("0", BRIEF_WINDOW_MIN_MS),
-            ("100", BRIEF_WINDOW_MIN_MS),
-            ("250", 250),
-            ("4500", BRIEF_WINDOW_MAX_MS),
-            ("4501", BRIEF_WINDOW_MAX_MS),
-            ("600000", BRIEF_WINDOW_MAX_MS),
-        ] {
-            assert_eq!(
-                brief_window_ms(home.path(), None, Some(env), 3_000),
-                expected,
-                "{env}"
-            );
-        }
-        write_config(home.path(), "brief_window_ms: 99999\n");
-        assert_eq!(
-            brief_window_ms(home.path(), None, None, 3_000),
-            BRIEF_WINDOW_MAX_MS
-        );
-        assert_eq!(
-            brief_window_ms(home.path(), None, None, 90_000),
-            BRIEF_WINDOW_MAX_MS.min(99_999)
-        );
     }
 }
 

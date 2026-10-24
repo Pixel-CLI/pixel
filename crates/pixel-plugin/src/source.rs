@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! The `github:` source of `pixel install`: parsed and validated before any
@@ -128,9 +128,9 @@ mod tests {
     #[test]
     fn owner_repo_and_an_optional_ref_are_split() {
         assert_eq!(
-            parse("Pixel-CLI/pixel-git"),
+            parse("PIXEL-CLI/pixel-git"),
             GitHubSource {
-                owner: "Pixel-CLI".into(),
+                owner: "PIXEL-CLI".into(),
                 repo: "pixel-git".into(),
                 reference: None
             }

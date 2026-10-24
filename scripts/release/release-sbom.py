@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 """Narrow a cargo-cyclonedx SBOM to what one release archive compiles.
@@ -8,7 +8,7 @@
 
 `<raw.cdx.json>` is `cargo cyclonedx --describe binaries --format json` for
 the `pixel` binary, run with the target and the feature flags of the build.
-`<cargo-tree.txt>` is `cargo tree -p pixel-cli --target <target> <features>
+`<cargo-tree.txt>` is `cargo tree -p pixel --target <target> <features>
 -e normal,build --prefix none --format '{p}'` with the same flags: one
 `<name> v<version> ...` line per crate cargo compiles into that binary.
 
@@ -29,7 +29,7 @@ writing nothing:
   target than `<target>` (a wrong flag in the release job);
 - a compiled crate the SBOM does not list: a smaller SBOM than the binary is
   the one error worse than a larger one;
-- a tree with no crate besides `pixel-cli` (an empty or truncated `cargo tree`
+- a tree with no crate besides `pixel` (an empty or truncated `cargo tree`
   output).
 """
 
@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 BINARY = "pixel"
-PACKAGE = "pixel-cli"
+PACKAGE = "pixel"
 TARGET_PROPERTY = "cdx:rustc:sbom:target:triple"
 
 

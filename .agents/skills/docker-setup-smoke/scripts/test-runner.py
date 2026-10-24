@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 """Verify mode selection, failed-run evidence and the fake model script without Docker."""
@@ -95,9 +95,7 @@ if sys.argv[1] == 'run':
 
     def test_distribution_modes_install_through_the_channel_a_new_user_would_use(self):
         cases = [('--installer', 'installer.sh', 'tester', 'debian:bookworm-slim',
-                  'APT_SOURCE_PARTS=/etc/apt/sources.list.d/'),
-                 ('--brew', 'brew.sh', 'linuxbrew', 'homebrew/brew',
-                  'APT_SOURCE_PARTS=/nonexistent')]
+                  'APT_SOURCE_PARTS=/etc/apt/sources.list.d/')]
         for flag, bootstrap, user, base, apt in cases:
             with self.subTest(flag=flag):
                 result, calls = self.run_case(flag)
@@ -144,7 +142,7 @@ if sys.argv[1] == 'run':
 
     def test_ambiguous_or_invalid_selectors_never_provision_a_container(self):
         for args in [('v0.6.1', '--source', 'main'), ('--pr', '0'), ('--source', 'bad'), ('--pr', '427;echo'),
-                     ('--brew', 'v0.6.1'), ('--installer', '--brew'), ('--brew', '--agents'),
+                     ('--installer', '--agents'),
                      ('--agents', '--agents')]:
             with self.subTest(args=args):
                 result, calls = self.run_case(*args)

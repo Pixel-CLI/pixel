@@ -7,10 +7,7 @@
 ARG BASE_IMAGE
 ARG BASE_DIGEST
 FROM ${BASE_IMAGE}@sha256:${BASE_DIGEST}
-# homebrew/brew defaults to its linuxbrew user; the bootstrap runs as root.
 USER root
-# homebrew/brew adds a third-party apt source whose key rotation breaks
-# `apt-get update`; run.sh points this at a missing directory for that base.
 ARG APT_SOURCE_PARTS=/etc/apt/sources.list.d/
 RUN apt-get -o "Dir::Etc::SourceParts=$APT_SOURCE_PARTS" update -qq \
     && apt-get -o "Dir::Etc::SourceParts=$APT_SOURCE_PARTS" install -y -qq \

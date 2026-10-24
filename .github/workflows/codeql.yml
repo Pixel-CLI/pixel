@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 # CodeQL: static analysis (SAST) of the code and the workflows, on every pull
@@ -40,7 +40,12 @@ concurrency:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-26.04
+    # Code scanning on a private repository needs GitHub Advanced Security;
+    # without it the upload step fails the job ("Advanced Security must be
+    # enabled for this repository to use code scanning"). The workflow starts
+    # to run on its own the day the repository is public.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       # Upload the results to code scanning.
@@ -77,14 +82,14 @@ jobs:
           key: codeql-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.hash }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.cargo/config.toml', '.github/workflows/codeql.yml') }}
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           languages: ${{ matrix.language }}
           build-mode: none
           # Default security queries preserve eligibility for incremental analysis.
 
       - name: Analyze and upload results
-        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           category: /language:${{ matrix.language }}
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 name: Mutants
@@ -24,7 +24,7 @@ env:
 jobs:
   range:
     name: Nightly range
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       run: ${{ steps.range.outputs.run }}
@@ -48,7 +48,7 @@ jobs:
     name: Mutants plan
     needs: range
     if: needs.range.outputs.run == 'true'
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       mutants: ${{ steps.size.outputs.mutants }}
@@ -79,7 +79,7 @@ jobs:
       # every shard must generate the same list. Two cargo-mutants releases
       # can disagree on which mutants a diff produces.
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-mutants@27.1.0
 
@@ -175,7 +175,7 @@ jobs:
       # builds after that failed at the link step and came back `unviable`.
       # The preinstalled .NET, Android and GHC toolchains are never used here
       # and hold 16 GB, but deleting them costs 40 to 110 s per shard, often
-      # more than the shard's mutants. ubuntu-26.04 starts with 92 GB free
+      # more than the shard's mutants. ubuntu-latest starts with 92 GB free
       # and a shard used at most 9 GB (cache, baseline, 20 mutants; runs
       # 36182035966, 36195319520, 36200090079), so the toolchains go only
       # when an image leaves less than MIN_FREE_GB. This checks the root
@@ -215,7 +215,7 @@ jobs:
           toolchain: nightly-2026-05-12
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # Same key as the CI test job: both build the Linux debug profile.
           # The shared entry is keyed by rust-cache on the compiler, so the
@@ -239,7 +239,7 @@ jobs:
           fi
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-mutants@27.1.0
 
@@ -288,7 +288,7 @@ jobs:
       # rust-cache exports CARGO_INCREMENTAL=0 for the job (smaller cache
       # entries). That is the wrong trade here: every mutant rebuilds the
       # mutated crate after a one-function change, which is exactly what
-      # incremental compilation is for (pixel-cli: ~8 s -> ~3 s per mutant,
+      # incremental compilation is for (Pixel-CLI: ~8 s -> ~3 s per mutant,
       # and the build is where a 60-mutant run spends most of its time).
       # Dependencies are never built incrementally, so the restored cache
       # stays valid.
@@ -357,7 +357,7 @@ jobs:
     # An unchanged main skips the plan and the report; a failed plan for
     # an actual range must still produce a red report.
     if: always() && needs.range.outputs.run == 'true'
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Stop when the plan failed

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! `pixel classify` — Ollaya local decision daemon (TypeSafe-compatible).
@@ -21,9 +21,9 @@
 //! process, and rejections are errors — never truncation: a `choice`
 //! question carries 2–255 labels (the 2-floor is already enforced by
 //! `Spec::checked`). Ollaya's other limits need no client preflight: state
-//! is capped at 65,536 tokens, but Pixel's own 32,768-character cap keeps
+//! is capped at 65,536 tokens, but PIXEL's own 32,768-character cap keeps
 //! every component far below that; the 8 MiB request-body cap is likewise
-//! unreachable from a Pixel spec. The per-model option budget (e.g.
+//! unreachable from a PIXEL spec. The per-model option budget (e.g.
 //! ~125 options for `laya:en`) is only known to the server and surfaces as
 //! a clear `422 TOO_MANY_OPTIONS` error.
 //!
@@ -41,7 +41,7 @@ use std::time::Duration;
 /// shared schema ceiling).
 pub const MAX_LABELS: usize = 255;
 
-/// The single question this adapter sends (Pixel's contract is one decision
+/// The single question this adapter sends (PIXEL's contract is one decision
 /// per spec; Ollaya allows 1–256 questions).
 const QUESTION_ID: &str = "q1";
 /// First call can include the model load on a cold server; later calls are
@@ -251,7 +251,7 @@ pub fn build_request(spec: &Spec, model_name: &str) -> Value {
     })
 }
 
-/// Reject, before any request, the one limit Pixel's own caps do not already
+/// Reject, before any request, the one limit PIXEL's own caps do not already
 /// cover. An unsupported input must fail here with a clear message — never
 /// truncated, never silently reshaped.
 pub fn preflight(spec: &Spec) -> Result<(), String> {

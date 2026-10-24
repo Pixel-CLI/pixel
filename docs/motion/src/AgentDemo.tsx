@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 import {AbsoluteFill, interpolate, useCurrentFrame, useVideoConfig} from 'remotion';
 import {C, F, PX} from './theme';
 
 // Replays two recorded agent runs side by side on one clock: the same task,
-// the same model, the same bare setup, one with Pixel's protocol. Every line,
+// the same model, the same bare setup, one with PIXEL's protocol. Every line,
 // time and token count comes from src/demo/*.json, which scripts/trace.ts
 // derives from the stream-json that scripts/record-demo.sh captured.
 
@@ -171,7 +171,7 @@ const headline = (dt: number, dtok: number) =>
 
 const delta = (a: number, b: number) => {
 	const d = Math.round(((b - a) / a) * 100);
-	return d <= 0 ? `−${-d}% with Pixel` : `+${d}% with Pixel`;
+	return d <= 0 ? `−${-d}% with PIXEL` : `+${d}% with PIXEL`;
 };
 
 export const AgentDemo = ({vanilla, pixel, speed, recorded, modelName}: DemoProps) => {
@@ -202,7 +202,7 @@ export const AgentDemo = ({vanilla, pixel, speed, recorded, modelName}: DemoProp
 				<rect width={W} height={1000} fill="url(#grid)"/>
 				<g opacity={1 - summary * 0.88}>
 					<text x={60} y={92} fontFamily={F.display} fontSize={60} fontWeight={700} style={PX} fill={C.ink}>
-						Same task. Same model. One has Pixel.
+						Same task. Same model. One has PIXEL.
 					</text>
 					<text x={1540} y={62} textAnchor="end" fontFamily={F.mono} fontSize={15} fontWeight={600} letterSpacing={1.4} fill={C.inkSoft}>
 						REAL RUNS · {speed}× SPEED
@@ -229,9 +229,9 @@ export const AgentDemo = ({vanilla, pixel, speed, recorded, modelName}: DemoProp
 						</text>
 						<g>
 							<rect x={420} y={214} width={14} height={14} rx={2} fill={C.coral}/>
-							<text x={444} y={227} fontFamily={F.mono} fontSize={16} fill={C.inkSoft}>without Pixel</text>
+							<text x={444} y={227} fontFamily={F.mono} fontSize={16} fill={C.inkSoft}>without PIXEL</text>
 							<rect x={640} y={214} width={14} height={14} rx={2} fill={C.green}/>
-							<text x={664} y={227} fontFamily={F.mono} fontSize={16} fill={C.inkSoft}>with Pixel</text>
+							<text x={664} y={227} fontFamily={F.mono} fontSize={16} fill={C.inkSoft}>with PIXEL</text>
 						</g>
 						<Figure x={250} y={320} label="MEDIAN WALL TIME" left={clock(timeA)} right={clock(timeB)} better={delta(timeA, timeB)}/>
 						<Figure x={690} y={320} label="MEDIAN TOKENS READ" left={k(tokA)} right={k(tokB)} better={delta(tokA, tokB)}/>

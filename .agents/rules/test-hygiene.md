@@ -5,6 +5,8 @@ paths:
 
 # Test Hygiene That Keeps Suites Deterministic
 
+> Issue and PR numbers (`#262`, …) in this file refer to Pixel's history, where each lesson was learned.
+
 Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
 
 - **Test modules come last in their file.** Every `#[cfg(test)] mod`

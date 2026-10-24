@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 # Prepare a release commit's content, without committing or pushing anything.
@@ -29,7 +29,7 @@
 #    matched to an entry by eye, then commits in no merged PR. Resolve the
 #    canonical GitHub repository and collect this inventory before any write;
 #    a failed or capped lookup refuses the cut;
-# 7. `pixel check-release` runs from the tree exactly as the Release
+# 7. `scripts/release/check-release.py` runs from the tree exactly as the Release
 #    workflow's verify job runs it;
 # 8. `scripts/release/release-prepare-only.py HEAD` checks that the uncommitted diff
 #    holds only what this script writes: the rule the CI `scope` job applies
@@ -473,7 +473,7 @@ if [ -n "$LAST_TAG" ]; then
     echo
 fi
 
-cargo run -q -p pixel-cli -- check-release "v$VERSION" --repo .
+python3 scripts/release/check-release.py "v$VERSION" --repo .
 
 # Absent from a disposable fixture that copies only this script.
 if [ -f scripts/release/release-prepare-only.py ]; then

@@ -1,1 +1,0 @@
-**brief:** constant definitions keep their declaration and attached documentation instead of expanding into unrelated neighboring source. Usage and test evidence remain available. Pack and probe budgets reserve room for the final skill footer so a single hook stays within its context limit.

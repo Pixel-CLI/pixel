@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! Per-root exclusive build lock via `flock(2)`.
@@ -18,7 +18,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use fs2::FileExt;
-use pixel_git::GitRunner;
+use pixel_io::GitRunner;
 
 use crate::index::SHARD_DIR;
 
@@ -36,7 +36,7 @@ const GITIGNORE_HEADER: &str = "# pixel index sidecar\n";
 /// True if a repo-root `.gitignore` contains only pixel housekeeping — our
 /// [`GITIGNORE_HEADER`] comment (optional) plus the `.pixel/` entry line
 /// and nothing else. Such a file is a from-scratch write by an earlier
-/// release of [`ensure_pixel_gitignored`] (which now writes `info/exclude`)
+/// release of [`ensure_pixel_ioignored`] (which now writes `info/exclude`)
 /// for a repo that had no ignore file: it must never pollute the
 /// index/search file universe any more than `.pixel/` itself does. A real
 /// user `.gitignore` carrying any other ignore rule is *not* housekeeping
@@ -80,7 +80,7 @@ pub fn is_pixel_only_gitignore_text(content: &str) -> bool {
 ///
 /// No-op outside a git work tree root or when git cannot run; idempotent;
 /// non-fatal.
-pub fn ensure_pixel_gitignored(root: &Path) {
+pub fn ensure_pixel_ioignored(root: &Path) {
     // Only act at a work tree root (root/.git exists as dir or file): the
     // entry is anchored there.
     let git_marker = root.join(".git");
@@ -119,7 +119,7 @@ pub fn ensure_pixel_gitignored(root: &Path) {
     // Atomic: a reader (or a crash) never sees a half-written exclude file.
     // The user's file mode is kept; a new file gets the usual 0o644.
     let mode = std::fs::metadata(&path).map_or(0o644, |m| m.permissions().mode() & 0o777);
-    let _ = pixel_git::nofollow::write_replace(&path, &content, mode);
+    let _ = pixel_io::nofollow::write_replace(&path, &content, mode);
 }
 
 impl BuildLock {
@@ -127,12 +127,12 @@ impl BuildLock {
     /// until it is available. The `.pixel` directory is created if missing.
     pub fn acquire(root: &Path) -> io::Result<Self> {
         let dir = root.join(SHARD_DIR);
-        pixel_git::sidecar::private_dir(&dir)?;
-        let file = pixel_git::nofollow::open_lock(&dir.join("build.lock"))?;
+        pixel_io::sidecar::private_dir(&dir)?;
+        let file = pixel_io::nofollow::open_lock(&dir.join("build.lock"))?;
         file.lock_exclusive()?;
         // Under the lock: two builders never read-modify-write the exclude
         // file at once.
-        ensure_pixel_gitignored(root);
+        ensure_pixel_ioignored(root);
         Ok(BuildLock { _file: file })
     }
 
@@ -140,12 +140,12 @@ impl BuildLock {
     /// if the lock is held by another process.
     pub fn try_acquire(root: &Path) -> io::Result<Option<Self>> {
         let dir = root.join(SHARD_DIR);
-        pixel_git::sidecar::private_dir(&dir)?;
-        let file = pixel_git::nofollow::open_lock(&dir.join("build.lock"))?;
+        pixel_io::sidecar::private_dir(&dir)?;
+        let file = pixel_io::nofollow::open_lock(&dir.join("build.lock"))?;
         if file.try_lock_exclusive().is_err() {
             return Ok(None);
         }
-        ensure_pixel_gitignored(root);
+        ensure_pixel_ioignored(root);
         Ok(Some(BuildLock { _file: file }))
     }
 }
@@ -229,7 +229,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(SHARD_DIR)).unwrap();
         std::fs::write(dir.join(SHARD_DIR).join("shard"), "x").unwrap();
 
-        ensure_pixel_gitignored(&dir);
+        ensure_pixel_ioignored(&dir);
 
         assert_eq!(
             std::fs::read_to_string(dir.join(".gitignore")).unwrap(),
@@ -273,7 +273,7 @@ mod tests {
         let exclude = exclude_file(&git);
         std::fs::remove_file(&exclude).ok();
 
-        ensure_pixel_gitignored(&dir);
+        ensure_pixel_ioignored(&dir);
 
         assert!(!dir.join(".gitignore").exists(), "no .gitignore created");
         assert_eq!(
@@ -291,7 +291,7 @@ mod tests {
         let exclude = exclude_file(&git);
         std::fs::write(&exclude, "scratch/").unwrap();
 
-        ensure_pixel_gitignored(&dir);
+        ensure_pixel_ioignored(&dir);
 
         assert_eq!(
             std::fs::read_to_string(&exclude).unwrap(),
@@ -311,7 +311,7 @@ mod tests {
             let exclude = exclude_file(&git);
             let before = std::fs::read_to_string(&exclude).unwrap_or_default();
 
-            ensure_pixel_gitignored(&dir);
+            ensure_pixel_ioignored(&dir);
 
             assert_eq!(
                 std::fs::read_to_string(&exclude).unwrap_or_default(),
@@ -321,9 +321,9 @@ mod tests {
             std::fs::remove_dir_all(&dir).ok();
         }
         let (dir, git) = git_repo();
-        ensure_pixel_gitignored(&dir);
+        ensure_pixel_ioignored(&dir);
         let once = std::fs::read_to_string(exclude_file(&git)).unwrap();
-        ensure_pixel_gitignored(&dir);
+        ensure_pixel_ioignored(&dir);
         assert_eq!(std::fs::read_to_string(exclude_file(&git)).unwrap(), once);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -338,9 +338,9 @@ mod tests {
         let exclude = exclude_file(&git);
         std::fs::remove_file(&exclude).ok();
 
-        ensure_pixel_gitignored(&dir);
-        ensure_pixel_gitignored(&dir);
-        ensure_pixel_gitignored(&dir);
+        ensure_pixel_ioignored(&dir);
+        ensure_pixel_ioignored(&dir);
+        ensure_pixel_ioignored(&dir);
 
         assert_eq!(
             std::fs::read_to_string(&exclude).unwrap(),
@@ -358,7 +358,7 @@ mod tests {
         let exclude = exclude_file(&git);
         std::fs::write(&exclude, b"caf\xe9/\n").unwrap();
 
-        ensure_pixel_gitignored(&dir);
+        ensure_pixel_ioignored(&dir);
 
         let mut expected = b"caf\xe9/\n".to_vec();
         expected.extend_from_slice(format!("{GITIGNORE_HEADER}/.pixel/\n").as_bytes());
@@ -388,7 +388,7 @@ mod tests {
             return;
         }
 
-        ensure_pixel_gitignored(&dir);
+        ensure_pixel_ioignored(&dir);
 
         std::fs::set_permissions(&exclude, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(std::fs::read_to_string(&exclude).unwrap(), "keep/\n");
@@ -417,7 +417,7 @@ mod tests {
         std::fs::create_dir_all(linked.join(SHARD_DIR)).unwrap();
         std::fs::write(linked.join(SHARD_DIR).join("shard"), "x").unwrap();
 
-        ensure_pixel_gitignored(&linked);
+        ensure_pixel_ioignored(&linked);
 
         assert_eq!(status(&linked_git), "");
         assert!(!linked.join(".gitignore").exists());
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn gitignore_untouched_outside_git_repo() {
         let dir = temp_dir();
-        ensure_pixel_gitignored(&dir);
+        ensure_pixel_ioignored(&dir);
         assert!(!dir.join(".gitignore").exists(), "no .gitignore created");
         std::fs::remove_dir_all(&dir).ok();
     }

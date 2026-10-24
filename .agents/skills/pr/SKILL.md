@@ -16,7 +16,7 @@ names as the code spells them).
 `Closes #<n>` for the issue the PR resolves, `Refs #<n>` when it does only
 part of it (`.agents/rules/project-task.md`). After opening, check that the
 issue lists the PR under Development: a keyword inside a code span or with
-a typo does not link, and `board-sync.yml` reads only what GitHub linked.
+a typo does not link.
 
 ## Summary
 
@@ -55,7 +55,6 @@ The examples below show the shapes; their names are illustrative.
    on(pull_request_target)
   -  number = regex("Task (\d+)", body)
   +  issues = pr.closingIssuesReferences
-  +  for issue in issues on project 3: set Status
   ```
 
 - **Mermaid** `sequenceDiagram`, for an exchange between processes (CLI,

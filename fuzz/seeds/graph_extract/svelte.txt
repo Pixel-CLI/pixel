@@ -1,4 +1,0 @@
-svelte
-<h1>Title text here</h1>
-<script lang="ts">
-  fetch("/api/unclosed");

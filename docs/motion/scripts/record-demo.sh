@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 # Records the agent runs the AgentDemo composition replays.
@@ -14,7 +14,7 @@
 # The only difference: the `pixel` arm gets the hooks `pixel setup` writes
 # for Claude Code (SessionStart injects the agent prompt, UserPromptSubmit
 # adds the task packet, PostToolUse records metrics), passed with
-# --settings, so it measures Pixel as a user installs it.
+# --settings, so it measures PIXEL as a user installs it.
 #
 # Usage: [ARMS="vanilla pixel"] [PAR=n] [REF=v0.5.0] [EFFORT=medium] \
 #        [TASK="..."] [CANDIDATE_PROMPT=file] [CANDIDATE_BIN=path/to/pixel] \
@@ -24,7 +24,7 @@
 # Keep it low: on an 8-core laptop 22 simultaneous sessions saturate the CPU,
 # the task-packet query of the prompt-submit hook then takes 500-900 ms
 # instead of ~150 ms, and every run past its 750 ms deadline starts without a
-# packet. packets.txt records, per Pixel run, whether its packet was
+# packet. packets.txt records, per PIXEL run, whether its packet was
 # delivered (the session is in its copy's .pixel/task-runtime.json).
 #
 # TASK replaces the default task (the English-answer instruction still
@@ -36,7 +36,7 @@
 # with a copy of the installed prompt, so the two arms differ by the prompt
 # text alone. Use ARMS="pixel candidate" for that comparison.
 #
-# CANDIDATE_BIN compares two Pixel binaries instead: the `candidate` arm's
+# CANDIDATE_BIN compares two PIXEL binaries instead: the `candidate` arm's
 # hooks, its index and the `pixel` its agent runs are that binary (first on
 # its PATH); every other input stays the installed one's. Setting both
 # CANDIDATE_* options changes two variables at once, and meta.txt says so.
@@ -49,7 +49,7 @@
 # binary and served by its own daemon: the daemon answers one request at a
 # time, so 22 sessions sharing one queued their task-packet queries past the
 # prompt-submit hook's 750 ms deadline and a third of the runs got no packet.
-# Every run also gets its own PIXEL_SESSION_ID, so one run's Pixel calls
+# Every run also gets its own PIXEL_SESSION_ID, so one run's PIXEL calls
 # never feed another run's repeated-call notes.
 # Writes <arm>-<rep>.jsonl: one stream-json event per line, each wrapped as
 # {"t": <ms since epoch when the line arrived>, "e": <event>}.
@@ -96,7 +96,7 @@ git -C "$repo" diff --cached --quiet ||
   git -C "$repo" -c user.name=demo -c user.email=demo@localhost commit --quiet -m "demo: drop the demo's own sources"
 (cd "$repo" && pixel prepare-repo . >/dev/null 2>&1)
 
-# The hooks of a Pixel arm; $1 prefixes the SessionStart command (an
+# The hooks of a PIXEL arm; $1 prefixes the SessionStart command (an
 # environment assignment, or nothing), $2 is the binary.
 settings_for() {
   local bin=${2:-$pixel_bin}
@@ -203,7 +203,7 @@ for rep in $(seq 1 "$reps"); do
 done
 wait
 
-# Whether each Pixel run's prompt-submit hook delivered its task packet:
+# Whether each PIXEL run's prompt-submit hook delivered its task packet:
 # stream-json shows no UserPromptSubmit event, but the hook records the
 # session in the copy's task runtime before it prints the packet.
 for f in "$out"/*.jsonl; do

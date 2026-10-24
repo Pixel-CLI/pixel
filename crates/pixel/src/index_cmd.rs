@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! `pixel index pack` / `pixel index unpack` — portable index bundles.
 //!
 //! The team's sharing story: CI (or one developer) runs `pixel build-index`
-//! once, `pack` freezes `.pixel`'s index files into a single `.pxpack` tar
+//! once, `pack` freezes `.pixel`'s index files into a single `.pixelpack` tar
 //! with a per-file xxh3 manifest, and everyone else `unpack`s it — from a
 //! path or an `https://` URL — instead of rebuilding. `history.db` stays
 //! opt-in behind `--include-history`: it is the lazy index this PR made
@@ -19,11 +19,15 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use pixel_daemon::api::GRAPH_DB_FILE;
-use pixel_facts::store::HISTORY_DB_FILE;
-use pixel_index::index::SHARD_DIR;
+use pixel_graph::store::DB as GRAPH_DB_FILE;
+use pixel_index::delta::STATE_FILE;
+use pixel_index::history::store::HISTORY_DB_FILE;
+use pixel_index::index::SHARD_FILE;
+use pixel_io::sidecar::DIR_NAME as SHARD_DIR;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use crate::commands::Done;
 
 const MANIFEST: &str = "manifest.json";
 const PACK_FORMAT: u32 = 1;
@@ -35,13 +39,13 @@ const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// Index-bearing files packed by default, besides the graph db itself
 /// (`GRAPH_DB_FILE`, whose name moves with its schema). Journals, locks,
 /// targets, and plan/workspace state are local and never travel.
-const INDEX_FILES: &[&str] = &["base.shard", "calls.json", "state.json"];
+const INDEX_FILES: &[&str] = &[SHARD_FILE, STATE_FILE];
 
 #[derive(clap::Subcommand)]
 pub enum IndexCmd {
-    /// Freeze this repo's index into a single `.pxpack` bundle.
+    /// Freeze this repo's index into a single `.pixelpack` bundle.
     Pack {
-        /// Output file (e.g. index.pxpack).
+        /// Output file (e.g. index.pixelpack).
         #[arg(long)]
         out: PathBuf,
         /// Also pack history.db (the on-demand facts index).
@@ -138,7 +142,7 @@ fn pack(root: &Path, out: &Path, include_history: bool) -> Result<Value, String>
         created_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64),
-        repo_head: pixel_git::GitRunner::new(root).rev_parse_head(),
+        repo_head: pixel_io::GitRunner::new(root).rev_parse_head(),
         files: entries,
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
@@ -213,7 +217,22 @@ fn fetch_source(source: &str) -> Result<Vec<u8>, String> {
 /// hash-checked against the manifest, staged in `.unpack-tmp`, then
 /// renamed into place.
 fn unpack(root: &Path, source: &str, force: bool) -> Result<Value, String> {
-    if crate::daemon_ping(root) && !force {
+    unpack_with(
+        root,
+        source,
+        force,
+        crate::client::probe(root) != crate::client::Probe::Absent,
+    )
+}
+
+/// [`unpack`], told whether a daemon answers for the repository.
+fn unpack_with(
+    root: &Path,
+    source: &str,
+    force: bool,
+    daemon_running: bool,
+) -> Result<Value, String> {
+    if daemon_running && !force {
         return Err(
             "index unpack: a daemon is running for this repo — stop it or pass --force".to_string(),
         );
@@ -274,13 +293,13 @@ fn unpack(root: &Path, source: &str, force: bool) -> Result<Value, String> {
     let shard_dir = root.join(SHARD_DIR);
     // The same trust check as every store open: a `.pixel/` the repository
     // commits is not one to install an index into.
-    pixel_git::sidecar::check(root).map_err(|e| format!("index unpack: {e}"))?;
+    pixel_io::sidecar::check(root).map_err(|e| format!("index unpack: {e}"))?;
     let tmp_dir = shard_dir.join(format!(".unpack-{}", std::process::id()));
-    pixel_git::sidecar::private_dir(&tmp_dir).map_err(|e| format!("index unpack: {e}"))?;
+    pixel_io::sidecar::private_dir(&tmp_dir).map_err(|e| format!("index unpack: {e}"))?;
     for (name, body) in &staged {
         let stage = tmp_dir.join(name);
         let _ = std::fs::remove_file(&stage);
-        pixel_git::nofollow::create_new(&stage, pixel_git::nofollow::PRIVATE_MODE)
+        pixel_io::nofollow::create_new(&stage, pixel_io::nofollow::PRIVATE_MODE)
             .and_then(|mut file| std::io::Write::write_all(&mut file, body))
             .map_err(|e| format!("index unpack: stage {name}: {e}"))?;
     }
@@ -293,7 +312,7 @@ fn unpack(root: &Path, source: &str, force: bool) -> Result<Value, String> {
     }
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
-    let head_now = pixel_git::GitRunner::new(root).rev_parse_head();
+    let head_now = pixel_io::GitRunner::new(root).rev_parse_head();
     let head_matches = match (&manifest.repo_head, &head_now) {
         (Some(packed), Some(now)) => Some(packed == now),
         _ => None,
@@ -307,24 +326,24 @@ fn unpack(root: &Path, source: &str, force: bool) -> Result<Value, String> {
     }))
 }
 
-pub fn run(cmd: IndexCmd) -> Result<(), String> {
+pub(crate) fn run(cmd: &IndexCmd) -> Result<Done, String> {
     let out = match cmd {
         IndexCmd::Pack {
             out,
             include_history,
             path,
-        } => pack(&path, &out, include_history)?,
+        } => pack(&crate::workspace_cmd::root_of(path), out, *include_history)?,
         IndexCmd::Unpack {
             source,
             force,
             path,
-        } => unpack(&path, &source, force)?,
+        } => unpack(&crate::workspace_cmd::root_of(path), source, *force)?,
     };
-    println!(
-        "{}",
+    let text = format!(
+        "{}\n",
         serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
     );
-    Ok(())
+    Ok(Done::new(out, text, false))
 }
 
 #[cfg(test)]
@@ -332,7 +351,7 @@ mod tests {
     use super::*;
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("px-idx-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pixel-idx-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(SHARD_DIR)).unwrap();
         dir.canonicalize().unwrap()
@@ -344,7 +363,7 @@ mod tests {
         let dst = scratch("dst");
         std::fs::write(src.join(SHARD_DIR).join(GRAPH_DB_FILE), b"graph-bytes").unwrap();
         std::fs::write(src.join(SHARD_DIR).join("state.json"), b"{}").unwrap();
-        let pack_file = src.join("index.pxpack");
+        let pack_file = src.join("index.pixelpack");
         pack(&src, &pack_file, false).unwrap();
 
         let report = unpack(&dst, pack_file.to_str().unwrap(), true).unwrap();
@@ -362,7 +381,7 @@ mod tests {
             .position(|w| w == b"graph-bytes")
             .expect("packed content");
         bytes[pos] ^= 0xff;
-        let bad = src.join("bad.pxpack");
+        let bad = src.join("bad.pixelpack");
         std::fs::write(&bad, bytes).unwrap();
         // tar checksum may fail first, or the manifest hash — either way it
         // must not install.
@@ -378,7 +397,7 @@ mod tests {
     #[test]
     fn pack_errors_on_an_empty_index() {
         let root = scratch("empty");
-        let err = pack(&root, &root.join("x.pxpack"), false).unwrap_err();
+        let err = pack(&root, &root.join("x.pixelpack"), false).unwrap_err();
         assert!(err.contains("nothing to pack"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -402,7 +421,7 @@ mod tests {
             &graph_wal,
             "history.db",
             "history.db-wal",
-            "graph.db",
+            "graph.v1.db",
         ] {
             std::fs::write(shard.join(name), b"x").unwrap();
         }
@@ -413,7 +432,7 @@ mod tests {
         assert!(plain.contains(&GRAPH_DB_FILE.to_string()), "{plain:?}");
         assert!(plain.contains(&graph_wal), "{plain:?}");
         assert!(
-            !plain.contains(&"graph.db".to_string()),
+            !plain.contains(&"graph.v1.db".to_string()),
             "a graph under the old schema's name is not the index: {plain:?}"
         );
         assert!(!plain.iter().any(|n| n.starts_with("history")), "{plain:?}");
@@ -427,10 +446,10 @@ mod tests {
 
     #[test]
     fn urls_take_the_fetch_path_not_the_filesystem() {
-        assert!(is_url("https://x.example/p.pxpack"));
-        assert!(is_url("http://x.example/p.pxpack"));
-        assert!(!is_url("pack.pxpack"));
-        assert!(!is_url("/tmp/pack.pxpack"));
+        assert!(is_url("https://x.example/p.pixelpack"));
+        assert!(is_url("http://x.example/p.pixelpack"));
+        assert!(!is_url("pack.pixelpack"));
+        assert!(!is_url("/tmp/pack.pixelpack"));
     }
 
     /// A tar member like `files/sub/evil` must be refused — a `||`→`&&`
@@ -466,7 +485,7 @@ mod tests {
                 .unwrap();
             builder.finish().unwrap();
         }
-        let pack_file = dst.join("evil.pxpack");
+        let pack_file = dst.join("evil.pixelpack");
         std::fs::write(&pack_file, &tar_bytes).unwrap();
         let err = unpack(&dst, pack_file.to_str().unwrap(), true).unwrap_err();
         assert!(err.contains("unsafe member"), "{err}");
@@ -497,7 +516,7 @@ mod tests {
                     .unwrap();
                 builder.finish().unwrap();
             }
-            let pack_file = dst.join("foreign.pxpack");
+            let pack_file = dst.join("foreign.pixelpack");
             std::fs::write(&pack_file, &tar_bytes).unwrap();
             let err = unpack(&dst, pack_file.to_str().unwrap(), true).unwrap_err();
             assert!(err.contains("unsafe member"), "{member}: {err}");
@@ -520,13 +539,13 @@ mod tests {
             std::fs::write(shard.join(name), b"x").unwrap();
         }
         let listed = pack_list(&shard, true);
-        assert_eq!(listed.len(), 9);
+        assert_eq!(listed.len(), 6 + INDEX_FILES.len());
         for path in listed {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             assert!(packable(&name), "{name}");
         }
         assert!(
-            !packable("graph.db"),
+            !packable("graph.v1.db"),
             "an older schema's graph never travels"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -560,7 +579,7 @@ mod tests {
             "x",
         ]);
         std::fs::write(root.join(SHARD_DIR).join(GRAPH_DB_FILE), b"g").unwrap();
-        let pack_file = root.join("p.pxpack");
+        let pack_file = root.join("p.pixelpack");
         pack(&root, &pack_file, false).unwrap();
         let report = unpack(&root, pack_file.to_str().unwrap(), true).unwrap();
         assert_eq!(report["head_matches"], serde_json::json!(true), "{report}");
@@ -574,46 +593,25 @@ mod tests {
         let dst = scratch("nodae");
         let src = scratch("nodae-src");
         std::fs::write(src.join(SHARD_DIR).join(GRAPH_DB_FILE), b"g").unwrap();
-        let pack_file = src.join("p.pxpack");
+        let pack_file = src.join("p.pixelpack");
         pack(&src, &pack_file, false).unwrap();
         unpack(&dst, pack_file.to_str().unwrap(), false).unwrap();
         let _ = std::fs::remove_dir_all(&dst);
         let _ = std::fs::remove_dir_all(&src);
     }
 
-    /// A live daemon + no --force must refuse — the `!` on `!force` is the
-    /// whole protection.
+    /// A live daemon + no --force must refuse: the `!` on `!force` is the
+    /// whole protection. `--force` overrides the same live daemon.
     #[test]
     fn unpack_refuses_while_a_daemon_answers() {
-        use std::io::{BufRead, BufReader, Write};
         let root = scratch("live");
-        let listener =
-            std::os::unix::net::UnixListener::bind(pixel_daemon::daemon::socket_path(&root))
-                .unwrap();
-        let server = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut line = String::new();
-                if BufReader::new(&stream).read_line(&mut line).is_ok() {
-                    let reply = pixel_daemon::api::Response::success(
-                        "ping",
-                        serde_json::json!({
-                            "pong": true,
-                            "protocol_version": pixel_daemon::api::PROTOCOL_VERSION,
-                        }),
-                    );
-                    let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap());
-                }
-            }
-        });
         let src = scratch("live-src");
         std::fs::write(src.join(SHARD_DIR).join(GRAPH_DB_FILE), b"g").unwrap();
-        let pack_file = src.join("p.pxpack");
+        let pack_file = src.join("p.pixelpack");
         pack(&src, &pack_file, false).unwrap();
-        let err = unpack(&root, pack_file.to_str().unwrap(), false).unwrap_err();
+        let err = unpack_with(&root, pack_file.to_str().unwrap(), false, true).unwrap_err();
         assert!(err.contains("daemon is running"), "{err}");
-        // --force overrides the same live daemon.
-        unpack(&root, pack_file.to_str().unwrap(), true).unwrap();
-        server.join().unwrap();
+        unpack_with(&root, pack_file.to_str().unwrap(), true, true).unwrap();
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&src);
     }
@@ -622,12 +620,13 @@ mod tests {
     #[test]
     fn run_propagates_pack_errors() {
         let root = scratch("run");
-        let err = run(IndexCmd::Pack {
-            out: root.join("x.pxpack"),
+        let Err(err) = run(&IndexCmd::Pack {
+            out: root.join("x.pixelpack"),
             include_history: false,
             path: root.clone(),
-        })
-        .unwrap_err();
+        }) else {
+            panic!("an empty index packs nothing");
+        };
         assert!(err.contains("nothing to pack"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }

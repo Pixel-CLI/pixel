@@ -1,8 +1,8 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
-//! `pixel install <source>`, `pixel uninstall <plugin>`, `pixel plugin …` and
-//! the dispatch of an unknown subcommand to a plugin.
+//! `pixel install <source>`, `pixel uninstall <plugin>`, `pixel plugin …` and the
+//! dispatch of an unknown subcommand to a plugin (`specs/plugins.md`).
 //!
 //! The host itself (manifests, trust, lookup) is `pixel-plugin`; this file
 //! reads the process (HOME, PATH, the working directory), prints, and execs.
@@ -13,26 +13,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as Process, ExitStatus};
 use std::time::{Duration, Instant};
 
-use clap::Subcommand;
 use clap::error::{ContextKind, ContextValue, ErrorKind};
-use pixel_plugin::{Binary, Env, Error, Host, MOVED_COMMANDS};
+use pixel_plugin::{Binary, Env, Error, Host};
+use serde_json::{Value, json};
 
-#[derive(Subcommand)]
-pub enum PluginCmd {
-    /// List the plugins visible here: the repo's, your own, and `pixel-<name>` on PATH.
-    List,
-    /// Allow a plugin that declares `network = true` to run, or switch a brief probe back on.
-    Enable { name: String },
-    /// Switch a brief probe off: the prompt-submit brief stops running it (its files stay).
-    Disable { name: String },
-    /// Allow a repo plugin (`<repo>/.pixel/plugins/<name>/`) as it is on disk now; any later change revokes it.
-    Trust { name: String },
-}
+use crate::cli::PluginCmd;
+use crate::commands::Done;
 
 /// Environment variable that redirects `github:<owner>/<repo>` sources (and
 /// their release downloads) from `https://github.com` to a mirror, a GitHub
 /// Enterprise host or a `file://` directory laid out the same way.
 const GITHUB_BASE_ENV: &str = "PIXEL_GITHUB_BASE_URL";
+
+/// Exit status of a refusal no retry changes (an unsupported source kind).
+const REFUSED_EXIT: i32 = 2;
 
 /// The host as this process sees it. The repo tier is the git root of the
 /// working directory, and never the home directory itself (a dotfiles
@@ -45,8 +39,9 @@ fn host() -> Result<Host, String> {
         .ok_or("HOME is not set: plugins live under ~/.pixel")?;
     let cwd =
         std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;
+    let repo_root = pixel_io::discover_root(&cwd).filter(|root| *root != home);
     Ok(Host {
-        repo_root: pixel_git::discover_root(&cwd),
+        repo_root,
         home,
         path: std::env::var_os("PATH").unwrap_or_default(),
         github_base: std::env::var(GITHUB_BASE_ENV)
@@ -55,56 +50,31 @@ fn host() -> Result<Host, String> {
     })
 }
 
-/// The host the prompt-submit brief reads its probes from: the repository
-/// being briefed as the repo tier, this user's `~/.pixel/plugins`, no PATH.
-pub fn brief_host(root: &Path) -> Option<Host> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|h| !h.as_os_str().is_empty())?;
-    Some(Host {
-        repo_root: Some(root.to_path_buf()),
-        home,
-        path: std::ffi::OsString::new(),
-        github_base: None,
-    })
-}
-
-/// The moved commands a plugin runs here, as this process sees the machine:
-/// what a rule, a next-step suggestion or the doctor may name without
-/// teaching a command that fails. A host that cannot be built (no `HOME`)
-/// has none.
-pub fn available() -> pixel_plugin::Available {
-    host().map_or_else(
-        |_| pixel_plugin::Available::none(),
-        |host| pixel_plugin::Available::scan(&host),
-    )
-}
-
-/// `pixel install <source>`. An unsupported source kind (`npm:`) is a usage
-/// error: it prints its reason and owns exit status 2, the code of a refusal
-/// that no retry changes.
-pub fn install(
+/// `pixel install <source>`. An unsupported source kind (`npm:`) prints its
+/// reason and owns exit status 2.
+pub(crate) fn install(
     source: &str,
     name: Option<&str>,
-    unverified: pixel_plugin::Unverified,
+    allow_unverified: bool,
     json: bool,
-    owned_exit: &std::cell::Cell<Option<i32>>,
-) -> Result<(), String> {
+) -> Result<Done, String> {
     let host = host()?;
+    let unverified = if allow_unverified {
+        pixel_plugin::Unverified::Allow
+    } else {
+        pixel_plugin::Unverified::Refuse
+    };
     match pixel_plugin::add_with(&host, source, name, unverified) {
-        Ok(added) if json => {
-            println!("{}", installed_json(&added));
-            Ok(())
-        }
         Ok(added) => {
-            print!("{}", render_installed(&added));
-            deliver_skill(&host, &added)?;
-            Ok(())
+            let mut text = render_installed(&added);
+            text.push_str(&deliver_skill(&host, &added)?);
+            Ok(Done::new(installed_json(&added), text, json))
         }
         Err(error @ Error::Unsupported(_)) => {
-            eprintln!("pixel: {error}");
-            owned_exit.set(Some(pixel_plugin::HINT_EXIT));
-            Ok(())
+            let mut done = Done::new(json!({"ok": false}), String::new(), json)
+                .note(Some(format!("pixel: {error}")));
+            done.exit = REFUSED_EXIT;
+            Ok(done)
         }
         Err(error) => Err(error.to_string()),
     }
@@ -171,10 +141,10 @@ fn render_installed(added: &pixel_plugin::Added) -> String {
 /// What `pixel install --json` prints: the plugin, and how its program got
 /// there (`binary.kind`), with the downloaded asset's URL, sha256 and whether
 /// a published digest verified it.
-fn installed_json(added: &pixel_plugin::Added) -> serde_json::Value {
+fn installed_json(added: &pixel_plugin::Added) -> Value {
     let binary = match &added.binary {
-        Binary::Present => serde_json::json!({ "kind": "present" }),
-        Binary::Downloaded(got) => serde_json::json!({
+        Binary::Present => json!({ "kind": "present" }),
+        Binary::Downloaded(got) => json!({
             "kind": "downloaded",
             "url": got.url,
             "sha256": got.sha256,
@@ -184,7 +154,7 @@ fn installed_json(added: &pixel_plugin::Added) -> serde_json::Value {
             git_url,
             reference,
             download_error,
-        } => serde_json::json!({
+        } => json!({
             "kind": "shipped",
             "git_url": git_url,
             "reference": reference,
@@ -194,14 +164,14 @@ fn installed_json(added: &pixel_plugin::Added) -> serde_json::Value {
             git_url,
             reference,
             download_error,
-        } => serde_json::json!({
+        } => json!({
             "kind": "missing",
             "git_url": git_url,
             "reference": reference,
             "download_error": download_error,
         }),
     };
-    serde_json::json!({
+    json!({
         "name": added.name,
         "version": added.manifest.version,
         "dir": added.dir.to_string_lossy(),
@@ -210,12 +180,12 @@ fn installed_json(added: &pixel_plugin::Added) -> serde_json::Value {
     })
 }
 
-/// Deliver a plugin's declared skill to the harness roots once the plugin
-/// is in place, printing each destination: the roots rule and the backup
+/// Deliver a plugin's declared skill to the harness roots once the plugin is
+/// in place, listing each destination: the roots rule and the backup
 /// semantics are `pixel setup`'s, one spelling, in `pixel-setup`.
-fn deliver_skill(host: &Host, added: &pixel_plugin::Added) -> Result<(), String> {
+fn deliver_skill(host: &Host, added: &pixel_plugin::Added) -> Result<String, String> {
     let Some(skill) = &added.skill else {
-        return Ok(());
+        return Ok(String::new());
     };
     let destinations = pixel_setup::skill::deploy_plugin_skill(&host.home, &added.name, skill)
         .map_err(|error| {
@@ -224,107 +194,110 @@ fn deliver_skill(host: &Host, added: &pixel_plugin::Added) -> Result<(), String>
                 name = added.name
             )
         })?;
-    for destination in destinations {
-        println!("delivered skill {}", destination.display());
-    }
-    Ok(())
+    Ok(destinations
+        .iter()
+        .map(|destination| format!("delivered skill {}\n", destination.display()))
+        .collect())
 }
 
 /// `pixel uninstall <plugin>`.
-pub fn uninstall(name: &str) -> Result<(), String> {
+pub(crate) fn uninstall(name: &str) -> Result<Done, String> {
     let host = host()?;
     // What the install delivered, read before the plugin directory goes: a
     // harness copy no longer matching it is the user's and is kept.
     let delivered = pixel_plugin::installed_skill(&host, name).map_err(|e| e.to_string())?;
     pixel_plugin::remove(&host, name).map_err(|e| e.to_string())?;
-    println!("removed plugin {name}");
+    let mut text = format!("removed plugin {name}\n");
+    let (mut removed, mut kept) = (Vec::new(), Vec::new());
     if let Some(content) = &delivered {
         let sweep = pixel_setup::skill::remove_plugin_skill(&host.home, name, content)
             .map_err(|e| e.to_string())?;
         for file in &sweep.removed {
-            println!("removed skill {}", file.display());
+            text.push_str(&format!("removed skill {}\n", file.display()));
         }
         for file in &sweep.kept {
-            println!(
-                "kept skill {} (differs from what was delivered)",
+            text.push_str(&format!(
+                "kept skill {} (differs from what was delivered)\n",
                 file.display()
-            );
+            ));
         }
+        removed = sweep.removed;
+        kept = sweep.kept;
     }
-    Ok(())
+    let value = json!({"removed": name, "skills_removed": removed, "skills_kept": kept});
+    Ok(Done::new(value, text, false))
 }
 
-pub fn run(cmd: PluginCmd) -> Result<(), String> {
+/// `pixel plugin …`.
+pub(crate) fn run(cmd: &PluginCmd) -> Result<Done, String> {
     let host = host()?;
-    match cmd {
+    let (value, text) = match cmd {
         PluginCmd::List => {
             let rows = pixel_plugin::list(&host).map_err(|e| e.to_string())?;
-            print!("{}", pixel_plugin::render(&rows));
+            (json!({"listed": rows.len()}), pixel_plugin::render(&rows))
         }
         PluginCmd::Enable { name } => {
-            match pixel_plugin::enable(&host, &name).map_err(|e| e.to_string())? {
-                pixel_plugin::Enabled::Yes => println!("enabled plugin {name}"),
-                pixel_plugin::Enabled::NotNeeded => {
-                    println!("plugin {name} declares no network access: nothing to enable");
+            match pixel_plugin::enable(&host, name).map_err(|e| e.to_string())? {
+                pixel_plugin::Enabled::Yes => {
+                    (json!({"enabled": name}), format!("enabled plugin {name}\n"))
                 }
+                pixel_plugin::Enabled::NotNeeded => (
+                    json!({"enabled": null}),
+                    format!("plugin {name} declares no network access: nothing to enable\n"),
+                ),
             }
         }
         PluginCmd::Disable { name } => {
-            pixel_plugin::disable(&host, &name).map_err(|e| e.to_string())?;
-            println!("disabled brief probe {name}");
+            pixel_plugin::disable(&host, name).map_err(|e| e.to_string())?;
+            (
+                json!({"disabled": name}),
+                format!("disabled brief probe {name}\n"),
+            )
         }
         PluginCmd::Trust { name } => {
-            let digest = pixel_plugin::trust(&host, &name).map_err(|e| e.to_string())?;
-            println!("trusted repo plugin {name} (sha256 {})", &digest[..12]);
+            let digest = pixel_plugin::trust(&host, name).map_err(|e| e.to_string())?;
+            (
+                json!({"trusted": name, "sha256": digest}),
+                format!("trusted repo plugin {name} (sha256 {})\n", &digest[..12]),
+            )
         }
-    }
-    Ok(())
+    };
+    Ok(Done::new(value, text, false))
 }
 
 /// What an unknown subcommand turned into.
 enum Plan {
     /// A plugin to exec.
     Run(Process),
-    /// Not a plugin: print this and exit with the code.
+    /// A plugin that cannot run: print this and exit with the code.
     Stop(String, i32),
-    /// Not ours: clap's own error stands.
+    /// Not a plugin: clap's own error stands.
     Unknown,
 }
 
 /// Decide what `pixel <name> <args…>` does when the core has no such command:
-/// a plugin of that name runs; otherwise a moved command gets its plugin
-/// hint and a name 0.8.0 removed gets its replacement.
-fn plan(host: &Host, name: &str, args: &[OsString], env: Env<'_>, moved: &[(&str, &str)]) -> Plan {
+/// a plugin of that name runs, one that cannot says why, and any other name
+/// is clap's.
+fn plan(host: &Host, name: &str, args: &[OsString], env: Env<'_>) -> Plan {
     match pixel_plugin::resolve(host, name) {
         Ok(Some(plugin)) => Plan::Run(pixel_plugin::command(&plugin, args, env)),
-        Ok(None) => pixel_plugin::moved_hint(moved, name)
-            .or_else(|| {
-                crate::removed_commands::removed_hint(name, moved, |current| {
-                    matches!(pixel_plugin::resolve(host, current), Ok(Some(_)))
-                })
-            })
-            .map_or(Plan::Unknown, |hint| {
-                Plan::Stop(hint, pixel_plugin::HINT_EXIT)
-            }),
+        Ok(None) => Plan::Unknown,
         Err(error) => Plan::Stop(error.to_string(), 1),
     }
 }
 
 /// Hand an unrecognized subcommand to a plugin. `Some(code)` when it was
-/// handled and the process should exit with `code` (the plugin replaces
-/// this process on success, so only failures and hints return); `None`
-/// leaves clap's error to be shown.
-pub fn dispatch(error: &clap::Error, argv: &[String]) -> Option<i32> {
+/// handled and the process should exit with `code`; `None` leaves clap's
+/// error to be shown.
+pub(crate) fn dispatch(error: &clap::Error, argv: &[String]) -> Option<i32> {
     let (index, name) = pixel_plugin::command_word(argv)?;
     if !names_the_unknown_command(error, name) {
         return None;
     }
     let host = host().ok()?;
     let cwd = std::env::current_dir().ok()?;
-    let root = crate::discover_root(Path::new(".")).unwrap_or(cwd);
-    let graph_db = root
-        .join(pixel_index::index::SHARD_DIR)
-        .join(pixel_daemon::api::GRAPH_DB_FILE);
+    let root = pixel_io::discover_root(Path::new(".")).unwrap_or(cwd);
+    let graph_db = pixel_io::sidecar::dir(&root).join(pixel_graph::store::DB);
     let bin = std::env::current_exe().ok()?;
     let env = Env {
         repo_root: &root,
@@ -332,7 +305,7 @@ pub fn dispatch(error: &clap::Error, argv: &[String]) -> Option<i32> {
         bin: &bin,
     };
     let args = pixel_plugin::os_args(&argv[index + 1..]);
-    match plan(&host, name, &args, env, &MOVED_COMMANDS) {
+    match plan(&host, name, &args, env) {
         Plan::Run(process) => Some(run_logged(process, name, argv, &root)),
         Plan::Stop(message, code) => {
             eprintln!("pixel: {message}");
@@ -353,11 +326,11 @@ fn names_the_unknown_command(error: &clap::Error, name: &str) -> bool {
 }
 
 /// Run the plugin as a child with this process's stdio, wait for it, and
-/// write its run to the repository's action log like any core command:
-/// `.pixel/actions.jsonl`, the command word and the arguments through
-/// [`crate::logged_args`] (a credential in them is masked the same way), the
-/// outcome and the duration. The exit code is the plugin's own. A signal
-/// that ends the plugin is `128 + signal`, the shell's convention.
+/// write its run to the repository's action log like any core command: the
+/// command word and the arguments through [`crate::run::logged_args`] (a
+/// credential in them is masked the same way), the outcome and the duration.
+/// The exit code is the plugin's own. A signal that ends the plugin is
+/// `128 + signal`, the shell's convention.
 fn run_logged(mut process: Process, name: &str, argv: &[String], root: &Path) -> i32 {
     let started = Instant::now();
     let code = match process.status() {
@@ -380,384 +353,19 @@ fn exit_code(status: ExitStatus) -> i32 {
 }
 
 /// One action-log record for a plugin run. The record is on disk before the
-/// process exits: `pixel action-log` and the metrics history read it back.
+/// process exits: `pixel metrics` reads it back.
 fn log_run(name: &str, argv: &[String], root: &Path, code: i32, elapsed: Duration) {
-    let mut logger = pixel_actionlog::ActionLog::spawn_for_root(root);
+    let mut logger = pixel_metrics::ActionLog::spawn_for_root(root);
     let result = if code == 0 {
         Ok(())
     } else {
         Err(format!("{name} exited {code}"))
     };
-    let mut event = crate::usage_journal::action(name, crate::logged_args(&argv[1..]), "plugin")
+    let event = crate::run::action(name, crate::run::logged_args(&argv[1..]), "plugin")
         .with_result(&result, elapsed);
-    if let Some(correlation) = crate::task_commands::action_correlation(root) {
-        event = event.with_task(correlation);
-    }
     logger.log(event);
     logger.finish_flush();
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Cli;
-    use clap::CommandFactory;
-    use std::os::unix::fs::PermissionsExt;
-
-    fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-plugin-cmd-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn host_at(dir: &Path) -> Host {
-        let bin = dir.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        Host {
-            home: dir.join("home"),
-            repo_root: None,
-            path: bin.into_os_string(),
-            github_base: None,
-        }
-    }
-
-    fn env() -> Env<'static> {
-        Env {
-            repo_root: Path::new("/repo"),
-            graph_db: Path::new("/repo/.pixel/graph.v2.db"),
-            bin: Path::new("/bin/pixel"),
-        }
-    }
-
-    #[test]
-    fn a_name_in_the_table_that_no_plugin_provides_gets_the_hint_and_exit_two() {
-        let dir = scratch("hint");
-        let host = host_at(&dir);
-        let table = [("made-up-cmd", "pixel-made-up")];
-        let Plan::Stop(message, code) = plan(&host, "made-up-cmd", &[], env(), &table) else {
-            panic!("expected the moved-command hint");
-        };
-        assert_eq!(code, 2);
-        assert_eq!(
-            message,
-            "\"made-up-cmd\" moved to a plugin: pixel install github:Pixel-CLI/pixel-made-up"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_removed_name_names_its_replacement_and_drops_the_install_once_the_plugin_runs() {
-        let dir = scratch("removed");
-        let host = host_at(&dir);
-        let table = [("commit-history", "pixel-git")];
-        let Plan::Stop(message, code) = plan(&host, "ready", &[], env(), &table) else {
-            panic!("expected the removed-command hint");
-        };
-        assert_eq!(code, 2);
-        assert_eq!(
-            message,
-            "'ready' was removed in 0.8.0; use `pixel prepare-repo`"
-        );
-        let Plan::Stop(message, _) = plan(&host, "history", &[], env(), &table) else {
-            panic!("expected the removed-command hint");
-        };
-        assert_eq!(
-            message,
-            "'history' was removed in 0.8.0; use `pixel commit-history`, a plugin command: pixel install github:Pixel-CLI/pixel-git"
-        );
-        let exe = dir.join("bin/pixel-commit-history");
-        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let Plan::Stop(message, _) = plan(&host, "history", &[], env(), &table) else {
-            panic!("expected the removed-command hint");
-        };
-        assert_eq!(
-            message,
-            "'history' was removed in 0.8.0; use `pixel commit-history`"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_name_outside_the_table_is_left_to_clap() {
-        let dir = scratch("unknown");
-        let host = host_at(&dir);
-        assert!(matches!(
-            plan(
-                &host,
-                "made-up-cmd",
-                &[],
-                env(),
-                &[("other", "pixel-other")]
-            ),
-            Plan::Unknown
-        ));
-        assert!(matches!(
-            plan(&host, "Not Valid", &[], env(), &[]),
-            Plan::Unknown
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_plugin_on_path_wins_over_the_hint_and_receives_the_args() {
-        let dir = scratch("path");
-        let host = host_at(&dir);
-        let exe = dir.join("bin/pixel-made-up-cmd");
-        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let args = vec![OsString::from("a"), OsString::from("--b")];
-        let Plan::Run(process) = plan(
-            &host,
-            "made-up-cmd",
-            &args,
-            env(),
-            &[("made-up-cmd", "pixel-made-up")],
-        ) else {
-            panic!("expected the PATH plugin to run");
-        };
-        assert_eq!(process.get_program(), exe.as_os_str());
-        assert_eq!(process.get_args().collect::<Vec<_>>(), ["a", "--b"]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_resolution_failure_stops_with_its_reason_and_exit_one() {
-        let dir = scratch("untrusted");
-        let host = Host {
-            repo_root: Some(dir.join("repo")),
-            ..host_at(&dir)
-        };
-        let plugin = dir.join("repo/.pixel/plugins/tool");
-        std::fs::create_dir_all(&plugin).unwrap();
-        std::fs::write(
-            plugin.join("pixel-plugin.toml"),
-            "name = \"tool\"\nversion = \"1\"\napi = 1\ndescription = \"d\"\nrun = \"run\"\ncapabilities = [\"command\"]\n",
-        )
-        .unwrap();
-        std::fs::write(plugin.join("run"), "#!/bin/sh\n").unwrap();
-        let Plan::Stop(message, code) = plan(&host, "tool", &[], env(), &MOVED_COMMANDS) else {
-            panic!("expected a refusal");
-        };
-        assert_eq!(code, 1);
-        assert!(message.contains("`pixel plugin trust tool`"), "{message}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The clap error for `line`, built on a thread with room for the whole
-    /// command tree (the test thread's default stack is too small for it).
-    fn parse_error(line: &'static str) -> clap::Error {
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(move || {
-                Cli::command()
-                    .try_get_matches_from(line.split_whitespace())
-                    .unwrap_err()
-            })
-            .unwrap()
-            .join()
-            .unwrap()
-    }
-
-    #[test]
-    fn only_the_top_level_unknown_word_is_dispatched() {
-        let top = parse_error("pixel nosuchcmd arg");
-        assert!(names_the_unknown_command(&top, "nosuchcmd"));
-        assert!(!names_the_unknown_command(&top, "arg"));
-        let nested = parse_error("pixel plugin nosuchcmd");
-        assert!(
-            !names_the_unknown_command(&nested, "plugin"),
-            "a nested typo is clap's to report"
-        );
-        let usage = parse_error("pixel search-content");
-        assert!(!names_the_unknown_command(&usage, "search-content"));
-    }
-
-    #[test]
-    fn a_moved_name_is_dispatched_only_when_the_core_does_not_build_it_in() {
-        let built_in = |name: &'static str| {
-            on_big_stack(move || Cli::command().find_subcommand(name).is_some())
-        };
-        // The moved commands #878 dropped from the binary reach the hint ...
-        for name in [
-            "flow",
-            "plan-rollback",
-            "token-savings",
-            "squash-branch",
-            "fast-forward",
-            "commit-history",
-            "recall",
-            "ultraflow",
-        ] {
-            assert!(is_moved_name(name) && !built_in(name), "{name}");
-        }
-        // ... the one moved command still built in is clap's, whatever the table
-        // says.
-        assert!(is_moved_name("check-release") && built_in("check-release"));
-    }
-
-    fn is_moved_name(name: &str) -> bool {
-        MOVED_COMMANDS.iter().any(|(moved, _)| *moved == name)
-    }
-
-    fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(f)
-            .unwrap()
-            .join()
-            .unwrap()
-    }
-
-    fn installed(dir: &Path, name: &str, binary: Binary) -> pixel_plugin::Added {
-        pixel_plugin::Added {
-            name: name.to_owned(),
-            dir: dir.join(name),
-            manifest: pixel_plugin::Manifest {
-                name: name.to_owned(),
-                version: "1.4.2".to_owned(),
-                api: 1,
-                description: "d".to_owned(),
-                run: "bin/tool".to_owned(),
-                capabilities: vec![pixel_plugin::Capability::Command],
-                network: false,
-                commands: vec![],
-                skill: None,
-                probe: None,
-            },
-            binary,
-            skill: None,
-        }
-    }
-
-    #[test]
-    fn the_install_report_names_what_was_downloaded_or_how_to_build_it() {
-        let dir = Path::new("/h/.pixel/plugins");
-        assert_eq!(
-            render_installed(&installed(dir, "tool", Binary::Present)),
-            "installed plugin tool 1.4.2 in /h/.pixel/plugins/tool\n"
-        );
-        let url = "https://github.com/acme/tool/releases/latest/download/pixel-tool-x".to_owned();
-        let digest = "ab".repeat(32);
-        let verified = Binary::Downloaded(pixel_plugin::Downloaded {
-            url: url.clone(),
-            verified: true,
-            sha256: digest.clone(),
-        });
-        assert_eq!(
-            render_installed(&installed(dir, "tool", verified)),
-            format!(
-                "installed plugin tool 1.4.2 in /h/.pixel/plugins/tool\ndownloaded {url} (sha256 {digest} verified)\n"
-            )
-        );
-        let unverified = Binary::Downloaded(pixel_plugin::Downloaded {
-            url: url.clone(),
-            verified: false,
-            sha256: digest.clone(),
-        });
-        assert!(
-            render_installed(&installed(dir, "tool", unverified)).ends_with(&format!(
-                "downloaded {url} (UNVERIFIED: no .sha256 published, installed by --allow-unverified; sha256 {digest})\n"
-            ))
-        );
-        let missing = Binary::Missing {
-            git_url: "https://github.com/acme/tool.git".to_owned(),
-            reference: Some("v2".to_owned()),
-            download_error: "cannot download u: HTTP 404".to_owned(),
-        };
-        let text = render_installed(&installed(dir, "tool", missing));
-        assert!(
-            text.contains("tool is installed but not runnable: its program `bin/tool` is not built and no release asset was usable (cannot download u: HTTP 404)\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("build it with: cargo install --git https://github.com/acme/tool.git --rev v2 --root /h/.pixel/plugins/tool\n"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn install_json_should_report_the_asset_url_digest_and_verification() {
-        let dir = Path::new("/h/.pixel/plugins");
-        let url = "https://github.com/acme/tool/releases/latest/download/pixel-tool-x";
-        let unverified = Binary::Downloaded(pixel_plugin::Downloaded {
-            url: url.to_owned(),
-            verified: false,
-            sha256: "cd".repeat(32),
-        });
-        assert_eq!(
-            installed_json(&installed(dir, "tool", unverified)),
-            serde_json::json!({
-                "name": "tool",
-                "version": "1.4.2",
-                "dir": "/h/.pixel/plugins/tool",
-                "network": false,
-                "binary": {
-                    "kind": "downloaded",
-                    "url": url,
-                    "sha256": "cd".repeat(32),
-                    "verified": false,
-                },
-            })
-        );
-        let missing = Binary::Missing {
-            git_url: "https://github.com/acme/tool.git".to_owned(),
-            reference: None,
-            download_error: "no digest".to_owned(),
-        };
-        assert_eq!(
-            installed_json(&installed(dir, "tool", missing))["binary"],
-            serde_json::json!({
-                "kind": "missing",
-                "git_url": "https://github.com/acme/tool.git",
-                "reference": null,
-                "download_error": "no digest",
-            })
-        );
-        assert_eq!(
-            installed_json(&installed(dir, "tool", Binary::Present))["binary"],
-            serde_json::json!({ "kind": "present" })
-        );
-    }
-
-    #[test]
-    fn a_shipped_program_without_a_release_asset_names_the_build_that_replaces_it() {
-        // The Pixel-CLI plugins ship a launcher at `run` that only finds a
-        // separately built binary: "installed" alone sent the user to a first
-        // run that failed (2026-10 retro).
-        let shipped = Binary::Shipped {
-            git_url: "https://github.com/acme/tool.git".to_owned(),
-            reference: None,
-            download_error: "cannot download u: HTTP 404".to_owned(),
-        };
-        assert_eq!(
-            render_installed(&installed(Path::new("/h/.pixel/plugins"), "tool", shipped)),
-            "installed plugin tool 1.4.2 in /h/.pixel/plugins/tool\n\
-             tool runs the repository's own `bin/tool`: no release asset replaced it (cannot download u: HTTP 404)\n\
-             if `tool` then reports a missing program, build it into the plugin with: \
-             cargo install --git https://github.com/acme/tool.git --root /h/.pixel/plugins/tool --force\n"
-        );
-    }
-
-    #[test]
-    fn a_network_plugin_tells_the_user_to_enable_it() {
-        let dir = Path::new("/h");
-        let mut added = installed(dir, "net", Binary::Present);
-        added.manifest.network = true;
-        assert!(
-            render_installed(&added).ends_with(
-                "net declares network access: run `pixel plugin enable net` to allow it\n"
-            )
-        );
-    }
-
-    #[test]
-    fn a_plugins_exit_code_is_its_own_and_a_signal_is_128_plus_it() {
-        assert_eq!(exit_code(ExitStatus::from_raw(0)), 0);
-        assert_eq!(exit_code(ExitStatus::from_raw(7 << 8)), 7);
-        assert_eq!(exit_code(ExitStatus::from_raw(9)), 137);
-        assert_eq!(exit_code(ExitStatus::from_raw(15)), 143);
-    }
-}
+mod tests;

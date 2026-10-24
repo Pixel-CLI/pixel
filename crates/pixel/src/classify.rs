@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! `pixel classify` — bounded label decision through a remote LLM.
@@ -325,73 +325,6 @@ fn document(engine: &dyn DecisionEngine, spec: &Spec, probs: &BTreeMap<String, f
     out
 }
 
-/// The JSON document for a history verdict: the same envelope as a model
-/// decision, but `snapshot.model` names the tier and `history` discloses the
-/// source, schema version, neighbours and raw vote shares. `probs` carries
-/// the raw vote shares, never calibrated probabilities (see the basis).
-fn history_document(spec: &Spec, verdict: &crate::classify_history::HistoryVerdict) -> Value {
-    let mut probs = BTreeMap::new();
-    for label in &spec.labels {
-        probs.insert(
-            label.clone(),
-            verdict.vote_shares.get(label).copied().unwrap_or(0.0),
-        );
-    }
-    let neighbours: Vec<Value> = verdict
-        .neighbours
-        .iter()
-        .map(|n| {
-            json!({
-                "id": n.id,
-                "text": n.text,
-                "label": n.label,
-                "similarity": n.similarity,
-            })
-        })
-        .collect();
-    json!({
-        "marker": "complete",
-        "predicted": verdict.label,
-        "probs": probs,
-        "epistemics": {
-            "closed_world": false,
-            "lower_bound": false,
-            "basis": verdict.basis,
-            "confidence": "complete",
-        },
-        "snapshot": {
-            "model": "verified-history",
-            "deterministic": true,
-            "labels": spec.labels,
-        },
-        "history": {
-            "source": verdict.source,
-            "version": verdict.version,
-            "neighbours": neighbours,
-            "scores": verdict.vote_shares,
-            "abstained": false,
-        },
-    })
-}
-
-/// The human-readable history verdict: raw vote shares, the argmax, and the
-/// tier's provenance on one line.
-fn render_history(verdict: &crate::classify_history::HistoryVerdict, spec: &Spec) -> String {
-    let mut out = String::new();
-    for label in &spec.labels {
-        let p = verdict.vote_shares.get(label).copied().unwrap_or(0.0);
-        out.push_str(&format!("{label}: {p:.3}\n"));
-    }
-    out.push_str(&format!("predicted: {}\n", verdict.label));
-    out.push_str(&format!(
-        "history: verified-history retrieval (source: {}, version: {}, neighbours: {})\n",
-        verdict.source,
-        verdict.version,
-        verdict.neighbours.len()
-    ));
-    out
-}
-
 /// Return the bounded text and whether at least one character was removed.
 fn clip_text(text: &str) -> (String, bool) {
     let mut chars = text.chars();
@@ -516,9 +449,9 @@ fn stored_base_for(
     let env_set = overrides
         .var("PIXEL_REMOTE_BASE")
         .is_some_and(|s| !s.is_empty());
-    let same_preset = crate::config_cmd::classify_remote_preset() == Some(preset);
+    let same_preset = crate::classify_config::classify_remote_preset() == Some(preset);
     (!env_set && same_preset)
-        .then(crate::config_cmd::classify_remote_base)
+        .then(crate::classify_config::classify_remote_base)
         .flatten()
 }
 
@@ -645,7 +578,7 @@ fn remote_key_value_from(
     }
     // `pixel config remote-key <preset>` is the fallback so a key need not
     // live in every shell's environment.
-    if let Some(key) = crate::config_cmd::remote_key(preset) {
+    if let Some(key) = crate::classify_config::remote_key(preset) {
         return Ok(Some(key));
     }
     // A preset that takes no key (`local`) has nothing for Infisical to
@@ -730,27 +663,33 @@ fn serve_line(engine: &mut dyn DecisionEngine, line: &str) -> Option<String> {
 trait ClassifyOutput {
     fn write_text(&mut self, text: &str) -> Result<(), String>;
     fn print_document(&mut self, document: &Value) -> Result<(), String>;
-    /// The moved commands a plugin runs here: `--task-intent` suggests only
-    /// ops that run.
-    fn plugins(&self) -> pixel_plugin::Available;
 }
 
 struct ProductionOutput;
 
+/// Text for stdout, counted by the invocation's accounting.
+fn write_stdout(text: &str) -> Result<(), String> {
+    crate::operation::print(format_args!("{text}"));
+    Ok(())
+}
+
+/// A JSON document for stdout, pretty-printed like every command's `--json`.
+fn print_document(document: &Value) -> Result<(), String> {
+    let pretty =
+        serde_json::to_string_pretty(document).map_err(|e| format!("result encode: {e}"))?;
+    crate::operation::print(format_args!("{pretty}\n"));
+    Ok(())
+}
+
 impl ClassifyOutput for ProductionOutput {
     #[cfg_attr(test, mutants::skip)] // thin adapter preserving stdout accounting
     fn write_text(&mut self, text: &str) -> Result<(), String> {
-        crate::write_stdout(text)
+        write_stdout(text)
     }
 
     #[cfg_attr(test, mutants::skip)] // thin adapter preserving JSON output caps
     fn print_document(&mut self, document: &Value) -> Result<(), String> {
-        crate::print_data(document, true)
-    }
-
-    #[cfg_attr(test, mutants::skip)] // thin adapter over the process's plugin directories
-    fn plugins(&self) -> pixel_plugin::Available {
-        crate::plugin_cmd::available()
+        print_document(document)
     }
 }
 
@@ -770,7 +709,7 @@ fn serve_jsonl(
     Ok(())
 }
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone)]
 #[group(multiple = true)]
 pub struct ClassifyOptions {
     /// The state text to judge — the part that varies (omit with --jsonl).
@@ -823,13 +762,6 @@ pub struct ClassifyOptions {
     /// its own error row; the stored engine choice is ignored.
     #[arg(long, conflicts_with_all = ["jsonl", "if_warm", "task_intent", "engine", "ollaya_url"], requires = "labels")]
     pub debug: bool,
-    /// Consult the verified-history tier before the model: answer from
-    /// stored, human-verified examples when the rubric matches, else fall
-    /// through to the model unchanged. Opt-in; the store is a bounded
-    /// project-local file under `.pixel/`.
-    #[arg(long, conflicts_with = "jsonl")]
-    pub history: bool,
-
     #[arg(long)]
     pub json: bool,
 }
@@ -881,7 +813,7 @@ fn one_shot_spec(opts: &ClassifyOptions) -> Result<Spec, String> {
         .as_deref()
         .ok_or("classify needs a text argument (or --jsonl)")?;
     if opts.task_intent {
-        return crate::prompt_intent::spec(text);
+        return crate::task_intent::spec(text);
     }
     Spec::checked(
         text.to_string(),
@@ -982,7 +914,6 @@ fn run_with(
     opener: impl FnOnce(
         crate::classify_setup::ResolvedEngine,
     ) -> Result<Box<dyn DecisionEngine>, String>,
-    history: Option<crate::classify_history::HistoryTier>,
     reader: impl BufRead,
     output: &mut dyn ClassifyOutput,
 ) -> Result<(), String> {
@@ -1030,55 +961,20 @@ fn run_with(
     }
 
     let spec = one_shot_spec(&opts)?;
-    // The verified-history tier runs before the model: a confident stored
-    // answer means the engine is never opened. An abstention falls through
-    // to the unchanged model path, disclosing why the tier stayed out.
-    let mut history_abstain = None;
-    if let Some(tier) = &history {
-        match tier.evaluate(&spec) {
-            crate::classify_history::HistoryDecision::Accept(verdict) => {
-                let ops = opts
-                    .task_intent
-                    .then(|| crate::prompt_intent::ops_for(&verdict.label, &output.plugins()))
-                    .flatten();
-                if opts.json {
-                    let mut doc = history_document(&spec, &verdict);
-                    if let Some(ops) = ops {
-                        doc["next_ops"] = json!(ops);
-                    }
-                    return output.print_document(&doc);
-                }
-                let mut text = render_history(&verdict, &spec);
-                if let Some(ops) = ops {
-                    text.push_str(&format!("next: {}\n", ops.join(", ")));
-                }
-                return output.write_text(&text);
-            }
-            crate::classify_history::HistoryDecision::Abstain(reason) => {
-                history_abstain = Some(reason);
-            }
-        }
-    }
     let mut engine = opener(resolve(&opts)?)?;
     let probs = engine.decide(&spec)?;
     let ops = opts
         .task_intent
-        .then(|| crate::prompt_intent::ops_for(predicted(&probs, &spec.labels), &output.plugins()))
+        .then(|| crate::task_intent::ops_for(predicted(&probs, &spec.labels)))
         .flatten();
     if opts.json {
         let mut doc = document(engine.as_ref(), &spec, &probs);
-        if let Some(reason) = history_abstain {
-            doc["history"] = json!({"abstained": true, "reason": reason.as_str()});
-        }
         if let Some(ops) = ops {
             doc["next_ops"] = json!(ops);
         }
         output.print_document(&doc)
     } else {
         let mut text = render_probs(&probs, &spec);
-        if let Some(reason) = history_abstain {
-            text.push_str(&format!("history: abstained ({})\n", reason.as_str()));
-        }
         if let Some(ops) = ops {
             text.push_str(&format!("next: {}\n", ops.join(", ")));
         }
@@ -1245,14 +1141,14 @@ fn resolve_engine_for(
     if opts.if_warm {
         return resolve_if_warm(
             opts,
-            crate::config_cmd::classify_engine(),
+            crate::classify_config::classify_engine(),
             crate::classify_setup::local_base(),
             crate::classify_setup::server_reachable,
         );
     }
     resolve_engine_with(
         opts,
-        crate::config_cmd::classify_engine(),
+        crate::classify_config::classify_engine(),
         crate::classify_setup::server_reachable,
         crate::classify_setup::ensure_local,
     )
@@ -1333,10 +1229,10 @@ fn stored_remote_model_when_unset(
     let env_set = overrides
         .var("PIXEL_REMOTE_MODEL")
         .is_some_and(|s| !s.is_empty());
-    if env_set || crate::config_cmd::classify_remote_preset() != Some(preset) {
+    if env_set || crate::classify_config::classify_remote_preset() != Some(preset) {
         return None;
     }
-    crate::config_cmd::classify_remote_model()
+    crate::classify_config::classify_remote_model()
 }
 
 /// The Ollaya engine config for one classify call. `--if-warm` gets a short
@@ -1350,18 +1246,21 @@ fn ollaya_config(base: String, if_warm: bool) -> crate::decide_ollaya::OllayaCon
         ..Default::default()
     };
     if if_warm {
-        config.timeout = crate::prompt_intent::HOOK_CALL_TIMEOUT;
+        config.timeout = crate::task_intent::HOOK_CALL_TIMEOUT;
     }
     config
 }
 
 pub fn run(opts: ClassifyOptions) -> Result<(), String> {
-    if !crate::config_cmd::classify_enabled()? {
-        return Err("classify is disabled; enable it with `pixel config classify on` or `pixel config setup`".into());
+    if !crate::classify_config::classify_enabled()? {
+        return Err(
+            "classify is disabled; enable it with `pixel config classify on` or `pixel config setup`"
+                .into(),
+        );
     }
     let remote_preset = resolve_remote_preset(
         opts.remote_preset,
-        crate::config_cmd::classify_remote_preset(),
+        crate::classify_config::classify_remote_preset(),
     );
     let remote_model = opts
         .remote_model
@@ -1369,7 +1268,6 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
         .or_else(|| stored_remote_model_when_unset(remote_preset, RemoteOverrides::Shared));
     // `opts` moves into `run_with`; the engine opener still needs the flag.
     let if_warm = opts.if_warm;
-    let history = opts.history.then(open_history_tier);
     let stdin = std::io::stdin();
     let mut output = ProductionOutput;
     if opts.debug {
@@ -1379,23 +1277,9 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
         opts,
         resolve_engine_for,
         move |resolved| open_resolved(resolved, remote_preset, remote_model, if_warm),
-        history,
         stdin.lock(),
         &mut output,
     )
-}
-
-/// Open the project-local history store for the tier. A store that cannot be
-/// opened (no `.pixel/`, unreadable file) becomes an empty store rather than
-/// failing the classify call: the tier is an optimization, never a new
-/// failure mode, and an empty store abstains so the model answers as before.
-fn open_history_tier() -> crate::classify_history::HistoryTier {
-    let store = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| crate::discover_root(&cwd).ok())
-        .and_then(|root| crate::classify_history::HistoryStore::open_checked(&root).ok())
-        .unwrap_or_else(crate::classify_history::HistoryStore::empty);
-    crate::classify_history::HistoryTier::new(store)
 }
 
 /// The engine a resolved choice maps to. The one place the remote/local
@@ -1511,7 +1395,6 @@ mod tests {
         documents: Vec<Value>,
         fail_text: bool,
         fail_document: bool,
-        plugins: pixel_plugin::Available,
     }
 
     impl ClassifyOutput for RecordingOutput {
@@ -1529,10 +1412,6 @@ mod tests {
             }
             self.documents.push(document.clone());
             Ok(())
-        }
-
-        fn plugins(&self) -> pixel_plugin::Available {
-            self.plugins.clone()
         }
     }
 
@@ -1573,8 +1452,8 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(PARSER_TEST_STACK)
             .spawn(move || {
-                let cli = crate::Cli::try_parse_from(args).unwrap();
-                let crate::Command::Classify(options) = cli.command else {
+                let cli = crate::cli::Cli::try_parse_from(args).unwrap();
+                let crate::cli::Command::Classify(options) = cli.command else {
                     panic!("classify argv parsed as another command");
                 };
                 options
@@ -1810,7 +1689,6 @@ mod tests {
                     )
                 },
                 |_| panic!("startup failure must prevent opening the engine"),
-                None,
                 Cursor::new(Vec::<u8>::new()),
                 &mut output,
             )
@@ -2005,7 +1883,6 @@ mod tests {
             if_warm: false,
             task_intent: false,
             debug: false,
-            history: false,
 
             json: false,
         };
@@ -2039,10 +1916,6 @@ mod tests {
             self.docs.push(document.clone());
             Ok(())
         }
-
-        fn plugins(&self) -> pixel_plugin::Available {
-            pixel_plugin::Available::none()
-        }
     }
 
     #[test]
@@ -2061,7 +1934,6 @@ mod tests {
             task_intent: false,
             debug: true,
             json: false,
-            history: false,
         };
         let lanes: Vec<DebugLane> = vec![
             (
@@ -2115,7 +1987,6 @@ mod tests {
             task_intent: false,
             debug: true,
             json: true,
-            history: false,
         };
         let lanes: Vec<DebugLane> = vec![
             (
@@ -2267,7 +2138,6 @@ mod tests {
             options,
             test_resolve,
             move |_resolved| fake_engine(recorded),
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -2321,7 +2191,7 @@ mod tests {
             .stack_size(PARSER_TEST_STACK)
             .spawn(move || {
                 assert!(
-                    crate::Cli::try_parse_from([
+                    crate::cli::Cli::try_parse_from([
                         "pixel",
                         "classify",
                         "--backend",
@@ -2353,7 +2223,6 @@ mod tests {
             if_warm: false,
             task_intent: false,
             debug: false,
-            history: false,
 
             json: false,
         };
@@ -2365,7 +2234,6 @@ mod tests {
                 *opened.lock().unwrap() += 1;
                 fake_engine(Arc::new(Mutex::new(Vec::new())))
             },
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -2388,7 +2256,6 @@ mod tests {
             if_warm: false,
             task_intent: false,
             debug: false,
-            history: false,
 
             json: true,
         };
@@ -2396,7 +2263,6 @@ mod tests {
             options,
             test_resolve,
             |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -2414,21 +2280,17 @@ mod tests {
     fn task_intent_should_judge_the_built_in_labels_and_name_the_ops_of_the_verdict() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&calls);
-        let mut output = RecordingOutput {
-            plugins: pixel_plugin::Available::of(&["plan-rollback", "dig-history"]),
-            ..Default::default()
-        };
+        let mut output = RecordingOutput::default();
         run_with(
             parse_classify(&["pixel", "classify", "the login broke", "--task-intent"]),
             test_resolve,
             move |_resolved| fake_engine(recorded),
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
         .unwrap();
         let spec = calls.lock().unwrap().remove(0);
-        assert_eq!(spec, crate::prompt_intent::spec("the login broke").unwrap());
+        assert_eq!(spec, crate::task_intent::spec("the login broke").unwrap());
         // The fake ties every intent label: the first, bugfix, is predicted.
         assert!(
             output.text.contains("predicted: bugfix\n"),
@@ -2437,7 +2299,7 @@ mod tests {
         );
         assert!(
             output.text.ends_with(
-                "next: pixel plan-rollback \"<problem>\", pixel dig-history --phrase \"<text>\", pixel impact \"<symbol>\"\n"
+                "next: pixel search-history \"<text>\", pixel impact \"<symbol>\", pixel call-path \"<from>\" \"<to>\"\n"
             ),
             "{}",
             output.text
@@ -2454,16 +2316,18 @@ mod tests {
             ]),
             test_resolve,
             |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
         .unwrap();
         assert_eq!(output.documents[0]["predicted"], "bugfix");
-        // No plugin runs: the ops that need one are left out, not taught.
         assert_eq!(
             output.documents[0]["next_ops"],
-            json!(["pixel impact \"<symbol>\""])
+            json!([
+                "pixel search-history \"<text>\"",
+                "pixel impact \"<symbol>\"",
+                "pixel call-path \"<from>\" \"<to>\""
+            ])
         );
 
         let mut output = RecordingOutput::default();
@@ -2471,7 +2335,6 @@ mod tests {
             parse_classify(&["pixel", "classify", "beta", "--label", "yes,no"]),
             test_resolve,
             |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -2563,7 +2426,7 @@ mod tests {
         let base = "http://127.0.0.1:7777".to_string();
         let warm = ollaya_config(base.clone(), true);
         assert_eq!(warm.base, base);
-        assert_eq!(warm.timeout, crate::prompt_intent::HOOK_CALL_TIMEOUT);
+        assert_eq!(warm.timeout, crate::task_intent::HOOK_CALL_TIMEOUT);
         assert_eq!(
             ollaya_config(base, false).timeout,
             crate::decide_ollaya::OllayaConfig::default().timeout,
@@ -2597,7 +2460,6 @@ mod tests {
             if_warm: false,
             task_intent: false,
             debug: false,
-            history: false,
 
             json: false,
         };
@@ -2609,7 +2471,6 @@ mod tests {
                 *opened.lock().unwrap() += 1;
                 fake_engine(recorded)
             },
-            None,
             Cursor::new(input),
             &mut output,
         )
@@ -2667,7 +2528,6 @@ mod tests {
                 if_warm: false,
                 task_intent: false,
                 debug: false,
-                history: false,
 
                 json: false,
             },
@@ -2678,7 +2538,6 @@ mod tests {
                 engine.battery_answer = Some(answers.clone());
                 Ok(Box::new(engine) as _)
             },
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -2721,7 +2580,6 @@ mod tests {
                 if_warm: false,
                 task_intent: false,
                 debug: false,
-                history: false,
 
                 json: false,
             },
@@ -2737,7 +2595,6 @@ mod tests {
                 }));
                 Ok(Box::new(engine) as _)
             },
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -2764,7 +2621,6 @@ mod tests {
                 if_warm: false,
                 task_intent: false,
                 debug: false,
-                history: false,
 
                 json: false,
             },
@@ -2773,7 +2629,6 @@ mod tests {
                 *opened.lock().unwrap() += 1;
                 fake_engine(Arc::new(Mutex::new(Vec::new())))
             },
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -2830,7 +2685,6 @@ mod tests {
             if_warm: false,
             task_intent: false,
             debug: false,
-            history: false,
 
             json: false,
         };
@@ -2839,7 +2693,6 @@ mod tests {
             jsonl_options(),
             test_resolve,
             |_resolved| Err("open failed".to_string()),
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -2850,7 +2703,6 @@ mod tests {
             jsonl_options(),
             test_resolve,
             |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
-            None,
             FailingReader,
             &mut output,
         )
@@ -2864,7 +2716,6 @@ mod tests {
             jsonl_options(),
             test_resolve,
             |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
-            None,
             Cursor::new(line),
             &mut output,
         )
@@ -2889,13 +2740,11 @@ mod tests {
                 if_warm: false,
                 task_intent: false,
                 debug: false,
-                history: false,
 
                 json: true,
             },
             test_resolve,
             |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -2909,17 +2758,18 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(PARSER_TEST_STACK)
             .spawn(move || {
-                let default =
-                    crate::Cli::try_parse_from(["pixel", "classify", "state", "--label", "a,b"])
-                        .unwrap();
-                let crate::Command::Classify(options) = default.command else {
+                let default = crate::cli::Cli::try_parse_from([
+                    "pixel", "classify", "state", "--label", "a,b",
+                ])
+                .unwrap();
+                let crate::cli::Command::Classify(options) = default.command else {
                     panic!("not classify");
                 };
                 // No flag = None: the engine then comes from the stored
                 // preference (auto: probe local, fall back to remote).
                 assert_eq!(options.engine, None);
                 assert_eq!(options.ollaya_url, crate::decide_ollaya::DEFAULT_BASE);
-                let ollaya = crate::Cli::try_parse_from([
+                let ollaya = crate::cli::Cli::try_parse_from([
                     "pixel",
                     "classify",
                     "state",
@@ -2931,7 +2781,7 @@ mod tests {
                     "http://127.0.0.1:9999",
                 ])
                 .unwrap();
-                let crate::Command::Classify(options) = ollaya.command else {
+                let crate::cli::Command::Classify(options) = ollaya.command else {
                     panic!("not classify");
                 };
                 assert_eq!(options.engine, Some(EngineChoice::Ollaya));
@@ -2957,7 +2807,6 @@ mod tests {
             if_warm: false,
             task_intent: false,
             debug: false,
-            history: false,
 
             json: false,
         };
@@ -2976,7 +2825,6 @@ mod tests {
                     },
                 )) as _)
             },
-            None,
             Cursor::new(Vec::<u8>::new()),
             &mut RecordingOutput::default(),
         )
@@ -3201,87 +3049,6 @@ mod tests {
         );
     }
 
-    // ---- verified-history tier (issue #624) ----
-
-    fn history_store() -> crate::classify_history::HistoryStore {
-        crate::classify_history::HistoryStore::open(std::env::temp_dir().join(format!(
-            "pixel-classify-history-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )))
-        .unwrap()
-    }
-
-    fn history_spec(text: &str) -> Spec {
-        spec(text, "the rubric", &["yes", "no"], &[("yes", "affirm")])
-    }
-
-    fn history_tier_with(entries: &[(&str, &str)]) -> crate::classify_history::HistoryTier {
-        let mut store = history_store();
-        let s = history_spec("seed");
-        for (text, label) in entries {
-            store
-                .add(crate::classify_history::NewEntry::for_spec(
-                    text.to_string(),
-                    label.to_string(),
-                    "task-intent".to_string(),
-                    "human-verified".to_string(),
-                    &s,
-                ))
-                .unwrap();
-        }
-        crate::classify_history::HistoryTier::new(store)
-    }
-
-    fn history_opts(text: &str) -> ClassifyOptions {
-        ClassifyOptions {
-            text: Some(text.to_string()),
-            context: Some("the rubric".to_string()),
-            labels: vec!["yes".to_string(), "no".to_string()],
-            criteria: vec!["yes=affirm".to_string()],
-            remote_preset: Some(crate::decide_remote::Preset::Openrouter),
-            remote_model: None,
-            engine: Some(EngineChoice::Remote),
-            ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
-            jsonl: false,
-            if_warm: false,
-            task_intent: false,
-            history: true,
-            json: false,
-            debug: false,
-        }
-    }
-
-    #[test]
-    fn history_accept_answers_before_the_model_and_never_opens_the_engine() {
-        let calls: Arc<Mutex<Vec<Spec>>> = Arc::new(Mutex::new(Vec::new()));
-        let calls_for_engine = Arc::clone(&calls);
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
-        let mut output = RecordingOutput::default();
-        run_with(
-            history_opts("fix the login bug"),
-            test_resolve,
-            move |_resolved| fake_engine(Arc::clone(&calls_for_engine)),
-            Some(tier),
-            Cursor::new(Vec::<u8>::new()),
-            &mut output,
-        )
-        .unwrap();
-        assert!(output.text.contains("predicted: yes"), "{}", output.text);
-        assert!(
-            output.text.contains("verified-history retrieval"),
-            "{}",
-            output.text
-        );
-        assert!(
-            calls.lock().unwrap().is_empty(),
-            "the model must not be consulted when history accepts"
-        );
-    }
-
     #[test]
     fn stored_remote_model_when_unset_should_yield_the_stored_model() {
         let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", None)]);
@@ -3293,37 +3060,6 @@ mod tests {
             )
             .as_deref(),
             Some("stored-m")
-        );
-    }
-
-    #[test]
-    fn history_accept_json_discloses_source_version_neighbours_and_scores() {
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
-        let mut output = RecordingOutput::default();
-        let mut opts = history_opts("fix the login bug");
-        opts.json = true;
-        run_with(
-            opts,
-            test_resolve,
-            |_resolved| fake_engine(Arc::new(Mutex::new(Vec::<Spec>::new()))),
-            Some(tier),
-            Cursor::new(Vec::<u8>::new()),
-            &mut output,
-        )
-        .unwrap();
-        let doc = &output.documents[0];
-        assert_eq!(doc["predicted"], "yes");
-        assert_eq!(doc["snapshot"]["model"], "verified-history");
-        assert_eq!(doc["snapshot"]["deterministic"], true);
-        assert_eq!(doc["history"]["source"], "human-verified");
-        assert_eq!(doc["history"]["version"], 1);
-        assert_eq!(doc["history"]["neighbours"].as_array().unwrap().len(), 1);
-        assert_eq!(doc["history"]["abstained"], false);
-        assert!(
-            doc["epistemics"]["basis"]
-                .as_str()
-                .unwrap()
-                .contains("not a calibrated probability")
         );
     }
 
@@ -3409,30 +3145,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_history_preserves_current_behavior_and_consults_the_model() {
-        let calls: Arc<Mutex<Vec<Spec>>> = Arc::new(Mutex::new(Vec::new()));
-        let calls_for_engine = Arc::clone(&calls);
-        let tier = history_tier_with(&[]);
-        let mut output = RecordingOutput::default();
-        run_with(
-            history_opts("fix the login bug"),
-            test_resolve,
-            move |_resolved| fake_engine(Arc::clone(&calls_for_engine)),
-            Some(tier),
-            Cursor::new(Vec::<u8>::new()),
-            &mut output,
-        )
-        .unwrap();
-        assert_eq!(calls.lock().unwrap().len(), 1, "the model must answer");
-        assert!(output.text.contains("predicted:"), "{}", output.text);
-        assert!(
-            output.text.contains("history: abstained (empty)"),
-            "{}",
-            output.text
-        );
-    }
-
-    #[test]
     fn jev_config_beside_another_preset_should_not_inherit_its_overrides() {
         let _env = jev_env(&OTHER_PRESET_OVERRIDES);
         let own = jev_config(None, RemoteOverrides::Ignored).unwrap();
@@ -3458,33 +3170,6 @@ mod tests {
                 .var("PIXEL_INFISICAL_SECRET_NAME")
                 .as_deref(),
             Some("OPENROUTER_API_KEY")
-        );
-    }
-
-    #[test]
-    fn history_abstention_falls_through_to_the_model_with_the_reason_disclosed() {
-        let calls: Arc<Mutex<Vec<Spec>>> = Arc::new(Mutex::new(Vec::new()));
-        let calls_for_engine = Arc::clone(&calls);
-        // One entry only: a close paraphrase clears the similarity threshold
-        // but cannot reach the support threshold.
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
-        let mut output = RecordingOutput::default();
-        run_with(
-            history_opts("fix login bug"),
-            test_resolve,
-            move |_resolved| fake_engine(Arc::clone(&calls_for_engine)),
-            Some(tier),
-            Cursor::new(Vec::<u8>::new()),
-            &mut output,
-        )
-        .unwrap();
-        assert_eq!(calls.lock().unwrap().len(), 1, "the model must answer");
-        assert!(
-            output
-                .text
-                .contains("history: abstained (insufficient-support)"),
-            "{}",
-            output.text
         );
     }
 
@@ -3724,8 +3409,8 @@ mod tests {
             .stack_size(PARSER_TEST_STACK)
             .spawn(move || {
                 let base = ["pixel", "classify", "state", "--label", "a,b", "--debug"];
-                assert!(crate::Cli::try_parse_from(base).is_ok());
-                let err = crate::Cli::try_parse_from(
+                assert!(crate::cli::Cli::try_parse_from(base).is_ok());
+                let err = crate::cli::Cli::try_parse_from(
                     base.into_iter()
                         .chain(["--ollaya-url", "http://127.0.0.1:9999"]),
                 )
@@ -3736,123 +3421,5 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
-    }
-
-    #[test]
-    fn history_json_abstention_discloses_the_reason_on_the_model_document() {
-        let tier = history_tier_with(&[]);
-        let mut output = RecordingOutput::default();
-        let mut opts = history_opts("fix the login bug");
-        opts.json = true;
-        run_with(
-            opts,
-            test_resolve,
-            |_resolved| fake_engine(Arc::new(Mutex::new(Vec::<Spec>::new()))),
-            Some(tier),
-            Cursor::new(Vec::<u8>::new()),
-            &mut output,
-        )
-        .unwrap();
-        let doc = &output.documents[0];
-        assert_eq!(doc["history"]["abstained"], true);
-        assert_eq!(doc["history"]["reason"], "empty");
-        assert_eq!(doc["snapshot"]["model"], "fake");
-    }
-
-    #[test]
-    fn history_if_warm_never_starts_a_daemon_or_reaches_the_network() {
-        // --if-warm answers only from an already-listening local engine. The
-        // tier is pure local computation, so a history accept returns before
-        // any engine is opened and a history abstention keeps the warm-only
-        // guarantee (the opener is never called for a cold engine).
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
-        let mut output = RecordingOutput::default();
-        let mut opts = history_opts("fix the login bug");
-        opts.if_warm = true;
-        opts.engine = Some(EngineChoice::Ollaya);
-        opts.ollaya_url = "http://127.0.0.1:9".to_string();
-        run_with(
-            opts,
-            |opts| resolve_engine_with(opts, None, |_| false, |_| panic!("must not start")),
-            |_resolved| panic!("a history accept must not open an engine"),
-            Some(tier),
-            Cursor::new(Vec::<u8>::new()),
-            &mut output,
-        )
-        .unwrap();
-        assert!(output.text.contains("predicted: yes"), "{}", output.text);
-    }
-
-    #[test]
-    fn history_if_warm_abstention_keeps_the_no_start_no_network_guarantee() {
-        // An empty history abstains; --if-warm then refuses the cold engine
-        // exactly as it would without the tier — nothing is started.
-        let tier = history_tier_with(&[]);
-        let mut output = RecordingOutput::default();
-        let mut opts = history_opts("fix the login bug");
-        opts.if_warm = true;
-        opts.engine = Some(EngineChoice::Ollaya);
-        opts.ollaya_url = "http://127.0.0.1:9".to_string();
-        let error = run_with(
-            opts,
-            |opts| {
-                // Simulate resolve_if_warm: when the engine is not warm,
-                // return an error without calling ensure (which would start it).
-                let base = &opts.ollaya_url;
-                if !base.is_empty() && base.starts_with("http") {
-                    // The URL looks valid but the engine is not listening.
-                    return Err(format!(
-                        "not warm: no local classify engine is listening at {base}; --if-warm never starts it"
-                    ));
-                }
-                resolve_engine_with(opts, None, |_| false, |_| panic!("must not start"))
-            },
-            |_resolved| panic!("a cold engine must not be opened"),
-            Some(tier),
-            Cursor::new(Vec::<u8>::new()),
-            &mut output,
-        )
-        .unwrap_err();
-        assert!(error.contains("not warm"), "{error}");
-        assert!(output.text.is_empty());
-    }
-
-    #[test]
-    fn history_if_warm_accept_returns_before_any_engine_resolution() {
-        // A history accept returns before resolve is called at all, so the
-        // warm-only guarantee holds by construction: no probe, no start.
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
-        let mut output = RecordingOutput::default();
-        let mut opts = history_opts("fix the login bug");
-        opts.if_warm = true;
-        opts.engine = Some(EngineChoice::Ollaya);
-        opts.ollaya_url = "http://127.0.0.1:9".to_string();
-        run_with(
-            opts,
-            |_opts| panic!("resolve must not be called on a history accept"),
-            |_resolved| panic!("a history accept must not open an engine"),
-            Some(tier),
-            Cursor::new(Vec::<u8>::new()),
-            &mut output,
-        )
-        .unwrap();
-        assert!(output.text.contains("predicted: yes"), "{}", output.text);
-    }
-
-    #[test]
-    fn history_document_carries_raw_vote_shares_not_calibrated_probabilities() {
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
-        let s = history_spec("fix the login bug");
-        let verdict = match tier.evaluate(&s) {
-            crate::classify_history::HistoryDecision::Accept(v) => v,
-            other @ crate::classify_history::HistoryDecision::Abstain(_) => {
-                panic!("expected accept, got {other:?}")
-            }
-        };
-        let doc = history_document(&s, &verdict);
-        assert_eq!(doc["probs"]["yes"], 1.0);
-        assert_eq!(doc["probs"]["no"], 0.0);
-        assert_eq!(doc["history"]["scores"]["yes"], 1.0);
-        assert_eq!(doc["marker"], "complete");
     }
 }

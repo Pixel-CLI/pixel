@@ -1,4 +1,4 @@
-pixel
+Pixel
 Copyright (c) 2026 Livio Gama
 
 This project contains code derived from hypergrep
@@ -34,8 +34,8 @@ This project bundles or depends on the following notable components:
   tree-sitter, tree-sitter-typescript, tree-sitter-javascript,
   tree-sitter-rust, tree-sitter-go, tree-sitter-java, tree-sitter-python,
   tree-sitter-c. Source: https://github.com/tree-sitter/
-- **Embedding models** — downloaded from Hugging Face Hub on first use
-  via `pixel recall setup` (the pixel-recall plugin):
+- **Embedding models** — downloaded from Hugging Face Hub on first use by the
+  optional semantic-classification components:
   - Multilingual E5 Small (fastembed default)
   - potion-base-2M (model2vec)
   These models have their own licenses; see the Hugging Face model pages.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 # Empty the workflow-run queue of work that no longer matters. A merged (or
@@ -11,7 +11,7 @@
 # By default this only prints what it would cancel. Pass --apply to cancel.
 set -euo pipefail
 
-owner_repo=${PIXEL_REPO:-Pixel-CLI/pixel}
+owner_repo=${PIXEL_REPO:-PIXEL-CLI/pixel}
 branch=
 all=0
 older_than=0

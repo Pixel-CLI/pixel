@@ -1,32 +1,40 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 [package]
 name = "pixel-daemon"
-version = "0.9.0"
+version = "0.0.0"
 edition.workspace = true
 license.workspace = true
+publish = false
+description = "The PIXEL daemon: one Unix socket per repository, NDJSON ops, a single writer and read replicas"
 
 [lints]
 workspace = true
 
+[features]
+# Semantic search: the daemon can open the cached embedding model and keep a
+# resident pool of code chunks (`specs/semantic.md`). Without it every
+# `meaning` request answers `failed` and says the build has no semantic search.
+semantic = ["pixel-index/model2vec"]
+
 [dependencies]
-rustc-hash = "1"
+fs2 = "0.4.3"
+memchr = "2"
 mutants = { workspace = true }
-pixel-index = { path = "../pixel-index" }
+notify = "8"
+regex = "1"
+pixel-brief = { path = "../pixel-brief" }
 pixel-graph = { path = "../pixel-graph" }
-pixel-context = { path = "../pixel-context" }
-pixel-rank = { path = "../pixel-rank" }
+pixel-index = { path = "../pixel-index" }
+pixel-io = { path = "../pixel-io" }
+pixel-metrics = { path = "../pixel-metrics" }
+pixel-model = { path = "../pixel-model" }
+pixel-plugin = { path = "../pixel-plugin" }
 pixel-proto = { path = "../pixel-proto" }
-pixel-ops = { path = "../pixel-ops" }
-pixel-facts = { path = "../pixel-facts" }
-pixel-session = { path = "../pixel-session" }
-pixel-recall = { path = "../pixel-recall", default-features = false }
-pixel-git = { path = "../pixel-git" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-memchr = "2"
-notify = "8"
-rusqlite = { version = "0.40", features = ["bundled"] }
 xxhash-rust = { workspace = true }
-fs2 = "0.4.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,19 +1,16 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
-//! Configuration storage: YAML reads and comment-preserving YAML writes.
+//! Configuration storage: YAML reads and comment-preserving YAML writes of
+//! the nested, global-only keys (`classify`, `remote_keys`); the flat
+//! settings are edited as text by `pixel_setup::settings`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 
 use serde_json::{Value, json};
 
-pub const FILE_NAME: &str = "config.yaml";
-const TEMPLATE: &str = include_str!("config.yaml");
-
-pub fn path_in(directory: &Path) -> PathBuf {
-    directory.join(FILE_NAME)
-}
+const TEMPLATE: &str = pixel_setup::settings::TEMPLATE;
 
 pub fn load(path: &Path) -> Result<Value, String> {
     let text = match std::fs::read_to_string(path) {
@@ -42,41 +39,6 @@ fn parse(text: &str, path: &Path) -> Result<Value, String> {
         ));
     }
     Ok(value)
-}
-
-/// Create the template once; never overwrite an existing YAML file.
-pub fn ensure(path: &Path) -> Result<(), String> {
-    if path.exists() {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    finish_create(
-        path,
-        create_private(path, format!("{TEMPLATE}\n").as_bytes()),
-    )
-}
-
-/// A concurrent creator wins without clobbering; every other write error remains an error.
-fn finish_create(path: &Path, result: std::io::Result<()>) -> Result<(), String> {
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(format!("create {}: {e}", path.display())),
-    }
-}
-
-pub fn create_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)?.write_all(bytes)
 }
 
 pub fn render(path: &Path, before: &Value, after: &Value) -> Result<String, String> {
@@ -145,26 +107,6 @@ fn patch_mapping(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn creation_should_accept_a_concurrent_winner_but_propagate_write_failures() {
-        let path = Path::new("config.yaml");
-        assert_eq!(finish_create(path, Ok(())), Ok(()));
-        assert_eq!(
-            finish_create(path, Err(std::io::ErrorKind::AlreadyExists.into())),
-            Ok(())
-        );
-        for kind in [
-            std::io::ErrorKind::PermissionDenied,
-            std::io::ErrorKind::WriteZero,
-        ] {
-            assert!(
-                finish_create(path, Err(kind.into()))
-                    .unwrap_err()
-                    .contains("create config.yaml")
-            );
-        }
-    }
 
     #[test]
     fn rendering_should_not_treat_an_unreadable_path_as_an_empty_template() {

@@ -36,9 +36,9 @@ curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.s
 pixel setup              # pick your agents
 ```
 
-Restart your agent, approve hooks if asked, ask your next code question. That's it: Pixel indexes the repository on its first use. Want it warm up front? `pixel prepare-repo .`
+Restart your agent, approve hooks if asked, ask your next code question. That's it: Pixel indexes the repository on its first use. Want it warm up front? `pixel prepare .`
 
-<sub>[Read the installer](scripts/release/install.sh) · [release notes](https://github.com/Pixel-CLI/pixel/releases/latest) · [build from main](.github/CONTRIBUTING.md#build) for unreleased integrations.</sub>
+<sub>[Read the installer](scripts/release/install.sh) · [release notes](https://github.com/Pixel-CLI/pixel/releases/latest) · [build from main](.github/CONTRIBUTING.md#build-and-test) for unreleased integrations.</sub>
 
 ## 🧠 The problem
 

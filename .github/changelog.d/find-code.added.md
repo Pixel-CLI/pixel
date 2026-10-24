@@ -1,0 +1,1 @@
+**find-code:** `pixel find-code "<phrase>"` ranks the strings, UI text, routes, env-var names and config keys that carry a phrase, with the owning symbol; `pixel pack-context <name>` fits one symbol to a token budget.

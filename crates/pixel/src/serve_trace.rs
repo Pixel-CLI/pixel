@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! The serve steps of this invocation, collected where each request is
@@ -7,7 +7,7 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
-use pixel_actionlog::ServeStep;
+use pixel_metrics::ServeStep;
 
 /// Steps kept per invocation. `ready` makes two requests; a command that
 /// loops over requests must not grow its log line without bound.
@@ -47,7 +47,7 @@ pub fn millis_since(start: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pixel_actionlog::{InProcessReason, ServeRoute};
+    use pixel_metrics::{InProcessReason, ServeRoute};
     use std::time::Duration;
 
     #[test]

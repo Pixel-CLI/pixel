@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 # Fuzz: runs every cargo-fuzz target under fuzz/ (`cargo fuzz list`) for a
@@ -36,7 +36,7 @@ on:
       # the dependency check below applies.
       - "crates/pixel-graph/**"
       - "crates/pixel-index/**"
-      - "crates/pixel-git/**"
+      - "crates/pixel-io/**"
       - "Cargo.toml"
       - "deny.toml"
       # Integration tests are never linked into a fuzz target (later
@@ -68,7 +68,7 @@ concurrency:
 jobs:
   fuzz:
     name: Fuzz
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '60' || inputs.seconds || '600' }}
@@ -98,7 +98,7 @@ jobs:
           toolchain: nightly
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-fuzz@0.13.2
           # install-action ships no manifest for cargo-fuzz: build it from
@@ -109,7 +109,7 @@ jobs:
       # applies the same deny.toml (advisories, licences, sources,
       # duplicates) to what the fuzz build compiles and runs.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-deny
 

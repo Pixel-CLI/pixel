@@ -1,31 +1,50 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 [package]
 name = "pixel-index"
-version = "0.9.0"
+version = "0.0.0"
 edition.workspace = true
 license.workspace = true
+publish = false
+description = "The PIXEL git-anchored trigram text index"
 
 [lints]
 workspace = true
 
+[features]
+# The embedding backend: a pure-Rust static model (Model2Vec). Everything else
+# of `semantic` (chunker, store, ranking) is always built and has no heavy
+# dependency; without this feature the binary can serve and rank stored
+# vectors but cannot embed a new text.
+model2vec = ["dep:model2vec-rs", "dep:tokenizers"]
+
 [dependencies]
 crc32fast = { workspace = true }
-mutants = { workspace = true }
-pixel-git = { path = "../pixel-git" }
 fs2 = "0.4.3"
 globset = "0.4"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 ignore = "0.4.33"
 memmap2 = "0.9.11"
+mutants = { workspace = true }
+model2vec-rs = { version = "0.3", optional = true, default-features = false, features = ["local-only"] }
+# model2vec-rs leaves the tokenizer's regex backend to its caller. fancy-regex is
+# pure Rust (no oniguruma C build for the musl lanes); the progress-bar and
+# unigram-trainer features its own `fancy-regex` flag adds are not needed to
+# load a model.
+tokenizers = { version = "0.21", optional = true, default-features = false, features = ["fancy-regex"] }
 rayon = "1.12.0"
+regex-syntax = "0.8.11"
+rusqlite = { version = "0.40", features = ["bundled"] }
+pixel-io = { path = "../pixel-io" }
+pixel-model = { path = "../pixel-model" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-regex-syntax = "0.8.11"
+thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 regex = "1.13.1"
+tempfile = { workspace = true }

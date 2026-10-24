@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
 //! The OpenCode integration under `~/.config/opencode/`.
@@ -17,25 +17,6 @@ use crate::install::{self, CheckStatus, InstallStep, Result};
 /// The evidence-brief plugin `pixel setup` deploys; the `plugins`
 /// directory auto-loads it, so no registration entry is needed.
 const BRIEF_PLUGIN_PATH: &str = "plugins/pixel-brief.js";
-
-/// The retired TUI plugin that toasted the metrics blocks (#1301); the brief
-/// plugin now posts them as chat messages. Setup and uninstall delete pixel's
-/// copy so the toasts stop; a foreign file there is left alone.
-const RETIRED_METRICS_PLUGIN_PATH: &str = "plugins/pixel-brief-metrics/tui.js";
-
-/// Deletes pixel's copy of the retired metrics plugin and then its directory
-/// when nothing else is in it. Whether a file was deleted.
-fn remove_retired_metrics_plugin(config_dir: &Path) -> Result<bool> {
-    let path = config_dir.join(RETIRED_METRICS_PLUGIN_PATH);
-    if !(path.is_file() && is_managed_plugin(&path)) {
-        return Ok(false);
-    }
-    fs::remove_file(&path)?;
-    if let Some(dir) = path.parent() {
-        let _ = fs::remove_dir(dir);
-    }
-    Ok(true)
-}
 
 /// Whether `path` is a plugin pixel wrote: a file carrying the managed
 /// marker. Anything else under that name belongs to the user, so uninstall
@@ -77,28 +58,41 @@ pub(crate) fn remove_opencode(config_dir: &Path, dry_run: bool) -> Result<Instal
         summary: install::dry_run_summary(dry_run, &summary),
         detail: Some(format!("plugin={}", plugin.display())),
     };
-    let retired = config_dir.join(RETIRED_METRICS_PLUGIN_PATH);
-    let managed = |path: &Path| path.is_file() && is_managed_plugin(path);
-    if !managed(&plugin) && !managed(&retired) {
+    if !(plugin.is_file() && is_managed_plugin(&plugin)) {
         return Ok(step("no pixel OpenCode plugin — nothing to remove".into()));
     }
     if !dry_run {
-        if managed(&plugin) {
-            fs::remove_file(&plugin)?;
-        }
-        remove_retired_metrics_plugin(config_dir)?;
+        fs::remove_file(&plugin)?;
     }
     Ok(step(format!("removed plugin {}", plugin.display())))
 }
 
+/// The plugin as setup writes it for `exe`: the binary path and the managed
+/// marker filled in.
+pub(crate) fn brief_source(exe: &Path) -> String {
+    include_str!("../assets/opencode-brief.js")
+        .replace("__PIXEL_BIN__", &format!("{:?}", exe.display().to_string()))
+        .replace("__MANAGED_BEGIN__", config::MANAGED_BEGIN)
+        .replace("__MANAGED_END__", config::MANAGED_END)
+}
+
+/// Where the plugin goes, relative to the OpenCode config directory.
+pub(crate) const fn brief_plugin_path() -> &'static str {
+    BRIEF_PLUGIN_PATH
+}
+
+/// Whether the file at `path` is a plugin PIXEL wrote.
+pub(crate) fn is_pixel_plugin(path: &Path) -> bool {
+    is_managed_plugin(path)
+}
+
 /// The prompt-submission evidence brief for OpenCode: `plugins/` auto-loads
-/// `pixel-brief.js`, a V2 plugin whose `prompt` hook runs `pixel brief`, whose
+/// `pixel-brief.js`, a V2 plugin whose `prompt` hook runs `pixel hook`, whose
 /// `context` hook adds the result to the turn's first request as a system part,
 /// and whose non-resuming synthetic messages show the brief's and each `pixel`
-/// call's metrics block in chat (the V1 `chat.message` export no longer
-/// loads). Written only where the config directory already exists; a managed
-/// earlier copy, V1 included, is replaced, a foreign file under that name is
-/// never touched. Pixel's copy of the retired toast plugin is deleted.
+/// call's metrics block in chat. Written only where the config directory
+/// already exists; a managed earlier copy is replaced, a foreign file under
+/// that name is never touched.
 pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let plugin = config_dir.join(BRIEF_PLUGIN_PATH);
     let step = |status, summary: String| InstallStep {
@@ -117,18 +111,13 @@ pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Res
         return Ok(step(
             CheckStatus::Yellow,
             format!(
-                "{} exists and is not Pixel's; left untouched",
+                "{} exists and is not PIXEL's; left untouched",
                 plugin.display()
             ),
         ));
     }
-    let source = include_str!("../assets/opencode-brief.js")
-        .replace("__PIXEL_BIN__", &format!("{:?}", exe.display().to_string()))
-        .replace("__MANAGED_BEGIN__", config::MANAGED_BEGIN)
-        .replace("__MANAGED_END__", config::MANAGED_END);
-    let retired = config_dir.join(RETIRED_METRICS_PLUGIN_PATH);
-    let retired_stale = retired.is_file() && is_managed_plugin(&retired);
-    if !retired_stale && fs::read_to_string(&plugin).is_ok_and(|text| text == source) {
+    let source = brief_source(exe);
+    if fs::read_to_string(&plugin).is_ok_and(|text| text == source) {
         return Ok(step(
             CheckStatus::Green,
             "the OpenCode prompt brief plugin is current".into(),
@@ -147,7 +136,6 @@ pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Res
         fs::create_dir_all(dir)?;
     }
     install::write_atomically(&plugin, &source)?;
-    remove_retired_metrics_plugin(config_dir)?;
     Ok(step(
         CheckStatus::Green,
         "wrote the OpenCode prompt brief plugin".into(),
@@ -283,7 +271,7 @@ mod tests {
         // the V2 loader and by this test as dead legacy, and the two
         // substrings are split so this test's own text cannot match them.
         assert!(
-            !source.contains(&format!("export const {}{}", "Pixel", "Brief")),
+            !source.contains(&format!("export const {}{}", "PIXEL", "Brief")),
             "the V1 named export never runs in V2"
         );
         assert!(
@@ -297,27 +285,27 @@ mod tests {
             "install replaces all three placeholders; without the managed \
              marker uninstall would treat the file as the user's"
         );
-        // The brief bounds its own window and printing at six seconds
-        // (`BRIEF_WINDOW_MAX_MS` plus slack); a shield below that bound kills
-        // briefs still inside their budget, and 1_500 ms did exactly that. It
-        // matches `BRIEF_TIMEOUT_MS` in `pi-brief.ts`, pinned the same way.
+        // The hook bounds its own window and printing at six seconds
+        // (`Host::deadline` less what printing keeps back); a shield below
+        // that bound kills briefs still inside their budget. It matches
+        // `BRIEF_TIMEOUT_MS` in `pixel.ts`, pinned the same way.
         assert_eq!(source.matches("const BRIEF_TIMEOUT_MS = 6_500;").count(), 1);
         assert!(
             source.contains("}, BRIEF_TIMEOUT_MS);"),
             "the timer must fire the named bound, not a literal"
         );
         assert!(
-            source.contains("\"--metrics\", \"on\"")
+            source.contains(r#""hook", "prompt-submit", "--host", "opencode""#)
                 && source.contains("metricsBlock")
                 && source.contains("ctx.session.synthetic")
                 && source.contains("description: text, resume: false"),
-            "the managed plugin must expose brief and finalized Pixel metrics in chat"
+            "the managed plugin must expose brief and finalized PIXEL metrics in chat"
         );
         assert!(
             source.contains("ctx.tool.hook(\"execute.after\"")
                 && source.contains("event.result")
                 && source.contains("event.error"),
-            "the V2 tool hook must relay finalized Pixel metrics"
+            "the V2 tool hook must relay finalized PIXEL metrics"
         );
         assert!(
             !source.contains("session.prompt")
@@ -336,18 +324,18 @@ mod tests {
         );
     }
 
-    /// Install writes the brief plugin, marked managed, is idempotent, and
-    /// deletes pixel's copy of the retired toast plugin (#1301) while sparing
-    /// a foreign file at that path; uninstall removes both of pixel's files.
+    /// Install writes the brief plugin, marked managed, and is idempotent;
+    /// uninstall removes it.
     #[test]
-    fn install_writes_the_brief_and_retires_the_toast_plugin() {
-        let home = scratch("metrics-install");
+    fn install_writes_the_brief_plugin_once() {
+        let home = scratch("plugin-install");
         let dir = config_dir(&home);
-        let retired = dir.join(RETIRED_METRICS_PLUGIN_PATH);
-        fs::create_dir_all(retired.parent().unwrap()).unwrap();
-        fs::write(&retired, format!("// {}\n", config::MANAGED_BEGIN)).unwrap();
+        fs::create_dir_all(&dir).unwrap();
         let exe = Path::new("/bin/pixel");
 
+        let step = install_brief(&dir, exe, true).unwrap();
+        assert!(step.summary.starts_with("would write"), "{}", step.summary);
+        assert!(!dir.join(BRIEF_PLUGIN_PATH).exists());
         let step = install_brief(&dir, exe, false).unwrap();
         assert_eq!(step.summary, "wrote the OpenCode prompt brief plugin");
         let text = fs::read_to_string(dir.join(BRIEF_PLUGIN_PATH)).unwrap();
@@ -355,22 +343,32 @@ mod tests {
             text.contains(config::MANAGED_BEGIN),
             "the brief is unmarked"
         );
+        assert!(
+            text.contains("\"/bin/pixel\""),
+            "the binary path is baked in"
+        );
         assert!(!text.contains("__MANAGED_"), "the brief kept a placeholder");
-        assert!(!retired.exists(), "pixel's toast plugin survived setup");
-        assert!(!dir.join("plugins/pixel-brief-metrics").exists());
+        assert!(
+            !text.contains("__PIXEL_BIN__"),
+            "the brief kept a placeholder"
+        );
         let again = install_brief(&dir, exe, false).unwrap();
         assert_eq!(again.summary, "the OpenCode prompt brief plugin is current");
-
-        fs::create_dir_all(retired.parent().unwrap()).unwrap();
-        fs::write(&retired, "// mine\n").unwrap();
-        let step = install_brief(&dir, exe, false).unwrap();
-        assert!(matches!(step.status, CheckStatus::Green), "{step:?}");
-        assert_eq!(fs::read_to_string(&retired).unwrap(), "// mine\n");
-
-        fs::write(&retired, format!("// {}\n", config::MANAGED_BEGIN)).unwrap();
         remove_opencode(&dir, false).unwrap();
         assert!(!dir.join(BRIEF_PLUGIN_PATH).exists());
-        assert!(!retired.exists());
+    }
+
+    /// A file of the user's own at the plugin path is never overwritten.
+    #[test]
+    fn install_leaves_a_foreign_plugin_alone_and_says_so() {
+        let home = scratch("plugin-foreign");
+        let dir = config_dir(&home);
+        let plugin = dir.join(BRIEF_PLUGIN_PATH);
+        fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        fs::write(&plugin, "// mine\n").unwrap();
+        let step = install_brief(&dir, Path::new("/bin/pixel"), false).unwrap();
+        assert!(matches!(step.status, CheckStatus::Yellow), "{step:?}");
+        assert_eq!(fs::read_to_string(&plugin).unwrap(), "// mine\n");
     }
 
     /// The metrics reach the user as chat messages and never the brief text a

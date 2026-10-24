@@ -1,72 +1,53 @@
-# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-FileCopyrightText: The RTO contributors
 # SPDX-License-Identifier: MIT
 
 [package]
-name = "pixel-cli"
-version = "0.9.0"
+name = "pixel"
+version = "0.0.0"
 edition.workspace = true
 license.workspace = true
-
-[lints]
-workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pixel speeds up coding agents by pushing deterministic evidence when it can remove repeated investigation turns"
+publish = false
 
 [[bin]]
 name = "pixel"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [features]
-default = ["fastembed", "model2vec"]
-# ONNX-backed embeddings. Cannot build for *-unknown-linux-musl: ort-sys
-# downloads a prebuilt ONNX Runtime and upstream publishes no musl build.
-fastembed = ["pixel-recall/fastembed"]
-# Pure-Rust embeddings. No ONNX, no OpenSSL, no C++ — builds fine for musl,
-# so the Linux release keeps a working semantic channel without fastembed.
-model2vec = ["pixel-recall/model2vec"]
+# Semantic search: `pixel search-meaning` and the brief's meaning leads embed
+# with the cached Model2Vec code model (`specs/semantic.md`). Off by default:
+# the backend pulls a tokenizer stack that the musl release build does not yet
+# carry. Without it the command says so and the brief uses word leads.
+semantic = ["pixel-daemon/semantic"]
 
 [dependencies]
-mutants = { workspace = true }
-# Global allocator; see `main.rs`. `default-features = false` keeps the
-# override and secure features (and their build-time C) off.
-mimalloc = { version = "0.1", default-features = false }
-pixel-index = { path = "../pixel-index" }
-pixel-git = { path = "../pixel-git" }
-pixel-recall = { path = "../pixel-recall", default-features = false }
+clap = { version = "4.5", features = ["derive"] }
+libc = "0.2"
+pixel-brief = { path = "../pixel-brief" }
 pixel-daemon = { path = "../pixel-daemon" }
 pixel-graph = { path = "../pixel-graph" }
-pixel-rank = { path = "../pixel-rank" }
-pixel-ops = { path = "../pixel-ops" }
-pixel-facts = { path = "../pixel-facts" }
-pixel-setup = { path = "../pixel-setup" }
-pixel-proto = { path = "../pixel-proto" }
-pixel-actionlog = { path = "../pixel-actionlog" }
-pixel-release = { path = "../pixel-release" }
-pixel-task = { path = "../pixel-task" }
+pixel-index = { path = "../pixel-index" }
+pixel-io = { path = "../pixel-io" }
+pixel-metrics = { path = "../pixel-metrics" }
+pixel-model = { path = "../pixel-model" }
 pixel-plugin = { path = "../pixel-plugin" }
-# The brief reads a French prompt with pixel-mvp's rules (execution_brief/french.rs).
-mvp-model = { path = "../mvp-model" }
-rusqlite = { version = "0.40", features = ["bundled"] }
-fs2 = "0.4.3"
-clap = { version = "4.5", features = ["derive"] }
-# `pixel completions <shell>` and `pixel man`, generated from the same clap tree.
-clap_complete = "4.5"
-clap_mangen = "0.3"
-serde = "1"
-serde_json = "1"
+pixel-proto = { path = "../pixel-proto" }
+pixel-setup = { path = "../pixel-setup" }
+mutants = { workspace = true }
+serde = { workspace = true }
 serde-saphyr = "2.0"
-yaml-edit = { version = "0.3.2", default-features = false }
-regex = "1.13"
-ignore = "0.4.33"
-libc = "0.2"
-ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
+serde_json = { workspace = true }
 tar = "0.4"
-sha2 = { workspace = true }
 xxhash-rust = { workspace = true }
+yaml-edit = { version = "0.3.2", default-features = false }
+ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 
 [dev-dependencies]
-# Tests read `website/data/agents.toml` and the workspace `Cargo.toml`
-# (tests/cli/docs_drift.rs).
+tempfile = { workspace = true }
 toml_edit = "0.25.15"
-tempfile = "3"
-# The hook guarantees are checked over generated payloads
-# (tests/cli/hook_guarantees_cli.rs, task_hook::tests).
-proptest = { workspace = true }
+serde_json = { workspace = true }

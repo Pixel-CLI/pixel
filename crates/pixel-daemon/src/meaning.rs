@@ -1,397 +1,211 @@
-// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-FileCopyrightText: The RTO contributors
 // SPDX-License-Identifier: MIT
 
-//! The resident index behind the `meaning` request.
+//! The daemon's resident semantic pool (`specs/semantic.md`).
 //!
-//! [`Meaning`] owns one [`Resident`]: the chunk vectors and term counts of
-//! the repository, built on a background thread and then answering from
-//! memory. A request never builds, embeds a chunk, reads a file or waits for a
-//! build: it embeds the question, ranks, and returns. When there is nothing to
-//! rank with (cold, still building, built for an older generation, no model on
-//! disk, a failed build) it says which in a typed `unavailable` answer and
-//! the caller falls back.
-//!
-//! Freshness is the daemon's publication generation, the counter the watcher
-//! batches and graph builds already advance ([`crate::api::Service`]). A
-//! build is stamped with the generation seen before it reads the first file,
-//! so an edit that lands mid-build leaves it stale, never wrongly fresh. Once
-//! the vectors have been asked for, every watcher batch starts the rebuild at
-//! once, so the next question finds it done (a graph build, which advances
-//! the generation without changing a file, is caught by the next question
-//! instead); a daemon nobody asks pays nothing. Builds reuse every file whose
-//! bytes are unchanged ([`Resident::build`]) and coalesce: changes that arrive
-//! during a build are covered by one more.
-//!
-//! The embedding model is the one `pixel search-meaning` uses and is never
-//! downloaded here: without it on disk the answer is `model_missing`.
+//! The first `meaning` request that finds the embedding model on disk starts
+//! one background build and answers `warming`; the build reads the corpus
+//! (symbol chunks from the graph store, windows for the other files), embeds
+//! what the vector store lacks and holds the result. A request answers from
+//! the pool only while the pool was built for the generation being served:
+//! behind it, the answer is `refreshing` and a rebuild starts, so a caller with
+//! a deadline falls back to word leads instead of waiting. Nothing here ever
+//! downloads a model.
 
-use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
-use pixel_proto::{MeaningHit, MeaningPool, MeaningResult, MeaningUnavailableReason};
-use pixel_recall::code_resident::{RESIDENT_MAX_FILES, Resident, ResidentStats};
-use pixel_recall::code_search::{
-    DEFAULT_LIMIT, MAX_FILE_BYTES, SEMANTIC_LEADS_UNVERIFIED, VectorCache,
-};
-use pixel_recall::embed::Embedder;
-use serde_json::Value;
+use pixel_graph::store::Store;
+use pixel_index::semantic::chunk::{Chunk, FILE_MAX, SymbolSpan, chunk_file};
+use pixel_index::semantic::embed::Embedder;
+use pixel_index::semantic::pool::{Pool, PoolStats};
+use pixel_index::semantic::store::{STORE_DIR, VectorStore};
+use pixel_model::{SymbolKind, credential_path};
+use pixel_proto::meaning::{MeaningHit, MeaningPool, MeaningResult, MeaningUnavailableReason};
 
-/// Most leads one request returns, whatever `limit` asks for.
-pub(crate) const MEANING_MAX_LIMIT: usize = 50;
+use crate::service::Shared;
 
-/// Longest question the request embeds and scores, in bytes: its terms cost a
-/// pass over every chunk each, so a pasted page would not stay within a
-/// brief's window.
-pub(crate) const MEANING_QUERY_MAX_BYTES: usize = 1_024;
+/// The most hits one request returns.
+pub const HITS_MAX: usize = 20;
 
-/// How long a failed build (a model that will not load) is left alone before
-/// the next request tries again. A model that is not on disk is checked on
-/// every request: that costs a `stat`.
-const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// The hits returned when the request names no limit.
+pub const HITS_DEFAULT: usize = 10;
 
-/// Most builds one background run chains while newer generations keep
-/// arriving.
-const MAX_BUILDS_PER_RUN: usize = 8;
+/// The corpus stops growing at this many files.
+const FILES_MAX: usize = 20_000;
+
+/// The corpus stops growing at this many bytes of text.
+const BYTES_MAX: u64 = 96 * 1024 * 1024;
+
+/// Extensions that are never prose or code: dependency locks and binaries
+/// the text reader would skip anyway.
+const SKIPPED_EXTENSIONS: [&str; 6] = ["lock", "svg", "map", "min.js", "snap", "sum"];
 
 /// Why an embedder could not be opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OpenFailure {
-    /// The model has not been downloaded.
-    ModelMissing,
-    /// It is on disk and does not load.
+pub enum OpenFailure {
+    /// The model is not on disk and a request never downloads it.
+    ModelMissing(String),
+    /// The model is there but unusable, or this build cannot embed.
     Failed(String),
 }
 
-/// Opens the embedder the vectors are built with, from disk and never from
-/// the network.
-pub(crate) type Opener = Arc<dyn Fn() -> Result<Box<dyn Embedder>, OpenFailure> + Send + Sync>;
+/// How a daemon opens its embedder.
+pub type Opener = fn(&Path) -> Result<Arc<dyn Embedder>, OpenFailure>;
 
-/// The opener over an embedding model: [`OpenFailure::ModelMissing`] without
-/// it on disk, else whatever `open` returns.
-fn open_when_on_disk(
-    on_disk: bool,
-    open: impl FnOnce() -> Result<Box<dyn Embedder>, String>,
-) -> Result<Box<dyn Embedder>, OpenFailure> {
-    if on_disk {
-        open().map_err(OpenFailure::Failed)
-    } else {
-        Err(OpenFailure::ModelMissing)
+/// The opener of a real daemon: the cached code model, offline.
+#[cfg(feature = "semantic")]
+pub fn default_opener(_root: &Path) -> Result<Arc<dyn Embedder>, OpenFailure> {
+    use pixel_index::semantic::embed::{CODE_MODEL_REPO, model_cached, model_dir, open_cached};
+    let Some(cache) = pixel_index::cache::cache_root() else {
+        return Err(OpenFailure::Failed(
+            "no cache directory (HOME is not set)".to_owned(),
+        ));
+    };
+    if !model_cached(&cache, CODE_MODEL_REPO) {
+        return Err(OpenFailure::ModelMissing(format!(
+            "{CODE_MODEL_REPO} is not in {}; `pixel search-meaning --download` fetches it",
+            model_dir(&cache, CODE_MODEL_REPO).display()
+        )));
     }
+    open_cached(&model_dir(&cache, CODE_MODEL_REPO), CODE_MODEL_REPO)
+        .map(|model| Arc::new(model) as Arc<dyn Embedder>)
+        .map_err(|error| OpenFailure::Failed(error.to_string()))
 }
 
-/// The production opener: the model of `pixel search-meaning`, offline.
-#[cfg_attr(test, mutants::skip)] // one-line adapter over the on-disk model; `open_when_on_disk` holds the rule and is tested
-fn open_code_model() -> Result<Box<dyn Embedder>, OpenFailure> {
-    open_when_on_disk(
-        pixel_recall::code_search::code_model_on_disk(),
-        pixel_recall::code_search::open_code_embedder_offline,
-    )
+/// The opener of a build without the `semantic` feature.
+#[cfg(not(feature = "semantic"))]
+pub fn default_opener(_root: &Path) -> Result<Arc<dyn Embedder>, OpenFailure> {
+    Err(OpenFailure::Failed(
+        "this build has no semantic search (built without the `semantic` feature)".to_owned(),
+    ))
 }
 
-/// A finished build and the generation it was made for.
-struct Built {
-    resident: Resident,
-    generation: u64,
-    at: Instant,
-}
-
-/// Why the last build failed.
-struct Failure {
-    reason: MeaningUnavailableReason,
-    detail: Option<String>,
-    at: Instant,
-}
-
-impl Failure {
-    fn failed(detail: impl Into<String>) -> Self {
-        Self {
-            reason: MeaningUnavailableReason::Failed,
-            detail: Some(detail.into()),
-            at: Instant::now(),
-        }
-    }
-}
-
-impl From<OpenFailure> for Failure {
-    fn from(failure: OpenFailure) -> Self {
-        match failure {
-            OpenFailure::ModelMissing => Self {
-                reason: MeaningUnavailableReason::ModelMissing,
-                detail: None,
-                at: Instant::now(),
-            },
-            OpenFailure::Failed(detail) => Self::failed(detail),
-        }
-    }
-}
-
-#[derive(Default)]
-struct State {
-    ready: Option<Arc<Built>>,
-    building: bool,
-    failure: Option<Failure>,
-}
-
-/// Where a request stands against the state.
-enum Availability {
-    Fresh(Arc<Built>),
-    Unavailable {
-        reason: MeaningUnavailableReason,
-        detail: Option<String>,
+enum State {
+    Cold,
+    Warming,
+    /// `symbolic`: the chunks were cut at the graph's symbols; a pool built
+    /// before the graph existed holds windows only and is rebuilt once it does.
+    Ready {
+        pool: Arc<Pool>,
+        embedder: Arc<dyn Embedder>,
+        symbolic: bool,
     },
+    Refreshing,
+    Unavailable(MeaningUnavailableReason, String),
 }
 
-/// The resident vectors of one repository, shared by the daemon's request
-/// loop and the read replicas of the evidence bridge.
-pub(crate) struct Meaning {
-    root: PathBuf,
-    open: Opener,
-    cache: VectorCache,
-    max_files: usize,
-    retry_after: Duration,
+/// What a caller is serving: the generation, and whether its graph holds every
+/// edit batch (a pool cut without the graph is rebuilt once it does).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Serving {
+    pub generation: u64,
+    pub graph_fresh: bool,
+}
+
+/// The pool and its state machine, shared by the writer and its replicas.
+pub struct Meaning {
     state: Mutex<State>,
-    /// The embedder that embeds the questions; a build takes it while it
-    /// embeds chunks, and puts it back.
-    embedder: Mutex<Option<Box<dyn Embedder>>>,
-    /// The newest generation any request or watcher batch has reported.
-    latest: AtomicU64,
+    opener: Opener,
 }
 
 impl Meaning {
-    /// The production index of `root`: the `search-meaning` model, and the
-    /// vector store of `root` when it carries a pixel index.
-    #[cfg_attr(test, mutants::skip)] // adapter reading $HOME; `vector_cache_for` and `with` hold the rules and are tested
-    pub(crate) fn new(root: &Path) -> Arc<Self> {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        Self::with(
-            root,
-            Arc::new(open_code_model),
-            pixel_recall::code_search::vector_cache_for(root, home.as_deref()),
-            RESIDENT_MAX_FILES,
-            RETRY_AFTER,
-        )
-    }
-
-    pub(crate) fn with(
-        root: &Path,
-        open: Opener,
-        cache: VectorCache,
-        max_files: usize,
-        retry_after: Duration,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            root: root.to_path_buf(),
-            open,
-            cache,
-            max_files,
-            retry_after,
-            state: Mutex::new(State::default()),
-            embedder: Mutex::new(None),
-            latest: AtomicU64::new(0),
-        })
-    }
-
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn embedder(&self) -> MutexGuard<'_, Option<Box<dyn Embedder>>> {
-        self.embedder.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Start the background build when the vectors are not fresh for
-    /// `generation`, none is running and the last failure is not recent.
-    pub(crate) fn ensure(self: &Arc<Self>, generation: u64) {
-        self.latest.fetch_max(generation, Ordering::AcqRel);
-        let mut state = self.lock();
-        let fresh = state
-            .ready
-            .as_ref()
-            .is_some_and(|built| built.generation >= generation);
-        let backing_off = state.failure.as_ref().is_some_and(|failure| {
-            failure.reason == MeaningUnavailableReason::Failed
-                && failure.at.elapsed() < self.retry_after
-        });
-        if fresh || state.building || backing_off {
-            return;
-        }
-        state.building = true;
-        drop(state);
-        self.spawn_build();
-    }
-
-    /// A new `generation` was published (a watcher batch): rebuild now when
-    /// the vectors have been asked for, so the next question finds them
-    /// fresh. An index nobody asked for stays cold.
-    pub(crate) fn nudge(self: &Arc<Self>, generation: u64) {
-        self.latest.fetch_max(generation, Ordering::AcqRel);
-        let state = self.lock();
-        let asked_for = state.ready.is_some() || state.building;
-        drop(state);
-        if asked_for {
-            self.ensure(generation);
+    pub fn new(opener: Opener) -> Self {
+        Self {
+            state: Mutex::new(State::Cold),
+            opener,
         }
     }
 
-    #[cfg_attr(test, mutants::skip)] // detached thread; `run_builds` holds the loop and is tested
-    fn spawn_build(self: &Arc<Self>) {
-        let meaning = Arc::clone(self);
-        let spawned = std::thread::Builder::new()
-            .name("pixel-meaning".to_string())
-            .spawn(move || meaning.run_builds());
-        if let Err(error) = spawned {
-            let mut state = self.lock();
-            state.building = false;
-            state.failure = Some(Failure::failed(format!("build thread: {error}")));
-        }
-    }
-
-    /// Build for the newest generation seen, and again while newer ones keep
-    /// arriving (at most [`MAX_BUILDS_PER_RUN`] in a row: a tree edited
-    /// without pause is rebuilt by the next request), then clear the running
-    /// flag. A panic is a failed build, not a flag that stays set. Returns
-    /// the builds run.
-    pub(crate) fn run_builds(&self) -> usize {
-        let mut builds = 0;
-        loop {
-            builds += 1;
-            let target = self.latest.load(Ordering::Acquire);
-            let previous = self.lock().ready.clone();
-            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                self.build(previous.as_deref(), target)
-            }))
-            .unwrap_or_else(|_| Err(Failure::failed("the build panicked")));
-            let mut state = self.lock();
-            match outcome {
-                Ok(built) => {
-                    state.ready = Some(Arc::new(built));
-                    state.failure = None;
-                    if self.latest.load(Ordering::Acquire) > target && builds < MAX_BUILDS_PER_RUN {
-                        continue;
-                    }
+    /// Answers `query`, or says why it cannot yet. `at` is what the caller
+    /// serves: a pool answers only for the generation it was built for.
+    pub(crate) fn request(
+        &self,
+        shared: &Arc<Shared>,
+        query: &str,
+        limit: Option<usize>,
+        at: Serving,
+    ) -> MeaningResult {
+        let limit = limit.unwrap_or(HITS_DEFAULT).clamp(1, HITS_MAX);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*state {
+            State::Cold => match (self.opener)(&shared.root) {
+                Ok(embedder) => {
+                    *state = State::Warming;
+                    self.spawn_build(shared, embedder);
+                    unavailable(MeaningUnavailableReason::Warming, None)
                 }
-                Err(failure) => state.failure = Some(failure),
-            }
-            state.building = false;
-            return builds;
-        }
-    }
-
-    /// One build for `generation`, refreshing `previous`.
-    fn build(&self, previous: Option<&Built>, generation: u64) -> Result<Built, Failure> {
-        let taken = self.embedder().take();
-        let mut embedder = match taken {
-            Some(embedder) => embedder,
-            None => (self.open)()?,
-        };
-        let built = Resident::build(
-            &self.root,
-            previous.map(|built| &built.resident),
-            embedder.as_mut(),
-            self.cache,
-            self.max_files,
-        );
-        *self.embedder() = Some(embedder);
-        built
-            .map(|resident| Built {
-                resident,
-                generation,
-                at: Instant::now(),
-            })
-            .map_err(Failure::failed)
-    }
-
-    fn availability(&self, generation: u64) -> Availability {
-        let state = self.lock();
-        if let Some(built) = &state.ready
-            && built.generation >= generation
-        {
-            return Availability::Fresh(Arc::clone(built));
-        }
-        let unavailable = |reason, detail| Availability::Unavailable { reason, detail };
-        if state.building {
-            return unavailable(
-                if state.ready.is_some() {
-                    MeaningUnavailableReason::Refreshing
-                } else {
-                    MeaningUnavailableReason::Warming
-                },
-                None,
-            );
-        }
-        if let Some(failure) = &state.failure {
-            return unavailable(failure.reason, failure.detail.clone());
-        }
-        unavailable(
-            if state.ready.is_some() {
-                MeaningUnavailableReason::Stale
-            } else {
-                MeaningUnavailableReason::Cold
+                Err(OpenFailure::ModelMissing(detail)) => {
+                    // Not cached as a failure: the model may be downloaded
+                    // later, and the next request looks again.
+                    unavailable(MeaningUnavailableReason::ModelMissing, Some(detail))
+                }
+                Err(OpenFailure::Failed(detail)) => {
+                    *state = State::Unavailable(MeaningUnavailableReason::Failed, detail.clone());
+                    unavailable(MeaningUnavailableReason::Failed, Some(detail))
+                }
             },
-            None,
-        )
-    }
-
-    /// The answer to a `meaning` request at `generation`, as the wire value.
-    /// It reads the state and ranks; it never starts or waits for a build
-    /// ([`Meaning::ensure`] does the first).
-    ///
-    /// # Errors
-    ///
-    /// A blank question, or an embedder that fails on a built index.
-    pub(crate) fn answer(
-        &self,
-        generation: u64,
-        query: &str,
-        limit: Option<usize>,
-    ) -> Result<Value, String> {
-        serde_json::to_value(self.result(generation, query, limit)?).map_err(|e| e.to_string())
-    }
-
-    fn result(
-        &self,
-        generation: u64,
-        query: &str,
-        limit: Option<usize>,
-    ) -> Result<MeaningResult, String> {
-        let query = query.trim();
-        if query.is_empty() {
-            return Err("meaning needs a question: the query is empty".to_string());
-        }
-        let built = match self.availability(generation) {
-            Availability::Fresh(built) => built,
-            Availability::Unavailable { reason, detail } => {
-                return Ok(unavailable(reason, detail));
+            State::Warming => unavailable(MeaningUnavailableReason::Warming, None),
+            State::Refreshing => unavailable(MeaningUnavailableReason::Refreshing, None),
+            State::Unavailable(reason, detail) => unavailable(*reason, Some(detail.clone())),
+            State::Ready {
+                pool,
+                embedder,
+                symbolic,
+            } => {
+                if pool.generation < at.generation || (!*symbolic && at.graph_fresh) {
+                    let embedder = Arc::clone(embedder);
+                    *state = State::Refreshing;
+                    self.spawn_build(shared, embedder);
+                    return unavailable(MeaningUnavailableReason::Refreshing, None);
+                }
+                let (pool, embedder) = (Arc::clone(pool), Arc::clone(embedder));
+                drop(state);
+                answer(&pool, embedder.as_ref(), query, limit)
             }
-        };
-        let (query, truncated) = bounded_query(query);
-        let (k, capped) = bounded_limit(limit);
-        let hits = {
-            let mut slot = self.embedder();
-            // A build that started after the state was read holds the
-            // embedder: the vectors are being replaced.
-            let Some(embedder) = slot.as_mut() else {
-                return Ok(unavailable(MeaningUnavailableReason::Refreshing, None));
-            };
-            built
-                .resident
-                .search(embedder.as_mut(), query, k)
-                .map_err(|error| format!("meaning: {error}"))?
-        };
-        let stats = built.resident.stats();
-        let mut caps = caps_for(stats, self.max_files);
-        caps.extend(capped.map(|requested| {
-            format!("limit capped at {MEANING_MAX_LIMIT} (requested {requested})")
-        }));
-        if truncated {
-            caps.push(format!(
-                "query truncated to its first {MEANING_QUERY_MAX_BYTES} bytes"
-            ));
         }
-        Ok(MeaningResult::Ready {
+    }
+
+    #[cfg_attr(test, mutants::skip)] // detached thread; `build` and `request` are tested
+    fn spawn_build(&self, shared: &Arc<Shared>, embedder: Arc<dyn Embedder>) {
+        let shared = Arc::clone(shared);
+        let generation = shared
+            .published
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .generation;
+        std::thread::spawn(move || {
+            let outcome = build(&shared.root, embedder.as_ref(), generation);
+            let mut state = shared
+                .meaning
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            *state = match outcome {
+                Ok((pool, symbolic)) => State::Ready {
+                    pool: Arc::new(pool),
+                    embedder,
+                    symbolic,
+                },
+                Err(detail) => State::Unavailable(MeaningUnavailableReason::Failed, detail),
+            };
+        });
+    }
+}
+
+fn unavailable(reason: MeaningUnavailableReason, detail: Option<String>) -> MeaningResult {
+    MeaningResult::Unavailable {
+        reason,
+        detail,
+        caps: Vec::new(),
+    }
+}
+
+fn answer(pool: &Pool, embedder: &dyn Embedder, query: &str, limit: usize) -> MeaningResult {
+    match pool.query(embedder, query, limit) {
+        Ok(hits) => MeaningResult::Ready {
             hits: hits
                 .into_iter()
                 .map(|hit| MeaningHit {
@@ -403,841 +217,415 @@ impl Meaning {
                     snippet: hit.snippet,
                 })
                 .collect(),
-            pool: MeaningPool {
-                model: stats.model_id.clone(),
-                dims: stats.dims,
-                files: stats.files,
-                chunks: stats.chunks,
-                eligible_files: stats.eligible_files,
-                generation: built.generation,
-                age_ms: u64::try_from(built.at.elapsed().as_millis()).unwrap_or(u64::MAX),
-                resident_bytes: stats.bytes,
-            },
-            caps,
-        })
+            pool: pool_info(&pool.stats, pool),
+            caps: vec![
+                "semantic leads rank by similarity and are unverified: read them before relying on them".to_owned(),
+            ],
+        },
+        Err(error) => unavailable(MeaningUnavailableReason::Failed, Some(error.to_string())),
     }
 }
 
-/// `query` cut to [`MEANING_QUERY_MAX_BYTES`] at a character boundary, and
-/// whether it was.
-fn bounded_query(query: &str) -> (&str, bool) {
-    if query.len() <= MEANING_QUERY_MAX_BYTES {
-        return (query, false);
-    }
-    (
-        &query[..query.floor_char_boundary(MEANING_QUERY_MAX_BYTES)],
-        true,
-    )
-}
-
-/// The leads to return for a requested `limit`, and the request when it was
-/// capped. Zero is honoured: a question that only asks whether the vectors
-/// are ready.
-fn bounded_limit(limit: Option<usize>) -> (usize, Option<usize>) {
-    let requested = limit.unwrap_or(DEFAULT_LIMIT);
-    (
-        requested.min(MEANING_MAX_LIMIT),
-        (requested > MEANING_MAX_LIMIT).then_some(requested),
-    )
-}
-
-/// The caps a `Ready` answer names: that its leads are unverified, and what
-/// the index left out of the repository.
-fn caps_for(stats: &ResidentStats, max_files: usize) -> Vec<String> {
-    let mut caps = vec![SEMANTIC_LEADS_UNVERIFIED.to_string()];
-    if stats.file_limit_reached {
-        caps.push(format!(
-            "the index holds a deterministic sample of {} of {} eligible files (resident limit {max_files})",
-            stats.sampled_files, stats.eligible_files
-        ));
-    }
-    if stats.skipped_files > 0 {
-        caps.push(format!(
-            "{} eligible file(s) are not indexed: unreadable, over {} KiB, binary or not UTF-8",
-            stats.skipped_files,
-            MAX_FILE_BYTES / 1024
-        ));
-    }
-    if stats.credential_files > 0 {
-        caps.push(format!(
-            "{} eligible file(s) are never indexed: credential-shaped paths (.env, keys, secrets)",
-            stats.credential_files
-        ));
-    }
-    if !stats.vector_cache_errors.is_empty() {
-        caps.push(format!(
-            "vector cache: {}; the affected chunks were embedded again",
-            stats.vector_cache_errors.join("; ")
-        ));
-    }
-    caps
-}
-
-/// The `unavailable` answer for `reason`.
-fn unavailable(reason: MeaningUnavailableReason, detail: Option<String>) -> MeaningResult {
-    MeaningResult::Unavailable {
-        reason,
-        detail,
-        caps: vec![format!(
-            "semantic index unavailable ({}): no semantic leads",
-            reason.as_str()
-        )],
+fn pool_info(stats: &PoolStats, pool: &Pool) -> MeaningPool {
+    MeaningPool {
+        model: stats.model.clone(),
+        dims: stats.dims,
+        files: stats.files,
+        chunks: stats.chunks,
+        eligible_files: stats.files,
+        generation: pool.generation,
+        age_ms: u64::try_from(pool.built_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        resident_bytes: stats.resident_bytes,
     }
 }
 
-#[cfg(test)]
-pub(crate) mod testing {
-    //! The model stand-in the daemon's tests share: no weights, no download.
+/// Reads the corpus of `root`, embeds what is missing and returns the pool.
+fn build(root: &Path, embedder: &dyn Embedder, generation: u64) -> Result<(Pool, bool), String> {
+    let (chunks, symbolic) = corpus(root).map_err(|error| error.to_string())?;
+    let mut store = vector_store(root);
+    let pool = Pool::build(chunks, embedder, store.as_mut(), generation)
+        .map_err(|error| error.to_string())?;
+    Ok((pool, symbolic))
+}
 
-    use super::*;
-    use pixel_recall::embed::EmbedKind;
-
-    pub(crate) const DIMS: usize = 256;
-
-    /// Embeds a text as its words hashed into [`DIMS`] buckets; counts the
-    /// passages it is handed and can be told to fail on questions.
-    pub(crate) struct WordEmbedder {
-        pub(crate) passages: Arc<AtomicU64>,
-        pub(crate) fail_queries: bool,
+/// The vector store of `root`, when this root may keep one: it carries a
+/// `.pixel` directory and is not the home directory.
+fn vector_store(root: &Path) -> Option<VectorStore> {
+    let sidecar = root.join(pixel_index::index::SHARD_DIR);
+    if !sidecar.is_dir() {
+        return None;
     }
+    if std::env::var_os("HOME").is_some_and(|home| Path::new(&home) == root) {
+        return None;
+    }
+    VectorStore::open(&sidecar.join(STORE_DIR)).ok()
+}
 
-    impl Embedder for WordEmbedder {
-        fn model_id(&self) -> &str {
-            "fixture-words"
+/// Every chunk of `root`: symbols of the graph's files, windows of the rest;
+/// all windows when the graph does not exist yet (the flag says which).
+fn corpus(root: &Path) -> Result<(Vec<Chunk>, bool), pixel_graph::store::StoreError> {
+    let store = match Store::open(root) {
+        Ok(store) => Some(store),
+        Err(pixel_graph::store::StoreError::NoIndex) => None,
+        Err(error) => return Err(error),
+    };
+    let mut by_file: BTreeMap<String, Vec<SymbolSpan>> = BTreeMap::new();
+    let symbols = match &store {
+        Some(store) => store.all_symbols()?,
+        None => Vec::new(),
+    };
+    for symbol in symbols {
+        if matches!(
+            symbol.kind,
+            SymbolKind::File | SymbolKind::Package | SymbolKind::Variant
+        ) {
+            continue;
         }
-
-        fn dims(&self) -> usize {
-            DIMS
-        }
-
-        fn embed_batch(
-            &mut self,
-            texts: &[&str],
-            kind: EmbedKind,
-        ) -> Result<Vec<Vec<f32>>, String> {
-            if matches!(kind, EmbedKind::Query) && self.fail_queries {
-                return Err("fixture model failed".into());
-            }
-            if matches!(kind, EmbedKind::Passage) {
-                self.passages
-                    .fetch_add(texts.len() as u64, Ordering::SeqCst);
-            }
-            Ok(texts
-                .iter()
-                .map(|text| {
-                    let mut vector = vec![0.0f32; DIMS];
-                    for word in text.split(|c: char| !c.is_alphanumeric()) {
-                        if !word.is_empty() {
-                            let bucket = xxhash_rust::xxh3::xxh3_64(word.to_lowercase().as_bytes())
-                                % DIMS as u64;
-                            vector[bucket as usize] += 1.0;
-                        }
-                    }
-                    vector
-                })
-                .collect())
-        }
+        by_file.entry(symbol.file).or_default().push(SymbolSpan {
+            name: symbol.name,
+            line: symbol.line,
+            end_line: symbol.end_line,
+        });
     }
-
-    /// An index over `root` whose model is a [`WordEmbedder`], with the
-    /// vector store off and a backoff no test waits out.
-    pub(crate) fn meaning(root: &Path) -> Arc<Meaning> {
-        counting(root).0
-    }
-
-    /// [`meaning`] and the number of times its model was opened.
-    pub(crate) fn counting(root: &Path) -> (Arc<Meaning>, Arc<AtomicU64>) {
-        let opened = Arc::new(AtomicU64::new(0));
-        let passages = Arc::new(AtomicU64::new(0));
-        let meaning = Meaning::with(
-            root,
-            {
-                let opened = Arc::clone(&opened);
-                Arc::new(move || {
-                    opened.fetch_add(1, Ordering::SeqCst);
-                    Ok(Box::new(WordEmbedder {
-                        passages: Arc::clone(&passages),
-                        fail_queries: false,
-                    }) as Box<dyn Embedder>)
-                })
-            },
-            VectorCache::Disabled,
-            100,
-            Duration::from_secs(3600),
+    let graph_files: Vec<String> = match &store {
+        Some(store) => store.file_rows()?.into_iter().map(|row| row.path).collect(),
+        None => Vec::new(),
+    };
+    let mut paths: Vec<String> = graph_files.clone();
+    if let Ok(files) = pixel_io::GitRunner::new(root).ls_files_or_err() {
+        let known: std::collections::HashSet<&str> =
+            graph_files.iter().map(String::as_str).collect();
+        paths.extend(
+            files
+                .into_iter()
+                .filter(|path| !known.contains(path.as_str())),
         );
-        (meaning, opened)
     }
-
-    /// An index whose model opens only once the returned sender is used or
-    /// dropped: its build stays `warming` for as long as a test needs.
-    pub(crate) fn gated(root: &Path) -> (Arc<Meaning>, std::sync::mpsc::Sender<()>) {
-        let (release, gate) = std::sync::mpsc::channel::<()>();
-        let gate = Mutex::new(gate);
-        let passages = Arc::new(AtomicU64::new(0));
-        let meaning = Meaning::with(
-            root,
-            Arc::new(move || {
-                // A dropped sender also ends the wait.
-                let _ = gate.lock().unwrap_or_else(PoisonError::into_inner).recv();
-                Ok(Box::new(WordEmbedder {
-                    passages: Arc::clone(&passages),
-                    fail_queries: false,
-                }) as Box<dyn Embedder>)
-            }),
-            VectorCache::Disabled,
-            100,
-            Duration::from_secs(3600),
-        );
-        (meaning, release)
+    let mut chunks = Vec::new();
+    let mut bytes = 0_u64;
+    let mut spans: HashMap<String, Vec<SymbolSpan>> = by_file.into_iter().collect();
+    for path in paths.into_iter().take(FILES_MAX) {
+        if credential_path(Path::new(&path)) || skipped(&path) {
+            continue;
+        }
+        let Ok(file) = pixel_io::repo_path::confine(root, &path) else {
+            continue;
+        };
+        let Ok(text) = pixel_io::nofollow::read_text_capped(&file, FILE_MAX as u64) else {
+            continue;
+        };
+        bytes += text.len() as u64;
+        if bytes > BYTES_MAX {
+            break;
+        }
+        let symbols = spans.remove(&path).unwrap_or_default();
+        chunks.extend(chunk_file(&path, &text, &symbols));
     }
+    Ok((chunks, store.is_some()))
+}
 
-    /// Build the index for `generation` on this thread, as the background
-    /// thread would.
-    pub(crate) fn build(meaning: &Meaning, generation: u64) {
-        meaning.latest.store(generation, Ordering::SeqCst);
-        meaning.run_builds();
+fn skipped(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    SKIPPED_EXTENSIONS
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")))
+}
+
+/// Brief leads from the pool: hits, or the reason they are not available.
+pub(crate) fn leads(
+    shared: &Arc<Shared>,
+    query: &str,
+    limit: usize,
+    at: Serving,
+    deadline: Instant,
+) -> Result<Vec<MeaningHit>, String> {
+    if Instant::now() >= deadline {
+        return Err("no time left".to_owned());
+    }
+    match shared.meaning.request(shared, query, Some(limit), at) {
+        MeaningResult::Ready { hits, .. } => Ok(hits),
+        MeaningResult::Unavailable { reason, detail, .. } => Err(detail.map_or_else(
+            || reason.as_str().to_owned(),
+            |d| format!("{}: {d}", reason.as_str()),
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
+    use std::time::Duration;
 
-    use super::testing::{DIMS, WordEmbedder};
+    use pixel_index::semantic::embed::HashingEmbedder;
+    use pixel_proto::Op;
+    use serde_json::Value;
+
     use super::*;
+    use crate::service::Service;
+    use crate::testutil::{git, repo};
 
-    /// A scratch directory removed on drop.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let dir = std::env::temp_dir().join(format!(
-                "pixel-daemon-meaning-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
+    fn hashing(_root: &Path) -> Result<Arc<dyn Embedder>, OpenFailure> {
+        Ok(Arc::new(HashingEmbedder::new(128)))
     }
 
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    fn missing(_root: &Path) -> Result<Arc<dyn Embedder>, OpenFailure> {
+        Err(OpenFailure::ModelMissing(
+            "the model is not in the cache".to_owned(),
+        ))
     }
 
-    struct Fixture {
-        root: Scratch,
-        passages: Arc<AtomicU64>,
-        opened: Arc<AtomicU64>,
+    fn broken(_root: &Path) -> Result<Arc<dyn Embedder>, OpenFailure> {
+        Err(OpenFailure::Failed("onnx exploded".to_owned()))
     }
 
-    impl Fixture {
-        fn new() -> Self {
-            let root = Scratch::new();
-            write(
-                root.path(),
-                "src/billing.rs",
-                &function("Charge the customer card for an invoice", "charge_invoice"),
-            );
-            write(
-                root.path(),
-                "src/weather.rs",
-                &function(
-                    "Render the weather forecast for the week",
-                    "render_forecast",
-                ),
-            );
-            Self {
-                root,
-                passages: Arc::new(AtomicU64::new(0)),
-                opened: Arc::new(AtomicU64::new(0)),
-            }
-        }
+    fn project(opener: Opener) -> (tempfile::TempDir, Service) {
+        let (dir, root) = repo(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+            ),
+            ("src/lib.rs", "pub mod retry;\npub mod draw;\n"),
+            (
+                "src/retry.rs",
+                "/// Reads the retry limit from the config file.\npub fn retry_limit() -> u32 {\n    3\n}\n",
+            ),
+            (
+                "src/draw.rs",
+                "/// Draws the sidebar animation frame.\npub fn draw_frame() {}\n",
+            ),
+            (
+                "docs/guide.md",
+                "# Guide\n\nHow the retry limit is configured.\n",
+            ),
+        ]);
+        std::fs::create_dir_all(root.join(".pixel")).unwrap();
+        let service = Service::open_with(&root, opener).expect("the service opens");
+        (dir, service)
+    }
 
-        fn meaning(&self) -> Arc<Meaning> {
-            self.meaning_with(100, Duration::from_secs(3600))
-        }
-
-        fn meaning_with(&self, max_files: usize, retry_after: Duration) -> Arc<Meaning> {
-            let passages = Arc::clone(&self.passages);
-            let opened = Arc::clone(&self.opened);
-            Meaning::with(
-                self.root.path(),
-                Arc::new(move || {
-                    opened.fetch_add(1, Ordering::SeqCst);
-                    Ok(Box::new(WordEmbedder {
-                        passages: Arc::clone(&passages),
-                        fail_queries: false,
-                    }) as Box<dyn Embedder>)
-                }),
-                VectorCache::Disabled,
-                max_files,
-                retry_after,
-            )
-        }
-
-        fn meaning_failing(&self, failure: OpenFailure, retry_after: Duration) -> Arc<Meaning> {
-            let opened = Arc::clone(&self.opened);
-            Meaning::with(
-                self.root.path(),
-                Arc::new(move || {
-                    opened.fetch_add(1, Ordering::SeqCst);
-                    Err(failure.clone())
-                }),
-                VectorCache::Disabled,
-                100,
-                retry_after,
-            )
+    fn at() -> Serving {
+        Serving {
+            generation: 1,
+            graph_fresh: true,
         }
     }
 
-    fn write(root: &Path, path: &str, text: &str) {
-        let target = root.join(path);
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::write(target, text).unwrap();
+    /// Any graph read builds the graph, which a fresh service has not yet.
+    fn build_graph(service: &mut Service) {
+        let op = serde_json::from_str(r#"{"op":"symbol","name":"retry_limit"}"#).expect("an op");
+        assert!(service.handle(op).ok);
     }
 
-    fn function(doc: &str, name: &str) -> String {
-        let steps: String = (0..10)
-            .map(|step| format!("    let step_{step} = {step} + 1;\n"))
-            .collect();
-        format!("/// {doc}\npub fn {name}() -> u32 {{\n{steps}    0\n}}\n")
-    }
-
-    fn result(
-        meaning: &Meaning,
-        generation: u64,
-        query: &str,
-        limit: Option<usize>,
-    ) -> MeaningResult {
-        meaning.result(generation, query, limit).unwrap()
-    }
-
-    fn reason(result: &MeaningResult) -> MeaningUnavailableReason {
-        match result {
-            MeaningResult::Unavailable { reason, .. } => *reason,
-            ready @ MeaningResult::Ready { .. } => panic!("expected unavailable, got {ready:?}"),
-        }
-    }
-
-    fn hits(result: MeaningResult) -> (Vec<MeaningHit>, MeaningPool, Vec<String>) {
-        match result {
-            MeaningResult::Ready { hits, pool, caps } => (hits, pool, caps),
-            unavailable @ MeaningResult::Unavailable { .. } => {
-                panic!("expected ready, got {unavailable:?}")
-            }
-        }
-    }
-
-    /// Wait for the background build to clear its flag, for a bounded time.
-    fn wait_until_idle(meaning: &Meaning) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while meaning.lock().building {
-            assert!(Instant::now() < deadline, "the build did not finish");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    /// A cold index answers `cold` without building anything: reading is not
-    /// asking for a build.
-    #[test]
-    fn answer_should_report_cold_and_build_nothing_before_anything_asked_for_it() {
-        let fixture = Fixture::new();
-        let meaning = fixture.meaning();
-        let answer = result(&meaning, 1, "charge the invoice", None);
-        assert_eq!(reason(&answer), MeaningUnavailableReason::Cold);
-        assert!(!meaning.lock().building);
-        assert_eq!(fixture.opened.load(Ordering::SeqCst), 0, "no model opened");
-        assert_eq!(fixture.passages.load(Ordering::SeqCst), 0);
-        let MeaningResult::Unavailable { caps, detail, .. } = answer else {
-            unreachable!()
-        };
-        assert_eq!(
-            caps,
-            ["semantic index unavailable (cold): no semantic leads"]
-        );
-        assert_eq!(detail, None);
-    }
-
-    /// `ensure` starts the build and the request that follows says so; once
-    /// it finishes the same request ranks.
-    #[test]
-    fn ensure_should_build_in_the_background_and_then_answer_with_ranked_leads() {
-        let fixture = Fixture::new();
-        let meaning = fixture.meaning();
-        meaning.ensure(1);
-        let during = result(&meaning, 1, "charge the invoice", None);
-        // The thread may already be done: only a cold answer is wrong.
-        assert_ne!(
-            reason_or_ready(&during),
-            Some(MeaningUnavailableReason::Cold)
-        );
-        wait_until_idle(&meaning);
-
-        let (found, pool, caps) = hits(result(
-            &meaning,
-            1,
-            "charge the customer card invoice",
-            None,
-        ));
-        assert_eq!(found[0].path, "src/billing.rs");
-        assert_eq!(found[0].symbol.as_deref(), Some("charge_invoice"));
-        assert_eq!((found[0].start_line, found[0].end_line), (1, 14));
-        assert_eq!(found[1].path, "src/weather.rs");
-        assert!(found[0].score > found[1].score);
-        assert_eq!(pool.model, "fixture-words");
-        assert_eq!((pool.files, pool.dims, pool.generation), (2, DIMS, 1));
-        assert_eq!(pool.eligible_files, 2);
-        assert!(pool.resident_bytes > (pool.chunks * DIMS * 4) as u64);
-        assert_eq!(caps, [SEMANTIC_LEADS_UNVERIFIED]);
-        assert_eq!(fixture.opened.load(Ordering::SeqCst), 1);
-    }
-
-    fn reason_or_ready(result: &MeaningResult) -> Option<MeaningUnavailableReason> {
-        match result {
-            MeaningResult::Unavailable { reason, .. } => Some(*reason),
-            MeaningResult::Ready { .. } => None,
-        }
-    }
-
-    /// The thread runs the same loop a test can call: the first build is
-    /// `warming` while it runs and `ready` after.
-    #[test]
-    fn availability_should_say_warming_while_the_first_build_runs() {
-        let fixture = Fixture::new();
-        let meaning = fixture.meaning();
-        meaning.lock().building = true;
-        assert_eq!(
-            reason(&result(&meaning, 1, "invoice", None)),
-            MeaningUnavailableReason::Warming
-        );
-        assert_eq!(meaning.run_builds(), 1, "nothing newer arrived");
-        assert!(!meaning.lock().building);
-        assert!(reason_or_ready(&result(&meaning, 0, "invoice", None)).is_none());
-    }
-
-    /// Built for generation 1, a request at generation 2 is stale until a
-    /// rebuild is running (`refreshing`) and fresh when it finished; the
-    /// answer never mixes the two.
-    #[test]
-    fn availability_should_distinguish_stale_refreshing_and_fresh_generations() {
-        let fixture = Fixture::new();
-        let meaning = fixture.meaning();
-        meaning.latest.store(1, Ordering::SeqCst);
-        meaning.run_builds();
-        assert!(reason_or_ready(&result(&meaning, 1, "invoice", None)).is_none());
-        assert!(
-            reason_or_ready(&result(&meaning, 0, "invoice", None)).is_none(),
-            "a caller behind the build is served by it"
-        );
-
-        assert_eq!(
-            reason(&result(&meaning, 2, "invoice", None)),
-            MeaningUnavailableReason::Stale
-        );
-        meaning.lock().building = true;
-        assert_eq!(
-            reason(&result(&meaning, 2, "invoice", None)),
-            MeaningUnavailableReason::Refreshing
-        );
-        meaning.lock().building = false;
-
-        meaning.latest.store(2, Ordering::SeqCst);
-        meaning.run_builds();
-        let (_, pool, _) = hits(result(&meaning, 2, "invoice", None));
-        assert_eq!(pool.generation, 2);
-    }
-
-    /// An edit between two questions is in the next answer, and the rebuild
-    /// embeds only what changed.
-    #[test]
-    fn rebuild_should_see_an_edit_and_embed_only_the_changed_file() {
-        let fixture = Fixture::new();
-        let meaning = fixture.meaning();
-        meaning.latest.store(1, Ordering::SeqCst);
-        meaning.run_builds();
-        let embedded = fixture.passages.load(Ordering::SeqCst);
-        assert_eq!(embedded, 2);
-
-        write(
-            fixture.root.path(),
-            "src/weather.rs",
-            &function("Predict the glacier avalanche risk", "predict_avalanche"),
-        );
-        meaning.latest.store(2, Ordering::SeqCst);
-        meaning.run_builds();
-        assert_eq!(fixture.passages.load(Ordering::SeqCst), embedded + 1);
-        let (found, _, _) = hits(result(&meaning, 2, "glacier avalanche risk", Some(1)));
-        assert_eq!(found[0].symbol.as_deref(), Some("predict_avalanche"));
-        assert_eq!(
-            fixture.opened.load(Ordering::SeqCst),
-            1,
-            "the model stays loaded across builds"
-        );
-    }
-
-    /// A watcher batch that lands while a build runs is covered by one more
-    /// build in the same run: the vectors end fresh for the newest generation,
-    /// not for the one the run started with.
-    #[test]
-    fn run_builds_should_build_again_when_a_newer_generation_arrives_mid_build() {
-        let fixture = Fixture::new();
-        let slot: Arc<OnceLock<std::sync::Weak<Meaning>>> = Arc::default();
-        let passages = Arc::clone(&fixture.passages);
-        let meaning = Meaning::with(
-            fixture.root.path(),
-            {
-                let slot = Arc::clone(&slot);
-                Arc::new(move || {
-                    // The watcher publishes generation 2 while the model loads.
-                    if let Some(meaning) = slot.get().and_then(std::sync::Weak::upgrade) {
-                        meaning.latest.fetch_max(2, Ordering::SeqCst);
-                    }
-                    Ok(Box::new(WordEmbedder {
-                        passages: Arc::clone(&passages),
-                        fail_queries: false,
-                    }) as Box<dyn Embedder>)
-                })
-            },
-            VectorCache::Disabled,
-            100,
-            Duration::from_secs(3600),
-        );
-        slot.set(Arc::downgrade(&meaning)).unwrap();
-        meaning.latest.store(1, Ordering::SeqCst);
-        meaning.lock().building = true;
-        assert_eq!(meaning.run_builds(), 2, "one build per generation seen");
-
-        assert!(!meaning.lock().building);
-        let (_, pool, _) = hits(result(&meaning, 2, "invoice", None));
-        assert_eq!(pool.generation, 2, "the run ended on the newest generation");
-        assert_eq!(
-            fixture.passages.load(Ordering::SeqCst),
-            2,
-            "the second build reused every file of the first"
-        );
-    }
-
-    /// No model on disk is reported as such on every request, and a model
-    /// that appears is used by the next build without a restart.
-    #[test]
-    fn ensure_should_report_a_missing_model_and_retry_on_every_request() {
-        let fixture = Fixture::new();
-        let meaning = fixture.meaning_failing(OpenFailure::ModelMissing, Duration::from_secs(3600));
-        meaning.ensure(1);
-        wait_until_idle(&meaning);
-        let answer = result(&meaning, 1, "invoice", None);
-        assert_eq!(reason(&answer), MeaningUnavailableReason::ModelMissing);
-        meaning.ensure(1);
-        wait_until_idle(&meaning);
-        assert_eq!(
-            fixture.opened.load(Ordering::SeqCst),
-            2,
-            "a missing model is checked again on the next request"
-        );
-    }
-
-    /// A model that fails to load is not retried within the backoff, and is
-    /// once the backoff passed; the detail reaches the answer.
-    #[test]
-    fn ensure_should_back_off_after_a_failed_build() {
-        let fixture = Fixture::new();
-        let failing = fixture.meaning_failing(
-            OpenFailure::Failed("model load: corrupt".into()),
-            Duration::from_secs(3600),
-        );
-        failing.ensure(1);
-        wait_until_idle(&failing);
-        failing.ensure(1);
-        wait_until_idle(&failing);
-        assert_eq!(
-            fixture.opened.load(Ordering::SeqCst),
-            1,
-            "within the backoff"
-        );
-        let answer = result(&failing, 1, "invoice", None);
-        let MeaningResult::Unavailable { reason, detail, .. } = answer else {
-            panic!("expected unavailable")
-        };
-        assert_eq!(reason, MeaningUnavailableReason::Failed);
-        assert_eq!(detail.as_deref(), Some("model load: corrupt"));
-
-        let retrying = fixture.meaning_failing(
-            OpenFailure::Failed("model load: corrupt".into()),
-            Duration::ZERO,
-        );
-        retrying.ensure(1);
-        wait_until_idle(&retrying);
-        retrying.ensure(1);
-        wait_until_idle(&retrying);
-        assert_eq!(fixture.opened.load(Ordering::SeqCst), 3, "past the backoff");
-    }
-
-    /// A panic in the build is a failed build with the flag cleared, never a
-    /// daemon stuck on `warming`.
-    #[test]
-    fn run_builds_should_turn_a_panicking_build_into_a_failure() {
-        let fixture = Fixture::new();
-        let meaning = Meaning::with(
-            fixture.root.path(),
-            Arc::new(|| panic!("model exploded")),
-            VectorCache::Disabled,
-            100,
-            Duration::from_secs(3600),
-        );
-        meaning.lock().building = true;
-        meaning.run_builds();
-        assert!(!meaning.lock().building);
-        let MeaningResult::Unavailable { reason, detail, .. } =
-            result(&meaning, 1, "invoice", None)
-        else {
-            panic!("expected unavailable")
-        };
-        assert_eq!(reason, MeaningUnavailableReason::Failed);
-        assert_eq!(detail.as_deref(), Some("the build panicked"));
-    }
-
-    /// A watcher batch rebuilds at once only once the vectors have been
-    /// asked for; a cold index stays cold.
-    #[test]
-    fn nudge_should_rebuild_only_an_index_that_was_asked_for() {
-        let fixture = Fixture::new();
-        let cold = fixture.meaning();
-        cold.nudge(5);
-        assert!(!cold.lock().building);
-        assert_eq!(fixture.opened.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            cold.latest.load(Ordering::SeqCst),
-            5,
-            "the generation is remembered"
-        );
-
-        let warm = fixture.meaning();
-        warm.latest.store(1, Ordering::SeqCst);
-        warm.run_builds();
-        warm.nudge(2);
-        wait_until_idle(&warm);
-        let (_, pool, _) = hits(result(&warm, 2, "invoice", None));
-        assert_eq!(
-            pool.generation, 2,
-            "already rebuilt before the next question"
-        );
-    }
-
-    #[test]
-    fn answer_should_refuse_a_blank_question_even_when_unavailable() {
-        let fixture = Fixture::new();
-        let meaning = fixture.meaning();
-        for blank in ["", "   ", "\n\t"] {
-            let error = meaning.answer(1, blank, None).unwrap_err();
-            assert!(error.contains("query is empty"), "{error}");
-        }
-    }
-
-    /// The limit: the default without one, honoured below the cap and at it,
-    /// capped above it with the request named, and zero allowed (a probe).
-    #[test]
-    fn answer_should_apply_the_default_limit_and_cap_the_requested_one() {
-        let fixture = Fixture::new();
-        for index in 0..60 {
-            write(
-                fixture.root.path(),
-                &format!("src/extra_{index:02}.rs"),
-                &function(
-                    &format!("Helper number {index}"),
-                    &format!("helper_{index}"),
-                ),
-            );
-        }
-        let meaning = fixture.meaning_with(1000, Duration::from_secs(3600));
-        meaning.latest.store(1, Ordering::SeqCst);
-        meaning.run_builds();
-
-        let (found, _, caps) = hits(result(&meaning, 1, "helper number", None));
-        assert_eq!(found.len(), DEFAULT_LIMIT);
-        assert_eq!(caps, [SEMANTIC_LEADS_UNVERIFIED]);
-
-        let (found, _, caps) = hits(result(
-            &meaning,
-            1,
-            "helper number",
-            Some(MEANING_MAX_LIMIT),
-        ));
-        assert_eq!(found.len(), MEANING_MAX_LIMIT);
-        assert_eq!(
-            caps,
-            [SEMANTIC_LEADS_UNVERIFIED],
-            "at the cap is not over it"
-        );
-
-        let (found, _, caps) = hits(result(
-            &meaning,
-            1,
-            "helper number",
-            Some(MEANING_MAX_LIMIT + 1),
-        ));
-        assert_eq!(found.len(), MEANING_MAX_LIMIT);
-        assert_eq!(
-            caps.last().map(String::as_str),
-            Some("limit capped at 50 (requested 51)")
-        );
-
-        let (found, pool, _) = hits(result(&meaning, 1, "helper number", Some(0)));
-        assert!(found.is_empty());
-        assert_eq!(pool.files, 62, "a zero limit still reports the pool");
-
-        assert_eq!(bounded_limit(Some(3)), (3, None));
-        assert_eq!(bounded_limit(None), (DEFAULT_LIMIT, None));
-        assert_eq!(bounded_limit(Some(50)), (50, None));
-        assert_eq!(bounded_limit(Some(51)), (50, Some(51)));
-    }
-
-    /// Hits come best first with ties by path, run to run.
-    #[test]
-    fn answer_should_break_ties_by_path_deterministically() {
-        let fixture = Fixture::new();
-        write(
-            fixture.root.path(),
-            "src/b_twin.rs",
-            &function("Total the ledger", "total"),
-        );
-        write(
-            fixture.root.path(),
-            "src/a_twin.rs",
-            &function("Total the ledger", "total"),
-        );
-        let meaning = fixture.meaning();
-        meaning.latest.store(1, Ordering::SeqCst);
-        meaning.run_builds();
-        let first = hits(result(&meaning, 1, "total the ledger", None)).0;
-        let second = hits(result(&meaning, 1, "total the ledger", None)).0;
-        assert_eq!(first, second);
-        let paths: Vec<&str> = first.iter().map(|hit| hit.path.as_str()).collect();
-        assert_eq!(&paths[..2], ["src/a_twin.rs", "src/b_twin.rs"]);
-    }
-
-    /// A question longer than the cap is cut at a character boundary and the
-    /// answer says so; one at the cap is whole.
-    #[test]
-    fn bounded_query_should_cut_at_a_character_boundary_above_the_cap_only() {
-        let at_cap = "a".repeat(MEANING_QUERY_MAX_BYTES);
-        assert_eq!(bounded_query(&at_cap), (at_cap.as_str(), false));
-        let over = "a".repeat(MEANING_QUERY_MAX_BYTES + 1);
-        assert_eq!(
-            bounded_query(&over),
-            (&over[..MEANING_QUERY_MAX_BYTES], true)
-        );
-        // A two-byte character straddling the cap is dropped whole.
-        let wide = format!(
-            "{}é{}",
-            "a".repeat(MEANING_QUERY_MAX_BYTES - 1),
-            "b".repeat(10)
-        );
-        let (kept, truncated) = bounded_query(&wide);
-        assert!(truncated);
-        assert_eq!(kept.len(), MEANING_QUERY_MAX_BYTES - 1);
-    }
-
-    #[test]
-    fn answer_should_name_a_truncated_query_in_its_caps() {
-        let fixture = Fixture::new();
-        let meaning = fixture.meaning();
-        meaning.latest.store(1, Ordering::SeqCst);
-        meaning.run_builds();
-        let long = format!("charge the invoice {}", "padding ".repeat(200));
-        let (_, _, caps) = hits(result(&meaning, 1, &long, None));
-        assert_eq!(
-            caps.last().map(String::as_str),
-            Some("query truncated to its first 1024 bytes")
-        );
-        let (_, _, caps) = hits(result(&meaning, 1, "charge the invoice", None));
-        assert_eq!(caps, [SEMANTIC_LEADS_UNVERIFIED]);
-    }
-
-    /// Every way the index falls short of the repository is a cap in words.
-    #[test]
-    fn caps_for_should_name_the_sample_the_skips_and_the_store_failures() {
-        let plain = ResidentStats::default();
-        assert_eq!(caps_for(&plain, 5), [SEMANTIC_LEADS_UNVERIFIED]);
-        let short = ResidentStats {
-            files: 4,
-            skipped_files: 1,
-            credential_files: 2,
-            eligible_files: 9,
-            sampled_files: 5,
-            file_limit_reached: true,
-            vector_cache_errors: vec!["segment unreadable".into()],
-            ..ResidentStats::default()
-        };
-        assert_eq!(
-            caps_for(&short, 5),
-            [
-                SEMANTIC_LEADS_UNVERIFIED.to_string(),
-                "the index holds a deterministic sample of 5 of 9 eligible files (resident limit 5)"
-                    .to_string(),
-                "1 eligible file(s) are not indexed: unreadable, over 512 KiB, binary or not UTF-8"
-                    .to_string(),
-                "2 eligible file(s) are never indexed: credential-shaped paths (.env, keys, secrets)"
-                    .to_string(),
-                "vector cache: segment unreadable; the affected chunks were embedded again"
-                    .to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn open_when_on_disk_should_report_a_missing_model_and_pass_a_load_error_through() {
-        let missing = open_when_on_disk(false, || panic!("must not open"));
-        assert_eq!(missing.err(), Some(OpenFailure::ModelMissing));
-        let broken = open_when_on_disk(true, || Err("corrupt".to_string()));
-        assert_eq!(broken.err(), Some(OpenFailure::Failed("corrupt".into())));
-        let opened = open_when_on_disk(true, || {
-            Ok(Box::new(WordEmbedder {
-                passages: Arc::new(AtomicU64::new(0)),
-                fail_queries: false,
-            }) as Box<dyn Embedder>)
+    fn meaning(service: &mut Service, query: &str) -> MeaningResult {
+        let response = service.handle(Op::Meaning {
+            stale_ok: false,
+            query: query.to_owned(),
+            limit: None,
         });
-        assert_eq!(opened.unwrap().model_id(), "fixture-words");
+        assert!(response.ok, "{:?}", response.error);
+        let value: Value = response.result.expect("a result");
+        serde_json::from_value(value).expect("a meaning result")
     }
 
-    /// A model that fails on a question surfaces as an error, not as a
-    /// `ready` answer without leads.
-    #[test]
-    fn answer_should_fail_when_the_model_fails_on_the_question() {
-        let fixture = Fixture::new();
-        let meaning = fixture.meaning();
-        meaning.latest.store(1, Ordering::SeqCst);
-        meaning.run_builds();
-        *meaning.embedder() = Some(Box::new(WordEmbedder {
-            passages: Arc::new(AtomicU64::new(0)),
-            fail_queries: true,
-        }));
-        let error = meaning.answer(1, "charge the invoice", None).unwrap_err();
-        assert!(error.contains("fixture model failed"), "{error}");
+    /// Asks until the pool answers or `within` passes: a build runs on its own
+    /// thread, and a request never waits for it.
+    fn until_ready(service: &mut Service, query: &str, within: Duration) -> MeaningResult {
+        let deadline = Instant::now() + within;
+        loop {
+            let result = meaning(service, query);
+            if matches!(result, MeaningResult::Ready { .. }) || Instant::now() >= deadline {
+                return result;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
-    /// While a build holds the embedder a request cannot rank, and says the
-    /// vectors are being replaced.
     #[test]
-    fn answer_should_report_refreshing_when_a_build_holds_the_embedder() {
-        let fixture = Fixture::new();
-        let meaning = fixture.meaning();
-        meaning.latest.store(1, Ordering::SeqCst);
-        meaning.run_builds();
-        let held = meaning.embedder().take();
-        assert_eq!(
-            reason(&result(&meaning, 1, "charge the invoice", None)),
-            MeaningUnavailableReason::Refreshing
+    fn a_missing_model_answers_model_missing_every_time_and_never_builds() {
+        let (_dir, mut service) = project(missing);
+        for _ in 0..2 {
+            match meaning(&mut service, "retry limit") {
+                MeaningResult::Unavailable { reason, detail, .. } => {
+                    assert_eq!(reason, MeaningUnavailableReason::ModelMissing);
+                    assert_eq!(detail.as_deref(), Some("the model is not in the cache"));
+                }
+                other @ MeaningResult::Ready { .. } => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_model_that_fails_to_open_is_remembered_with_its_reason() {
+        let (_dir, mut service) = project(broken);
+        for _ in 0..2 {
+            match meaning(&mut service, "retry limit") {
+                MeaningResult::Unavailable { reason, detail, .. } => {
+                    assert_eq!(reason, MeaningUnavailableReason::Failed);
+                    assert_eq!(detail.as_deref(), Some("onnx exploded"));
+                }
+                other @ MeaningResult::Ready { .. } => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_request_warms_the_pool_then_answers_with_leads_and_the_pool() {
+        let (_dir, mut service) = project(hashing);
+        build_graph(&mut service);
+        let first = meaning(&mut service, "where is the retry limit read from config");
+        assert!(
+            matches!(
+                first,
+                MeaningResult::Unavailable {
+                    reason: MeaningUnavailableReason::Warming,
+                    ..
+                }
+            ),
+            "the first request never waits: {first:?}"
         );
-        *meaning.embedder() = held;
-        assert!(reason_or_ready(&result(&meaning, 1, "charge the invoice", None)).is_none());
+        let ready = until_ready(
+            &mut service,
+            "where is the retry limit read from config",
+            Duration::from_secs(20),
+        );
+        let MeaningResult::Ready { hits, pool, caps } = ready else {
+            panic!("never ready: {ready:?}")
+        };
+        assert_eq!(hits[0].path, "src/retry.rs", "{hits:?}");
+        assert_eq!(hits[0].symbol.as_deref(), Some("retry_limit"));
+        assert_eq!(pool.model, "pixel-hashing");
+        assert_eq!(pool.dims, 128);
+        assert!(pool.files >= 3 && pool.chunks >= pool.files, "{pool:?}");
+        assert!(caps[0].contains("unverified"));
+        // The guide ranks below the code file for a question that does not name docs.
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        let guide = paths.iter().position(|p| *p == "docs/guide.md");
+        assert!(guide.is_none_or(|at| at > 0), "{paths:?}");
+    }
+
+    #[test]
+    fn a_pool_cut_before_the_graph_existed_is_rebuilt_at_its_symbols() {
+        let (_dir, mut service) = project(hashing);
+        let windows = until_ready(&mut service, "retry limit config", Duration::from_secs(20));
+        let MeaningResult::Ready { hits, .. } = windows else {
+            panic!("never ready")
+        };
+        assert_eq!(hits[0].symbol, None, "no graph yet, so windows: {hits:?}");
+        build_graph(&mut service);
+        let rebuilding = meaning(&mut service, "retry limit config");
+        assert!(
+            matches!(
+                rebuilding,
+                MeaningResult::Unavailable {
+                    reason: MeaningUnavailableReason::Refreshing,
+                    ..
+                }
+            ),
+            "{rebuilding:?}"
+        );
+        let symbols = until_ready(&mut service, "retry limit config", Duration::from_secs(20));
+        let MeaningResult::Ready { hits, .. } = symbols else {
+            panic!("never rebuilt")
+        };
+        assert!(
+            hits.iter()
+                .any(|h| h.symbol.as_deref() == Some("retry_limit")),
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn the_limit_is_clamped_and_one_hit_comes_per_file() {
+        let (_dir, mut service) = project(hashing);
+        let _ = until_ready(&mut service, "retry", Duration::from_secs(20));
+        let response = service.handle(Op::Meaning {
+            stale_ok: false,
+            query: "retry".into(),
+            limit: Some(1),
+        });
+        let value: MeaningResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        let MeaningResult::Ready { hits, .. } = value else {
+            panic!("not ready")
+        };
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn a_pool_behind_the_served_generation_says_refreshing_and_rebuilds() {
+        let (dir, mut service) = project(hashing);
+        let ready = until_ready(&mut service, "retry", Duration::from_secs(20));
+        assert!(matches!(ready, MeaningResult::Ready { .. }));
+        // A new commit moves the generation the next request serves.
+        std::fs::write(dir.path().join("src/extra.rs"), "pub fn extra_retry() {}\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "more"]);
+        let _ = service.handle(Op::Reindex {});
+        let behind = meaning(&mut service, "retry");
+        assert!(
+            matches!(
+                behind,
+                MeaningResult::Unavailable {
+                    reason: MeaningUnavailableReason::Refreshing,
+                    ..
+                }
+            ),
+            "{behind:?}"
+        );
+        let again = until_ready(&mut service, "extra retry", Duration::from_secs(20));
+        let MeaningResult::Ready { hits, .. } = again else {
+            panic!("never rebuilt: {again:?}")
+        };
+        assert!(hits.iter().any(|h| h.path == "src/extra.rs"), "{hits:?}");
+    }
+
+    #[test]
+    fn the_vector_store_lives_under_the_sidecar_and_is_reused_by_the_next_build() {
+        let (dir, mut service) = project(hashing);
+        let _ = until_ready(&mut service, "retry", Duration::from_secs(20));
+        let store = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(".pixel/code-vectors");
+        let manifest =
+            std::fs::read_to_string(store.join("manifest.json")).expect("the store was written");
+        assert!(manifest.contains("pixel-hashing"));
+    }
+
+    #[test]
+    fn leads_should_fail_without_waiting_once_the_deadline_has_passed() {
+        let (_dir, service) = project(hashing);
+        let shared = service.shared();
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let error = leads(&shared, "retry", 3, at(), past).unwrap_err();
+        assert_eq!(error, "no time left");
+        let cold = leads(
+            &shared,
+            "retry",
+            3,
+            at(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert_eq!(cold, "warming");
+    }
+
+    #[test]
+    fn skipped_should_name_lockfiles_and_minified_bundles_only() {
+        assert!(skipped("Cargo.lock"));
+        assert!(skipped("web/app.min.js"));
+        assert!(!skipped("src/lock.rs"));
+        assert!(!skipped("docs/guide.md"));
+    }
+
+    #[test]
+    fn the_default_opener_without_the_feature_says_so() {
+        if cfg!(feature = "semantic") {
+            return;
+        }
+        match default_opener(Path::new("/")) {
+            Err(OpenFailure::Failed(detail)) => assert!(detail.contains("no semantic search")),
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("opened without the feature"),
+        }
     }
 }
