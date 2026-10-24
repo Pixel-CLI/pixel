@@ -996,7 +996,7 @@ runs both entry points from Pi's extension events:
 | --- | --- | --- |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`, `SubagentStart`, `SubagentStop`, plus `PostToolUseFailure` (Claude) or `Interrupt` (Codex) | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks. Once enforced, a task retains its gates if runtime settings change. On `prompt-submit` it also returns the `[PIXEL:BRIEF]` evidence brief as `additionalContext` (see below). On `SessionStart` and a briefed `UserPromptSubmit` it may start the repository's daemon in the background (see "Keeping a daemon behind the brief"). Every hook of the table also leaves its line in `.pixel/brief-feedback.jsonl` after it has answered the host (`prompt-submit` parts, `post-tool-use`, `tool-failure`, `stop`): the read feedback of the brief, best effort and silent, so it adds no registration and cannot fail a host. |
 | `UserPromptSubmit` (Claude Code and Codex, `brief_parts` entries; default 3) | `pixel run-hook task-event --provider <host> --event prompt-submit --part K/N` | The brief split over `N` hooks (see "A brief larger than one hook"). Part 1 is the entry above with the ledger and the brief; parts 2 to `N` only print their slice. |
-| `before_agent_start` (Pi, `pixel-brief.ts`) | `pixel run-hook task-event --provider pi --event prompt-submit` | Payload `{session_id, cwd, prompt, brief_only: true}` on stdin. `brief_only` (`BRIEF_ONLY` in `task_hook.rs`) keeps the ledger out: no task is bound, nothing is gated or enforced, and the answer is the bare decision `{"decision":"observe","context":<brief>}`. The brief gets the configured `brief_parts` budget (3 by default) as one message, the 3 s hook window, and leaves its line in `.pixel/brief-feedback.jsonl` and the per-session dedupe. A delivered brief adds the `🟩 pixel prompt-submit` `systemMessage` under the same `metrics` rules as the other hosts. The package injects `context` as the `pixel-brief` custom message with the untrusted-data trailer, and shows `systemMessage` to the user only (`ctx.ui.notify`, never part of the model's context). A Pi payload without `brief_only` keeps `TaskProvider::Pi`'s ledger-only behaviour and gets no brief. |
+| `before_agent_start` (Pi, `pixel-brief.ts`) | `pixel run-hook task-event --provider pi --event prompt-submit` | Payload `{session_id, cwd, prompt, brief_only: true}` on stdin. `brief_only` (`BRIEF_ONLY` in `task_hook.rs`) keeps the ledger out: no task is bound, nothing is gated or enforced, and the answer is the bare decision `{"decision":"observe","context":<brief>}`. The brief gets the configured `brief_parts` budget (3 by default) as one message, the 3 s hook window, and leaves its line in `.pixel/brief-feedback.jsonl` and the per-session dedupe. A delivered brief adds the `🟩 pixel prompt-submit` `systemMessage` under the same `metrics` rules as the other hosts. The package injects `context` as the `pixel-brief` custom message with the untrusted-data trailer, which its renderer draws as one summary line until a click or the tool-expand key (ctrl+o) opens it, and shows `systemMessage` to the user only (`ctx.ui.notify`, never part of the model's context). A Pi payload without `brief_only` keeps `TaskProvider::Pi`'s ledger-only behaviour and gets no brief. |
 | `session_start`, `session_compact` (Pi, `pixel-brief.ts`) | `pixel run-hook task-event --provider pi --event session-start` | Payload `{session_id, cwd, source, brief_only: true}`; `source` is `clear` for a new session, `compact` after a compaction and `startup` otherwise. It may start the repository's daemon and, for `clear` and `compact`, forgets what the brief already sent. |
 | `tool_result` of a bash call that ran `pixel` (Pi, `pixel-brief.ts`) | `pixel run-hook metrics --provider pi` | Claude-shaped payload (`tool_name`, `tool_input.command`, `tool_response`, `cwd`, `session_id`). Relays the finalized Pixel metrics line as `systemMessage`, whether or not the bash result already holds the box, as Codex does; the package shows it to the user only and never rewrites the tool result. |
 | `PostToolUse` (Claude Code, matching `Bash`) | `pixel run-hook metrics --provider claude` | Relays the finalized Pixel metrics line to Claude's `systemMessage` after a shell call. |
@@ -1270,8 +1270,13 @@ skipped unless asked. A code-shaped prompt that resolved `defined:` reads the
 definition's range, then its callers' declarations, then the best chunk of the
 top fused files. Its ZERO step (one unambiguous definition of at most 40 lines shown as the answer, `answer::STRONG_ZERO`) is off: 1 of 2 firings was right on dev. The typed text loses its links (`strip_urls`) before the signal is decided, so a pasted `utm_source` is not a code identifier. Ranges come from lines actually read at HEAD, never from a
 credential-shaped path.
-`scripts/bench/bench-brief-excerpt.py` measures excerpt@1 and `scripts/bench/bench-brief-spans.py` the
-ZERO precision and the share of gold spans inside the `read:` ranges. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
+`scripts/bench/bench-brief-excerpt.py` measures excerpt@1. `scripts/bench/bench-brief-spans.py` retains
+the legacy ZERO/read-range overlap counts and measures annotated-reference file/line precision,
+recall and F0.5 from numbered source actually delivered, overall and by question shape. Suggested
+reads earn no source credit; the pinned annotations are not exhaustive relevance judgments.
+Before retrieval, the scorer rejects annotations outside tracked source files or their
+line bounds in the clean pinned fixture; results identify both input files by SHA-256.
+A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
 explicit cue (config, setting, env, flag, option, default), not `install` or
 `hook`. That
 block's cap is `PROSE_BRIEF_BYTES` (3584, under OpenCode's 4000-byte plugin
@@ -1310,7 +1315,10 @@ that use it with their call sites and the tests that reach it through them,
 and its tests by name with the first assertion (the first three with their
 bodies). A block is cut at a line, never across parts. The detail of each
 symbol rises (two lines around a site, a neighbourhood, the whole function,
-the neighbours of a constant) while every block still fits. The text may
+the neighbours of a field or value) while every block still fits. Constant
+definitions keep their declaration and attached documentation at every detail
+level; their usage evidence can still expand. Pack and probe budgets reserve
+room for the final skill line appended by the chain. The text may
 exceed one hook's 10 000-character cap: `Pack::text` is the whole of it and
 `split_parts` cuts it at block boundaries into parts of `PART_CHARS` (9 800)
 characters, at most `MAX_PARTS` (8). The count is the `brief_parts`

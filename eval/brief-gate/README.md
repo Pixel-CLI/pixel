@@ -19,7 +19,9 @@ python3 scripts/bench/bench-brief-gate.py --pixel <pixel> --repo <fixture> --spl
 | File | What |
 | --- | --- |
 | `prompts.jsonl` | the set, one JSON object per line |
+| `answer_spans.jsonl` | annotated answer line ranges for a subset of prompt ids |
 | `../../scripts/bench/bench-brief-gate.py` | the runner, the metrics and `--check-set` / `--self-test` |
+| `../../scripts/bench/bench-brief-spans.py` | the answer-span scorer and its `--self-test` |
 
 ## Schema
 
@@ -124,6 +126,62 @@ Keep the strata balanced (add rows in pairs, one for each split), give the row a
 fresh `id`, and for `expected_files` read the code first and write the evidence.
 A new row changes the set's SHA-256, which the runner records: a before and an
 after must use the same file.
+
+## Annotated answer-span scoreboard
+
+Run the focused scorer against a clean checkout of the fixture SHA recorded in
+`bench-brief-gate.py`:
+
+```bash
+python3 scripts/bench/bench-brief-spans.py --pixel <pixel> --repo <fixture> --split all --out spans.json
+```
+
+Before calling the binary, the scorer verifies the fixture commit, rejects
+tracked edits, and checks every annotation against tracked regular source files:
+paths must exist and inclusive line ranges must fit the file. Invalid labels
+stop the run with their question IDs, rather than becoming retrieval failures.
+These checks establish that a range exists; source review must still establish
+that it answers the question. The output records SHA-256 hashes of both input
+files so results from different annotation versions cannot be confused.
+It sends `pixel brief --json --parts 1` for each annotated
+prompt. Each result records the exact brief text, the numbered source lines
+parsed from `answer` and `### path:line[-line] — label` blocks, UTF-8 brief
+bytes, CLI elapsed milliseconds, and a failure category when the invocation
+does not return valid JSON. Relative binary paths are resolved from the
+scorer's launch directory; bare names use `PATH`. `--parts 1` is explicit;
+this scorer measures CLI time and does not measure hook p95 or multi-part hook
+delivery.
+
+`quality.line` reports pooled precision, recall, and F0.5 over unique
+`(path, line)` coordinates. Gold lines are the inclusive annotated
+`answer_spans`; predictions are only numbered source lines actually shown in
+the brief. `quality.file` applies the same metrics to the unique paths with
+shown lines and the paths in those annotations. Duplicate lines count once.
+Each metric also reports macro precision, recall, and F0.5 averaged per prompt;
+failed or empty rows stay in that denominator with a zero score.
+Pointers (`files:`), `defined:`, `read:` and `also:` ranges receive no credit.
+Rows that fail or return no brief remain in the totals with no predicted lines,
+so they contribute false negatives; the failure count and per-row CLI time
+remain visible. The JSON retains every per-row `brief_text` and parsed
+`shown_lines` so the score can be inspected against what was delivered.
+
+`quality_by_shape` groups only on the explicit `shape` field in
+`answer_spans.jsonl`; missing tags are `unclassified`, and unknown tags fail
+the run. The current annotations contain 9 `symbol`, 20 `where-behavior`, 4
+`multi-hop`, and no `edit-set` questions. The empty edit-set category is a
+coverage gap, not a zero score.
+
+The [2026-10-21 source audit](answer-spans-audit.md) retains all 33 questions,
+repairs three references to renamed files, and adds missing callers to two
+answers. Historical scores from the earlier labels must be recomputed from
+their saved briefs with the corrected annotations for both arms. Changing the
+labels does not itself improve retrieval, and these already-inspected questions
+are exploratory evidence rather than an unseen evaluation set.
+
+These are annotated-reference measurements, not exhaustive relevance labels
+or SWE-grep parity. Lines outside a gold range count as false positives even
+when they are another valid way to answer; a gold range may itself omit useful
+evidence. The older span-hit fields remain for continuity and are not F0.5.
 
 ## `prompts-multirepo.jsonl` (#906)
 

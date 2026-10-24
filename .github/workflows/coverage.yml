@@ -79,7 +79,7 @@ jobs:
       # Its own key: instrumented objects are useless to the Test job's
       # `linux-debug` cache and the other way round. Only main writes it.
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: linux-coverage
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -96,7 +96,7 @@ jobs:
           fi
 
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
@@ -189,7 +189,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: linux-coverage-branch
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -205,7 +205,7 @@ jobs:
           fi
 
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
 

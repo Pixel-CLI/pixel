@@ -1666,12 +1666,12 @@ fn definition_candidates(
             part: Part::Definition,
             block: block.clone(),
         }];
-        // A value or a field sits among its siblings: the neighbours say
-        // what the group is.
+        // A value, variant, field or variable sits among its siblings: the
+        // neighbours say what the group is.
         if by > 0
             && matches!(
                 site.kind.as_str(),
-                "const" | "value" | "variant" | "field" | "variable"
+                "value" | "variant" | "field" | "variable"
             )
             && let Some((first, last)) = block_range(&block).map(|(_, a, b)| (a, b))
             && last - first < COMPACT_DECL_LINES as u64
@@ -3116,14 +3116,12 @@ mod tests {
     fn build_should_show_the_definition_its_usage_in_functions_and_its_tests() {
         let pack = built(&input(1), &repo()).unwrap();
         let heads = heads(&pack);
-        // A constant sits among its siblings: with room to spare, they come too.
         assert_eq!(
             heads[0],
-            "src/api.rs:1-20 — SEARCH_DEFAULT_ROWS definition (const) with its neighbours"
+            "src/api.rs:4-5 — SEARCH_DEFAULT_ROWS definition (const)"
         );
-        // The use in `search` sits inside the lines the definition brings.
         assert!(
-            !heads.iter().any(|head| head.contains("usage in search")),
+            heads.iter().any(|head| head.contains("usage in search")),
             "{heads:?}"
         );
         assert_eq!(
@@ -3153,6 +3151,61 @@ mod tests {
         assert!(pack.has_evidence());
         assert_eq!(pack.targets(), 1);
         assert!(!pack.fallback());
+    }
+
+    #[test]
+    fn build_should_keep_a_multiline_constant_doc_and_usages_without_siblings() {
+        let mut evidence = repo();
+        evidence.sources[0].1 = lines(&[
+            "//! The wire contract.",
+            "/// Rows a search returns when the request names no limit.",
+            "pub const SEARCH_DEFAULT_ROWS: usize =",
+            "    60 +",
+            "    40;",
+            "pub const SEARCH_MAX_ROWS: usize = 10_000;",
+            "",
+            "pub fn search() -> usize {",
+            "    SEARCH_DEFAULT_ROWS",
+            "}",
+        ]);
+        evidence.symbols[0].1 = Ok(vec![symbol_hit(
+            "src/api.rs",
+            "SEARCH_DEFAULT_ROWS",
+            "const",
+            3,
+            5,
+        )]);
+        evidence.rows[0].1[0] = row("src/api.rs", 3, "pub const SEARCH_DEFAULT_ROWS: usize =");
+        evidence.rows[0].1[1] = row("src/api.rs", 9, "    SEARCH_DEFAULT_ROWS");
+        let mut request = input(1);
+        request.defined = vec![site("src/api.rs", 3, Some(5), "const")];
+
+        let pack = built(&request, &evidence).unwrap();
+        let text = pack.text();
+        let heads = heads(&pack);
+
+        assert!(
+            heads.contains(&"src/api.rs:1-5 — SEARCH_DEFAULT_ROWS definition (const)".to_string()),
+            "{heads:?}"
+        );
+        assert!(text.contains("1| //! The wire contract."), "{text}");
+        assert!(text.contains("2| /// Rows a search returns when the request names no limit."));
+        assert!(text.contains("3| pub const SEARCH_DEFAULT_ROWS: usize ="));
+        assert!(text.contains("4|     60 +"));
+        assert!(text.contains("5|     40;"));
+        assert!(!text.contains("SEARCH_MAX_ROWS"), "{text}");
+        assert!(
+            heads.iter().any(|head| head.contains("usage in search")),
+            "{heads:?}"
+        );
+        assert!(
+            heads.iter().any(|head| head.contains("usage in handler")),
+            "{heads:?}"
+        );
+        assert!(
+            heads.contains(&"tests of SEARCH_DEFAULT_ROWS".to_string()),
+            "{heads:?}"
+        );
     }
 
     #[test]

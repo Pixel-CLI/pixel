@@ -146,10 +146,14 @@ fn a_prompt_naming_a_symbol_should_get_its_definition_usage_and_tests_as_source(
         ),
         "{text}"
     );
-    // The definition keeps its doc comment and its value; a constant brings
-    // the lines around it, and a usage they already show is not repeated.
+    // The definition keeps its doc comment and value; its usage remains a
+    // separate block instead of widening the definition to neighbouring lines.
     assert!(
-        text.contains("### src/limits.rs:1-6 — MAX_RETRIES definition (const) with its neighbours\n1| /// How many times a failed request is sent again.\n2| pub const MAX_RETRIES: u32 = 42;"),
+        text.contains("### src/limits.rs:1-2 — MAX_RETRIES definition (const)\n1| /// How many times a failed request is sent again.\n2| pub const MAX_RETRIES: u32 = 42;"),
+        "{text}"
+    );
+    assert!(
+        text.contains("### src/limits.rs:4-6 — MAX_RETRIES usage in backoff\n4| pub fn backoff(attempt: u32) -> u32 {\n5|     attempt.min(MAX_RETRIES) * 2\n6| }"),
         "{text}"
     );
     assert_eq!(
