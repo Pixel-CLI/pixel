@@ -11,6 +11,13 @@ updates:
       # and deserve their own review.
       cargo-minor-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # fastembed 7.1.3 pins ort 2.0.0-rc.15, whose ort-sys leaves
+      # onnxruntime::coreml symbols undefined in the aarch64-apple-darwin
+      # release link (Cross-build, #1330). PR CI never runs that link, so
+      # the bump looked green. Lift once a later fastembed links there.
+      - dependency-name: "fastembed"
+        versions: [">=7.1.2"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
