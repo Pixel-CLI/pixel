@@ -23,7 +23,8 @@
 // <!-- pixel:managed:begin -->
 // <!-- pixel:managed:end -->
 import { spawn } from "node:child_process";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, keyText, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Box, Container, Markdown, MouseRegion, TruncatedText } from "@earendil-works/pi-tui";
 
 const PIXEL_BIN = "{PIXEL_BIN}";
 const MAX_OUTPUT = 30_000;
@@ -104,7 +105,47 @@ const text = (content: unknown): string =>
         .join("\n")
     : "";
 
+// A click's open/closed choice per brief, dropped once the tool-expand key
+// (ctrl+o) changes; Pi rebuilds the component on every invalidate, so the
+// choice cannot live in it.
+const clicked = new WeakMap<object, { at: boolean; open: boolean }>();
+
 export default function (pi: ExtensionAPI) {
+  // The brief runs to tens of lines: it shows as one summary line that a click
+  // or ctrl+o opens, the way Pi shows an invoked skill.
+  pi.registerMessageRenderer("pixel-brief", (message, { expanded, outputPad }, theme) => {
+    const body = typeof message.content === "string" ? message.content : text(message.content);
+    const lines = body.split("\n");
+    const summary = lines.find((line) => line.trim() && line.trim() !== "[PIXEL:BRIEF]")?.trim() ?? "";
+    const label = theme.fg("customMessageLabel", "\x1b[1m[pixel brief]\x1b[22m ");
+    const box = new Box(outputPad, 0, (t) => theme.bg("customMessageBg", t));
+    const fill = () => {
+      const choice = clicked.get(message);
+      if (choice && choice.at !== expanded) clicked.delete(message);
+      const open = choice?.at === expanded ? choice.open : expanded;
+      const content = new Container();
+      if (open) {
+        content.addChild(new TruncatedText(label + theme.fg("dim", "(click to collapse)")));
+        content.addChild(new Markdown(body, 0, 0, getMarkdownTheme(), {
+          color: (t) => theme.fg("customMessageText", t),
+        }));
+      } else {
+        content.addChild(new TruncatedText(label
+          + theme.fg("dim", `${lines.length} lines (click or ${keyText("app.tools.expand")} to expand) `)
+          + theme.fg("customMessageText", summary)));
+      }
+      box.clear();
+      box.addChild(new MouseRegion(content, (event) => {
+        if (event.type !== "click" || event.button !== "left") return undefined;
+        clicked.set(message, { at: expanded, open: !open });
+        fill();
+        return { handled: true };
+      }));
+    };
+    fill();
+    return box;
+  });
+
   const sessionStart = (source: string) => async (_event: unknown, ctx: ExtensionContext) => {
     await run(
       ["run-hook", "task-event", "--provider", "pi", "--event", "session-start"],
