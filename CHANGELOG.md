@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **pi:** `/skill:name <text>` no longer briefs the skill's own body: Pi hands extensions the expanded `<skill …>…</skill>` block plus the text, and the brief now searches only the text (a bare `/skill:name` gets no brief).
+
 ## [0.9.0] - 2026-10-21
 
 0.9.0 brings the prompt-submit brief to every agent Pixel supports and makes it answer more questions on its own. Pi, Devin and Antigravity now receive the brief and show its metrics line, plain-language and French prompts get leads by default, and new probes quote the tests and documentation a question names. Underneath, the daemon and the release binary got faster and leaner, and `pixel setup` keeps a receipt of everything it changes so it can undo it.

@@ -98,6 +98,13 @@ const text = (content: unknown): string =>
         .join("\n")
     : "";
 
+// pi expands `/skill:name args` to `<skill name=… location=…>\n…\n</skill>\n\nargs`
+// (its own parseSkillBlock shape); only `args` is what the user asked.
+const userPrompt = (prompt: string): string => {
+  const skill = /^<skill name="[^"]+" location="[^"]+">\n[\s\S]*?\n<\/skill>(?:\n\n([\s\S]+))?$/.exec(prompt);
+  return (skill ? skill[1] ?? "" : prompt).trim();
+};
+
 export default function (pi: ExtensionAPI) {
   const sessionStart = (source: string) => async (_event: unknown, ctx: ExtensionContext) => {
     await run(
@@ -115,7 +122,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (event.messageType === "custom") return;
-    const prompt = (event.prompt ?? "").trim();
+    const prompt = userPrompt(event.prompt ?? "");
     if (!prompt || prompt.length > MAX_PROMPT) return;
     const reply = await run(
       ["run-hook", "task-event", "--provider", "pi", "--event", "prompt-submit"],
