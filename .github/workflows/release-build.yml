@@ -89,7 +89,7 @@ jobs:
       # cross-build.yml and reproducible-build.yml pin the same version.
       - name: Install cross (Linux musl)
         if: runner.os == 'Linux'
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cross@0.2.5
 
@@ -128,7 +128,7 @@ jobs:
       # the crates it lists, failing when one the build compiles is absent.
       # Its name matches none of the pixel-*.tar.gz globs downstream.
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-cyclonedx@0.5.9
 
