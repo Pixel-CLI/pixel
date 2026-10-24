@@ -1313,7 +1313,10 @@ that use it with their call sites and the tests that reach it through them,
 and its tests by name with the first assertion (the first three with their
 bodies). A block is cut at a line, never across parts. The detail of each
 symbol rises (two lines around a site, a neighbourhood, the whole function,
-the neighbours of a constant) while every block still fits. The text may
+the neighbours of a field or value) while every block still fits. Constant
+definitions keep their declaration and attached documentation at every detail
+level; their usage evidence can still expand. Pack and probe budgets reserve
+room for the final skill line appended by the chain. The text may
 exceed one hook's 10 000-character cap: `Pack::text` is the whole of it and
 `split_parts` cuts it at block boundaries into parts of `PART_CHARS` (9 800)
 characters, at most `MAX_PARTS` (8). The count is the `brief_parts`

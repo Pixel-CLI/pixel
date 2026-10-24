@@ -2728,6 +2728,9 @@ pub(crate) struct ProbeSetup {
     /// Characters the merged brief may hold: the hook parts the host takes,
     /// whatever the tier shrank the region pack to (a maybe's pack is one
     /// part, but a probe that answers it may fill all of them).
+    /// shortcut: the aggregate cap does not guarantee all lines fit the
+    /// configured parts; use delivery-splitter fitting when fixing multipart
+    /// probe loss.
     pub(crate) cap: usize,
     /// What the probes are given at least after the chain: [`PROBE_FLOOR`] for a
     /// hook, nothing for the `brief` command (OpenCode kills it at 1.2 s).
@@ -2842,6 +2845,10 @@ impl Pending {
             return (text, Vec::new());
         }
         let kind = brief.kind.map(QuestionKind::as_str);
+        let footer_reserve = SKILL_LINE.len() + 1;
+        let max_bytes = setup
+            .max_bytes
+            .map(|max_bytes| max_bytes.saturating_sub(footer_reserve));
         let stage = probes::Stage {
             host: &setup.host,
             root: &setup.root,
@@ -2849,8 +2856,8 @@ impl Pending {
             kind,
             gate_closed,
             deadline: probe_deadline(self.started, self.deadline, Instant::now(), setup.floor),
-            cap: setup.cap,
-            max_bytes: setup.max_bytes,
+            cap: setup.cap.saturating_sub(footer_reserve),
+            max_bytes,
         };
         match probes::apply(&stage, text.as_deref().unwrap_or("")) {
             (Some(merged), runs) => (Some(merged), runs),
@@ -2885,9 +2892,6 @@ impl Pending {
         let render_ms = millis(render_started.elapsed());
         let probe_started = Instant::now();
         let (text, probe_runs) = self.probe_stage(&brief, text);
-        // shortcut: appended after the part budget, so a brief that fills its last
-        // part exactly loses this line to an undelivered part; reserve room in
-        // `fit` if that shows up.
         let text = text.map(|text| format!("{}\n{SKILL_LINE}", text.trim_end_matches('\n')));
         let probe_ms = (!probe_runs.is_empty()).then(|| millis(probe_started.elapsed()));
         let recovered = matches!(brief.admission, Admission::Closed(_)) && text.is_some();
@@ -3194,7 +3198,11 @@ where
     let deadline = started + window;
     let state = Arc::new(Mutex::new(Brief {
         signal: Some(signal),
-        pack_limit: pack,
+        // Every rendered pack path gets this line after fitting, including stale notices.
+        pack_limit: region_pack::Limit {
+            parts: pack.parts,
+            chars: pack.chars.saturating_sub(SKILL_LINE.len() + 1),
+        },
         seen,
         ..Brief::default()
     }));
@@ -10447,6 +10455,83 @@ mod tests {
                 assert_eq!(finished.text, None, "{label}");
                 assert_eq!(finished.record.probes, [], "{label}");
             }
+        }
+    }
+
+    #[test]
+    fn finishing_should_reserve_the_skill_footer_in_probe_character_and_byte_limits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let plugin = root.join(".pixel/plugins/near-cap");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plugin.join("pixel-plugin.toml"),
+            "name = \"near-cap\"\nversion = \"0.1.0\"\napi = 1\ndescription = \"near cap evidence\"\nrun = \"probe\"\ncapabilities = [\"brief-probe\"]\n[brief-probe]\nowner = \"test\"\nbudget_ms = 400\nwhen_prompt = \"crate\"\n",
+        )
+        .unwrap();
+        let program = plugin.join("probe");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ncat >/dev/null\nprintf '### source.rs:1-34 - probe evidence\\n'\ni=1\nwhile [ \"$i\" -le 34 ]; do printf '%02d| %080d\\n' \"$i\" 0; i=$((i + 1)); done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rows = (1..=34)
+            .map(|line| format!("{line:02}| {:080}\n", 0))
+            .collect::<String>();
+        let untrimmed = format!("[PIXEL:BRIEF]\n### source.rs:1-34 - probe evidence\n{rows}");
+        assert!(untrimmed.len() > 3_000 - SKILL_LINE.len() - 1);
+        assert!(untrimmed.len() <= 3_000);
+
+        for (char_cap, max_bytes) in [(3_000, None), (6_000, Some(3_000))] {
+            let (send, done) = mpsc::channel();
+            send.send(()).unwrap();
+            let started = Instant::now();
+            let finished = Pending {
+                state: Arc::new(Mutex::new(Brief::default())),
+                done,
+                deadline: started + SECOND,
+                started,
+                log: None,
+                central: None,
+                kicked: None,
+                task: "what does this crate expose".into(),
+                signal: Signal::Prose,
+                sent: None,
+                probes: Some(ProbeSetup {
+                    host: pixel_plugin::Host {
+                        home: root.clone(),
+                        repo_root: None,
+                        path: std::ffi::OsString::new(),
+                        github_base: None,
+                    },
+                    root: root.clone(),
+                    cap: char_cap,
+                    floor: Duration::ZERO,
+                    max_bytes,
+                }),
+            }
+            .finish_with_record();
+
+            if max_bytes.is_some() {
+                assert_eq!(finished.text, None);
+            } else {
+                let text = finished.text.expect("probe brief");
+                assert!(
+                    text.contains("### source.rs:1-34 - probe evidence"),
+                    "{text}"
+                );
+                assert!(text.contains("01| "), "{text}");
+                assert!(text.ends_with(&format!("\n{SKILL_LINE}")), "{text}");
+                assert!(
+                    text.chars().count() <= char_cap,
+                    "{} chars",
+                    text.chars().count()
+                );
+            }
+            assert_eq!(finished.record.probes[0].outcome, "ok");
         }
     }
 
