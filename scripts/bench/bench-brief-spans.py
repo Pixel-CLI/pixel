@@ -30,6 +30,7 @@ Tune on ``dev``; measure ``test`` once. Standard library only.
 import argparse
 import collections
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -37,6 +38,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -261,6 +263,100 @@ def validate_fixture(repo):
         raise ValueError("answer-span fixture has tracked working-tree changes")
 
 
+def validate_gold(repo, gold_rows, prompts=None):
+    """Reject answer spans that cannot refer to tracked source in ``repo``."""
+    root = Path(repo).resolve()
+    try:
+        result = subprocess.run(["git", "ls-files", "--stage", "-z"], cwd=root,
+                                capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError(f"cannot list tracked fixture files at {root}") from error
+
+    tracked_files = set()
+    for entry in result.stdout.split(b"\0"):
+        if not entry:
+            continue
+        try:
+            metadata, raw_path = entry.split(b"\t", 1)
+            mode, _, stage = metadata.decode("ascii").split()
+            path = os.fsdecode(raw_path)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if stage == "0" and mode in {"100644", "100755"}:
+            tracked_files.add(path)
+
+    errors = []
+    checked_paths = {}
+    seen_ids = set()
+    for gold in gold_rows:
+        question_id = gold.get("id") if isinstance(gold, dict) else None
+        label = question_id if isinstance(question_id, str) and question_id else "<unknown>"
+        if not isinstance(gold, dict):
+            errors.append(f"{label}: gold row must be an object")
+            continue
+        if not isinstance(question_id, str) or not question_id:
+            errors.append(f"{label}: id must be a non-empty string")
+        elif question_id in seen_ids:
+            errors.append(f"{label}: duplicate gold question id")
+        else:
+            seen_ids.add(question_id)
+        if prompts is not None and isinstance(question_id, str) and question_id not in prompts:
+            errors.append(f"{label}: id has no matching prompt")
+        spans = gold.get("answer_spans")
+        if not isinstance(spans, list) or not spans:
+            errors.append(f"{label}: answer_spans must be a non-empty list")
+            continue
+
+        for index, span in enumerate(spans, start=1):
+            where = f"{label} span {index}"
+            if not isinstance(span, dict):
+                errors.append(f"{where}: span must be an object")
+                continue
+            raw_path = span.get("path")
+            if not isinstance(raw_path, str) or not raw_path:
+                errors.append(f"{where}: path must be a non-empty relative path")
+                continue
+            parts = raw_path.split("/")
+            if (raw_path.startswith("/") or "\\" in raw_path or
+                    any(part in {"", ".", ".."} for part in parts)):
+                errors.append(f"{where}: path must be a normalized repository-relative path ({raw_path!r})")
+                continue
+            source = checked_paths.get(raw_path)
+            if source is None:
+                source = root.joinpath(*parts)
+                checked_paths[raw_path] = source
+            if raw_path not in tracked_files:
+                errors.append(f"{where}: path is not a tracked regular source file ({raw_path})")
+                continue
+            try:
+                source.resolve(strict=True).relative_to(root)
+            except (OSError, RuntimeError, ValueError):
+                errors.append(f"{where}: source is missing or resolves outside the fixture ({raw_path})")
+                continue
+            if source.is_symlink() or not source.is_file():
+                errors.append(f"{where}: source is not a regular file ({raw_path})")
+                continue
+
+            start, end = span.get("start_line"), span.get("end_line")
+            if (not isinstance(start, int) or isinstance(start, bool) or start < 1 or
+                    not isinstance(end, int) or isinstance(end, bool) or end < start):
+                errors.append(f"{where}: start_line/end_line must be positive ordered integers")
+                continue
+            try:
+                source_bytes = source.read_bytes()
+            except OSError:
+                errors.append(f"{where}: cannot read source ({raw_path})")
+                continue
+            line_count = source_bytes.count(b"\n")
+            if source_bytes and not source_bytes.endswith(b"\n"):
+                line_count += 1
+            if end > line_count:
+                errors.append(f"{where}: end_line {end} exceeds {raw_path} line count {line_count}")
+
+    if errors:
+        raise ValueError("invalid answer-span gold:\n" + "\n".join(f"- {error}" for error in errors))
+
+
 def resolve_pixel(pixel, launch_dir=None):
     value = str(pixel)
     path = Path(value)
@@ -289,11 +385,16 @@ def main():
     except ValueError as error:
         parser.error(str(error))
     pixel = resolve_pixel(args.pixel)
-    prompts = {r["id"]: r for r in map(json.loads, open(PROMPTS)) if r.get("id")}
-    gold_rows = list(map(json.loads, open(SPANS)))
+    prompt_bytes = PROMPTS.read_bytes()
+    span_bytes = SPANS.read_bytes()
+    prompts = {r["id"]: r for r in map(json.loads, prompt_bytes.splitlines()) if r.get("id")}
+    gold_rows = list(map(json.loads, span_bytes.splitlines()))
     try:
         for gold in gold_rows:
+            if not isinstance(gold, dict):
+                raise ValueError("gold row must be an object")
             shape_of(gold)
+        validate_gold(args.repo, gold_rows, prompts)
     except ValueError as error:
         parser.error(str(error))
     rows = []
@@ -317,7 +418,10 @@ def main():
     groups = {"strong": [r for r in rows if r["fired"] and r["tier"] is None],
               "prose": [r for r in rows if r["tier"] in ("high", "low")]}
     shapes = sorted({row["shape"] for row in rows})
-    result = {"split": args.split, "fixture_sha": FIXTURE_SHA, "parts": 1, "summary": summarize(rows),
+    result = {"split": args.split, "fixture_sha": FIXTURE_SHA,
+              "prompts_sha256": hashlib.sha256(prompt_bytes).hexdigest(),
+              "answer_spans_sha256": hashlib.sha256(span_bytes).hexdigest(),
+              "parts": 1, "summary": summarize(rows),
               "quality": summarize_quality(rows), "rows": rows,
               "by_signal": {name: summarize(group) for name, group in groups.items()},
               "quality_by_shape": {shape: summarize_quality([r for r in rows if r["shape"] == shape])
@@ -428,6 +532,83 @@ class Tests(unittest.TestCase):
             main()
         self.assertEqual(process.call_count, 1)
         self.assertEqual(process.call_args.args[0], ["git", "rev-parse", "HEAD"])
+
+    def make_git_fixture(self, directory):
+        repo = Path(directory)
+        (repo / "source.rs").write_text("first line\nsecond line\n")
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "--", "source.rs"], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c",
+                        "user.email=fixture@example.com", "-c", "commit.gpgsign=false",
+                        "commit", "--quiet", "-m", "fixture"], check=True)
+        return repo
+
+    def test_gold_preflight_rejects_every_bad_row_before_pixel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self.make_git_fixture(directory)
+            (repo / "untracked.rs").write_text("not in git\n")
+            rows = [
+                {"id": "bg-test-missing", "shape": "symbol", "answer_spans": [
+                    {"path": "missing.rs", "start_line": 1, "end_line": 1}]},
+                {"id": "bg-test-untracked", "shape": "symbol", "answer_spans": [
+                    {"path": "untracked.rs", "start_line": 1, "end_line": 1}]},
+                {"id": "bg-test-out-of-bounds", "shape": "symbol", "answer_spans": [
+                    {"path": "source.rs", "start_line": 1, "end_line": 3}]},
+                {"id": "bg-test-malformed", "shape": "symbol", "answer_spans": [
+                    {"path": "source.rs", "start_line": "1", "end_line": 2}]},
+            ]
+            prompts = directory + "/prompts.jsonl"
+            spans = directory + "/answer_spans.jsonl"
+            Path(prompts).write_text("\n".join(json.dumps({
+                "id": row["id"], "text": "question", "split": "test",
+            }) for row in rows) + "\n")
+            Path(spans).write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            arguments = ["bench-brief-spans.py", "--pixel", "pixel", "--repo", str(repo)]
+            with mock.patch.object(sys, "argv", arguments), \
+                    mock.patch.object(sys.modules[__name__], "PROMPTS", Path(prompts)), \
+                    mock.patch.object(sys.modules[__name__], "SPANS", Path(spans)), \
+                    mock.patch.object(sys.modules[__name__], "validate_fixture"), \
+                    mock.patch.object(sys.modules[__name__], "run") as pixel, \
+                    contextlib.redirect_stderr(io.StringIO()) as stderr, \
+                    self.assertRaises(SystemExit) as raised:
+                main()
+            self.assertEqual(raised.exception.code, 2)
+            pixel.assert_not_called()
+            for question_id in ("bg-test-missing", "bg-test-untracked", "bg-test-out-of-bounds",
+                                "bg-test-malformed"):
+                self.assertIn(question_id, stderr.getvalue())
+            self.assertIn("not a tracked regular source file", stderr.getvalue())
+            self.assertIn("exceeds source.rs line count 2", stderr.getvalue())
+            self.assertIn("positive ordered integers", stderr.getvalue())
+
+    def test_gold_preflight_accepts_valid_ranges_and_records_input_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self.make_git_fixture(directory)
+            prompt_bytes = b'{"id":"bg-test-valid","text":"question","split":"dev"}\n'
+            span_bytes = (b'{"id":"bg-test-valid","shape":"symbol","answer_spans":'
+                          b'[{"path":"source.rs","start_line":1,"end_line":2}]}\n')
+            prompts = Path(directory) / "prompts.jsonl"
+            spans = Path(directory) / "answer_spans.jsonl"
+            prompts.write_bytes(prompt_bytes)
+            spans.write_bytes(span_bytes)
+            output = Path(directory) / "result.json"
+            arguments = ["bench-brief-spans.py", "--pixel", "pixel", "--repo", str(repo),
+                         "--out", str(output)]
+            with mock.patch.object(sys, "argv", arguments), \
+                    mock.patch.object(sys.modules[__name__], "PROMPTS", prompts), \
+                    mock.patch.object(sys.modules[__name__], "SPANS", spans), \
+                    mock.patch.object(sys.modules[__name__], "validate_fixture"), \
+                    mock.patch.object(sys.modules[__name__], "run", return_value={
+                        "brief": "", "tier": None, "elapsed_ms": 1,
+                        "failed": False, "error": None,
+                    }) as pixel, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                main()
+            pixel.assert_called_once()
+            result = json.loads(output.read_text())
+            self.assertEqual(result["prompts_sha256"], hashlib.sha256(prompt_bytes).hexdigest())
+            self.assertEqual(result["answer_spans_sha256"], hashlib.sha256(span_bytes).hexdigest())
+            self.assertEqual(result["summary"]["n"], 1)
 
     def test_relative_binary_paths_use_the_launch_directory(self):
         self.assertEqual(resolve_pixel("target/dev-release/pixel", "/work/repo"),

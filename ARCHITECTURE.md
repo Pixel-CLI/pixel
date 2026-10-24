@@ -1274,6 +1274,8 @@ credential-shaped path.
 the legacy ZERO/read-range overlap counts and measures annotated-reference file/line precision,
 recall and F0.5 from numbered source actually delivered, overall and by question shape. Suggested
 reads earn no source credit; the pinned annotations are not exhaustive relevance judgments.
+Before retrieval, the scorer rejects annotations outside tracked source files or their
+line bounds in the clean pinned fixture; results identify both input files by SHA-256.
 A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
 explicit cue (config, setting, env, flag, option, default), not `install` or
 `hook`. That
