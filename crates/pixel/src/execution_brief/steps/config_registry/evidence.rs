@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Source excerpts for a key, with the secrets masked, and the literal
 //! `set("key", value)` calls a question names.
 

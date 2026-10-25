@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! A named JavaScript setting, the function that compiles it when it is set,
 //! and the getter that reads the compiled value (`trust proxy` and `req.ip`).
 

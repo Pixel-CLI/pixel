@@ -147,9 +147,7 @@ fn overlapping_ranges_of_one_file_become_one_block() {
     let brief = format!("[PIXEL:BRIEF]\n{first}{second}{apart}");
     assert_eq!(
         ask("what does start do", &brief),
-        format!(
-            "drop: .\n### src/a.rs:1-5 — start (function definition)\n1| one\n2| two\n3| three\n4| four\n5| five\n### src/a.rs:9 — later (function usage)\n9| nine\n"
-        ),
+        "drop: .\n### src/a.rs:1-5 — start (function definition)\n1| one\n2| two\n3| three\n4| four\n5| five\n### src/a.rs:9 — later (function usage)\n9| nine\n",
         "the first block takes the second's lines (a one-line span is one number)"
     );
     let other = "### src/b.rs:3-4 — start (function usage)\n3| three\n4| four\n";

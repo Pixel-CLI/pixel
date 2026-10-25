@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `{key: declarations, reads}` built from the scanned lines.
 
 use std::collections::{BTreeMap, BTreeSet};

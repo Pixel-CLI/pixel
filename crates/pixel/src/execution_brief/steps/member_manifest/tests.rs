@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `probes/cand-k-member-manifest` has no test file: these are the cases its
 //! docstring promises, run on the step.
 

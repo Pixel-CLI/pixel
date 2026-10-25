@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The lines that may define or read a configuration key: the script ran one
 //! `rg` over the tree; the step walks it with the `ignore` crate `rg` is built
 //! on, and reads the git-tracked environment templates beside it.

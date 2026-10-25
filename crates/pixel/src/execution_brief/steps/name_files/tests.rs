@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The cases of `probes/name-files/tests/test_probe.py`, then the ones its
 //! docstring promises, run on the step.
 

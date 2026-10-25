@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The tracked source files that hold a narrow shape: what `rg -l` over the
 //! working tree gave the script, restricted to the files it kept (tracked,
 //! regular, inside the repository, at most 400 KiB).

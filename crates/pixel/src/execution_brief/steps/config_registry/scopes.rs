@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Comment and string masking, and the braced items of Rust and JavaScript
 //! sources, the way the script finds them: offsets are kept (a masked
 //! character becomes spaces of its own byte width), so a match in the masked

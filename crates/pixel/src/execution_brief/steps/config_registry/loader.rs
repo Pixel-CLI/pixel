@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! A Python configuration loader a question about environment files or
 //! overrides asks for: a method that reads an environment variable named by
 //! one of its parameters, forwards the result to a same-class helper, and

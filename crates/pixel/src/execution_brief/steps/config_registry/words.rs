@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The word handling of the script: stems, the prompt's words, the tokens of
 //! a key.
 

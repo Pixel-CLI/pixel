@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The cases of `probes/doc-sections/tests/` (issues #1200 and #1234), run on
 //! the step.
 

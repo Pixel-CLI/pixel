@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! A browser preference a prompt names: the `localStorage` or `sessionStorage`
 //! key it is read from and written to, and where an imported key constant is
 //! declared.

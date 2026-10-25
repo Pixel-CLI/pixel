@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The cases of `probes/config-registry/tests/test_probe.py` run on the step.
 
 use std::os::unix::fs::symlink;

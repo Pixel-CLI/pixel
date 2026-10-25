@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Which keys a question asks about.
 
 use std::collections::BTreeSet;

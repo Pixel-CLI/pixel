@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The repository as the script reads it: lines of a file through
 //! `Path.read_text(errors="replace")`, the tracked inventory with its caps,
 //! and the checks a source file passes before it is quoted.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! A prompt-named CLI setting (a `Flag` implementation of a Rust command-line
 //! tool) and the function that derives its runtime value.
 

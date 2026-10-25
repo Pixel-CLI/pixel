@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The cases of `probes/overview-answer-evidence/tests/test_probe.py` (the
 //! library root and the tracked FIFO), and the rest of the script's contract,
 //! run on the step.
