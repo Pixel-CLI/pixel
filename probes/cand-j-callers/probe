@@ -7,7 +7,10 @@ X is the identifier-shaped word of the question that the symbol graph resolves t
 callers (their body when short, else the window around the call) and the call sites of those callers, the tests
 among the callers, the test helpers named after X (`X_raw`), and the tests that set what X reads: the ALLCAPS
 environment names in its body and doc comment, looked up in the test files. Unrelated test blocks of the brief
-are dropped. Needs `pixel` (PIXEL_BIN, else PATH) and its daemon. Read-only, deterministic, no network."""
+are dropped. Needs `pixel` (PIXEL_BIN, else PATH) and its daemon. Read-only, deterministic, no network.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/cand_j_callers.rs) and does not start
+this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import ast
 import json
 import os

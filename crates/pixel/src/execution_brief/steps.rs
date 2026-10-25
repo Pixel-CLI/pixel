@@ -71,7 +71,8 @@ register!(
     history_fallback,
     cand_k_commit_patch,
     rank_blocks,
-    config_registry
+    config_registry,
+    cand_j_callers
 );
 
 mod graph;
