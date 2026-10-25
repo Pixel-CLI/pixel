@@ -249,6 +249,27 @@ fn budget_time_error(
     ))
 }
 
+/// The freshness check of an un-anchored tree ran past the same budget as its
+/// build. `root` is named because it is often not the directory the command
+/// was given: an ancestor's shard makes a gitless invocation root there.
+pub(crate) fn freshness_budget_error(
+    root: &Path,
+    elapsed: std::time::Duration,
+    budget: std::time::Duration,
+    files: usize,
+) -> IndexError {
+    IndexError::Budget(format!(
+        "{} is not inside a git repository, and checking its index for changes exceeded the time budget: \
+         stopped after {:.1}s (budget {:.1}s), {} files read. \
+         Run pixel inside a git repository (a `.git` bounds the file set) or from a smaller directory \
+         (an ancestor's `.pixel/` re-roots a gitless run), or raise the budget with PIXEL_INDEX_BUDGET_MS=<ms> (0 disables).",
+        root.display(),
+        elapsed.as_secs_f32(),
+        budget.as_secs_f32(),
+        files
+    ))
+}
+
 fn budget_bytes_error(files: usize, bytes: u64, cap: u64) -> IndexError {
     IndexError::Budget(format!(
         "index build exceeded its total-size cap: {} files / {:.2} GB > cap {:.2} GB, no shard written. \

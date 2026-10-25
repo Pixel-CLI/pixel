@@ -321,37 +321,65 @@ fn plain_sig_path(gpx_dir: &Path) -> PathBuf {
 /// Content signature for a non-Git directory. The same ignore, binary, size,
 /// and symlink policy as the index builder keeps freshness tied to the bytes
 /// that can actually appear in search results.
-fn plain_signature(root: &Path) -> String {
+///
+/// Runs under the plain-walk time budget of the build
+/// ([`index::build_budget_from_env`]): with no commit bounding the file set,
+/// an unrelated huge tree (an ancestor's `.pixel/` re-rooting a run in
+/// `/tmp`) would otherwise be read and hashed end to end on every open.
+fn plain_signature(root: &Path) -> Result<String, index::IndexError> {
+    plain_signature_within(root, index::build_budget_from_env())
+}
+
+fn plain_signature_within(
+    root: &Path,
+    budget: Option<std::time::Duration>,
+) -> Result<String, index::IndexError> {
     use std::hash::Hasher;
+    let started = Instant::now();
+    let mut entries: Vec<(String, u64)> = Vec::new();
     // Must mirror `index::build`'s walk policy exactly — both go through
     // `policy_walk` — or freshness would disagree with what the shard
     // actually contains.
-    let mut entries: Vec<(String, u64)> = crate::index::policy_walk(root)
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let rel = path.strip_prefix(root).ok()?.to_string_lossy().into_owned();
-            if is_internal(&rel) {
-                return None;
-            }
-            let meta = std::fs::symlink_metadata(path).ok()?;
-            if !meta.file_type().is_file() || meta.len() > MAX_FILE_BYTES {
-                return None;
-            }
-            let content = std::fs::read(path).ok()?;
-            if content[..content.len().min(8192)].contains(&0) {
-                return None;
-            }
-            Some((rel, xxhash_rust::xxh3::xxh3_64(&content)))
-        })
-        .collect();
+    for entry in crate::index::policy_walk(root).filter_map(Result::ok) {
+        if let Some(budget) = budget
+            && started.elapsed() > budget
+        {
+            return Err(index::freshness_budget_error(
+                root,
+                started.elapsed(),
+                budget,
+                entries.len(),
+            ));
+        }
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().into_owned();
+        if is_internal(&rel) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            continue;
+        };
+        if !meta.file_type().is_file() || meta.len() > MAX_FILE_BYTES {
+            continue;
+        }
+        let Ok(content) = std::fs::read(path) else {
+            continue;
+        };
+        if content[..content.len().min(8192)].contains(&0) {
+            continue;
+        }
+        entries.push((rel, xxhash_rust::xxh3::xxh3_64(&content)));
+    }
     entries.sort();
     let mut h = xxhash_rust::xxh3::Xxh3::new();
     for (rel, content_hash) in &entries {
         h.write(rel.as_bytes());
         h.write(&content_hash.to_le_bytes());
     }
-    format!("{:016x}", h.finish())
+    Ok(format!("{:016x}", h.finish()))
 }
 
 /// Load the stored plain-walk signature, or `None` if absent/corrupt.
@@ -671,7 +699,7 @@ impl IndexSet {
         // directory signature has changed (or is missing on first open).
         if head.is_none()
             && base.as_ref().is_some_and(|s| s.commit_oid().is_none())
-            && load_plain_sig(&gpx_dir).as_deref() != Some(&plain_signature(root))
+            && load_plain_sig(&gpx_dir).as_deref() != Some(&plain_signature(root)?)
         {
             base = None;
         }
@@ -693,7 +721,7 @@ impl IndexSet {
                         delta_anchor_held(root, &s)
                     } else {
                         s.commit_oid().is_none()
-                            && load_plain_sig(&gpx_dir).as_deref() == Some(&plain_signature(root))
+                            && load_plain_sig(&gpx_dir).as_deref() == Some(&plain_signature(root)?)
                     };
                     if valid {
                         let base = (BaseSource::Reused, millis(started.elapsed()));
@@ -776,7 +804,7 @@ impl IndexSet {
                         source = BaseSource::BuiltFromWalk;
                         index::build(root, extractor.as_ref())?;
                         let shard = Shard::open(&base_path)?;
-                        save_plain_sig(&gpx_dir, &plain_signature(root));
+                        save_plain_sig(&gpx_dir, &plain_signature(root)?);
                         shard
                     }
                 }
@@ -1318,6 +1346,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The freshness walk of an un-anchored tree stops at its budget with an
+    /// error naming the root, and a lifted or generous budget returns the
+    /// same signature.
+    #[test]
+    fn plain_signature_should_stop_at_its_time_budget() {
+        let dir = scratch("plain-sig-budget");
+        for n in 0..50 {
+            std::fs::write(dir.join(format!("f{n}.rs")), format!("fn f{n}() {{}}\n")).unwrap();
+        }
+        let message = plain_signature_within(&dir, Some(Duration::ZERO))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains(&format!("{} is not inside a git repository", dir.display()))
+                && message.contains("PIXEL_INDEX_BUDGET_MS"),
+            "{message}"
+        );
+        let lifted = plain_signature_within(&dir, None).unwrap();
+        let roomy = plain_signature_within(&dir, Some(Duration::from_secs(600))).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(lifted, roomy);
+    }
+
     /// A file over the size cap never reaches the shard, so it must not move
     /// the plain-tree freshness signature either.
     #[test]
@@ -1326,7 +1377,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
-        let before = plain_signature(&dir);
+        let before = plain_signature(&dir).unwrap();
         let big = dir.join("big.txt");
         std::fs::write(&big, vec![b'x'; 8192]).unwrap();
         std::fs::OpenOptions::new()
@@ -1335,9 +1386,9 @@ mod tests {
             .unwrap()
             .set_len(MAX_FILE_BYTES + 1)
             .unwrap();
-        let after = plain_signature(&dir);
+        let after = plain_signature(&dir).unwrap();
         std::fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
-        let with_small = plain_signature(&dir);
+        let with_small = plain_signature(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(before, after);
         assert_ne!(before, with_small);

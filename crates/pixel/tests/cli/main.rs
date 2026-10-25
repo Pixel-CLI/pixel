@@ -32,6 +32,7 @@ mod install_exit;
 mod json_contract;
 mod metrics_cli;
 mod ollaya_fresh_install_cli;
+mod outside_repo_cli;
 #[cfg(unix)]
 mod plugin_cli;
 mod prompt_brief_cli;

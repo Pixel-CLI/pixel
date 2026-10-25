@@ -1414,7 +1414,10 @@ fn route_through_daemon_with(
                 Ok(response) => (Some(response), ServeStep::new(ServeRoute::DaemonStarted)),
                 Err(reason) => (None, ServeStep::in_process(reason)),
             };
-            if step.reason != Some(InProcessReason::AutoStartDisabled) {
+            if !matches!(
+                step.reason,
+                Some(InProcessReason::AutoStartDisabled | InProcessReason::NotARepository)
+            ) {
                 step.start_ms = Some(start_ms);
             }
             (response, step)
@@ -1437,6 +1440,13 @@ fn auto_start_daemon(root: &Path, req: &Request) -> Result<Response, InProcessRe
             config_cmd::DAEMON_AUTO_START_ENV,
         ) {
             return Err(InProcessReason::AutoStartDisabled);
+        }
+        // A root without `.git` is a plain-walk tree (or an ancestor's shard
+        // that re-rooted a run in `/tmp`): no commit bounds its file set, so
+        // no daemon watches or indexes it for a command that did not ask.
+        // `pixel daemon start <dir>` still can.
+        if !root.join(".git").exists() {
+            return Err(InProcessReason::NotARepository);
         }
         let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         spawn_daemon(&abs).map_err(|_| InProcessReason::StartFailed)?;

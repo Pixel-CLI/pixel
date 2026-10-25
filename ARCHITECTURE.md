@@ -491,7 +491,10 @@ gets its command list from the CLI parser instead.
    `pixel daemon start <root> --foreground` in the background and polls the
    socket for up to five seconds. A daemon on a newer protocol is left alone
    and the command runs in process. `PIXEL_DAEMON_AUTO_START=0`, or
-   `daemon_auto_start: false` in the config, disables the spawn. One function
+   `daemon_auto_start: false` in the config, disables the spawn, and so does a
+   root without `.git` (reason `not_a_repository` in the action log's serve
+   step): nothing bounds the file set a daemon would index and watch there,
+   so the command runs in process. One function
    (`spawn_daemon`) spells that spawn for this path, `pixel daemon start` and
    the hooks, and `--warm-meaning` (hidden; background start only) makes the
    start process ask the new daemon one `meaning` question once it answers.
@@ -574,6 +577,14 @@ envelope talks to the daemon socket directly.
   leaves it behind. `targets_facts` answers `index_stale` only while
   `covered_head` differs from HEAD, never on the base shard's commit,
   which only a rebuild moves.
+- Outside a git repository the base shard has no commit to anchor on, so
+  its freshness is a content signature (`plain_signature`, stored as
+  `base.sig`): one walk that reads and hashes every file the index would
+  hold. The walk runs under the plain-walk budget (`PIXEL_INDEX_BUDGET_MS`,
+  default 5 s, `0` lifts it) like the build; past it the open fails naming the
+  root and saying it is not inside a git repository, rather than hashing an
+  unrelated huge tree. That is the case when a `.pixel/base.shard` in an
+  ancestor (`/tmp`) re-roots a gitless run there (`discover_root`).
 - The graph is built lazily on the first graph command and updated per file
   by the daemon watcher. Its quiet debounce extends only for recorded content
   events and is capped from the first pending edit (see Daemon and wire contract).

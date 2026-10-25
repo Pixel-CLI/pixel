@@ -448,3 +448,30 @@ fn kick_meaning_without_a_daemon_opens_nothing() {
     kick_meaning(&root);
     assert!(!root.join(pixel_index::index::SHARD_DIR).exists());
 }
+
+/// A root without `.git` is served in this process: the auto-start refuses
+/// before spawning anything, and the step names the reason without timing a
+/// start that never ran.
+#[test]
+fn a_root_without_git_is_never_given_an_auto_started_daemon() {
+    let _lock = crate::ENV_LOCK.lock().unwrap();
+    let root = scratch_root("route-no-git");
+    let saved = std::env::var_os("PIXEL_DAEMON_AUTO_START");
+    // SAFETY: process-wide environment access is serialized by ENV_LOCK.
+    unsafe {
+        std::env::set_var("PIXEL_DAEMON_AUTO_START", "1");
+    }
+    let (response, step) = route_through_daemon(&root, &Request::Status {});
+    // SAFETY: same lock as above.
+    unsafe {
+        match saved {
+            Some(value) => std::env::set_var("PIXEL_DAEMON_AUTO_START", value),
+            None => std::env::remove_var("PIXEL_DAEMON_AUTO_START"),
+        }
+    }
+    assert!(response.is_none());
+    assert_eq!(step.route, ServeRoute::InProcess);
+    assert_eq!(step.reason, Some(InProcessReason::NotARepository));
+    assert_eq!(step.start_ms, None, "{step:?}");
+    assert!(!daemon::socket_path(&root).exists());
+}
