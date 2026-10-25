@@ -15,6 +15,11 @@
 //! window holds fewer than three groups are dropped, longer ones are cut to
 //! their best window. A shown function that is short and named by a group
 //! brings its first caller from the graph. Read-only, deterministic.
+//!
+//! Since #1344 the step no longer matches the script byte for byte: a source
+//! excerpt is bounded to [`SOURCE_CAP`] lines that favour executable matches
+//! and control flow, test units are kept whole and ranked by evidence per
+//! character, and the densest code leads, then the tests, then the rest.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -87,11 +92,19 @@ const BRIEF_BOOST: f64 = 1.3;
 const MIN_WINDOW: usize = 2;
 /// The rarest groups a window must hold all of.
 const REQUIRED: usize = 2;
-/// Test files shown, tests of a family, lines of a test, bytes of tests.
+/// Test files shown, units of a family, bytes of tests.
 const MAX_TEST: usize = 3;
-const FAMILY: usize = 3;
-const TEST_CAP: usize = 12;
+const FAMILY: usize = 2;
 const TEST_BYTES: usize = 3000;
+/// Lines of a source excerpt.
+const SOURCE_CAP: usize = 18;
+/// A test file named after a group: its score, and its units' extra weight.
+const STEM_BOOST: f64 = 1.15;
+const DEDICATED_BOOST: f64 = 1.5;
+/// How much a match weighs on an executable line, a comment line, any other.
+const CODE_FACTOR: f64 = 2.0;
+const COMMENT_FACTOR: f64 = 0.05;
+const OTHER_FACTOR: f64 = 0.5;
 /// Files read, and the bytes of one.
 const MAX_FILES: usize = 4000;
 const MAX_FILE_BYTES: u64 = 300_000;
@@ -112,8 +125,15 @@ static STRING_OPEN: LazyLock<Regex> = LazyLock::new(|| {
 static TEST_MARK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\s*#\[(tokio::)?test|^\s*@(Test|pytest)").expect("the mark pattern is a literal")
 });
-static DIGITS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\d+").expect("the digits pattern is a literal"));
+/// Quoted literals (kept as evidence) and trailing line comments (cut).
+static EVIDENCE_NOISE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""(\\.|[^"\\])*"|'(\\.|[^'\\])*'|//.*$|(?:^|\s)#.*$"#)
+        .expect("the evidence pattern is a literal")
+});
+static CONTROL_FLOW: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:return|throw|raise|break|continue)\b")
+        .expect("the control-flow pattern is a literal")
+});
 
 fn run(ctx: &Ctx) -> String {
     stop_cause(ctx).unwrap_or_default()
@@ -127,7 +147,8 @@ struct Unit {
     name: String,
 }
 
-/// The tests of a file, leading comment and attribute lines included.
+/// The tests of a file, from the test mark (or the declaration) to the end;
+/// leading comments are not part of a unit.
 fn units(path: &str, lines: &[String]) -> Vec<Unit> {
     let mut found = Vec::new();
     let in_test_file = TESTPATH.is_match(path);
@@ -182,7 +203,9 @@ fn units(path: &str, lines: &[String]) -> Vec<Unit> {
             last
         });
         found.push(Unit {
-            first: start + 1,
+            first: (start..=at)
+                .find(|k| TEST_MARK.is_match(&lines[*k]))
+                .map_or(at + 1, |k| k + 1),
             last: end + 1,
             name: name.to_owned(),
         });
@@ -325,20 +348,162 @@ fn windows(lines: &[String], groups: &[Group]) -> Vec<Window> {
     out
 }
 
-/// Groups held and their summed score in `lines`.
+fn count_in(members: &BTreeSet<String>, text: &str) -> usize {
+    members.iter().map(|member| text.matches(member.as_str()).count()).sum()
+}
+
+/// `weight * (1 + ln count)`, the score of a group seen `count` times.
+fn weighed(weight: f64, count: usize) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let count = count as f64;
+    weight * (1.0 + count.ln())
+}
+
+/// Groups held and their summed score in `lines`, line by line: a match on an
+/// executable line weighs most, one in a comment or a declared name least.
 fn unit_score(lines: &[String], groups: &[Group]) -> (usize, f64) {
-    let body = lines.join("\n").to_lowercase();
     let (mut got, mut total) = (0, 0.0);
     for (weight, members) in groups {
-        let held: usize = members.iter().map(|member| body.matches(member.as_str()).count()).sum();
+        let (mut held, mut score) = (0, 0.0);
+        for original in lines {
+            let text = evidence_text(original).to_lowercase();
+            let matches = count_in(members, &text);
+            if matches == 0 {
+                continue;
+            }
+            held += matches;
+            let name = DECL
+                .captures(original)
+                .and_then(|caps| (1..=3).find_map(|k| caps.get(k)))
+                .map_or(0, |name| count_in(members, &name.as_str().to_lowercase()))
+                .min(matches);
+            let body = matches - name;
+            if body > 0 {
+                score += weighed(*weight, body) * line_factor(original, &text);
+            }
+            if name > 0 {
+                score += weighed(*weight, name) * COMMENT_FACTOR;
+            }
+        }
         if held != 0 {
             got += 1;
-            #[allow(clippy::cast_precision_loss)]
-            let held = held as f64;
-            total += weight * (1.0 + held.ln());
+            total += score;
         }
     }
     (got, total)
+}
+
+/// The weight of a match on `original` (`text` is its [`evidence_text`]).
+fn line_factor(original: &str, text: &str) -> f64 {
+    if is_comment_line(original) {
+        COMMENT_FACTOR
+    } else if code_like(text) {
+        CODE_FACTOR
+    } else {
+        OTHER_FACTOR
+    }
+}
+
+/// A line's group evidence, a control-flow statement weighing twice the
+/// heaviest group.
+fn line_evidence(original: &str, groups: &[Group], heaviest: f64) -> f64 {
+    let text = evidence_text(original).to_lowercase();
+    let factor = line_factor(original, &text);
+    let words: f64 = groups
+        .iter()
+        .map(|(weight, members)| match count_in(members, &text) {
+            0 => 0.0,
+            n => weighed(*weight, n) * factor,
+        })
+        .sum();
+    let flow = factor == CODE_FACTOR && CONTROL_FLOW.is_match(&text);
+    words + if flow { heaviest * 2.0 } else { 0.0 }
+}
+
+fn heaviest(groups: &[Group]) -> f64 {
+    groups.iter().map(|(weight, _)| *weight).reduce(f64::max).unwrap_or(1.0)
+}
+
+/// The line without its trailing comment; quoted literals stay evidence.
+fn evidence_text(line: &str) -> String {
+    if is_comment_line(line) {
+        return line.to_owned();
+    }
+    let mut text = String::with_capacity(line.len());
+    let mut copied = 0;
+    for found in EVIDENCE_NOISE.find_iter(line) {
+        text.push_str(&line[copied..found.start()]);
+        let token = found.as_str();
+        if token.starts_with("//") || token.trim_start().starts_with('#') {
+            return text;
+        }
+        text.push_str(token);
+        copied = found.end();
+    }
+    text.push_str(&line[copied..]);
+    text
+}
+
+/// The [`SOURCE_CAP`]-line part of `[first, last]` with the most evidence:
+/// comments keep context without outweighing executable lines.
+fn focused_window(lines: &[String], first: usize, last: usize, groups: &[Group]) -> (usize, usize) {
+    let size = last - first + 1;
+    if size <= SOURCE_CAP {
+        return (first, last);
+    }
+    let heaviest = heaviest(groups);
+    let evidence: Vec<f64> =
+        (first..=last).map(|n| line_evidence(line_of(lines, n), groups, heaviest)).collect();
+    let mut best = (first, f64::NEG_INFINITY);
+    for (offset, window) in evidence.windows(SOURCE_CAP).enumerate() {
+        let score: f64 = window.iter().sum();
+        if score > best.1 {
+            best = (first + offset, score);
+        }
+    }
+    (best.0, best.0 + SOURCE_CAP - 1)
+}
+
+/// Rendered characters of `[a, b]`.
+fn cost(lines: &[String], a: usize, b: usize) -> usize {
+    (a..=b).map(|n| line_of(lines, n).chars().count() + 8).sum()
+}
+
+/// Rendered characters of a unit, blank lines left out as the block does.
+fn unit_cost(lines: &[String], unit: &Unit) -> usize {
+    (unit.first..=unit.last)
+        .map(|n| line_of(lines, n))
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.chars().count() + 8)
+        .sum()
+}
+
+/// Evidence per rendered character of a span.
+fn density(lines: &[String], a: usize, b: usize, groups: &[Group]) -> f64 {
+    let heaviest = heaviest(groups);
+    let score: f64 = (a..=b).map(|n| line_evidence(line_of(lines, n), groups, heaviest)).sum();
+    #[allow(clippy::cast_precision_loss)]
+    let size = cost(lines, a, b).max(1) as f64;
+    score / size
+}
+
+/// The densest code span first, then the test units in their order, then the
+/// rest of the code by density; a span shown twice is kept once.
+fn evidence_order(
+    mut code: Vec<(String, usize, usize)>,
+    tests: Vec<(String, usize, usize)>,
+    texts: &BTreeMap<String, Vec<String>>,
+    groups: &[Group],
+) -> Vec<(String, usize, usize)> {
+    let dense = |(path, a, b): &(String, usize, usize)| density(&texts[path], *a, *b, groups);
+    code.sort_by(|x, y| dense(y).total_cmp(&dense(x)).then_with(|| x.cmp(y)));
+    let rest = if code.is_empty() { Vec::new() } else { code.split_off(1) };
+    let mut seen = BTreeSet::new();
+    code.into_iter()
+        .chain(tests)
+        .chain(rest)
+        .filter(|span| seen.insert(span.clone()))
+        .collect()
 }
 
 fn line_of(lines: &[String], n: usize) -> &str {
@@ -482,7 +647,12 @@ fn stop_cause(ctx: &Ctx) -> Option<String> {
         if !found.is_empty() && !TESTPATH.is_match(path) {
             let mut marked: HashSet<usize> = HashSet::new();
             for unit in units(path, lines) {
-                marked.extend(unit.first..=unit.last);
+                // A unit's leading comments count as test lines here.
+                let mut first = unit.first;
+                while first > 1 && COMMENT_START.is_match(line_of(lines, first - 1)) {
+                    first -= 1;
+                }
+                marked.extend(first..=unit.last);
             }
             found.retain(|(_, _, a, b)| {
                 let inside = (*a..=*b).filter(|n| marked.contains(n)).count();
@@ -548,6 +718,8 @@ fn stop_cause(ctx: &Ctx) -> Option<String> {
             .then_with(|| x.2.cmp(&y.2))
     });
     let mut chosen: Vec<(String, usize, usize)> = Vec::new();
+    // The windows before they are bounded: where callers are looked for.
+    let mut discovery: Vec<(String, usize, usize)> = Vec::new();
     let mut per_file: HashMap<&str, usize> = HashMap::new();
     let mut used = 0;
     for (_, path, a, b) in rows {
@@ -567,19 +739,20 @@ fn stop_cause(ctx: &Ctx) -> Option<String> {
         let (a, b) = recentre(lines, a, b, &groups);
         let (a, b) = trim(lines, a, b, &groups);
         let (a, b) = snap(lines, a, b);
-        let size: usize = (a..=b).map(|n| line_of(lines, n).chars().count() + 8).sum();
+        let (lo, hi) = focused_window(lines, a, b, &groups);
+        let size = cost(lines, lo, hi);
         if used + size > BYTES {
             continue;
         }
-        chosen.push((path.to_owned(), a, b));
+        chosen.push((path.to_owned(), lo, hi));
+        discovery.push((path.to_owned(), a, b));
         *per_file.entry(path).or_insert(0) += 1;
         used += size;
     }
 
-    chosen.extend(callers_of_named(ctx, &texts, &names, &chosen, &covered));
-    if wants_tests {
-        chosen.extend(tests(&texts, &groups, &names));
-    }
+    chosen.extend(callers_of_named(ctx, &texts, &names, &discovery, &covered));
+    let found = if wants_tests { tests(&texts, &groups, &names) } else { Vec::new() };
+    let chosen = evidence_order(chosen, found, &texts, &groups);
     if chosen.is_empty() {
         return None;
     }
@@ -587,10 +760,9 @@ fn stop_cause(ctx: &Ctx) -> Option<String> {
     if !drops.is_empty() {
         let _ = writeln!(text, "drop: ^(?:{})", drops.join("|"));
     }
-    chosen.sort();
     for (path, a, b) in &chosen {
         let kind = if TESTPATH.is_match(path) { "test" } else { "code" };
-        let _ = writeln!(text, "### {path}:{a}-{b} — where the question's words meet ({kind})");
+        let _ = writeln!(text, "### {path}:{a}-{b} — {kind}");
         let lines = &texts[path];
         for n in *a..=*b {
             let line = line_of(lines, n);
@@ -674,11 +846,21 @@ struct Found<'a> {
     unit: Unit,
 }
 
-/// A test kept for a file: score, first and last line, family and name.
-type Kept = (f64, usize, usize, String, String);
+/// The first two `_`-separated words of a name with three or more, else the
+/// name; digits count (`mode1` and `mode2` are two families), so a numeric
+/// suffix after them (`stop_after_binary_2`) is a sibling.
+fn family_of(name: &str) -> String {
+    if name.matches('_').count() >= 2 {
+        name.split('_').take(2).collect::<Vec<_>>().join("_")
+    } else {
+        name.to_owned()
+    }
+}
 
-/// The tests that carry the question's groups: at most one per file (two in a
-/// file named after a group), their neighbours of the same family.
+/// The whole tests that carry the question's groups, by evidence per
+/// character: at most one per file (two in a file named after a group, of two
+/// families), each with one sibling of its family, within [`TEST_BYTES`]; a
+/// unit larger than that is skipped.
 fn tests(
     texts: &BTreeMap<String, Vec<String>>,
     groups: &[Group],
@@ -690,12 +872,18 @@ fn tests(
     };
     let mut all: Vec<Found> = Vec::new();
     for (path, lines) in texts {
-        let boost = if named(path) { 1.15 } else { 1.0 };
+        let boost = if named(path) { STEM_BOOST * DEDICATED_BOOST } else { 1.0 };
         for unit in units(path, lines) {
+            let size = unit_cost(lines, &unit);
+            if size > TEST_BYTES {
+                continue;
+            }
             let body = &lines[unit.first - 1..unit.last.min(lines.len())];
             let (got, total) = unit_score(body, groups);
             if got >= MIN_GROUPS - 1 && total > 0.0 {
-                all.push(Found { total: total * boost, path, unit });
+                #[allow(clippy::cast_precision_loss)]
+                let total = total * boost / size.max(1) as f64;
+                all.push(Found { total, path, unit });
             }
         }
     }
@@ -705,74 +893,47 @@ fn tests(
             .then_with(|| x.path.cmp(y.path))
             .then_with(|| x.unit.first.cmp(&y.unit.first))
     });
-    let family_of = |name: &str| {
-        let norm = DIGITS.replace_all(name, "").into_owned();
-        if norm.matches('_').count() >= 2 {
-            norm.split('_').take(2).collect::<Vec<_>>().join("_")
-        } else {
-            norm
-        }
-    };
-    // (score, first, last, family, name) kept per file, best first.
-    let mut best: BTreeMap<&str, Vec<Kept>> = BTreeMap::new();
-    for found in &all {
-        let dedicated = named(found.path);
-        let family = family_of(&found.unit.name);
-        let slot = best.entry(found.path).or_default();
-        if slot.len() < if dedicated { 2 } else { 1 } && slot.iter().all(|kept| kept.3 != family) {
-            slot.push((
-                found.total * if dedicated { 1.5 } else { 1.0 },
-                found.unit.first,
-                found.unit.last,
-                family,
-                found.unit.name.clone(),
-            ));
-        }
-    }
-    let mut picks: Vec<(&Kept, &str)> = best
-        .iter()
-        .flat_map(|(path, kept)| kept.iter().map(move |item| (item, *path)))
-        .collect();
-    picks.sort_by(|x, y| {
-        y.0.0
-            .total_cmp(&x.0.0)
-            .then_with(|| x.1.cmp(y.1))
-            .then_with(|| x.0.1.cmp(&y.0.1))
-    });
-    let mut out = Vec::new();
-    let (mut spent, mut seen_files): (usize, Vec<&str>) = (0, Vec::new());
-    for ((_, a, b, family, name), path) in picks {
-        if !seen_files.contains(&path) {
-            if seen_files.len() >= MAX_TEST {
-                continue;
-            }
-            seen_files.push(path);
-        }
+    let mut files: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut families: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    let mut out: Vec<(String, usize, usize)> = Vec::new();
+    let mut spent = 0;
+    for Found { path, unit, .. } in all {
         let lines = &texts[path];
-        let plain = DIGITS.replace_all(name, "").into_owned();
-        let mut near: Vec<Unit> = units(path, lines)
-            .into_iter()
-            .filter(|unit| {
-                *family != plain
-                    && DIGITS.replace_all(&unit.name, "").starts_with(&format!("{family}_"))
-                    && unit.first != *a
-            })
-            .collect();
-        near.sort_by_key(|unit| unit.first);
-        let mut group = vec![(*a, *b, name.clone())];
-        group.extend(near.into_iter().take(FAMILY - 1).map(|unit| (unit.first, unit.last, unit.name)));
-        group.sort();
-        for (first, last, _) in group {
-            let last = last.min(first + TEST_CAP - 1);
-            let size: usize = (first..=last)
-                .filter(|n| !line_of(lines, *n).trim().is_empty())
-                .map(|n| line_of(lines, n).chars().count() + 8)
-                .sum();
-            if spent + size > TEST_BYTES {
+        let family = family_of(&unit.name);
+        let held = files.get(path).copied().unwrap_or(0);
+        let room = if named(path) { 2 } else { 1 };
+        if held >= room
+            || families.get(path).is_some_and(|known| known.contains(&family))
+            || spent + unit_cost(lines, &unit) > TEST_BYTES
+            || (held == 0 && files.len() >= MAX_TEST)
+        {
+            continue;
+        }
+        let shown = |out: &[(String, usize, usize)], first: usize| {
+            out.iter().any(|(known, at, _)| known == path && *at == first)
+        };
+        let mut group = vec![unit.clone()];
+        if family != unit.name {
+            group.extend(
+                units(path, lines)
+                    .into_iter()
+                    .filter(|other| {
+                        family_of(&other.name) == family
+                            && other.first != unit.first
+                            && !shown(&out, other.first)
+                    })
+                    .take(FAMILY - 1),
+            );
+        }
+        files.insert(path, held + 1);
+        families.entry(path).or_default().insert(family);
+        for member in group {
+            let size = unit_cost(lines, &member);
+            if shown(&out, member.first) || spent + size > TEST_BYTES {
                 continue;
             }
             spent += size;
-            out.push((path.to_owned(), first, last));
+            out.push((path.to_owned(), member.first, member.last));
         }
     }
     out

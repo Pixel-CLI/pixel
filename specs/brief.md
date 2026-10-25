@@ -162,6 +162,29 @@ is not shown above.") or, when only regions near the question back it, on
   session and sends everything. `PIXEL_BRIEF_DEDUPE=0` turns it off.
 - A block is cut at a line, never across parts.
 
+## Stop-cause evidence
+
+A "why does X stop, skip, ignore …" question runs the `cand-j-stop-cause` step
+(`execution_brief/steps/cand_j_stop_cause.rs`). Its source windows are found by
+the question's rare words and then bounded to 18 lines, executable matches and
+control-flow lines (`return`, `throw`, `raise`, `break`, `continue`) favoured
+over repeated commentary; the first caller of a short function the words name
+is looked up in the window before that bound. When the question also says
+test, spec, prove, proof or cover, the best test units follow (a unit holds two
+groups; three files, one unit per file and two in a file named after a group
+word, with the siblings of its family by name, at most two family units;
+complete units are kept within 3,000 bytes in all, and oversized units are
+skipped). A unit starts at its test mark or declaration, not at the comments
+above it. Test units are ranked by evidence per character; declaration labels
+and leading comments do not outweigh executable code or expected output.
+Test-family digits remain significant (`mode1` and `mode2` are separate
+families), and a numeric suffix after the family remains a sibling variant.
+The densest code anchor leads, followed by complete test evidence and remaining
+code ordered by evidence per character. Inline comments do not count as code
+evidence; quoted strings remain eligible evidence. Blocks are headed
+`path:a-b — code|test`, lines numbered, cut at 200 characters. `pixel brief`
+stays within `CLI_CHARS` (3,900 characters).
+
 ## Switches
 
 | Switch | Effect |

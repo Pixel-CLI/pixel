@@ -1726,6 +1726,13 @@ spells them so a step prints its script's bytes (`splitlines`, `universal_newlin
 `pixel-rank` (`reciprocal_rank`, `bm25_idf`, `BM25_K1`, `BM25_B`). `scripts/bench/step-parity.py <name>` judges the script and the step with `probe-test.py` on the same
 baseline briefs and compares what each merged into them.
 
+The CLI brief remains capped at 3,900 characters (`CLI_CHARS`). The `cand-j-stop-cause` step bounds each code excerpt
+to 18 lines that favour executable matches and control flow over repeated commentary. The densest executable code
+leads, followed by complete assertion-bearing test units (when the question asks for proof) and the remaining code by
+evidence per character; test units omit leading commentary and share a 3,000-byte aggregate budget. At most two units
+of a test family are included, and oversized units are skipped. Its headings use the compact `path:a-b — code|test`
+form. The step no longer matches the `probes/cand-j-stop-cause/probe` script, which the host does not start.
+
 ## Testing and gates
 
 The `pixel-bench` wire benchmark calls the production bounded reader and compares
