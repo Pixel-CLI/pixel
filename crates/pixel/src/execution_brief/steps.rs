@@ -46,7 +46,7 @@ macro_rules! register {
     };
 }
 
-register!(test_bodies, workspace_overview);
+register!(test_bodies, workspace_overview, overview_answer_evidence);
 
 /// Python's text handling, for the steps ported from a script.
 mod pytext;

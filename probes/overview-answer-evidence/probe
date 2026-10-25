@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Evidence for a named Cargo member: crate docs/API, dependency purposes and bounded examples."""
+"""Evidence for a named Cargo member: crate docs/API, dependency purposes and bounded examples.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/overview_answer_evidence.rs) and does
+not start this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import json
 import os
 import re
