@@ -1023,7 +1023,7 @@ enum Command {
     },
     /// Show effective settings and paths, or edit persistent YAML configuration.
     /// `pixel config <key> [<value>]` reads or writes one setting
-    /// (`daemon_auto_start`, `brief`, `brief_parts`); the other forms are the
+    /// (`daemon_auto_start`, `brief`, `edit_hooks`, `brief_parts`); the other forms are the
     /// subcommands below.
     #[command(args_conflicts_with_subcommands = true)]
     Config {

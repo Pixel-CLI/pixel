@@ -465,3 +465,33 @@ fn the_action_log_should_keep_the_value_of_a_setting_it_can_show() {
     let log = fs::read_to_string(repo.join(".pixel/actions.jsonl")).unwrap();
     assert!(log.contains("config brief_parts 4"), "{log}");
 }
+
+#[test]
+fn edit_hooks_should_be_off_by_default_and_follow_a_written_value() {
+    let home = Scratch::for_test("config", "edit-hooks-home");
+    let repo = repo_with_git("edit-hooks-repo");
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("edit_hooks: false (default)\n"));
+    let text = stdout(&run(&home, &repo, &["config", "edit_hooks"]));
+    assert!(text.starts_with("edit_hooks: off — default"), "{text}");
+
+    let global = home.join(".pixel/config.yaml");
+    let text = stdout(&run(
+        &home,
+        &repo,
+        &["config", "edit_hooks", "on", "--global"],
+    ));
+    assert!(
+        text.contains(&format!("edit_hooks: on — wrote {}", global.display())),
+        "{text}"
+    );
+    assert!(text.contains("run `pixel setup`"), "{text}");
+    assert_eq!(yaml(&global)["edit_hooks"], true);
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("edit_hooks: true"));
+
+    // A repository layer wins, and anything but on/off is refused unwritten.
+    stdout(&run(&home, &repo, &["config", "edit_hooks", "off"]));
+    assert!(stdout(&run(&home, &repo, &["config", "edit_hooks"])).starts_with("edit_hooks: off"));
+    let bad = run(&home, &repo, &["config", "edit_hooks", "maybe"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("edit_hooks takes on or off"));
+}
