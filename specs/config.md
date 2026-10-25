@@ -26,13 +26,14 @@ reported with the file's path and the rule, never silently ignored.
 | `pixel config <key>` | prints `<key>: <value> — <source>` where the source is an environment variable, a file path or `default` |
 | `pixel config <key> <value> [--global] [--path P]` | validates, then writes the repository layer of the repository that contains `P` (default `.`), or the global one with `--global`; then prints `<key>: <value> — wrote <file>` |
 
-The flat settings `pixel config <key> <value>` writes are exactly three:
+The flat settings `pixel config <key> <value>` writes are exactly four:
 
 | Key | Value | Environment | Default |
 |---|---|---|---|
 | `daemon_auto_start` | `on`/`true` or `off`/`false` (stored as a boolean) | `PIXEL_DAEMON_AUTO_START` | on |
 | `brief` | `on`/`off` | `PIXEL_BRIEF` | on |
 | `brief_parts` | a whole number from 1 to 8 | none shown by `pixel config`; the pack builder also reads `PIXEL_BRIEF_PARTS` (`brief.md`) | 3 |
+| `edit_hooks` | `on`/`off` | `PIXEL_EDIT_HOOKS` (the hook alone; `pixel setup` registers the edit hooks from the global layer only, `hooks.md`) | off |
 
 An environment value of `0`, `false` or `off` is off, anything else on.
 

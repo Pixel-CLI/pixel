@@ -11,6 +11,7 @@ contract a host and a user can rely on.
 |---|---|---|
 | `pixel run-hook task-event --provider <p> --event <e> [--part K/N]` | one host payload on stdin | at most one JSON object on one line |
 | `pixel run-hook metrics --provider <p> [--event post-tool-use\|post-invocation]` | a tool-call payload on stdin | at most one JSON object on one line |
+| `pixel run-hook edit-event --provider <p> --event pre-edit\|post-edit` | a tool-call payload on stdin | at most one JSON object on one line: a `[PIXEL:EDIT]` card before an edit that changes or removes a declaration other files still call, a `[PIXEL:STALE-CALLERS]` note after it; nothing otherwise |
 
 - `--provider` of `task-event`: `claude`, `codex`, `pi`, `devin`, `gemini`,
   `antigravity` (`TaskProvider`). `metrics` takes `claude`, `codex`, `devin`,
@@ -46,6 +47,8 @@ prints, never in an exit status, so the tail removes no intended block.
 | Antigravity | one `prompt-submit` on `PreInvocation` (first invocation only), `metrics --provider antigravity` on `PostToolUse` and `--event post-invocation` on `PostInvocation`. |
 | Pi | no hook registration: the package `extensions/pixel-brief.ts` runs `task-event --provider pi` with `brief_only: true` and `metrics --provider pi`. |
 | OpenCode | no hook: `plugins/pixel-brief.js` runs `pixel brief` (`brief.md`). |
+
+With `edit_hooks` on in the global layer (`config.md`, default off), `pixel setup` also registers `edit-event --event pre-edit` on `PreToolUse` and `--event post-edit` on `PostToolUse` for Claude Code, Codex and Devin, one entry each, no matcher, ending in ` || true`; turning it off and re-running setup removes them. The edit hooks read the existing graph only (1 s, nothing built), never block, and send each card once per declaration change per session.
 
 ## Guarantees
 

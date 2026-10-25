@@ -220,7 +220,7 @@ fn config_should_list_the_settings_the_binary_accepts() {
     let config = spec("config.md");
     let table = bullet_after(
         &config,
-        "The flat settings `pixel config <key> <value>` writes are exactly three:",
+        "The flat settings `pixel config <key> <value>` writes are exactly four:",
         "An environment value",
     );
     let documented: BTreeSet<String> = table
