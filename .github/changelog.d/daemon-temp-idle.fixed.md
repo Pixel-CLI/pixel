@@ -1,0 +1,1 @@
+**daemon:** a daemon serving a directory under the system temp dir exits after 2 minutes idle instead of 30. Test fixtures there are often never deleted, so the root-removed check never fired and a test loop could pile up hundreds of daemons holding gigabytes of RAM.

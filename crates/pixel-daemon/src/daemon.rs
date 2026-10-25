@@ -37,6 +37,18 @@ pub use readers::ReadReplica;
 use readers::{Busy, READERS, Readers};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Idle cap for a daemon serving a directory under the system temp dir.
+/// Test fixtures there are often never deleted, so the root check never
+/// fires, and a test loop auto-starts one daemon every few seconds: at the
+/// full `IDLE_TIMEOUT` hundreds pile up and hold gigabytes of RAM.
+const TEMP_IDLE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+
+fn idle_timeout_for(root: &Path, configured: Duration, temp_dir: Option<&Path>) -> Duration {
+    match temp_dir {
+        Some(temp) if root.starts_with(temp) => configured.min(TEMP_IDLE_TIMEOUT),
+        _ => configured,
+    }
+}
 const DEBOUNCE: Duration = Duration::from_millis(500);
 /// Four debounce windows retain burst batching while bounding queue wait during
 /// continuous edits to two seconds; applying the batch can take additional time.
@@ -1068,9 +1080,14 @@ fn run_loop(lane: Lane) {
     // Compared on every pass: a directory swapped in at the same path must
     // stop this daemon as surely as a deleted one.
     let opened_root = root_identity(&root);
+    let idle_timeout = idle_timeout_for(
+        &root,
+        IDLE_TIMEOUT,
+        std::env::temp_dir().canonicalize().ok().as_deref(),
+    );
     while !shutdown && !service.gone {
         let now = Instant::now();
-        let idle_left = IDLE_TIMEOUT
+        let idle_left = idle_timeout
             .checked_sub(now.duration_since(last_activity))
             .unwrap_or(Duration::ZERO);
         let timeout = match flush_at {
@@ -1208,7 +1225,7 @@ fn run_loop(lane: Lane) {
             next_sweep = Some(Instant::now() + every);
         }
 
-        if last_activity.elapsed() >= IDLE_TIMEOUT {
+        if last_activity.elapsed() >= idle_timeout {
             eprintln!("pixel daemon: idle timeout, exiting");
             break;
         }
@@ -1694,6 +1711,24 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_daemon_under_the_temp_dir_should_idle_out_within_the_temp_cap() {
+        let temp = Path::new("/private/var/folders/x/T");
+        let fixture = Path::new("/private/var/folders/x/T/wb-abc");
+        assert_eq!(
+            idle_timeout_for(fixture, IDLE_TIMEOUT, Some(temp)),
+            TEMP_IDLE_TIMEOUT
+        );
+        let short = Duration::from_secs(30);
+        assert_eq!(idle_timeout_for(fixture, short, Some(temp)), short);
+        let repo = Path::new("/Users/me/code/repo");
+        assert_eq!(
+            idle_timeout_for(repo, IDLE_TIMEOUT, Some(temp)),
+            IDLE_TIMEOUT
+        );
+        assert_eq!(idle_timeout_for(fixture, IDLE_TIMEOUT, None), IDLE_TIMEOUT);
+    }
 
     use crate::wire::read_capped_line_with;
 
