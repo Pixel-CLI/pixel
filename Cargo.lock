@@ -2395,6 +2395,7 @@ dependencies = [
  "tar",
  "tempfile",
  "toml_edit",
+ "tree-sitter",
  "ureq 3.4.2",
  "xxhash-rust",
  "yaml-edit",

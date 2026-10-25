@@ -70,7 +70,8 @@ register!(
     cand_j_stop_cause,
     history_fallback,
     cand_k_commit_patch,
-    rank_blocks
+    rank_blocks,
+    config_registry
 );
 
 mod graph;

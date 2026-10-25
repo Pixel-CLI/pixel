@@ -58,6 +58,8 @@ regex = "1.13"
 # The workspace-overview brief step reads manifests (execution_brief/steps/).
 toml_edit = "0.25.15"
 ignore = "0.4.33"
+# The config-registry step reads a Python loader (execution_brief/steps/config_registry/loader.rs).
+tree-sitter = "0.27"
 libc = "0.2"
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 tar = "0.4"

@@ -68,6 +68,23 @@ pub(super) fn re_escape(text: &str) -> String {
     out
 }
 
+/// `text[:count]`: the first `count` characters.
+pub(super) fn take_chars(text: &str, count: usize) -> &str {
+    text.char_indices()
+        .nth(count)
+        .map_or(text, |(at, _)| &text[..at])
+}
+
+/// `str.isupper()`: at least one cased character and no lowercase one.
+pub(super) fn is_upper(text: &str) -> bool {
+    text.chars().any(char::is_uppercase) && !text.chars().any(char::is_lowercase)
+}
+
+/// `str.islower()`: at least one cased character and no uppercase one.
+pub(super) fn is_lower(text: &str) -> bool {
+    text.chars().any(char::is_lowercase) && !text.chars().any(char::is_uppercase)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +106,15 @@ mod tests {
     #[test]
     fn universal_newlines_turns_every_line_end_into_a_newline() {
         assert_eq!(universal_newlines("a\r\nb\rc\n"), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn take_chars_cuts_on_characters_and_case_tests_need_a_cased_letter() {
+        assert_eq!(take_chars("héllo", 2), "hé");
+        assert_eq!(take_chars("ab", 5), "ab");
+        assert_eq!(take_chars("ab", 0), "");
+        assert!(is_upper("A1") && !is_upper("1") && !is_upper("Ab"));
+        assert!(is_lower("a1") && !is_lower("1") && !is_lower("aB"));
     }
 
     #[test]

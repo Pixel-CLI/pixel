@@ -6,7 +6,10 @@
 by a registry built with rg over the working tree: key, value or fallback, where it is declared, where it is read.
 Reads env reads in JS/TS/Python/Rust/Go/Ruby, typed env declarations, committed .env templates and the git-tracked
 .env.development / .env.production (values that look like secrets are masked; untracked .env* are never read),
-exported default constants and dev-server port settings. Read-only, deterministic."""
+exported default constants and dev-server port settings. Read-only, deterministic.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/config_registry.rs) and does not
+start this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import ast
 import io
 import json
