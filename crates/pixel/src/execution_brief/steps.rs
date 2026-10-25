@@ -54,7 +54,8 @@ register!(
     member_manifest,
     doc_sections,
     name_files,
-    flow_rank
+    flow_rank,
+    cand_j_stop_cause
 );
 
 mod graph;

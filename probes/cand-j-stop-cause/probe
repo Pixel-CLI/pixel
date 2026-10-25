@@ -8,7 +8,10 @@ of verb synonyms: stop = quit = halt ...) each form a group; every 30-line windo
 holds close together. Windows inside multi-line string literals (flag documentation) and windows with little code
 are left out; the best non-overlapping windows are shown, tests and source alike, a test file named after a group
 weighing a little more. Brief blocks whose best window holds fewer than three groups are dropped, longer ones are
-cut to their best window. Read-only, deterministic, no network."""
+cut to their best window. Read-only, deterministic, no network.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/cand_j_stop_cause.rs) and does not start
+this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import json
 import math
 import os

@@ -75,10 +75,6 @@ pub(super) struct Hop {
 /// Which side of a call `uses` lists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Role {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the first step that reads callers removes this")
-    )]
     Callers,
     Callees,
 }
