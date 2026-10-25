@@ -53,7 +53,8 @@ register!(
     overview_answer_evidence,
     member_manifest,
     doc_sections,
-    name_files
+    name_files,
+    flow_rank
 );
 
 mod graph;

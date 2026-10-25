@@ -9,7 +9,10 @@ by the question's words (generic words weigh little, tests are left out, an exac
 the best six one level at a time down to depth 3 (from a named entry, a level where fewer than two callees carry the
 question's words keeps its best three: a narrow chain is the path), and shows the entry in full and each ranked body.
 It replaces the brief's own flow blocks. Needs `pixel` (PIXEL_BIN, else PATH) and its daemon; prints nothing without
-them. Issues #906, #1198."""
+them. Issues #906, #1198.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/flow_rank.rs) and does not start
+this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import json
 import os
 import re
