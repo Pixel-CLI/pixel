@@ -12,7 +12,7 @@
 use tree_sitter::Node;
 
 use super::{Defs, Landing, Walker};
-use crate::ruby::{Fact, dsl};
+use crate::mvp_index::ruby::{Fact, dsl};
 
 impl Walker<'_> {
     /// Whether the innermost frame's `def`s land on an object no lookup of
@@ -22,7 +22,7 @@ impl Walker<'_> {
     /// or an expression's singleton class. A block evaluated on a constant,
     /// `class << X` and a concern's `included do` are placed exactly, or
     /// left to resolution to tell.
-    pub(in crate::ruby) fn unplaced(&self) -> bool {
+    pub(in crate::mvp_index::ruby) fn unplaced(&self) -> bool {
         self.locals.current_defs() == Defs::Foreign
             && matches!(
                 self.locals.landing(),
@@ -35,7 +35,7 @@ impl Walker<'_> {
 
     /// The parameter of the innermost hook method around the walk, the
     /// object it runs for, when a replay reads the hook (D14).
-    pub(in crate::ruby) fn hook_base(&self) -> Option<&str> {
+    pub(in crate::mvp_index::ruby) fn hook_base(&self) -> Option<&str> {
         self.scopes
             .iter()
             .rev()
@@ -45,12 +45,12 @@ impl Walker<'_> {
 
     /// Records that a method `name` (`None`: any name) is defined on an
     /// object the rules cannot name.
-    pub(in crate::ruby) fn taint(&mut self, name: Option<String>) {
+    pub(in crate::mvp_index::ruby) fn taint(&mut self, name: Option<String>) {
         self.facts.push(Fact::Tainted { name });
     }
 
     /// Records the names a definer may define (`None`: any).
-    pub(in crate::ruby) fn taint_all(&mut self, names: Option<Vec<String>>) {
+    pub(in crate::mvp_index::ruby) fn taint_all(&mut self, names: Option<Vec<String>>) {
         match names {
             Some(names) => {
                 for name in names {
@@ -70,13 +70,13 @@ impl Walker<'_> {
     /// residual, and so is a gem's module, whose names the graph does not
     /// hold. A module `Module.new` builds there is none of the graph's
     /// (`dsl::fresh`, #111).
-    pub(in crate::ruby) fn spread(&mut self, args: &[Node]) {
+    pub(in crate::mvp_index::ruby) fn spread(&mut self, args: &[Node]) {
         self.spread_by(args, false);
     }
 
     /// [`Walker::spread`] for the mixin `call`: one an example group's
     /// body records as its step is a [`Fact::GroupSpread`] (ADR-0041).
-    pub(in crate::ruby) fn spread_from(&mut self, call: Node, args: &[Node]) {
+    pub(in crate::mvp_index::ruby) fn spread_from(&mut self, call: Node, args: &[Node]) {
         let group = self.group_mixins.contains(&call.id());
         self.spread_by(args, group);
     }

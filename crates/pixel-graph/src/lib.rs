@@ -12,8 +12,10 @@
 //! - `build`: whole-repo build/update orchestration
 //! - `impact`, `trace`, `process`, `cluster`, `changes`: analyses
 //! - `predicate`: bounded reachability with witnesses (`pixel evaluate`)
-//! - `mvp_adapter`: pixel-mvp's Rust index in this graph's rows (vendored
-//!   `mvp-*` crates), and `mvp_adapter::ruby`, its Ruby answer merged site
+//! - `mvp_index`: pixel-mvp's indexer for Ruby and Rust (imported; see its
+//!   `ORIGIN.md`), returning rows and writing nothing
+//! - `mvp_adapter`: pixel-mvp's Rust index in this graph's rows (`mvp_index`
+//!   and the vendored `mvp-*` crates), and `mvp_adapter::ruby`, its Ruby answer merged site
 //!   by site with this graph's; `shadow`: this graph's Rust edges against it
 
 pub mod build;
@@ -26,6 +28,7 @@ pub mod extract;
 pub mod impact;
 pub mod imports;
 pub mod mvp_adapter;
+pub mod mvp_index;
 pub mod plan;
 pub mod predicate;
 pub mod process;

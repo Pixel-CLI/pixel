@@ -210,7 +210,7 @@ impl<'a> Building<'a, '_> {
 mod audited_contract_tests {
     use super::super::Index;
     use super::*;
-    use crate::ruby::resolve::{fixture::Generation, stubs::Tests};
+    use crate::mvp_index::ruby::resolve::{fixture::Generation, stubs::Tests};
 
     fn building<'a, 'i>(index: &'i Index<'a>) -> Building<'a, 'i> {
         Building {

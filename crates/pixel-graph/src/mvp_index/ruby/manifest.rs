@@ -24,7 +24,7 @@ pub const RUBY_FILE_NAMES: &[&str] = &["Gemfile", "Rakefile", "Guardfile", "Capf
 /// The extensions of Ruby source (v1 `extract.rs:166`).
 const RUBY_EXTENSIONS: &[&str] = &["rb", "rake", "gemspec", "ru"];
 
-pub use crate::guard::is_generated_blob;
+pub use crate::mvp_index::guard::is_generated_blob;
 
 /// Deepest node the manifest readers visit, as the walker's cap (v1 reads
 /// manifests without one; a cap keeps a hostile Gemfile off the stack).

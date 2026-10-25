@@ -414,7 +414,7 @@ end
 /// What a test file is: one only a test runner loads.
 #[test]
 fn a_test_file_is_under_spec_or_test_or_named_so() {
-    use crate::ruby::resolve::test_file;
+    use crate::mvp_index::ruby::resolve::test_file;
     for path in [
         "spec/models/link_spec.rb",
         "spec/support/helpers.rb",

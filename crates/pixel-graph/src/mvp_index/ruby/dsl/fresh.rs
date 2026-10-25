@@ -25,7 +25,7 @@ use super::super::extract::Walker;
 
 /// Whether `arg` is `Module.new` (or `Module.new do … end`), which
 /// builds a module no other code names.
-pub(in crate::ruby) fn fresh_module(w: &Walker, arg: Node) -> bool {
+pub(in crate::mvp_index::ruby) fn fresh_module(w: &Walker, arg: Node) -> bool {
     if arg.kind() != "call" || w.field_text(arg, "method").as_deref() != Some("new") {
         return false;
     }
@@ -47,8 +47,8 @@ pub(in crate::ruby) fn fresh_module(w: &Walker, arg: Node) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::ruby::Fact;
-    use crate::ruby::tests::facts_of;
+    use crate::mvp_index::ruby::Fact;
+    use crate::mvp_index::ruby::tests::facts_of;
 
     fn opaque_or_mixed(facts: &[Fact]) -> Vec<String> {
         facts

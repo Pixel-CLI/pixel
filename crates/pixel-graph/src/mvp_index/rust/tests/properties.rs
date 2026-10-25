@@ -9,7 +9,7 @@
 
 use proptest::prelude::*;
 
-use crate::text;
+use crate::mvp_index::text;
 
 use super::*;
 

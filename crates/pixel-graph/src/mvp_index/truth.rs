@@ -23,8 +23,8 @@ use mvp_model::hash::Hash;
 use mvp_model::{EdgeKind, FileRows, Kept, Lang, SymbolKind};
 use proptest::prelude::*;
 
-use crate::tree::{Tree, TreeFile};
-use crate::{extract, link, plan, text};
+use crate::mvp_index::tree::{Tree, TreeFile};
+use crate::mvp_index::{extract, link, plan, text};
 
 /// Node kinds a definition of `kind` starts with, per language.
 fn definition_kinds(lang: Lang, kind: SymbolKind) -> &'static [&'static str] {
@@ -92,7 +92,7 @@ struct Line {
 /// of the same offsets reads (#107); no line moves.
 fn reparse(lang: Lang, content: &str) -> HashMap<u32, Line> {
     let tree = match lang {
-        Lang::Ruby => crate::ruby::tree(content.as_bytes()).expect("a parse"),
+        Lang::Ruby => crate::mvp_index::ruby::tree(content.as_bytes()).expect("a parse"),
         Lang::Rust => {
             let mut parser = tree_sitter::Parser::new();
             parser.set_language(&grammar(lang)).expect("grammar loads");
@@ -266,7 +266,7 @@ pub fn write_tree(root: &Path, files: &[(String, String)]) -> Tree {
         let full = root.join(path);
         std::fs::create_dir_all(full.parent().expect("a parent")).expect("directories");
         std::fs::write(&full, content).expect("written");
-        let lang = crate::lang::wanted(path).expect("a supported file");
+        let lang = crate::mvp_index::lang::wanted(path).expect("a supported file");
         tree_files.push(TreeFile {
             path: path.clone(),
             lang,
@@ -738,7 +738,7 @@ fn c10_reference_every_row_is_true_of_the_tree() {
         .map(std::path::PathBuf::from)
         .expect("PIXEL_MVP_REFERENCE_REPO names the reference repository");
     let started = Instant::now();
-    let tree = crate::tree::scan(&root).expect("a git work tree");
+    let tree = crate::mvp_index::tree::scan(&root).expect("a git work tree");
     let scanned = started.elapsed();
     let plan = plan(&tree, &[], None, &[]);
     let started = Instant::now();

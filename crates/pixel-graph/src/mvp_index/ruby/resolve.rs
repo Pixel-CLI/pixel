@@ -183,7 +183,7 @@ use self::stubs::Tests;
 use super::require::Projects;
 use super::routes::{DRAWN, app_of, camelize_path, drawn_name, join_module};
 use super::{ALIAS, CONDITIONAL, Context, DELEGATE, MIXIN, REBOUND, ROUTE, VALUE, singleton_of};
-use crate::lang::World;
+use crate::mvp_index::lang::World;
 
 /// For `world.edges[i]`, the index in `world.symbols` of its target, or
 /// `None` when no rule proves one. Each Ruby project is a program of its

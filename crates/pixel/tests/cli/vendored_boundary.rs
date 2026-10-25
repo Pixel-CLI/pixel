@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 /// The crates allowed to depend on an `mvp-*` crate, and which ones each may
 /// read:
 ///
-/// - `pixel-graph` reads pixel-mvp's index (`mvp-index`, `mvp-store`,
-///   `mvp-model`) through `pixel_graph::mvp_adapter` (ADR-0035 there);
+/// - `pixel-graph` reads pixel-mvp's index (its own `mvp_index` module over
+///   `mvp-store` and `mvp-model`) through `pixel_graph::mvp_adapter`
+///   (ADR-0035 there);
 /// - `pixel-cli` reads pixel-mvp's French-prompt rules (`mvp_model::language`,
 ///   `sub_words`, `prompt_terms`, `fold`, `Lexicon`: pure functions over a
 ///   prompt's text) through `execution_brief/french.rs` (ADR-0032, moved
@@ -22,7 +23,7 @@ use std::path::{Path, PathBuf};
 ///   through `execution_brief/words.rs` (ADR-0030 and ADR-0031 there), and no
 ///   index crate: the plain-word leads read v1's own graph.
 const READERS: [(&str, &[&str]); 2] = [
-    ("pixel-graph", &["mvp-index", "mvp-model", "mvp-store"]),
+    ("pixel-graph", &["mvp-model", "mvp-store"]),
     ("pixel-cli", &["mvp-model"]),
 ];
 

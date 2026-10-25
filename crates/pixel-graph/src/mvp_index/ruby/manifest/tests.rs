@@ -6,8 +6,8 @@
 //! `extract/contract_tests.rs`, `imports/ruby.rs`, `tests/all/ruby_projects.rs`).
 
 use super::*;
-use crate::guard::{GENERATED_MAX_BYTES_PER_LINE, GENERATED_MIN_BYTES};
-use crate::ruby::extract::testing::{imports, rows, symbols};
+use crate::mvp_index::guard::{GENERATED_MAX_BYTES_PER_LINE, GENERATED_MIN_BYTES};
+use crate::mvp_index::ruby::extract::testing::{imports, rows, symbols};
 
 /// By whole name or by the extension of the file name, never of a
 /// directory, case-sensitive. v1

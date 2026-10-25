@@ -10,7 +10,7 @@ use super::super::fixture::Generation;
 use super::super::stubs::Tests;
 use super::super::{Index, Side};
 use super::MAX_ANCESTOR_DEPTH;
-use crate::ruby::Fact;
+use crate::mvp_index::ruby::Fact;
 
 // R6-04: a walk nested in one that met the cap was kept, at each depth an
 // owner was met, as the steps it reached: the square of the cap in steps
@@ -149,7 +149,7 @@ fn c10_ruby_models_a_block_or_a_macro_defines_on_still_share_one_lookup() {
     // delegate :dd; end; def tick; tock; end; def tock
     // subN.rb: class SubN < Base; include Shared
     let (base, shared) = ("base.rb", "shared.rb");
-    let pattern = format!("{}?", crate::ruby::unread::INTERPOLATED);
+    let pattern = format!("{}?", crate::mvp_index::ruby::unread::INTERPOLATED);
     let mut g = Generation::default();
     g.def(base, Class, "Base", 1, 6)
         .def(base, Method, "Base.flag", 2, 2)

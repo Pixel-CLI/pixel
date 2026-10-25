@@ -6,8 +6,9 @@ import of model, store and index is pixel-mvp `e91e8da`; the lexicon is from
 
 ## Owned here
 
-- `crates/mvp-model`, `mvp-store`, `mvp-index`: edit directly, test in this
-  workspace, include in the scheduled mutation campaign. ORIGIN.md records
+- `crates/mvp-model`, `mvp-store`, and the indexer as pixel-graph's
+  `mvp_index` module (`crates/pixel-graph/src/mvp_index`): edit directly,
+  test in this workspace, include in the scheduled mutation campaign. ORIGIN.md records
   provenance, not a restriction. The copy-over script is retired.
 - French prompt rules and BM25: maintained in `execution_brief/french.rs`
   and `words.rs`; lexicon data and its generator in `crates/mvp-lexicon`.
@@ -15,7 +16,7 @@ import of model, store and index is pixel-mvp `e91e8da`; the lexicon is from
   single-JSON-line hooks: already implemented and tested in Pixel.
 
 Keep crate names, graph paths and the origin commit unchanged during the
-handover. When extraction changes, bump the relevant version in mvp-index;
+handover. When extraction changes, bump the relevant version in `mvp_index`;
 when storage changes, bump mvp-store's schema as required. The adapter's
 source signature includes the extractor versions. A Ruby merge rule change
 also updates its undo format when required. No private checkout is needed.
@@ -24,7 +25,7 @@ also updates its undo format when required. No private checkout is needed.
 
 Pixel's `mvp_integrity` integration tests exercise the production refresh
 adapter for mixed Ruby/Rust edits, corruption recovery and provenance without
-rewriting git's index. The original library tests remain in their crates.
+rewriting git's index. The original library tests remain beside their code.
 `mvp-reference.yml` runs the imported C-10 truth test on both original pinned
 public repositories. Binary-specific MVP install/telemetry/selector tests
 are not copied into an unrelated CLI; Pixel keeps its own entry-point tests.
@@ -43,7 +44,7 @@ are not copied into an unrelated CLI; Pixel keeps its own entry-point tests.
   #1012, #1013, #1014, #1015 and #1019, including byte-exact restoration,
   owned-file cleanup, retries and symlink preservation. #1043 carries
   staged-file synchronization from MVP #85 into Pixel's writers.
-- mvp-index still invokes git outside GitRunner, through its own
+- `mvp_index` still invokes git outside GitRunner, through its own
   `bounded` module (a timeout and an output cap on every command, #1085).
   The imported lint baseline can be tightened here without reopening the
   experimental repository.

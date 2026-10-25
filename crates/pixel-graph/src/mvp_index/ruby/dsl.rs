@@ -21,7 +21,7 @@ use super::{
     ALIAS, ASSOCIATION, ASSOCIATION_EXTENDED, ASSOCIATION_THROUGH, CONDITIONAL, DELEGATE, Fact,
     MIXIN,
 };
-use crate::lang::FILE_OWNER;
+use crate::mvp_index::lang::FILE_OWNER;
 
 /// Closed Rails callback list: positional symbols name instance methods,
 /// skip declarations included (a reference does not assert that the
@@ -1036,15 +1036,16 @@ fn push_named_ancestor(
 
 /// The hooks Ruby calls on a module included, extended or prepended, and
 /// on a class subclassed (D14).
-pub(in crate::ruby) const HOOKS: &[&str] = &["included", "extended", "prepended", "inherited"];
+pub(in crate::mvp_index::ruby) const HOOKS: &[&str] =
+    &["included", "extended", "prepended", "inherited"];
 
 /// The methods that replace what `include`, `prepend` or `extend` does.
-pub(in crate::ruby) const FEATURES: &[&str] =
+pub(in crate::mvp_index::ruby) const FEATURES: &[&str] =
     &["append_features", "prepend_features", "extend_object"];
 
 /// The hooks Ruby calls on a method defined, which the rules do not read
 /// (R8-06).
-pub(in crate::ruby) const ADDED: &[&str] = &["method_added", "singleton_method_added"];
+pub(in crate::mvp_index::ruby) const ADDED: &[&str] = &["method_added", "singleton_method_added"];
 
 /// `def self.included(base)` and its family in a class or module body
 /// (D14), as the hook's ancestor declarations: `base.include(X)`,

@@ -11,6 +11,17 @@
 //! `extract::extract` of the planned files within an optional deadline, and
 //! `link::link`, which decides every site of the generation again.
 
+// The imported crate's lint baseline, kept from its own manifest: unsafe code
+// forbidden, and none of the workspace's adopted pedantic lints that it did
+// not enable. Tightening it is a separate change.
+#![forbid(unsafe_code)]
+#![allow(
+    clippy::items_after_statements,
+    clippy::map_unwrap_or,
+    clippy::redundant_closure_for_method_calls,
+    clippy::stable_sort_primitive
+)]
+
 mod bounded;
 pub mod codec;
 pub mod extract;

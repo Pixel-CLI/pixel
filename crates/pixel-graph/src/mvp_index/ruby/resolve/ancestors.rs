@@ -105,8 +105,8 @@ use self::held::{Behind, Contained, Hidden, Holders, Opaque, Shares};
 use super::constants;
 use super::corelib::{in_core_namespace, is_core};
 use super::{Decision, Def, Index, Side};
-use crate::ruby::unread::fits;
-use crate::ruby::{singleton_of, singleton_scope};
+use crate::mvp_index::ruby::unread::fits;
+use crate::mvp_index::ruby::{singleton_of, singleton_scope};
 
 /// Deepest nesting of ancestor walks (an include or a superclass is one
 /// level); past it the rest is unknown, and so is the whole of each walk
@@ -721,7 +721,7 @@ impl<'a> Index<'a> {
     /// so the step is unsure from the front of every chain that may meet
     /// the method (#106). Every other chain is left alone.
     ///
-    /// [`Fact::Fronted`]: crate::ruby::Fact::Fronted
+    /// [`Fact::Fronted`]: crate::mvp_index::ruby::Fact::Fronted
     fn fronted(&self, owner: &str, side: Side, name: &str) -> bool {
         if !self.facts.front_named(name) {
             return false;

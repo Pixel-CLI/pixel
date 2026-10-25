@@ -311,7 +311,7 @@ impl Index<'_> {
                 let required = if arg == "_" {
                     Vec::new()
                 } else if let Some(bounds) = arg.strip_prefix(BOUNDED) {
-                    crate::codec::fields(bounds)
+                    crate::mvp_index::codec::fields(bounds)
                 } else {
                     return arg.clone();
                 };

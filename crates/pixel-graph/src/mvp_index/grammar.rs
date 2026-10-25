@@ -657,7 +657,9 @@ fn scan(lang: &str, files: &[File]) -> Names {
 }
 
 fn rule_files(lang: &str) -> Vec<File> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(lang);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/mvp_index")
+        .join(lang);
     let mut files = Vec::new();
     sources(&dir, &mut files);
     files

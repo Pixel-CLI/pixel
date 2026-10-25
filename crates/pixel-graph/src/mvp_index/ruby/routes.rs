@@ -32,7 +32,7 @@ use mvp_model::EdgeKind;
 use tree_sitter::Node;
 
 use super::{Context, Fact, ROUTE};
-use crate::lang::{FILE_OWNER, Site};
+use crate::mvp_index::lang::{FILE_OWNER, Site};
 
 /// The module a file under `config/routes/` is read in: its controllers
 /// are relative to the scope of the `draw` that reads it, which only

@@ -14,9 +14,9 @@ use mvp_model::{Symbol, SymbolKind};
 
 use super::stubs::Tests;
 use super::{Side, split_method};
-use crate::ruby::dsl::ADDED;
-use crate::ruby::unread::{INTERPOLATED, Unread, fits};
-use crate::ruby::{Fact, singleton_of};
+use crate::mvp_index::ruby::dsl::ADDED;
+use crate::mvp_index::ruby::unread::{INTERPOLATED, Unread, fits};
+use crate::mvp_index::ruby::{Fact, singleton_of};
 
 /// A constant path as written, with its nesting, innermost first.
 type Written = (String, Vec<String>);
@@ -1128,7 +1128,7 @@ mod tests {
     use mvp_model::Lang;
 
     use super::{Facts, Names, Side};
-    use crate::ruby::unread::INTERPOLATED;
+    use crate::mvp_index::ruby::unread::INTERPOLATED;
 
     // R6-02: every miss scanned every tainted name for a pattern, once per
     // site and chain step: 16.9 s for 12 000 singleton defs.
@@ -1280,7 +1280,7 @@ mod tests {
                 "class Model{i} < Base\n  def action_{i}; \"class Other{i}\"; end\nend\n"
             ));
         }
-        let rows = crate::extract::rows("lib/models.rb", Lang::Ruby, text.as_bytes());
+        let rows = crate::mvp_index::extract::rows("lib/models.rb", Lang::Ruby, text.as_bytes());
         let facts = Facts::read(
             &[("lib/models.rb".to_owned(), rows.facts.clone())],
             &rows.symbols,
@@ -1310,7 +1310,7 @@ mod tests {
                 "class MC{i}\n  def self.setup_{i}; include Mz; end\n  def self.named_{i}; attr_reader :a_{i}; end\nend\n"
             ));
         }
-        let rows = crate::extract::rows("lib/m.rb", Lang::Ruby, text.as_bytes());
+        let rows = crate::mvp_index::extract::rows("lib/m.rb", Lang::Ruby, text.as_bytes());
         let facts = Facts::read(
             &[("lib/m.rb".to_owned(), rows.facts.clone())],
             &rows.symbols,

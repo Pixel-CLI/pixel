@@ -15,9 +15,9 @@ use rustc_hash::FxHashMap as HashMap;
 use mvp_model::{Edge, EdgeKind, Symbol, SymbolKind};
 
 use super::resolve;
-use crate::extract::uid;
-use crate::lang::World;
-use crate::ruby::{ASSOCIATION, Context, Fact, MIXIN, ROUTE};
+use crate::mvp_index::extract::uid;
+use crate::mvp_index::lang::World;
+use crate::mvp_index::ruby::{ASSOCIATION, Context, Fact, MIXIN, ROUTE};
 
 #[derive(Default)]
 pub struct Generation {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 //! pixel-mvp's index in front of this graph, for Rust (ADR-0035 of the
-//! pixel-mvp research repository; `crates/mvp-index/ORIGIN.md`).
+//! pixel-mvp research repository; `crates/pixel-graph/src/mvp_index/ORIGIN.md`).
 //!
 //! The adapter keeps this graph's symbols and answers, in this graph's
 //! rows, what pixel-mvp's rules decide at each Rust site:
@@ -42,6 +42,7 @@ use std::time::Duration;
 
 use mvp_model::{Graph, Lang};
 
+use crate::mvp_index;
 use crate::store::{
     DELETE_FILE_UNRESOLVED_CALLS, EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, Tier,
 };
@@ -52,8 +53,9 @@ pub mod ruby_switch;
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 /// The pixel-mvp commit the `mvp-*` crates were copied from. A test holds it
-/// equal to `crates/mvp-index/ORIGIN.md`. It stays fixed after the handover;
-/// extraction changes bump the language versions, storage changes the schema.
+/// equal to `crates/pixel-graph/src/mvp_index/ORIGIN.md`. It stays fixed
+/// after the handover; extraction changes bump the language versions, storage
+/// changes the schema.
 pub const MVP_COMMIT: &str = "e91e8da";
 
 /// Meta key: where the graph's Rust edges come from. Absent when they are
@@ -1005,7 +1007,7 @@ mod tests {
     #[test]
     fn the_origin_commit_matches_the_provenance_record() {
         let vendored = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../mvp-index/ORIGIN.md"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mvp_index/ORIGIN.md"),
         )
         .unwrap();
         assert!(

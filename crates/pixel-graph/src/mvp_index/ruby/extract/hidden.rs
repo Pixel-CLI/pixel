@@ -14,7 +14,7 @@
 use tree_sitter::Node;
 
 use super::{BoundKind, Defs, Landing, Walker};
-use crate::ruby::{Fact, dsl};
+use crate::mvp_index::ruby::{Fact, dsl};
 
 /// The methods that change the visibility of methods (or constants) of the
 /// class or module they act on.
@@ -34,7 +34,7 @@ impl Walker<'_> {
     /// one, whose `defs` they are: hidden when a bare `private` or
     /// `protected` is in force there. It hides the methods of the class
     /// itself only in `class << self`, never a `def self.m`.
-    pub(in crate::ruby) fn hide_defined(
+    pub(in crate::mvp_index::ruby) fn hide_defined(
         &mut self,
         defs: Defs,
         at: usize,
@@ -122,7 +122,7 @@ impl Walker<'_> {
     /// cannot read, is hidden on both sides of the class or module it acts
     /// on: the open owner, the constant's, or every one when the rules
     /// cannot name it.
-    pub(in crate::ruby) fn hide_unread(&mut self, call: Node, method: &str) {
+    pub(in crate::mvp_index::ruby) fn hide_unread(&mut self, call: Node, method: &str) {
         let sent = matches!(method, "send" | "public_send" | "__send__");
         if !sent && !VISIBILITY.contains(&method) {
             return;
@@ -233,7 +233,7 @@ impl Walker<'_> {
     /// names in the nesting `scope`, or on the open owner for `None`
     /// (`K.class_eval "private :a"`): a visibility method written there
     /// may hide any of its methods (R11-03).
-    pub(in crate::ruby) fn evaluated_visibility(
+    pub(in crate::mvp_index::ruby) fn evaluated_visibility(
         &mut self,
         code: &str,
         on: Option<(&str, &[String])>,
@@ -257,7 +257,7 @@ impl Walker<'_> {
     /// `protected` hide every method of `X` (R11-03).
     ///
     /// [`Locals::visibility`]: super::locals::Locals::visibility
-    pub(in crate::ruby) fn visibility_word(&mut self, word: &str) {
+    pub(in crate::mvp_index::ruby) fn visibility_word(&mut self, word: &str) {
         self.locals.visibility(word);
         if matches!(word, "private" | "protected")
             && let Landing::SingletonOf { path, scope, .. } = self.locals.landing()

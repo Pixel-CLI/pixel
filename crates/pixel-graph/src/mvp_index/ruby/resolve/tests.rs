@@ -7,7 +7,7 @@
 use mvp_model::SymbolKind::{Class, Method, Module};
 
 use super::fixture::Generation;
-use crate::ruby::{ALIAS, DELEGATE};
+use crate::mvp_index::ruby::{ALIAS, DELEGATE};
 
 #[test]
 fn c10_ruby_bare_and_self_calls_reach_the_callers_own_method() {

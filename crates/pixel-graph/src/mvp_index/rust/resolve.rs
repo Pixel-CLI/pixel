@@ -147,8 +147,8 @@ use super::args::{ArgTypes, Effective};
 use super::cfg;
 use super::modules::{self, ModId, Tree};
 use super::{Argument, Context, Facts, Form, ItemKind, Manifest, ScopeKind, SelfKind};
-use crate::extract::uid;
-use crate::lang::World;
+use crate::mvp_index::extract::uid;
+use crate::mvp_index::lang::World;
 
 /// Every site of the generation, decided. A panic in the rules (a bug, as
 /// facts are read defensively) leaves every site unresolved rather than

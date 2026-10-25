@@ -40,12 +40,16 @@ fn crates_dir() -> PathBuf {
 }
 
 /// The `mvp-*` foundations may not depend on any `pixel-*` crate, so the
-/// "only GitRunner spawns git" claim covers the `pixel-*` crates alone.
-/// mvp-index runs git through its own `bounded` module instead: git's local
-/// environment cleared, a timeout and an output cap (docs/mvp-handover.md).
-/// This exemption does not exempt them from ordinary tests or mutations.
-fn vendored(name: &str) -> bool {
-    matches!(name, "mvp-model" | "mvp-store" | "mvp-index")
+/// "only GitRunner spawns git" claim covers the `pixel-*` code alone.
+/// pixel-graph's `mvp_index` module (pixel-mvp's indexer) runs git through
+/// its own `bounded` module instead: git's local environment cleared, a
+/// timeout and an output cap (docs/mvp-handover.md). This exemption does not
+/// exempt them from ordinary tests or mutations. `path` is relative to
+/// `crates/`.
+fn vendored(path: &Path) -> bool {
+    ["mvp-model", "mvp-store", "pixel-graph/src/mvp_index"]
+        .iter()
+        .any(|dir| path.starts_with(dir))
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -274,14 +278,12 @@ fn test_modules_follow_every_production_item() {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(&crates).unwrap() {
         let krate = entry.unwrap().path();
-        if vendored(&krate.file_name().unwrap().to_string_lossy()) {
-            continue;
-        }
         let src = krate.join("src");
         if src.is_dir() {
             rust_sources(&src, &mut files);
         }
     }
+    files.retain(|file| !vendored(file.strip_prefix(&crates).unwrap()));
     assert!(files.len() > 50, "walked too few files: {}", files.len());
 
     let mut offenders = Vec::new();
@@ -391,7 +393,7 @@ fn only_pixel_git_spawns_git_in_production_code() {
         let krate = entry.unwrap().path();
         let name = krate.file_name().unwrap().to_string_lossy().into_owned();
         // The bench crate is not shipped; pixel-git is the boundary itself.
-        if name == "pixel-git" || name == "pixel-bench" || vendored(&name) {
+        if name == "pixel-git" || name == "pixel-bench" {
             continue;
         }
         let src = krate.join("src");
@@ -399,6 +401,7 @@ fn only_pixel_git_spawns_git_in_production_code() {
             rust_sources(&src, &mut files);
         }
     }
+    files.retain(|file| !vendored(file.strip_prefix(&crates).unwrap()));
     assert!(files.len() > 50, "walked too few files: {}", files.len());
 
     let mut offenders = Vec::new();

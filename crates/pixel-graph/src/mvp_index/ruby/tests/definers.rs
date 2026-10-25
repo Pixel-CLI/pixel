@@ -11,7 +11,7 @@ use std::rc::Rc;
 use mvp_model::EdgeKind::{Call, Reference};
 
 use super::{assert_unresolved, index, labelled, resolved};
-use crate::ruby::Fact;
+use crate::mvp_index::ruby::Fact;
 
 /// `def Outer.s1` and `def s2` in `class << Outer` define methods of the
 /// class the constant names, as `def self.s1` does; so does a top-level

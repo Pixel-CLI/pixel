@@ -7,12 +7,12 @@
 
 use mvp_model::{Edge, EdgeKind, FileRows, Lang};
 
-use crate::ruby::{ASSOCIATION, Context, MIXIN, ROUTE};
+use crate::mvp_index::ruby::{ASSOCIATION, Context, MIXIN, ROUTE};
 
 /// The rows the driver makes of `source` at `path`: uids, owners, the
 /// `File` symbol.
 pub fn rows(path: &str, source: &str) -> FileRows {
-    crate::extract::rows(path, Lang::Ruby, source.as_bytes())
+    crate::mvp_index::extract::rows(path, Lang::Ruby, source.as_bytes())
 }
 
 /// `kind name line-end_line | signature`; the `File` symbol has none.

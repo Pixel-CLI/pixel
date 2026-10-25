@@ -13,9 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mvp_model::hash::{Hash, Hasher};
 use mvp_model::{Delta, Edge, FileRow, FileRows, Kept, Lang, Provenance, Symbol};
 
-use crate::extract::{Extracted, UNREAD};
-use crate::lang::{self, World};
-use crate::tree::{Tree, TreeFile};
+use crate::mvp_index::extract::{Extracted, UNREAD};
+use crate::mvp_index::lang::{self, World};
+use crate::mvp_index::tree::{Tree, TreeFile};
 
 /// What the next generation needs from the files on disk.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -511,7 +511,8 @@ mod tests {
             .provenance
             .dirty
         };
-        let rows = |content: &str| crate::extract::rows("a.rb", Lang::Ruby, content.as_bytes());
+        let rows =
+            |content: &str| crate::mvp_index::extract::rows("a.rb", Lang::Ruby, content.as_bytes());
         assert!(!link_read(vec![rows("def a; end")], Vec::new()));
         assert!(!link_read(Vec::new(), vec!["a.rb".to_owned()]));
         assert!(link_read(vec![rows("def edited; end")], Vec::new()));
@@ -529,8 +530,8 @@ mod budget {
     use mvp_model::{Delta, FileRows, Kept};
 
     use super::*;
-    use crate::extract::extract;
-    use crate::truth::{index, write_tree};
+    use crate::mvp_index::extract::extract;
+    use crate::mvp_index::truth::{index, write_tree};
 
     fn owned(files: &[(&str, &str)]) -> Vec<(String, String)> {
         files
@@ -807,7 +808,7 @@ mod budget {
     fn c10_a_language_with_a_file_indexed_unread_resolves_none_of_its_sites() {
         let big = format!(
             "def helper\n  :big\nend\n{}",
-            "# padding\n".repeat(crate::tree::SIZE_CAP as usize / 10 + 1)
+            "# padding\n".repeat(crate::mvp_index::tree::SIZE_CAP as usize / 10 + 1)
         );
         let read = owned(&[
             ("lib/a.rb", "def helper\n  :a\nend\n"),

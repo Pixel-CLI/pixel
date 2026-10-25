@@ -12,8 +12,8 @@ use mvp_model::{EdgeKind, SymbolKind};
 use tree_sitter::Node;
 
 use super::{BoundKind, Defs, Gate, Landing, Owner, This, Walker, line, one_line};
-use crate::lang::FILE_OWNER;
-use crate::ruby::{Context, Fact, MIXIN, dsl};
+use crate::mvp_index::lang::FILE_OWNER;
+use crate::mvp_index::ruby::{Context, Fact, MIXIN, dsl};
 
 /// What a definition keeps of its nesting, in bytes: each scope's name and
 /// 32 more for its copy (R10-03).
@@ -74,7 +74,7 @@ impl<'a> Walker<'a> {
         let Landing::SingletonOf { path, scope, read } = self.locals.landing() else {
             return None;
         };
-        let name = crate::ruby::singleton_scope(&read);
+        let name = crate::mvp_index::ruby::singleton_scope(&read);
         self.facts.push(Fact::Definee {
             name: name.clone(),
             written: path,
@@ -139,7 +139,7 @@ impl<'a> Walker<'a> {
     /// top-level `A`. When another file could give a nearer scope an `A`,
     /// a [`Fact::Compact`] says so, and resolution abstains where that
     /// reading matters.
-    pub(in crate::ruby) fn qualify(&mut self, name: &str) -> String {
+    pub(in crate::mvp_index::ruby) fn qualify(&mut self, name: &str) -> String {
         if let Some(rooted) = name.strip_prefix("::") {
             return rooted.to_owned();
         }
@@ -215,7 +215,7 @@ impl<'a> Walker<'a> {
     /// `Object` for a bare `Class.new` (none recorded), and `Struct` or
     /// `Data`, which the graph never holds. Returns whether it pushed the
     /// owner.
-    pub(in crate::ruby) fn constructed(&mut self, call: Node<'a>) -> bool {
+    pub(in crate::mvp_index::ruby) fn constructed(&mut self, call: Node<'a>) -> bool {
         let Some((symbol, assignment)) = self.constructor(call) else {
             return false;
         };
@@ -279,7 +279,7 @@ impl<'a> Walker<'a> {
     /// in the owner's `class << self` is its singleton class's
     /// ([`super::singleton_scope`], R2). A constructor's constant is its
     /// class ([`Self::constructed`]).
-    pub(in crate::ruby) fn constants(&mut self, node: Node<'a>) {
+    pub(in crate::mvp_index::ruby) fn constants(&mut self, node: Node<'a>) {
         let own_singleton = self.nearest() == Some(BoundKind::SingletonClass)
             && (self.locals.current_defs() == Defs::Singleton
                 || matches!(self.locals.landing(), Landing::SingletonOf { .. }));
@@ -385,7 +385,7 @@ impl<'a> Walker<'a> {
     /// The constant an assignment target names: its path, or `X` for
     /// `self::X` in a class or module body, where `self` is the innermost
     /// lexical scope (R8, [`Self::self_is_scope`]).
-    pub(in crate::ruby) fn assigned_constant(&self, target: Node) -> Option<String> {
+    pub(in crate::mvp_index::ruby) fn assigned_constant(&self, target: Node) -> Option<String> {
         if let Some(path) = dsl::constant_text(self, target) {
             return Some(path);
         }
@@ -421,7 +421,7 @@ impl<'a> Walker<'a> {
     /// v)` anywhere, the top-level `X`, which a `class X` may then reopen
     /// (R7-11). In a block whose `self` is a class or module it makes
     /// (`Class.new do`), nothing ([`Self::self_is_scope`], R9-02).
-    pub(in crate::ruby) fn const_set(&mut self, call: Node) {
+    pub(in crate::mvp_index::ruby) fn const_set(&mut self, call: Node) {
         let mut args = call
             .child_by_field_name("arguments")
             .map(|args| dsl::positional(args))
@@ -471,7 +471,7 @@ impl<'a> Walker<'a> {
     /// counts) is assigned `value` in a namespace the rules do not follow,
     /// when that value may be a class or module: anything but a literal
     /// ([`Fact::Alias`], R8-09).
-    pub(in crate::ruby) fn alias(&mut self, name: &str, value: Option<Node>) {
+    pub(in crate::mvp_index::ruby) fn alias(&mut self, name: &str, value: Option<Node>) {
         let literal = value.is_some_and(|value| {
             matches!(
                 value.kind(),
@@ -508,12 +508,12 @@ impl<'a> Walker<'a> {
     /// the top-level reading (B2). Ruby also looks through the ancestors of
     /// the innermost scope, and another file may define a nearer one: a
     /// [`Fact::Definee`] lets resolution check.
-    pub(in crate::ruby) fn refer(&self, path: &str) -> String {
+    pub(in crate::mvp_index::ruby) fn refer(&self, path: &str) -> String {
         self.read_through(path, self.cref.iter().rev())
     }
 
     /// [`Self::refer`] in the nesting `cref`, innermost first.
-    pub(in crate::ruby) fn read_in(&self, path: &str, cref: &[String]) -> String {
+    pub(in crate::mvp_index::ruby) fn read_in(&self, path: &str, cref: &[String]) -> String {
         self.read_through(path, cref.iter())
     }
 
@@ -533,7 +533,7 @@ impl<'a> Walker<'a> {
 
     /// Whether this file has defined the class, module or constant `name`
     /// so far.
-    pub(in crate::ruby) fn defines_constant(&self, name: &str) -> bool {
+    pub(in crate::mvp_index::ruby) fn defines_constant(&self, name: &str) -> bool {
         self.constants.contains(name)
     }
 
@@ -542,7 +542,7 @@ impl<'a> Walker<'a> {
     /// prepended, then its included modules, the latest first, each with
     /// the modules it includes, then its superclass and that one's; each
     /// constant read where it is written (B10).
-    pub(in crate::ruby) fn ancestors_in_file(&self, scope: &str) -> Vec<String> {
+    pub(in crate::mvp_index::ruby) fn ancestors_in_file(&self, scope: &str) -> Vec<String> {
         self.ancestors_of(scope, 0, &mut HashSet::from_iter([scope.to_owned()]))
     }
 

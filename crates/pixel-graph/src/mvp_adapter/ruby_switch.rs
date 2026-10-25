@@ -30,6 +30,7 @@ use rusqlite::params;
 
 use super::ruby::{RubyPlan, Scope, ruby_plan, ruby_plan_in};
 use super::{BoxErr, Changes, MVP_COMMIT, refresh};
+use crate::mvp_index;
 use crate::store::{EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, Tier};
 
 /// The switch.

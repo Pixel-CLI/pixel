@@ -17,8 +17,10 @@ use rustc_hash::FxHashMap as HashMap;
 use tree_sitter::Node;
 
 use super::Walker;
-use crate::ruby::{MAYBE_NIL, VALUE, VALUE_CONSTANT, VALUE_FACTORY, VALUE_FIXTURE, VALUE_LET};
-use crate::text;
+use crate::mvp_index::ruby::{
+    MAYBE_NIL, VALUE, VALUE_CONSTANT, VALUE_FACTORY, VALUE_FIXTURE, VALUE_LET,
+};
+use crate::mvp_index::text;
 
 /// Most calls a path holds: a longer chain is left untyped.
 const MAX_SEGMENTS: usize = 8;
@@ -561,8 +563,8 @@ mod audited_contract_tests {
 
     #[test]
     fn fixture_roots_should_require_literal_names_and_instance_test_context() {
-        use crate::ruby::Context;
-        use crate::ruby::extract::testing::rows;
+        use crate::mvp_index::ruby::Context;
+        use crate::mvp_index::ruby::extract::testing::rows;
         for (source, expected) in [
             (
                 "class Check; def test_run; users(:one).label; end; end",
@@ -631,8 +633,8 @@ mod audited_contract_tests {
 
     #[test]
     fn long_local_alias_chains_should_abstain_instead_of_retyping_forever() {
-        use crate::ruby::Context;
-        use crate::ruby::extract::testing::rows;
+        use crate::mvp_index::ruby::Context;
+        use crate::mvp_index::ruby::extract::testing::rows;
         let mut source = "class Check; def run; a0=Room.new;".to_string();
         for i in 1..12 {
             source.push_str(&format!("a{i}=a{};", i - 1));

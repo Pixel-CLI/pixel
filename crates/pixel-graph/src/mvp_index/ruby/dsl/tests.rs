@@ -9,7 +9,9 @@
 //! as their own sites, the cref added.
 
 use super::CALLBACK_METHODS;
-use crate::ruby::extract::testing::{ancestors, associations, calls, references, rows, symbols};
+use crate::mvp_index::ruby::extract::testing::{
+    ancestors, associations, calls, references, rows, symbols,
+};
 
 /// Each method of the closed callback list references the symbols it is
 /// given in a class or module body, and nowhere else: not at the top level,
@@ -1039,7 +1041,7 @@ end
 
 #[test]
 fn audited_association_extensions_should_require_a_block_extend_option_or_extending_lambda() {
-    use crate::ruby::{ASSOCIATION_EXTENDED, Context};
+    use crate::mvp_index::ruby::{ASSOCIATION_EXTENDED, Context};
     for (declaration, extended) in [
         ("has_many :items", false),
         ("has_many :items, -> { where(open: true) }", false),

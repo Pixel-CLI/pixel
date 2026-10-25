@@ -5,7 +5,7 @@
 //! `Cargo.toml` declares: the package, its `[lib]` and its `[[bin]]`s.
 //!
 //! `Cargo.toml` is read by [`read`], written for the few keys resolution
-//! needs over the TOML subset of `toml`, because `mvp-index` takes no TOML
+//! needs over the TOML subset of `toml`, because `mvp_index` takes no TOML
 //! crate (ADR-0013's table). It reads `[package]`, `[lib]` and `[[bin]]`
 //! tables and, in them, `key = "string"` or `key = 'string'` statements;
 //! multi-line strings and arrays are skipped whole, so a line inside one is
@@ -30,10 +30,10 @@ use std::borrow::Cow;
 
 use super::toml::{self, Statement, Value};
 use super::{DepKind, DepSource, Dependency, Manifest};
-use crate::lang::{Def, Extraction};
-use crate::text;
+use crate::mvp_index::lang::{Def, Extraction};
+use crate::mvp_index::text;
 
-pub use crate::guard::is_generated_blob;
+pub use crate::mvp_index::guard::is_generated_blob;
 
 /// A `*.rs` file (the extension of the file name, not of a directory:
 /// v1's G-1), or a `Cargo.toml`.

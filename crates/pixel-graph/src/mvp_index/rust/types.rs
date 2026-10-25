@@ -251,7 +251,7 @@ pub fn impl_args(
             match params.iter().find(|(name, _)| *name == written) {
                 Some((_, None)) => return CONSTRAINED.to_owned(),
                 Some((_, Some(bounds))) if !bounds.is_empty() => {
-                    return format!("{BOUNDED}{}", crate::codec::record(bounds));
+                    return format!("{BOUNDED}{}", crate::mvp_index::codec::record(bounds));
                 }
                 _ => {}
             }

@@ -18,7 +18,7 @@
 use mvp_model::{Lang, SymbolKind};
 
 use super::{Rust, rows};
-use crate::lang::{Rules, World};
+use crate::mvp_index::lang::{Rules, World};
 
 const APP: &str = "[package]\nname = \"app\"\n";
 

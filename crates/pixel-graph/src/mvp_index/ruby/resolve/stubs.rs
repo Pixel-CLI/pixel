@@ -24,8 +24,8 @@ use std::rc::Rc;
 use mvp_model::{EdgeKind, SymbolKind};
 
 use super::{Decision, Index, Side, split_method, test_file};
-use crate::lang::World;
-use crate::ruby::{Context, Fact, MIXIN, VALUE, VALUE_FIXTURE, VALUE_LET};
+use crate::mvp_index::lang::World;
+use crate::mvp_index::ruby::{Context, Fact, MIXIN, VALUE, VALUE_FIXTURE, VALUE_LET};
 
 /// Whose stubs an index's lookups meet.
 #[derive(Clone)]

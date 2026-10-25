@@ -16,7 +16,7 @@ use super::{Chain, Lookup, Node, Stands};
 /// The steps before a step the rules cannot name, but that may be one of
 /// the graph's classes or modules (B5), in one object's chain: lookup from
 /// that object meets them before whatever the step holds.
-pub(in crate::ruby::resolve) struct Behind<'a> {
+pub(in crate::mvp_index::ruby::resolve) struct Behind<'a> {
     pub(super) chain: Rc<Chain<'a>>,
     /// Where the step is in the chain.
     pub(super) at: usize,
@@ -32,7 +32,7 @@ pub(in crate::ruby::resolve) struct Behind<'a> {
 
 /// What the unknown steps before an opaque one may hold (R6-08, R6-15).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::ruby::resolve) enum Hidden {
+pub(in crate::mvp_index::ruby::resolve) enum Hidden {
     Nothing,
     Spread,
     Anything,
@@ -41,7 +41,7 @@ pub(in crate::ruby::resolve) enum Hidden {
 /// Every [`Behind`], indexed by the names its steps define, so that a call
 /// on `self` looks at those alone and not at every object (R6-03).
 #[derive(Default)]
-pub(in crate::ruby::resolve) struct Opaque<'a> {
+pub(in crate::mvp_index::ruby::resolve) struct Opaque<'a> {
     pub(super) steps: Vec<Behind<'a>>,
     /// Method name → the entries one of whose steps defines it, among
     /// those whose steps no fact touches ([`Index::quiet`]).
@@ -119,7 +119,7 @@ struct Member<'a> {
 /// Every [`Share`] of two objects or more, with the one each object is
 /// in and its place there.
 #[derive(Default)]
-pub(in crate::ruby::resolve) struct Shares<'a> {
+pub(in crate::mvp_index::ruby::resolve) struct Shares<'a> {
     shares: Vec<Share<'a>>,
     of: HashMap<(&'a str, Side), (usize, u32)>,
 }
@@ -127,7 +127,7 @@ pub(in crate::ruby::resolve) struct Shares<'a> {
 /// The objects holding one step, when a share holds it: shares, with the
 /// objects of each that hold it when not all of them do (the step is in
 /// their own lists), and the others, looked up one by one (R10-01).
-pub(in crate::ruby::resolve) struct Held<'a> {
+pub(in crate::mvp_index::ruby::resolve) struct Held<'a> {
     pub(super) shares: Vec<(usize, Option<HashSet<u32>>)>,
     pub(super) single: Vec<(&'a str, Side)>,
 }
@@ -159,7 +159,7 @@ impl<'a> Contained<'a> {
 impl<'a> Index<'a> {
     /// Whether lookup from every object holding `owner`'s step on `side`
     /// reaches `Object` ([`Index::reaches_object`]), read once.
-    pub(in crate::ruby::resolve) fn reach(&self, owner: &'a str, side: Side) -> bool {
+    pub(in crate::mvp_index::ruby::resolve) fn reach(&self, owner: &'a str, side: Side) -> bool {
         if let Some(&reach) = self.walks.reach.borrow().get(&(owner, side)) {
             return reach;
         }
@@ -175,7 +175,7 @@ impl<'a> Index<'a> {
     /// Whether lookup of `name` from every object of this project holding
     /// `owner`'s step on `side` finds `own` (F1), the objects of a share
     /// read together ([`Share`]; R10-01, R11-01).
-    pub(in crate::ruby::resolve) fn agree(
+    pub(in crate::mvp_index::ruby::resolve) fn agree(
         &self,
         owner: &'a str,
         side: Side,
@@ -290,7 +290,7 @@ impl<'a> Index<'a> {
 
     /// [`Held`] for `owner`'s step on `side`, built once; `None` when no
     /// share holds it.
-    pub(in crate::ruby::resolve) fn held(
+    pub(in crate::mvp_index::ruby::resolve) fn held(
         &self,
         owner: &'a str,
         side: Side,
@@ -512,7 +512,11 @@ impl<'a> Index<'a> {
     /// `side` past the cut: a class's instance step only a class's
     /// instances, its own step only a class; a module's instance step any
     /// object, its own methods none but the module (R5-01).
-    pub(in crate::ruby::resolve) fn held_past_a_cut(&self, owner: &'a str, side: Side) -> bool {
+    pub(in crate::mvp_index::ruby::resolve) fn held_past_a_cut(
+        &self,
+        owner: &'a str,
+        side: Side,
+    ) -> bool {
         let module = !self.classes.contains_key(owner);
         if module && side == Side::Singleton {
             return false;

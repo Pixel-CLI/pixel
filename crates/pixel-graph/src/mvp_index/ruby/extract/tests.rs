@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use super::parse;
 use super::testing::{ancestors, calls, imports, references, rows, symbols};
-use crate::guard::over_budget;
-use crate::text;
+use crate::mvp_index::guard::over_budget;
+use crate::mvp_index::text;
 
 /// A definition's signature is its first line read from the start of the
 /// line it opens on, so it is always a prefix of that trimmed line: a
@@ -1782,9 +1782,9 @@ fn audited_rspec_core_reopenings_should_disable_the_model_for_the_root_and_neste
         ("module Other::Core; end", false),
     ] {
         let found = rows("spec/support/core.rb", source);
-        let facts = crate::ruby::Fact::decode_all(&found.facts);
+        let facts = crate::mvp_index::ruby::Fact::decode_all(&found.facts);
         assert_eq!(
-            facts.contains(&crate::ruby::Fact::RspecOff),
+            facts.contains(&crate::mvp_index::ruby::Fact::RspecOff),
             off,
             "{source}"
         );

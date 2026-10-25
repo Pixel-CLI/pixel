@@ -6,7 +6,8 @@ on:
   pull_request:
     paths:
       - '.github/workflows/mvp-reference.yml'
-      - 'crates/mvp-index/**'
+      - 'crates/pixel-graph/src/mvp_index/**'
+      - 'crates/pixel-graph/Cargo.toml'
       - 'crates/mvp-model/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -14,7 +15,8 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/mvp-reference.yml'
-      - 'crates/mvp-index/**'
+      - 'crates/pixel-graph/src/mvp_index/**'
+      - 'crates/pixel-graph/Cargo.toml'
       - 'crates/mvp-model/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -59,4 +61,4 @@ jobs:
       - name: Every extracted row is true of the pinned tree
         env:
           PIXEL_MVP_REFERENCE_REPO: ${{ github.workspace }}/reference
-        run: cargo test --locked -p mvp-index truth::c10_reference_every_row_is_true_of_the_tree -- --ignored --exact
+        run: cargo test --locked -p pixel-graph --lib mvp_index::truth::c10_reference_every_row_is_true_of_the_tree -- --ignored --exact

@@ -99,10 +99,10 @@ use self::flow::{is_branch, passes_block_on};
 use self::locals::{Gate, Locals};
 use super::unread::{self, Unread};
 use super::{Context, Fact, MIXIN, REBOUND, dsl, manifest, routes};
-use crate::lang::{Def, Extraction, FILE_OWNER, Site};
-use crate::text;
+use crate::mvp_index::lang::{Def, Extraction, FILE_OWNER, Site};
+use crate::mvp_index::text;
 
-pub use crate::guard::PARSE_BUDGET;
+pub use crate::mvp_index::guard::PARSE_BUDGET;
 
 mod constants;
 mod factories;
@@ -181,7 +181,7 @@ fn extract_tree(path: &str, content: &[u8]) -> Extraction {
 
 /// The Ruby tree of `content`, or `None` past `budget` (`guard::parse`).
 pub fn parse(content: &[u8], budget: Duration) -> Option<Tree> {
-    crate::guard::parse(&tree_sitter_ruby::LANGUAGE.into(), content, budget)
+    crate::mvp_index::guard::parse(&tree_sitter_ruby::LANGUAGE.into(), content, budget)
 }
 
 /// The tree the walk reads of `content` ([`forwarding::parse`]).

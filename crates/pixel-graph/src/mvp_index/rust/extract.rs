@@ -24,15 +24,15 @@ use super::{
     MacroCall, ModPath, ProcKind, ProcMacro, Receiver, Scope, ScopeKind, SelfKind, TypeRef,
     UNREAD_NAME, Use, Variant, Vis,
 };
-use crate::extract::uid;
-use crate::lang::{Def, Extraction, Site};
-use crate::text as rows_text;
+use crate::mvp_index::extract::uid;
+use crate::mvp_index::lang::{Def, Extraction, Site};
+use crate::mvp_index::text as rows_text;
 
 /// Nodes deeper than this are skipped with their subtree; this depth itself
 /// is visited (v1's `MAX_DEPTH`, W-1).
 pub const MAX_DEPTH: usize = 512;
 
-pub use crate::guard::PARSE_BUDGET;
+pub use crate::mvp_index::guard::PARSE_BUDGET;
 
 /// Item kinds that make a block a scope of its own.
 const BLOCK_ITEMS: [&str; 13] = [
@@ -66,7 +66,7 @@ pub fn extract(content: &[u8]) -> Extraction {
 
 /// The Rust tree of `content`, or `None` past `budget` (`guard::parse`).
 pub fn parse_within(content: &[u8], budget: Duration) -> Option<Tree> {
-    crate::guard::parse(&tree_sitter_rust::LANGUAGE.into(), content, budget)
+    crate::mvp_index::guard::parse(&tree_sitter_rust::LANGUAGE.into(), content, budget)
 }
 
 /// Where a function or constant is declared.

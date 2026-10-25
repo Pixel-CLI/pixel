@@ -15,7 +15,7 @@
 use tree_sitter::Node;
 
 use super::{Walker, rspec};
-use crate::ruby::Fact;
+use crate::mvp_index::ruby::Fact;
 
 /// Records the factory `call` declares, when it is one.
 pub(super) fn factory(w: &mut Walker, call: Node, method: &str) {
@@ -162,7 +162,7 @@ fn holds_initialize_with(w: &Walker, node: Node) -> bool {
 #[cfg(test)]
 mod audited_contract_tests {
     use super::*;
-    use crate::ruby::extract::testing::rows;
+    use crate::mvp_index::ruby::extract::testing::rows;
 
     fn factories(source: &str) -> Vec<Fact> {
         Fact::decode_all(&rows("spec/factories/items.rb", source).facts)

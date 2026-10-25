@@ -9,8 +9,8 @@ use tree_sitter::Node;
 
 use super::locals::Gate;
 use super::{MAX_DEPTH, REQUIRE_METHODS, Walker, children, line};
-use crate::lang::FILE_OWNER;
-use crate::ruby::CONDITIONAL;
+use crate::mvp_index::lang::FILE_OWNER;
+use crate::mvp_index::ruby::CONDITIONAL;
 
 impl Walker<'_> {
     /// The `require`s of a region the grammar could not parse: a load

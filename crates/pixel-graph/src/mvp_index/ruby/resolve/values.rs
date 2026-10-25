@@ -33,10 +33,10 @@ use mvp_model::{EdgeKind, SymbolKind};
 
 use super::ancestors::{Lookup, MAX_ANCESTOR_DEPTH, Op, Superclass};
 use super::{Decision, Index, Side, split_method};
-use crate::lang::World;
-use crate::ruby::manifest::fixture_set;
-use crate::ruby::routes::{camelize_path, singularize};
-use crate::ruby::{
+use crate::mvp_index::lang::World;
+use crate::mvp_index::ruby::manifest::fixture_set;
+use crate::mvp_index::ruby::routes::{camelize_path, singularize};
+use crate::mvp_index::ruby::{
     ASSOCIATION_EXTENDED, ASSOCIATION_THROUGH, Context, Fact, MAYBE_NIL, VALUE_CONSTANT,
     VALUE_FACTORY, VALUE_FIXTURE, VALUE_LET,
 };
@@ -233,7 +233,7 @@ impl<'a> Index<'a> {
             let (name, flags) = (name.clone(), flags.clone());
             let macro_ = context
                 .qualifier
-                .strip_prefix(crate::ruby::ASSOCIATION)
+                .strip_prefix(crate::mvp_index::ruby::ASSOCIATION)
                 .unwrap_or_default()
                 .to_owned();
             let collection = matches!(macro_.as_str(), "has_many" | "has_and_belongs_to_many");
@@ -792,7 +792,7 @@ impl<'a> Index<'a> {
 #[cfg(test)]
 mod audited_contract_tests {
     use super::*;
-    use crate::ruby::resolve::{fixture::Generation, stubs::Tests};
+    use crate::mvp_index::ruby::resolve::{fixture::Generation, stubs::Tests};
 
     #[test]
     fn model_finders_should_preserve_argument_shape_nil_and_array_contracts() {

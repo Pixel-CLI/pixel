@@ -20,7 +20,7 @@
 use tree_sitter::Node;
 
 use super::{Walker, flow, line, one_line, values};
-use crate::ruby::{Fact, GROUP, SHARED_GROUP};
+use crate::mvp_index::ruby::{Fact, GROUP, SHARED_GROUP};
 
 /// The calls that make an example group.
 const GROUPS: &[&str] = &[

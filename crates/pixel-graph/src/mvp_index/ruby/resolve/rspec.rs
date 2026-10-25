@@ -34,8 +34,8 @@ use rustc_hash::FxHashMap as HashMap;
 
 use super::ancestors::Lookup;
 use super::{Decision, Index, Side};
-use crate::ruby::routes::camelize_path;
-use crate::ruby::{Context, Fact, GROUP, SHARED_GROUP};
+use crate::mvp_index::ruby::routes::camelize_path;
+use crate::mvp_index::ruby::{Context, Fact, GROUP, SHARED_GROUP};
 
 /// The example groups of the program's spec files.
 #[derive(Default)]

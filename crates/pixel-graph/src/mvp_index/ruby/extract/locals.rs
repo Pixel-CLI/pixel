@@ -12,7 +12,7 @@ use super::{BlockKind, Defs, Landing, Scope, This};
 /// earlier in a visible scope; otherwise the bare name is a method call
 /// (v1 `RubyLocals`).
 #[derive(Debug, Default)]
-pub(in crate::ruby) struct Locals {
+pub(in crate::mvp_index::ruby) struct Locals {
     frames: Vec<Frame>,
 }
 
@@ -168,7 +168,7 @@ impl Locals {
 
     /// Where a `def` written in the innermost frame lands when it has no
     /// owner the rules can name.
-    pub(in crate::ruby) fn landing(&self) -> Landing {
+    pub(in crate::mvp_index::ruby) fn landing(&self) -> Landing {
         self.frames
             .last()
             .map_or(Landing::Nowhere, |f| f.landing.clone())
@@ -203,7 +203,7 @@ impl Locals {
         }
     }
 
-    pub(in crate::ruby) fn is_local(&self, name: &str) -> bool {
+    pub(in crate::mvp_index::ruby) fn is_local(&self, name: &str) -> bool {
         for frame in self.frames.iter().rev() {
             if frame.names.iter().any(|known| known == name) {
                 return true;
@@ -217,7 +217,7 @@ impl Locals {
 
     /// What a declaration written in the innermost frame's body generates
     /// (`attr_reader` in `class << self` makes class methods).
-    pub(in crate::ruby) fn current_defs(&self) -> Defs {
+    pub(in crate::mvp_index::ruby) fn current_defs(&self) -> Defs {
         self.frames.last().map_or(Defs::Instance, |f| f.defs)
     }
 

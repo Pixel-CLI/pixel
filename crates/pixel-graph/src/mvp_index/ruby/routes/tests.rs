@@ -6,8 +6,8 @@
 //! once-campfire's routes file.
 
 use super::*;
-use crate::ruby::extract::testing::{routes as route_sites, rows};
-use crate::ruby::extract::{PARSE_BUDGET, parse};
+use crate::mvp_index::ruby::extract::testing::{routes as route_sites, rows};
+use crate::mvp_index::ruby::extract::{PARSE_BUDGET, parse};
 
 /// Every route of `source` as `VERB /path controller#action (Constant#action)`,
 /// or `VERB /path mount Constant`, in route order (v1's `table`).

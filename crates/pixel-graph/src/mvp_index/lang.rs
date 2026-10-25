@@ -7,7 +7,7 @@
 
 use mvp_model::{Edge, EdgeKind, Lang, Symbol, SymbolKind};
 
-use crate::{ruby, rust};
+use crate::mvp_index::{ruby, rust};
 
 /// What one language knows. Every method is a pure function of its
 /// arguments: no I/O, no global state.

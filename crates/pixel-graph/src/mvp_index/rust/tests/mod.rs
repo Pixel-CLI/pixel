@@ -25,8 +25,8 @@ mod uses;
 use mvp_model::{EdgeKind, Lang, SymbolKind};
 
 use super::{Context, Facts, Rust};
-use crate::extract::rows;
-use crate::lang::{Extraction, Rules, World};
+use crate::mvp_index::extract::rows;
+use crate::mvp_index::lang::{Extraction, Rules, World};
 
 /// What the rule file extracts from one file.
 fn extract(path: &str, src: &str) -> Extraction {

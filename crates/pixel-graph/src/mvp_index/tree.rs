@@ -15,9 +15,9 @@ use std::time::SystemTime;
 use mvp_model::hash::{Hash, Hasher};
 use mvp_model::{Diff, DiffFile, FileStat, Lang};
 
-use crate::bounded;
-use crate::guard::{GENERATED_MIN_BYTES, is_generated_blob};
-use crate::lang;
+use crate::mvp_index::bounded;
+use crate::mvp_index::guard::{GENERATED_MIN_BYTES, is_generated_blob};
+use crate::mvp_index::lang;
 
 /// Pixel's state directory at the root of a repository: never indexed,
 /// never counted as changed, whatever git says of it (the plugins a team
@@ -72,7 +72,7 @@ pub struct Tree {
     /// outside Pixel's state: what [`changes`] counts whole.
     pub untracked: Vec<String>,
     /// The copy of git's index the scan read in its place, when it was of
-    /// git's index as the scan found it ([`git_index`](crate::git_index)).
+    /// git's index as the scan found it ([`git_index`](crate::mvp_index::git_index)).
     pub index: Option<PathBuf>,
     /// Git's index has no refreshed copy yet: the writer makes one.
     pub unsettled: bool,
@@ -110,7 +110,7 @@ pub enum SkipReason {
 
 /// Whether a file of `lang` is indexed without being parsed: larger than
 /// [`SIZE_CAP`], or a generated blob its rules refuse. Its definitions are
-/// unknown, so it is read by [`Rules::unread`](crate::lang::Rules::unread),
+/// unknown, so it is read by [`Rules::unread`](crate::mvp_index::lang::Rules::unread),
 /// not `extract`. A function of the bytes alone, asked about the bytes
 /// extraction reads, never the scan's (`extract::rows`): the rows and the
 /// hash stored with them always come from the same bytes.
@@ -206,11 +206,11 @@ pub fn scan_discovered_in(
     } = repo;
     let copy = index
         .as_deref()
-        .and_then(|source| crate::git_index::Copy::of(base, source));
+        .and_then(|source| crate::mvp_index::git_index::Copy::of(base, source));
     let unsettled = copy.as_ref().is_some_and(|copy| !copy.made());
     // The copy stands for git's index only while that is the version it
     // was made of, the scan's end included; else git's own index is read.
-    if let Some(copy) = copy.filter(crate::git_index::Copy::made)
+    if let Some(copy) = copy.filter(crate::mvp_index::git_index::Copy::made)
         && let Ok(tree) = scan_using(&root, commit.clone(), Some(copy.path()), known)
         && copy.holds()
     {

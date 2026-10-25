@@ -41,10 +41,10 @@ use std::path::PathBuf;
 use mvp_model::hash::Hash;
 use mvp_model::{Delta, EdgeKind, FileRow, FileRows, Kept, Symbol};
 
-use crate::extract::{Extracted, rows};
-use crate::lang;
-use crate::link::link;
-use crate::tree::{Tree, TreeFile};
+use crate::mvp_index::extract::{Extracted, rows};
+use crate::mvp_index::lang;
+use crate::mvp_index::link::link;
+use crate::mvp_index::tree::{Tree, TreeFile};
 
 /// A resolved edge or an undecided site: source name, kind, line, and the
 /// target's name (resolved) or the target as written (unresolved).
@@ -59,7 +59,7 @@ fn index(files: &[(&str, &str)]) -> Vec<FileRows> {
 }
 
 /// The facts extraction records for `code`, written as `lib/x.rb`.
-pub(in crate::ruby) fn facts_of(code: &str) -> Vec<super::Fact> {
+pub(in crate::mvp_index::ruby) fn facts_of(code: &str) -> Vec<super::Fact> {
     let rows = index(&[("lib/x.rb", code)]);
     let file = rows.iter().find(|r| r.file.path == "lib/x.rb");
     super::Fact::decode_all(&file.expect("lib/x.rb").facts)
@@ -131,7 +131,7 @@ fn run(files: &[(&str, &str)], before: &[FileRows]) -> Delta {
     };
     let indexed: Vec<FileRow> = before.iter().map(|rows| rows.file.clone()).collect();
     let extractor = (!before.is_empty()).then(lang::extractor);
-    let plan = crate::link::plan(&tree, &indexed, extractor.as_deref(), &[]);
+    let plan = crate::mvp_index::link::plan(&tree, &indexed, extractor.as_deref(), &[]);
     let content: HashMap<&str, &str> = kept.iter().copied().collect();
     let extracted = Extracted {
         files: plan

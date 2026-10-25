@@ -343,8 +343,8 @@ fn join(dir: &str, rel: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::ruby::Fact;
-    use crate::ruby::resolve::fixture::Generation;
+    use crate::mvp_index::ruby::Fact;
+    use crate::mvp_index::ruby::resolve::fixture::Generation;
 
     fn gem(name: &str, require: Option<&str>) -> Fact {
         Fact::Gem {

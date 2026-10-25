@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 //! The part of TOML a `Cargo.toml` reader needs, without a TOML crate
-//! (ADR-0013 allows none in `mvp-index`): table headers, `key = value`
+//! (ADR-0013 allows none in `mvp_index`): table headers, `key = value`
 //! statements with dotted and quoted keys, single-line strings, booleans
 //! and one level of inline table. Every other value (numbers, dates,
 //! arrays, multi-line strings, nested tables) is skipped as a whole, across

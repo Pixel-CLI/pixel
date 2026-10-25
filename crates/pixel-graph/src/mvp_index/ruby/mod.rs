@@ -132,8 +132,8 @@ use std::rc::Rc;
 use mvp_model::EdgeKind;
 use mvp_model::Lang;
 
-use crate::codec;
-use crate::lang::{Extraction, Rules, World};
+use crate::mvp_index::codec;
+use crate::mvp_index::lang::{Extraction, Rules, World};
 
 /// Bumped by any change to the grammar or these rules.
 pub const VERSION: u32 = 14;

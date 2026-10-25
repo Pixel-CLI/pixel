@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use mvp_model::hash::Hash;
 
-use crate::tree::{STATE, git_in};
+use crate::mvp_index::tree::{STATE, git_in};
 
 /// The copies' names in [`STATE`]: this prefix, then the key.
 pub const PREFIX: &str = "git-index.";
@@ -46,7 +46,7 @@ pub struct Copy {
 impl Copy {
     /// The copy of the version of `source` there is now, in `base`'s
     /// [`STATE`]: the work tree's root, or the directory a caller keeps
-    /// Pixel's state under ([`crate::tree::scan_discovered_in`]); `None`
+    /// Pixel's state under ([`crate::mvp_index::tree::scan_discovered_in`]); `None`
     /// when `source` is not a regular file (no index yet, before the first
     /// `git add`).
     pub fn of(base: &Path, source: &Path) -> Option<Copy> {
@@ -107,7 +107,7 @@ pub fn refresh(root: &Path, file: &Path) -> bool {
         "-q",
         "--refresh",
     ]);
-    crate::bounded::run(command, &[]).is_ok_and(|done| done.status.code().is_some())
+    crate::mvp_index::bounded::run(command, &[]).is_ok_and(|done| done.status.code().is_some())
 }
 
 /// The key of the version of git's index file at `source`: its path,
@@ -149,7 +149,7 @@ fn key(_: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree::{discover, scan_discovered, scan_discovered_in};
+    use crate::mvp_index::tree::{discover, scan_discovered, scan_discovered_in};
     use std::process::Stdio;
 
     /// Runs git in `dir`, as a test sets a repository up.
@@ -216,9 +216,13 @@ mod tests {
         assert_eq!(tree.index, None, "git's own index read");
         assert!(tree.unsettled, "the writer is to make the next copy");
         // What reading the copy of the old version would have said.
-        let stale =
-            crate::tree::scan_using(root, tree.commit.clone(), Some(copy.path()), &|_| None)
-                .unwrap();
+        let stale = crate::mvp_index::tree::scan_using(
+            root,
+            tree.commit.clone(),
+            Some(copy.path()),
+            &|_| None,
+        )
+        .unwrap();
         assert!(!stale.dirty);
     }
 

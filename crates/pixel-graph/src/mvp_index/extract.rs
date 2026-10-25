@@ -14,9 +14,9 @@ use std::time::Instant;
 use mvp_model::hash::Hash;
 use mvp_model::{Edge, FileRow, FileRows, Lang, Symbol, SymbolKind, uid_path};
 
-use crate::lang::{self, Extraction};
-use crate::text;
-use crate::tree::{self, TreeFile};
+use crate::mvp_index::lang::{self, Extraction};
+use crate::mvp_index::text;
+use crate::mvp_index::tree::{self, TreeFile};
 
 /// What `extract` did with the files it was given.
 #[derive(Debug, Default)]
@@ -186,7 +186,7 @@ mod tests {
     use mvp_model::EdgeKind;
 
     use super::*;
-    use crate::lang::{Def, Site};
+    use crate::mvp_index::lang::{Def, Site};
 
     fn def(kind: SymbolKind, name: &str, line: u32, end_line: u32) -> Def {
         Def {
@@ -242,7 +242,7 @@ mod tests {
     fn a_file_indexed_unread_yields_its_file_symbol_only() {
         let large = format!(
             "def helper\nend\n{}",
-            "helper\n".repeat(crate::tree::SIZE_CAP as usize / 7 + 1)
+            "helper\n".repeat(crate::mvp_index::tree::SIZE_CAP as usize / 7 + 1)
         );
         let blob = format!("def helper; end; {}\n", "helper; ".repeat(10_000));
         let rust_blob = "fn helper() {} ".repeat(5_000);
@@ -265,8 +265,8 @@ mod tests {
     #[test]
     fn facts_written_with_the_codec_never_start_with_the_unread_mark() {
         for field in [UNREAD, "\\", "\\unread"] {
-            assert!(!crate::codec::record(&[field]).starts_with(UNREAD));
-            assert!(!crate::codec::records(&[[field, "x"]]).starts_with(UNREAD));
+            assert!(!crate::mvp_index::codec::record(&[field]).starts_with(UNREAD));
+            assert!(!crate::mvp_index::codec::records(&[[field, "x"]]).starts_with(UNREAD));
         }
     }
 

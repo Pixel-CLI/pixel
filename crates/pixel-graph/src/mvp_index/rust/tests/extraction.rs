@@ -31,7 +31,9 @@ fn rust_reads_rs_files_by_the_extension_of_the_file_name_and_every_manifest() {
 
 #[test]
 fn the_generated_blob_guard_is_exact_on_both_conditions() {
-    use crate::guard::{GENERATED_MAX_BYTES_PER_LINE as PER_LINE, GENERATED_MIN_BYTES as MIN};
+    use crate::mvp_index::guard::{
+        GENERATED_MAX_BYTES_PER_LINE as PER_LINE, GENERATED_MIN_BYTES as MIN,
+    };
     let one_line = |len: usize| vec![b'x'; len];
     // At the size floor, one line is a blob; one byte under, it is source.
     assert!(!Rust.accepts("a.rs", &one_line(MIN)));
@@ -161,7 +163,7 @@ fn c18_rust_types_bounds_and_use_groups_nested_without_bound_cost_no_stack() {
         // so the file is read, not indexed unread (`tree::unread`).
         blank = "\n".repeat(n / 10),
     );
-    assert!(!crate::tree::unread(
+    assert!(!crate::mvp_index::tree::unread(
         Lang::Rust,
         "src/lib.rs",
         src.as_bytes()
@@ -433,7 +435,7 @@ fn an_impl_parameter_keeps_its_bounds_and_a_type_its_declared_ones() {
             _ => None,
         })
         .collect();
-    let bounded = |bounds: &[&str]| format!("_:{}", crate::codec::record(bounds));
+    let bounded = |bounds: &[&str]| format!("_:{}", crate::mvp_index::codec::record(bounds));
     assert_eq!(
         args,
         [

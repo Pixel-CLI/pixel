@@ -10,7 +10,7 @@
 use super::super::corelib::defines_no_hook;
 use super::super::{Def, Index, Side, facts, split_method};
 use super::{Building, Chain, Decl, Lookup, Node, Object, Op, Stands};
-use crate::ruby::dsl::{FEATURES, HOOKS};
+use crate::mvp_index::ruby::dsl::{FEATURES, HOOKS};
 
 /// A hook's definition, as lookup finds it.
 pub(super) enum HookDef {
@@ -261,8 +261,8 @@ impl<'a> Index<'a> {
     /// define or remove (R8-06). Read from the definitions and facts alone,
     /// before any chain is walked.
     ///
-    /// [`Fact::Hook`]: crate::ruby::Fact::Hook
-    pub(in crate::ruby::resolve) fn unknown_hook(&self, module: &str) -> bool {
+    /// [`Fact::Hook`]: crate::mvp_index::ruby::Fact::Hook
+    pub(in crate::mvp_index::ruby::resolve) fn unknown_hook(&self, module: &str) -> bool {
         HOOKS.iter().chain(FEATURES).any(|&name| {
             [Side::Singleton, Side::Instance].into_iter().any(|side| {
                 let defined = self.methods[side as usize]

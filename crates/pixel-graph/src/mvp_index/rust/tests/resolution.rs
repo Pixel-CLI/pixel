@@ -1259,7 +1259,7 @@ fn facts_another_version_wrote_resolve_nothing_and_never_panic() {
     let rows = rows("src/lib.rs", Lang::Rust, src.as_bytes());
     // Records this version cannot read; scopes, items and owners out of
     // range; a context naming a scope the facts do not have.
-    let garbage = crate::codec::records(&[
+    let garbage = crate::mvp_index::codec::records(&[
         vec!["scope", "", "file"],
         vec!["scope", "7", "impl", "Ghost", "", "", ""],
         vec!["item", "5", "ghost", "#ghost#function", "pub", "fn"],

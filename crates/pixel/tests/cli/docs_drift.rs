@@ -540,8 +540,8 @@ fn documented_deps_reads_every_form_of_the_depends_cell() {
         (set(&["pixel-graph", "pixel-git"]), None)
     );
     assert_eq!(
-        documented_deps("git, mvp-index", &libraries),
-        (set(&["pixel-git", "mvp-index"]), None)
+        documented_deps("git, mvp-store", &libraries),
+        (set(&["pixel-git", "mvp-store"]), None)
     );
     assert_eq!(
         documented_deps("index (dev: daemon, proto)", &libraries),

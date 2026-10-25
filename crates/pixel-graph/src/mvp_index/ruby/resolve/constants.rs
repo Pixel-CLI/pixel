@@ -18,7 +18,7 @@ use super::ancestors::Lookup;
 /// whatever comes past it may hold the constant, so nothing is proven.
 pub(super) const CUT: &str = "#<cut>";
 use super::{Decision, Index, Side, split_method};
-use crate::ruby::{singleton_of, singleton_scope};
+use crate::mvp_index::ruby::{singleton_of, singleton_scope};
 
 /// Most aliases of aliases followed to the method they copy (R11-03).
 const MAX_ALIASES: usize = 8;
@@ -242,7 +242,7 @@ impl<'a> Index<'a> {
 
     /// `found`, the method a call on `owner` on `side` reaches, unless it
     /// may be private or protected there
-    /// ([`Fact::Hidden`](crate::ruby::Fact::Hidden)): Ruby raises
+    /// ([`Fact::Hidden`](crate::mvp_index::ruby::Fact::Hidden)): Ruby raises
     /// `NoMethodError` for `Foo.m` and `Foo.new.m` there, whatever finds it
     /// (an `extend self`, a `define_method`, an `attr_reader *NAMES`, a
     /// Struct member made private), so the call proves nothing (R9-03).
