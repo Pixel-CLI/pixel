@@ -4,7 +4,10 @@
 
 """Quote matching Markdown/reStructuredText sections for explanatory questions. Source navigation is left to code
 packs. Rank by prompt overlap, keep the top two sections, omit already quoted rows and mark excerpt truncation.
-Read-only and deterministic (score, path, line). Issues #906, #1200, #1234."""
+Read-only and deterministic (score, path, line). Issues #906, #1200, #1234.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/doc_sections.rs) and does not start
+this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import json
 import math
 import os

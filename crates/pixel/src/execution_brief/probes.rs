@@ -148,7 +148,16 @@ fn apply_with(stage: &Stage, brief: &str, steps: &[&Step]) -> (Option<String>, V
             let in_process: Vec<_> = due_steps
                 .iter()
                 .map(|step| {
-                    scope.spawn(|| run_step(step, stage.root, stage.prompt, &input, stage.deadline))
+                    scope.spawn(|| {
+                        run_step(
+                            step,
+                            stage.root,
+                            stage.prompt,
+                            stage.kind,
+                            &input,
+                            stage.deadline,
+                        )
+                    })
                 })
                 .collect();
             let failed = |name: &str| (None, ProbeRun::since(name, Instant::now(), "failed", 0));
@@ -268,6 +277,7 @@ fn run_step(
     step: &Step,
     root: &Path,
     prompt: &str,
+    kind: Option<&str>,
     brief: &str,
     deadline: Instant,
 ) -> (Option<String>, ProbeRun) {
@@ -278,7 +288,7 @@ fn run_step(
     if started >= limit {
         return (None, run("skipped", 0));
     }
-    let text = (step.run)(&Ctx::new(root, prompt, brief, limit));
+    let text = (step.run)(&Ctx::new(root, prompt, brief, limit).with_kind(kind));
     if Instant::now() > limit {
         return (None, run("timeout", 0));
     }
@@ -997,19 +1007,32 @@ mod tests {
         let root = Path::new(".");
         let far = Instant::now() + Duration::from_secs(60);
         let said = step_that(|_| "### a — a\n".to_owned());
-        let (text, run) = run_step(&said, root, "p", "b", far);
+        let (text, run) = run_step(&said, root, "p", None, "b", far);
         assert_eq!(text.as_deref(), Some("### a — a\n"));
         assert_eq!((run.name.as_str(), run.outcome, run.bytes), ("x", "ok", 12));
         let quiet = step_that(|_| " \n".to_owned());
-        assert_eq!(run_step(&quiet, root, "p", "b", far).1.outcome, "empty");
+        assert_eq!(
+            run_step(&quiet, root, "p", None, "b", far).1.outcome,
+            "empty"
+        );
         let late = step_that(|_| {
             std::thread::sleep(Duration::from_millis(120));
             "### late — late\n".to_owned()
         });
-        let (text, run) = run_step(&late, root, "p", "b", far);
+        let (text, run) = run_step(&late, root, "p", None, "b", far);
         assert_eq!((text, run.outcome), (None, "timeout"));
-        let (text, run) = run_step(&said, root, "p", "b", Instant::now());
+        let (text, run) = run_step(&said, root, "p", None, "b", Instant::now());
         assert_eq!((text, run.outcome), (None, "skipped"));
+    }
+
+    #[test]
+    fn a_step_is_told_the_question_kind_the_brief_settled_on() {
+        let root = Path::new(".");
+        let far = Instant::now() + Duration::from_secs(60);
+        let echo = step_that(|ctx| format!("### {}\n", ctx.kind.unwrap_or("none")));
+        let said = |kind| run_step(&echo, root, "p", kind, "b", far).0;
+        assert_eq!(said(Some("config")).as_deref(), Some("### config\n"));
+        assert_eq!(said(None).as_deref(), Some("### none\n"));
     }
 
     #[test]

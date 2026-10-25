@@ -50,7 +50,8 @@ register!(
     test_bodies,
     workspace_overview,
     overview_answer_evidence,
-    member_manifest
+    member_manifest,
+    doc_sections
 );
 
 /// Python's text handling, for the steps ported from a script.
@@ -104,6 +105,8 @@ pub(crate) struct Ctx<'a> {
     pub(crate) prompt: &'a str,
     /// The brief the step adds to (it opens on `[PIXEL:BRIEF]`).
     pub(crate) brief: &'a str,
+    /// The question kind the brief settled on; `None` when it did not.
+    pub(crate) kind: Option<&'a str>,
     root: &'a Path,
     deadline: Instant,
     tracked: OnceCell<Option<Vec<String>>>,
@@ -114,10 +117,16 @@ impl<'a> Ctx<'a> {
         Self {
             prompt,
             brief,
+            kind: None,
             root,
             deadline,
             tracked: OnceCell::new(),
         }
+    }
+
+    /// The same request, for a brief of question kind `kind`.
+    pub(crate) fn with_kind(self, kind: Option<&'a str>) -> Self {
+        Self { kind, ..self }
     }
 
     /// Whether the step's time is up: it returns what it has, or nothing.
@@ -257,8 +266,19 @@ pub(crate) mod testing {
 
     /// What `step` prints for `prompt` in `root`, the brief being `brief`.
     pub(crate) fn run(step: &Step, root: &Path, prompt: &str, brief: &str) -> String {
+        run_kind(step, root, prompt, brief, None)
+    }
+
+    /// [`run`] for a brief of question kind `kind`.
+    pub(crate) fn run_kind(
+        step: &Step,
+        root: &Path,
+        prompt: &str,
+        brief: &str,
+        kind: Option<&str>,
+    ) -> String {
         let deadline = Instant::now() + Duration::from_secs(15);
-        (step.run)(&Ctx::new(root, prompt, brief, deadline))
+        (step.run)(&Ctx::new(root, prompt, brief, deadline).with_kind(kind))
     }
 
     /// The `### ` lines of an output.
@@ -436,7 +456,8 @@ mod tests {
             &prompt,
             &brief,
             Instant::now() + Duration::from_millis(step.budget_ms),
-        );
+        )
+        .with_kind(request["kind"].as_str());
         print!("<<<STEP\n{}STEP>>>\n", (step.run)(&ctx));
     }
 }
