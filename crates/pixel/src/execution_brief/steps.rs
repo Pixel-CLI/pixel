@@ -74,6 +74,7 @@ register!(
     config_registry,
     cand_j_callers,
     cand_k_code_sites,
+    error_origin,
 );
 
 mod graph;
@@ -84,6 +85,7 @@ mod text;
 mod commit_lookup;
 
 register_post!(prune_noise);
+mod walk;
 
 /// A brief probe in Rust.
 pub(crate) struct Step {
@@ -158,6 +160,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// The repository's working directory.
+    /// The repository the step reads.
     pub(crate) fn root(&self) -> &Path {
         self.root
     }

@@ -7,7 +7,10 @@ Literal/described matches remain candidates; Python syntax distinguishes message
 assignments, documentation and local raises. Matching caught types add a handler
 with its conversion/rethrow branches and import boundary. Name-only callers and
 test links remain unresolved candidates, never a causal chain. Read-only and
-deterministic; a missing parser result cannot prove an emission. Issues #906, #1231."""
+deterministic; a missing parser result cannot prove an emission. Issues #906, #1231.
+
+The brief runs the Rust step of the same name (`execution_brief/steps/error_origin.rs`) and does not start
+this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import ast
 import json
 import math
