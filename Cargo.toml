@@ -3,7 +3,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/pixel-index", "crates/pixel", "crates/pixel-graph", "crates/pixel-context", "crates/pixel-daemon", "crates/pixel-recall", "crates/pixel-bench", "crates/pixel-session", "crates/pixel-proto", "crates/pixel-git", "crates/pixel-rank", "crates/pixel-ops", "crates/pixel-facts", "crates/pixel-setup", "crates/pixel-actionlog", "crates/pixel-release", "crates/pixel-task", "crates/pixel-plugin", "crates/mvp-model", "crates/mvp-store", "crates/mvp-index"]
+members = ["crates/pixel-index", "crates/pixel", "crates/pixel-graph", "crates/pixel-context", "crates/pixel-daemon", "crates/pixel-recall", "crates/pixel-bench", "crates/pixel-session", "crates/pixel-proto", "crates/pixel-git", "crates/pixel-rank", "crates/pixel-ops", "crates/pixel-facts", "crates/pixel-setup", "crates/pixel-actionlog", "crates/pixel-release", "crates/pixel-task", "crates/pixel-plugin", "crates/mvp-model", "crates/mvp-store"]
 
 [workspace.package]
 edition = "2024"
@@ -80,8 +80,8 @@ openssl = { version = "0.10", features = ["vendored"] }
 lto = "fat"
 # No landing pads: 62,887,792 bytes against 67,307,376 (-6.6%) and 5.10 ms
 # per `--version` against 5.20. The cost is the six `catch_unwind` sites
-# (mvp-index/ruby/extract.rs:146, pixel-graph/src/extract.rs:336/359, and
-# the daemon's `answer`): with abort they no longer recover, so a panicking
+# (pixel-graph/src/mvp_index/ruby/extract.rs:146,
+# pixel-graph/src/extract.rs:336/359, and the daemon's `answer`): with abort they no longer recover, so a panicking
 # extractor or handler ends the process instead of returning a default or a
 # failure envelope. The daemon is restarted by the next call's auto-start.
 panic = "abort"

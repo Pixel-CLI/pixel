@@ -15,9 +15,8 @@ rustc-hash = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 pixel-git = { path = "../pixel-git" }
 pixel-index = { path = "../pixel-index" }
-# pixel-mvp's index, imported (crates/mvp-*/ORIGIN.md): the adapter in
-# `mvp_adapter` reads it.
-mvp-index = { path = "../mvp-index" }
+# pixel-mvp's model and store, imported (crates/mvp-*/ORIGIN.md); its
+# indexer lives in `mvp_index` (src/mvp_index/ORIGIN.md), read by `mvp_adapter`.
 mvp-model = { path = "../mvp-model" }
 mvp-store = { path = "../mvp-store" }
 # `shadow` builds both graphs in a scratch directory.
@@ -50,6 +49,8 @@ unicode-normalization = "0.1"
 mutants = { workspace = true }
 
 [dev-dependencies]
+# `mvp_index::truth`'s generated corpora.
+proptest = { workspace = true }
 tempfile = "3"
 # `trace`: a test counts the statements one update runs on its connection.
 rusqlite = { version = "0.40", features = ["bundled", "trace"] }
