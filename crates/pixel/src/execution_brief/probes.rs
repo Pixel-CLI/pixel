@@ -138,7 +138,16 @@ fn apply_staged<'a>(
             .collect()
     };
     let due_steps = due_in(steps);
-    let due_post = due_in(post);
+    // A post step runs only where its probe is installed: `pixel setup` never
+    // installed `prune-noise`, so a brief that did not run it before still does not.
+    let due_post: Vec<&Step> = due_in(post)
+        .into_iter()
+        .filter(|step| {
+            set.probes
+                .iter()
+                .any(|probe| probe.place == Place::User && probe.name == step.name)
+        })
+        .collect();
     if due.is_empty() && due_steps.is_empty() && due_post.is_empty() {
         return (None, Vec::new());
     }
@@ -615,6 +624,15 @@ mod tests {
             cap: 3 * 9_800,
             max_bytes: None,
         }
+    }
+
+    /// A home where the probes `names` are installed: a post step runs only there.
+    fn installed(dir: &Path, names: &[&str]) -> Host {
+        let home = dir.join("home");
+        for name in names {
+            fixture_probe(&home, name, SCRIPT, "");
+        }
+        host(&home)
     }
 
     fn host(home: &Path) -> Host {
@@ -1140,7 +1158,7 @@ mod tests {
     #[test]
     fn a_post_step_runs_after_the_others_on_the_brief_they_made() {
         let tmp = tempfile::tempdir().unwrap();
-        let h = host(&tmp.path().join("empty-home"));
+        let h = installed(tmp.path(), &["poster"]);
         let s = stage(&h, tmp.path(), Some("tests"), 5_000);
         let (merged, runs) = apply_staged(
             &s,
@@ -1159,7 +1177,7 @@ mod tests {
     #[test]
     fn a_post_step_runs_on_the_brief_alone_when_no_other_probe_added_anything() {
         let tmp = tempfile::tempdir().unwrap();
-        let h = host(&tmp.path().join("empty-home"));
+        let h = installed(tmp.path(), &["poster"]);
         let s = stage(&h, tmp.path(), Some("tests"), 5_000);
         let (merged, runs) = apply_staged(&s, "[PIXEL:BRIEF]\n### a.rs:1-1 — a\n", &[], &[&POSTER]);
         assert_eq!(outcomes(&runs), [("poster", "ok")]);
@@ -1178,7 +1196,7 @@ mod tests {
     #[test]
     fn a_post_step_with_nothing_to_say_leaves_what_the_others_made() {
         let tmp = tempfile::tempdir().unwrap();
-        let h = host(&tmp.path().join("empty-home"));
+        let h = installed(tmp.path(), &["quiet"]);
         let s = stage(&h, tmp.path(), Some("tests"), 5_000);
         let quiet = Step {
             name: "quiet",
@@ -1219,7 +1237,7 @@ mod tests {
     #[test]
     fn a_post_step_follows_its_when_and_the_closed_gate_and_the_byte_limit_applies_to_its_result() {
         let tmp = tempfile::tempdir().unwrap();
-        let h = host(&tmp.path().join("empty-home"));
+        let h = installed(tmp.path(), &["poster"]);
         let brief = "[PIXEL:BRIEF]\n### a.rs:1-1 — a\n";
         let flow_only = Step {
             when_kinds: &["flow"],
@@ -1240,5 +1258,16 @@ mod tests {
         small.max_bytes = Some(10);
         let (merged, runs) = apply_staged(&small, brief, &[], &[&POSTER]);
         assert_eq!((merged, outcomes(&runs)), (None, vec![("poster", "ok")]));
+    }
+
+    #[test]
+    fn a_post_step_whose_probe_is_not_installed_never_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = host(&tmp.path().join("empty-home"));
+        let s = stage(&h, tmp.path(), Some("tests"), 5_000);
+        let brief = "[PIXEL:BRIEF]\n### a.rs:1-1 — a\n";
+        assert_eq!(apply_staged(&s, brief, &[], &[&POSTER]), (None, Vec::new()));
+        let (_, runs) = apply_staged(&s, brief, &[&DEMO], &[&POSTER]);
+        assert_eq!(outcomes(&runs), [("demo", "ok")]);
     }
 }

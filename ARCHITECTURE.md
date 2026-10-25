@@ -1718,7 +1718,8 @@ step takes the place of the user-tier script of its name, which is not started (
 same name is another plugin and still runs); `pixel plugin disable <name>` switches the step off; each run is
 logged under the step's name like a script's. While `pixel setup` still installs the script of a ported probe, the
 host skips it. A step whose probe manifest says `stage = "post"` is listed in `register_post!` (`steps::POST`)
-instead: it runs after the others, one by one, on the brief they produced (`prune-noise`, which only shrinks it), and
+instead: it runs after the others, one by one, on the brief they produced (`prune-noise`, which only shrinks it), only
+where its probe is installed in `~/.pixel/plugins/` (`pixel setup` does not install `prune-noise`), and
 `Ctx::kind` gives it the question kind the stage settled on. The string rules the steps share, spelled as Python
 spells them so a step prints its script's bytes (`splitlines`, `universal_newlines`, `re.escape`, character slices,
 `subwords`, the two stems, `Path.suffix`), live once in `steps/text.rs`; reciprocal-rank and BM25 terms come from

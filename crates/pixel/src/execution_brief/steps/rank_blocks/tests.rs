@@ -283,10 +283,10 @@ fn the_registered_step_takes_the_script_s_place_and_leads_the_brief() {
     assert_eq!(
         headers(&merged),
         [
-            // `cand-k-code-sites` applies too: its read site of the constant
-            // takes the place of the brief's block on the same line, ahead.
-            "### src/client.rs:2 — reads MAX_RETRIES",
+            // `cand-k-code-sites` applies too and leads with its read site.
+            "### src/client.rs:2-2 — reads MAX_RETRIES",
             "### src/limits.rs:3-27 — MAX_RETRIES (constant, with context)",
+            "### src/client.rs:2-2 — retry the MAX_RETRIES",
         ]
     );
     assert!(!merged.contains("unrelated"), "{merged}");

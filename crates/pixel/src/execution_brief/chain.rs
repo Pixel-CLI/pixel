@@ -10708,9 +10708,7 @@ mod tests {
             if expected {
                 assert_eq!(
                     finished.text.as_deref(),
-                    // `prune-noise` (not run behind a closed gate) writes the
-                    // one-line span of the probe's block as `1`.
-                    Some(format!("[PIXEL:BRIEF]\n### source.rs:{} — evidence\n1| pub struct Library;\n{SKILL_LINE}", if label == "closed" { "1-1" } else { "1" }).as_str()),
+                    Some(format!("[PIXEL:BRIEF]\n### source.rs:1-1 — evidence\n1| pub struct Library;\n{SKILL_LINE}").as_str()),
                     "{label}"
                 );
                 // Steps that apply to every brief (`rank-blocks`) run beside it.
