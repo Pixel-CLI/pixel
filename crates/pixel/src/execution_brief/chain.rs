@@ -10713,8 +10713,15 @@ mod tests {
                     Some(format!("[PIXEL:BRIEF]\n### source.rs:1-1 — evidence\n1| pub struct Library;\n{SKILL_LINE}").as_str()),
                     "{label}"
                 );
-                assert_eq!(finished.record.probes.len(), 1, "{label}");
-                assert_eq!(finished.record.probes[0].outcome, "ok", "{label}");
+                // Steps that apply to every brief (`rank-blocks`) run beside it.
+                let recovery: Vec<_> = finished
+                    .record
+                    .probes
+                    .iter()
+                    .filter(|run| run.name == "recovery")
+                    .collect();
+                assert_eq!(recovery.len(), 1, "{label}");
+                assert_eq!(recovery[0].outcome, "ok", "{label}");
                 if label == "closed" {
                     assert!(
                         !finished.record.enforced,

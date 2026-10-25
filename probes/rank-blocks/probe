@@ -5,7 +5,11 @@
 """rank-blocks: the answer is often in the brief already, buried among blocks that share no word with the question.
 Scores each block by the question's words its header names, drops the blocks that share none, moves the rest to
 the front by score, and shows the best constants with 12 lines of context and where they are used. Says nothing
-when no block shares a word with the question (it never empties a brief)."""
+when no block shares a word with the question (it never empties a brief).
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/rank_blocks.rs) and does not
+start this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with. The step searches
+the uses in the tracked files instead of starting `rg`."""
 import json
 import re
 import subprocess

@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use super::super::testing::{applied, commit_line, commit_staged, git, repo, run};
+use super::super::testing::{applied, commit_line, commit_staged, git, outcomes_of, repo, run};
 use super::*;
 
 const TITLE: &str = "rework every widget module";
@@ -397,13 +397,8 @@ fn the_registered_step_takes_the_script_s_place_and_replaces_the_history_fallbac
     let dir = wide(1);
     let prompt = format!("what did the commit \"{TITLE}\" change?");
     let (merged, runs) = applied(STEP.name, dir.path(), "history", &prompt, "");
-    assert_eq!(
-        runs,
-        [
-            ("cand-k-commit-patch".to_owned(), "ok"),
-            ("history-fallback".to_owned(), "ok")
-        ]
-    );
+    assert_eq!(outcomes_of(&runs, "cand-k-commit-patch"), ["ok"]);
+    assert_eq!(outcomes_of(&runs, "history-fallback"), ["ok"]);
     let merged = merged.unwrap();
     let headers: Vec<&str> = merged.lines().filter(|l| l.starts_with("### ")).collect();
     let head = git_head(dir.path());

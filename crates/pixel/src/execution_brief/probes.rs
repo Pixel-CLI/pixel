@@ -504,6 +504,13 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
+    /// [`super::apply`] without the registered steps: these tests are about
+    /// scripts and the merge, and a step that applies to every brief
+    /// (`rank-blocks`) would be a run of theirs.
+    fn apply(stage: &Stage, brief: &str) -> (Option<String>, Vec<ProbeRun>) {
+        apply_with(stage, brief, &[])
+    }
+
     fn mode(text: &str) -> ProbeMode {
         if text == "lead" {
             ProbeMode::Lead
@@ -1047,8 +1054,13 @@ mod tests {
         let h = host(&home);
         let mut s = stage(&h, repo.path(), Some("tests"), 5_000);
         s.prompt = "where are the tests for redirect handling";
-        let (merged, runs) = apply(&s, "");
-        assert_eq!(outcomes(&runs), [("test-bodies", "ok")]);
+        let (merged, runs) = super::apply(&s, "");
+        // `rank-blocks` applies to every brief and runs beside it.
+        let ran: Vec<_> = outcomes(&runs)
+            .into_iter()
+            .filter(|(name, _)| *name == "test-bodies")
+            .collect();
+        assert_eq!(ran, [("test-bodies", "ok")]);
         assert_eq!(
             merged.unwrap(),
             "[PIXEL:BRIEF]\n### tests/test_client.py:1-2 — test test_follows_a_redirect_and_handles_it\n1| def test_follows_a_redirect_and_handles_it():\n2|     assert redirect() == 1\n"

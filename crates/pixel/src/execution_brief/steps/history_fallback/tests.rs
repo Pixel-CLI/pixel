@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use super::super::testing::{applied, commit_line as commit, commit_staged, git, repo, run};
+use super::super::testing::{applied, commit_line as commit, commit_staged, git, outcomes_of, repo, run};
 use super::*;
 
 fn ask(root: &Path, prompt: &str) -> String {
@@ -240,7 +240,8 @@ fn the_registered_step_runs_and_the_installed_script_of_its_name_does_not() {
     let prompt = "which commit introduced delta compression";
     // A review question: `cand-k-commit-patch` skips it, this step answers by its words.
     let (merged, runs) = applied(STEP.name, dir.path(), "review", prompt, "");
-    assert_eq!(runs, [("history-fallback".to_owned(), "ok")]);
+    assert_eq!(outcomes_of(&runs, "history-fallback"), ["ok"]);
+    assert_eq!(outcomes_of(&runs, "cand-k-commit-patch"), Vec::<&str>::new());
     assert_eq!(
         merged.unwrap(),
         format!("[PIXEL:BRIEF]\n{}", ask(dir.path(), prompt))

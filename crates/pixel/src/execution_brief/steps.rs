@@ -57,7 +57,8 @@ register!(
     flow_rank,
     cand_j_stop_cause,
     history_fallback,
-    cand_k_commit_patch
+    cand_k_commit_patch,
+    rank_blocks
 );
 
 mod graph;
@@ -401,6 +402,15 @@ pub(crate) mod testing {
                 .map(|run| (run.name, run.outcome))
                 .collect(),
         )
+    }
+
+    /// The outcomes of the runs of `name` in the runs [`applied`] gives. Steps
+    /// that apply to every brief (`rank-blocks`, `prune-noise`) run beside it.
+    pub(crate) fn outcomes_of(runs: &[(String, &'static str)], name: &str) -> Vec<&'static str> {
+        runs.iter()
+            .filter(|(run, _)| run == name)
+            .map(|(_, outcome)| *outcome)
+            .collect()
     }
 
     /// The `### ` lines of an output.
