@@ -7,7 +7,9 @@
 
 use std::path::Path;
 
-use super::super::testing::{applied, commit_line, commit_staged, git, outcomes_of, repo, run};
+use super::super::testing::{
+    applied, commit_line, commit_staged, git, outcomes_of, repo, run, short_head,
+};
 use super::*;
 
 const TITLE: &str = "rework every widget module";
@@ -89,20 +91,11 @@ fn a_small_commit_shows_every_hunk_and_no_cut_line() {
 fn the_block_opens_with_the_history_header_and_the_commit_line() {
     let dir = wide(1);
     let out = about_title(dir.path());
-    let head = git_head(dir.path());
+    let head = short_head(dir.path());
     let first = out.lines().next().unwrap();
     assert_eq!(first, format!("### commit {head} — message, files and patch"));
     assert_eq!(out.lines().nth(2), Some(TITLE));
     assert!(out.contains("\nfiles in the commit:\n src/widget_000.rs | 40 +"), "{out}");
-}
-
-fn git_head(root: &Path) -> String {
-    let head = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    String::from_utf8(head.stdout).unwrap().trim().to_owned()
 }
 
 /// The commit a `### commit <id> — …` header names.
@@ -401,7 +394,7 @@ fn the_registered_step_takes_the_script_s_place_and_replaces_the_history_fallbac
     assert_eq!(outcomes_of(&runs, "history-fallback"), ["ok"]);
     let merged = merged.unwrap();
     let headers: Vec<&str> = merged.lines().filter(|l| l.starts_with("### ")).collect();
-    let head = git_head(dir.path());
+    let head = short_head(dir.path());
     assert_eq!(headers.len(), 2, "{merged}");
     assert!(headers[0].starts_with(&format!("### commit {head}")), "{merged}");
     assert!(headers[1].starts_with("### history — commits matching "), "{merged}");

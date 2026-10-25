@@ -120,6 +120,8 @@ fn brief(root: &Path, env: &[(&str, &str)]) -> Value {
         .env_remove("PIXEL_BRIEF")
         .env_remove("PIXEL_BRIEF_PACK")
         .env_remove("PIXEL_BRIEF_PARTS")
+        // These tests are about the pack, not about what the probes make of it.
+        .env("PIXEL_BRIEF_PROBES", "0")
         .args(["brief", PROMPT, "--json", "--metrics", "off"]);
     for (key, value) in env {
         command.env(key, value);
@@ -266,6 +268,7 @@ fn hook_context(root: &Path, part: Option<&str>) -> String {
         .env_remove("PIXEL_BRIEF_PARTS")
         // The same prompt, asked again in one session, would be withheld.
         .env("PIXEL_BRIEF_DEDUPE", "0")
+        .env("PIXEL_BRIEF_PROBES", "0")
         .args(["run-hook", "task-event", "--provider", "claude"])
         .args(["--event", "prompt-submit"])
         .stdin(Stdio::piped())

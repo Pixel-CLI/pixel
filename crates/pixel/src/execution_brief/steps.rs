@@ -361,6 +361,16 @@ pub(crate) mod testing {
         String::from_utf8(head.stdout).unwrap().trim().to_owned()
     }
 
+    /// The abbreviated id of the commit `HEAD` names in `root`.
+    pub(crate) fn short_head(root: &Path) -> String {
+        let head = Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8(head.stdout).unwrap().trim().to_owned()
+    }
+
     /// What the brief's probe stage makes of `brief` for a `kind` question in
     /// `root`, with a script named like the step installed in a throwaway home
     /// (it prints `### script.rs:1-1 — the script ran`): the merged brief, and

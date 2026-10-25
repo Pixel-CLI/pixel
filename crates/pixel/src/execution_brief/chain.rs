@@ -10877,7 +10877,15 @@ mod tests {
             "{:?}",
             floored.text
         );
-        assert_eq!(floored.record.probes[0].outcome, "ok");
+        // Steps that apply to every brief (`rank-blocks`) run beside the probe.
+        let slow = |record: &Record| {
+            record
+                .probes
+                .iter()
+                .find(|run| run.name == "slow")
+                .map(|run| run.outcome)
+        };
+        assert_eq!(slow(&floored.record), Some("ok"));
         assert_eq!(floored.record.deadline_ms, Some(60));
         assert!(
             floored.record.elapsed_ms > 60,
@@ -10888,7 +10896,7 @@ mod tests {
         // Without the floor the window ends the probe: that loss is the
         // probe's `timeout`, and the packet still was not cut.
         let unfloored = finish(Duration::ZERO);
-        assert_eq!(unfloored.record.probes[0].outcome, "timeout");
+        assert_eq!(slow(&unfloored.record), Some("timeout"));
         assert!(!unfloored.record.cut);
     }
 }

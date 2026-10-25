@@ -396,6 +396,9 @@ fn brief_json(root: &Path, prompt: &str, env: &[(&str, &str)]) -> Value {
     command
         .current_dir(root)
         .env("PIXEL_BRIEF_PACK", "0")
+        // The built-in probe steps would run here (`probe_ms`); a test that
+        // wants them says so in `env`.
+        .env("PIXEL_BRIEF_PROBES", "0")
         .args(["brief", prompt, "--json", "--metrics", "off"]);
     for (key, value) in env {
         command.env(key, value);
