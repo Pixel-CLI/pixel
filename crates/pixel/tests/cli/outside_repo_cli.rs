@@ -104,6 +104,7 @@ fn a_gitless_tree_over_its_time_budget_should_fail_fast_without_a_daemon() {
     for args in [
         &["search-content", "retry"][..],
         &["find-code", "retry"][..],
+        &["search-history", "retry"][..],
     ] {
         let mut command = pixel_in(&root.join("work"), args);
         // 1 ms: the freshness walk of 400 files cannot finish inside it.
