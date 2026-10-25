@@ -15,7 +15,10 @@ Two shapes, both derived from the prompt and the repository when the probe runs:
   definitions that rank highest (a header naming the stem, several hits, several stems) are shown, at most two
   per file.
 
-Read-only (rg, git, file reads), deterministic (sorted), prints nothing when it has nothing to add."""
+Read-only (rg, git, file reads), deterministic (sorted), prints nothing when it has nothing to add.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/cand_k_code_sites.rs) and does not start
+this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import json
 import math
 import os

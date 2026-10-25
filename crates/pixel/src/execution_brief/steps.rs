@@ -72,7 +72,8 @@ register!(
     cand_k_commit_patch,
     rank_blocks,
     config_registry,
-    cand_j_callers
+    cand_j_callers,
+    cand_k_code_sites,
 );
 
 mod graph;
