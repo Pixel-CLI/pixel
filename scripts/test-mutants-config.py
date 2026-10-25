@@ -107,8 +107,11 @@ class MutantsConfigContract(unittest.TestCase):
 
     def test_owned_foundations_are_inside_the_gate(self):
         patterns = [to_regex(g) for g in exclude_globs()]
-        for part in ("model", "store", "index"):
-            module = f"crates/mvp-{part}/src/lib.rs"
+        for module in (
+            "crates/mvp-model/src/lib.rs",
+            "crates/mvp-store/src/lib.rs",
+            "crates/pixel-graph/src/mvp_index/mod.rs",
+        ):
             with self.subTest(module=module):
                 self.assertTrue((REPO / module).is_file())
                 self.assertFalse(any(p.match(module) for p in patterns))
