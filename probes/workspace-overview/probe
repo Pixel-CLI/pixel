@@ -12,7 +12,10 @@
 Workspaces are read from the manifests when the probe runs: Cargo `[workspace].members`, package.json
 `workspaces`, `pnpm-workspace.yaml`, `go.work` (or several `go.mod`), pyproject `[tool.uv.workspace]`. No name is
 written here. Read-only (tracked files via `git ls-files`), no network, sorted output, nothing printed when the
-repository is no workspace or the prompt asks about neither."""
+repository is no workspace or the prompt asks about neither.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/workspace_overview.rs) and does not
+start this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import fnmatch
 import json
 import re

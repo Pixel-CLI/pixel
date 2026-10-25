@@ -46,7 +46,10 @@ macro_rules! register {
     };
 }
 
-register!(test_bodies);
+register!(test_bodies, workspace_overview);
+
+/// Python's text handling, for the steps ported from a script.
+mod pytext;
 
 /// A brief probe in Rust.
 pub(crate) struct Step {
