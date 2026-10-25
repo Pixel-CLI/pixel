@@ -56,7 +56,8 @@ register!(
     name_files,
     flow_rank,
     cand_j_stop_cause,
-    history_fallback
+    history_fallback,
+    cand_k_commit_patch
 );
 
 mod graph;
@@ -244,6 +245,21 @@ pub(crate) fn subwords(text: &str) -> Vec<String> {
     words
 }
 
+/// `text` as a regex that matches only it, spelled like Python's `re.escape`
+/// (3.7 and later): the characters that can mean something, and the space, `#`,
+/// `&`, `-` and `~`, get a backslash. A probe script printed its directives with
+/// that function; the same spelling keeps a step's bytes the script's.
+pub(crate) fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if "()[]{}?*+-|^$\\.&~# \t\n\r\x0b\x0c".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     //! What the tests of a step share: a real git repository in a temp dir
@@ -293,6 +309,41 @@ pub(crate) mod testing {
     ) -> String {
         let deadline = Instant::now() + Duration::from_secs(15);
         (step.run)(&Ctx::new(root, prompt, brief, deadline).with_kind(kind))
+    }
+
+    /// Commits one more line of `source.py` (`feature = True`) with `subject`
+    /// and `body` as the message, and returns the new commit.
+    pub(crate) fn commit_line(root: &Path, subject: &str, body: &str) -> String {
+        let source = root.join("source.py");
+        let before = std::fs::read_to_string(&source).unwrap_or_default();
+        std::fs::write(&source, format!("{before}feature = True\n")).unwrap();
+        git(root, &["add", "source.py"]);
+        commit_staged(root, subject, body)
+    }
+
+    /// Commits what is staged, as a fixed author, and returns the new commit.
+    pub(crate) fn commit_staged(root: &Path, subject: &str, body: &str) -> String {
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Probe Test",
+                "-c",
+                "user.email=probe@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                subject,
+                "-m",
+                body,
+            ],
+        );
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8(head.stdout).unwrap().trim().to_owned()
     }
 
     /// What the brief's probe stage makes of `brief` for a `kind` question in
@@ -381,6 +432,20 @@ mod tests {
         assert_eq!(subwords("Ab"), ["ab"]);
         assert_eq!(subwords("é"), Vec::<String>::new());
         assert_eq!(subwords(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn escape_spells_like_python_re_escape() {
+        assert_eq!(escape("a b-c.d"), "a\\ b\\-c\\.d");
+        assert_eq!(
+            escape("fn(x) -> [y]#&~"),
+            "fn\\(x\\)\\ \\->\\ \\[y\\]\\#\\&\\~"
+        );
+        assert_eq!(escape("é_9Z"), "é_9Z");
+        assert_eq!(escape("\\^$|?*+{}"), "\\\\\\^\\$\\|\\?\\*\\+\\{\\}");
+        assert_eq!(escape("a\tb"), "a\\\tb");
+        let held = regex::Regex::new(&format!("^{}$", escape("### a b-(c)+ [d]"))).unwrap();
+        assert!(held.is_match("### a b-(c)+ [d]"));
     }
 
     #[test]

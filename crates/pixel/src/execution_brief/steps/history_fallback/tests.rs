@@ -5,39 +5,9 @@
 //! step, and one case per branch of the lookup.
 
 use std::path::Path;
-use std::process::Command;
 
-use super::super::testing::{applied, git, repo, run};
+use super::super::testing::{applied, commit_line as commit, commit_staged, git, repo, run};
 use super::*;
-
-/// Commits one more line of `source.py` and returns the new commit.
-pub(super) fn commit(root: &Path, subject: &str, body: &str) -> String {
-    let source = root.join("source.py");
-    let before = std::fs::read_to_string(&source).unwrap_or_default();
-    std::fs::write(&source, format!("{before}feature = True\n")).unwrap();
-    git(root, &["add", "source.py"]);
-    git(
-        root,
-        &[
-            "-c",
-            "user.name=Probe Test",
-            "-c",
-            "user.email=probe@example.invalid",
-            "commit",
-            "-q",
-            "-m",
-            subject,
-            "-m",
-            body,
-        ],
-    );
-    let head = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    String::from_utf8(head.stdout).unwrap().trim().to_owned()
-}
 
 fn ask(root: &Path, prompt: &str) -> String {
     run(&STEP, root, prompt, "")
@@ -200,10 +170,7 @@ fn a_merge_shows_what_it_brought_to_its_first_parent() {
     git(root, &["checkout", "-q", "-b", "side"]);
     std::fs::write(root.join("sprocket.txt"), "teeth\n").unwrap();
     git(root, &["add", "sprocket.txt"]);
-    git(
-        root,
-        &["-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "-m", "side: sprocket"],
-    );
+    commit_staged(root, "side: sprocket", "");
     git(root, &["checkout", "-q", "-"]);
     git(
         root,
@@ -251,10 +218,7 @@ fn the_patch_stops_at_ninety_lines_of_the_commit_block() {
     )
     .unwrap();
     git(root, &["add", "source.py"]);
-    git(
-        root,
-        &["-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "-m", "feat: delta compression"],
-    );
+    commit_staged(root, "feat: delta compression", "");
     let out = ask(root, "which commit introduced delta compression");
     let block = out.split("### commit ").nth(1).unwrap();
     let lines = block.lines().count() - 1;
@@ -274,7 +238,8 @@ fn the_registered_step_runs_and_the_installed_script_of_its_name_does_not() {
     let dir = repo(&[]);
     commit(dir.path(), "feat: delta compression", "");
     let prompt = "which commit introduced delta compression";
-    let (merged, runs) = applied(STEP.name, dir.path(), "history", prompt, "");
+    // A review question: `cand-k-commit-patch` skips it, this step answers by its words.
+    let (merged, runs) = applied(STEP.name, dir.path(), "review", prompt, "");
     assert_eq!(runs, [("history-fallback".to_owned(), "ok")]);
     assert_eq!(
         merged.unwrap(),

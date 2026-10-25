@@ -12,7 +12,10 @@ lockfiles and generated files only summarised, inside a byte budget. The block
 carries the header history-fallback uses, so in `lead` mode it replaces that block (a later block with a header
 already held is skipped by the merge).
 
-Read-only git, deterministic, nothing printed when no commit matches or the brief already holds a history block."""
+Read-only git, deterministic, nothing printed when no commit matches or the brief already holds a history block.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/cand_k_commit_patch.rs) and does
+not start this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import collections
 import json
 import math
