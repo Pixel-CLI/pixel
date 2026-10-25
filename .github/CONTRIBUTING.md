@@ -7,6 +7,7 @@ without guessing. If you are an agent, treat the "Definition of done"
 checklist as the contract for your pull request.
 
 - Architecture, crate map, wire contract: [ARCHITECTURE.md](../ARCHITECTURE.md)
+- Contracts a caller can rely on (hooks, brief, classify, metrics, config, daemon wire): [specs/](../specs/README.md); `cargo test -p pixel-cli --test cli specs_drift::` holds their command index
 - Security model and vulnerability reporting: [SECURITY.md](SECURITY.md)
 - How we treat each other, and how to report a problem: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - Where the project is heading, and what it will not do:

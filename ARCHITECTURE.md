@@ -8,6 +8,8 @@ should read before touching more than one crate.
 For what Pixel does and why, read `README.md`. For per-turn project rules,
 read `AGENTS.md`. For the actors, trust boundaries and threats across these
 crates, read [docs/threat-model.md](docs/threat-model.md).
+For what callers can rely on (hooks, the brief, classify, metrics, config,
+the daemon wire), read the contracts in [specs/](specs/README.md).
 
 ## One-screen summary
 

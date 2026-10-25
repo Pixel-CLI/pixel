@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -40,7 +40,7 @@ fn subcommands() -> BTreeSet<String> {
 
 /// Subcommand names from the `Commands:` block of `pixel --help`, in the
 /// order clap prints them.
-fn subcommands_in_help_order() -> Vec<String> {
+pub(crate) fn subcommands_in_help_order() -> Vec<String> {
     let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
         .arg("--help")
         .env("PIXEL_DAEMON_AUTO_START", "0")
@@ -68,7 +68,7 @@ fn subcommands_in_help_order() -> Vec<String> {
 /// subcommands of `pixel --help` and the commands that move to plugin
 /// repositories (`pixel_plugin::MOVED_COMMANDS`), which `pixel <name>` answers
 /// to by running the plugin or by printing how to install it.
-fn documentable_commands() -> BTreeSet<String> {
+pub(crate) fn documentable_commands() -> BTreeSet<String> {
     let mut known = subcommands();
     known.extend(
         pixel_plugin::MOVED_COMMANDS
@@ -80,7 +80,7 @@ fn documentable_commands() -> BTreeSet<String> {
 
 /// Every `` `pixel <name>`` reference in `text` (backticked only: prose such
 /// as "the pixel binary" is not a command).
-fn referenced_commands(text: &str) -> BTreeSet<String> {
+pub(crate) fn referenced_commands(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for (i, _) in text.match_indices("`pixel ") {
         let rest = &text[i + "`pixel ".len()..];

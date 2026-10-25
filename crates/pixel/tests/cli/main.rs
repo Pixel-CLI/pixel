@@ -48,6 +48,7 @@ mod setup_cli;
 #[cfg(unix)]
 mod setup_goldens_cli;
 mod sidecar_trust_cli;
+mod specs_drift;
 mod support;
 mod targets_cli;
 mod task_cli;
