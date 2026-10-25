@@ -12,11 +12,8 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use super::Ctx;
-use crate::execution_brief::steps::text::{head, splitlines};
+use crate::execution_brief::steps::text::{head, indent, is_word, re, splitlines_owned};
 
-fn re(source: &str) -> Regex {
-    Regex::new(source).expect("the pattern is a literal")
-}
 
 /// Extensions of the files a question about code is answered from.
 const CODE_EXT: &[&str] = &[
@@ -116,7 +113,7 @@ impl<'a, 'b> Source<'a, 'b> {
         let rows = self
             .ctx
             .read(path, MAX_FILE_BYTES)
-            .map_or_else(Vec::new, |text| splitlines(&text));
+            .map_or_else(Vec::new, |text| splitlines_owned(&text));
         let mut tests = HashSet::new();
         for (n, line) in rows.iter().enumerate() {
             if TEST_ATTRIBUTE.is_match(line) {
@@ -213,7 +210,6 @@ impl<'a, 'b> Source<'a, 'b> {
 
 /// `-w -F needle` of `rg`: an occurrence with no word character on either side.
 pub(super) fn has_word(line: &str, needle: &str) -> bool {
-    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
     let mut from = 0;
     while let Some(at) = line[from..].find(needle) {
         let start = from + at;
@@ -228,10 +224,6 @@ pub(super) fn has_word(line: &str, needle: &str) -> bool {
     false
 }
 
-/// `len(line) - len(line.lstrip())`.
-pub(super) fn indent(line: &str) -> usize {
-    line.chars().count() - line.trim_start().chars().count()
-}
 
 /// A blank line or one that starts a comment.
 pub(super) fn is_comment(line: &str) -> bool {

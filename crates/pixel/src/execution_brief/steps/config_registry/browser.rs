@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use regex::Regex;
 
-use super::super::pytext::{splitlines, take_chars};
+use super::super::text::{splitlines, head};
 use super::repo::{MAX_FILE_BYTES, Repo, resolve};
 use super::scopes::{SCOPED_BLOCK_MAX_LINES, SCOPED_EVIDENCE_MAX, rust_scopes, source_range};
 use super::search::scoped_source_files;
@@ -127,7 +127,7 @@ fn key_declaration(repo: &Repo, source_path: &str, source: &str, expression: &st
         let Ok(raw) = std::fs::read(&target) else {
             continue;
         };
-        let text = super::super::pytext::universal_newlines(&String::from_utf8_lossy(&raw));
+        let text = super::super::text::universal_newlines(&String::from_utf8_lossy(&raw));
         for (_, end, body_start) in rust_scopes(&text, &scope) {
             let body = &text[body_start..end - 1];
             if let Some(found) = entry.find(body) {
@@ -250,12 +250,12 @@ pub(super) fn evidence(repo: &Repo, prompt: &str) -> String {
     )];
     let sensitive_key = is_sensitive(&key);
     for number in lo..=hi {
-        let line = take_chars(lines[number - 1], 150);
+        let line = head(lines[number - 1], 150);
         out.push(format!(
             "{number}| {}",
             if sensitive_key || is_sensitive(line) { "<masked>" } else { line }
         ));
     }
     out.extend(key_declaration(repo, &rel, &source, &key));
-    take_chars(&(out.join("\n") + "\n"), SCOPED_EVIDENCE_MAX).to_owned()
+    head(&(out.join("\n") + "\n"), SCOPED_EVIDENCE_MAX).to_owned()
 }

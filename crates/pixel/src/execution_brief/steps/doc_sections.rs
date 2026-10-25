@@ -20,7 +20,7 @@ use std::sync::LazyLock;
 use pixel_plugin::ProbeMode;
 use regex::Regex;
 
-use super::pytext::{splitlines, stem};
+use super::text::{splitlines, stem_ing_es_s};
 use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
@@ -221,7 +221,7 @@ fn words(text: &str) -> BTreeSet<String> {
             let lower = word.to_lowercase();
             !STOP.contains(&lower.as_str()) && !GENERIC.contains(&lower.as_str())
         })
-        .map(stem)
+        .map(stem_ing_es_s)
         .collect()
 }
 

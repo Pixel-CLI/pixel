@@ -14,7 +14,8 @@ use regex::Regex;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::super::walk::Walk;
-use super::{MIN_SHARED, is_test_path, stem, tokens};
+use super::super::text::subwords;
+use super::{MIN_SHARED, is_test_path, stem};
 
 /// The role of a line the script gives when no syntax says better.
 pub(super) const UNVERIFIED: &str = "occurrence candidate; emission unverified";
@@ -266,7 +267,7 @@ pub(super) fn handlers(walk: &mut Walk, meaningful: &HashSet<String>) -> Option<
             let Some(kind) = kind else {
                 continue;
             };
-            let words: HashSet<String> = tokens(&parsed.text[kind.byte_range()])
+            let words: HashSet<String> = subwords(&parsed.text[kind.byte_range()])
                 .iter()
                 .map(|token| stem(token))
                 .collect();

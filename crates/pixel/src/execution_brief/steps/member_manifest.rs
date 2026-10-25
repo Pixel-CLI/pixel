@@ -22,7 +22,7 @@ use std::sync::LazyLock;
 use pixel_plugin::ProbeMode;
 use regex::Regex;
 
-use super::pytext::{re_escape, splitlines, universal_newlines};
+use super::text::{escape, head, last_segment, splitlines, universal_newlines};
 use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
@@ -87,7 +87,7 @@ fn run(ctx: &Ctx) -> String {
             .enumerate()
             .filter(|(_, line)| !NOISE.is_match(line))
             .take(MAX_MANIFEST)
-            .map(|(index, line)| format!("{}| {}", index + 1, clip(line, 140)))
+            .map(|(index, line)| format!("{}| {}", index + 1, head(line, 140)))
             .collect();
         let prefix = format!("{member}/");
         let inside: Vec<&str> = files
@@ -104,7 +104,7 @@ fn run(ctx: &Ctx) -> String {
         }
         return format!(
             "drop: ^(?!{}[/ ])\n### {hit}:1-{} — manifest of {name} (identity lines cut)\n{}\n### {member}/ — {} tracked files\n{}\n",
-            re_escape(member),
+            escape(member),
             lines.len(),
             shown.join("\n"),
             inside.len(),
@@ -114,18 +114,12 @@ fn run(ctx: &Ctx) -> String {
     String::new()
 }
 
-fn last_segment(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
 
 /// `os.path.dirname` of a path with a slash.
 fn directory(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
-fn clip(text: &str, limit: usize) -> String {
-    text.chars().take(limit).collect()
-}
 
 #[cfg(test)]
 mod tests;

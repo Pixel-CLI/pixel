@@ -1720,7 +1720,10 @@ same name is another plugin and still runs); `pixel plugin disable <name>` switc
 logged under the step's name like a script's. While `pixel setup` still installs the script of a ported probe, the
 host skips it. A step whose probe manifest says `stage = "post"` is listed in `register_post!` (`steps::POST`)
 instead: it runs after the others, one by one, on the brief they produced (`prune-noise`, which only shrinks it), and
-`Ctx::kind` gives it the question kind the stage settled on. `scripts/bench/step-parity.py <name>` judges the script and the step with `probe-test.py` on the same
+`Ctx::kind` gives it the question kind the stage settled on. The string rules the steps share, spelled as Python
+spells them so a step prints its script's bytes (`splitlines`, `universal_newlines`, `re.escape`, character slices,
+`subwords`, the two stems, `Path.suffix`), live once in `steps/text.rs`; reciprocal-rank and BM25 terms come from
+`pixel-rank` (`reciprocal_rank`, `bm25_idf`, `BM25_K1`, `BM25_B`). `scripts/bench/step-parity.py <name>` judges the script and the step with `probe-test.py` on the same
 baseline briefs and compares what each merged into them.
 
 ## Testing and gates

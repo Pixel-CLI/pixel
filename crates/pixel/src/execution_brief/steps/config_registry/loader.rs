@@ -18,7 +18,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use tree_sitter::Node;
 
-use super::super::pytext::{splitlines, universal_newlines};
+use super::super::text::{splitlines, universal_newlines};
 use super::repo::{MAX_FILE_BYTES, Repo};
 use super::scan::SCAN_MAX_COLUMNS;
 

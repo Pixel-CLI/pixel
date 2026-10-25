@@ -20,6 +20,7 @@ use pixel_git::{ENUMERATION_MAX_OUTPUT_BYTES, GitOptions, GitRunner};
 use regex::Regex;
 
 use super::Ctx;
+use super::text::is_word;
 
 /// Words any history question uses: they name no commit of their own.
 const ASKING: &[&str] = &[
@@ -121,10 +122,6 @@ fn subject_of(line: &str) -> &str {
 fn runs(text: &str, keep: fn(char) -> bool) -> impl Iterator<Item = &str> {
     text.split(move |ch: char| !keep(ch))
         .filter(|run| !run.is_empty())
-}
-
-fn is_word(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
 }
 
 /// `(start, end, number)` of each version the text quotes (`3.10`, `v5.3.0`):

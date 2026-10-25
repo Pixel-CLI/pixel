@@ -217,7 +217,7 @@ pub(super) fn evidence(repo: &Repo, prompt: &str, rows: &[Row]) -> String {
             if bytes_read > BYTES_READ_MAX {
                 break;
             }
-            let text = super::super::pytext::universal_newlines(&String::from_utf8_lossy(&raw));
+            let text = super::super::text::universal_newlines(&String::from_utf8_lossy(&raw));
             compiler = Some((rel, text));
             break;
         }

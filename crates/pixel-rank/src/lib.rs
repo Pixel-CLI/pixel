@@ -858,8 +858,7 @@ pub fn bm25_scores(terms: &[String], docs: &[Bm25Doc]) -> Option<Vec<f64>> {
                 .iter()
                 .filter(|d| d.term_freqs.get(j).copied().unwrap_or(0) > 0)
                 .count() as f64;
-            // Lucene form: strictly positive for every df in 0..=N.
-            (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+            bm25_idf(n, df)
         })
         .collect();
 
@@ -881,6 +880,13 @@ pub fn bm25_scores(terms: &[String], docs: &[Bm25Doc]) -> Option<Vec<f64>> {
         scores.push(score);
     }
     any_nonzero.then_some(scores)
+}
+
+/// BM25's inverse document frequency of a term `df` of `n` documents hold,
+/// in Lucene's form: strictly positive for every `df` in `0..=n`, where the
+/// classic form goes negative past half the pool and inverts the ranking.
+pub fn bm25_idf(n: f64, df: f64) -> f64 {
+    (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
 }
 
 const EXACT_NAME_BONUS: f64 = 0.05;
@@ -1054,12 +1060,20 @@ pub fn rrf_fuse(lists_with_weights: &[(&[String], f64)], k: f64) -> Vec<(String,
     let mut scores: HashMap<String, f64> = HashMap::default();
     for (list, w) in lists_with_weights {
         for (rank, path) in list.iter().enumerate() {
-            *scores.entry(path.clone()).or_default() += w / (k + rank as f64 + 1.0);
+            *scores.entry(path.clone()).or_default() += reciprocal_rank(*w, k, rank);
         }
     }
     let mut out: Vec<(String, f64)> = scores.into_iter().collect();
     out.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     out
+}
+
+/// What the entry at zero-based `rank` of one list adds to an item's fused
+/// score, `weight / (k + rank + 1)`: ranks count from one, so the first entry
+/// of a list of weight 1 adds `1 / (k + 1)`. The one spelling of the term
+/// every reciprocal-rank fusion in the workspace sums.
+pub fn reciprocal_rank(weight: f64, k: f64, rank: usize) -> f64 {
+    weight / (k + rank as f64 + 1.0)
 }
 
 /// Boost multiplier for a symbol kind. Real definitions (Function/Struct/
@@ -1157,7 +1171,7 @@ pub fn compute_targets(
         family: u8,
     ) -> &'m mut Entry {
         let e = fused.entry(path.to_string()).or_default();
-        e.score += weight / (RRF_K + rank as f64 + 1.0);
+        e.score += reciprocal_rank(weight, RRF_K, rank);
         e.families |= family;
         e
     }
@@ -2159,6 +2173,32 @@ mod tests {
         assert_eq!(report.envelope["lower_bound"], true);
         assert_eq!(report.envelope["graph"], "unavailable");
         assert!(report.closed_world.contains("EXCEPT"));
+    }
+
+    #[test]
+    fn reciprocal_rank_should_count_ranks_from_one() {
+        assert_eq!(
+            reciprocal_rank(1.0, RRF_K, 0).to_bits(),
+            (1.0 / 61.0f64).to_bits()
+        );
+        assert_eq!(
+            reciprocal_rank(1.0, RRF_K, 7).to_bits(),
+            (1.0 / 68.0f64).to_bits()
+        );
+        assert_eq!(
+            reciprocal_rank(2.0, 10.0, 1).to_bits(),
+            (2.0 / 12.0f64).to_bits()
+        );
+    }
+
+    #[test]
+    fn bm25_idf_should_stay_positive_and_fall_with_df() {
+        assert_eq!(
+            bm25_idf(4.0, 1.0).to_bits(),
+            (1.0f64 + 3.5 / 1.5).ln().to_bits()
+        );
+        assert!(bm25_idf(4.0, 4.0) > 0.0);
+        assert!(bm25_idf(4.0, 0.0) > bm25_idf(4.0, 1.0));
     }
 
     #[test]

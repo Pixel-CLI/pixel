@@ -28,7 +28,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use mvp_model::{sub_words, terms};
+// BM25's constants (pixel-mvp's ADR-0030): the usual k1 and b.
 use pixel_graph::GraphStore;
+use pixel_rank::{BM25_B as B, BM25_K1 as K1, bm25_idf};
 
 use super::chain::MeaningHit;
 
@@ -36,9 +38,6 @@ use super::chain::MeaningHit;
 /// did not answer; `0`, `false` or `off` never does.
 pub(crate) const WORDS_ENV: &str = "PIXEL_BRIEF_BM25";
 
-/// BM25's constants (pixel-mvp's ADR-0030): the usual k1 and b.
-const K1: f64 = 1.2;
-const B: f64 = 0.75;
 /// The distinct terms of the prompt the best file must hold for any lead:
 /// fewer is a prompt the repository's names do not speak about
 /// (pixel-mvp's ADR-0030 §5).
@@ -269,13 +268,7 @@ pub(crate) fn rank(files: &[FileRow], wanted: &[String], limit: usize) -> Vec<Me
             df[at] += 1;
         }
     }
-    let idf: Vec<f64> = df
-        .iter()
-        .map(|&df| {
-            let df = df as f64;
-            (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
-        })
-        .collect();
+    let idf: Vec<f64> = df.iter().map(|&df| bm25_idf(n, df as f64)).collect();
     let mut ranked: Vec<(usize, f64, usize)> = docs
         .iter()
         .enumerate()

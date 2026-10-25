@@ -25,7 +25,7 @@ use pixel_plugin::ProbeMode;
 use regex::Regex;
 
 use super::graph::{Edge, Role, Sym};
-use super::text::{BRACE_NOISE, COMMENT_START, DECL, SRC, TESTPATH, escape, head, lines_of};
+use super::text::{BRACE_NOISE, COMMENT_START, DECL, SRC, TESTPATH, escape, head, lines_of, re};
 use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
@@ -56,9 +56,6 @@ const MAX_FILE_BYTES: u64 = 300_000;
 /// Callers and callees are read this far into their pages.
 const EDGE_OFFSET: usize = 100;
 
-fn re(source: &str) -> Regex {
-    Regex::new(source).expect("the pattern is a literal")
-}
 
 static IDENT: LazyLock<Regex> = LazyLock::new(|| {
     re(

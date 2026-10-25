@@ -31,11 +31,11 @@ use pixel_plugin::ProbeMode;
 use regex::Regex;
 
 use self::source::{
-    Hit, Source, block, chain, decl_end, decls_of, fname, has_word, indent, is_comment, is_decl,
+    Hit, Source, block, chain, decl_end, decls_of, fname, has_word, is_comment, is_decl,
     is_type_head, size, window, with_docs, with_type,
 };
-use super::text::escape;
-use super::{Ctx, Step, subwords};
+use super::text::{escape, indent, re, subwords};
+use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
     name: "cand-k-code-sites",
@@ -69,9 +69,6 @@ const QUESTION_WORDS: &[&str] = &[
     "reads", "show", "shows", "make", "makes", "determine",
 ];
 
-fn re(source: &str) -> Regex {
-    Regex::new(source).expect("the pattern is a literal")
-}
 
 static ENV_TOKEN: LazyLock<Regex> =
     LazyLock::new(|| re(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]*[A-Z0-9]\b"));

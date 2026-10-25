@@ -9,8 +9,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::super::pytext::{is_lower, is_upper, take_chars};
-use super::super::subwords;
+use super::super::text::{head, is_lower, is_upper, subwords};
 
 const STOP_TEXT: &str = "about above after again against also another because been before being below between both could does doing down during each
 from further have having here into just more most much once only other over same should some such than that their them then there these they this those
@@ -28,7 +27,7 @@ const WEAK_WORDS: [&str; 12] = [
 pub(super) static WEAK: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
     WEAK_WORDS
         .iter()
-        .flat_map(|word| [(*word).to_owned(), take_chars(word, 6).to_owned()])
+        .flat_map(|word| [(*word).to_owned(), head(word, 6).to_owned()])
         .collect()
 });
 
@@ -57,7 +56,7 @@ pub(super) fn stems<S: AsRef<str>>(words: impl IntoIterator<Item = S>) -> BTreeS
     words
         .into_iter()
         .map(|word| {
-            let cut = take_chars(word.as_ref(), 6);
+            let cut = head(word.as_ref(), 6);
             if cut.chars().count() >= 4 && cut.ends_with('s') && !cut.ends_with("ss") {
                 cut[..cut.len() - 1].to_owned()
             } else {

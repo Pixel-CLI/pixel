@@ -12,7 +12,7 @@ use std::rc::Rc;
 use ignore::WalkBuilder;
 
 use super::Ctx;
-use super::text::splitlines;
+use super::text::splitlines_owned;
 
 /// Bytes of a file that is searched; `rg` has no limit, a generated bundle
 /// must not stop the walk.
@@ -71,7 +71,7 @@ impl<'a, 'b> Walk<'a, 'b> {
         let rows = Rc::new(
             self.ctx
                 .read(path, MAX_READ_BYTES)
-                .map_or_else(Vec::new, |text| splitlines(&text)),
+                .map_or_else(Vec::new, |text| splitlines_owned(&text)),
         );
         self.lines.insert(path.to_owned(), Rc::clone(&rows));
         rows

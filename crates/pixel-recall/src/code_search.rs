@@ -1276,13 +1276,13 @@ pub(crate) fn rank_files(
             let evidence = lexical.get(&path).copied().unwrap_or_default();
             let fixed = pixel_rank::bm25_fixed(evidence.score);
             // Competition ranks: equal scores receive exactly equal evidence weight.
-            let fused = 2.0 / (60.0 + (index + 1) as f64)
+            let fused = pixel_rank::reciprocal_rank(2.0, pixel_rank::RRF_K, index)
                 + if fixed == 0 {
                     0.0
                 } else {
-                    lexical_ranks
-                        .get(&fixed)
-                        .map_or(0.0, |&rank| 1.0 / (60.0 + rank as f64))
+                    lexical_ranks.get(&fixed).map_or(0.0, |&rank| {
+                        pixel_rank::reciprocal_rank(1.0, pixel_rank::RRF_K, rank - 1)
+                    })
                 };
             let demoted = FileKind::of(&path).filter(|kind| !kind.named_by(&terms));
             AskHit {

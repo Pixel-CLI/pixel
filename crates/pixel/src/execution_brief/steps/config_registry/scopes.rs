@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use regex::{Captures, Regex};
 
 use super::evidence::SECRETISH;
-use super::super::pytext::{splitlines, take_chars};
+use super::super::text::{splitlines, head};
 
 /// Lines a quoted source range may span.
 pub(super) const SCOPED_BLOCK_MAX_LINES: usize = 72;
@@ -334,7 +334,7 @@ pub(super) fn source_range(path: &str, source: &str, start: usize, end: usize, n
         hi = lo + SCOPED_BLOCK_MAX_LINES - 1;
     }
     let mut out = vec![format!("### {path}:{lo}-{hi} — {note}")];
-    out.extend((lo..=hi).map(|at| format!("{at}| {}", take_chars(lines[at - 1], 150))));
+    out.extend((lo..=hi).map(|at| format!("{at}| {}", head(lines[at - 1], 150))));
     out
 }
 

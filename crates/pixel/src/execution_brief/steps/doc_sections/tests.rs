@@ -294,12 +294,12 @@ fn changelogs_vendor_and_deep_paths_are_not_documentation_and_one_word_is_not_en
 
 #[test]
 fn stem_and_words_follow_the_script() {
-    assert_eq!(stem("Loading"), "load");
-    assert_eq!(stem("Boxes"), "box");
-    assert_eq!(stem("Cats"), "cats", "four letters are kept");
-    assert_eq!(stem("Parts"), "part");
-    assert_eq!(stem("sings"), "sing", "`s` is tried after `ing` and `es`");
-    assert_eq!(stem("xxes"), "xxes");
+    assert_eq!(stem_ing_es_s("Loading"), "load");
+    assert_eq!(stem_ing_es_s("Boxes"), "box");
+    assert_eq!(stem_ing_es_s("Cats"), "cats", "four letters are kept");
+    assert_eq!(stem_ing_es_s("Parts"), "part");
+    assert_eq!(stem_ing_es_s("sings"), "sing", "`s` is tried after `ing` and `es`");
+    assert_eq!(stem_ing_es_s("xxes"), "xxes");
     let found = words("The Loading of files, CODE and a Setting: ab 12 x-ray");
     assert_eq!(found.into_iter().collect::<Vec<_>>(), ["load", "ray", "sett"]);
 }

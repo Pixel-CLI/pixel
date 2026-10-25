@@ -126,10 +126,6 @@ pub(crate) const LOW_READ_BRIEF_BYTES: usize = 1200;
 pub(crate) type Model = fn(&GateInput) -> relevance::Verdict;
 /// Leads a meaning search returns: as many files as a brief shows.
 const MEANING_LIMIT: usize = MAX_FILES;
-/// Rank constant of the reciprocal-rank fusion of the meaning leads and the
-/// co-files: large enough that the top of either list outweighs the bottom of
-/// both, the value the fusion literature settled on.
-const FUSE_K: f64 = 60.0;
 /// Match rows one text search pulls before its files are grouped.
 pub(crate) const SEARCH_ROWS: usize = 200;
 /// Matches one concept search keeps.
@@ -3750,9 +3746,11 @@ fn fold(state: &Mutex<Brief>, plan: &Plan, got: &Gathered) {
 }
 
 /// What the entry at zero-based `rank` of one list adds to a file's fused
-/// score: ranks count from one, so the first entry adds `1 / (FUSE_K + 1)`.
+/// score ([`pixel_rank::reciprocal_rank`] of weight 1). The rank constant is
+/// [`pixel_rank::RRF_K`]: large enough that the top of either list outweighs
+/// the bottom of both, the value the fusion literature settled on.
 fn reciprocal_rank(rank: usize) -> f64 {
-    1.0 / (FUSE_K + rank as f64 + 1.0)
+    pixel_rank::reciprocal_rank(1.0, pixel_rank::RRF_K, rank)
 }
 
 /// Reciprocal-rank fusion of the meaning leads and the relevance co-files,

@@ -34,8 +34,8 @@ use ignore::overrides::OverrideBuilder;
 use pixel_plugin::ProbeMode;
 use regex::Regex;
 
-use super::pytext::{re_escape, splitlines, stem, universal_newlines};
-use super::{Ctx, Step, subwords};
+use super::text::{escape, head, splitlines, stem_ing_es_s, subwords, universal_newlines};
+use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
     name: "name-files",
@@ -212,7 +212,7 @@ fn run(ctx: &Ctx) -> String {
         // from what was just located.
         if words(header).is_disjoint(&want) && !added.iter().any(|other| common_dirs(path, other) > 0)
         {
-            out.push_str(&format!("drop: ^{}$\n", re_escape(header)));
+            out.push_str(&format!("drop: ^{}$\n", escape(header)));
         }
     }
     out.push_str(&found.join("\n"));
@@ -251,7 +251,7 @@ fn words(text: &str) -> BTreeSet<String> {
         let word: String = chars[at..end].iter().collect();
         let lower = word.to_lowercase();
         if end - at > 2 && !STOP.contains(&lower.as_str()) && !GENERIC.contains(&lower.as_str()) {
-            out.insert(stem(&word));
+            out.insert(stem_ing_es_s(&word));
         }
         at = end;
     }
@@ -424,13 +424,10 @@ fn body(ctx: &Ctx, path: &str, lo: usize, count: usize) -> Vec<String> {
     let source = splitlines(&text);
     let hi = source.len().min(lo + count - 1);
     (lo..=hi)
-        .map(|number| format!("{number}| {}", clip(source[number - 1], 160)))
+        .map(|number| format!("{number}| {}", head(source[number - 1], 160)))
         .collect()
 }
 
-fn clip(text: &str, limit: usize) -> String {
-    text.chars().take(limit).collect()
-}
 
 /// The file name without its last extension.
 fn file_stem(path: &str) -> &str {
@@ -662,7 +659,7 @@ fn module_evidence(ctx: &Ctx, safe: &Safe, rows: &[&str], prompt: &str) -> Vec<S
             source[..hi]
                 .iter()
                 .enumerate()
-                .map(|(index, line)| format!("{}| {}", index + 1, clip(line, 160))),
+                .map(|(index, line)| format!("{}| {}", index + 1, head(line, 160))),
         );
         add(block);
     }
@@ -675,7 +672,7 @@ fn module_evidence(ctx: &Ctx, safe: &Safe, rows: &[&str], prompt: &str) -> Vec<S
         }
         add(vec![
             format!("### {rel}:{number}-{number} — source reference to {name}"),
-            format!("{number}| {}", clip(&source[number - 1], 160)),
+            format!("{number}| {}", head(&source[number - 1], 160)),
         ]);
     }
     out

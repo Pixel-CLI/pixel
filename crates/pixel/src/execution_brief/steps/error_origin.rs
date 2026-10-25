@@ -27,9 +27,9 @@ use std::sync::LazyLock;
 use pixel_plugin::ProbeMode;
 use regex::Regex;
 
-use super::text::head;
+use super::text::{head, re, subwords};
 use super::walk::Walk;
-use super::{Ctx, Step, subwords};
+use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
     name: "error-origin",
@@ -79,9 +79,6 @@ const GENERIC: &[&str] = &[
     "comes", "come", "from", "that", "says", "reads", "contains", "default", "page",
 ];
 
-fn re(source: &str) -> Regex {
-    Regex::new(source).expect("the pattern is a literal")
-}
 
 static FN: LazyLock<Regex> = LazyLock::new(|| {
     re(
@@ -106,10 +103,6 @@ pub(super) fn is_test_path(path: &str) -> bool {
     TEST_PATH.is_match(path)
 }
 
-/// The words of code or prose, split at case changes, underscores and punctuation, lowercased.
-pub(super) fn tokens(text: &str) -> Vec<String> {
-    subwords(text)
-}
 
 /// A word without one plural or tense ending.
 pub(super) fn stem(word: &str) -> String {
@@ -133,7 +126,7 @@ pub(super) fn stem(word: &str) -> String {
 /// The question's words, stemmed, once each, without the function words.
 fn prompt_words(prompt: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for token in tokens(prompt) {
+    for token in subwords(prompt) {
         if token.chars().count() < 2 || STOP.contains(&token.as_str()) {
             continue;
         }
@@ -265,7 +258,7 @@ fn emitter(lines: &[String], first: usize, path: &str) -> HashSet<String> {
         .next()
         .and_then(|part| part.split('\'').next())
         .unwrap_or("");
-    tokens(&[name.as_deref().unwrap_or(""), above, before_quote].join(" "))
+    subwords(&[name.as_deref().unwrap_or(""), above, before_quote].join(" "))
         .into_iter()
         .collect()
 }
@@ -448,7 +441,7 @@ fn described(walk: &mut Walk, prompt: &str) -> Option<Option<Described>> {
                 }
                 context = emitter(&lines, first, path);
             }
-            let words_in = tokens(&message);
+            let words_in = subwords(&message);
             let own: HashSet<String> = words_in.iter().cloned().collect();
             if !present.iter().any(|word| carried(word, &own)) {
                 continue;
@@ -718,7 +711,7 @@ fn error_emission(
                 hi_context = following;
                 function_end = following;
             }
-            let near: HashSet<String> = tokens(&lines[lo_context..hi_context.max(lo_context)].join(" "))
+            let near: HashSet<String> = subwords(&lines[lo_context..hi_context.max(lo_context)].join(" "))
                 .iter()
                 .map(|token| stem(token))
                 .collect();

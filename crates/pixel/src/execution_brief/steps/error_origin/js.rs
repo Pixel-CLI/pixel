@@ -17,7 +17,7 @@ use regex::Regex;
 
 use super::super::Ctx;
 use super::super::walk::Walk;
-use super::super::text::splitlines;
+use super::super::text::{re, splitlines_owned};
 use super::{JS_EXT, is_test_path, show};
 
 /// Bytes of tracked JavaScript that is scanned.
@@ -30,9 +30,6 @@ const MAX_MANIFEST_BYTES: u64 = 64_000;
 /// Characters of a quoted manifest line.
 const MAX_LINE_CHARS: usize = 900;
 
-fn re(source: &str) -> Regex {
-    Regex::new(source).expect("the pattern is a literal")
-}
 
 static DEFAULT: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\bdefault\b"));
 static NOT_FOUND: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b404\b|\bnot[\s-]+found\b"));
@@ -282,7 +279,7 @@ fn manifests(ctx: &Ctx) -> HashMap<String, Manifest> {
         found.insert(
             path.clone(),
             Manifest {
-                lines: splitlines(&text),
+                lines: splitlines_owned(&text),
                 dependencies,
             },
         );
@@ -566,7 +563,7 @@ pub(super) fn boundary(ctx: &Ctx, walk: &mut Walk, prompt: &str, paths: &[String
         return Vec::new();
     };
     let line_of = |at: usize| found.source[..at].matches('\n').count() + 1;
-    let source_lines = splitlines(&found.source);
+    let source_lines = splitlines_owned(&found.source);
     let (import_line, fallback_line, use_line) =
         (line_of(found.import_at), line_of(found.fallback_at), line_of(found.use_at));
     let callee = &found.callee;

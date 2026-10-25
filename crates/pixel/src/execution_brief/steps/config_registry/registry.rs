@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::super::pytext::take_chars;
+use super::super::text::{head, last_segment};
 use super::scan::{CODE_EXT, ENV_LINE, Row};
 
 /// Where a key is declared and the value written there.
@@ -83,9 +83,6 @@ fn is_env_file(base: &str) -> bool {
     base.starts_with(".env") || base.ends_with(".env")
 }
 
-pub(super) fn base_of(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
 
 /// Every capture group 1 of `pattern` over `text`.
 fn keys_of<'a>(pattern: &Regex, text: &'a str) -> impl Iterator<Item = &'a str> {
@@ -101,7 +98,7 @@ pub(super) fn registry(rows: &[Row]) -> Registry {
     let mut reg = Registry::new();
     for row in rows {
         let Row { path, line, text } = row;
-        let base = base_of(path);
+        let base = last_segment(path);
         let stripped = text.trim();
         if is_env_file(base) {
             if let Some(caps) = ENV_LINE.captures(text) {
@@ -162,7 +159,7 @@ pub(super) fn registry(rows: &[Row]) -> Registry {
                         path: path.clone(),
                         line: *line,
                         text: stripped.to_owned(),
-                        value: take_chars(value, 60).to_owned(),
+                        value: head(value, 60).to_owned(),
                     });
                 }
             }

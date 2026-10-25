@@ -28,7 +28,7 @@ use pixel_plugin::ProbeMode;
 use regex::Regex;
 
 use super::graph::{Role, Sym};
-use super::text::head;
+use super::text::{head, re, suffix};
 use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
@@ -85,9 +85,6 @@ const SOURCE_SUFFIXES: &[&str] = &[
     ".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".go", ".java", ".kt", ".swift",
 ];
 
-fn re(pattern: &str) -> Regex {
-    Regex::new(pattern).expect("the pattern is a literal")
-}
 
 static WORD3: LazyLock<Regex> = LazyLock::new(|| re(r"[A-Za-z][A-Za-z0-9]*"));
 static WORD4: LazyLock<Regex> = LazyLock::new(|| re(r"[A-Za-z]{4,}"));
@@ -195,15 +192,6 @@ impl Scan<'_, '_> {
     }
 }
 
-/// `Path(path).suffix` of Python: the last `.ext` of the file name, if the
-/// name does not start or end with the dot.
-fn suffix(path: &str) -> &str {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    match name.rfind('.') {
-        Some(dot) if dot > 0 && dot + 1 < name.len() => &name[dot..],
-        _ => "",
-    }
-}
 
 /// The tracked source paths ordered by how many words of the prompt their
 /// names carry (camel case split), before the bounded read.

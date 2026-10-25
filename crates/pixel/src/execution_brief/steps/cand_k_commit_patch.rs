@@ -22,7 +22,8 @@ use pixel_plugin::ProbeMode;
 use regex::Regex;
 
 use super::commit_lookup::{by_subject, by_version, git, greps, id_of, quoted, rare_words};
-use super::{Ctx, Step, escape};
+use super::text::escape;
+use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
     name: "cand-k-commit-patch",

@@ -23,6 +23,7 @@ use super::js::{
     self, Factory, assigned_functions, code_mask, export_name_candidates, export_name_edges,
     has_script_extension, imported_local_names, proven_getter_functions,
 };
+use super::super::text::{indent as indent_of, re};
 use super::{Ctx, TESTPATH, head, lines_of};
 use crate::execution_brief::steps::text::SRC;
 
@@ -37,9 +38,6 @@ const MAX_SOURCE_SCAN: Duration = Duration::from_millis(1_000);
 /// Bytes of one file.
 const MAX_FILE_BYTES: u64 = 300_000;
 
-fn re(source: &str) -> Regex {
-    Regex::new(source).expect("the pattern is a literal")
-}
 
 static WORD: LazyLock<Regex> = LazyLock::new(|| re(r"[a-z]+"));
 static CAMEL: LazyLock<Regex> = LazyLock::new(|| re(r"([a-z0-9])([A-Z])"));
@@ -250,9 +248,6 @@ impl Blocks {
     }
 }
 
-fn indent_of(line: &str) -> usize {
-    line.chars().count() - line.trim_start().chars().count()
-}
 
 /// `str.count('\n', 0, offset) + 1`.
 fn line_at(source: &str, offset: usize) -> i64 {
@@ -474,7 +469,7 @@ fn id_factories(ctx: &Ctx, sources: &Sources, words: &BTreeSet<String>, out: &mu
             }
             let mask = masks.entry(caller_path.clone()).or_insert_with(|| code_mask(source)).clone();
             let masked_lines: Vec<String> = if has_script_extension(caller_path) {
-                crate::execution_brief::steps::text::splitlines(&mask)
+                crate::execution_brief::steps::text::splitlines_owned(&mask)
             } else {
                 lines.clone()
             };

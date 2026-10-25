@@ -39,7 +39,8 @@ use std::sync::LazyLock;
 use pixel_plugin::ProbeMode;
 use regex::Regex;
 
-use super::{Ctx, Step, subwords};
+use super::text::subwords;
+use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
     name: "prune-noise",

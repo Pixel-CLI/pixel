@@ -78,8 +78,7 @@ register!(
 );
 
 mod graph;
-/// Python's text handling, for the steps ported from a script.
-mod pytext;
+/// The string rules the steps share, spelled the way Python spells them.
 mod text;
 // Not steps: what two of them share.
 mod commit_lookup;
@@ -220,65 +219,6 @@ impl<'a> Ctx<'a> {
         (u64::try_from(raw.len()).ok()? <= limit)
             .then(|| String::from_utf8_lossy(&raw).into_owned())
     }
-}
-
-/// The words of code or prose, split at case changes, digits and punctuation,
-/// lowercased: `HTTPServerError2` is `http`, `server`, `error`, `2`. The same
-/// words as `re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", text)` in a probe
-/// script: a run of capitals stops before the capital that starts the next
-/// word.
-pub(crate) fn subwords(text: &str) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let run_end = |from: usize, keep: fn(char) -> bool| {
-        from + chars[from..].iter().take_while(|ch| keep(**ch)).count()
-    };
-    let lower = |ch: char| ch.is_ascii_lowercase();
-    let upper = |ch: char| ch.is_ascii_uppercase();
-    let word = |from: usize, to: usize| chars[from..to].iter().collect::<String>().to_lowercase();
-    let mut words = Vec::new();
-    let mut at = 0;
-    while at < chars.len() {
-        if upper(chars[at]) {
-            let capitals = run_end(at, upper);
-            let before_lower = chars.get(capitals).copied().is_some_and(lower);
-            // `HTTPServer`: the capitals but the last, which starts `Server`.
-            let end = if before_lower { capitals - 1 } else { capitals };
-            if end > at {
-                words.push(word(at, end));
-                at = end;
-                continue;
-            }
-            let end = run_end(at + 1, lower);
-            words.push(word(at, end));
-            at = end;
-        } else if lower(chars[at]) {
-            let end = run_end(at, lower);
-            words.push(word(at, end));
-            at = end;
-        } else if chars[at].is_ascii_digit() {
-            let end = run_end(at, |ch| ch.is_ascii_digit());
-            words.push(word(at, end));
-            at = end;
-        } else {
-            at += 1;
-        }
-    }
-    words
-}
-
-/// `text` as a regex that matches only it, spelled like Python's `re.escape`
-/// (3.7 and later): the characters that can mean something, and the space, `#`,
-/// `&`, `-` and `~`, get a backslash. A probe script printed its directives with
-/// that function; the same spelling keeps a step's bytes the script's.
-pub(crate) fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if "()[]{}?*+-|^$\\.&~# \t\n\r\x0b\x0c".contains(ch) {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 #[cfg(test)]
@@ -455,38 +395,6 @@ pub(crate) mod testing {
 mod tests {
     use super::*;
     use std::time::Duration;
-
-    #[test]
-    fn subwords_split_like_the_script_regex() {
-        assert_eq!(
-            subwords("HTTPServerError2"),
-            ["http", "server", "error", "2"]
-        );
-        assert_eq!(
-            subwords("followRedirect_v2"),
-            ["follow", "redirect", "v", "2"]
-        );
-        assert_eq!(subwords("ABc"), ["a", "bc"]);
-        assert_eq!(subwords("XML"), ["xml"]);
-        assert_eq!(subwords("a-B c"), ["a", "b", "c"]);
-        assert_eq!(subwords("Ab"), ["ab"]);
-        assert_eq!(subwords("é"), Vec::<String>::new());
-        assert_eq!(subwords(""), Vec::<String>::new());
-    }
-
-    #[test]
-    fn escape_spells_like_python_re_escape() {
-        assert_eq!(escape("a b-c.d"), "a\\ b\\-c\\.d");
-        assert_eq!(
-            escape("fn(x) -> [y]#&~"),
-            "fn\\(x\\)\\ \\->\\ \\[y\\]\\#\\&\\~"
-        );
-        assert_eq!(escape("é_9Z"), "é_9Z");
-        assert_eq!(escape("\\^$|?*+{}"), "\\\\\\^\\$\\|\\?\\*\\+\\{\\}");
-        assert_eq!(escape("a\tb"), "a\\\tb");
-        let held = regex::Regex::new(&format!("^{}$", escape("### a b-(c)+ [d]"))).unwrap();
-        assert!(held.is_match("### a b-(c)+ [d]"));
-    }
 
     #[test]
     fn every_step_applies_exactly_where_the_manifest_of_its_probe_does() {

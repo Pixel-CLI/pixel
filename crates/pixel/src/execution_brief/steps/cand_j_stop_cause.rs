@@ -24,7 +24,9 @@ use pixel_plugin::ProbeMode;
 use regex::Regex;
 
 use super::graph::{Role, Sym};
-use super::text::{BRACE_NOISE, COMMENT_START, DECL, SRC, TESTPATH, escape, head, lines_of, stem};
+use super::text::{
+    BRACE_NOISE, COMMENT_START, DECL, LETTERS, SRC, TESTPATH, escape, head, lines_of, stem,
+};
 use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
@@ -94,8 +96,6 @@ const TEST_BYTES: usize = 3000;
 const MAX_FILES: usize = 4000;
 const MAX_FILE_BYTES: u64 = 300_000;
 
-static LETTERS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[A-Za-z]{4,}").expect("the letters pattern is a literal"));
 static BRIEF_HEADER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^### (\S+?):(\d+)-(\d+)(.*)$").expect("the header pattern is a literal")
 });

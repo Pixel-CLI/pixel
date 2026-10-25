@@ -27,7 +27,7 @@ use std::sync::LazyLock;
 use pixel_plugin::ProbeMode;
 use regex::Regex;
 
-use super::pytext::take_chars;
+use super::text::{head, last_segment};
 use super::{Ctx, Step};
 
 mod browser;
@@ -48,7 +48,7 @@ use evidence::{
     setter_evidence,
 };
 use rank::{rank, rank_bound};
-use registry::{Def, Entry, base_of, registry};
+use registry::{Def, Entry, registry};
 use repo::Repo;
 use scan::scan;
 use words::words_of;
@@ -101,7 +101,7 @@ fn emit(repo: &Repo, prompt: &str) -> String {
     let words = words_of(prompt);
     let scoped = cli_setting::evidence(repo, prompt) + &browser::evidence(repo, prompt);
     if !scoped.is_empty() {
-        return take_chars(&scoped, OUT_CAP).to_owned();
+        return head(&scoped, OUT_CAP).to_owned();
     }
     let loader = loader::evidence(repo, prompt);
     let Some(rows) = scan(repo) else {
@@ -109,7 +109,7 @@ fn emit(repo: &Repo, prompt: &str) -> String {
     };
     let compiled = compiled::evidence(repo, prompt, &rows);
     if !compiled.is_empty() {
-        return take_chars(&compiled, OUT_CAP).to_owned();
+        return head(&compiled, OUT_CAP).to_owned();
     }
     let reg = registry(&rows);
     let bound_only = BOUND_QUERY.is_match(prompt) && !EXISTING_CONFIG_INTENT.is_match(prompt);
@@ -120,13 +120,13 @@ fn emit(repo: &Repo, prompt: &str) -> String {
         rank(repo, &all, prompt)
     };
     let setters = setter_evidence(repo, &rows, prompt);
-    let prefix = take_chars(&(loader + &setters), OUT_CAP).to_owned();
+    let prefix = head(&(loader + &setters), OUT_CAP).to_owned();
     if keys.is_empty() {
         return prefix;
     }
     let registry_output = registry_output(repo, &reg, &keys, &words);
     let remaining = OUT_CAP.saturating_sub(prefix.chars().count());
-    prefix + take_chars(&registry_output, remaining)
+    prefix + head(&registry_output, remaining)
 }
 
 /// The head lines and excerpts of the chosen keys.
@@ -136,7 +136,7 @@ fn registry_output(repo: &Repo, reg: &registry::Registry, keys: &[String], words
         .iter()
         .filter(|file| file.starts_with(".env") || file.contains("/.env"))
         .flat_map(|file| file.split_whitespace())
-        .filter(|file| base_of(file).starts_with(".env"))
+        .filter(|file| last_segment(file).starts_with(".env"))
         .collect();
     let mut head = vec![format!(
         "### config registry — keys matching {} (key | value or fallback | declared | read at)",

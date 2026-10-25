@@ -9,9 +9,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::super::pytext::take_chars;
+use super::super::text::{head, last_segment};
 use super::rank::comment_above;
-use super::registry::{Def, base_of};
+use super::registry::Def;
 use super::repo::Repo;
 use super::scan::{Row, SCAN_MAX_COLUMNS};
 use super::words::{letters, stems, words_of};
@@ -60,7 +60,7 @@ pub(super) fn block(repo: &Repo, path: &str, n: usize, before: usize, after: usi
     let lo = n.saturating_sub(before).max(1);
     let hi = lines.len().min(n + after);
     let mut out = vec![format!("### {path}:{lo}-{hi}")];
-    out.extend((lo..=hi).map(|at| format!("{at}| {}", take_chars(&lines[at - 1], 150))));
+    out.extend((lo..=hi).map(|at| format!("{at}| {}", head(&lines[at - 1], 150))));
     out
 }
 
@@ -172,7 +172,7 @@ pub(super) fn declaration_candidates(repo: &Repo, key: &str, defs: &[&Def]) -> (
 
 /// Whether the base name of `path` is an environment file.
 pub(super) fn is_env_path(path: &str) -> bool {
-    base_of(path).starts_with(".env")
+    last_segment(path).starts_with(".env")
 }
 
 pub(super) fn comment_marks(repo: &Repo, path: &str, line: usize) -> usize {

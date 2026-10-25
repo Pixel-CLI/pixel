@@ -24,7 +24,7 @@ use pixel_plugin::ProbeMode;
 use regex::Regex;
 
 use super::graph::{Edge, Hop, Role, Sym};
-use super::text::{escape, head, lines_of, stem};
+use super::text::{LETTERS, escape, head, lines_of, stem};
 use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
@@ -98,8 +98,6 @@ static RUST_FN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z_]\w*)")
         .expect("the fn pattern is a literal")
 });
-static LETTERS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[A-Za-z]{4,}").expect("the letters pattern is a literal"));
 
 fn run(ctx: &Ctx) -> String {
     chain(ctx).unwrap_or_default()

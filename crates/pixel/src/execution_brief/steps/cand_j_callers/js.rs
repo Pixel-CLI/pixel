@@ -15,6 +15,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use super::super::text::suffix;
+
 /// `re.escape` for a pattern of the regex crate.
 fn escaped(text: &str) -> String {
     regex::escape(text)
@@ -327,15 +329,6 @@ pub(super) fn has_script_extension(path: &str) -> bool {
     SCRIPT_EXTENSIONS.contains(&lower.as_str())
 }
 
-/// `Path(path).suffix`: the last dot and what follows, unless the dot starts
-/// or ends the name.
-fn suffix(path: &str) -> &str {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    match name.rfind('.') {
-        Some(dot) if dot > 0 && dot + 1 < name.len() => &name[dot..],
-        _ => "",
-    }
-}
 
 /// `os.path.normpath` for a relative or rooted POSIX path.
 fn normpath(path: &str) -> String {

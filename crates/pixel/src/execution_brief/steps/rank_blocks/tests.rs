@@ -47,13 +47,13 @@ fn identifiers_are_cut_into_the_parts_the_script_regex_finds() {
 
 #[test]
 fn a_word_loses_one_ing_es_or_s_when_it_is_longer_than_four_letters() {
-    assert_eq!(stem("Parsing"), "pars");
-    assert_eq!(stem("Boxes"), "box");
-    assert_eq!(stem("limits"), "limit");
-    assert_eq!(stem("cats"), "cats");
-    assert_eq!(stem("thing"), "th");
-    assert_eq!(stem("class"), "clas");
-    assert_eq!(stem("RETRY"), "retry");
+    assert_eq!(stem_ing_es_s("Parsing"), "pars");
+    assert_eq!(stem_ing_es_s("Boxes"), "box");
+    assert_eq!(stem_ing_es_s("limits"), "limit");
+    assert_eq!(stem_ing_es_s("cats"), "cats");
+    assert_eq!(stem_ing_es_s("thing"), "th");
+    assert_eq!(stem_ing_es_s("class"), "clas");
+    assert_eq!(stem_ing_es_s("RETRY"), "retry");
 }
 
 #[test]

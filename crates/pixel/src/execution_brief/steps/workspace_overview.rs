@@ -25,7 +25,7 @@ use pixel_plugin::ProbeMode;
 use regex::Regex;
 use toml_edit::{DocumentMut, Item, TableLike};
 
-use super::pytext::{splitlines, universal_newlines};
+use super::text::{last_segment, splitlines, universal_newlines};
 use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
@@ -320,9 +320,6 @@ fn manifest_path(dir: &str, name: &str) -> String {
     }
 }
 
-fn last_segment(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
 
 /// One member of a workspace. A dependency maps to whether the manifest says
 /// it is a path dependency of the same repository.

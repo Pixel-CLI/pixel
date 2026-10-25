@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use regex::Regex;
 
-use super::super::pytext::take_chars;
+use super::super::text::head;
 use super::repo::Repo;
 use super::scopes::{
     SCOPED_EVIDENCE_MAX, back_chars, forward_chars, rust_code_mask, rust_scopes, source_range,
@@ -222,7 +222,7 @@ pub(super) fn evidence(repo: &Repo, prompt: &str) -> String {
                 "matching CLI setting declaration and override",
             ));
             let text = blocks.join("\n") + "\n";
-            return take_chars(&text, SCOPED_EVIDENCE_MAX).to_owned();
+            return head(&text, SCOPED_EVIDENCE_MAX).to_owned();
         }
     }
     String::new()

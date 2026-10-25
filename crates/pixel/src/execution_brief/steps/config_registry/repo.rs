@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
-use super::super::pytext::{splitlines, universal_newlines};
+use super::super::text::{splitlines, universal_newlines};
 use super::super::Ctx;
 
 /// A file larger than this many bytes is not read (the script's

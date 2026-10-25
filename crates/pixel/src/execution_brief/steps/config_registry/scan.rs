@@ -12,7 +12,7 @@ use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 use regex::Regex;
 
-use super::super::pytext::{splitlines, universal_newlines};
+use super::super::text::{splitlines, universal_newlines};
 use super::repo::{MAX_FILE_BYTES, Repo};
 
 /// A line of a file: its path, its number (counted on `\n`) and its text.

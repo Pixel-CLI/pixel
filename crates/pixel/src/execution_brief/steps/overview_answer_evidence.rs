@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use pixel_plugin::ProbeMode;
 use toml_edit::{DocumentMut, Item, TableLike, Value};
 
-use super::pytext::splitlines;
+use super::text::{head, last_segment, splitlines};
 use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
@@ -71,9 +71,6 @@ fn directory(path: &str) -> &str {
     path.rsplit_once('/').map_or(path, |(dir, _)| dir)
 }
 
-fn last_segment(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
 
 /// The text of the tracked file `path` (a regular file of at most
 /// [`MAX_FILE_BYTES`], never a link).
@@ -182,7 +179,7 @@ fn evidence(
                 splitlines(&text)
                     .into_iter()
                     .take(12)
-                    .map(|line| clip(line, MAX_DOC_CHARS)),
+                    .map(|line| head(line, MAX_DOC_CHARS).to_owned()),
             );
         }
     }
@@ -305,14 +302,10 @@ fn crate_source(
     Some((path, text))
 }
 
-/// The first `limit` characters of `text`.
-fn clip(text: &str, limit: usize) -> String {
-    text.chars().take(limit).collect()
-}
 
 /// `text` on one line, whitespace collapsed, cut to `limit` characters.
 fn one_line(text: &str, limit: usize) -> String {
-    clip(&text.split_whitespace().collect::<Vec<_>>().join(" "), limit)
+    head(&text.split_whitespace().collect::<Vec<_>>().join(" "), limit).to_owned()
 }
 
 /// The leading `//!` or `/*! */` documentation of a Rust source.
@@ -321,7 +314,7 @@ fn leading_docs(text: &str, max_lines: usize) -> Vec<String> {
     let mut block = false;
     for raw in splitlines(text).into_iter().take(max_lines) {
         let line = if raw.chars().count() > MAX_DOC_CHARS {
-            clip(raw, MAX_DOC_CHARS) + "…"
+            head(raw, MAX_DOC_CHARS).to_owned() + "…"
         } else {
             raw.to_owned()
         };
@@ -373,7 +366,7 @@ fn numbered_lines(lines: &[&str], limit: usize) -> Vec<String> {
         .iter()
         .take(limit)
         .enumerate()
-        .map(|(index, line)| format!("{}| {}", index + 1, clip(line, 180)))
+        .map(|(index, line)| format!("{}| {}", index + 1, head(line, 180)))
         .collect();
     if lines.len() > limit {
         out.push(format!("... {} lines omitted", lines.len() - limit));

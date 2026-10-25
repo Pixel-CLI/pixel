@@ -30,7 +30,8 @@ use pixel_git::repo_path::is_normal_relative;
 use pixel_plugin::ProbeMode;
 use regex::Regex;
 
-use super::{Ctx, Step, escape};
+use super::text::{escape, is_word, stem_ing_es_s};
+use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
     name: "rank-blocks",
@@ -155,26 +156,13 @@ fn parts(text: &str) -> Vec<&str> {
     found
 }
 
-/// `word` lowercased, without one `ing`, `es` or `s` when it is longer than four.
-fn stem(word: &str) -> String {
-    let word = word.to_lowercase();
-    for suffix in ["ing", "es", "s"] {
-        if word.len() > 4
-            && let Some(cut) = word.strip_suffix(suffix)
-        {
-            return cut.to_owned();
-        }
-    }
-    word
-}
-
 /// The stems of the words of `text` that are three letters or more and not
 /// function words.
 fn words(text: &str) -> HashSet<String> {
     parts(text)
         .into_iter()
         .filter(|part| part.len() > 2 && !STOP.contains(&part.to_lowercase().as_str()))
-        .map(stem)
+        .map(stem_ing_es_s)
         .collect()
 }
 
@@ -213,11 +201,6 @@ fn with_context(ctx: &Ctx, header: &str) -> Option<Vec<String>> {
         }
     }
     Some(out)
-}
-
-/// Whether `ch` can be part of a word: what `rg -w` calls one.
-fn is_word(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
 }
 
 /// Whether `line` holds `name` as a whole word.
