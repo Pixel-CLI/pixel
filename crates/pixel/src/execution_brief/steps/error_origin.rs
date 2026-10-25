@@ -120,7 +120,7 @@ pub(super) fn stem(word: &str) -> String {
         return format!("{cut}y");
     }
     for suffix in ["ing", "ed", "s"] {
-        if length - suffix.len() >= 3
+        if length >= suffix.len() + 3
             && word.ends_with(suffix)
             && let Some(cut) = word.strip_suffix(suffix)
         {
