@@ -4095,10 +4095,9 @@ fn config_value_from(args: &[String]) -> Option<usize> {
         .enumerate()
         .skip(at)
         .find(|(_, arg)| !arg.starts_with("--"))?;
-    let known = config_cmd::is_setting(key)
-        || Cli::command()
-            .find_subcommand("config")
-            .is_some_and(|config| config.find_subcommand(key).is_some());
+    // `has_subcommand` reads the derive's names, never the whole `Cli` tree,
+    // which overflows a 2 MiB test thread in a debug build.
+    let known = config_cmd::is_setting(key) || <ConfigCmd as clap::Subcommand>::has_subcommand(key);
     (!known).then_some(key_at + 1)
 }
 

@@ -11,10 +11,21 @@ fn argv(args: &[&str]) -> Vec<String> {
 }
 
 /// The clap error `run` would get for `args`, from the real definition.
+/// Parsed on a thread with a 4 MiB stack — the derived command tree
+/// overflows the 2 MiB a test thread gets, the same reason
+/// `validate_cli_syntax` spawns one.
 fn parse_error(args: &[String]) -> clap::Error {
-    Cli::command()
-        .try_get_matches_from(args)
-        .expect_err("these argvs do not parse")
+    let args = args.to_vec();
+    std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            Cli::command()
+                .try_get_matches_from(args)
+                .expect_err("these argvs do not parse")
+        })
+        .unwrap()
+        .join()
+        .unwrap()
 }
 
 /// A global flag before the verb used to move `run-hook` off `argv[1]`, and
