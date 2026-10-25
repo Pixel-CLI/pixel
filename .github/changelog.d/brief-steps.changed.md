@@ -1,0 +1,1 @@
+**brief:** the `test-bodies` probe now runs inside the brief's own process as a Rust step (`execution_brief/steps/`): no interpreter start and no `rg`, same blocks, same gating and budget. The installed `test-bodies` script is no longer started; `pixel plugin disable test-bodies` still switches it off.

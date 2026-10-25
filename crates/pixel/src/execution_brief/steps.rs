@@ -46,7 +46,7 @@ macro_rules! register {
     };
 }
 
-register!();
+register!(test_bodies);
 
 /// A brief probe in Rust.
 pub(crate) struct Step {
@@ -91,13 +91,6 @@ impl Step {
 
 /// What a step is given: the request a probe gets on stdin, and the files of
 /// the repository, read through the brief's deadline.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the first step, ported next, reads files through it"
-    )
-)]
 pub(crate) struct Ctx<'a> {
     /// What the user typed.
     pub(crate) prompt: &'a str,
@@ -108,13 +101,6 @@ pub(crate) struct Ctx<'a> {
     tracked: OnceCell<Option<Vec<String>>>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the first step, ported next, reads files through it"
-    )
-)]
 impl<'a> Ctx<'a> {
     pub(crate) fn new(root: &'a Path, prompt: &'a str, brief: &'a str, deadline: Instant) -> Self {
         Self {
@@ -188,13 +174,6 @@ impl<'a> Ctx<'a> {
 /// words as `re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", text)` in a probe
 /// script: a run of capitals stops before the capital that starts the next
 /// word.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the first step, ported next, splits words with it"
-    )
-)]
 pub(crate) fn subwords(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let run_end = |from: usize, keep: fn(char) -> bool| {
@@ -237,10 +216,12 @@ pub(crate) fn subwords(text: &str) -> Vec<String> {
 #[cfg(test)]
 pub(crate) mod testing {
     //! What the tests of a step share: a real git repository in a temp dir
-    //! (the steps wrap `git ls-files`, so nothing is mocked).
+    //! (the steps wrap `git ls-files`, so nothing is mocked), and a step run
+    //! on it the way the brief runs it.
 
     use super::*;
     use std::process::Command;
+    use std::time::Duration;
 
     /// A repository whose index holds `files` (`path`, `text`).
     pub(crate) fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
@@ -264,6 +245,19 @@ pub(crate) mod testing {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?}");
+    }
+
+    /// What `step` prints for `prompt` in `root`, the brief being `brief`.
+    pub(crate) fn run(step: &Step, root: &Path, prompt: &str, brief: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        (step.run)(&Ctx::new(root, prompt, brief, deadline))
+    }
+
+    /// The `### ` lines of an output.
+    pub(crate) fn headers(out: &str) -> Vec<&str> {
+        out.lines()
+            .filter(|line| line.starts_with("### "))
+            .collect()
     }
 }
 

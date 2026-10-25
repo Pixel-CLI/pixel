@@ -1011,4 +1011,24 @@ mod tests {
         let (text, run) = run_step(&said, root, "p", "b", Instant::now());
         assert_eq!((text, run.outcome), (None, "skipped"));
     }
+
+    #[test]
+    fn the_registered_test_bodies_step_runs_and_the_installed_script_of_its_name_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fixture_probe(&home, "test-bodies", SCRIPT, "when_kinds = [\"tests\"]\n");
+        let repo = super::super::steps::testing::repo(&[(
+            "tests/test_client.py",
+            "def test_follows_a_redirect_and_handles_it():\n    assert redirect() == 1\n\n\ndef test_other():\n    pass\n",
+        )]);
+        let h = host(&home);
+        let mut s = stage(&h, repo.path(), Some("tests"), 5_000);
+        s.prompt = "where are the tests for redirect handling";
+        let (merged, runs) = apply(&s, "");
+        assert_eq!(outcomes(&runs), [("test-bodies", "ok")]);
+        assert_eq!(
+            merged.unwrap(),
+            "[PIXEL:BRIEF]\n### tests/test_client.py:1-2 — test test_follows_a_redirect_and_handles_it\n1| def test_follows_a_redirect_and_handles_it():\n2|     assert redirect() == 1\n"
+        );
+    }
 }

@@ -8,7 +8,10 @@ the subject words; Rust keeps its tests inline, so a named or subject-named sour
 case is a Python `def test_*`, a JS `it(...)`/`test(...)`, or a Rust `fn` under `#[test]`, cut at its closing line
 and at 40 lines. A case scores by the subject words its name (3x) and body carry (a token starting with the word),
 each weighted by how few cases carry it; cases under half the best score, and ranges the brief already quotes, are
-left out. Read-only, deterministic, at most 9 000 bytes. Issue #1196."""
+left out. Read-only, deterministic, at most 9 000 bytes. Issue #1196.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/test_bodies.rs) and does not start
+this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import json
 import math
 import os
