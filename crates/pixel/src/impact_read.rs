@@ -41,8 +41,10 @@ pub(crate) fn query(
     })?
 }
 
-fn read(path: &Path, symbol: &str, direction: &str, depth: u32) -> Result<Value, String> {
-    let root = crate::discover_root(path)?;
+/// The repository's graph, read-only, inside one read transaction, once its
+/// extractor version and freshness signature check out. Shared by every
+/// bounded no-refresh read (`impact --no-refresh`, the edit hooks).
+pub(crate) fn open_fresh(root: &Path) -> Result<GraphStore, String> {
     let database = root
         .join(pixel_index::index::SHARD_DIR)
         .join(pixel_daemon::api::GRAPH_DB_FILE);
@@ -71,9 +73,15 @@ fn read(path: &Path, symbol: &str, direction: &str, depth: u32) -> Result<Value,
     // Only files edited since the last full build are read and hashed, so
     // the check fits the deadline on a large tree; its stat trust is
     // acceptable for a read the caller verifies against source.
-    if signature != freshness_signature_trusting_stat(&root, &store).map_err(|e| e.to_string())? {
+    if signature != freshness_signature_trusting_stat(root, &store).map_err(|e| e.to_string())? {
         return Err("graph is stale; continue with native tools".into());
     }
+    Ok(store)
+}
+
+fn read(path: &Path, symbol: &str, direction: &str, depth: u32) -> Result<Value, String> {
+    let root = crate::discover_root(path)?;
+    let store = open_fresh(&root)?;
     let mut data = pixel_daemon::api::impact_on_graph(&store, symbol, direction, Some(depth))?;
     data["epistemics"] = serde_json::to_value(pixel_proto::Epistemics {
         basis: "existing graph; source signature checked (files older than the build by mtime)"

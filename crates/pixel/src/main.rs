@@ -47,6 +47,7 @@ mod decide_infisical;
 mod decide_jev;
 mod decide_ollaya;
 mod decide_remote;
+mod edit_hook;
 mod evaluate_cmd;
 mod execution_brief;
 mod graph_shadow_cmd;
@@ -1224,6 +1225,15 @@ enum HookCmd {
         /// flag the one hook prints the whole brief.
         #[arg(long, value_name = "K/N")]
         part: Option<brief_parts::BriefPart>,
+    },
+    /// The optional edit hooks (`pre-edit`, `post-edit`), registered by
+    /// `pixel setup` only when `edit_hooks` is on: the callers a change to a
+    /// declaration strands, before and after the agent writes the file.
+    EditEvent {
+        #[arg(long, value_enum)]
+        provider: task_hook::TaskProvider,
+        #[arg(long, value_enum)]
+        event: edit_hook::EditEvent,
     },
     /// Relay finalized 🟩 metrics lines through a provider's hook contract.
     Metrics {
@@ -5872,6 +5882,7 @@ fn run_command(
                 event,
                 part,
             } => task_hook::run(provider, event, part),
+            HookCmd::EditEvent { provider, event } => edit_hook::run(provider, event),
             HookCmd::Metrics { provider, event } => {
                 hook_metrics::run_metrics_hook(provider, event);
             }

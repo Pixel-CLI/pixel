@@ -19,6 +19,7 @@ mod core_commands_cli;
 mod cycles_cli;
 mod docs_drift;
 mod doctor_cli;
+mod edit_hooks_cli;
 mod evaluate_cli;
 mod execution_brief;
 mod french_brief_cli;

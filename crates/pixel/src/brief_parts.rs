@@ -153,7 +153,7 @@ pub(crate) fn slice(text: &str, part: BriefPart, limits: Limits) -> &str {
         .unwrap_or("")
 }
 
-fn hex(text: &str) -> String {
+pub(crate) fn hex(text: &str) -> String {
     Sha256::digest(text.as_bytes())
         .iter()
         .fold(String::new(), |mut out, byte| {
