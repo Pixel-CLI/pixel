@@ -16,7 +16,9 @@
 //! beside the scripts, under the same `when`, budget and merge, and takes the
 //! place of the installed script of its name, which is not started. A step is
 //! switched off like its script was: `PIXEL_BRIEF_PROBES=0`, or `pixel plugin
-//! disable <name>`.
+//! disable <name>`. A step of the post stage (`stage = "post"` in the manifest
+//! of its probe, [`steps::POST`]) runs after the others, on the brief they
+//! produced, and its output is merged in turn.
 //!
 //! [`merge`] is specified by `scripts/bench/probe-test.py` (`merge`) and pinned by
 //! the golden cases of `tests/fixtures/probe-merge.json`, which both run.
@@ -92,11 +94,23 @@ pub(crate) fn enabled(value: Option<&str>) -> bool {
 /// `brief` after the probes of `stage`, and the run of each: `None` when no
 /// probe added anything.
 pub(crate) fn apply(stage: &Stage, brief: &str) -> (Option<String>, Vec<ProbeRun>) {
-    apply_with(stage, brief, steps::ALL)
+    apply_staged(stage, brief, steps::ALL, steps::POST)
 }
 
-/// [`apply`] with `steps` as the registered ones.
+/// [`apply`] with `steps` as the registered ones and no step of the post stage.
+#[cfg(test)]
 fn apply_with(stage: &Stage, brief: &str, steps: &[&Step]) -> (Option<String>, Vec<ProbeRun>) {
+    apply_staged(stage, brief, steps, &[])
+}
+
+/// [`apply`] with `steps` as the registered ones, and `post` as the steps that
+/// run after them.
+fn apply_staged<'a>(
+    stage: &Stage,
+    brief: &str,
+    steps: &[&'a Step],
+    post: &[&'a Step],
+) -> (Option<String>, Vec<ProbeRun>) {
     let Ok(set) = pixel_plugin::probes(stage.host) else {
         return (None, Vec::new());
     };
@@ -111,16 +125,21 @@ fn apply_with(stage: &Stage, brief: &str, steps: &[&Step]) -> (Option<String>, V
         .filter(|probe| probe.spec.applies(stage.kind, stage.prompt))
         .filter(|probe| !stage.gate_closed || probe.spec.when_gate_closed)
         .filter(|probe| {
-            probe.place != Place::User || !steps.iter().any(|step| step.name == probe.name)
+            probe.place != Place::User
+                || !steps.iter().chain(post).any(|step| step.name == probe.name)
         })
         .collect();
-    let due_steps: Vec<&Step> = steps
-        .iter()
-        .copied()
-        .filter(|step| step.applies(stage.kind, stage.prompt, stage.gate_closed))
-        .filter(|step| !disabled.iter().any(|name| name == step.name))
-        .collect();
-    if due.is_empty() && due_steps.is_empty() {
+    let due_in = |registered: &[&'a Step]| -> Vec<&'a Step> {
+        registered
+            .iter()
+            .copied()
+            .filter(|step| step.applies(stage.kind, stage.prompt, stage.gate_closed))
+            .filter(|step| !disabled.iter().any(|name| name == step.name))
+            .collect()
+    };
+    let due_steps = due_in(steps);
+    let due_post = due_in(post);
+    if due.is_empty() && due_steps.is_empty() && due_post.is_empty() {
         return (None, Vec::new());
     }
     let input = if brief.trim().is_empty() {
@@ -174,15 +193,32 @@ fn apply_with(stage: &Stage, brief: &str, steps: &[&Step]) -> (Option<String>, V
                 });
             scripts.chain(in_process).collect()
         });
-    let runs: Vec<ProbeRun> = results.iter().map(|(_, _, (_, run))| run.clone()).collect();
+    let mut runs: Vec<ProbeRun> = results.iter().map(|(_, _, (_, run))| run.clone()).collect();
     let outputs: Vec<(String, ProbeMode, String)> = results
         .into_iter()
         .filter_map(|(name, mode, (stdout, _))| stdout.map(|out| (name, mode, out)))
         .collect();
-    if outputs.is_empty() {
-        return (None, runs);
+    let mut merged = (!outputs.is_empty()).then(|| merge(&input, &outputs, stage.cap));
+    // The post stage: each step reads what the stages before it made.
+    for step in due_post {
+        let current = merged.as_deref().unwrap_or(&input);
+        let (out, run) = run_step(
+            step,
+            stage.root,
+            stage.prompt,
+            stage.kind,
+            current,
+            stage.deadline,
+        );
+        runs.push(run);
+        if let Some(out) = out {
+            let outputs = [(step.name.to_owned(), step.mode, out)];
+            merged = Some(merge(current, &outputs, stage.cap));
+        }
     }
-    let merged = merge(&input, &outputs, stage.cap);
+    let Some(merged) = merged else {
+        return (None, runs);
+    };
     if stage.max_bytes.is_some_and(|max| merged.len() > max) {
         return (None, runs);
     }
@@ -506,7 +542,7 @@ mod tests {
 
     /// [`super::apply`] without the registered steps: these tests are about
     /// scripts and the merge, and a step that applies to every brief
-    /// (`rank-blocks`) would be a run of theirs.
+    /// (`prune-noise`) would be a run of theirs.
     fn apply(stage: &Stage, brief: &str) -> (Option<String>, Vec<ProbeRun>) {
         apply_with(stage, brief, &[])
     }
@@ -1055,7 +1091,7 @@ mod tests {
         let mut s = stage(&h, repo.path(), Some("tests"), 5_000);
         s.prompt = "where are the tests for redirect handling";
         let (merged, runs) = super::apply(&s, "");
-        // `rank-blocks` applies to every brief and runs beside it.
+        // `rank-blocks` and `prune-noise` apply to every brief and run beside it.
         let ran: Vec<_> = outcomes(&runs)
             .into_iter()
             .filter(|(name, _)| *name == "test-bodies")
@@ -1065,5 +1101,144 @@ mod tests {
             merged.unwrap(),
             "[PIXEL:BRIEF]\n### tests/test_client.py:1-2 — test test_follows_a_redirect_and_handles_it\n1| def test_follows_a_redirect_and_handles_it():\n2|     assert redirect() == 1\n"
         );
+    }
+
+    /// A step of the post stage: it reads the brief the others made, and
+    /// replaces it.
+    const POSTER: Step = Step {
+        name: "poster",
+        when_kinds: &[],
+        skip_kinds: &[],
+        when_prompt: None,
+        when_gate_closed: false,
+        budget_ms: 2_000,
+        mode: ProbeMode::Lead,
+        run: |ctx| {
+            let blocks = ctx
+                .brief
+                .lines()
+                .filter(|line| line.starts_with("### "))
+                .count();
+            format!(
+                "drop: .\n### post.rs:1-1 — {blocks} blocks, kind {:?}\n",
+                ctx.kind
+            )
+        },
+    };
+
+    #[test]
+    fn a_step_is_given_the_kind_of_the_question() {
+        let root = Path::new(".");
+        let far = Instant::now() + Duration::from_secs(60);
+        let kind = step_that(|ctx| format!("### k.rs:1-1 — {:?}\n", ctx.kind));
+        let (text, _) = run_step(&kind, root, "p", Some("flow"), "b", far);
+        assert_eq!(text.as_deref(), Some("### k.rs:1-1 — Some(\"flow\")\n"));
+        let (text, _) = run_step(&kind, root, "p", None, "b", far);
+        assert_eq!(text.as_deref(), Some("### k.rs:1-1 — None\n"));
+    }
+
+    #[test]
+    fn a_post_step_runs_after_the_others_on_the_brief_they_made() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = host(&tmp.path().join("empty-home"));
+        let s = stage(&h, tmp.path(), Some("tests"), 5_000);
+        let (merged, runs) = apply_staged(
+            &s,
+            "[PIXEL:BRIEF]\n### a.rs:1-1 — a\n",
+            &[&DEMO],
+            &[&POSTER],
+        );
+        assert_eq!(outcomes(&runs), [("demo", "ok"), ("poster", "ok")]);
+        assert_eq!(
+            merged.unwrap(),
+            "[PIXEL:BRIEF]\n### post.rs:1-1 — 2 blocks, kind Some(\"tests\")\n",
+            "it saw the brief and the block of the step before it, and knew the kind"
+        );
+    }
+
+    #[test]
+    fn a_post_step_runs_on_the_brief_alone_when_no_other_probe_added_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = host(&tmp.path().join("empty-home"));
+        let s = stage(&h, tmp.path(), Some("tests"), 5_000);
+        let (merged, runs) = apply_staged(&s, "[PIXEL:BRIEF]\n### a.rs:1-1 — a\n", &[], &[&POSTER]);
+        assert_eq!(outcomes(&runs), [("poster", "ok")]);
+        assert_eq!(
+            merged.unwrap(),
+            "[PIXEL:BRIEF]\n### post.rs:1-1 — 1 blocks, kind Some(\"tests\")\n"
+        );
+        let (merged, _) = apply_staged(&s, "", &[], &[&POSTER]);
+        assert_eq!(
+            merged.unwrap(),
+            "[PIXEL:BRIEF]\n### post.rs:1-1 — 0 blocks, kind Some(\"tests\")\n",
+            "an empty brief is given as its tag"
+        );
+    }
+
+    #[test]
+    fn a_post_step_with_nothing_to_say_leaves_what_the_others_made() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = host(&tmp.path().join("empty-home"));
+        let s = stage(&h, tmp.path(), Some("tests"), 5_000);
+        let quiet = Step {
+            name: "quiet",
+            run: |_| String::new(),
+            ..POSTER
+        };
+        let brief = "[PIXEL:BRIEF]\n### a.rs:1-1 — a\n";
+        let (merged, runs) = apply_staged(&s, brief, &[], &[&quiet]);
+        assert_eq!((merged, outcomes(&runs)), (None, vec![("quiet", "empty")]));
+        let (merged, runs) = apply_staged(&s, brief, &[&DEMO], &[&quiet]);
+        assert_eq!(outcomes(&runs), [("demo", "ok"), ("quiet", "empty")]);
+        assert_eq!(
+            merged.unwrap(),
+            "[PIXEL:BRIEF]\n### a.rs:1-1 — a\n### demo.rs:1-1 — where is it | [PIXEL:BRIEF]\n"
+        );
+    }
+
+    #[test]
+    fn a_post_step_takes_the_place_of_its_script_and_is_switched_off_like_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fixture_probe(&home, "poster", SCRIPT, "");
+        let h = host(&home);
+        let s = stage(&h, tmp.path(), Some("tests"), 5_000);
+        let (_, runs) = apply_staged(&s, "[PIXEL:BRIEF]\n", &[], &[&POSTER]);
+        assert_eq!(
+            outcomes(&runs),
+            [("poster", "ok")],
+            "the script is not started"
+        );
+        pixel_plugin::disable(&h, "poster").unwrap();
+        assert_eq!(
+            apply_staged(&s, "[PIXEL:BRIEF]\n", &[], &[&POSTER]),
+            (None, Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_post_step_follows_its_when_and_the_closed_gate_and_the_byte_limit_applies_to_its_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = host(&tmp.path().join("empty-home"));
+        let brief = "[PIXEL:BRIEF]\n### a.rs:1-1 — a\n";
+        let flow_only = Step {
+            when_kinds: &["flow"],
+            ..POSTER
+        };
+        let tests = stage(&h, tmp.path(), Some("tests"), 5_000);
+        assert_eq!(
+            apply_staged(&tests, brief, &[], &[&flow_only]),
+            (None, Vec::new())
+        );
+        let mut closed = stage(&h, tmp.path(), Some("tests"), 5_000);
+        closed.gate_closed = true;
+        assert_eq!(
+            apply_staged(&closed, brief, &[], &[&POSTER]),
+            (None, Vec::new())
+        );
+        let mut small = stage(&h, tmp.path(), Some("tests"), 5_000);
+        small.max_bytes = Some(10);
+        let (merged, runs) = apply_staged(&small, brief, &[], &[&POSTER]);
+        assert_eq!((merged, outcomes(&runs)), (None, vec![("poster", "ok")]));
     }
 }

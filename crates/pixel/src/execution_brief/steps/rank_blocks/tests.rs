@@ -284,7 +284,8 @@ fn the_registered_step_takes_the_script_s_place_and_leads_the_brief() {
         headers(&merged),
         [
             "### src/limits.rs:3-27 — MAX_RETRIES (constant, with context)",
-            "### src/client.rs:2-2 — retry the MAX_RETRIES",
+            // `prune-noise`, which runs after, writes a one-line span as one number.
+            "### src/client.rs:2 — retry the MAX_RETRIES",
         ]
     );
     assert!(!merged.contains("unrelated"), "{merged}");

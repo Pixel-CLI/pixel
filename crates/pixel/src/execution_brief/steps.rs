@@ -46,6 +46,18 @@ macro_rules! register {
     };
 }
 
+/// Declares the modules of the steps that run after the others (`stage =
+/// "post"` in the manifest of their probe) and lists them in [`POST`].
+macro_rules! register_post {
+    ($($module:ident),* $(,)?) => {
+        $(mod $module;)*
+
+        /// Every step of the post stage: each runs on the brief the others
+        /// made, one after the other (`probes::apply`).
+        pub(crate) const POST: &[&Step] = &[$(&$module::STEP),*];
+    };
+}
+
 register!(
     cand_j_chain,
     test_bodies,
@@ -67,6 +79,8 @@ mod pytext;
 mod text;
 // Not steps: what two of them share.
 mod commit_lookup;
+
+register_post!(prune_noise);
 
 /// A brief probe in Rust.
 pub(crate) struct Step {
@@ -461,7 +475,11 @@ mod tests {
     #[test]
     fn every_step_applies_exactly_where_the_manifest_of_its_probe_does() {
         let probes = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../probes");
-        for step in ALL {
+        let staged = ALL
+            .iter()
+            .map(|step| (*step, false))
+            .chain(POST.iter().map(|step| (*step, true)));
+        for (step, post) in staged {
             let manifest = probes.join(step.name).join("pixel-plugin.toml");
             // A probe deleted after its port has nothing left to match.
             let Ok(text) = std::fs::read_to_string(&manifest) else {
@@ -512,6 +530,12 @@ mod tests {
                 step.name
             );
             assert_eq!(table["owner"].as_str(), Some("pixel"), "{}", step.name);
+            assert_eq!(
+                table.get("stage").and_then(|item| item.as_str()),
+                post.then_some("post"),
+                "{}",
+                step.name
+            );
         }
     }
 
@@ -577,6 +601,17 @@ mod tests {
     }
 
     #[test]
+    fn a_request_carries_the_kind_of_the_question_when_it_is_given_one() {
+        let dir = fixture();
+        assert_eq!(ctx(dir.path(), 5_000).kind, None);
+        let asked = ctx(dir.path(), 5_000).with_kind(Some("flow"));
+        assert_eq!(
+            (asked.kind, asked.prompt, asked.brief),
+            (Some("flow"), "p", "b")
+        );
+    }
+
+    #[test]
     fn a_step_out_of_time_lists_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(dir.path(), "p", "b", Instant::now());
@@ -593,17 +628,22 @@ mod tests {
     #[ignore = "driven by scripts/bench/step-parity.py"]
     fn print_the_output_of_the_step_named_by_the_environment() {
         let name = std::env::var("PIXEL_STEP").unwrap();
-        let step = ALL.iter().find(|step| step.name == name).unwrap();
+        let step = ALL
+            .iter()
+            .chain(POST)
+            .find(|step| step.name == name)
+            .unwrap();
         let request: serde_json::Value = serde_json::from_reader(std::io::stdin()).unwrap();
         let text = |key: &str| request[key].as_str().unwrap_or_default().to_owned();
         let (root, prompt, brief) = (text("repo_root"), text("prompt"), text("brief"));
+        let kind = request["kind"].as_str().map(ToOwned::to_owned);
         let ctx = Ctx::new(
             Path::new(&root),
             &prompt,
             &brief,
             Instant::now() + Duration::from_millis(step.budget_ms),
         )
-        .with_kind(request["kind"].as_str());
+        .with_kind(kind.as_deref());
         print!("<<<STEP\n{}STEP>>>\n", (step.run)(&ctx));
     }
 }

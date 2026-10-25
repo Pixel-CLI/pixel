@@ -17,7 +17,10 @@ Rules, each generic (they read the block's header shape, never a name, and the q
   total      default 8 KB, 12 KB for flow and test questions; the least valuable blocks go first
 
 It replaces the whole brief (`drop: .` then its own blocks, mode lead) and prints nothing when nothing shrank.
-Read-only, deterministic, no network."""
+Read-only, deterministic, no network.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/prune_noise.rs, stage "post")
+and does not start this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import json
 import os
 import re
