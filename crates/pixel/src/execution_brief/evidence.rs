@@ -802,7 +802,7 @@ impl Evidence for Live {
 /// `deadline` as wall-clock milliseconds since the Unix epoch, the form a
 /// request carries to the daemon (`pixel_proto::REQUEST_DEADLINE_FIELD`): the
 /// daemon stops at the very instant this process does.
-fn unix_ms_at(deadline: Instant) -> u64 {
+pub(super) fn unix_ms_at(deadline: Instant) -> u64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -812,7 +812,7 @@ fn unix_ms_at(deadline: Instant) -> u64 {
 
 /// A connection to the repository's daemon socket whose reads and writes give
 /// up when `deadline` does; `None` when nothing listens or no time is left.
-fn connect(root: &Path, deadline: Instant) -> Option<UnixStream> {
+pub(super) fn connect(root: &Path, deadline: Instant) -> Option<UnixStream> {
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .filter(|left| !left.is_zero())?;

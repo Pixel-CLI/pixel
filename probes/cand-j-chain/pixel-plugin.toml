@@ -6,7 +6,7 @@ run = "probe"
 capabilities = ["brief-probe"]
 
 [brief-probe]
-owner = "LivioGama"
+owner = "pixel"
 when_prompt = "(?i)\\b(trace|call (chain|path)|end to end|walk (me )?through|from \\w+ (through|to|into))\\b"
 skip_kinds = ["overview", "review", "history"]
 when_gate_closed = true

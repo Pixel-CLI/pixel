@@ -10,7 +10,10 @@ the shortest chain from the entry to a constructor. Each hop is shown at its cal
 the other callees of the entry that take the target in their signature are shown at their head, and, at each hop,
 the callees whose names carry the question's words (generic words weigh nothing) follow, two levels deep. The
 brief's own flow blocks are replaced. Needs `pixel` (PIXEL_BIN, else PATH) and its daemon; prints nothing
-without a chain. Read-only, deterministic, no network."""
+without a chain. Read-only, deterministic, no network.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/cand_j_chain.rs) and does not start
+this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import json
 import os
 import re

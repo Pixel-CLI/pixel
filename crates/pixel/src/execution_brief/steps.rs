@@ -47,6 +47,7 @@ macro_rules! register {
 }
 
 register!(
+    cand_j_chain,
     test_bodies,
     workspace_overview,
     overview_answer_evidence,
@@ -55,8 +56,10 @@ register!(
     name_files
 );
 
+mod graph;
 /// Python's text handling, for the steps ported from a script.
 mod pytext;
+mod text;
 
 /// A brief probe in Rust.
 pub(crate) struct Step {
