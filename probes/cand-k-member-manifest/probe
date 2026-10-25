@@ -11,7 +11,10 @@ numbers, so features, optional and dev dependencies and deprecation comments are
 of the member's directory (examples, readme, tests included, which `ls` would show). Brief blocks outside the
 member's directory are dropped: the lexical neighbours of a crate question are other crates' files.
 
-Read-only (git ls-files, file reads), deterministic, nothing printed when no member is named."""
+Read-only (git ls-files, file reads), deterministic, nothing printed when no member is named.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/member_manifest.rs) and does not
+start this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import json
 import os
 import re
