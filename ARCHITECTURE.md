@@ -1707,6 +1707,20 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
 `.pixel/brief-decisions.jsonl`. `scripts/bench/probe-equivalence.py` checks the native brief against the reference chain
 `scripts/bench/probe-chain.py` on the census questions.
 
+A probe can also be a *step*: the same rule written in Rust in `crates/pixel/src/execution_brief/steps/<name>.rs` and
+listed by name in the `register!` call of `steps.rs` (`steps::ALL`). `probes::apply_with` runs the due steps in the
+brief's own process, beside the due scripts and in the same scoped threads, under the `when_kinds` / `skip_kinds` /
+`when_prompt` / `when_gate_closed`, `budget_ms` and `mode` the step declares (`Step::spec` builds the same `ProbeSpec`
+a manifest does). A step returns the text a script would print (`### header` blocks and `drop:` / `first:` lines),
+so `merge` stays one specification. Its `steps::Ctx` hands it the prompt, the brief and the tracked files (one `git
+ls-files -z` shared by every step of the brief) and reads a regular file without following a link; it shares the
+process, so it stops itself at `Ctx::timed_out` and an answer that comes after its limit is dropped (`timeout`). A
+step takes the place of the user-tier script of its name, which is not started (a repository's trusted probe of the
+same name is another plugin and still runs); `pixel plugin disable <name>` switches the step off; each run is
+logged under the step's name like a script's. While `pixel setup` still installs the script of a ported probe, the
+host skips it. `scripts/bench/step-parity.py <name>` judges the script and the step with `probe-test.py` on the same
+baseline briefs and compares what each merged into them.
+
 ## Testing and gates
 
 The `pixel-bench` wire benchmark calls the production bounded reader and compares

@@ -27,6 +27,7 @@ pub(crate) mod relevance;
 pub(crate) mod routes;
 pub(crate) mod sent;
 pub(crate) mod session_paths;
+mod steps;
 mod words;
 
 const MAX_CAPS: usize = 32;

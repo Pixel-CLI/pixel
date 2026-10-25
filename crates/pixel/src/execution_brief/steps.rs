@@ -1,0 +1,440 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
+//! Brief steps: a brief probe written in Rust.
+//!
+//! A probe (`probes/<name>/`) is a script the plugin host starts for every
+//! prompt: an interpreter boots, `git ls-files` and `rg` run, and what it
+//! prints is merged into the brief. A step is the same rule as a function of
+//! the same request, run inside the brief's process: no interpreter, one
+//! `git ls-files` shared by every step, and the same tests as any other code.
+//!
+//! A step is a [`Step`]: when it applies (`when_kinds`, `when_prompt`,
+//! `skip_kinds`, `when_gate_closed`, `budget_ms` and `mode` mean what they do
+//! in a probe's `[brief-probe]` table) and a `run` that reads a [`Ctx`] and
+//! returns what the script would have printed: `### header` blocks, then
+//! lines, and the `drop:` / `first:` directives. The text goes through the
+//! same [`merge`](super::probes::merge) as a script's, so the output rules
+//! (cap, order, a header already held is skipped) are one specification.
+//!
+//! To add a step: write `steps/<name>.rs` with a `pub(super) const STEP:
+//! Step`, and list the module in the `register!` call below. A step with the
+//! name of an installed user-tier probe replaces it: the host does not start
+//! the script (`probes::apply`), so the brief never runs both.
+//!
+//! A step must not panic (the release build aborts on a panic, which would
+//! end the hook) and must stop at [`Ctx::timed_out`]: it shares the process,
+//! so the brief cannot kill it the way it kills a script at its budget.
+
+use std::cell::OnceCell;
+use std::fs::OpenOptions;
+use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
+use std::time::Instant;
+
+use pixel_git::{ENUMERATION_MAX_OUTPUT_BYTES, GitOptions, GitRunner};
+use pixel_plugin::{ProbeMode, ProbeSpec};
+
+/// Declares the step modules and lists them in [`ALL`]: one name per step.
+macro_rules! register {
+    ($($module:ident),* $(,)?) => {
+        $(mod $module;)*
+
+        /// Every step.
+        pub(crate) const ALL: &[&Step] = &[$(&$module::STEP),*];
+    };
+}
+
+register!();
+
+/// A brief probe in Rust.
+pub(crate) struct Step {
+    /// The name of the probe it replaces (`probes/<name>/`).
+    pub(crate) name: &'static str,
+    /// Applies to these question kinds; with `when_prompt`, either is enough.
+    pub(crate) when_kinds: &'static [&'static str],
+    /// Never applies to these kinds.
+    pub(crate) skip_kinds: &'static [&'static str],
+    /// Applies when the prompt matches this regex (searched, not anchored).
+    pub(crate) when_prompt: Option<&'static str>,
+    /// Applies when the relevance gate is closed (needs `when_prompt`).
+    pub(crate) when_gate_closed: bool,
+    /// Wall time the step gets, inside what is left of the brief's window.
+    pub(crate) budget_ms: u64,
+    /// Where its blocks go relative to the brief's own.
+    pub(crate) mode: ProbeMode,
+    /// The step: the blocks and directives it adds to the brief, or `""`.
+    pub(crate) run: fn(&Ctx) -> String,
+}
+
+impl Step {
+    /// The `[brief-probe]` table of the same rule.
+    pub(crate) fn spec(&self) -> ProbeSpec {
+        let owned = |items: &[&str]| items.iter().map(ToString::to_string).collect();
+        ProbeSpec {
+            owner: "pixel".to_owned(),
+            when_kinds: owned(self.when_kinds),
+            skip_kinds: owned(self.skip_kinds),
+            when_prompt: self.when_prompt.map(ToString::to_string),
+            when_gate_closed: self.when_gate_closed,
+            budget_ms: self.budget_ms,
+            mode: self.mode,
+        }
+    }
+
+    /// Whether the step runs for a brief of `kind` asked `prompt`.
+    pub(crate) fn applies(&self, kind: Option<&str>, prompt: &str, gate_closed: bool) -> bool {
+        (!gate_closed || self.when_gate_closed) && self.spec().applies(kind, prompt)
+    }
+}
+
+/// What a step is given: the request a probe gets on stdin, and the files of
+/// the repository, read through the brief's deadline.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the first step, ported next, reads files through it"
+    )
+)]
+pub(crate) struct Ctx<'a> {
+    /// What the user typed.
+    pub(crate) prompt: &'a str,
+    /// The brief the step adds to (it opens on `[PIXEL:BRIEF]`).
+    pub(crate) brief: &'a str,
+    root: &'a Path,
+    deadline: Instant,
+    tracked: OnceCell<Option<Vec<String>>>,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the first step, ported next, reads files through it"
+    )
+)]
+impl<'a> Ctx<'a> {
+    pub(crate) fn new(root: &'a Path, prompt: &'a str, brief: &'a str, deadline: Instant) -> Self {
+        Self {
+            prompt,
+            brief,
+            root,
+            deadline,
+            tracked: OnceCell::new(),
+        }
+    }
+
+    /// Whether the step's time is up: it returns what it has, or nothing.
+    pub(crate) fn timed_out(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+
+    /// The tracked files, listed once for every step of the brief; `None`
+    /// when git cannot list them in time.
+    pub(crate) fn files(&self) -> Option<&[String]> {
+        self.tracked
+            .get_or_init(|| {
+                let left = self.deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return None;
+                }
+                let git = GitRunner::with_options(
+                    self.root,
+                    GitOptions {
+                        timeout: Some(left),
+                        max_output_bytes: Some(ENUMERATION_MAX_OUTPUT_BYTES),
+                    },
+                );
+                // `-z` lists a name as it is, not quoted; a name that is not
+                // UTF-8 cannot be a path of a brief block and is left out.
+                let out = git.run_isolated(&["ls-files", "-z"]).ok()?;
+                Some(
+                    out.split(|byte| *byte == 0)
+                        .filter_map(|name| std::str::from_utf8(name).ok())
+                        .filter(|name| !name.is_empty())
+                        .map(ToString::to_string)
+                        .collect(),
+                )
+            })
+            .as_deref()
+    }
+
+    /// The text of the tracked file `path`, lossily decoded. `None` when it is
+    /// not a regular file (a link is never followed, a pipe never opened for
+    /// good), cannot be read, or holds more than `limit` bytes.
+    pub(crate) fn read(&self, path: &str, limit: u64) -> Option<String> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(self.root.join(path))
+            .ok()?;
+        if !file.metadata().ok()?.is_file() {
+            return None;
+        }
+        let mut raw = Vec::new();
+        (&mut file)
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut raw)
+            .ok()?;
+        (u64::try_from(raw.len()).ok()? <= limit)
+            .then(|| String::from_utf8_lossy(&raw).into_owned())
+    }
+}
+
+/// The words of code or prose, split at case changes, digits and punctuation,
+/// lowercased: `HTTPServerError2` is `http`, `server`, `error`, `2`. The same
+/// words as `re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", text)` in a probe
+/// script: a run of capitals stops before the capital that starts the next
+/// word.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the first step, ported next, splits words with it"
+    )
+)]
+pub(crate) fn subwords(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let run_end = |from: usize, keep: fn(char) -> bool| {
+        from + chars[from..].iter().take_while(|ch| keep(**ch)).count()
+    };
+    let lower = |ch: char| ch.is_ascii_lowercase();
+    let upper = |ch: char| ch.is_ascii_uppercase();
+    let word = |from: usize, to: usize| chars[from..to].iter().collect::<String>().to_lowercase();
+    let mut words = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        if upper(chars[at]) {
+            let capitals = run_end(at, upper);
+            let before_lower = chars.get(capitals).copied().is_some_and(lower);
+            // `HTTPServer`: the capitals but the last, which starts `Server`.
+            let end = if before_lower { capitals - 1 } else { capitals };
+            if end > at {
+                words.push(word(at, end));
+                at = end;
+                continue;
+            }
+            let end = run_end(at + 1, lower);
+            words.push(word(at, end));
+            at = end;
+        } else if lower(chars[at]) {
+            let end = run_end(at, lower);
+            words.push(word(at, end));
+            at = end;
+        } else if chars[at].is_ascii_digit() {
+            let end = run_end(at, |ch| ch.is_ascii_digit());
+            words.push(word(at, end));
+            at = end;
+        } else {
+            at += 1;
+        }
+    }
+    words
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    //! What the tests of a step share: a real git repository in a temp dir
+    //! (the steps wrap `git ls-files`, so nothing is mocked).
+
+    use super::*;
+    use std::process::Command;
+
+    /// A repository whose index holds `files` (`path`, `text`).
+    pub(crate) fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in files {
+            let file = dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
+        }
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["add", "."]);
+        dir
+    }
+
+    pub(crate) fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn subwords_split_like_the_script_regex() {
+        assert_eq!(
+            subwords("HTTPServerError2"),
+            ["http", "server", "error", "2"]
+        );
+        assert_eq!(
+            subwords("followRedirect_v2"),
+            ["follow", "redirect", "v", "2"]
+        );
+        assert_eq!(subwords("ABc"), ["a", "bc"]);
+        assert_eq!(subwords("XML"), ["xml"]);
+        assert_eq!(subwords("a-B c"), ["a", "b", "c"]);
+        assert_eq!(subwords("Ab"), ["ab"]);
+        assert_eq!(subwords("é"), Vec::<String>::new());
+        assert_eq!(subwords(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn every_step_applies_exactly_where_the_manifest_of_its_probe_does() {
+        let probes = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../probes");
+        for step in ALL {
+            let manifest = probes.join(step.name).join("pixel-plugin.toml");
+            // A probe deleted after its port has nothing left to match.
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                continue;
+            };
+            let doc: toml_edit::DocumentMut = text.parse().unwrap();
+            let table = &doc["brief-probe"];
+            let strings = |key: &str| -> Vec<String> {
+                table
+                    .get(key)
+                    .and_then(|item| item.as_array())
+                    .map_or_else(Vec::new, |array| {
+                        array
+                            .iter()
+                            .filter_map(|item| item.as_str().map(ToString::to_string))
+                            .collect()
+                    })
+            };
+            let spec = step.spec();
+            assert_eq!(spec.when_kinds, strings("when_kinds"), "{}", step.name);
+            assert_eq!(spec.skip_kinds, strings("skip_kinds"), "{}", step.name);
+            assert_eq!(
+                spec.when_prompt.as_deref(),
+                table.get("when_prompt").and_then(|item| item.as_str()),
+                "{}",
+                step.name
+            );
+            assert_eq!(
+                spec.when_gate_closed,
+                table
+                    .get("when_gate_closed")
+                    .and_then(toml_edit::Item::as_bool)
+                    .unwrap_or(false),
+                "{}",
+                step.name
+            );
+            assert_eq!(
+                i64::try_from(spec.budget_ms).ok(),
+                table.get("budget_ms").and_then(toml_edit::Item::as_integer),
+                "{}",
+                step.name
+            );
+            let mode = table.get("mode").and_then(|item| item.as_str());
+            assert_eq!(
+                spec.mode == ProbeMode::Lead,
+                mode == Some("lead"),
+                "{}",
+                step.name
+            );
+            assert_eq!(table["owner"].as_str(), Some("pixel"), "{}", step.name);
+        }
+    }
+
+    #[test]
+    fn a_step_never_runs_for_a_closed_gate_unless_it_says_so() {
+        let open = Step {
+            name: "x",
+            when_kinds: &["tests"],
+            skip_kinds: &["history"],
+            when_prompt: None,
+            when_gate_closed: false,
+            budget_ms: 100,
+            mode: ProbeMode::Append,
+            run: |_| String::new(),
+        };
+        assert!(open.applies(Some("tests"), "p", false));
+        assert!(!open.applies(Some("tests"), "p", true));
+        assert!(!open.applies(Some("history"), "p", false));
+        assert!(!open.applies(Some("flow"), "p", false));
+        let closed = Step {
+            when_prompt: Some("tests"),
+            when_gate_closed: true,
+            ..open
+        };
+        assert!(closed.applies(None, "which tests", true));
+        assert!(!closed.applies(None, "which spans", true));
+    }
+
+    fn fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "abc").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("a.txt"), dir.path().join("link.txt")).unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        dir
+    }
+
+    fn ctx(root: &Path, ms: u64) -> Ctx<'_> {
+        Ctx::new(root, "p", "b", Instant::now() + Duration::from_millis(ms))
+    }
+
+    #[test]
+    fn read_returns_a_regular_file_within_the_limit_and_nothing_else() {
+        let dir = fixture();
+        let ctx = ctx(dir.path(), 5_000);
+        assert_eq!(ctx.read("a.txt", 3).as_deref(), Some("abc"));
+        assert_eq!(ctx.read("a.txt", 2), None, "one byte over the limit");
+        assert_eq!(ctx.read("link.txt", 100), None, "a link is not followed");
+        assert_eq!(ctx.read("sub", 100), None, "a directory is not a file");
+        assert_eq!(ctx.read("absent.txt", 100), None);
+    }
+
+    #[test]
+    fn files_lists_the_tracked_names_once_and_not_the_untracked_ones() {
+        let dir = testing::repo(&[("tracked.rs", "x"), ("é.rs", "x")]);
+        let root = dir.path();
+        std::fs::write(root.join("loose.rs"), "x").unwrap();
+        let ctx = ctx(root, 5_000);
+        let mut files = ctx.files().unwrap().to_vec();
+        files.sort();
+        assert_eq!(files, ["tracked.rs", "é.rs"]);
+        std::fs::remove_file(root.join("tracked.rs")).unwrap();
+        assert_eq!(ctx.files().unwrap().len(), 2, "listed once per brief");
+    }
+
+    #[test]
+    fn a_step_out_of_time_lists_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(dir.path(), "p", "b", Instant::now());
+        assert!(ctx.timed_out());
+        assert!(ctx.files().is_none());
+        let ahead = self::ctx(dir.path(), 5_000);
+        assert!(!ahead.timed_out());
+    }
+
+    /// How `scripts/bench/step-parity.py` runs a step on the request a probe
+    /// gets on stdin: the step named by `PIXEL_STEP`, its output between two
+    /// marker lines.
+    #[test]
+    #[ignore = "driven by scripts/bench/step-parity.py"]
+    fn print_the_output_of_the_step_named_by_the_environment() {
+        let name = std::env::var("PIXEL_STEP").unwrap();
+        let step = ALL.iter().find(|step| step.name == name).unwrap();
+        let request: serde_json::Value = serde_json::from_reader(std::io::stdin()).unwrap();
+        let text = |key: &str| request[key].as_str().unwrap_or_default().to_owned();
+        let (root, prompt, brief) = (text("repo_root"), text("prompt"), text("brief"));
+        let ctx = Ctx::new(
+            Path::new(&root),
+            &prompt,
+            &brief,
+            Instant::now() + Duration::from_millis(step.budget_ms),
+        );
+        print!("<<<STEP\n{}STEP>>>\n", (step.run)(&ctx));
+    }
+}

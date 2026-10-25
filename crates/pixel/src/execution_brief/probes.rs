@@ -12,6 +12,12 @@
 //! them into the brief. A probe that times out, fails or prints nothing is
 //! skipped and logged; the brief is never worse for a probe that broke.
 //!
+//! A probe ported to Rust is a [`Step`] (`steps/`): it runs in this process
+//! beside the scripts, under the same `when`, budget and merge, and takes the
+//! place of the installed script of its name, which is not started. A step is
+//! switched off like its script was: `PIXEL_BRIEF_PROBES=0`, or `pixel plugin
+//! disable <name>`.
+//!
 //! [`merge`] is specified by `scripts/bench/probe-test.py` (`merge`) and pinned by
 //! the golden cases of `tests/fixtures/probe-merge.json`, which both run.
 
@@ -20,9 +26,11 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use pixel_plugin::{Host, Probe, ProbeMode};
+use pixel_plugin::{Config, Host, Place, Probe, ProbeMode};
 use regex::Regex;
 use serde_json::json;
+
+use super::steps::{self, Ctx, Step};
 
 /// Environment opt-out: `0`, `false` or `off` runs no probe.
 pub(crate) const PROBES_ENV: &str = "PIXEL_BRIEF_PROBES";
@@ -46,6 +54,18 @@ pub(crate) struct ProbeRun {
     pub(crate) bytes: usize,
     /// `ok`, `empty`, `timeout`, `failed` or `skipped`.
     pub(crate) outcome: &'static str,
+}
+
+impl ProbeRun {
+    /// The run of `name` that began at `started` and ended now.
+    fn since(name: &str, started: Instant, outcome: &'static str, bytes: usize) -> Self {
+        Self {
+            name: name.to_owned(),
+            ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            bytes,
+            outcome,
+        }
+    }
 }
 
 /// What the brief hands the probe stage.
@@ -72,16 +92,35 @@ pub(crate) fn enabled(value: Option<&str>) -> bool {
 /// `brief` after the probes of `stage`, and the run of each: `None` when no
 /// probe added anything.
 pub(crate) fn apply(stage: &Stage, brief: &str) -> (Option<String>, Vec<ProbeRun>) {
+    apply_with(stage, brief, steps::ALL)
+}
+
+/// [`apply`] with `steps` as the registered ones.
+fn apply_with(stage: &Stage, brief: &str, steps: &[&Step]) -> (Option<String>, Vec<ProbeRun>) {
     let Ok(set) = pixel_plugin::probes(stage.host) else {
         return (None, Vec::new());
     };
+    let disabled = Config::at(stage.host.config_file())
+        .disabled()
+        .unwrap_or_default();
+    // A script is not started when a step takes its place; a repository's
+    // own probe of the same name is another plugin and still runs.
     let due: Vec<&Probe> = set
         .probes
         .iter()
         .filter(|probe| probe.spec.applies(stage.kind, stage.prompt))
         .filter(|probe| !stage.gate_closed || probe.spec.when_gate_closed)
+        .filter(|probe| {
+            probe.place != Place::User || !steps.iter().any(|step| step.name == probe.name)
+        })
         .collect();
-    if due.is_empty() {
+    let due_steps: Vec<&Step> = steps
+        .iter()
+        .copied()
+        .filter(|step| step.applies(stage.kind, stage.prompt, stage.gate_closed))
+        .filter(|step| !disabled.iter().any(|name| name == step.name))
+        .collect();
+    if due.is_empty() && due_steps.is_empty() {
         return (None, Vec::new());
     }
     let input = if brief.trim().is_empty() {
@@ -98,36 +137,38 @@ pub(crate) fn apply(stage: &Stage, brief: &str) -> (Option<String>, Vec<ProbeRun
     })
     .to_string();
     let exe = std::env::current_exe().unwrap_or_default();
-    let results: Vec<(Option<String>, ProbeRun)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = due
-            .iter()
-            .map(|probe| scope.spawn(|| run_one(probe, &request, stage.root, &exe, stage.deadline)))
-            .collect();
-        handles
-            .into_iter()
-            .zip(&due)
-            .map(|(handle, probe)| {
-                handle.join().unwrap_or_else(|_| {
-                    (
-                        None,
-                        ProbeRun {
-                            name: probe.name.clone(),
-                            ms: 0,
-                            bytes: 0,
-                            outcome: "failed",
-                        },
-                    )
+    let results: Vec<(String, ProbeMode, (Option<String>, ProbeRun))> =
+        std::thread::scope(|scope| {
+            let scripts: Vec<_> = due
+                .iter()
+                .map(|probe| {
+                    scope.spawn(|| run_one(probe, &request, stage.root, &exe, stage.deadline))
                 })
-            })
-            .collect()
-    });
-    let runs: Vec<ProbeRun> = results.iter().map(|(_, run)| run.clone()).collect();
+                .collect();
+            let in_process: Vec<_> = due_steps
+                .iter()
+                .map(|step| {
+                    scope.spawn(|| run_step(step, stage.root, stage.prompt, &input, stage.deadline))
+                })
+                .collect();
+            let failed = |name: &str| (None, ProbeRun::since(name, Instant::now(), "failed", 0));
+            let scripts = scripts.into_iter().zip(&due).map(|(handle, probe)| {
+                let done = handle.join().unwrap_or_else(|_| failed(&probe.name));
+                (probe.name.clone(), probe.spec.mode, done)
+            });
+            let in_process = in_process
+                .into_iter()
+                .zip(&due_steps)
+                .map(|(handle, step)| {
+                    let done = handle.join().unwrap_or_else(|_| failed(step.name));
+                    (step.name.to_owned(), step.mode, done)
+                });
+            scripts.chain(in_process).collect()
+        });
+    let runs: Vec<ProbeRun> = results.iter().map(|(_, _, (_, run))| run.clone()).collect();
     let outputs: Vec<(String, ProbeMode, String)> = results
         .into_iter()
-        .zip(&due)
-        .filter_map(|((stdout, _), probe)| {
-            stdout.map(|out| (probe.name.clone(), probe.spec.mode, out))
-        })
+        .filter_map(|(name, mode, (stdout, _))| stdout.map(|out| (name, mode, out)))
         .collect();
     if outputs.is_empty() {
         return (None, runs);
@@ -148,12 +189,8 @@ fn run_one(
     deadline: Instant,
 ) -> (Option<String>, ProbeRun) {
     let started = Instant::now();
-    let run = |outcome: &'static str, bytes: usize| ProbeRun {
-        name: probe.name.clone(),
-        ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        bytes,
-        outcome,
-    };
+    let run =
+        |outcome: &'static str, bytes: usize| ProbeRun::since(&probe.name, started, outcome, bytes);
     let limit = (started + Duration::from_millis(probe.spec.budget_ms)).min(deadline);
     if started >= limit {
         return (None, run("skipped", 0));
@@ -217,6 +254,34 @@ fn run_one(
         return (None, run("failed", 0));
     }
     let text = String::from_utf8_lossy(&raw).into_owned();
+    if text.trim().is_empty() {
+        return (None, run("empty", 0));
+    }
+    let bytes = text.len();
+    (Some(text), run("ok", bytes))
+}
+
+/// Run one step inside `min(budget, what is left of the window)`. It shares
+/// the process, so it cannot be killed at the limit: it stops itself there
+/// ([`Ctx::timed_out`]), and an answer that comes later is dropped.
+fn run_step(
+    step: &Step,
+    root: &Path,
+    prompt: &str,
+    brief: &str,
+    deadline: Instant,
+) -> (Option<String>, ProbeRun) {
+    let started = Instant::now();
+    let run =
+        |outcome: &'static str, bytes: usize| ProbeRun::since(step.name, started, outcome, bytes);
+    let limit = (started + Duration::from_millis(step.budget_ms)).min(deadline);
+    if started >= limit {
+        return (None, run("skipped", 0));
+    }
+    let text = (step.run)(&Ctx::new(root, prompt, brief, limit));
+    if Instant::now() > limit {
+        return (None, run("timeout", 0));
+    }
     if text.trim().is_empty() {
         return (None, run("empty", 0));
     }
@@ -797,5 +862,153 @@ mod tests {
         let mut output = Vec::new();
         std::io::Read::read_to_end(&mut stdout, &mut output).unwrap();
         assert!(output.is_empty());
+    }
+
+    /// A step that shows what it was given, and the script it replaces.
+    const DEMO: Step = Step {
+        name: "demo",
+        when_kinds: &["tests"],
+        skip_kinds: &[],
+        when_prompt: None,
+        when_gate_closed: false,
+        budget_ms: 2_000,
+        mode: ProbeMode::Append,
+        run: |ctx| {
+            let first = ctx.brief.lines().next().unwrap_or_default();
+            format!("### demo.rs:1-1 — {} | {first}\n", ctx.prompt)
+        },
+    };
+    const SCRIPT: &str =
+        "#!/bin/sh\ncat >/dev/null\nprintf '### script.rs:1-1 — the script ran\\n'\n";
+
+    fn outcomes(runs: &[ProbeRun]) -> Vec<(&str, &str)> {
+        runs.iter()
+            .map(|run| (run.name.as_str(), run.outcome))
+            .collect()
+    }
+
+    #[test]
+    fn a_step_takes_the_place_of_the_installed_script_of_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fixture_probe(&home, "demo", SCRIPT, "");
+        fixture_probe(&home, "other", SCRIPT, "");
+        let h = host(&home);
+        let s = stage(&h, tmp.path(), Some("tests"), 5_000);
+        let (merged, runs) = apply_with(&s, "", &[&DEMO]);
+        assert_eq!(
+            outcomes(&runs),
+            [("other", "ok"), ("demo", "ok")],
+            "the script of another name runs beside the step, the script of its own does not"
+        );
+        assert_eq!(
+            merged.unwrap(),
+            "[PIXEL:BRIEF]\n### demo.rs:1-1 — where is it | [PIXEL:BRIEF]\n### script.rs:1-1 — the script ran\n"
+        );
+    }
+
+    #[test]
+    fn a_step_runs_with_no_script_installed_and_is_given_the_prompt_and_the_brief() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = host(&tmp.path().join("empty-home"));
+        let s = stage(&h, tmp.path(), Some("tests"), 5_000);
+        let (merged, runs) = apply_with(&s, "[PIXEL:BRIEF]\n### a.rs:1-1 — a\n", &[&DEMO]);
+        assert_eq!(outcomes(&runs), [("demo", "ok")]);
+        assert_eq!(
+            merged.unwrap(),
+            "[PIXEL:BRIEF]\n### a.rs:1-1 — a\n### demo.rs:1-1 — where is it | [PIXEL:BRIEF]\n"
+        );
+    }
+
+    #[test]
+    fn a_step_is_switched_off_like_its_script_was() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fixture_probe(&home, "demo", SCRIPT, "");
+        let h = host(&home);
+        let s = stage(&h, tmp.path(), Some("tests"), 5_000);
+        pixel_plugin::disable(&h, "demo").unwrap();
+        assert_eq!(apply_with(&s, "", &[&DEMO]), (None, Vec::new()));
+        pixel_plugin::enable(&h, "demo").unwrap();
+        let (_, runs) = apply_with(&s, "", &[&DEMO]);
+        assert_eq!(outcomes(&runs), [("demo", "ok")]);
+    }
+
+    #[test]
+    fn a_step_follows_its_when_and_the_closed_gate_like_a_script() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = host(&tmp.path().join("empty-home"));
+        let none = (None, Vec::new());
+        let flow = stage(&h, tmp.path(), Some("flow"), 5_000);
+        assert_eq!(
+            apply_with(&flow, "", &[&DEMO]),
+            none,
+            "a kind it does not name"
+        );
+        let mut closed = stage(&h, tmp.path(), Some("tests"), 5_000);
+        closed.gate_closed = true;
+        assert_eq!(
+            apply_with(&closed, "", &[&DEMO]),
+            none,
+            "a closed gate runs only opted-in steps"
+        );
+        let opted_in = Step {
+            name: "demo-closed",
+            when_kinds: &[],
+            when_prompt: Some("where"),
+            when_gate_closed: true,
+            ..DEMO
+        };
+        let (merged, runs) = apply_with(&closed, "", &[&DEMO, &opted_in]);
+        assert_eq!(outcomes(&runs), [("demo-closed", "ok")]);
+        assert!(merged.is_some());
+    }
+
+    #[test]
+    fn a_probe_of_the_repository_with_the_name_of_a_step_is_another_plugin_and_still_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, repo) = (tmp.path().join("home"), tmp.path().join("repo"));
+        fixture_probe(&repo, "demo", SCRIPT, "");
+        let h = Host {
+            repo_root: Some(repo.clone()),
+            ..host(&home)
+        };
+        pixel_plugin::trust(&h, "demo").unwrap();
+        let s = stage(&h, &repo, Some("tests"), 5_000);
+        let (_, runs) = apply_with(&s, "", &[&DEMO]);
+        assert_eq!(outcomes(&runs), [("demo", "ok"), ("demo", "ok")]);
+    }
+
+    fn step_that(run: fn(&Ctx) -> String) -> Step {
+        Step {
+            name: "x",
+            when_kinds: &[],
+            skip_kinds: &[],
+            when_prompt: None,
+            when_gate_closed: false,
+            budget_ms: 40,
+            mode: ProbeMode::Append,
+            run,
+        }
+    }
+
+    #[test]
+    fn a_step_is_run_inside_its_budget_and_an_answer_after_it_is_dropped() {
+        let root = Path::new(".");
+        let far = Instant::now() + Duration::from_secs(60);
+        let said = step_that(|_| "### a — a\n".to_owned());
+        let (text, run) = run_step(&said, root, "p", "b", far);
+        assert_eq!(text.as_deref(), Some("### a — a\n"));
+        assert_eq!((run.name.as_str(), run.outcome, run.bytes), ("x", "ok", 12));
+        let quiet = step_that(|_| " \n".to_owned());
+        assert_eq!(run_step(&quiet, root, "p", "b", far).1.outcome, "empty");
+        let late = step_that(|_| {
+            std::thread::sleep(Duration::from_millis(120));
+            "### late — late\n".to_owned()
+        });
+        let (text, run) = run_step(&late, root, "p", "b", far);
+        assert_eq!((text, run.outcome), (None, "timeout"));
+        let (text, run) = run_step(&said, root, "p", "b", Instant::now());
+        assert_eq!((text, run.outcome), (None, "skipped"));
     }
 }

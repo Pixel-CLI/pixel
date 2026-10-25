@@ -281,11 +281,13 @@ python3 -I scripts/bench/probe-test.py my-probe --live   # opt-in: the agent wit
   contributor needs no private data. A maintainer's local census is an optional second source, `--census-db
   <census.db>`; its prompts are never committed. The PR states the `PROBE ... | KEEP` line `probe-test` prints and
   `report.md`.
-- Shipping: register a validated probe in `crates/pixel-setup/src/bundled_probes.rs` and its explicit shipping
-  allowlist test. Registered probes are embedded in the binary and installed by `pixel setup` into
-  `~/.pixel/plugins/<name>/`; the prompt-submit brief runs it (see ARCHITECTURE.md, "Agent integration").
-  `pixel plugin disable <name>` switches one off, `enable` back on. CI runs `probe-test.py --check-all` on every
-  directory of `probes/`; experimental directories are not automatically installed.
+- Shipping: a validated probe ships as a Rust step in `crates/pixel/src/execution_brief/steps/<name>.rs`, registered
+  by one name in `steps.rs`, and `python3 -I scripts/bench/step-parity.py <name>` shows it covers what the script
+  did (see `.agents/skills/probe/SKILL.md`, step 8). The script stays in `probes/<name>/` as its oracle. The
+  fourteen scripts registered in `crates/pixel-setup/src/bundled_probes.rs` are embedded in the binary and installed
+  by `pixel setup` into `~/.pixel/plugins/<name>/`; the brief skips the installed script of a name that has a step.
+  `pixel plugin disable <name>` switches a probe or a step off, `enable` back on. CI runs `probe-test.py
+  --check-all` on every directory of `probes/`; experimental directories are not automatically installed.
 
 ## Mutation testing
 

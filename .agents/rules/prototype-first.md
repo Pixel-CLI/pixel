@@ -29,6 +29,9 @@ paid several times.
 - **Not for bug fixes with a known cause.** A defect whose fix is already
   clear goes straight to a test and the fix; this rule is for changes whose
   benefit is a bet.
-- **A prototype that works becomes a probe.** A brief heuristic proven by a script is shipped as
-  `probes/<name>/` (a generic script plus its manifest), judged by `scripts/bench/probe-test.py` and written with the
-  `probe` skill (`.agents/skills/probe/SKILL.md`); not as a Rust change to the brief.
+- **A prototype that works becomes a step.** A brief heuristic proven by a script is first `probes/<name>/` (a generic
+  script plus its manifest, not registered in `bundled_probes.rs`), judged by `scripts/bench/probe-test.py` and written
+  with the `probe` skill (`.agents/skills/probe/SKILL.md`). A KEEP ships as a Rust step, not as a registered script: port
+  it to `crates/pixel/src/execution_brief/steps/<name>.rs` (one file, one name in `register!`), prove it with
+  `scripts/bench/step-parity.py <name>` (same coverage, same merged briefs as the script) and the brief's latency lane,
+  and keep the script as the oracle that parity runs against. Not as a change to the brief's chain.

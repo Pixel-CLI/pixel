@@ -7,8 +7,8 @@ description: "Create or refine a brief probe, make a question zero-call, or run 
 
 A probe is a script in `probes/<name>/` that adds evidence to the prompt-submit brief (contract: CONTRIBUTING.md,
 "Write a probe"). `/probe "<question>" [--repo <path>]` does the whole job from a plain prompt. Prototype in a
-script first (`.agents/rules/prototype-first.md`); Rust is for the brief's integration, never for one probe's idea.
-Use the frozen `pixel` (`--bin`), never a rebuild.
+script first (`.agents/rules/prototype-first.md`); the Rust is written only for a KEEP, as a step (step 8), never to
+find out whether an idea works. Use the frozen `pixel` (`--bin`), never a rebuild while validating.
 
 **Agent.** The scripts take `--agent codex|claude` (default: the agent this runs under, `claude` inside Claude Code;
 `PIXEL_PROBE_AGENT` overrides). Claude runs use `claude -p --output-format stream-json` with a per-run settings
@@ -46,6 +46,13 @@ the Claude quota, so pass `--agent codex` for heavy loops. Both streams are norm
    logged as hypothesis -> predicted -> live -> kept/dropped.
 7. **Hand back** a report: calls before -> after, the probe diff, the bench delta. With the user's ok, commit the
    probe on the current branch; a KEEP becomes a PR (`Refs #906`), a DROP is reported and not merged.
+8. **Ship a KEEP as a step.** The script stays in `probes/<name>/` (unregistered) as the oracle; the shipped form is
+   `crates/pixel/src/execution_brief/steps/<name>.rs`: a `pub(super) const STEP: Step` (the manifest's `when_*`,
+   `budget_ms`, `mode`) whose `run(&Ctx) -> String` returns what the script printed, plus one name in `register!`
+   (`steps.rs`). Port the script's cases as the step's tests (`steps::testing::repo` builds the git fixture), then run
+   `python3 -I scripts/bench/step-parity.py <name> --bin <pixel built before the port>`: both arms' `probe-test` verdicts
+   and `identical` on every question. A step has no process to kill: it must not panic (release aborts) and checks
+   `ctx.timed_out()` in its loops.
 
 For a question already in a recorded set use the same harness directly: `brief-check.py --all`,
 `probe-translate.py <id>`, `probe-test.py <name> [--live]`. The default set is the **public bench**
