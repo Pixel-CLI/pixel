@@ -3,8 +3,10 @@
 
 //! `pixel-plugin.toml`: what a plugin directory declares about itself.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Component, Path};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use toml_edit::{DocumentMut, Item};
 
@@ -97,9 +99,24 @@ impl ProbeSpec {
             || self
                 .when_prompt
                 .as_deref()
-                .and_then(|pattern| regex::Regex::new(pattern).ok())
+                .and_then(compiled)
                 .is_some_and(|re| re.is_match(prompt))
     }
+}
+
+/// `pattern` compiled once per process: every brief asks each probe and step
+/// whether it applies, and compiling their patterns afresh took 76 ms of a
+/// debug build's window. `None` for a pattern that does not compile.
+fn compiled(pattern: &str) -> Option<regex::Regex> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    cache
+        .entry(pattern.to_owned())
+        .or_insert_with(|| regex::Regex::new(pattern).ok())
+        .clone()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

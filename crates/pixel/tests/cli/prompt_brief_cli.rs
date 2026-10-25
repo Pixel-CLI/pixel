@@ -188,7 +188,8 @@ fn stamp(path: &Path) -> (u64, SystemTime) {
 fn rename_prompt_should_carry_files_definition_and_callers_in_the_hook_context() {
     let root = indexed("rename");
     for provider in ["claude", "codex"] {
-        let output = hook(&root, provider, RENAME, &[]);
+        // The built-in probe steps (`name-files`) would add their blocks here.
+        let output = hook(&root, provider, RENAME, &[("PIXEL_BRIEF_PROBES", "0")]);
         assert_eq!(
             output["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit",
             "{provider}"
