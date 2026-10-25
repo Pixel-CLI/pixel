@@ -5,7 +5,10 @@
 """history-fallback: a history question whose brief has no history block (no history index, a lookup that missed
 the window) is answered from git itself: the commits naming a version the prompt quotes, else `log --grep` on the
 prompt's rarest words, a `-S` pickaxe on the rarest, then the top commit's message, stat, patch (a merge against its
-first parent) and first tag. Read-only git, deterministic."""
+first parent) and first tag. Read-only git, deterministic.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/history_fallback.rs) and does not
+start this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import collections
 import json
 import math

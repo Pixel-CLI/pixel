@@ -55,13 +55,16 @@ register!(
     doc_sections,
     name_files,
     flow_rank,
-    cand_j_stop_cause
+    cand_j_stop_cause,
+    history_fallback
 );
 
 mod graph;
 /// Python's text handling, for the steps ported from a script.
 mod pytext;
 mod text;
+// Not steps: what two of them share.
+mod commit_lookup;
 
 /// A brief probe in Rust.
 pub(crate) struct Step {
@@ -290,6 +293,63 @@ pub(crate) mod testing {
     ) -> String {
         let deadline = Instant::now() + Duration::from_secs(15);
         (step.run)(&Ctx::new(root, prompt, brief, deadline).with_kind(kind))
+    }
+
+    /// What the brief's probe stage makes of `brief` for a `kind` question in
+    /// `root`, with a script named like the step installed in a throwaway home
+    /// (it prints `### script.rs:1-1 — the script ran`): the merged brief, and
+    /// the `(name, outcome)` of each run. Proves a step is registered and that
+    /// it takes the script's place.
+    pub(crate) fn applied(
+        name: &str,
+        root: &Path,
+        kind: &str,
+        prompt: &str,
+        brief: &str,
+    ) -> (Option<String>, Vec<(String, &'static str)>) {
+        use super::super::probes::{self, Stage};
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".pixel/plugins").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pixel-plugin.toml"),
+            format!(
+                "name = \"{name}\"\nversion = \"0.1.0\"\napi = 1\ndescription = \"d\"\nrun = \"probe\"\ncapabilities = [\"brief-probe\"]\n\n[brief-probe]\nowner = \"o\"\nbudget_ms = 400\n"
+            ),
+        )
+        .unwrap();
+        let script = dir.join("probe");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ncat >/dev/null\nprintf '### script.rs:1-1 — the script ran\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = pixel_plugin::Host {
+            home: tmp.path().to_path_buf(),
+            repo_root: None,
+            path: std::ffi::OsString::new(),
+            github_base: None,
+        };
+        let stage = Stage {
+            host: &host,
+            root,
+            prompt,
+            kind: Some(kind),
+            gate_closed: false,
+            deadline: Instant::now() + Duration::from_secs(10),
+            cap: 3 * 9_800,
+            max_bytes: None,
+        };
+        let (merged, runs) = probes::apply(&stage, brief);
+        (
+            merged,
+            runs.into_iter()
+                .map(|run| (run.name, run.outcome))
+                .collect(),
+        )
     }
 
     /// The `### ` lines of an output.
