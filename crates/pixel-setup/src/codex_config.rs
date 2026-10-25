@@ -84,6 +84,7 @@ pub(crate) fn install_task_hooks(
     codex_home: &Path,
     exe: &Path,
     prompt_parts: u8,
+    edit_hooks: bool,
     dry_run: bool,
 ) -> Result<InstallStep> {
     let path = codex_home.join(HOOKS_FILE);
@@ -117,6 +118,14 @@ pub(crate) fn install_task_hooks(
     let before = hooks.clone();
     if let Err(error) =
         crate::routing::merge_task_hooks(hooks, crate::routing::Provider::Codex, exe, prompt_parts)
+            .and_then(|()| {
+                crate::routing::merge_edit_hooks(
+                    hooks,
+                    crate::routing::Provider::Codex,
+                    exe,
+                    edit_hooks,
+                )
+            })
     {
         return Ok(step(CheckStatus::Red, format!("{error} — not touched")));
     }
@@ -153,6 +162,7 @@ pub(crate) fn install_task_hooks(
 pub(crate) fn check_task_hooks(
     codex_home: &Path,
     exe: &Path,
+    edit_hooks: bool,
 ) -> std::result::Result<(String, serde_json::Value), String> {
     let path = codex_home.join(HOOKS_FILE);
     let detail = serde_json::json!({
@@ -177,6 +187,14 @@ pub(crate) fn check_task_hooks(
         }
         return Err(format!(
             "task lifecycle hooks missing or asynchronous in {} — run `pixel setup`",
+            path.display()
+        ));
+    }
+    if edit_hooks
+        && !crate::routing::edit_hooks_registered(&value, crate::routing::Provider::Codex, exe)
+    {
+        return Err(format!(
+            "edit hooks missing in {} while `edit_hooks` is on — run `pixel setup`",
             path.display()
         ));
     }
@@ -867,8 +885,8 @@ mod tests {
     #[test]
     fn task_hook_reinstall_refreshes_the_binary_path_without_duplicating_events() {
         let home = scratch_codex_home("refresh");
-        install_task_hooks(&home, Path::new("/old/pixel"), 1, false).unwrap();
-        install_task_hooks(&home, Path::new("/new/pixel"), 1, false).unwrap();
+        install_task_hooks(&home, Path::new("/old/pixel"), 1, false, false).unwrap();
+        install_task_hooks(&home, Path::new("/new/pixel"), 1, false, false).unwrap();
         let hooks = hook_events(&home);
         let commands = hooks.to_string();
         assert!(commands.contains("/new/pixel"), "{commands}");
@@ -895,7 +913,7 @@ mod tests {
     fn task_hook_install_should_remove_renamed_pixel_callbacks_only() {
         let home = scratch_codex_home("renamed");
         let exe = Path::new("/opt/pixel custom/pixel-next");
-        install_task_hooks(&home, exe, 1, false).unwrap();
+        install_task_hooks(&home, exe, 1, false, false).unwrap();
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
         value["hooks"]["PostToolUse"] = serde_json::json!([
@@ -908,7 +926,7 @@ mod tests {
         )
         .unwrap();
 
-        install_task_hooks(&home, exe, 1, false).unwrap();
+        install_task_hooks(&home, exe, 1, false, false).unwrap();
         let hooks = hook_events(&home);
         let post = hooks["PostToolUse"].as_array().unwrap();
         assert_eq!(
@@ -926,7 +944,7 @@ mod tests {
             "'/opt/pixel custom/pixel-next' run-hook task-event --provider codex --event post-tool-use || true",
             "task lifecycle command is preserved"
         );
-        assert!(check_task_hooks(&home, exe).is_ok());
+        assert!(check_task_hooks(&home, exe, false).is_ok());
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -934,7 +952,7 @@ mod tests {
     fn task_hook_install_refuses_unparseable_hooks_json() {
         let home = scratch_codex_home("broken");
         fs::write(home.join(HOOKS_FILE), "not json").unwrap();
-        let step = install_task_hooks(&home, Path::new("/x"), 1, false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), 1, false, false).unwrap();
         assert_eq!(step.status, CheckStatus::Red);
         assert_eq!(
             fs::read_to_string(home.join(HOOKS_FILE)).unwrap(),
@@ -942,7 +960,7 @@ mod tests {
             "an unparseable file is never rewritten"
         );
         fs::write(home.join(HOOKS_FILE), "{\"hooks\": [1]}").unwrap();
-        let step = install_task_hooks(&home, Path::new("/x"), 1, false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), 1, false, false).unwrap();
         assert_eq!(
             step.status,
             CheckStatus::Red,
@@ -958,7 +976,7 @@ mod tests {
         // user including root — and is not "absent": it must come back Red,
         // never Ok-treated-as-empty.
         fs::create_dir(home.join(HOOKS_FILE)).unwrap();
-        let step = install_task_hooks(&home, Path::new("/x"), 1, false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), 1, false, false).unwrap();
         assert_eq!(step.status, CheckStatus::Red, "{}", step.summary);
         assert!(step.summary.contains("not touched"), "{}", step.summary);
         let _ = fs::remove_dir_all(&home);
@@ -968,12 +986,12 @@ mod tests {
     fn task_hook_check_requires_registration_and_rejects_retired_hooks() {
         let home = scratch_codex_home("check");
         assert!(
-            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            check_task_hooks(&home, Path::new("pixel"), false).is_err(),
             "absent file has no task lifecycle"
         );
         fs::write(home.join(HOOKS_FILE), "{\"hooks\": {}}").unwrap();
         assert!(
-            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            check_task_hooks(&home, Path::new("pixel"), false).is_err(),
             "empty hooks object has no task lifecycle"
         );
         fs::write(
@@ -987,11 +1005,11 @@ mod tests {
         )
         .unwrap();
         assert!(
-            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            check_task_hooks(&home, Path::new("pixel"), false).is_err(),
             "a partial task lifecycle is not registered"
         );
-        install_task_hooks(&home, Path::new("pixel"), 1, false).unwrap();
-        assert!(check_task_hooks(&home, Path::new("pixel")).is_ok());
+        install_task_hooks(&home, Path::new("pixel"), 1, false, false).unwrap();
+        assert!(check_task_hooks(&home, Path::new("pixel"), false).is_ok());
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
         value["hooks"]["PostToolUse"] = serde_json::json!([
@@ -1003,7 +1021,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            check_task_hooks(&home, Path::new("pixel"), false).is_err(),
             "legacy automatic metric entry is rejected"
         );
         let _ = fs::remove_dir_all(&home);
@@ -1012,8 +1030,8 @@ mod tests {
     #[test]
     fn task_hook_install_keeps_the_task_prompt_event_but_removes_pixel_guidance() {
         let home = scratch_codex_home("half-registered");
-        install_task_hooks(&home, Path::new("pixel"), 1, false).unwrap();
-        assert!(check_task_hooks(&home, Path::new("pixel")).is_ok());
+        install_task_hooks(&home, Path::new("pixel"), 1, false, false).unwrap();
+        assert!(check_task_hooks(&home, Path::new("pixel"), false).is_ok());
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
         value["hooks"]["UserPromptSubmit"]
@@ -1026,7 +1044,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            check_task_hooks(&home, Path::new("pixel"), false).is_err(),
             "removing the task prompt event breaks the registered lifecycle"
         );
         let _ = fs::remove_dir_all(&home);

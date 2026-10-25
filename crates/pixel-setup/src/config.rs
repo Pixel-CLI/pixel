@@ -72,6 +72,26 @@ pub fn brief_parts(home: &Path, repo: Option<&Path>) -> u8 {
         })
 }
 
+/// Settings key of the edit hooks (`pixel config edit_hooks on`): the card
+/// before an agent edits a file and the stale-callers note after it.
+pub const EDIT_HOOKS_KEY: &str = "edit_hooks";
+
+/// Whether `pixel setup` registers the edit hooks: `edit_hooks: true` in the
+/// repository's `.pixel/config.yaml` when `repo` is given and sets it, else in
+/// the global `~/.pixel/config.yaml`. Off when neither says so, and a value
+/// that is not a boolean counts as unset.
+pub fn edit_hooks(home: &Path, repo: Option<&Path>) -> bool {
+    repo.into_iter()
+        .chain([home])
+        .find_map(|dir| {
+            crate::doctor::load_pixel_config(dir)
+                .ok()?
+                .get(EDIT_HOOKS_KEY)?
+                .as_bool()
+        })
+        .unwrap_or(false)
+}
+
 /// Settings key of the time one prompt brief may take.
 pub const BRIEF_WINDOW_KEY: &str = "brief_window_ms";
 /// Environment override of [`BRIEF_WINDOW_KEY`], in milliseconds; it wins over both config layers.
@@ -356,6 +376,23 @@ mod tests {
             brief_parts(home.path(), Some(repo.path())),
             5,
             "a repository layer that does not set it defers to the global one"
+        );
+    }
+
+    #[test]
+    fn edit_hooks_should_be_off_unless_a_layer_turns_them_on() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(!edit_hooks(home.path(), None));
+        write_config(home.path(), "edit_hooks: true\n");
+        assert!(edit_hooks(home.path(), None));
+        assert!(edit_hooks(home.path(), Some(repo.path())));
+        write_config(repo.path(), "edit_hooks: false\n");
+        assert!(!edit_hooks(home.path(), Some(repo.path())));
+        write_config(home.path(), "edit_hooks: 'yes'\n");
+        assert!(
+            !edit_hooks(home.path(), None),
+            "not a boolean counts as unset"
         );
     }
 

@@ -691,7 +691,7 @@ mod roundtrip_tests {
         let toml = home.path().join(".codex/config.toml");
         let text = "# my model\nmodel  = 'o3'\n";
         fs::write(&toml, text).unwrap();
-        crate::codex_config::install_task_hooks(&home.path().join(".codex"), exe, 1, false)
+        crate::codex_config::install_task_hooks(&home.path().join(".codex"), exe, 1, false, false)
             .unwrap();
         remove_pixel_hooks_from_settings(&home.path().join(config::CODEX_HOOKS_FILE), exe, false)
             .unwrap();

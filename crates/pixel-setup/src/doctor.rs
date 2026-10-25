@@ -327,7 +327,11 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     runner.check(
         "install.codex-metrics-hook",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            let (summary, detail) = crate::codex_config::check_task_hooks(&codex_home, &exe)?;
+            let (summary, detail) = crate::codex_config::check_task_hooks(
+                &codex_home,
+                &exe,
+                crate::config::edit_hooks(&home, None),
+            )?;
             Ok(DoctorCheckDetail {
                 summary,
                 detail: Some(detail),
@@ -396,6 +400,16 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             if !claude_metrics_relay_registered(&value, &exe) {
                 missing.push("PostToolUse metrics relay".to_owned());
             }
+            let edit_hooks = crate::config::edit_hooks(&home, None);
+            if edit_hooks
+                && !crate::routing::edit_hooks_registered(
+                    &value,
+                    crate::routing::Provider::Claude,
+                    &exe,
+                )
+            {
+                missing.push("edit hooks (`edit_hooks` is on)".to_owned());
+            }
             if !missing.is_empty() {
                 return Err(format!(
                     "missing pixel hooks in {}: {} — run `pixel setup`",
@@ -422,6 +436,16 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     brief_parts_drift(&path, installed, crate::config::brief_parts(&home, None))
             {
                 return Ok((CheckStatus::Yellow, drift, Remedy::Catalogue));
+            }
+            if status == CheckStatus::Green
+                && !edit_hooks
+                && crate::routing::edit_hooks_present(&value, &exe)
+            {
+                return Ok((
+                    CheckStatus::Yellow,
+                    edit_hooks_drift(&path),
+                    Remedy::Catalogue,
+                ));
             }
             Ok((status, detail, Remedy::Catalogue))
         },
@@ -751,6 +775,18 @@ fn brief_parts_drift(path: &Path, installed: u8, configured: u8) -> Option<Docto
             "configured_parts": configured,
         })),
     })
+}
+
+/// Yellow outcome when edit hooks are registered in `path` but `edit_hooks`
+/// is off: `pixel setup` takes them out.
+fn edit_hooks_drift(path: &Path) -> DoctorCheckDetail {
+    DoctorCheckDetail {
+        summary: format!(
+            "edit hooks are registered in {}, but `edit_hooks` is off — run `pixel setup`",
+            path.display()
+        ),
+        detail: Some(serde_json::json!({"path": path.display().to_string()})),
+    }
 }
 
 /// Whether Claude has exactly the `PostToolUse` metrics relay setup writes.

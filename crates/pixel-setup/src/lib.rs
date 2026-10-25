@@ -20,6 +20,7 @@ pub mod bundled_probes;
 pub mod codex_config;
 pub mod config;
 pub mod doctor;
+pub mod edit_input;
 pub mod install;
 mod json_edit;
 pub mod opencode_config;

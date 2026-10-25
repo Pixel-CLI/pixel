@@ -113,7 +113,8 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
                 config::PIXEL_EXECUTABLES.contains(&name.as_str())
                     || own.as_deref() == Some(name.as_str())
             }) && (["metrics --provider claude", "metrics --provider codex"].contains(verb)
-                || task_hook_verb(verb))
+                || task_hook_verb(verb)
+                || edit_hook_verb(verb))
         })
         .map(|(_, verb)| verb)
 }
@@ -223,20 +224,34 @@ fn task_hook_verb(verb: &str) -> bool {
     parse_task_verb(verb).is_some()
 }
 
-/// Replace only Pixel task registrations, preserving foreign hooks and trust.
+/// The edit hooks, off unless `edit_hooks` is on: the host event each rides
+/// and the `edit-event` word it passes. They sit beside the task-event
+/// entries of the same host event, with no matcher, because each host names
+/// its edit tools differently and `edit-event` ignores any other tool.
+pub(crate) const EDIT_HOOK_EVENTS: &[(&str, &str)] =
+    &[("PreToolUse", "pre-edit"), ("PostToolUse", "post-edit")];
+
+fn edit_hook_verb(verb: &str) -> bool {
+    match verb.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["edit-event", "--provider", provider, "--event", event] => {
+            matches!(*provider, "claude" | "codex" | "devin")
+                && EDIT_HOOK_EVENTS.iter().any(|(_, name)| name == event)
+        }
+        _ => false,
+    }
+}
+
+/// Takes out every Pixel entry whose verb satisfies `owned`, keeping foreign
+/// hooks and the rest of each group, and returns where each event's first
+/// emptied group sat.
 ///
-/// `prompt_parts` is how many `UserPromptSubmit` entries carry the brief for
-/// a host with a per-hook cap on injected context (Claude Code and Codex;
-/// every other provider keeps one): each is the same command with
-/// `--part K/N`, so a brief larger than one hook may inject still arrives.
-pub(crate) fn merge_task_hooks(
+/// Codex keys a hook's trust by its group index, so Pixel's new groups go
+/// where its old ones were, not after the user's.
+fn purge_verbs(
     hooks: &mut Map<String, Value>,
-    provider: Provider,
     exe: &Path,
-    prompt_parts: u8,
-) -> Result<(), String> {
-    // Codex keys a hook's trust by its group index, so Pixel's new groups go
-    // where its old ones were, not after the user's.
+    owned: fn(&str) -> bool,
+) -> HashMap<String, usize> {
     let mut slots: HashMap<String, usize> = HashMap::new();
     for (event, groups) in hooks.iter_mut() {
         let Some(groups) = groups.as_array_mut() else {
@@ -251,7 +266,7 @@ pub(crate) fn merge_task_hooks(
                         .get("command")
                         .and_then(Value::as_str)
                         .and_then(|command| pixel_hook_verb(command, exe))
-                        .is_some_and(task_hook_verb)
+                        .is_some_and(owned)
                 });
                 if inner.is_empty() {
                     if before > 0 {
@@ -264,6 +279,60 @@ pub(crate) fn merge_task_hooks(
         }
         *groups = kept;
     }
+    slots
+}
+
+/// Replaces Pixel's edit hooks (see [`EDIT_HOOK_EVENTS`]) in `hooks`: always
+/// takes the old ones out, and writes them again only when `enabled`. With
+/// `enabled` false it removes nothing but the edit hooks, so a setup with the
+/// switch off writes what it wrote before the switch existed.
+pub(crate) fn merge_edit_hooks(
+    hooks: &mut Map<String, Value>,
+    provider: Provider,
+    exe: &Path,
+    enabled: bool,
+) -> Result<(), String> {
+    let slots = purge_verbs(hooks, exe, edit_hook_verb);
+    hooks.retain(|event, groups| {
+        !(slots.contains_key(event) && groups.as_array().is_some_and(Vec::is_empty))
+    });
+    if !enabled {
+        return Ok(());
+    }
+    for &(event, name) in EDIT_HOOK_EVENTS {
+        let groups = hooks
+            .entry(event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| format!("{event} is not an array"))?;
+        let command = fail_open(&format!(
+            "{} run-hook edit-event --provider {} --event {name}",
+            quoted_executable(exe),
+            provider.name()
+        ));
+        let at = slots
+            .get(event)
+            .copied()
+            .unwrap_or(groups.len())
+            .min(groups.len());
+        groups.insert(at, hook_group(command, None));
+    }
+    Ok(())
+}
+
+/// Replace only Pixel task registrations, preserving foreign hooks and trust.
+///
+/// `prompt_parts` is how many `UserPromptSubmit` entries carry the brief for
+/// a host with a per-hook cap on injected context (Claude Code and Codex;
+/// every other provider keeps one): each is the same command with
+/// `--part K/N`, so a brief larger than one hook may inject still arrives.
+pub(crate) fn merge_task_hooks(
+    hooks: &mut Map<String, Value>,
+    provider: Provider,
+    exe: &Path,
+    prompt_parts: u8,
+) -> Result<(), String> {
+    let slots = purge_verbs(hooks, exe, task_hook_verb);
     if provider == Provider::Devin {
         // A previous install wrote the events Devin does not accept; the
         // purge above emptied their groups, and a key left empty still makes
@@ -412,6 +481,28 @@ pub(crate) fn task_hooks_registered(value: &Value, provider: Provider, exe: &Pat
     })
 }
 
+/// Whether every edit hook of `provider` is registered, synchronous and
+/// unrestricted.
+pub(crate) fn edit_hooks_registered(value: &Value, provider: Provider, exe: &Path) -> bool {
+    EDIT_HOOK_EVENTS.iter().all(|(event, name)| {
+        let expected = format!("edit-event --provider {} --event {name}", provider.name());
+        eligible_verbs(value, event, exe).contains(&expected.as_str())
+    })
+}
+
+/// Whether any edit hook is registered, whatever its provider or state.
+pub(crate) fn edit_hooks_present(value: &Value, exe: &Path) -> bool {
+    value
+        .get("hooks")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|events| events.values())
+        .filter_map(Value::as_array)
+        .flat_map(|groups| commands(groups))
+        .filter_map(|command| pixel_hook_verb(command, exe))
+        .any(edit_hook_verb)
+}
+
 /// Preserve outer matchers and co-located foreign/security hooks.
 /// Every entry [`is_pixel_hook`] recognises goes, so one pass also collapses
 /// entries an earlier install stacked.
@@ -472,21 +563,23 @@ fn hook_group(command: String, matcher: Option<&str>) -> Value {
 /// Register the task-event hooks of `provider` in the settings file `path`,
 /// replacing only Pixel's own entries and keeping every foreign one. Claude
 /// also receives its `PostToolUse` metrics relay. `prompt_parts` is how many
-/// hooks carry the prompt brief (see [`merge_task_hooks`]).
+/// hooks carry the prompt brief (see [`merge_task_hooks`]); `edit_hooks` adds
+/// the edit hooks (see [`merge_edit_hooks`]).
 pub(crate) fn install_task_events(
     path: &Path,
     exe: &Path,
     provider: Provider,
     prompt_parts: u8,
+    edit_hooks: bool,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
     let mut value = install::read_settings(path)?;
-    configure_task_events(&mut value, provider, exe, prompt_parts).map_err(|reason| {
-        InstallError::InvalidSettings {
+    configure_task_events(&mut value, provider, exe, prompt_parts, edit_hooks).map_err(
+        |reason| InstallError::InvalidSettings {
             path: path.into(),
             reason,
-        }
-    })?;
+        },
+    )?;
     let backup = install::write_settings(path, &value, dry_run)?;
     Ok(install::InstallStep {
         id: format!("hooks.{}", provider.name()),
@@ -511,6 +604,7 @@ fn configure_task_events(
     provider: Provider,
     exe: &Path,
     prompt_parts: u8,
+    edit_hooks: bool,
 ) -> Result<(), String> {
     let root = value
         .as_object_mut()
@@ -529,7 +623,8 @@ fn configure_task_events(
             .ok_or("PostToolUse is not an array")?
             .push(metrics_relay_group(exe, provider));
     }
-    merge_task_hooks(hooks, provider, exe, prompt_parts)
+    merge_task_hooks(hooks, provider, exe, prompt_parts)?;
+    merge_edit_hooks(hooks, provider, exe, edit_hooks)
 }
 
 /// Every hook command of `groups`, in order.
@@ -678,6 +773,93 @@ mod tests {
         ] {
             assert!(!is_pixel_hook(command, exe), "{command}");
         }
+    }
+
+    /// What `configure_task_events` writes for `provider` into a fresh file.
+    fn written(provider: Provider, edit_hooks: bool) -> Value {
+        let mut value = json!({});
+        configure_task_events(&mut value, provider, Path::new("/tmp/pixel"), 1, edit_hooks)
+            .unwrap();
+        value
+    }
+
+    #[test]
+    fn edit_hooks_off_should_write_what_task_hooks_alone_write() {
+        let exe = Path::new("/tmp/pixel");
+        for provider in [Provider::Claude, Provider::Codex, Provider::Devin] {
+            // The body of `configure_task_events` before the switch existed.
+            let mut expected = json!({"hooks": {}});
+            if provider == Provider::Claude {
+                expected["hooks"]["PostToolUse"] = json!([metrics_relay_group(exe, provider)]);
+            }
+            merge_task_hooks(expected["hooks"].as_object_mut().unwrap(), provider, exe, 1).unwrap();
+            let written = written(provider, false);
+            assert_eq!(written, expected, "{provider:?}");
+            assert!(!edit_hooks_present(&written, exe));
+        }
+    }
+
+    #[test]
+    fn edit_hooks_on_should_add_two_failing_open_entries_recognised_everywhere() {
+        let exe = Path::new("/tmp/pixel");
+        for provider in [Provider::Claude, Provider::Codex, Provider::Devin] {
+            let on = written(provider, true);
+            let off = written(provider, false);
+            assert!(edit_hooks_registered(&on, provider, exe), "{provider:?}");
+            assert!(!edit_hooks_registered(&off, provider, exe));
+            assert!(task_hooks_registered(&on, provider, exe));
+            assert!(stacked_pixel_hooks(&on, exe).is_empty());
+            for (event, name) in EDIT_HOOK_EVENTS {
+                let command = format!(
+                    "'/tmp/pixel' run-hook edit-event --provider {} --event {name}{FAIL_OPEN}",
+                    provider.name()
+                );
+                assert!(
+                    on["hooks"][*event].to_string().contains(&command),
+                    "{provider:?} {event}"
+                );
+                assert!(is_pixel_hook(&command, exe));
+                // Recognised with or without the tail, so an older entry is replaced.
+                assert!(is_pixel_hook(command.trim_end_matches(FAIL_OPEN), exe));
+            }
+            // Writing again changes nothing; switching off gives the off file back.
+            let mut again = on.clone();
+            configure_task_events(&mut again, provider, exe, 1, true).unwrap();
+            assert_eq!(again, on);
+            merge_edit_hooks(
+                again["hooks"].as_object_mut().unwrap(),
+                provider,
+                exe,
+                false,
+            )
+            .unwrap();
+            assert_eq!(again, off, "{provider:?}");
+            // Removal takes the edit hooks with the rest.
+            let mut removed = on;
+            remove_pixel_hooks(removed["hooks"].as_object_mut().unwrap(), exe);
+            assert!(!edit_hooks_present(&removed, exe));
+        }
+    }
+
+    #[test]
+    fn edit_hooks_should_leave_foreign_hooks_and_their_group_index_alone() {
+        let exe = Path::new("/tmp/pixel");
+        let foreign = json!({"matcher":"Edit","hooks":[{"type":"command","command":"my-guard"}]});
+        let mut value = json!({"hooks":{"PreToolUse":[foreign.clone()],"PostToolUse":[]}});
+        let hooks = value["hooks"].as_object_mut().unwrap();
+        merge_task_hooks(hooks, Provider::Codex, exe, 1).unwrap();
+        merge_edit_hooks(hooks, Provider::Codex, exe, true).unwrap();
+        assert_eq!(value["hooks"]["PreToolUse"][0], foreign);
+        let on = value.clone();
+        let hooks = value["hooks"].as_object_mut().unwrap();
+        merge_edit_hooks(hooks, Provider::Codex, exe, false).unwrap();
+        merge_edit_hooks(hooks, Provider::Codex, exe, true).unwrap();
+        assert_eq!(value, on);
+        let mut restricted = on;
+        restricted["hooks"]["PostToolUse"][0]["matcher"] = json!("Read");
+        let n = restricted["hooks"]["PostToolUse"].as_array().unwrap().len();
+        restricted["hooks"]["PostToolUse"][n - 1]["matcher"] = json!("Read");
+        assert!(!edit_hooks_registered(&restricted, Provider::Codex, exe));
     }
 
     /// A release build's executable: every release installs it as `pixel`.

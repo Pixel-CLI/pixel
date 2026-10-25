@@ -192,6 +192,8 @@ pub fn install_selected(
     }
     // How many hooks carry the prompt brief: a host caps what each injects.
     let prompt_parts = crate::config::brief_parts(&home, None);
+    // The edit hooks are off unless the global config switches them on.
+    let edit_hooks = crate::config::edit_hooks(&home, None);
     // The pixel skill is the retrieval workflow every harness reads as a
     // skill: a guided run writes the selected agents' roots, the unattended
     // install every configured one.
@@ -212,6 +214,7 @@ pub fn install_selected(
             &exe,
             crate::routing::Provider::Claude,
             prompt_parts,
+            edit_hooks,
             dry_run,
         )?);
     }
@@ -220,6 +223,7 @@ pub fn install_selected(
             &codex_home,
             &exe,
             prompt_parts,
+            edit_hooks,
             dry_run,
         )?);
     }
@@ -261,6 +265,7 @@ pub fn install_selected(
             &exe,
             crate::routing::Provider::Devin,
             1,
+            edit_hooks,
             dry_run,
         )?);
     }

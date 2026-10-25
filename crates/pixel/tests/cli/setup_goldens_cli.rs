@@ -539,3 +539,135 @@ fn remove_should_keep_preexisting_empty_directories_and_user_yaml_bytes() {
         .collect();
     assert_eq!(without_backups, original);
 }
+
+/// The commands of `run-hook edit-event` entries in a hooks settings file.
+fn edit_event_commands(settings: &Path) -> Vec<String> {
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(settings).unwrap()).unwrap();
+    value["hooks"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .flat_map(|(_, groups)| groups.as_array().into_iter().flatten())
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .filter_map(|hook| hook["command"].as_str())
+        .filter(|command| command.contains(" run-hook edit-event "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The status and summary of `install.claude-hooks` for the fixture home.
+fn claude_hooks_check(root: &Path) -> (String, String) {
+    let out = pixel_command()
+        .env_clear()
+        .env("HOME", root.join("home"))
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("PIXEL_DAEMON_AUTO_START", "0")
+        .env("PIXEL_METRICS", "0")
+        .current_dir(root.join("repo"))
+        .args([
+            "doctor",
+            "--only",
+            "install.claude-hooks",
+            "--json",
+            "--shell",
+            "zsh",
+        ])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    let check = &report["checks"][0];
+    (
+        check["status"].as_str().unwrap().to_owned(),
+        check["reason"]
+            .as_str()
+            .or_else(|| check["summary"].as_str())
+            .unwrap()
+            .to_owned(),
+    )
+}
+
+#[test]
+fn edit_hooks_should_be_registered_only_with_the_switch_on_and_follow_it_back_off() {
+    let root = fixture("edit-hooks");
+    let home = root.join("home");
+    let config = home.join(".pixel/config.yaml");
+    let settings = home.join(".claude/settings.json");
+    let hooks = home.join(".codex/hooks.json");
+
+    // Switch unset: the hooks files hold no edit hook.
+    run(&root, &["setup", "--selected-agents=1", FEATURES]);
+    run(&root, &["setup", "--selected-agents=2", FEATURES]);
+    let off = (fs::read(&settings).unwrap(), fs::read(&hooks).unwrap());
+    assert!(edit_event_commands(&settings).is_empty());
+    assert!(edit_event_commands(&hooks).is_empty());
+
+    // Switch on: one pre-edit and one post-edit entry per host, failing open.
+    let template = fs::read_to_string(&config).unwrap();
+    fs::write(&config, format!("{template}\nedit_hooks: true\n")).unwrap();
+    run(&root, &["setup", "--selected-agents=1", FEATURES]);
+    run(&root, &["setup", "--selected-agents=2", FEATURES]);
+    for (file, provider) in [(&settings, "claude"), (&hooks, "codex")] {
+        let commands = edit_event_commands(file);
+        assert_eq!(commands.len(), 2, "{provider}: {commands:?}");
+        for event in ["pre-edit", "post-edit"] {
+            let tail = format!("run-hook edit-event --provider {provider} --event {event} || true");
+            assert!(commands.iter().any(|c| c.ends_with(&tail)), "{commands:?}");
+        }
+    }
+    // Doctor recognises them: a complete set is not reported missing or drifting.
+    let (status, summary) = claude_hooks_check(&root);
+    assert!(!summary.contains("edit hooks"), "{status}: {summary}");
+
+    // A missing entry is named while the switch is on.
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+    for groups in value["hooks"].as_object_mut().unwrap().values_mut() {
+        for group in groups.as_array_mut().unwrap() {
+            group["hooks"].as_array_mut().unwrap().retain(|hook| {
+                !hook["command"]
+                    .as_str()
+                    .is_some_and(|c| c.contains(" edit-event "))
+            });
+        }
+    }
+    let complete = fs::read(&settings).unwrap();
+    fs::write(&settings, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let (status, summary) = claude_hooks_check(&root);
+    assert_eq!(status, "red", "{summary}");
+    assert!(summary.contains("edit hooks"), "{summary}");
+
+    // Switch back off with the hooks still registered: doctor says so, and
+    // setup takes them out, leaving what it wrote with the switch unset.
+    fs::write(&settings, &complete).unwrap();
+    fs::write(&config, format!("{template}\nedit_hooks: false\n")).unwrap();
+    let (status, summary) = claude_hooks_check(&root);
+    assert_eq!(status, "yellow", "{summary}");
+    assert!(summary.contains("`edit_hooks` is off"), "{summary}");
+    run(&root, &["setup", "--selected-agents=1", FEATURES]);
+    run(&root, &["setup", "--selected-agents=2", FEATURES]);
+    assert_eq!(
+        (fs::read(&settings).unwrap(), fs::read(&hooks).unwrap()),
+        off
+    );
+
+    // Uninstall takes out the hooks of a switched-on install too.
+    fs::write(&config, format!("{template}\nedit_hooks: true\n")).unwrap();
+    run(&root, &["setup", "--selected-agents=1", FEATURES]);
+    run(&root, &["setup", "--selected-agents=2", FEATURES]);
+    run(
+        &root,
+        &[
+            "setup",
+            "--remove",
+            "--binary-path",
+            root.join("absent-pixel").to_str().unwrap(),
+            "--json",
+        ],
+    );
+    for file in [&settings, &hooks] {
+        let left = fs::read_to_string(file).unwrap_or_default();
+        assert!(!left.contains("edit-event"), "{left}");
+    }
+}
