@@ -6,7 +6,10 @@
 SmartCase, smart_case, smart-case) located with one ripgrep pass over every compound, the definition shown.
 (b) Source files whose stem is a word of the prompt ("config" -> flags/config.rs), shown whole when short.
 Blocks of the brief that share no content word with the prompt are dropped. Read-only (rg, file reads),
-deterministic."""
+deterministic.
+
+The brief runs the Rust step of the same name (crates/pixel/src/execution_brief/steps/name_files.rs) and does not start
+this script; it stays as the oracle that scripts/bench/step-parity.py compares the step with."""
 import concurrent.futures
 import json
 import os

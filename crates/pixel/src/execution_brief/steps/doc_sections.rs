@@ -20,7 +20,7 @@ use std::sync::LazyLock;
 use pixel_plugin::ProbeMode;
 use regex::Regex;
 
-use super::pytext::splitlines;
+use super::pytext::{splitlines, stem};
 use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
@@ -210,20 +210,6 @@ fn source_question(kind: Option<&str>, prompt: &str) -> bool {
         Some("overview" | "config") => false,
         Some(_) => SOURCE_INTENT.is_match(prompt),
     }
-}
-
-/// `text` with a trailing `s`, `es` or `ing` cut when the word is longer than
-/// four letters, lowercased.
-fn stem(word: &str) -> String {
-    let word = word.to_lowercase();
-    for suffix in ["ing", "es", "s"] {
-        if word.len() > 4
-            && let Some(cut) = word.strip_suffix(suffix)
-        {
-            return cut.to_owned();
-        }
-    }
-    word
 }
 
 /// The stemmed words of three letters or more that are not function words.

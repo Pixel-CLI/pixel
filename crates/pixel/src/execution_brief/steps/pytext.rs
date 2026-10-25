@@ -40,6 +40,34 @@ pub(super) fn splitlines(text: &str) -> Vec<&str> {
     lines
 }
 
+/// `word` lowercased with a trailing `ing`, `es` or `s` cut (the first that
+/// fits) when it is longer than four letters: the stem of `doc-sections` and
+/// `name-files`.
+pub(super) fn stem(word: &str) -> String {
+    let word = word.to_lowercase();
+    for suffix in ["ing", "es", "s"] {
+        if word.len() > 4
+            && let Some(cut) = word.strip_suffix(suffix)
+        {
+            return cut.to_owned();
+        }
+    }
+    word
+}
+
+/// Python's `re.escape`: a backslash before each of `()[]{}?*+-|^$\.&~#`,
+/// a space and the ASCII whitespace controls.
+pub(super) fn re_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if "()[]{}?*+-|^$\\.&~# \t\n\r\x0b\x0c".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +89,16 @@ mod tests {
     #[test]
     fn universal_newlines_turns_every_line_end_into_a_newline() {
         assert_eq!(universal_newlines("a\r\nb\rc\n"), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn the_drop_pattern_escapes_the_directory_like_python() {
+        assert_eq!(re_escape("a/b c.d-e_f"), "a/b\\ c\\.d\\-e_f");
+        assert_eq!(
+            re_escape("()[]{}?*+-|^$\\.&~# \t"),
+            "\\(\\)\\[\\]\\{\\}\\?\\*\\+\\-\\|\\^\\$\\\\\\.\\&\\~\\#\\ \\\t"
+        );
+        assert_eq!(re_escape("é\u{b}\u{c}\n\r"), "é\\\u{b}\\\u{c}\\\n\\\r");
+        assert_eq!(re_escape("a!\"%',:;<=>@`/_"), "a!\"%',:;<=>@`/_");
     }
 }

@@ -22,7 +22,7 @@ use std::sync::LazyLock;
 use pixel_plugin::ProbeMode;
 use regex::Regex;
 
-use super::pytext::{splitlines, universal_newlines};
+use super::pytext::{re_escape, splitlines, universal_newlines};
 use super::{Ctx, Step};
 
 pub(super) const STEP: Step = Step {
@@ -125,19 +125,6 @@ fn directory(path: &str) -> &str {
 
 fn clip(text: &str, limit: usize) -> String {
     text.chars().take(limit).collect()
-}
-
-/// Python's `re.escape`: a backslash before each of `()[]{}?*+-|^$\.&~#`,
-/// a space and the ASCII whitespace controls.
-fn re_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if "()[]{}?*+-|^$\\.&~# \t\n\r\x0b\x0c".contains(ch) {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 #[cfg(test)]

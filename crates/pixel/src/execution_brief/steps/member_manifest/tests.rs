@@ -153,11 +153,3 @@ fn a_manifest_that_cannot_be_read_ends_the_step() {
     std::os::unix::fs::symlink("n/Cargo.toml", dir.path().join("m/Cargo.toml")).unwrap();
     assert_eq!(run(&STEP, dir.path(), "the m crate or the n crate contains?", ""), "");
 }
-
-#[test]
-fn the_drop_pattern_escapes_the_directory_like_python() {
-    assert_eq!(re_escape("a/b c.d-e_f"), "a/b\\ c\\.d\\-e_f");
-    assert_eq!(re_escape("()[]{}?*+-|^$\\.&~# \t"), "\\(\\)\\[\\]\\{\\}\\?\\*\\+\\-\\|\\^\\$\\\\\\.\\&\\~\\#\\ \\\t");
-    assert_eq!(re_escape("é\u{b}\u{c}\n\r"), "é\\\u{b}\\\u{c}\\\n\\\r");
-    assert_eq!(re_escape("a!\"%',:;<=>@`/_"), "a!\"%',:;<=>@`/_");
-}

@@ -51,7 +51,8 @@ register!(
     workspace_overview,
     overview_answer_evidence,
     member_manifest,
-    doc_sections
+    doc_sections,
+    name_files
 );
 
 /// Python's text handling, for the steps ported from a script.
@@ -127,6 +128,11 @@ impl<'a> Ctx<'a> {
     /// The same request, for a brief of question kind `kind`.
     pub(crate) fn with_kind(self, kind: Option<&'a str>) -> Self {
         Self { kind, ..self }
+    }
+
+    /// The repository's working directory.
+    pub(crate) fn root(&self) -> &Path {
+        self.root
     }
 
     /// Whether the step's time is up: it returns what it has, or nothing.
