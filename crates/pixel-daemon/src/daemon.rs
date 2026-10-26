@@ -1630,19 +1630,16 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
             ReadResult::Ok => {}
             ReadResult::Eof => break,
             ReadResult::TooLong => {
-                std::hint::cold_path();
                 let resp = failure_response("error", "request line too long");
                 let _ = write_response(&mut writer, &mut frame, &resp);
                 break;
             }
             ReadResult::TimedOut | ReadResult::Err => {
-                std::hint::cold_path();
                 break;
             }
         }
         request_count += 1;
         let Ok(text) = std::str::from_utf8(&line) else {
-            std::hint::cold_path();
             let resp = failure_response("error", "request is not valid UTF-8");
             let _ = write_response(&mut writer, &mut frame, &resp);
             continue;
@@ -1668,7 +1665,6 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
         let written = if encode_line(&mut frame, &resp).is_ok() {
             write_line_whole(&mut writer, &frame).is_ok()
         } else {
-            std::hint::cold_path();
             write_line_whole(&mut writer, SERIALIZE_FAILURE).is_ok()
         };
         if !written {
