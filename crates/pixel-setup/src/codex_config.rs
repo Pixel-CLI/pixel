@@ -1050,5 +1050,23 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
+    #[test]
+    fn task_hook_check_requires_edit_hooks_exactly_when_the_switch_is_on() {
+        let home = scratch_codex_home("edit-hooks-check");
+        let exe = Path::new("/opt/pixel/pixel");
+        install_task_hooks(&home, exe, 1, true, false).unwrap();
+        assert!(check_task_hooks(&home, exe, true).is_ok());
+        assert!(check_task_hooks(&home, exe, false).is_ok());
+
+        install_task_hooks(&home, exe, 1, false, false).unwrap();
+        assert!(check_task_hooks(&home, exe, false).is_ok());
+        let error = check_task_hooks(&home, exe, true).unwrap_err();
+        assert!(
+            error.contains("edit hooks missing in") && error.contains("`edit_hooks` is on"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
     // ---- project trust ---------------------------------------------------
 }

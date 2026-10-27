@@ -807,6 +807,8 @@ mod tests {
             let off = written(provider, false);
             assert!(edit_hooks_registered(&on, provider, exe), "{provider:?}");
             assert!(!edit_hooks_registered(&off, provider, exe));
+            assert!(edit_hooks_present(&on, exe), "{provider:?}");
+            assert!(!edit_hooks_present(&off, exe), "{provider:?}");
             assert!(task_hooks_registered(&on, provider, exe));
             assert!(stacked_pixel_hooks(&on, exe).is_empty());
             for (event, name) in EDIT_HOOK_EVENTS {
@@ -839,6 +841,25 @@ mod tests {
             remove_pixel_hooks(removed["hooks"].as_object_mut().unwrap(), exe);
             assert!(!edit_hooks_present(&removed, exe));
         }
+    }
+
+    /// An edit-event verb is Pixel's only for a host that has edit hooks and
+    /// an event of the edit pair: either half wrong disowns it.
+    #[test]
+    fn edit_hook_verb_should_need_an_edit_host_and_an_edit_event() {
+        for provider in ["claude", "codex", "devin"] {
+            for (_, event) in EDIT_HOOK_EVENTS {
+                let verb = format!("edit-event --provider {provider} --event {event}");
+                assert!(edit_hook_verb(&verb), "{verb}");
+            }
+            assert!(!edit_hook_verb(&format!(
+                "edit-event --provider {provider} --event session-start"
+            )));
+        }
+        assert!(!edit_hook_verb("edit-event --provider pi --event pre-edit"));
+        assert!(!edit_hook_verb(
+            "task-event --provider claude --event pre-edit"
+        ));
     }
 
     #[test]

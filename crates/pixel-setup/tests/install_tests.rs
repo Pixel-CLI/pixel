@@ -2296,6 +2296,68 @@ fn doctor_should_flag_a_missing_brief_part_and_a_set_the_config_no_longer_asks_f
     assert_eq!(fixed.status, CheckStatus::Green, "{fixed:?}");
 }
 
+/// `install.claude-hooks` follows the `edit_hooks` switch both ways: on, the
+/// edit hooks must be there (green when they are, red when they are not);
+/// off, edit hooks left in the settings are yellow, not green.
+#[test]
+#[cfg(unix)]
+fn doctor_should_judge_the_claude_edit_hooks_against_the_edit_hooks_switch() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    let settings = home.join(".claude/settings.json");
+    let config = home.join(".pixel/config.yaml");
+    fs::create_dir_all(home.join(".pixel")).unwrap();
+    let run = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
+            only: vec!["install.claude-hooks".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.claude-hooks").clone()
+    };
+
+    fs::write(&config, "edit_hooks: true\n").unwrap();
+    install_claude_in(home, &exe);
+    let on = run();
+    assert_eq!(on.status, CheckStatus::Green, "{on:?}");
+    let with_edit_hooks = fs::read_to_string(&settings).unwrap();
+
+    // Switched off after the install: the leftover edit hooks are yellow.
+    fs::write(&config, "edit_hooks: false\n").unwrap();
+    let stale = run();
+    assert_eq!(stale.status, CheckStatus::Yellow, "{stale:?}");
+    assert!(
+        stale.summary.contains("edit hooks are registered in")
+            && stale.summary.contains("`edit_hooks` is off"),
+        "{stale:?}"
+    );
+
+    // Off and reinstalled: no edit hooks, green again.
+    install_claude_in(home, &exe);
+    let off = run();
+    assert_eq!(off.status, CheckStatus::Green, "{off:?}");
+
+    // Switched on with the edit hooks gone: red, naming them.
+    fs::write(&config, "edit_hooks: true\n").unwrap();
+    let missing = run();
+    assert_eq!(missing.status, CheckStatus::Red, "{missing:?}");
+    assert!(
+        missing
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("edit hooks (`edit_hooks` is on)")),
+        "{missing:?}"
+    );
+
+    // The settings the switch-on install wrote are green once more.
+    fs::write(&settings, with_edit_hooks).unwrap();
+    let restored = run();
+    assert_eq!(restored.status, CheckStatus::Green, "{restored:?}");
+}
+
 /// Claude Code blocks the user's prompt when a `UserPromptSubmit` hook exits
 /// 2, and a `pixel` older than `--part` exits 2 on the unknown flag: every
 /// prompt command the install writes must exit 0 whatever the binary does.

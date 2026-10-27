@@ -82,6 +82,12 @@ fn an_ambiguous_missing_or_empty_replacement_leaves_the_content_unknown() {
         targets("Edit", &missing, &disk),
         vec![target("src/x.rs", None)]
     );
+    // `replace_all` of text that is absent changes nothing: the content is unknown.
+    let missing_all = json!({"file_path": "src/x.rs", "old_string": "nope", "new_string": "y", "replace_all": true});
+    assert_eq!(
+        targets("Edit", &missing_all, &disk),
+        vec![target("src/x.rs", None)]
+    );
     let empty = json!({"file_path": "src/x.rs", "old_string": "", "new_string": "y"});
     assert_eq!(
         targets("Edit", &empty, &disk),
@@ -175,4 +181,13 @@ fn a_patch_with_two_hunks_applies_both_in_order() {
         found[0].proposed.as_deref(),
         Some("fn a() {\n    uno();\n}\n\nfn b() {\n    dos();\n}\n")
     );
+}
+
+#[test]
+fn a_string_under_an_earlier_key_without_the_patch_marker_does_not_hide_the_patch() {
+    let input = json!({"input": "not a patch", "patch": PATCH});
+    assert_eq!(patch_text(&input), Some(PATCH));
+    let argv = json!({"command": ["apply_patch", PATCH]});
+    assert_eq!(patch_text(&argv), Some(PATCH));
+    assert_eq!(patch_text(&json!({"input": "not a patch"})), None);
 }

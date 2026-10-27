@@ -330,6 +330,12 @@ fn plain_signature(root: &Path) -> Result<String, index::IndexError> {
     plain_signature_within(root, index::build_budget_from_env())
 }
 
+/// A walk is out of time only once it is strictly past its budget: spending
+/// exactly the budget is still within it.
+fn past_budget(elapsed: Duration, budget: Duration) -> bool {
+    elapsed > budget
+}
+
 fn plain_signature_within(
     root: &Path,
     budget: Option<std::time::Duration>,
@@ -342,7 +348,7 @@ fn plain_signature_within(
     // actually contains.
     for entry in crate::index::policy_walk(root).filter_map(Result::ok) {
         if let Some(budget) = budget
-            && started.elapsed() > budget
+            && past_budget(started.elapsed(), budget)
         {
             return Err(index::freshness_budget_error(
                 root,
@@ -1392,6 +1398,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(before, after);
         assert_ne!(before, with_small);
+    }
+
+    /// A walk that has spent exactly its budget is still within it.
+    #[test]
+    fn past_budget_should_be_strict_at_the_budget() {
+        let budget = Duration::from_millis(50);
+        assert!(!past_budget(Duration::from_millis(49), budget));
+        assert!(!past_budget(budget, budget));
+        assert!(past_budget(Duration::from_millis(51), budget));
+    }
+
+    /// The size cap is inclusive here too: a file of exactly
+    /// `MAX_FILE_BYTES` is indexed, so it must move the freshness signature.
+    #[test]
+    fn plain_signature_should_count_a_file_exactly_at_the_size_cap() {
+        let dir = scratch("plain-sig-at-cap");
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        let before = plain_signature(&dir).unwrap();
+        let cap = usize::try_from(MAX_FILE_BYTES).unwrap();
+        std::fs::write(dir.join("at_cap.txt"), "a".repeat(cap)).unwrap();
+        let after = plain_signature(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_ne!(before, after);
+    }
+
+    /// A git repo whose base is anchored is reused on the fast path, with no
+    /// build lock: a lock held elsewhere must not stall the open.
+    #[test]
+    fn open_or_build_should_reuse_an_anchored_base_without_the_build_lock() {
+        let _cache = IsolatedCache::new("reuse-no-lock");
+        let dir = scratch("reuse-no-lock");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        drop(IndexSet::open_or_build(&dir, ex()).unwrap());
+        let held = BuildLock::acquire(&dir).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let base = IndexSet::open_or_build(&dir, ex()).map(|s| s.open_timings().base);
+                let _ = tx.send(base.is_ok_and(|b| b == BaseSource::Reused));
+            })
+        };
+        let reused = rx.recv_timeout(Duration::from_secs(10));
+        drop(held);
+        worker.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(reused, Ok(true));
+    }
+
+    /// The walk signature only judges a base that has no commit anchor: an
+    /// anchored base whose repository lost its `.git` is not invalidated by
+    /// the missing signature.
+    #[test]
+    fn open_or_build_should_keep_an_anchored_base_when_git_is_gone() {
+        let _cache = IsolatedCache::new("anchored-no-git");
+        let dir = scratch("anchored-no-git");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        drop(IndexSet::open_or_build(&dir, ex()).unwrap());
+        std::fs::remove_dir_all(dir.join(".git")).unwrap();
+        let again = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let base = again.open_timings().base;
+        drop(again);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(base, BaseSource::Reused);
     }
 
     /// A pixel-only `.gitignore` is skipped from the overlay, but only that

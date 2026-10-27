@@ -2197,6 +2197,11 @@ mod tests {
             bm25_idf(4.0, 1.0).to_bits(),
             (1.0f64 + 3.5 / 1.5).ln().to_bits()
         );
+        // `df = 1` makes `df + 0.5` and `df * 0.5` equal; `df = 2` tells them apart.
+        assert_eq!(
+            bm25_idf(5.0, 2.0).to_bits(),
+            (1.0f64 + 3.5 / 2.5).ln().to_bits()
+        );
         assert!(bm25_idf(4.0, 4.0) > 0.0);
         assert!(bm25_idf(4.0, 0.0) > bm25_idf(4.0, 1.0));
     }
