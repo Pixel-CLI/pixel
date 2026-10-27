@@ -39,11 +39,11 @@ const MAX_PENDING: usize = 16;
 /// Where a session's state lives under `.pixel/`.
 const SESSION_DIR: &str = "edit-hooks";
 /// A session file older than this is deleted by the next write.
-const SESSION_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const SESSION_MAX_AGE: Duration = Duration::from_secs(86_400); // 24 hours
 /// The largest session file read back; a bigger one counts as absent.
-const SESSION_MAX_BYTES: u64 = 256 * 1024;
+const SESSION_MAX_BYTES: u64 = 262_144; // 256 KiB
 /// The largest source file an edit is checked against.
-const SOURCE_MAX_BYTES: u64 = 1024 * 1024;
+const SOURCE_MAX_BYTES: u64 = 1_048_576; // 1 MiB
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum EditEvent {
@@ -583,14 +583,235 @@ mod tests {
     }
 
     #[test]
+    fn a_session_should_load_up_to_the_size_bound_and_not_a_byte_past_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = Session::path(temp.path(), "session-bound");
+        let mut session = Session::default();
+        session.carded.insert("uid|change".to_owned());
+        let json = serde_json::to_string(&session).unwrap();
+        let padded = |len: u64| format!("{json}{}", " ".repeat(len as usize - json.len()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, padded(SESSION_MAX_BYTES)).unwrap();
+        assert_eq!(Session::load(&path), session, "a file at the bound loads");
+        std::fs::write(&path, padded(SESSION_MAX_BYTES + 1)).unwrap();
+        assert_eq!(
+            Session::load(&path),
+            Session::default(),
+            "a file a byte over the bound is absent"
+        );
+    }
+
+    #[test]
+    fn a_source_should_be_read_up_to_the_size_bound_and_not_a_byte_past_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let write =
+            |name: &str, len: u64| std::fs::write(root.join(name), "a".repeat(len as usize));
+        write("at.rs", SOURCE_MAX_BYTES).unwrap();
+        write("over.rs", SOURCE_MAX_BYTES + 1).unwrap();
+        write("small.rs", 3).unwrap();
+        assert_eq!(
+            read_source(root, "at.rs").map(|text| text.len() as u64),
+            Some(SOURCE_MAX_BYTES)
+        );
+        assert_eq!(read_source(root, "over.rs"), None);
+        assert_eq!(read_source(root, "small.rs").as_deref(), Some("aaa"));
+        assert_eq!(read_source(root, "missing.rs"), None);
+    }
+
+    #[test]
     fn a_text_should_stop_at_the_byte_bound() {
         let mut out = String::new();
         let line = "x".repeat(99);
-        let mut pushed = 0;
-        while push_bounded(&mut out, &line) {
-            pushed += 1;
-        }
+        // A bounded count: a push that never refuses fails the assertion
+        // instead of looping.
+        let pushed = (0..50)
+            .take_while(|_| push_bounded(&mut out, &line))
+            .count();
         assert_eq!(pushed, TEXT_MAX_BYTES / 100);
-        assert!(out.len() <= TEXT_MAX_BYTES);
+        assert_eq!(out.len(), TEXT_MAX_BYTES);
+    }
+
+    #[test]
+    fn a_line_and_its_newline_should_fit_the_bound_exactly_or_be_refused() {
+        let mut out = "x".repeat(TEXT_MAX_BYTES - 100);
+        assert!(
+            !push_bounded(&mut out, &"y".repeat(100)),
+            "the newline would be byte {}",
+            TEXT_MAX_BYTES + 1
+        );
+        assert_eq!(
+            out.len(),
+            TEXT_MAX_BYTES - 100,
+            "a refused line adds nothing"
+        );
+        assert!(push_bounded(&mut out, &"y".repeat(99)));
+        assert_eq!(out.len(), TEXT_MAX_BYTES);
+        assert!(out.ends_with("y\n"));
+    }
+
+    const LIB: &str = "export function alpha(x: number): number { return x > 0 ? alpha(x - 1) : 0; }\n\
+         export function beta(): number { return 1; }\n";
+    const USE: &str =
+        "import { alpha } from \"./lib\"; export function run(): number { return alpha(1); }\n";
+    const TWICE: &str = "import { alpha } from \"./lib\"; export function r1() { return alpha(1); } export function r2() { return alpha(2); }\n";
+    const LOOSE: &str = "export function loose(o: any) { return o.alpha(1); }\n";
+    const RESHAPED: &str = "export function alpha(x: number, y: number): number { return x > 0 ? alpha(x - 1, y) : 0; }\n\
+         export function beta(): number { return 1; }\n";
+
+    /// The graph `pixel rebuild-graph` would store for `files`, read back in process.
+    fn graph_of(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, GraphStore) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("repo");
+        for (name, text) in files {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let db = temp.path().canonicalize().unwrap().join("graph.db");
+        pixel_graph::build::build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        (temp, root, store)
+    }
+
+    fn symbol(store: &GraphStore, file: &str, qualified: &str) -> SymbolRow {
+        let row = store.file_by_path(file).unwrap().unwrap();
+        store
+            .symbols_in_file(row.id)
+            .unwrap()
+            .into_iter()
+            .find(|symbol| symbol.qualified == qualified)
+            .unwrap()
+    }
+
+    #[test]
+    fn callers_should_be_the_distinct_sites_outside_the_declaration() {
+        let (_temp, _root, store) = graph_of(&[
+            ("src/lib.ts", LIB),
+            ("src/use.ts", USE),
+            ("src/twice.ts", TWICE),
+            ("src/loose.ts", LOOSE),
+        ]);
+        let alpha = symbol(&store, "src/lib.ts", "alpha");
+        let found = callers(&store, &alpha, "src/lib.ts").unwrap();
+        // The recursion on line 1 of lib.ts sits inside `alpha` and is not a
+        // caller; use.ts calls on that same line number from another file, so
+        // it is one; two callers on one line of twice.ts are one site.
+        let sites: Vec<(&str, u32, bool)> = found
+            .iter()
+            .map(|caller| (caller.file.as_str(), caller.line, caller.proved))
+            .collect();
+        assert_eq!(
+            sites,
+            [
+                ("src/loose.ts", 1, false),
+                ("src/twice.ts", 1, true),
+                ("src/use.ts", 1, true),
+            ]
+        );
+        assert_eq!(found[2].holder, "run");
+    }
+
+    #[test]
+    fn a_card_should_name_proved_and_possible_callers_of_a_reshaped_declaration() {
+        let (_temp, root, store) = graph_of(&[
+            ("src/lib.ts", LIB),
+            ("src/use.ts", USE),
+            ("src/loose.ts", LOOSE),
+        ]);
+        let mut session = Session::default();
+        let text = card(&store, &mut session, &root, "src/lib.ts", RESHAPED).unwrap();
+        assert_eq!(
+            text,
+            [
+                "[PIXEL:EDIT] `alpha` (function) in src/lib.ts changes its signature; 1 caller(s) outside it:",
+                "  was: function alpha(x: number): number",
+                "  now: function alpha(x: number, y: number): number",
+                "  - src/use.ts:1 in run",
+                "  possible (name match only):",
+                "  - src/loose.ts:1 in loose",
+                "Update these callers in the same change, or say why they are fine.",
+            ]
+            .join("\n")
+        );
+    }
+
+    #[test]
+    fn a_card_without_name_matches_should_not_list_a_possible_section() {
+        let (_temp, root, store) = graph_of(&[("src/lib.ts", LIB), ("src/use.ts", USE)]);
+        let mut session = Session::default();
+        let text = card(&store, &mut session, &root, "src/lib.ts", RESHAPED).unwrap();
+        assert_eq!(
+            text,
+            [
+                "[PIXEL:EDIT] `alpha` (function) in src/lib.ts changes its signature; 1 caller(s) outside it:",
+                "  was: function alpha(x: number): number",
+                "  now: function alpha(x: number, y: number): number",
+                "  - src/use.ts:1 in run",
+                "Update these callers in the same change, or say why they are fine.",
+            ]
+            .join("\n")
+        );
+    }
+
+    #[test]
+    fn a_declaration_missing_from_the_proposal_should_be_carded_as_removed_not_matched_by_kind() {
+        let (_temp, root, store) = graph_of(&[("src/lib.ts", LIB), ("src/use.ts", USE)]);
+        let mut session = Session::default();
+        // `alpha` is renamed; `beta`, another function, stays.
+        let renamed = LIB.replace("alpha", "gamma");
+        let text = card(&store, &mut session, &root, "src/lib.ts", &renamed).unwrap();
+        assert_eq!(
+            text,
+            [
+                "[PIXEL:EDIT] `alpha` (function) in src/lib.ts is removed or renamed; 1 caller(s) outside it:",
+                "  was: function alpha(x: number): number",
+                "  - src/use.ts:1 in run",
+                "Update these callers in the same change, or say why they are fine.",
+            ]
+            .join("\n")
+        );
+    }
+
+    #[test]
+    fn a_card_should_replace_only_the_pending_entry_of_its_own_declaration() {
+        let (_temp, root, store) = graph_of(&[("src/lib.ts", LIB), ("src/use.ts", USE)]);
+        let entry = |file: &str, name: &str| Pending {
+            name: name.to_owned(),
+            kind: "function".to_owned(),
+            file: file.to_owned(),
+            old: "old".to_owned(),
+            announced: true,
+            sites: Vec::new(),
+        };
+        let mut session = Session {
+            pending: vec![
+                entry("src/lib.ts", "alpha"),
+                entry("src/lib.ts", "beta"),
+                entry("src/other.ts", "alpha"),
+            ],
+            ..Session::default()
+        };
+        card(&store, &mut session, &root, "src/lib.ts", RESHAPED).unwrap();
+        assert_eq!(
+            session.pending,
+            [
+                entry("src/lib.ts", "beta"),
+                entry("src/other.ts", "alpha"),
+                Pending {
+                    name: "alpha".to_owned(),
+                    kind: "function".to_owned(),
+                    file: "src/lib.ts".to_owned(),
+                    old: "function alpha(x: number): number".to_owned(),
+                    announced: false,
+                    sites: vec![Site {
+                        file: "src/use.ts".to_owned(),
+                        line: 1,
+                        holder: "run".to_owned(),
+                        hash: hex(USE),
+                    }],
+                },
+            ]
+        );
     }
 }
