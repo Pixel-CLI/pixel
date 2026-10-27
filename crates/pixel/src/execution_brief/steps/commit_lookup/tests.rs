@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
+use std::path::Path;
+
+use super::super::testing::{commit_line, git, repo};
 use super::*;
 
 fn numbers(text: &str) -> Vec<&str> {
@@ -75,4 +78,148 @@ fn a_grep_argument_is_made_for_each_of_the_first_words() {
     let words: Vec<String> = ["alpha", "beta", "gamma"].map(ToOwned::to_owned).to_vec();
     assert_eq!(greps(&words, 2), ["--grep=alpha", "--grep=beta"]);
     assert_eq!(greps(&words, 5).len(), 3);
+}
+
+fn ctx_for<R>(root: &Path, prompt: &str, run: impl FnOnce(&Ctx) -> R) -> R {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    run(&Ctx::new(root, prompt, "", deadline))
+}
+
+/// A repository whose history is `subjects`, newest first, as empty commits.
+fn history(subjects: &[&str]) -> tempfile::TempDir {
+    let dir = repo(&[]);
+    for subject in subjects.iter().rev() {
+        commit_empty(dir.path(), &["-m", subject]);
+    }
+    dir
+}
+
+fn commit_empty(root: &Path, message: &[&str]) {
+    let mut args = vec![
+        "-c",
+        "user.name=Probe Test",
+        "-c",
+        "user.email=probe@example.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+    ];
+    args.extend_from_slice(message);
+    git(root, &args);
+}
+
+/// The subjects `by_subject` ranks for `prompt`, best first.
+fn ranked_subjects(root: &Path, prompt: &str) -> Vec<String> {
+    ctx_for(root, prompt, |ctx| by_subject(ctx, prompt))
+        .into_iter()
+        .map(|(_, line)| subject_of(&line).to_owned())
+        .collect()
+}
+
+#[test]
+fn subjects_rank_by_rarity_and_adjacency_of_the_shared_words() {
+    // Each term of the score moves this order: the rare words of the second
+    // line outweigh the common ones of the third, the adjacent pair of the
+    // first lifts a two-word subject over both, and ties go to the newest.
+    let dir = history(&[
+        "delta bravo alpha foxtrot",
+        "alpha other",
+        "alpha other",
+        "alpha bravo",
+        "foxtrot other",
+        "charlie echo bravo delta",
+    ]);
+    assert_eq!(
+        ranked_subjects(dir.path(), "alpha bravo charlie delta echo foxtrot"),
+        [
+            "alpha bravo",
+            "charlie echo bravo delta",
+            "delta bravo alpha foxtrot"
+        ]
+    );
+}
+
+#[test]
+fn three_shared_words_admit_a_subject_and_two_need_an_adjacent_pair() {
+    let dir = history(&["charlie bravo alpha", "bravo alpha other"]);
+    assert_eq!(
+        ranked_subjects(dir.path(), "alpha bravo charlie"),
+        ["charlie bravo alpha"]
+    );
+}
+
+#[test]
+fn a_pair_of_which_one_word_says_nothing_is_not_adjacent() {
+    let dir = history(&["parser the lexer"]);
+    assert_eq!(
+        ranked_subjects(dir.path(), "parser the lexer"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_history_of_more_than_a_mebibyte_of_subjects_is_still_ranked() {
+    let dir = history(&["charlie bravo alpha"]);
+    let message = dir.path().join(".git/long-subject");
+    std::fs::write(&message, "z".repeat(1_200_000)).unwrap();
+    commit_empty(dir.path(), &["-F", message.to_str().unwrap()]);
+    assert_eq!(
+        ranked_subjects(dir.path(), "alpha bravo charlie"),
+        ["charlie bravo alpha"]
+    );
+}
+
+/// `(commit, subject)` of what `by_version` finds for `prompt`.
+fn named_by_version(root: &Path, prompt: &str) -> Vec<(String, String)> {
+    ctx_for(root, prompt, |ctx| by_version(ctx, prompt))
+        .into_iter()
+        .map(|(sha, line)| (sha, subject_of(&line).to_owned()))
+        .collect()
+}
+
+#[test]
+fn the_commit_a_release_tag_points_at_is_named_without_the_version_in_its_message() {
+    let dir = repo(&[]);
+    let tagged = commit_line(dir.path(), "cut the cord", "");
+    git(dir.path(), &["tag", "v4.2"]);
+    assert_eq!(
+        named_by_version(dir.path(), "which commit shipped 4.2"),
+        [(tagged, "cut the cord".to_owned())]
+    );
+}
+
+#[test]
+fn a_tagged_commit_that_names_the_version_is_listed_once() {
+    let dir = repo(&[]);
+    let tagged = commit_line(dir.path(), "release 5.0.0 notes", "");
+    git(dir.path(), &["tag", "v5.0.0"]);
+    assert_eq!(
+        named_by_version(dir.path(), "what changed in 5.0.0"),
+        [(tagged, "release 5.0.0 notes".to_owned())]
+    );
+}
+
+#[test]
+fn the_tagged_commit_comes_before_a_newer_one_that_shares_more_words() {
+    let dir = repo(&[]);
+    let tagged = commit_line(dir.path(), "cut the cord", "");
+    git(dir.path(), &["tag", "v6.1"]);
+    let newer = commit_line(dir.path(), "tune the parser for 6.1", "");
+    assert_eq!(
+        named_by_version(dir.path(), "what changed in the parser for 6.1"),
+        [
+            (tagged, "cut the cord".to_owned()),
+            (newer, "tune the parser for 6.1".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn an_untagged_commit_that_shares_no_word_with_the_prompt_is_not_named() {
+    let dir = repo(&[]);
+    commit_line(dir.path(), "update to 3.1", "");
+    assert_eq!(
+        named_by_version(dir.path(), "which commit tuned the parser for 3.1"),
+        Vec::<(String, String)>::new()
+    );
 }
