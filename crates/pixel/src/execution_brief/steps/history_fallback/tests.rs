@@ -162,6 +162,21 @@ fn a_brief_that_holds_a_history_block_gets_nothing() {
     assert_ne!(run(&STEP, dir.path(), prompt, other), "");
 }
 
+/// flask-05 (#1351): the brief's own history block, matched on "dropped",
+/// listed old commits and hid the one the asked version names.
+#[test]
+fn a_version_the_held_history_block_misses_is_still_named() {
+    let dir = repo(&[]);
+    let expected = commit(dir.path(), "drop support for Python 3.10", "");
+    commit(dir.path(), "dropped pkg_resources", "");
+    let prompt = "which commit dropped support for Python 3.10?";
+    let missed = "[PIXEL:BRIEF]\n### history — commits matching dropped\nfedc06c295 2010-07-04 dropped pkg_resources\n";
+    let out = run(&STEP, dir.path(), prompt, missed);
+    assert!(expected.starts_with(commit_of(&out)), "{out}");
+    let held = format!("[PIXEL:BRIEF]\n### history — commits matching 3.10\n{expected} x\n");
+    assert_eq!(run(&STEP, dir.path(), prompt, &held), "");
+}
+
 #[test]
 fn a_merge_shows_what_it_brought_to_its_first_parent() {
     let dir = repo(&[]);

@@ -47,20 +47,24 @@ const SHOWN: &str = "6";
 const PICKED: &str = "5";
 
 fn run(ctx: &Ctx) -> String {
-    if ctx
+    let held = ctx
         .brief
         .split('\n')
-        .any(|line| line.starts_with("### history"))
-    {
-        return String::new();
-    }
+        .any(|line| line.starts_with("### history"));
     let prompt = ctx.prompt;
     let named = by_version(ctx, prompt);
     if let Some((_, first)) = named.first() {
+        // A version the prompt names outranks a history block matched on its
+        // words, which can miss that commit (flask-05, #1351).
         let shown: Vec<&str> = named.iter().map(|(_, line)| line.as_str()).collect();
-        return id_of(first).map_or_else(String::new, |sha| {
-            show(ctx, &lookup::versions(prompt), &shown, sha)
-        });
+        return id_of(first)
+            .filter(|sha| !(held && lookup::shows(ctx.brief, sha)))
+            .map_or_else(String::new, |sha| {
+                show(ctx, &lookup::versions(prompt), &shown, sha)
+            });
+    }
+    if held {
+        return String::new();
     }
     for phrase in quoted(prompt) {
         let out = git(

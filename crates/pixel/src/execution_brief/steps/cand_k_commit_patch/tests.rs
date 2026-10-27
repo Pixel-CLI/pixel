@@ -208,6 +208,21 @@ fn a_brief_that_holds_a_history_or_commit_block_gets_nothing() {
     assert_ne!(ask(dir.path(), &prompt, other), "");
 }
 
+/// flask-05 (#1351): a held block that misses the asked version's commit
+/// still gets its patch; one that shows it gets nothing.
+#[test]
+fn a_version_the_held_block_misses_still_earns_its_patch() {
+    let dir = repo(&[]);
+    let expected = commit_line(dir.path(), "drop support for Python 3.10", "");
+    commit_line(dir.path(), "dropped pkg_resources", "");
+    let prompt = "which commit dropped support for Python 3.10?";
+    let missed = "[PIXEL:BRIEF]\n### history — commits matching dropped\nfedc06c295 2010-07-04 dropped pkg_resources\n";
+    let out = ask(dir.path(), prompt, missed);
+    assert!(out.contains(&format!("### commit {}", &expected[..7])), "{out}");
+    let held = format!("[PIXEL:BRIEF]\n### history — commits matching 3.10\n{expected} x\n");
+    assert_eq!(ask(dir.path(), prompt, &held), "");
+}
+
 #[test]
 fn every_other_block_of_the_brief_is_dropped_by_its_exact_header() {
     let dir = wide(1);

@@ -21,7 +21,7 @@ use std::sync::LazyLock;
 use pixel_plugin::ProbeMode;
 use regex::Regex;
 
-use super::commit_lookup::{by_subject, by_version, git, greps, id_of, quoted, rare_words};
+use super::commit_lookup::{by_subject, by_version, git, greps, id_of, quoted, rare_words, shows};
 use super::text::escape;
 use super::{Ctx, Step};
 
@@ -76,13 +76,21 @@ static HEADERS: LazyLock<Regex> =
 
 fn run(ctx: &Ctx) -> String {
     let brief = ctx.brief;
-    if brief
+    let held = brief
         .split('\n')
-        .any(|line| line.starts_with("### history") || line.starts_with("### commit "))
-    {
-        return String::new();
-    }
-    let Some(sha) = find_commit(ctx, ctx.prompt) else {
+        .any(|line| line.starts_with("### history") || line.starts_with("### commit "));
+    // Past a held block, only a version the prompt names and the brief does
+    // not show yet still earns the patch (flask-05, #1351).
+    let sha = if held {
+        by_version(ctx, ctx.prompt)
+            .first()
+            .and_then(|(_, line)| id_of(line))
+            .filter(|sha| !shows(brief, sha))
+            .map(ToOwned::to_owned)
+    } else {
+        find_commit(ctx, ctx.prompt)
+    };
+    let Some(sha) = sha else {
         return String::new();
     };
     let stat = git(

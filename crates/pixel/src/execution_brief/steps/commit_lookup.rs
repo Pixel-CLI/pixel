@@ -113,6 +113,12 @@ pub(super) fn id_of(line: &str) -> Option<&str> {
     line.split_whitespace().next()
 }
 
+/// Whether `brief` already names `sha`, by its first seven characters (the
+/// shortest id git abbreviates to).
+pub(super) fn shows(brief: &str, sha: &str) -> bool {
+    brief.contains(sha.get(..7).unwrap_or(sha))
+}
+
 /// The subject of a `%h %as %s` line: what follows the date.
 fn subject_of(line: &str) -> &str {
     line.splitn(3, ' ').last().unwrap_or_default()

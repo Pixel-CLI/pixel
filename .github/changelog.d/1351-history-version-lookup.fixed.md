@@ -1,0 +1,1 @@
+**brief:** a history question that names a version (`which commit dropped Python 3.10?`) gets that version's commit again when the brief's own history block, matched on its words, listed other commits; since the history steps moved into Rust the block hid it (flask-05 went from 1 to 3 predicted calls).
