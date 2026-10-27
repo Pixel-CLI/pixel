@@ -16,11 +16,11 @@ use super::text::splitlines_owned;
 
 /// Bytes of a file that is searched; `rg` has no limit, a generated bundle
 /// must not stop the walk.
-const MAX_SEARCH_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_SEARCH_BYTES: u64 = 16_777_216; // 16 MiB
 /// Bytes of a file whose lines are quoted.
-const MAX_READ_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_READ_BYTES: u64 = 67_108_864; // 64 MiB
 /// Bytes of searched text kept for the next search of the run.
-const MAX_CACHED_BYTES: usize = 96 * 1024 * 1024;
+const MAX_CACHED_BYTES: usize = 100_663_296; // 96 MiB
 
 /// A line that matched: the 1-based line as `rg -n` prints it.
 #[derive(Clone)]
@@ -48,6 +48,8 @@ pub(super) struct Walk<'a, 'b> {
     paths: Option<Vec<String>>,
     docs: HashMap<String, Option<Rc<Doc>>>,
     cached: usize,
+    /// Where `cached` stops growing; a field so a test sets a small one.
+    cache_cap: usize,
     lines: HashMap<String, Rc<Vec<String>>>,
 }
 
@@ -58,6 +60,7 @@ impl<'a, 'b> Walk<'a, 'b> {
             paths: None,
             docs: HashMap::new(),
             cached: 0,
+            cache_cap: MAX_CACHED_BYTES,
             lines: HashMap::new(),
         }
     }
@@ -137,7 +140,7 @@ impl<'a, 'b> Walk<'a, 'b> {
             })
         });
         let size = text.map_or(0, |text| text.len());
-        if self.cached + size <= MAX_CACHED_BYTES {
+        if self.cached + size <= self.cache_cap {
             self.cached += size;
             self.docs.insert(path.to_owned(), found.clone());
         }
@@ -247,5 +250,45 @@ impl<'a, 'b> Walk<'a, 'b> {
             }
         }
         Some(found)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_byte_limits_are_16_64_and_96_mebibytes() {
+        assert_eq!(MAX_SEARCH_BYTES, 16 * 1024 * 1024);
+        assert_eq!(MAX_READ_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_CACHED_BYTES, 96 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_searched_file_is_kept_while_the_cache_cap_is_not_exceeded() {
+        let dir = tempfile::tempdir().unwrap();
+        // Sizes against a cap of 10: 6 fits (6 held), 6 does not (12), 4 fits
+        // exactly (10 held), 1 does not (11).
+        for (name, text) in [("a", "aaaaaa"), ("b", "bbbbbb"), ("c", "cccc"), ("d", "d")] {
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        let ctx = Ctx::new(
+            dir.path(),
+            "p",
+            "b",
+            Instant::now() + Duration::from_secs(30),
+        );
+        let mut walk = Walk::new(&ctx);
+        walk.cache_cap = 10;
+        let kept = |walk: &mut Walk, name: &str| {
+            let first = walk.doc(name).unwrap();
+            let second = walk.doc(name).unwrap();
+            Rc::ptr_eq(&first, &second)
+        };
+        assert!(kept(&mut walk, "a"));
+        assert!(!kept(&mut walk, "b"), "6 + 6 is over the cap");
+        assert!(kept(&mut walk, "c"), "6 + 4 is exactly the cap");
+        assert!(!kept(&mut walk, "d"), "10 + 1 is over the cap");
     }
 }

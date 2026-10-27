@@ -365,4 +365,14 @@ mod tests {
         // Bytes that are not UTF-8 are no payload.
         assert_eq!(read(vec![b'{', 0xff, b'}'], STDIN_WAIT), None);
     }
+
+    /// The deadline is fixed once per process and the first call wins. Far in
+    /// the future, so a stage of another test that reads it is not cut short.
+    #[test]
+    fn the_answer_deadline_is_the_first_one_fixed() {
+        let first = Instant::now() + Duration::from_secs(3_600);
+        fix_answer_by(first);
+        fix_answer_by(first + Duration::from_secs(1));
+        assert_eq!(answer_by(), Some(first));
+    }
 }

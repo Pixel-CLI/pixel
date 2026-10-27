@@ -25,7 +25,7 @@ use crate::execution_brief::{decision_log, feedback};
 pub const DEFAULT_SINCE: &str = "24h";
 
 /// A log is read up to this many bytes (both hold a few hundred lines).
-const MAX_READ_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_READ_BYTES: u64 = 16_777_216; // 16 MiB
 
 #[derive(Debug, Clone)]
 pub struct MetricsOptions {
@@ -486,5 +486,44 @@ mod tests {
                 "{expected}\n{text}"
             );
         }
+    }
+
+    #[test]
+    fn a_ratio_divides_and_has_no_value_without_a_denominator() {
+        assert_eq!(ratio(1, 4), Some(0.25));
+        assert_eq!(ratio(0, 3), Some(0.0));
+        assert_eq!(ratio(0, 0), None);
+        assert_eq!(ratio(5, 0), None);
+    }
+
+    #[test]
+    fn the_read_limit_is_16_mebibytes() {
+        assert_eq!(MAX_READ_BYTES, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_mean_has_one_decimal_and_a_missing_one_is_not_available() {
+        assert_eq!(mean(&json!(1.5)), "1.5");
+        assert_eq!(mean(&json!(2.0)), "2.0");
+        assert_eq!(mean(&Value::Null), "n/a");
+    }
+
+    #[test]
+    fn the_missing_logs_note_needs_both_logs_to_be_absent() {
+        let lines = vec![decision(1, "open", 5)];
+        let note = "no brief logs under .pixel/";
+        assert!(render(&report(None, None, "all", 0)).contains(note));
+        assert!(!render(&report(Some(&lines), None, "all", 0)).contains(note));
+        assert!(!render(&report(None, Some(&lines), "all", 0)).contains(note));
+        assert!(!render(&report(Some(&lines), Some(&lines), "all", 0)).contains(note));
+    }
+
+    #[test]
+    fn the_line_cap_note_is_printed_only_for_a_capped_log() {
+        let note = "a log is at its line cap";
+        let full = vec![decision(1, "open", 5); decision_log::MAX_LINES];
+        let under = vec![decision(1, "open", 5); decision_log::MAX_LINES - 1];
+        assert!(render(&report(Some(&full), None, "all", 0)).contains(note));
+        assert!(!render(&report(Some(&under), None, "all", 0)).contains(note));
     }
 }

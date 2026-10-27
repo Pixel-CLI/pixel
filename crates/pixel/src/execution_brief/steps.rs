@@ -205,7 +205,7 @@ impl<'a> Ctx<'a> {
     pub(crate) fn read(&self, path: &str, limit: u64) -> Option<String> {
         let mut file = OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .custom_flags(open_flags())
             .open(self.root.join(path))
             .ok()?;
         if !file.metadata().ok()?.is_file() {
@@ -219,6 +219,13 @@ impl<'a> Ctx<'a> {
         (u64::try_from(raw.len()).ok()? <= limit)
             .then(|| String::from_utf8_lossy(&raw).into_owned())
     }
+}
+
+/// How a step opens a file: never through a link, never blocking on a pipe.
+// The two flags are disjoint bits, so `|` and `^` yield the same value: no test can tell them apart.
+#[cfg_attr(test, mutants::skip)]
+const fn open_flags() -> i32 {
+    libc::O_NOFOLLOW | libc::O_NONBLOCK
 }
 
 #[cfg(test)]

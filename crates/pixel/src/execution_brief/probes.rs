@@ -334,7 +334,7 @@ fn run_step(
         return (None, run("skipped", 0));
     }
     let text = (step.run)(&Ctx::new(root, prompt, brief, limit).with_kind(kind));
-    if Instant::now() > limit {
+    if past(Instant::now(), limit) {
         return (None, run("timeout", 0));
     }
     if text.trim().is_empty() {
@@ -342,6 +342,11 @@ fn run_step(
     }
     let bytes = text.len();
     (Some(text), run("ok", bytes))
+}
+
+/// Whether `now` is later than `limit`: arriving exactly at it is on time.
+fn past(now: Instant, limit: Instant) -> bool {
+    now > limit
 }
 
 /// How long past its limit a probe's leader, once killed, is waited on for
@@ -1084,6 +1089,14 @@ mod tests {
         assert_eq!((text, run.outcome), (None, "timeout"));
         let (text, run) = run_step(&said, root, "p", None, "b", Instant::now());
         assert_eq!((text, run.outcome), (None, "skipped"));
+    }
+
+    #[test]
+    fn a_step_that_returns_exactly_at_its_limit_is_not_late() {
+        let limit = Instant::now();
+        assert!(!past(limit, limit));
+        assert!(past(limit + Duration::from_nanos(1), limit));
+        assert!(!past(limit, limit + Duration::from_nanos(1)));
     }
 
     #[test]
