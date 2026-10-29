@@ -59,6 +59,14 @@ impl Classifier {
                 if reader.read_line(&mut first).unwrap_or(0) == 0 {
                     continue; // The warm probe opens a connection without an HTTP request.
                 }
+                if first.starts_with("GET ") {
+                    // A liveness probe, not a decision: answer it and count nothing.
+                    // It can arrive under load, so it must not fail the fixture.
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
                 assert!(first.starts_with("POST /v1/systemone HTTP/1.1"), "{first}");
                 let mut length = None;
                 loop {

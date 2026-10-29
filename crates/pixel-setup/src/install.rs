@@ -355,10 +355,16 @@ pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<()> {
     let resolved = resolve_symlink_target(path);
     let target = resolved.as_deref().unwrap_or(path);
     let tmp = unique_temp_path(target);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // A new file gets 0644 whatever the umask: the default would make a
+    // group-writable harness file on machines with a 002 umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o644);
+    }
+    let mut file = options.open(&tmp)?;
     file.write_all(content.as_bytes())?;
     if let Ok(metadata) = fs::metadata(target) {
         file.set_permissions(metadata.permissions())?;

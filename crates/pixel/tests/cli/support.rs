@@ -347,3 +347,21 @@ fn action_log_of_an_unresolvable_path_lands_in_the_neutral_cwd_not_the_checkout(
         checkout.display()
     );
 }
+
+/// Executing a binary this test just copied can fail with ETXTBSY while a
+/// sibling test's forked child still holds the write descriptor, or while
+/// writeback finishes on overlay filesystems; a short bounded retry clears
+/// it (the same race antigravity's registration probe retries under).
+pub fn exec_while_text_busy(
+    mut probe: impl FnMut() -> std::io::Result<std::process::Output>,
+) -> std::io::Result<std::process::Output> {
+    for _ in 0..50 {
+        match probe() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            outcome => return outcome,
+        }
+    }
+    probe()
+}

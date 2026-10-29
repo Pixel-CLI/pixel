@@ -1334,7 +1334,9 @@ fn probe_merge_tree(root: &Path, ours: &str, theirs: &str) -> MergeTreeProbe {
         args.extend_from_slice(extra);
         args.push(ours);
         args.push(theirs);
-        match runner.run_output(&args, &[]) {
+        // The `CONFLICT (<kind>)` lines are parsed below, so git must print them
+        // in English whatever the user's locale.
+        match runner.run_output(&args, &[("LC_ALL", "C")]) {
             Ok(out) => (
                 out.success(),
                 String::from_utf8_lossy(&out.stdout).into_owned(),

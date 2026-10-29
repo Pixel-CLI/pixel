@@ -426,8 +426,8 @@ fn install_antigravity_plugin_with_agy(
     for path in [&ide_dir, &cli_dir] {
         fs::create_dir_all(path.join("skills/pixel"))?;
         install::write_atomically(&path.join("plugin.json"), &manifest_text)?;
-        fs::write(
-            path.join("skills/pixel/SKILL.md"),
+        install::write_atomically(
+            &path.join("skills/pixel/SKILL.md"),
             crate::skill::PIXEL_SKILL,
         )?;
         install::write_atomically(&path.join("hooks.json"), &hooks_text)?;

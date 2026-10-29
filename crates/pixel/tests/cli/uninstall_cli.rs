@@ -5,25 +5,7 @@
 
 use std::path::Path;
 
-use crate::support::Scratch;
-
-/// Executing a binary this test just copied can fail with ETXTBSY while a
-/// sibling test's forked child still holds the write descriptor, or while
-/// writeback finishes on overlay filesystems; a short bounded retry clears
-/// it (the same race antigravity's registration probe retries under).
-fn exec_while_text_busy(
-    mut probe: impl FnMut() -> std::io::Result<std::process::Output>,
-) -> std::io::Result<std::process::Output> {
-    for _ in 0..50 {
-        match probe() {
-            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            outcome => return outcome,
-        }
-    }
-    probe()
-}
+use crate::support::{Scratch, exec_while_text_busy};
 
 /// `install.sh` with `PIXEL_INSTALL_DIR` puts the binary outside
 /// `~/.local/bin`: the CLI hands the library the binary that runs, so

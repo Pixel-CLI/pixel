@@ -40,9 +40,12 @@ const URL_PREFIXES: [&str; 4] = ["https://", "ssh://", "file://", "git@"];
 /// program and ssh's own prompt are left alone and wait until
 /// [`CLONE_TIMEOUT`]; `GIT_SSH_COMMAND` is not set to force `BatchMode`,
 /// because it would shadow the user's `core.sshCommand`.
-const CLONE_ENV: [(&str, &str); 2] = [
+// `LC_ALL=C`: git's error text is what `add` reports, and it must not depend
+// on the locale the user runs in.
+const CLONE_ENV: [(&str, &str); 3] = [
     ("GIT_ALLOW_PROTOCOL", "https:ssh:file"),
     ("GIT_TERMINAL_PROMPT", "0"),
+    ("LC_ALL", "C"),
 ];
 
 /// What `add` installed.
@@ -1006,6 +1009,7 @@ mod tests {
             [
                 ("GIT_ALLOW_PROTOCOL", "https:ssh:file"),
                 ("GIT_TERMINAL_PROMPT", "0"),
+                ("LC_ALL", "C"),
             ],
             "every scheme add accepts, and no terminal prompt"
         );

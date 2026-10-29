@@ -1258,6 +1258,10 @@ fn c19_a_writer_checks_whole_only_a_file_changed_since_its_stamp() {
     file.set_modified(std::fs::metadata(&db).unwrap().modified().unwrap())
         .unwrap();
     drop(file);
+    // The stamp is recorded only once the file system's clock has moved past
+    // the ctime that `set_modified` just wrote (the racy-clean rule). Coarse
+    // kernel clocks tick every few milliseconds, so wait out a tick.
+    std::thread::sleep(Duration::from_millis(50));
     let started = SystemTime::now();
     let writer = Writer::open(dir.path(), None).unwrap();
     assert_eq!(

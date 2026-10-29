@@ -156,18 +156,20 @@ fn a_side_build_doctor_fix_should_leave_the_home_install_alone() {
     std::fs::hard_link(env!("CARGO_BIN_EXE_pixel"), &side_build)
         .or_else(|_| std::fs::copy(env!("CARGO_BIN_EXE_pixel"), &side_build).map(drop))
         .unwrap();
-    let out = std::process::Command::new(&side_build)
-        .arg("doctor")
-        .arg(&*repo)
-        .args(["--shell", "zsh", "--only", "install.claude-hooks", "--fix"])
-        .env("HOME", &*home)
-        .env("CODEX_HOME", home.join(".codex"))
-        .env("PIXEL_METRICS", "0")
-        .env("PIXEL_DAEMON_AUTO_START", "0")
-        .env_remove("XDG_CONFIG_HOME")
-        .current_dir(crate::support::neutral_cwd())
-        .output()
-        .unwrap();
+    let out = crate::support::exec_while_text_busy(|| {
+        std::process::Command::new(&side_build)
+            .arg("doctor")
+            .arg(&*repo)
+            .args(["--shell", "zsh", "--only", "install.claude-hooks", "--fix"])
+            .env("HOME", &*home)
+            .env("CODEX_HOME", home.join(".codex"))
+            .env("PIXEL_METRICS", "0")
+            .env("PIXEL_DAEMON_AUTO_START", "0")
+            .env_remove("XDG_CONFIG_HOME")
+            .current_dir(crate::support::neutral_cwd())
+            .output()
+    })
+    .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(

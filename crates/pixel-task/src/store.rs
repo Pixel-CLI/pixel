@@ -78,6 +78,18 @@ impl From<&std::fs::Metadata> for JournalFingerprint {
     }
 }
 
+/// The fingerprint to cache for a journal, if the entry may be trusted later.
+/// A rewrite of the same length within one kernel clock tick leaves the
+/// fingerprint as it was, so only a file last changed a second ago is cached
+/// (the racy-clean rule of git's index); otherwise the next read goes to disk.
+fn settled(fingerprint: JournalFingerprint) -> Option<JournalFingerprint> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos() as i128);
+    let ctime = fingerprint.ctime as i128 * 1_000_000_000 + fingerprint.ctime_nsec as i128;
+    (ctime + 1_000_000_000 < now).then_some(fingerprint)
+}
+
 #[derive(Debug, Clone)]
 struct JournalCacheEntry {
     fingerprint: Option<JournalFingerprint>,
@@ -217,7 +229,7 @@ impl Store {
             .insert(
                 task_id.into(),
                 JournalCacheEntry {
-                    fingerprint: Some(fingerprint),
+                    fingerprint: settled(fingerprint),
                     committed_len,
                     commits: commits.clone(),
                 },
@@ -924,7 +936,7 @@ impl Store {
             .insert(
                 task.task_id.clone(),
                 JournalCacheEntry {
-                    fingerprint: Some(fingerprint),
+                    fingerprint: settled(fingerprint),
                     committed_len: fingerprint.len,
                     commits: next_commits,
                 },
@@ -1386,6 +1398,9 @@ mod tests {
         let root = repo();
         let writer = Store::open(root.path()).unwrap();
         let task = begin(&writer, "begin");
+        // A journal written this second is not cached (see `settled`); wait
+        // until it has settled before counting reads.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
         let reader = Store::open(root.path()).unwrap();
         reader.journal_reads.store(0, Ordering::Relaxed);
 

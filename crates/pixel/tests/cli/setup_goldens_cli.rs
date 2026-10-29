@@ -155,7 +155,9 @@ fn fixture(tag: &str) -> Scratch {
     for (path, content) in SEED {
         let file = root.join("home").join(path);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
-        fs::write(file, content).unwrap();
+        fs::write(&file, content).unwrap();
+        // The goldens record modes; set them so a umask (002 here) cannot change them.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
     }
     let repo = root.join("repo");
     fs::create_dir_all(&repo).unwrap();
