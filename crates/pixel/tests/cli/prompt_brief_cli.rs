@@ -1123,7 +1123,8 @@ fn drained(stream: &mut std::net::TcpStream) -> bool {
                     .map(|n| n.trim().parse::<usize>().unwrap_or(0))
             })
             .unwrap_or(0);
-        if body.len() >= wanted {
+        // A request without a body (a GET liveness probe) is not a classification ask.
+        if body.len() >= wanted && wanted > 0 {
             return true;
         }
     }
