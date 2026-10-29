@@ -2548,7 +2548,6 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("does", 0, 0, 0),
                 ("install", 2, 1, 2),
                 ("handle", 1, 0, 0),
                 ("existing", 1, 0, 0),
@@ -2565,7 +2564,7 @@ mod tests {
             .collect();
         assert_eq!(
             general,
-            ["does", "handle", "existing"],
+            ["handle", "existing"],
             "listed with their counts, weighing nothing"
         );
         assert!(

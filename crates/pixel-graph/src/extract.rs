@@ -740,6 +740,46 @@ fn walk_call_arguments(w: &mut Walker, call: Node, arg_of: Option<String>) {
     }
 }
 
+/// Identifier operands of a fallback chain used as a callee: `(x ?? handler)(...)`,
+/// `(a || handler)(...)`, `(a && handler)(...)`. Each identifier operand is a
+/// function value the call may invoke, so it is a reference to that symbol.
+/// Member operands (`dependencies.start`) are data and are not followed.
+fn walk_callee_fallbacks(w: &mut Walker, callee: Node, call: Node) {
+    // (node, reached through a fallback operator). A plain callee identifier is the
+    // call itself, already recorded as a call, so it is only a reference inside a chain.
+    let mut stack = vec![(callee, false)];
+    while let Some((n, in_chain)) = stack.pop() {
+        match n.kind() {
+            "parenthesized_expression" => {
+                stack.extend(
+                    each_child(n)
+                        .into_iter()
+                        .filter(Node::is_named)
+                        .map(|c| (c, in_chain)),
+                );
+            }
+            "binary_expression" => {
+                let op = n.child_by_field_name("operator").map(|o| w.text(o));
+                if matches!(op.as_deref(), Some("??" | "||" | "&&")) {
+                    stack.extend(
+                        each_child(n)
+                            .into_iter()
+                            .filter(Node::is_named)
+                            .map(|c| (c, true)),
+                    );
+                }
+            }
+            "identifier" if in_chain => {
+                let name = w.text(n);
+                if !NON_REFERENCE_WORDS.contains(&name.as_str()) {
+                    w.push_reference(name, call, None);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The property of a member access whose receiver is `this`/`self`/`Self`,
 /// or `None` for a member of any other value.
 fn self_member_name(w: &Walker, member: Node) -> Option<String> {
@@ -853,6 +893,11 @@ fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
             // After extracting the callee, check arguments for identifier
             // references (callbacks / plugins / handlers passed as args).
             walk_call_arguments(w, node, callee_name);
+            // `(override ?? handler)(...)`: every identifier operand of a fallback
+            // chain used as the callee is a function that may run here.
+            if let Some(f) = node.child_by_field_name("function") {
+                walk_callee_fallbacks(w, f, node);
+            }
         }
         "new_expression" => {
             if let Some(c) = node.child_by_field_name("constructor")

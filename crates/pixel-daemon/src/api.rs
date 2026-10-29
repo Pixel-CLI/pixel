@@ -74,6 +74,37 @@ pub const SEARCH_MAX_ROWS: usize = 10_000;
 // `targets` (S3 probes, graph expansion and evidence): the caps keep the op
 // ms-scale; every cap that fires is named in the epistemics envelope.
 const CONTENT_PROBE_LIMIT: usize = 1000;
+/// Lines longer than this are minified or generated and carry no evidence.
+const EVIDENCE_MAX_LINE_BYTES: usize = 1_000;
+/// Characters of a matching line shown as evidence, centred on the keyword.
+const EVIDENCE_WINDOW_CHARS: usize = 160;
+
+/// The part of a matching line around its first occurrence of `keyword`, at most
+/// [`EVIDENCE_WINDOW_CHARS`] characters, with `…` where the line was cut.
+fn keyword_window(line: &str, keyword: &str) -> String {
+    let trimmed = line.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= EVIDENCE_WINDOW_CHARS {
+        return trimmed.to_string();
+    }
+    let lower = trimmed.to_lowercase();
+    let at = lower
+        .find(&keyword.to_lowercase())
+        .map_or(0, |byte| lower[..byte].chars().count());
+    let start = at
+        .saturating_sub(EVIDENCE_WINDOW_CHARS / 2)
+        .min(chars.len() - EVIDENCE_WINDOW_CHARS);
+    let end = start + EVIDENCE_WINDOW_CHARS;
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    out
+}
 const MAX_SEED_FILES: usize = 8;
 const MAX_SEED_SYMBOLS: usize = 24;
 /// P0 is the only tier the doctrine mandates checking before the first
@@ -879,6 +910,35 @@ impl Service {
 
     pub(crate) fn admitted_paths(&self) -> Vec<String> {
         self.index.read_or_recover().paths()
+    }
+
+    /// The files a task can rank: the admitted paths without generated, minified or
+    /// vendored bundles. A bundle names its own words in its filename and matches every
+    /// keyword it contains, so it is never the answer to a question about the code.
+    /// Only files past the graph's size floor are read.
+    pub(crate) fn ranked_paths(&self) -> Vec<String> {
+        self.admitted_paths()
+            .into_iter()
+            .filter(|rel| {
+                let full = self.root.join(rel);
+                match std::fs::metadata(&full) {
+                    Ok(meta) if meta.len() >= pixel_graph::extract::GENERATED_MIN_BYTES as u64 => {
+                        std::fs::read(&full).map_or(true, |bytes| {
+                            // A vendored bundle can average short lines and still carry a
+                            // multi-hundred-kilobyte minified line; no written source does.
+                            let longest = bytes
+                                .split(|b| *b == b'\n')
+                                .map(<[u8]>::len)
+                                .max()
+                                .unwrap_or(0);
+                            !pixel_graph::extract::is_generated_blob(&bytes)
+                                && longest < pixel_graph::extract::GENERATED_MIN_BYTES
+                        })
+                    }
+                    _ => true,
+                }
+            })
+            .collect()
     }
 
     pub fn graph_db_path(&self) -> PathBuf {
@@ -2139,7 +2199,7 @@ impl Service {
             (ensured.is_ok(), ensured.ok().flatten())
         };
 
-        let all_paths = self.admitted_paths();
+        let all_paths = self.ranked_paths();
         // S6: explicit file paths named in the task, matched against the
         // live tree before any lexical probe runs.
         let path_hits = engine::path_rank(&all_paths, &query.path_tokens);
@@ -2251,6 +2311,29 @@ impl Service {
             lines: evidence,
             ..
         } = probes;
+
+        // The same universe for every channel: a file the candidate set left out (a
+        // generated bundle) must not come back through the symbol or content probes.
+        let (symbol_hits, content_hits) = {
+            let ranked: HashSet<&str> = all_paths.iter().map(String::as_str).collect();
+            let symbol_hits: Vec<_> = symbol_hits
+                .into_iter()
+                .filter(|hit| ranked.contains(hit.path.as_str()))
+                .collect();
+            let content_hits = content_hits
+                .into_iter()
+                .map(|(kw, files)| {
+                    (
+                        kw,
+                        files
+                            .into_iter()
+                            .filter(|(p, _)| ranked.contains(p.as_str()))
+                            .collect(),
+                    )
+                })
+                .collect();
+            (symbol_hits, content_hits)
+        };
 
         let opts = engine::TargetsOptions {
             limit: limit.unwrap_or(engine::DEFAULT_LIMIT),
@@ -4609,7 +4692,10 @@ pub(crate) fn probe_content(index: &IndexSet, keywords: &[String]) -> ContentPro
             if kept >= CONTENT_PROBE_LIMIT {
                 break;
             }
-            if !line_has_keyword(&m.line, keyword) {
+            // A minified or generated line is not a readable match: it can run to
+            // megabytes (a bundled script carries whole wordlists on one line) and
+            // would be the evidence for every keyword it contains.
+            if m.line.len() > EVIDENCE_MAX_LINE_BYTES || !line_has_keyword(&m.line, keyword) {
                 continue;
             }
             *per_file.entry(m.path.clone()).or_default() += 1;
@@ -4621,7 +4707,7 @@ pub(crate) fn probe_content(index: &IndexSet, keywords: &[String]) -> ContentPro
             if lines.len() < EVIDENCE_MAX_LINES_PER_TARGET {
                 lines.push(ProbeLine {
                     line: m.line_number,
-                    text: m.line.clone(),
+                    text: keyword_window(&m.line, keyword),
                     keyword: keyword.clone(),
                 });
             }
@@ -12354,3 +12440,29 @@ mod context_crux_coordinate_tests {
 
 #[cfg(test)]
 mod contract_tests;
+
+#[cfg(test)]
+mod keyword_window_tests {
+    use super::{EVIDENCE_WINDOW_CHARS, keyword_window};
+
+    #[test]
+    fn a_long_line_is_shown_as_a_window_around_the_keyword() {
+        let line = format!("{}needle{}", "a".repeat(500), "b".repeat(500));
+        let shown = keyword_window(&line, "needle");
+        assert!(shown.contains("needle"), "{shown}");
+        assert!(
+            shown.chars().count() <= EVIDENCE_WINDOW_CHARS + 2,
+            "{}",
+            shown.len()
+        );
+        assert!(shown.starts_with('…') && shown.ends_with('…'));
+    }
+
+    #[test]
+    fn a_short_line_is_shown_whole_and_trimmed() {
+        assert_eq!(
+            keyword_window("   const needle = 1;  ", "needle"),
+            "const needle = 1;"
+        );
+    }
+}

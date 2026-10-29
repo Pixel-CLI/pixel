@@ -114,6 +114,35 @@ const STOPWORDS: &[&str] = &[
     "bug",
     "task",
     "issue",
+    // Question scaffolding of natural-language questions ("explain where X lives",
+    // "how is Y checked", "what happens when Z"): not code vocabulary.
+    "explain",
+    "describe",
+    "where",
+    "lives",
+    "live",
+    "located",
+    "locate",
+    "happens",
+    "happen",
+    "walk",
+    "through",
+    "repository",
+    "repo",
+    "codebase",
+    "checked",
+    "does",
+    "question",
+    "without",
+    "simple",
+    "which",
+    "who",
+    "whose",
+    "about",
+    "between",
+    "tell",
+    "show",
+    "give",
 ];
 
 /// French function words, dropped only from a task detected as French
@@ -190,6 +219,26 @@ const MIN_KEYWORD_LEN: usize = 3;
 /// broaden path/filename matching; the original keywords remain canonical for
 /// content probes and report labels.
 const SEMANTIC_RELATIONS: &[(&str, &[&str])] = &[
+    (
+        "allowed",
+        &["permission", "entitlement", "access", "authorized"],
+    ),
+    (
+        "permission",
+        &["allowed", "access", "entitlement", "authorized"],
+    ),
+    (
+        "access",
+        &["permission", "allowed", "entitlement", "authorized"],
+    ),
+    (
+        "entitlement",
+        &["permission", "access", "allowed", "plan", "tier"],
+    ),
+    ("validation", &["validate", "verify", "check", "guard"]),
+    ("validate", &["validation", "verify", "check"]),
+    ("verify", &["validate", "verification", "check"]),
+    ("identity", &["auth", "user", "jwt", "token"]),
     ("login", &["auth", "authenticate", "signin", "session"]),
     ("auth", &["login", "authenticate", "session", "user"]),
     ("authenticate", &["login", "auth", "session", "user"]),
@@ -388,10 +437,29 @@ pub const SHORT_TECH_KEYWORDS: &[&str] = &[
     "ai", "ml",
 ];
 
+/// Appends the joined form of each hyphenated word pair of plain letters: "sign-in"
+/// also contributes "signin", the spelling the code uses. Both forms stay in the task.
+fn join_hyphenated_words(task: &str) -> String {
+    let mut out = task.to_string();
+    for token in task.split_whitespace() {
+        let token = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+        let parts: Vec<&str> = token.split('-').collect();
+        if parts.len() == 2
+            && parts
+                .iter()
+                .all(|p| p.len() >= 2 && p.chars().all(|c| c.is_ascii_alphabetic()))
+        {
+            out.push(' ');
+            out.push_str(&parts.concat());
+        }
+    }
+    out
+}
+
 /// Normalize compound technical terms (e.g. "c#", "c++", ".net", "node.js")
 /// into clean alphanumeric words before word splitting.
 pub fn normalize_task_compounds(task: &str) -> String {
-    let mut out = task.to_string();
+    let mut out = join_hyphenated_words(task);
     let replacements = [
         ("c#", "csharp"),
         ("c-sharp", "csharp"),
@@ -770,6 +838,16 @@ pub const W_PATH: f64 = 6.0;
 /// deterministic structural signals). Only fused when the embedding model
 /// is warm and the caller opts in (`scope: "hybrid"`).
 pub const W_SEMANTIC: f64 = 1.5;
+/// Saturation of the per-keyword term frequency in the lexical score: a keyword's
+/// evidence stops adding weight once it is this strong (BM25's k, on the field mix).
+const LEXICAL_TF_SATURATION: f64 = 2.0;
+
+/// A path's per-keyword matches: keyword index to (weight, matched word).
+type KeywordMatches = BTreeMap<usize, (u32, String)>;
+/// A scored path with the keywords it matched and its IDF score.
+type ScoredPath = (String, Vec<String>, f64);
+/// A scored path with its per-keyword hit counts and its summed IDF.
+type ScoredContent = (String, Vec<(String, u32)>, f64);
 /// BM25 term-saturation parameter. 1.2 is the standard Robertson/Okapi
 /// default: term frequency saturates quickly, so the 20th occurrence of a
 /// term adds almost nothing over the 5th. This is the property raw match
@@ -907,28 +985,113 @@ const SECONDARY_GAP_RATIO: f64 = 0.7;
 
 /// S1: rank the file universe by path-word keyword overlap. Filename-component
 /// hits count double vs directory-component hits.
+/// Whether a path word and a task keyword name the same concept: equal, or one a
+/// prefix of the other (`route` / `router`, `fact` / `factual`) when the shorter is at
+/// least four characters and at least half the longer. A morphological match, not a
+/// fuzzy one: `explain` does not match `explanation`, which the thesaurus covers.
+fn word_matches_keyword(word: &str, keyword: &str) -> bool {
+    if word == keyword {
+        return true;
+    }
+    let (short, long) = if word.len() <= keyword.len() {
+        (word, keyword)
+    } else {
+        (keyword, word)
+    };
+    short.len() >= 4 && long.starts_with(short) && short.len() * 2 >= long.len()
+}
+
+/// Filename ranking with inverse-document-frequency weights: a keyword that names
+/// few paths (`classifier`) outweighs one that names many (`model`), and a match in
+/// the basename counts twice a match in a directory. Deterministic: score, then path.
 fn filename_rank(all_paths: &[String], keywords: &[String]) -> Vec<(String, Vec<String>)> {
-    let kw: HashSet<&str> = keywords.iter().map(String::as_str).collect();
-    let mut scored: Vec<(u32, String, Vec<String>)> = Vec::new();
+    filename_scored(all_paths, keywords)
+        .into_iter()
+        .map(|(p, m, _)| (p, m))
+        .collect()
+}
+
+/// For each path, the keywords its path names: index into `keywords`, with the
+/// strongest weight (2 in the basename, 1 in a directory) and the matched word.
+fn filename_fields(
+    all_paths: &[String],
+    keywords: &[String],
+) -> BTreeMap<String, BTreeMap<usize, (u32, String)>> {
+    let mut out = BTreeMap::new();
     for path in all_paths {
-        let mut matched: BTreeSet<String> = BTreeSet::new();
-        let mut score = 0u32;
         let components: Vec<&str> = path.split('/').collect();
         let last = components.len().saturating_sub(1);
+        let mut matched: BTreeMap<usize, (u32, String)> = BTreeMap::new();
         for (i, comp) in components.iter().enumerate() {
+            let weight = if i == last { 2 } else { 1 };
             for w in split_ident_words(comp) {
-                if kw.contains(w.as_str()) {
-                    score += if i == last { 2 } else { 1 };
-                    matched.insert(w);
+                for (k, kw) in keywords.iter().enumerate() {
+                    if word_matches_keyword(&w, kw) {
+                        let entry = matched.entry(k).or_insert((0, w.clone()));
+                        if weight > entry.0 {
+                            *entry = (weight, w.clone());
+                        }
+                    }
                 }
             }
         }
-        if score > 0 {
-            scored.push((score, path.clone(), matched.into_iter().collect()));
+        if !matched.is_empty() {
+            out.insert(path.clone(), matched);
         }
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    scored.into_iter().map(|(_, p, m)| (p, m)).collect()
+    out
+}
+
+/// [`filename_rank`] with each path's IDF score, best first.
+fn filename_scored(all_paths: &[String], keywords: &[String]) -> Vec<ScoredPath> {
+    // Per path: the keywords it names, with the strongest weight of each match.
+    let mut per_path: Vec<(usize, KeywordMatches)> = Vec::new();
+    let mut df = vec![0usize; keywords.len()];
+    for (idx, path) in all_paths.iter().enumerate() {
+        let components: Vec<&str> = path.split('/').collect();
+        let last = components.len().saturating_sub(1);
+        let mut matched: BTreeMap<usize, (u32, String)> = BTreeMap::new();
+        for (i, comp) in components.iter().enumerate() {
+            let weight = if i == last { 2 } else { 1 };
+            for w in split_ident_words(comp) {
+                for (k, kw) in keywords.iter().enumerate() {
+                    if word_matches_keyword(&w, kw) {
+                        let entry = matched.entry(k).or_insert((0, w.clone()));
+                        if weight > entry.0 {
+                            *entry = (weight, w.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for k in matched.keys() {
+            df[*k] += 1;
+        }
+        if !matched.is_empty() {
+            per_path.push((idx, matched));
+        }
+    }
+    let n = all_paths.len() as f64;
+    let idf: Vec<f64> = df
+        .iter()
+        .map(|&d| (1.0 + (n - d as f64 + 0.5) / (d as f64 + 0.5)).ln())
+        .collect();
+    let mut scored: Vec<(f64, String, Vec<String>)> = per_path
+        .into_iter()
+        .map(|(idx, matched)| {
+            let score: f64 = matched
+                .iter()
+                .map(|(k, (weight, _))| idf[*k] * f64::from(*weight))
+                .sum();
+            let words: BTreeSet<String> = matched.into_values().map(|(_, w)| w).collect();
+            (score, all_paths[idx].clone(), words.into_iter().collect())
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored
+        .into_iter()
+        .map(|(score, p, m)| (p, m, score))
+        .collect()
 }
 
 /// S6: rank the file universe against file paths named in the task.
@@ -1015,6 +1178,14 @@ fn idf_weight(kw: &str, content_hits: &BTreeMap<String, Vec<(String, u32)>>) -> 
 fn content_rank(
     content_hits: &BTreeMap<String, Vec<(String, u32)>>,
 ) -> Vec<(String, Vec<(String, u32)>)> {
+    content_scored(content_hits)
+        .into_iter()
+        .map(|(p, kw, _)| (p, kw))
+        .collect()
+}
+
+/// [`content_rank`] with each path's summed keyword IDF, best first.
+fn content_scored(content_hits: &BTreeMap<String, Vec<(String, u32)>>) -> Vec<ScoredContent> {
     type ScoredRow = (i64, u64, String, Vec<(String, u32)>);
     struct Acc {
         per_kw: Vec<(String, u32)>,
@@ -1047,7 +1218,10 @@ fn content_rank(
         })
         .collect();
     scored.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-    scored.into_iter().map(|(_, _, p, kw)| (p, kw)).collect()
+    scored
+        .into_iter()
+        .map(|(scaled, _, p, kw)| (p, kw, -scaled as f64 / 1000.0))
+        .collect()
 }
 
 /// Reciprocal-rank fusion over weighted ranked lists. Each list contributes
@@ -1124,6 +1298,35 @@ pub fn lexical_rank(
 // fusion + tiering
 // ---------------------------------------------------------------------------
 
+/// Weight of a file by its role: source is 1.0; prose, data and vendored assets are half.
+/// A path under `docs/`, `specs/` or `public/` is not implementation, whatever its name.
+fn file_role_weight(path: &str) -> f64 {
+    const NON_CODE_EXTENSIONS: &[&str] = &[
+        "md", "mdx", "txt", "rst", "adoc", "html", "json", "yaml", "yml", "toml", "lock", "svg",
+        "css", "scss",
+    ];
+    const NON_CODE_DIRS: &[&str] = &[
+        "docs",
+        "doc",
+        "specs",
+        "spec",
+        "public",
+        "vendor",
+        "third_party",
+    ];
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let in_dir = path
+        .split('/')
+        .rev()
+        .skip(1)
+        .any(|dir| NON_CODE_DIRS.contains(&dir.to_ascii_lowercase().as_str()));
+    if in_dir || NON_CODE_EXTENSIONS.contains(&ext.as_str()) {
+        0.5
+    } else {
+        1.0
+    }
+}
+
 fn round6(x: f64) -> f64 {
     (x * 1_000_000.0).round() / 1_000_000.0
 }
@@ -1175,6 +1378,18 @@ pub fn compute_targets(
         e.families |= family;
         e
     }
+    /// A channel that carries magnitude adds its normalised score directly.
+    fn bump_scored<'m>(
+        fused: &'m mut HashMap<String, Entry>,
+        path: &str,
+        value: f64,
+        family: u8,
+    ) -> &'m mut Entry {
+        let e = fused.entry(path.to_string()).or_default();
+        e.score += value;
+        e.families |= family;
+        e
+    }
 
     let limit = opts.limit.clamp(1, MAX_LIMIT);
 
@@ -1188,9 +1403,7 @@ pub fn compute_targets(
         .collect();
 
     // Per-signal ranked lists.
-    let s1 = filename_rank(&inputs.all_paths, &ranking_keywords);
     let s2 = &inputs.symbol_hits;
-    let s3 = content_rank(&inputs.content_hits);
     let s4 = &inputs.graph_neighbors;
     let s5 = &inputs.cluster_neighbors;
     let s6 = &inputs.path_hits;
@@ -1198,13 +1411,145 @@ pub fn compute_targets(
     // Fuse.
     let mut fused: HashMap<String, Entry> = HashMap::default();
 
-    for (rank, (path, matched)) in s1.iter().enumerate() {
-        let e = bump(&mut fused, path, rank, W_FILENAME, 1);
-        e.reasons
-            .push(format!("filename match: {}", matched.join(", ")));
+    // Lexical evidence, one score per file, computed per keyword (BM25F-style): a
+    // keyword's evidence in a file is its name, its symbols and its content together,
+    // so a file that names the rare word and also says it in its body beats one that
+    // only repeats a common word. The keyword's IDF over the repo weights it; words the
+    // task expanded with a thesaurus weigh half, because they are guesses.
+    let typed = query.keywords.len();
+    let kw_index: HashMap<&str, usize> = ranking_keywords
+        .iter()
+        .enumerate()
+        .map(|(k, kw)| (kw.as_str(), k))
+        .collect();
+    let name_fields = filename_fields(&inputs.all_paths, &ranking_keywords);
+    let mut symbol_fields: BTreeMap<String, BTreeMap<usize, u32>> = BTreeMap::new();
+    for hit in s2 {
+        for (_, kw) in &hit.symbols {
+            if let Some(&k) = kw_index.get(kw.as_str()) {
+                *symbol_fields
+                    .entry(hit.path.clone())
+                    .or_default()
+                    .entry(k)
+                    .or_default() += 1;
+            }
+        }
     }
-    for (rank, hit) in s2.iter().enumerate() {
-        let e = bump(&mut fused, &hit.path, rank, W_SYMBOL, 2);
+    let mut content_fields: BTreeMap<String, BTreeMap<usize, (u32, String)>> = BTreeMap::new();
+    for (kw, files) in &inputs.content_hits {
+        if let Some(&k) = kw_index.get(kw.as_str()) {
+            for (path, count) in files {
+                content_fields
+                    .entry(path.clone())
+                    .or_default()
+                    .insert(k, (*count, kw.clone()));
+            }
+        }
+    }
+    // Document frequency per keyword across every file any channel names.
+    let mut df = vec![0usize; ranking_keywords.len()];
+    let mut touched: BTreeSet<&str> = BTreeSet::new();
+    touched.extend(name_fields.keys().map(String::as_str));
+    touched.extend(symbol_fields.keys().map(String::as_str));
+    touched.extend(s2.iter().map(|hit| hit.path.as_str()));
+    touched.extend(content_fields.keys().map(String::as_str));
+    for path in &touched {
+        let mut ks: BTreeSet<usize> = BTreeSet::new();
+        if let Some(f) = name_fields.get(*path) {
+            ks.extend(f.keys());
+        }
+        if let Some(f) = symbol_fields.get(*path) {
+            ks.extend(f.keys());
+        }
+        if let Some(f) = content_fields.get(*path) {
+            ks.extend(f.keys());
+        }
+        for k in ks {
+            df[k] += 1;
+        }
+    }
+    let n = inputs.all_paths.len().max(1) as f64;
+    let idf: Vec<f64> = df
+        .iter()
+        .map(|&d| (1.0 + (n - d as f64 + 0.5) / (d as f64 + 0.5)).ln())
+        .collect();
+    let weight: Vec<f64> = (0..ranking_keywords.len())
+        .map(|k| if k < typed { 1.0 } else { 0.5 })
+        .collect();
+    let mut lexical: Vec<(String, f64)> = Vec::new();
+    for path in &touched {
+        let mut score = 0.0;
+        let mut keys: BTreeSet<usize> = BTreeSet::new();
+        for f in [
+            name_fields
+                .get(*path)
+                .map(|m| m.keys().copied().collect::<Vec<_>>()),
+            symbol_fields
+                .get(*path)
+                .map(|m| m.keys().copied().collect()),
+            content_fields
+                .get(*path)
+                .map(|m| m.keys().copied().collect()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            keys.extend(f);
+        }
+        for k in keys {
+            let mut tf = 0.0;
+            if let Some((w, _)) = name_fields.get(*path).and_then(|m| m.get(&k)) {
+                tf += W_FILENAME * if *w == 2 { 1.0 } else { 0.5 };
+            }
+            if let Some(c) = symbol_fields.get(*path).and_then(|m| m.get(&k)) {
+                tf += W_SYMBOL * (*c).min(3) as f64 / 3.0;
+            }
+            if let Some((c, _)) = content_fields.get(*path).and_then(|m| m.get(&k)) {
+                let c = (*c).min(CONTENT_COUNT_CAP) as f64;
+                tf += W_CONTENT * (1.0 + c).ln() / (1.0 + CONTENT_COUNT_CAP as f64).ln();
+            }
+            score += idf[k] * weight[k] * tf / (tf + LEXICAL_TF_SATURATION);
+        }
+        lexical.push(((*path).to_string(), score));
+    }
+    // Where and how questions are about code: a document or a vendored asset that names
+    // the same words is not the implementation, so it weighs less than source.
+    for (path, score) in &mut lexical {
+        *score *= file_role_weight(path);
+    }
+    let lexical_max = lexical.iter().map(|(_, s)| *s).fold(0.0_f64, f64::max);
+    // A file is a symbol match when any of its symbols is a hit; the keyword a symbol
+    // matched only decides how much that evidence weighs in the score.
+    let symbol_paths: BTreeSet<&str> = s2.iter().map(|hit| hit.path.as_str()).collect();
+    let lexical_scale = (W_FILENAME + W_SYMBOL + W_CONTENT) / (RRF_K + 1.0);
+    for (path, score) in &lexical {
+        let mut families = 0u8;
+        if name_fields.contains_key(path.as_str()) {
+            families |= 1;
+        }
+        if symbol_paths.contains(path.as_str()) {
+            families |= 2;
+        }
+        if content_fields.contains_key(path.as_str()) {
+            families |= 4;
+        }
+        let normalised = if lexical_max > 0.0 {
+            score / lexical_max
+        } else {
+            0.0
+        };
+        let e = bump_scored(&mut fused, path, lexical_scale * normalised, families);
+        if let Some(f) = name_fields.get(path.as_str()) {
+            let words: BTreeSet<&str> = f.values().map(|(_, w)| w.as_str()).collect();
+            e.reasons.push(format!(
+                "filename match: {}",
+                words.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+    // Symbol and content reasons, the same wording the per-channel loops gave.
+    for hit in s2 {
+        let e = fused.entry(hit.path.clone()).or_default();
         e.exact_name_hit |= hit.exact_name_hit;
         for (sym, _) in hit.symbols.iter().take(3) {
             e.reasons.push(format!("defines symbol `{}`", sym.name));
@@ -1215,9 +1560,15 @@ pub fn compute_targets(
                 .push(format!("+{} more matching symbols", hit.symbols.len() - 3));
         }
     }
-    for (rank, (path, per_kw)) in s3.iter().enumerate() {
-        let e = bump(&mut fused, path, rank, W_CONTENT, 4);
-        let detail: Vec<String> = per_kw
+    let mut content_by_path: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+    for (path, per_kw) in &content_fields {
+        let mut kws: Vec<(String, u32)> = per_kw.values().map(|(c, kw)| (kw.clone(), *c)).collect();
+        kws.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        content_by_path.insert(path.clone(), kws);
+    }
+    for (path, kws) in &content_by_path {
+        let e = fused.entry(path.clone()).or_default();
+        let detail: Vec<String> = kws
             .iter()
             .take(3)
             .map(|(kw, n)| format!("{n} for \"{kw}\""))
@@ -1434,9 +1785,9 @@ pub fn compute_targets(
     }
 
     let signal_hits = json!({
-        "filename": s1.len(),
+        "filename": name_fields.len(),
         "symbol": s2.len(),
-        "content": s3.len(),
+        "content": content_fields.len(),
         "graph": s4.len(),
         "cluster": s5.len(),
     });
@@ -2390,3 +2741,65 @@ mod tests {
 
 #[cfg(test)]
 mod contract_tests;
+
+#[cfg(test)]
+mod nl_retrieval_tests {
+    use super::*;
+
+    #[test]
+    fn keyword_matches_a_prefix_form_of_at_least_four_characters() {
+        assert!(word_matches_keyword("router", "route"));
+        assert!(word_matches_keyword("factual", "fact"));
+        assert!(word_matches_keyword("route", "route"));
+        // "explanation" is not a prefix of "explain": the thesaurus covers that pair.
+        assert!(!word_matches_keyword("explanation", "explain"));
+        // Short words never prefix-match, so "in" does not match "inside".
+        assert!(!word_matches_keyword("inside", "in"));
+    }
+
+    #[test]
+    fn documents_and_vendored_assets_weigh_half_source() {
+        assert_eq!(file_role_weight("lib/router.ts"), 1.0);
+        assert_eq!(file_role_weight("docs/plan.md"), 0.5);
+        assert_eq!(
+            file_role_weight("public/scripts/clerk-browser-auth.js"),
+            0.5
+        );
+        assert_eq!(file_role_weight("specs/audit.html"), 0.5);
+    }
+
+    #[test]
+    fn hyphenated_words_also_contribute_their_joined_form() {
+        let q = tokenize_task("where is the sign-in check").expect("keywords");
+        assert!(q.keywords.iter().any(|k| k == "signin"), "{:?}", q.keywords);
+        assert!(q.keywords.iter().any(|k| k == "sign"), "{:?}", q.keywords);
+    }
+
+    #[test]
+    fn a_rare_keyword_outweighs_a_common_one_in_the_same_position() {
+        // "model" names many files; "classifier" names one. The classifier file must
+        // rank above the model files even though all of them come first on "model".
+        let mut paths: Vec<String> = (0..12).map(|i| format!("lib/model_{i}.ts")).collect();
+        paths.push("lib/classifier.ts".into());
+        let inputs = SignalInputs {
+            all_paths: paths,
+            graph_available: true,
+            ..Default::default()
+        };
+        let query = TaskQuery {
+            keywords: vec!["model".into(), "classifier".into()],
+            exact_tokens: vec![],
+            path_tokens: vec![],
+            keywords_truncated: false,
+            language: TaskLanguage::English,
+        };
+        let report = compute_targets("t", &query, inputs, &TargetsOptions::default());
+        let first = &report.targets[0];
+        assert_eq!(
+            first.path,
+            "lib/classifier.ts",
+            "{:?}",
+            report.targets.iter().map(|t| &t.path).collect::<Vec<_>>()
+        );
+    }
+}

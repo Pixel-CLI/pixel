@@ -145,7 +145,6 @@ fn targets_facts_should_carry_the_relevance_block_and_repeat_it_identically() {
     assert_eq!(
         counts,
         [
-            ("does", 0),
             ("install", 2),
             ("handle", 1),
             ("existing", 1),
