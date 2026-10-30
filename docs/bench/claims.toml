@@ -48,6 +48,7 @@ commit = "9a8adca44865008d7a2d63bd6d8f0565a640ba27"
 measured = "2026-10-18"
 command = "git clone https://github.com/psf/requests && cd requests && git checkout 611c616 && pixel list-signatures src/requests/models.py"
 live = false
+tracking = "#1358"
 
 [[claim]]
 id = "readme-read-savings-median"
@@ -60,6 +61,7 @@ commit = "9a8adca44865008d7a2d63bd6d8f0565a640ba27"
 measured = "2026-10-18"
 command = "scripts/bench/bench-read-savings.sh"
 live = false
+tracking = "#1358"
 
 [[claim]]
 id = "benchmarks-requests-audit"
@@ -72,6 +74,7 @@ commit = "9a8adca44865008d7a2d63bd6d8f0565a640ba27"
 measured = "2026-10-18"
 command = "git clone https://github.com/psf/requests && cd requests && git checkout 611c616 && pixel audit"
 live = false
+tracking = "#1358"
 
 [[claim]]
 id = "read-savings-table"
@@ -84,6 +87,7 @@ commit = "9a8adca44865008d7a2d63bd6d8f0565a640ba27"
 measured = "2026-10-18"
 command = "scripts/bench/bench-read-savings.sh"
 live = false
+tracking = "#1358"
 
 [[claim]]
 id = "benchmarks-cold-start-rails"
