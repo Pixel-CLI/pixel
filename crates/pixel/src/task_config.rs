@@ -177,18 +177,17 @@ fn equivalent_requirement(key: &str, existing: &Value, required: &Value) -> Resu
 mod tests {
     use super::*;
 
-    struct Scratch(std::path::PathBuf);
+    struct Scratch(std::path::PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
     impl Scratch {
         fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!(
-                "pixel-task-config-{}-{}",
-                crate::task_commands::request(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
+            let _root_tmp = tempfile::Builder::new()
+                .prefix("pixel-task-config-")
+                .tempdir()
+                .unwrap();
+            let root = _root_tmp.path().to_path_buf();
             std::fs::create_dir_all(root.join(".pixel")).unwrap();
-            Self(root)
+            Self(root, _root_tmp)
         }
 
         fn write(&self, task: &Value) {

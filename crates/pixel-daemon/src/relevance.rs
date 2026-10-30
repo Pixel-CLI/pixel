@@ -2385,15 +2385,12 @@ mod tests {
     /// rare, not ubiquitous.
     const REPO_FILLER: usize = 40;
 
-    fn repo(tag: &str, files: &[(&str, &str)]) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-relevance-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+    fn repo(tag: &str, files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+        let scratch = tempfile::Builder::new()
+            .prefix(&format!("pixel-relevance-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let root = scratch.path().to_path_buf();
         let filler: Vec<(String, &str)> = (0..REPO_FILLER)
             .map(|n| (format!("filler/f{n:02}.txt"), "nothing here\n"))
             .collect();
@@ -2406,7 +2403,7 @@ mod tests {
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "fixture"]);
-        root.canonicalize().unwrap()
+        (scratch, root.canonicalize().unwrap())
     }
 
     /// The text index of `root` and, once `Service` built it, the graph.
@@ -2447,7 +2444,7 @@ mod tests {
 
     #[test]
     fn probe_content_should_match_whole_words_and_keep_the_first_two_lines_per_path() {
-        let root = repo(
+        let (_scratch, root) = repo(
             "probe",
             &[
                 (
@@ -2501,7 +2498,7 @@ mod tests {
             .iter()
             .map(|(p, b)| (p.as_str(), b.as_str()))
             .collect();
-        let root = repo("probe-cap", &borrowed);
+        let (_scratch, root) = repo("probe-cap", &borrowed);
         let (index, _) = open(&root);
         let probes = probe_content(&index, &["needle".to_owned()]);
         assert_eq!(probes.truncated, BTreeSet::from(["needle".to_owned()]));
@@ -2518,7 +2515,7 @@ mod tests {
 
     #[test]
     fn relevance_on_should_count_every_channel_of_a_real_repository() {
-        let root = repo("on-graph", INSTALL_REPO);
+        let (_scratch, root) = repo("on-graph", INSTALL_REPO);
         let (index, graph) = open(&root);
         let relevance = relevance_on(
             &index,
@@ -2621,7 +2618,7 @@ mod tests {
 
     #[test]
     fn relevance_on_should_answer_without_a_graph_and_say_so() {
-        let root = repo("on-nograph", INSTALL_REPO);
+        let (_scratch, root) = repo("on-nograph", INSTALL_REPO);
         let (index, _graph) = open(&root);
         let relevance = relevance_on(&index, None, "install claude settings").unwrap();
         assert!(!relevance.graph);
@@ -2639,7 +2636,7 @@ mod tests {
 
     #[test]
     fn relevance_on_should_fold_a_plural_the_graph_scan_matches_exactly() {
-        let root = repo("on-plural", INSTALL_REPO);
+        let (_scratch, root) = repo("on-plural", INSTALL_REPO);
         let (index, graph) = open(&root);
         let relevance = relevance_on(&index, Some(&graph), "claude setting").unwrap();
         assert_eq!(
@@ -2659,7 +2656,7 @@ mod tests {
 
     #[test]
     fn relevance_on_should_borrow_the_counts_of_a_synonym_for_a_french_keyword() {
-        let root = repo("on-french", LOGIN_REPO);
+        let (_scratch, root) = repo("on-french", LOGIN_REPO);
         let (index, graph) = open(&root);
         let relevance = relevance_on(&index, Some(&graph), "la connexion ne marche pas").unwrap();
         assert_eq!(
@@ -2683,7 +2680,7 @@ mod tests {
         // `connexion` has four synonyms and `utilisateur` three; probing all
         // of them would be seven probes. The first synonym of each matches,
         // so two probes suffice and the cap of six never fires.
-        let root = repo(
+        let (_scratch, root) = repo(
             "on-first",
             &[("src/auth.rs", "// login flow\n// user record\n")],
         );
@@ -2704,7 +2701,7 @@ mod tests {
 
     #[test]
     fn relevance_on_should_cap_synonym_probes_and_name_the_keywords_it_left_out() {
-        let root = repo("on-budget", LOGIN_REPO);
+        let (_scratch, root) = repo("on-budget", LOGIN_REPO);
         let (index, graph) = open(&root);
         // corriger: fix repair patch resolve; ajouter: add create insert;
         // supprimer: remove delete destroy. None occurs in the repository.
@@ -2729,7 +2726,7 @@ mod tests {
         // `profil` and `compte` share their three synonyms (profile, account,
         // user), none in the repository. Probing them again for `compte`
         // would spend the cap of six before `connexion` reached `login`.
-        let root = repo("on-shared", LOGIN_REPO);
+        let (_scratch, root) = repo("on-shared", LOGIN_REPO);
         let (index, graph) = open(&root);
         let relevance = relevance_on(&index, Some(&graph), "profil compte connexion").unwrap();
         for unmatched in ["profil", "compte"] {
@@ -2758,7 +2755,7 @@ mod tests {
     fn relevance_on_should_spend_no_synonym_probe_on_a_keyword_the_repository_has() {
         // `session` has a thesaurus entry; the repository has the word, so
         // no probe is spent and the French keyword still gets its turn.
-        let root = repo(
+        let (_scratch, root) = repo(
             "on-spend",
             &[
                 ("src/session.rs", "// session\n"),
@@ -2781,7 +2778,7 @@ mod tests {
         // `rust` and `python` are in the repository only as directory names,
         // `java` only in a text. Their thesaurus entries are 4 + 4 + 3 probes
         // that would use up the cap of six before `connexion` is reached.
-        let root = repo(
+        let (_scratch, root) = repo(
             "on-known",
             &[
                 ("src/rust/mod.rs", "pub fn first() {}\n"),
@@ -2814,7 +2811,7 @@ mod tests {
     fn relevance_on_should_borrow_a_synonym_that_only_a_symbol_name_contains() {
         // `login` never appears as a word of a text, so no content probe
         // finds it: only the graph scan over the synonyms does.
-        let root = repo("on-symbol", &[("src/a.rs", "pub fn do_login() {}\n")]);
+        let (_scratch, root) = repo("on-symbol", &[("src/a.rs", "pub fn do_login() {}\n")]);
         let (index, graph) = open(&root);
         let relevance = relevance_on(&index, Some(&graph), "la connexion ne marche pas").unwrap();
         assert_eq!(
@@ -2834,7 +2831,7 @@ mod tests {
 
     #[test]
     fn relevance_for_should_return_the_same_block_whatever_probes_a_caller_ran() {
-        let root = repo("for-shared", LOGIN_REPO);
+        let (_scratch, root) = repo("for-shared", LOGIN_REPO);
         let (index, graph) = open(&root);
         let query = query("la connexion ne marche pas");
         let all = index.paths();
@@ -2865,7 +2862,7 @@ mod tests {
 
     #[test]
     fn relevance_on_should_refuse_a_task_with_no_searchable_word() {
-        let root = repo("on-empty", LOGIN_REPO);
+        let (_scratch, root) = repo("on-empty", LOGIN_REPO);
         let (index, _) = open(&root);
         assert_eq!(
             relevance_on(&index, None, "to be or not").unwrap_err(),

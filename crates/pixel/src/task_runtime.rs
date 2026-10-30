@@ -151,17 +151,14 @@ pub(crate) fn now_unix() -> u64 {
 mod tests {
     use super::*;
 
-    fn root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-task-runtime-{name}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+    fn root(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let _root_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-task-runtime-{name}-"))
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         std::fs::create_dir_all(root.join(".pixel")).unwrap();
-        root
+        (_root_tmp, root)
     }
 
     fn packet(session: &str, head: &str, updated_unix: u64) -> Packet {
@@ -204,7 +201,7 @@ mod tests {
 
     #[test]
     fn read_returns_the_session_packet_only_for_its_head_and_while_fresh() {
-        let root = root("freshness");
+        let (_root_tmp, root) = root("freshness");
         let written = packet("session-1", "abc", 100);
         write_store(
             &root,
@@ -223,7 +220,7 @@ mod tests {
 
     #[test]
     fn corrupt_state_reads_as_absent() {
-        let root = root("corrupt");
+        let (_root_tmp, root) = root("corrupt");
         std::fs::write(store_path(&root), "not json").unwrap();
         assert!(read_claude_packet(&root, "session-1", "abc", 200).is_none());
         std::fs::remove_dir_all(root).unwrap();
@@ -231,7 +228,7 @@ mod tests {
 
     #[test]
     fn store_should_load_a_packet_written_before_the_intent_field_existed() {
-        let root = root("pre-intent");
+        let (_root_tmp, root) = root("pre-intent");
         let packet = [
             r#"{"version":1,"task_id":"claude:session-1:1","session_id":"session-1","#,
             r#""generation":1,"revision":1,"task":"fix auth","head_oid":"abc","#,

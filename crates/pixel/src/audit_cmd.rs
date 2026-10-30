@@ -431,11 +431,15 @@ mod tests {
     /// A repository with a graph built the way production builds it: the
     /// largest file first on disk, a second one, and a file whose rows hold
     /// no signature.
-    struct Fixture(PathBuf);
+    struct Fixture(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
     impl Fixture {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("px-audit-{tag}-{}", std::process::id()));
+            let _dir_tmp = tempfile::Builder::new()
+                .prefix(&format!("px-audit-{tag}-"))
+                .tempdir()
+                .unwrap();
+            let dir = _dir_tmp.path().to_path_buf();
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(dir.join("src")).unwrap();
             let big: String = (0..40)
@@ -453,7 +457,7 @@ mod tests {
             let db = root.join(SHARD_DIR).join(GRAPH_DB_FILE);
             std::fs::create_dir_all(db.parent().unwrap()).unwrap();
             pixel_graph::build::build_graph(&root, &db).unwrap();
-            Self(root)
+            Self(root, _dir_tmp)
         }
 
         fn store(&self) -> GraphStore {
@@ -584,7 +588,11 @@ mod tests {
     /// runs, and a row whose file is gone sorts last instead of first.
     #[test]
     fn largest_first_orders_by_size_then_path_and_drops_non_code() {
-        let dir = std::env::temp_dir().join(format!("px-audit-order-{}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("px-audit-order-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (name, size) in [("b.rs", 10), ("a.rs", 10), ("big.rs", 30), ("notes.md", 90)] {
@@ -889,7 +897,11 @@ mod tests {
 
     #[test]
     fn report_for_without_a_graph_names_the_command_that_builds_it() {
-        let dir = std::env::temp_dir().join(format!("px-audit-nograph-{}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("px-audit-nograph-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let err = report_for(&dir, 20, false).unwrap_err();

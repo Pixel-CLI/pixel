@@ -1123,7 +1123,8 @@ fn drained(stream: &mut std::net::TcpStream) -> bool {
                     .map(|n| n.trim().parse::<usize>().unwrap_or(0))
             })
             .unwrap_or(0);
-        if body.len() >= wanted {
+        // A request without a body (a GET liveness probe) is not a classification ask.
+        if body.len() >= wanted && wanted > 0 {
             return true;
         }
     }
@@ -1149,7 +1150,15 @@ fn classified(root: &Path, tag: &str, enabled: bool, base: &str) -> (bool, Value
     )
     .unwrap();
     let home_path = home.to_str().unwrap();
-    let output = hook(root, "claude", WEAK, &[("HOME", home_path)]);
+    // The probes race a wall-clock window; under CPU load the default three
+    // seconds can run out first, the signal turns weak and the classifier is
+    // skipped. This test is about the classifier, so it gives the probes room.
+    let output = hook(
+        root,
+        "claude",
+        WEAK,
+        &[("HOME", home_path), ("PIXEL_BRIEF_WINDOW_MS", "30000")],
+    );
     let delivered = output["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .is_some_and(|text| text.starts_with("[PIXEL:BRIEF]"));

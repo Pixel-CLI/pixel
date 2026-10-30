@@ -461,11 +461,14 @@ pub(crate) fn append_with(
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-brief-log-{tag}-{}", std::process::id()));
+    fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-brief-log-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        (_dir_tmp, dir)
     }
 
     fn record() -> Record {
@@ -746,7 +749,7 @@ mod tests {
 
     #[test]
     fn append_should_write_a_line_and_keep_only_the_last_cap_of_them() {
-        let dir = scratch("cap");
+        let (_dir_tmp, dir) = scratch("cap");
         let path = dir.join(LOG_FILE);
         for n in 0..5 {
             append(&path, &format!("{{\"n\":{n}}}"), 3).unwrap();
@@ -758,7 +761,7 @@ mod tests {
 
     #[test]
     fn append_should_keep_five_hundred_lines_by_default() {
-        let dir = scratch("default-cap");
+        let (_dir_tmp, dir) = scratch("default-cap");
         let path = dir.join(LOG_FILE);
         for n in 0..=MAX_LINES {
             append(&path, &format!("{n}"), MAX_LINES).unwrap();
@@ -774,7 +777,7 @@ mod tests {
     #[test]
     fn append_should_be_owner_only_and_not_create_a_missing_directory() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = scratch("mode");
+        let (_dir_tmp, dir) = scratch("mode");
         let path = dir.join(LOG_FILE);
         append(&path, "x", 3).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
@@ -788,7 +791,7 @@ mod tests {
     #[test]
     fn append_should_tighten_an_existing_file_to_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = scratch("tighten");
+        let (_dir_tmp, dir) = scratch("tighten");
         let path = dir.join(LOG_FILE);
         std::fs::write(&path, "old\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -801,7 +804,7 @@ mod tests {
 
     #[test]
     fn append_should_refuse_a_link_at_the_log_and_leave_its_target_alone() {
-        let dir = scratch("linked-file");
+        let (_dir_tmp, dir) = scratch("linked-file");
         let target = dir.join("elsewhere.txt");
         std::fs::write(&target, "keep me\n").unwrap();
         let path = dir.join(LOG_FILE);
@@ -819,7 +822,7 @@ mod tests {
 
     #[test]
     fn append_should_refuse_a_linked_directory_and_write_nothing_through_it() {
-        let dir = scratch("linked-dir");
+        let (_dir_tmp, dir) = scratch("linked-dir");
         let real = dir.join("real");
         std::fs::create_dir_all(&real).unwrap();
         let sidecar = dir.join(".pixel");
@@ -831,7 +834,7 @@ mod tests {
 
     #[test]
     fn project_id_should_be_a_stable_sixteen_hex_of_the_canonical_root() {
-        let dir = scratch("project-id");
+        let (_dir_tmp, dir) = scratch("project-id");
         let root = dir.join("repo");
         std::fs::create_dir_all(&root).unwrap();
         let id = project_id(&root);
@@ -851,7 +854,7 @@ mod tests {
         let _g = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let dir = scratch("central-path");
+        let (_dir_tmp, dir) = scratch("central-path");
         let root = dir.join("repo");
         std::fs::create_dir_all(&root).unwrap();
         // SAFETY: under ENV_LOCK, single-threaded test setup.
@@ -880,7 +883,7 @@ mod tests {
         let _g = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let dir = scratch("central-append");
+        let (_dir_tmp, dir) = scratch("central-append");
         let root = dir.join("repo");
         std::fs::create_dir_all(&root).unwrap();
         // SAFETY: under ENV_LOCK, single-threaded test setup.
@@ -912,7 +915,7 @@ mod tests {
         let _g = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let dir = scratch("central-off");
+        let (_dir_tmp, dir) = scratch("central-off");
         let root = dir.join("repo");
         std::fs::create_dir_all(&root).unwrap();
         // SAFETY: under ENV_LOCK, single-threaded test setup.

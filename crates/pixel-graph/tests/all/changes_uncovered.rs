@@ -10,23 +10,17 @@
 //! ranges cover the diff's line ranges, and a fixture that chooses both
 //! would answer it by construction.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use pixel_graph::build::build_graph;
 use pixel_graph::changes::{ChangesReport, UncoveredMotif, detect};
 use pixel_graph::store::GraphStore;
 
-fn tmpdir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "pixel-uncovered-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn tmpdir(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("pixel-uncovered-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -72,21 +66,23 @@ fn source_v1() -> String {
     .join("\n")
 }
 
-fn repo(name: &str) -> PathBuf {
-    let root = tmpdir(name);
+fn repo(name: &str) -> tempfile::TempDir {
+    let root_dir = tmpdir(name);
+    let root = root_dir.path();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/work.ts"), source_v1()).unwrap();
     std::fs::write(root.join(".gitignore"), "graph.db*\n").unwrap();
-    git(&root, &["init", "-q"]);
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-qm", "baseline"]);
-    root
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "baseline"]);
+    root_dir
 }
 
 /// Build the graph over the tree as it stands now and report against it.
 /// The db lives outside the repository so it never enters the diff.
 fn report(root: &Path, base: Option<&str>) -> ChangesReport {
-    let db = tmpdir("db").join("graph.db");
+    let db_dir = tmpdir("db");
+    let db = db_dir.path().join("graph.db");
     build_graph(root, &db).unwrap();
     let store = GraphStore::open(&db).unwrap();
     detect(&store, root, base, false).unwrap()
@@ -102,12 +98,13 @@ fn motifs(report: &ChangesReport) -> Vec<(String, UncoveredMotif)> {
 
 #[test]
 fn an_edit_inside_a_function_leaves_nothing_uncovered() {
-    let root = repo("covered");
+    let root_dir = repo("covered");
+    let root = root_dir.path();
     // Line 4 is inside `keep`, on both sides of the diff.
     let edited = source_v1().replace("  return n + 1", "  return n + 11");
     std::fs::write(root.join("src/work.ts"), edited).unwrap();
 
-    let r = report(&root, Some("HEAD"));
+    let r = report(root, Some("HEAD"));
     assert!(
         r.uncovered_changes.is_empty(),
         "an edit inside a symbol is covered: {:?}",
@@ -119,17 +116,18 @@ fn an_edit_inside_a_function_leaves_nothing_uncovered() {
     // The symbol itself is still reported as changed.
     let names: Vec<&str> = r.symbols.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, vec!["keep"]);
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn an_edit_between_symbols_is_uncovered_at_its_own_lines() {
-    let root = repo("outside");
+    let root_dir = repo("outside");
+    let root = root_dir.path();
     // Line 2 is a header comment: inside the file, outside every symbol.
     let edited = source_v1().replace("// second header line", "// second header line, edited");
     std::fs::write(root.join("src/work.ts"), edited).unwrap();
 
-    let r = report(&root, Some("HEAD"));
+    let r = report(root, Some("HEAD"));
     // One entry per side: the line exists in both, and each side is judged
     // against its own coordinates.
     assert_eq!(
@@ -147,12 +145,13 @@ fn an_edit_between_symbols_is_uncovered_at_its_own_lines() {
     assert_eq!(r.uncovered_changes[1].new_lines, None);
     // Nothing was deleted, so nothing lost its anchor.
     assert!(r.unanchored.is_empty(), "{:?}", r.unanchored);
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn deleting_a_function_leaves_it_unanchored_under_its_old_uid() {
-    let root = repo("deleted-symbol");
+    let root_dir = repo("deleted-symbol");
+    let root = root_dir.path();
     // Drop `gone` entirely: lines 6-8 disappear.
     let edited = source_v1().replace(
         "export function gone(n: number): number {\n  return n + 2\n}\n",
@@ -160,7 +159,7 @@ fn deleting_a_function_leaves_it_unanchored_under_its_old_uid() {
     );
     std::fs::write(root.join("src/work.ts"), edited).unwrap();
 
-    let r = report(&root, Some("HEAD"));
+    let r = report(root, Some("HEAD"));
     let uids: Vec<&str> = r.unanchored.iter().map(|u| u.uid.as_str()).collect();
     assert_eq!(
         uids,
@@ -179,7 +178,7 @@ fn deleting_a_function_leaves_it_unanchored_under_its_old_uid() {
         "{:?}",
         r.uncovered_changes
     );
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Deleting the second of two same-named spec helpers (#1217) reports it
@@ -204,34 +203,37 @@ fn deleting_the_second_same_named_definition_leaves_it_unanchored() {
         "",
     ]
     .join("\n");
-    let root = tmpdir("same-named");
+    let root_dir = tmpdir("same-named");
+    let root = root_dir.path();
     std::fs::create_dir_all(root.join("spec")).unwrap();
     std::fs::write(root.join("spec/a_spec.rb"), &source).unwrap();
     std::fs::write(root.join(".gitignore"), "graph.db*\n").unwrap();
-    git(&root, &["init", "-q"]);
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-qm", "baseline"]);
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "baseline"]);
     let edited = source.replace("    def helper\n      2\n    end\n", "");
     std::fs::write(root.join("spec/a_spec.rb"), edited).unwrap();
 
-    let r = report(&root, Some("HEAD"));
+    let r = report(root, Some("HEAD"));
     let lost: Vec<(&str, [u32; 2])> = r
         .unanchored
         .iter()
         .map(|u| (u.uid.as_str(), u.old_lines))
         .collect();
     assert_eq!(lost, vec![("spec/a_spec.rb#helper#function~2", [8, 10])]);
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn deleting_a_file_unanchors_its_symbols_even_when_the_graph_still_holds_them() {
-    let root = repo("deleted-file");
+    let root_dir = repo("deleted-file");
+    let root = root_dir.path();
     // The graph is built while the file is still there, then the file goes:
     // a stale graph still answers for it, which is exactly the case a
     // reachability answer must not be allowed to trust.
-    let db = tmpdir("db").join("graph.db");
-    build_graph(&root, &db).unwrap();
+    let db_dir = tmpdir("db");
+    let db = db_dir.path().join("graph.db");
+    build_graph(root, &db).unwrap();
     let store = GraphStore::open(&db).unwrap();
     assert!(
         store
@@ -242,22 +244,23 @@ fn deleting_a_file_unanchors_its_symbols_even_when_the_graph_still_holds_them() 
     );
     std::fs::remove_file(root.join("src/work.ts")).unwrap();
 
-    let r = detect(&store, &root, Some("HEAD"), false).unwrap();
+    let r = detect(&store, root, Some("HEAD"), false).unwrap();
     let mut names: Vec<&str> = r.unanchored.iter().map(|u| u.name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(names, vec!["gone", "keep"]);
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn a_change_in_a_file_no_grammar_reads_is_unsupported_language() {
-    let root = repo("unsupported");
+    let root_dir = repo("unsupported");
+    let root = root_dir.path();
     std::fs::write(root.join("config.toml"), "[a]\nb = 1\n").unwrap();
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-qm", "config"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "config"]);
     std::fs::write(root.join("config.toml"), "[a]\nb = 2\n").unwrap();
 
-    let r = report(&root, Some("HEAD"));
+    let r = report(root, Some("HEAD"));
     assert_eq!(
         motifs(&r),
         vec![
@@ -273,18 +276,19 @@ fn a_change_in_a_file_no_grammar_reads_is_unsupported_language() {
         "{:?}",
         r.uncovered_changes
     );
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn a_binary_change_is_a_non_text_change() {
-    let root = repo("binary");
+    let root_dir = repo("binary");
+    let root = root_dir.path();
     std::fs::write(root.join("data.bin"), [0u8, 1, 2, 3, 0, 4]).unwrap();
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-qm", "blob"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "blob"]);
     std::fs::write(root.join("data.bin"), [0u8, 9, 9, 9, 0, 4]).unwrap();
 
-    let r = report(&root, Some("HEAD"));
+    let r = report(root, Some("HEAD"));
     assert_eq!(
         motifs(&r),
         vec![("data.bin".to_string(), UncoveredMotif::NonTextChange)],
@@ -297,18 +301,19 @@ fn a_binary_change_is_a_non_text_change() {
     // And it counts as a changed file: a change with no hunk is still a
     // change, and a report that dropped it would claim to cover the diff.
     assert_eq!(r.changed_files, 1);
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn a_mode_only_change_is_a_non_text_change() {
-    let root = repo("mode");
+    let root_dir = repo("mode");
+    let root = root_dir.path();
     let script = root.join("src/work.ts");
     let mut perms = std::fs::metadata(&script).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
     std::fs::set_permissions(&script, perms).unwrap();
 
-    let r = report(&root, Some("HEAD"));
+    let r = report(root, Some("HEAD"));
     assert_eq!(
         motifs(&r),
         vec![("src/work.ts".to_string(), UncoveredMotif::NonTextChange)],
@@ -316,14 +321,16 @@ fn a_mode_only_change_is_a_non_text_change() {
         r.uncovered_changes
     );
     assert_eq!(r.changed_files, 1);
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn a_file_the_graph_does_not_hold_yet_is_not_indexed() {
-    let root = repo("not-indexed");
-    let db = tmpdir("db").join("graph.db");
-    build_graph(&root, &db).unwrap();
+    let root_dir = repo("not-indexed");
+    let root = root_dir.path();
+    let db_dir = tmpdir("db");
+    let db = db_dir.path().join("graph.db");
+    build_graph(root, &db).unwrap();
     let store = GraphStore::open(&db).unwrap();
     // Added after the build: indexable, simply not in the graph.
     std::fs::write(
@@ -331,9 +338,9 @@ fn a_file_the_graph_does_not_hold_yet_is_not_indexed() {
         "export function fresh(): number {\n  return 3\n}\n",
     )
     .unwrap();
-    git(&root, &["add", "src/fresh.ts"]);
+    git(root, &["add", "src/fresh.ts"]);
 
-    let r = detect(&store, &root, Some("HEAD"), false).unwrap();
+    let r = detect(&store, root, Some("HEAD"), false).unwrap();
     assert_eq!(
         motifs(&r),
         vec![("src/fresh.ts".to_string(), UncoveredMotif::NotIndexed)],
@@ -341,7 +348,7 @@ fn a_file_the_graph_does_not_hold_yet_is_not_indexed() {
         r.uncovered_changes
     );
     assert_eq!(r.uncovered_changes[0].new_lines, Some([1, 3]));
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Reading the base side costs a `git show` and a parse per file, so it is
@@ -350,7 +357,8 @@ fn a_file_the_graph_does_not_hold_yet_is_not_indexed() {
 /// conservative direction, silently covering less is not.
 #[test]
 fn past_the_base_read_cap_the_old_side_is_reported_unexamined() {
-    let root = tmpdir("base-cap");
+    let root_dir = tmpdir("base-cap");
+    let root = root_dir.path();
     std::fs::create_dir_all(root.join("src")).unwrap();
     // One more file than `BASE_EXTRACTION_CAP` (200), each with a line the
     // edit below removes, so every one of them asks for a base read.
@@ -362,9 +370,9 @@ fn past_the_base_read_cap_the_old_side_is_reported_unexamined() {
         )
         .unwrap();
     }
-    git(&root, &["init", "-q"]);
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-qm", "baseline"]);
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "baseline"]);
     for (i, f) in files.iter().enumerate() {
         std::fs::write(
             root.join(f),
@@ -373,7 +381,7 @@ fn past_the_base_read_cap_the_old_side_is_reported_unexamined() {
         .unwrap();
     }
 
-    let r = report(&root, Some("HEAD"));
+    let r = report(root, Some("HEAD"));
     assert_eq!(r.changed_files, 201);
     // The symbol judgement shares the cap: the 201st file is judged by its
     // status alone, and says so.
@@ -410,12 +418,13 @@ fn past_the_base_read_cap_the_old_side_is_reported_unexamined() {
         r.uncovered_changes
     );
     assert_eq!(r.uncovered_changes[0].old_lines, Some([2, 2]));
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn with_no_base_ref_the_old_side_is_read_from_the_index() {
-    let root = repo("index-base");
+    let root_dir = repo("index-base");
+    let root = root_dir.path();
     // Stage a version holding a symbol HEAD never had, then remove it from
     // the working tree. A plain `git diff` compares the working tree to the
     // index, so the removal's base side only exists in the index: reading
@@ -432,12 +441,12 @@ fn with_no_base_ref_the_old_side_is_read_from_the_index() {
         .join("\n")
     );
     std::fs::write(root.join("src/work.ts"), &staged).unwrap();
-    git(&root, &["add", "src/work.ts"]);
+    git(root, &["add", "src/work.ts"]);
     std::fs::write(root.join("src/work.ts"), source_v1()).unwrap();
 
-    let r = report(&root, None);
+    let r = report(root, None);
     let names: Vec<&str> = r.unanchored.iter().map(|u| u.name.as_str()).collect();
     assert_eq!(names, vec!["staged_only"]);
     assert_eq!(r.unanchored[0].uid, "src/work.ts#staged_only#function");
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }

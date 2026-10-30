@@ -139,8 +139,11 @@ mod tests {
 
     #[test]
     fn finds_lines_and_skips_binary() {
-        let dir = std::env::temp_dir().join(format!("gpx-verify-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-verify-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let text = dir.join("a.txt");
         std::fs::write(&text, "one handleClick\nplain\nhandleClick again\n").unwrap();
         let bin = dir.join("b.bin");
@@ -160,8 +163,11 @@ mod tests {
 
     #[test]
     fn search_file_page_skips_then_stops_at_the_page_size() {
-        let dir = std::env::temp_dir().join(format!("gpx-verify-page-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-verify-page-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let text = dir.join("p.txt");
         std::fs::write(&text, "hit 1\nhit 2\nhit 3\nhit 4\nhit 5\n").unwrap();
         let v = Verifier::new("hit").unwrap();
@@ -181,8 +187,11 @@ mod tests {
 
     #[test]
     fn one_searcher_serves_a_whole_candidate_set() {
-        let dir = std::env::temp_dir().join(format!("gpx-verify-reuse-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-verify-reuse-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let v = Verifier::new("hit").unwrap();
         let mut searcher = Verifier::searcher();
         let mut out = Vec::new();

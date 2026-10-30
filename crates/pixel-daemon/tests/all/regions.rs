@@ -20,9 +20,12 @@ use crate::support::git;
 ///   imports `login.rs` and `types.rs`.
 /// - `types.rs` defines `AuthConfig`, imported by both region files.
 /// - `strings.rs` is unrelated.
-fn fixture(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("gpx-regions-{tag}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+fn fixture(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("gpx-regions-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let dir = scratch.path().to_path_buf();
     std::fs::create_dir_all(dir.join("src/auth")).unwrap();
     std::fs::create_dir_all(dir.join("src/util")).unwrap();
     std::fs::write(
@@ -56,7 +59,7 @@ fn fixture(tag: &str) -> std::path::PathBuf {
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "fixture"]);
-    dir
+    (scratch, dir)
 }
 
 fn run_regions(dir: &Path, task: &str, regions: bool) -> serde_json::Value {
@@ -80,7 +83,7 @@ fn manifest(data: &serde_json::Value) -> &serde_json::Value {
 
 #[test]
 fn regions_absent_without_the_flag() {
-    let dir = fixture("flag");
+    let (_scratch, dir) = fixture("flag");
     let data = run_regions(
         &dir,
         "fix `login_user` and `start_session` auth flow",
@@ -95,7 +98,7 @@ fn regions_absent_without_the_flag() {
 
 #[test]
 fn regions_manifest_shape_and_witnesses() {
-    let dir = fixture("shape");
+    let (_scratch, dir) = fixture("shape");
     let data = run_regions(&dir, "fix `login_user` and `start_session` auth flow", true);
     let m = manifest(&data);
 
@@ -158,7 +161,7 @@ fn regions_manifest_shape_and_witnesses() {
 
 #[test]
 fn regions_conflicts_pin_the_conservative_direction() {
-    let dir = fixture("conflicts");
+    let (_scratch, dir) = fixture("conflicts");
     let data = run_regions(&dir, "fix `login_user` and `start_session` auth flow", true);
     let m = manifest(&data);
     let login_user = "src/auth/login.rs#login_user#function";
@@ -219,7 +222,7 @@ fn regions_conflicts_pin_the_conservative_direction() {
 
 #[test]
 fn regions_merge_order_puts_callees_first() {
-    let dir = fixture("layers");
+    let (_scratch, dir) = fixture("layers");
     let data = run_regions(&dir, "fix `login_user` and `start_session` auth flow", true);
     let m = manifest(&data);
     let layers = m["layers"].as_array().unwrap();
@@ -273,7 +276,7 @@ fn regions_merge_order_puts_callees_first() {
 
 #[test]
 fn regions_shared_files_carry_the_importer_witness() {
-    let dir = fixture("shared");
+    let (_scratch, dir) = fixture("shared");
     let data = run_regions(&dir, "fix `login_user` and `start_session` auth flow", true);
     let m = manifest(&data);
     let shared = m["shared_files"].as_array().unwrap();
@@ -312,7 +315,7 @@ fn regions_shared_file_outside_p0_is_detected() {
     // A file imported by two region files but not itself P0 must still
     // appear in shared_files — the import edges from region files to
     // non-P0 files are retained for this purpose.
-    let dir = fixture("extshared");
+    let (_scratch, dir) = fixture("extshared");
     let data = run_regions(&dir, "fix `login_user` and `start_session` auth flow", true);
 
     // Assert types.rs is NOT in the P0 target set — this test exercises
@@ -351,7 +354,7 @@ fn regions_shared_file_outside_p0_is_detected() {
 
 #[test]
 fn regions_is_deterministic() {
-    let dir = fixture("det");
+    let (_scratch, dir) = fixture("det");
     let a = run_regions(&dir, "fix `login_user` and `start_session` auth flow", true);
     let b = run_regions(&dir, "fix `login_user` and `start_session` auth flow", true);
     let strip = |mut v: serde_json::Value| {

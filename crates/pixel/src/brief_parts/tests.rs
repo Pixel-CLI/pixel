@@ -17,11 +17,15 @@ fn part(index: u8, count: u8) -> BriefPart {
     BriefPart { index, count }
 }
 
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pixel-brief-parts-{tag}-{}", std::process::id()));
+fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let _dir_tmp = tempfile::Builder::new()
+        .prefix(&format!("pixel-brief-parts-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let dir = _dir_tmp.path().to_path_buf();
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    dir.canonicalize().unwrap()
+    (_dir_tmp, dir.canonicalize().unwrap())
 }
 
 fn lengths(pieces: &[&str]) -> Vec<usize> {
@@ -247,7 +251,7 @@ fn the_stored_brief_is_keyed_by_session_and_prompt_and_names_neither() {
 #[test]
 fn a_stored_brief_is_owner_only_and_read_back_whole() {
     use std::os::unix::fs::PermissionsExt;
-    let root = scratch("store");
+    let (_root_tmp, root) = scratch("store");
     let path = cache_path(&root, Some("s"), "p");
     let text = format!("{}é\n", lines(100, 200));
     store(&path, &text, SystemTime::now()).unwrap();
@@ -274,7 +278,7 @@ fn a_stored_brief_is_owner_only_and_read_back_whole() {
 
 #[test]
 fn an_empty_brief_is_stored_so_the_other_parts_do_not_wait() {
-    let root = scratch("empty");
+    let (_root_tmp, root) = scratch("empty");
     let path = cache_path(&root, Some("s"), "p");
     store(&path, "", SystemTime::now()).unwrap();
     mark_done(&path);
@@ -288,7 +292,7 @@ fn an_empty_brief_is_stored_so_the_other_parts_do_not_wait() {
 
 #[test]
 fn waiting_for_a_brief_that_never_comes_ends_at_the_bound_with_nothing() {
-    let root = scratch("never");
+    let (_root_tmp, root) = scratch("never");
     let path = cache_path(&root, Some("s"), "p");
     let started = Instant::now();
     assert_eq!(
@@ -302,7 +306,7 @@ fn waiting_for_a_brief_that_never_comes_ends_at_the_bound_with_nothing() {
 
 #[test]
 fn a_part_that_waits_gets_the_brief_the_moment_part_one_stores_it() {
-    let root = scratch("late");
+    let (_root_tmp, root) = scratch("late");
     let path = cache_path(&root, Some("s"), "p");
     let writer = {
         let path = path.clone();
@@ -329,7 +333,7 @@ fn a_part_that_waits_gets_the_brief_the_moment_part_one_stores_it() {
 
 #[test]
 fn a_stored_brief_is_read_up_to_its_cap_and_no_further() {
-    let root = scratch("cap");
+    let (_root_tmp, root) = scratch("cap");
     let path = cache_path(&root, Some("s"), "p");
     let size = usize::try_from(MAX_STORED_BYTES).unwrap();
     store(&path, &"a".repeat(size + 5_000), SystemTime::now()).unwrap();
@@ -340,7 +344,7 @@ fn a_stored_brief_is_read_up_to_its_cap_and_no_further() {
 #[test]
 fn a_linked_directory_or_file_is_never_followed() {
     use std::os::unix::fs::symlink;
-    let root = scratch("links");
+    let (_root_tmp, root) = scratch("links");
     let outside = root.join("outside");
     fs::create_dir_all(&outside).unwrap();
     // `.pixel/brief-parts` is a link to a directory elsewhere.
@@ -366,7 +370,7 @@ fn a_linked_directory_or_file_is_never_followed() {
     );
 
     // `.pixel` itself is a link.
-    let root = scratch("links-pixel");
+    let (_root_tmp, root) = scratch("links-pixel");
     symlink(&outside, root.join(".pixel")).unwrap();
     assert!(
         store(
@@ -378,7 +382,7 @@ fn a_linked_directory_or_file_is_never_followed() {
     );
 
     // The file is a link to another file: stored over it, not through it.
-    let root = scratch("links-file");
+    let (_root_tmp, root) = scratch("links-file");
     let path = cache_path(&root, Some("s"), "p");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let target = root.join("target.txt");
@@ -399,7 +403,7 @@ fn a_linked_directory_or_file_is_never_followed() {
 
 #[test]
 fn forgetting_removes_the_stored_brief_and_only_that_one() {
-    let root = scratch("forget");
+    let (_root_tmp, root) = scratch("forget");
     let one = cache_path(&root, Some("s"), "one");
     let two = cache_path(&root, Some("s"), "two");
     store(&one, "1", SystemTime::now()).unwrap();
@@ -412,7 +416,7 @@ fn forgetting_removes_the_stored_brief_and_only_that_one() {
 
 #[test]
 fn pruning_deletes_what_is_older_than_the_age_and_keeps_the_rest() {
-    let dir = scratch("prune");
+    let (_dir_tmp, dir) = scratch("prune");
     let now = SystemTime::now();
     let age = Duration::from_secs(3_600);
     let write = |name: &str, written: SystemTime| {
@@ -445,7 +449,7 @@ fn pruning_deletes_what_is_older_than_the_age_and_keeps_the_rest() {
 
 #[test]
 fn storing_prunes_a_brief_older_than_an_hour() {
-    let root = scratch("store-prune");
+    let (_root_tmp, root) = scratch("store-prune");
     let old = cache_path(&root, Some("s"), "old");
     let new = cache_path(&root, Some("s"), "new");
     let now = SystemTime::now();
@@ -496,7 +500,7 @@ fn padding_makes_exactly_the_parts_asked_each_ending_in_its_marker() {
 
 #[test]
 fn a_part_holds_back_until_part_one_is_done_and_then_goes_at_once() {
-    let root = scratch("order");
+    let (_root_tmp, root) = scratch("order");
     let path = cache_path(&root, Some("s"), "p");
     store(&path, "the brief", SystemTime::now()).unwrap();
     let finisher = {
@@ -523,7 +527,7 @@ fn a_part_holds_back_until_part_one_is_done_and_then_goes_at_once() {
 
 #[test]
 fn a_part_whose_first_never_finishes_still_prints_at_the_bound() {
-    let root = scratch("unfinished");
+    let (_root_tmp, root) = scratch("unfinished");
     let path = cache_path(&root, Some("s"), "p");
     store(&path, "the brief", SystemTime::now()).unwrap();
     let started = Instant::now();
@@ -544,7 +548,7 @@ fn a_part_whose_first_never_finishes_still_prints_at_the_bound() {
 #[test]
 fn the_done_marker_is_owner_only_and_belongs_to_one_stored_brief() {
     use std::os::unix::fs::PermissionsExt;
-    let root = scratch("done");
+    let (_root_tmp, root) = scratch("done");
     let path = cache_path(&root, Some("s"), "p");
     store(&path, "one", SystemTime::now()).unwrap();
     mark_done(&path);
@@ -574,7 +578,7 @@ fn the_done_marker_is_owner_only_and_belongs_to_one_stored_brief() {
 
 #[test]
 fn a_missing_head_marker_survives_a_late_store_but_a_new_prompt_clears_it() {
-    let root = scratch("missing-head");
+    let (_root_tmp, root) = scratch("missing-head");
     let path = cache_path(&root, Some("s"), "p");
     store(&path, "first\nsecond\n", SystemTime::now()).unwrap();
     mark_done_missing_head(&path);
@@ -607,7 +611,7 @@ fn a_missing_head_marker_survives_a_late_store_but_a_new_prompt_clears_it() {
 
 #[test]
 fn a_missing_head_marker_waits_for_a_brief_stored_after_the_marker() {
-    let root = scratch("missing-head-late-brief");
+    let (_root_tmp, root) = scratch("missing-head-late-brief");
     let path = cache_path(&root, Some("s"), "p");
     mark_done_missing_head(&path);
     assert!(
@@ -634,7 +638,7 @@ fn a_missing_head_marker_waits_for_a_brief_stored_after_the_marker() {
 #[test]
 fn the_done_marker_is_never_written_through_a_link() {
     use std::os::unix::fs::symlink;
-    let root = scratch("done-links");
+    let (_root_tmp, root) = scratch("done-links");
     let outside = root.join("outside");
     fs::create_dir_all(&outside).unwrap();
     fs::create_dir_all(root.join(".pixel")).unwrap();
@@ -646,7 +650,7 @@ fn the_done_marker_is_never_written_through_a_link() {
 
 #[test]
 fn a_stored_brief_is_returned_without_waiting_for_part_ones_marker() {
-    let dir = scratch("wait-stored");
+    let (_dir_tmp, dir) = scratch("wait-stored");
     let path = dir.join("brief.txt");
     assert_eq!(
         wait_stored(&path, Duration::from_millis(30), POLL),
@@ -668,7 +672,7 @@ fn a_stored_brief_is_returned_without_waiting_for_part_ones_marker() {
 
 #[test]
 fn wait_stored_finds_a_brief_written_after_it_starts_waiting() {
-    let dir = scratch("wait-stored-late");
+    let (_dir_tmp, dir) = scratch("wait-stored-late");
     let path = dir.join("brief.txt");
     let writer_path = path.clone();
     let (started_tx, started_rx) = std::sync::mpsc::channel();

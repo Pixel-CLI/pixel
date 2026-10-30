@@ -7,22 +7,20 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
 const PIXEL: &str = env!("CARGO_BIN_EXE_pixel");
-static NEXT: AtomicU64 = AtomicU64::new(0);
 
-struct Fixture(PathBuf);
+struct Fixture(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-rename-cli-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let _root_tmp = tempfile::Builder::new()
+            .prefix("pixel-rename-cli-")
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
             root.join("src/login.ts"),
@@ -62,7 +60,7 @@ impl Fixture {
                 .unwrap();
             assert!(result.status.success(), "{result:?}");
         }
-        Self(root.canonicalize().unwrap())
+        Self(root.canonicalize().unwrap(), _root_tmp)
     }
 
     fn run(&self, args: &[&str]) -> Output {

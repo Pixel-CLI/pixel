@@ -319,23 +319,16 @@ fn parse_status_z(out: &[u8]) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
 
     use super::*;
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "pixel-git-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmpdir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("pixel-git-{tag}-"))
+            .tempdir()
+            .unwrap()
     }
 
     fn git(dir: &Path, args: &[&str]) {
@@ -362,7 +355,8 @@ mod tests {
     /// to an object that is not a commit, and yes to a commit it holds.
     #[test]
     fn commit_exists_accepts_only_commits_the_repository_holds() {
-        let root = tmpdir("plumbing-commit-exists");
+        let root_guard = tmpdir("plumbing-commit-exists");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::write(root.join("a.txt"), b"hello\n").unwrap();
         git(&root, &["add", "a.txt"]);
@@ -379,7 +373,8 @@ mod tests {
 
     #[test]
     fn rev_parse_head_and_ls_files_and_status_and_diff() {
-        let root = tmpdir("plumbing-basic");
+        let root_guard = tmpdir("plumbing-basic");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::write(root.join("a.txt"), b"hello\n").unwrap();
         git(&root, &["add", "a.txt"]);
@@ -409,7 +404,8 @@ mod tests {
     /// make every base build count an unreadable file.
     #[test]
     fn ls_tree_blobs_lists_blobs_and_skips_gitlinks() {
-        let root = tmpdir("plumbing-ls-tree-blobs");
+        let root_guard = tmpdir("plumbing-ls-tree-blobs");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/a.txt"), b"a\n").unwrap();
@@ -450,7 +446,8 @@ mod tests {
 
     #[test]
     fn rev_list_count_all_counts_every_ref_and_is_none_outside_a_repo() {
-        let root = tmpdir("plumbing-revlist");
+        let root_guard = tmpdir("plumbing-revlist");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         let runner = GitRunner::new(&root);
         assert_eq!(runner.rev_list_count_all(), Some(0), "empty repo counts 0");
@@ -468,7 +465,8 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "side"]);
         assert_eq!(runner.rev_list_count_all(), Some(2));
 
-        let outside = tmpdir("plumbing-revlist-outside");
+        let outside_guard = tmpdir("plumbing-revlist-outside");
+        let outside = outside_guard.path().to_path_buf();
         assert_eq!(GitRunner::new(&outside).rev_list_count_all(), None);
         let _ = std::fs::remove_dir_all(&outside);
         let _ = std::fs::remove_dir_all(&root);
@@ -476,7 +474,8 @@ mod tests {
 
     #[test]
     fn show_toplevel_resolves_a_subdirectory_to_the_repo_root() {
-        let root = tmpdir("plumbing-toplevel");
+        let root_guard = tmpdir("plumbing-toplevel");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         let nested = root.join("a").join("b");
         std::fs::create_dir_all(&nested).unwrap();
@@ -485,7 +484,8 @@ mod tests {
             .expect("inside a repo");
         assert_eq!(top, root.canonicalize().unwrap());
 
-        let outside = tmpdir("plumbing-toplevel-outside");
+        let outside_guard = tmpdir("plumbing-toplevel-outside");
+        let outside = outside_guard.path().to_path_buf();
         assert_eq!(GitRunner::new(&outside).show_toplevel(), None);
         let _ = std::fs::remove_dir_all(&outside);
         let _ = std::fs::remove_dir_all(&root);
@@ -493,7 +493,8 @@ mod tests {
 
     #[test]
     fn ls_files_or_err_distinguishes_no_files_from_no_repo() {
-        let root = tmpdir("plumbing-lsfiles-err");
+        let root_guard = tmpdir("plumbing-lsfiles-err");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         let runner = GitRunner::new(&root);
         assert_eq!(runner.ls_files_or_err().unwrap(), Vec::<String>::new());
@@ -506,7 +507,8 @@ mod tests {
         assert_eq!(files, vec!["a.txt".to_string(), "b.txt".to_string()]);
         assert_eq!(runner.ls_files(), files, "ls_files is the lenient view");
 
-        let outside = tmpdir("plumbing-lsfiles-outside");
+        let outside_guard = tmpdir("plumbing-lsfiles-outside");
+        let outside = outside_guard.path().to_path_buf();
         let err = GitRunner::new(&outside).ls_files_or_err().unwrap_err();
         assert!(
             matches!(err, GitError::NonZeroExit { .. }),
@@ -519,7 +521,8 @@ mod tests {
 
     #[test]
     fn status_porcelain_v2_path_reports_one_path_and_errors_outside_a_repo() {
-        let root = tmpdir("plumbing-status-v2");
+        let root_guard = tmpdir("plumbing-status-v2");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::write(root.join("a.txt"), b"a\n").unwrap();
         std::fs::write(root.join("b.txt"), b"b\n").unwrap();
@@ -543,7 +546,8 @@ mod tests {
         let out = runner.status_porcelain_v2_path("new.txt").unwrap();
         assert_eq!(out, "? new.txt\0", "untracked records are requested");
 
-        let outside = tmpdir("plumbing-status-v2-outside");
+        let outside_guard = tmpdir("plumbing-status-v2-outside");
+        let outside = outside_guard.path().to_path_buf();
         assert!(
             GitRunner::new(&outside)
                 .status_porcelain_v2_path("a.txt")
@@ -555,7 +559,8 @@ mod tests {
 
     #[test]
     fn show_blob_and_blob_size_for_committed_file() {
-        let root = tmpdir("plumbing-blob");
+        let root_guard = tmpdir("plumbing-blob");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::write(root.join("f.txt"), b"0123456789").unwrap();
         git(&root, &["add", "f.txt"]);
@@ -576,7 +581,8 @@ mod tests {
     /// diff never compared against.
     #[test]
     fn show_index_blob_reads_the_staged_bytes() {
-        let root = tmpdir("plumbing-index-blob");
+        let root_guard = tmpdir("plumbing-index-blob");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::write(root.join("f.txt"), b"committed\n").unwrap();
         git(&root, &["add", "f.txt"]);
@@ -600,7 +606,8 @@ mod tests {
 
     #[test]
     fn show_index_blob_rejects_a_path_that_reads_as_a_flag() {
-        let root = tmpdir("plumbing-index-inject");
+        let root_guard = tmpdir("plumbing-index-inject");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         let runner = GitRunner::new(&root);
         // `--end-of-options` keeps this a path, so git fails to find it
@@ -610,7 +617,8 @@ mod tests {
 
     #[test]
     fn show_blob_rejects_flag_injection_oid() {
-        let root = tmpdir("plumbing-inject");
+        let root_guard = tmpdir("plumbing-inject");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         let runner = GitRunner::new(&root);
         assert!(runner.show_blob("--upload-pack=/bin/sh", "f.txt").is_none());
@@ -618,7 +626,8 @@ mod tests {
 
     #[test]
     fn diff_unified0_validates_base_ref() {
-        let root = tmpdir("plumbing-diffu0");
+        let root_guard = tmpdir("plumbing-diffu0");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::write(root.join("h.txt"), b"one").unwrap();
         git(&root, &["add", "h.txt"]);
@@ -656,7 +665,8 @@ mod tests {
     #[test]
     fn ls_files_survives_enumeration_output_past_the_old_1mib_cap() {
         const N: usize = 5300; // ~5300 * ~250 bytes ≈ 1.3 MiB of `ls-files -z` output
-        let root = tmpdir("plumbing-lsfiles-big");
+        let root_guard = tmpdir("plumbing-lsfiles-big");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         let dir = long_component("tracked");
         std::fs::create_dir_all(root.join(&dir)).unwrap();
@@ -679,7 +689,8 @@ mod tests {
     #[test]
     fn status_porcelain_survives_enumeration_output_past_the_old_1mib_cap() {
         const N: usize = 5300; // pushes `status --porcelain -z` past the old 1 MiB cap
-        let root = tmpdir("plumbing-status-big");
+        let root_guard = tmpdir("plumbing-status-big");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::write(root.join("tracked.txt"), b"hello").unwrap();
         git(&root, &["add", "tracked.txt"]);
@@ -721,7 +732,8 @@ mod tests {
         // variant MUST surface that as an error (never as "nothing is
         // dirty"), which is the exact contract `pixel::rescue_cmd::apply`'s
         // dirty-file guard now depends on.
-        let root = tmpdir("plumbing-status-not-a-repo");
+        let root_guard = tmpdir("plumbing-status-not-a-repo");
+        let root = root_guard.path().to_path_buf();
         let runner = GitRunner::new(&root);
         assert!(
             runner.status_porcelain_or_err().is_err(),
@@ -736,7 +748,8 @@ mod tests {
     #[test]
     fn diff_name_status_survives_enumeration_output_past_the_old_1mib_cap() {
         const N: usize = 5300;
-        let root = tmpdir("plumbing-diffns-big");
+        let root_guard = tmpdir("plumbing-diffns-big");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::write(root.join("seed.txt"), b"seed").unwrap();
         git(&root, &["add", "seed.txt"]);
@@ -765,7 +778,8 @@ mod tests {
 
     #[test]
     fn show_blob_survives_files_between_the_old_1mib_and_new_4mib_cap() {
-        let root = tmpdir("plumbing-blob-big");
+        let root_guard = tmpdir("plumbing-blob-big");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         // ~2 MiB file: over the old 1 MiB default cap, comfortably under
         // the new 4 MiB blob cap (kept equal to `pixel_index::index::MAX_FILE_BYTES`).

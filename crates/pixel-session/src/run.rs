@@ -699,16 +699,17 @@ mod tests {
 
     #[test]
     fn git_head_is_the_full_oid_of_head_and_none_without_a_commit() {
-        let root =
-            std::env::temp_dir().join(format!("pixel-session-githead-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        assert_eq!(git_head(&root), None, "not a repository");
+        let root_dir = tempfile::Builder::new()
+            .prefix("pixel-session-githead-")
+            .tempdir()
+            .unwrap();
+        let root = root_dir.path();
+        assert_eq!(git_head(root), None, "not a repository");
 
         let git = |args: &[&str]| {
             let status = Command::new("git")
                 .arg("-C")
-                .arg(&root)
+                .arg(root)
                 .args(args)
                 .env("GIT_AUTHOR_NAME", "t")
                 .env("GIT_AUTHOR_EMAIL", "t@t")
@@ -721,14 +722,13 @@ mod tests {
             assert!(status.success(), "git {args:?}");
         };
         git(&["init", "-q"]);
-        assert_eq!(git_head(&root), None, "no commit yet");
+        assert_eq!(git_head(root), None, "no commit yet");
         std::fs::write(root.join("a.txt"), b"a\n").unwrap();
         git(&["add", "a.txt"]);
         git(&["commit", "-q", "-m", "first"]);
-        let head = git_head(&root).expect("HEAD after a commit");
+        let head = git_head(root).expect("HEAD after a commit");
         assert_eq!(head.len(), 40, "{head}");
         assert!(head.bytes().all(|b| b.is_ascii_hexdigit()), "{head}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn argv(parts: &[&str]) -> Vec<String> {

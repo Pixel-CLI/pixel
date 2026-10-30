@@ -1328,9 +1328,11 @@ mod tests {
     /// must all be refused, and a plain file under the cap accepted.
     #[test]
     fn is_regular_file_admits_only_plain_files_under_the_size_cap() {
-        let dir = std::env::temp_dir().join(format!("gpx-regular-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-regular-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let plain = dir.join("plain.txt");
         std::fs::write(&plain, b"hello").unwrap();
         assert!(is_regular_file(&plain));
@@ -1357,7 +1359,8 @@ mod tests {
     /// same signature.
     #[test]
     fn plain_signature_should_stop_at_its_time_budget() {
-        let dir = scratch("plain-sig-budget");
+        let dir_guard = scratch("plain-sig-budget");
+        let dir = dir_guard.path().to_path_buf();
         for n in 0..50 {
             std::fs::write(dir.join(format!("f{n}.rs")), format!("fn f{n}() {{}}\n")).unwrap();
         }
@@ -1379,9 +1382,11 @@ mod tests {
     /// the plain-tree freshness signature either.
     #[test]
     fn plain_signature_should_ignore_a_file_over_the_size_cap() {
-        let dir = std::env::temp_dir().join(format!("gpx-plain-sig-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-plain-sig-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
         let before = plain_signature(&dir).unwrap();
         let big = dir.join("big.txt");
@@ -1413,7 +1418,8 @@ mod tests {
     /// `MAX_FILE_BYTES` is indexed, so it must move the freshness signature.
     #[test]
     fn plain_signature_should_count_a_file_exactly_at_the_size_cap() {
-        let dir = scratch("plain-sig-at-cap");
+        let dir_guard = scratch("plain-sig-at-cap");
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
         let before = plain_signature(&dir).unwrap();
         let cap = usize::try_from(MAX_FILE_BYTES).unwrap();
@@ -1428,7 +1434,8 @@ mod tests {
     #[test]
     fn open_or_build_should_reuse_an_anchored_base_without_the_build_lock() {
         let _cache = IsolatedCache::new("reuse-no-lock");
-        let dir = scratch("reuse-no-lock");
+        let dir_guard = scratch("reuse-no-lock");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -1456,7 +1463,8 @@ mod tests {
     #[test]
     fn open_or_build_should_keep_an_anchored_base_when_git_is_gone() {
         let _cache = IsolatedCache::new("anchored-no-git");
-        let dir = scratch("anchored-no-git");
+        let dir_guard = scratch("anchored-no-git");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -1475,7 +1483,8 @@ mod tests {
     #[test]
     fn finish_open_should_skip_only_the_pixel_only_gitignore_from_the_overlay() {
         let _cache = IsolatedCache::new("pixel-only-gitignore");
-        let dir = scratch("pixel-only-gitignore");
+        let dir_guard = scratch("pixel-only-gitignore");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn first() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -1524,11 +1533,11 @@ mod tests {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("gpx-{tag}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("gpx-{tag}-"))
+            .tempdir()
+            .unwrap()
     }
 
     /// A private shard cache for one test. `open_or_build` reads and writes
@@ -1540,6 +1549,7 @@ mod tests {
     /// the previous value back on drop, a failed assertion included.
     struct IsolatedCache {
         home: PathBuf,
+        _home_guard: tempfile::TempDir,
         previous: Option<std::ffi::OsString>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
@@ -1549,7 +1559,8 @@ mod tests {
             let lock = crate::cache::CACHE_TEST_LOCK
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let home = scratch(&format!("{tag}-cache-home"));
+            let home_guard = scratch(&format!("{tag}-cache-home"));
+            let home = home_guard.path().to_path_buf();
             let previous = std::env::var_os("XDG_CACHE_HOME");
             // SAFETY: every test that sets XDG_CACHE_HOME holds
             // CACHE_TEST_LOCK, taken above.
@@ -1558,6 +1569,7 @@ mod tests {
             }
             Self {
                 home,
+                _home_guard: home_guard,
                 previous,
                 _lock: lock,
             }
@@ -1597,7 +1609,8 @@ mod tests {
     /// indexed, one byte more is skipped, and a real `.gitignore` is content.
     #[test]
     fn extract_blob_caps_size_inclusively_and_indexes_a_real_gitignore() {
-        let dir = scratch("extract-blob-cap");
+        let dir_guard = scratch("extract-blob-cap");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         let cap = usize::try_from(MAX_FILE_BYTES).unwrap();
         std::fs::write(dir.join("at_cap.txt"), "a".repeat(cap)).unwrap();
@@ -1622,7 +1635,8 @@ mod tests {
     #[test]
     fn a_valid_cached_shard_is_reused_without_a_rebuild() {
         let _cache = IsolatedCache::new("cache-reuse");
-        let dir = scratch("cache-reuse");
+        let dir_guard = scratch("cache-reuse");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn reusedNeedle() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -1646,7 +1660,8 @@ mod tests {
     /// only the last one makes a shard unfit to share.
     #[test]
     fn extract_blob_tells_skipped_from_unreadable() {
-        let dir = scratch("extract-blob");
+        let dir_guard = scratch("extract-blob");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("code.rs"), "fn needle() {}\n").unwrap();
         std::fs::write(dir.join("empty.txt"), "").unwrap();
@@ -1671,7 +1686,8 @@ mod tests {
 
     #[test]
     fn build_shard_from_counts_unreadable_blobs_and_prunes_default_ignores_on_request() {
-        let dir = scratch("build-shard-from");
+        let dir_guard = scratch("build-shard-from");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::create_dir_all(dir.join("node_modules/dep")).unwrap();
         std::fs::write(dir.join("app.rs"), "fn app() {}\n").unwrap();
@@ -1706,7 +1722,8 @@ mod tests {
     #[test]
     fn build_shard_from_keeps_every_blob_on_its_own_path_across_batches() {
         const FILES: usize = 150;
-        let dir = scratch("build-shard-batches");
+        let dir_guard = scratch("build-shard-batches");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         let mut contents: Vec<(String, String)> = (0..FILES)
             .map(|i| {
@@ -1769,7 +1786,8 @@ mod tests {
     /// and only a path the commit really lacks stays unreadable.
     #[test]
     fn a_batch_failing_part_way_falls_back_to_one_read_per_path() {
-        let dir = scratch("batch-part-way");
+        let dir_guard = scratch("batch-part-way");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn first_needle() {}\n").unwrap();
         std::fs::write(dir.join("b.rs"), "fn second_needle() {}\n").unwrap();
@@ -1831,7 +1849,8 @@ mod tests {
     #[test]
     fn the_shared_cache_replaces_a_bad_entry_and_never_stores_an_incomplete_shard() {
         let _cache = IsolatedCache::new("cache-publish");
-        let dir = scratch("cache-publish");
+        let dir_guard = scratch("cache-publish");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn cachedNeedle() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -1885,7 +1904,8 @@ mod tests {
     #[test]
     fn catch_up_accessors_should_report_the_opened_head_and_overlay_paths() {
         let _cache = IsolatedCache::new("catch_up_accessors");
-        let dir = scratch("catch-up-accessors");
+        let dir_guard = scratch("catch-up-accessors");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn alphaNeedle() {}\n").unwrap();
         std::fs::write(dir.join("b.rs"), "fn betaNeedle() {}\n").unwrap();
@@ -1912,9 +1932,11 @@ mod tests {
     #[test]
     fn git_anchored_layers_end_to_end() {
         let _cache = IsolatedCache::new("git_anchored_layers_end_to_end");
-        let dir = std::env::temp_dir().join(format!("gpx-indexset-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("alpha.rs"), "fn handleClick() {}\n").unwrap();
         std::fs::write(dir.join("beta.rs"), "fn openMenuWidget() {}\n").unwrap();
@@ -1967,12 +1989,11 @@ mod tests {
     fn refresh_file_excludes_gitignore_and_git_info_exclude_paths() {
         let _cache =
             IsolatedCache::new("refresh_file_excludes_gitignore_and_git_info_exclude_paths");
-        let dir = std::env::temp_dir().join(format!(
-            "gpx-indexset-refresh-ignore-{}",
-            std::process::id()
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-refresh-ignore-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("visible.rs"), "fn visible_base() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -2056,9 +2077,11 @@ mod tests {
     #[test]
     fn paths_merges_layers_and_honors_tombstones() {
         let _cache = IsolatedCache::new("paths_merges_layers_and_honors_tombstones");
-        let dir = std::env::temp_dir().join(format!("gpx-indexset-paths-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-paths-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("alpha.rs"), "fn alpha() {}\n").unwrap();
         std::fs::write(dir.join("beta.rs"), "fn beta() {}\n").unwrap();
@@ -2087,9 +2110,11 @@ mod tests {
     #[test]
     fn non_git_plain_build() {
         let _cache = IsolatedCache::new("non_git_plain_build");
-        let dir = std::env::temp_dir().join(format!("gpx-indexset-nogit-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-nogit-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join("solo.txt"), "plainWalkNeedle here\n").unwrap();
 
         let set = IndexSet::open_or_build(&dir, ex()).unwrap();
@@ -2105,7 +2130,8 @@ mod tests {
     #[test]
     fn an_unchanged_plain_directory_reopens_without_rebuilding_its_base() {
         let _cache = IsolatedCache::new("plain-reopen");
-        let dir = scratch("plain-reopen");
+        let dir_guard = scratch("plain-reopen");
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join("solo.txt"), "plainReopenNeedle\n").unwrap();
         let base = dir.join(SHARD_DIR).join(SHARD_FILE);
         drop(IndexSet::open_or_build(&dir, ex()).unwrap());
@@ -2128,16 +2154,11 @@ mod tests {
     #[test]
     fn hidden_files_are_indexed_but_git_dir_is_not() {
         let _cache = IsolatedCache::new("hidden_files_are_indexed_but_git_dir_is_not");
-        let dir = std::env::temp_dir().join(format!(
-            "gpx-indexset-hidden-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-hidden-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
 
         // --- non-Git directory: the plain-walk build path ---
         std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
@@ -2222,17 +2243,11 @@ mod tests {
     #[test]
     fn non_git_reopen_detects_changes() {
         let _cache = IsolatedCache::new("non_git_reopen_detects_changes");
-        let dir = std::env::temp_dir().join(format!(
-            "gpx-indexset-nongit-stale-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-nongit-stale-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
 
         // Initial build with one file.
         std::fs::write(dir.join("a.txt"), "firstNeedle here\n").unwrap();
@@ -2264,12 +2279,11 @@ mod tests {
     fn non_git_reopen_detects_equal_size_edit_with_restored_mtime() {
         let _cache =
             IsolatedCache::new("non_git_reopen_detects_equal_size_edit_with_restored_mtime");
-        let dir = std::env::temp_dir().join(format!(
-            "gpx-indexset-nongit-content-{}",
-            std::process::id()
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-nongit-content-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let source = dir.join("a.txt");
         let reference = dir.join("mtime-reference");
         std::fs::write(&source, "oldSameSizeNeedle\n").unwrap();
@@ -2313,17 +2327,11 @@ mod tests {
     #[test]
     fn base_shard_uses_commit_bytes_not_working_tree() {
         let _cache = IsolatedCache::new("base_shard_uses_commit_bytes_not_working_tree");
-        let dir = std::env::temp_dir().join(format!(
-            "gpx-indexset-prov-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-prov-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("src.rs"), "fn committedNeedle() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -2369,30 +2377,20 @@ mod tests {
     fn symlink_escape_is_blocked() {
         use std::os::unix::fs::symlink;
         let _cache = IsolatedCache::new("symlink_escape_is_blocked");
-        let dir = std::env::temp_dir().join(format!(
-            "gpx-indexset-symlink-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-symlink-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
 
         // External file with a unique needle that must never be searchable
         // through the repo's index.
-        let external = std::env::temp_dir().join(format!(
-            "gpx-ext-{}-{}.txt",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
+        let external_guard = tempfile::Builder::new()
+            .prefix("gpx-ext-")
+            .tempdir()
+            .unwrap();
+        let external = external_guard.path().join("external.txt");
         std::fs::write(&external, "externalSymlinkTargetNeedle\n").unwrap();
 
         // A regular tracked file (so the repo has at least one real file).
@@ -2420,10 +2418,11 @@ mod tests {
     #[test]
     fn oversized_worktree_file_is_not_indexed_or_verified() {
         let _cache = IsolatedCache::new("oversized_worktree_file_is_not_indexed_or_verified");
-        let dir =
-            std::env::temp_dir().join(format!("gpx-indexset-oversized-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-oversized-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join("small.rs"), "fn boundedNeedle() {}\n").unwrap();
         let mut oversized = vec![b'x'; MAX_FILE_BYTES as usize + 1];
         let needle = b"oversizedNeedle";
@@ -2444,17 +2443,11 @@ mod tests {
     #[test]
     fn search_limit_truncates() {
         let _cache = IsolatedCache::new("search_limit_truncates");
-        let dir = std::env::temp_dir().join(format!(
-            "gpx-indexset-limit-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-indexset-limit-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         // Many files, each with the same needle, so a broad pattern hits all.
         for i in 0..20 {
@@ -2505,7 +2498,8 @@ mod tests {
     #[test]
     fn open_or_build_should_publish_into_the_test_cache_when_the_guard_is_held() {
         let cache = IsolatedCache::new("isolated-publish");
-        let dir = scratch("isolated-publish");
+        let dir_guard = scratch("isolated-publish");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn isolatedNeedle() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -2541,7 +2535,8 @@ mod tests {
     /// start of `git diff base..HEAD`.
     #[test]
     fn delta_anchor_held_requires_an_anchor_commit_the_repository_holds() {
-        let dir = scratch("anchor-held");
+        let dir_guard = scratch("anchor-held");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn anchored() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -2566,7 +2561,8 @@ mod tests {
     #[test]
     fn reconcile_delta_should_fail_on_a_diff_git_cannot_compute() {
         let _cache = IsolatedCache::new("failed-diff");
-        let dir = scratch("failed-diff");
+        let dir_guard = scratch("failed-diff");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn diffed() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -2594,7 +2590,8 @@ mod tests {
     #[test]
     fn a_base_whose_commit_is_gone_should_be_rebuilt_not_diffed_as_empty() {
         let _cache = IsolatedCache::new("gone-base");
-        let dir = scratch("gone-base");
+        let dir_guard = scratch("gone-base");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn goneNeedle() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -2641,7 +2638,8 @@ mod tests {
     #[test]
     fn open_timings_should_name_the_layer_each_open_rebuilt() {
         let _cache = IsolatedCache::new("open-timings");
-        let dir = scratch("open-timings");
+        let dir_guard = scratch("open-timings");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn first() {}\n").unwrap();
         git(&dir, &["add", "."]);
@@ -2657,7 +2655,8 @@ mod tests {
         );
         assert_eq!(layers(&dir), (BaseSource::Reused, DeltaSource::None, 0));
 
-        let clone = scratch("open-timings-clone");
+        let clone_guard = scratch("open-timings-clone");
+        let clone = clone_guard.path().to_path_buf();
         std::fs::remove_dir_all(&clone).ok();
         let out = Command::new("git")
             .args(["clone", "-q"])
@@ -2681,7 +2680,8 @@ mod tests {
         std::fs::write(dir.join("b.rs"), "fn untracked() {}\n").unwrap();
         assert_eq!(layers(&dir), (BaseSource::Reused, DeltaSource::Reused, 2));
 
-        let plain = scratch("open-timings-plain");
+        let plain_guard = scratch("open-timings-plain");
+        let plain = plain_guard.path().to_path_buf();
         std::fs::write(plain.join("c.rs"), "fn plain() {}\n").unwrap();
         assert_eq!(
             layers(&plain),
@@ -2722,7 +2722,8 @@ mod tests {
     #[test]
     fn a_filtered_page_counts_kept_matches_only() {
         let _cache = IsolatedCache::new("filtered-page");
-        let dir = scratch("filtered-page");
+        let dir_guard = scratch("filtered-page");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         for name in ["a.md", "b.rs", "c.md", "d.rs", "e.md"] {
             std::fs::write(dir.join(name), "filterPageNeedle\n").unwrap();
@@ -2768,8 +2769,10 @@ mod tests {
     #[test]
     fn search_should_not_read_through_a_directory_link_a_forged_shard_names() {
         let _cache = IsolatedCache::new("containment");
-        let dir = scratch("containment-repo");
-        let outside = scratch("containment-outside");
+        let dir_guard = scratch("containment-repo");
+        let dir = dir_guard.path().to_path_buf();
+        let outside_guard = scratch("containment-outside");
+        let outside = outside_guard.path().to_path_buf();
         std::fs::write(outside.join("secret.txt"), "fn outsideNeedle() {}\n").unwrap();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn insideNeedle() {}\n").unwrap();
@@ -2808,8 +2811,10 @@ mod tests {
 
     #[test]
     fn containment_should_admit_plain_paths_inside_the_root_only() {
-        let dir = scratch("containment-unit");
-        let outside = scratch("containment-unit-outside");
+        let dir_guard = scratch("containment-unit");
+        let dir = dir_guard.path().to_path_buf();
+        let outside_guard = scratch("containment-unit-outside");
+        let outside = outside_guard.path().to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::os::unix::fs::symlink(&outside, dir.join("out")).unwrap();
         std::os::unix::fs::symlink(dir.join("src"), dir.join("in")).unwrap();
@@ -2831,7 +2836,8 @@ mod tests {
     #[test]
     fn open_or_build_should_refuse_a_pixel_dir_the_repository_tracks() {
         let _cache = IsolatedCache::new("tracked-pixel");
-        let dir = scratch("tracked-pixel");
+        let dir_guard = scratch("tracked-pixel");
+        let dir = dir_guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
         std::fs::create_dir_all(dir.join(SHARD_DIR)).unwrap();
@@ -2856,7 +2862,8 @@ mod tests {
     fn a_gitless_base_should_be_reused_until_the_tree_changes() {
         use std::os::unix::fs::PermissionsExt;
         let _cache = IsolatedCache::new("plain-sig");
-        let dir = scratch("plain-sig");
+        let dir_guard = scratch("plain-sig");
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join("a.rs"), "fn plainNeedle() {}\n").unwrap();
         let first = IndexSet::open_or_build(&dir, ex()).unwrap();
         assert_eq!(first.open_timings().base, BaseSource::BuiltFromWalk);
@@ -2882,8 +2889,9 @@ mod tests {
     /// A git fixture with ignore rules at every level the walk policy
     /// reads: a root `.gitignore` naming a directory, a nested `.gitignore`,
     /// and `.git/info/exclude`.
-    fn ruled_repo(tag: &str) -> PathBuf {
-        let dir = scratch(tag);
+    fn ruled_repo(tag: &str) -> tempfile::TempDir {
+        let guard = scratch(tag);
+        let dir = guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::create_dir_all(dir.join("src/sub")).unwrap();
         std::fs::write(dir.join(".gitignore"), "logs/\n").unwrap();
@@ -2893,7 +2901,7 @@ mod tests {
         std::fs::write(dir.join("src/sub/b.rs"), "fn beta_known() {}\n").unwrap();
         git(&dir, &["add", "."]);
         git(&dir, &["commit", "-qm", "one"]);
-        dir
+        guard
     }
 
     /// The editing rhythm: one walk for the first batch, then batches of
@@ -2901,7 +2909,8 @@ mod tests {
     #[test]
     fn a_one_file_batch_should_not_walk_the_tree_again() {
         let _cache = IsolatedCache::new("a_one_file_batch_should_not_walk_the_tree_again");
-        let dir = ruled_repo("refresh-no-walk");
+        let dir_guard = ruled_repo("refresh-no-walk");
+        let dir = dir_guard.path().to_path_buf();
         let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
 
         std::fs::write(dir.join("src/a.rs"), "fn alpha_edited() {}\n").unwrap();
@@ -2940,7 +2949,8 @@ mod tests {
     #[test]
     fn a_new_path_should_get_the_verdict_of_the_full_walk() {
         let _cache = IsolatedCache::new("a_new_path_should_get_the_verdict_of_the_full_walk");
-        let dir = ruled_repo("refresh-new-path");
+        let dir_guard = ruled_repo("refresh-new-path");
+        let dir = dir_guard.path().to_path_buf();
         let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
         assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
         let cases = [
@@ -2976,7 +2986,8 @@ mod tests {
         let _cache = IsolatedCache::new(
             "a_known_path_should_be_rejudged_when_it_stops_being_a_regular_file",
         );
-        let dir = ruled_repo("refresh-known-link");
+        let dir_guard = ruled_repo("refresh-known-link");
+        let dir = dir_guard.path().to_path_buf();
         let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
         assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
         std::fs::remove_file(dir.join("src/a.rs")).unwrap();

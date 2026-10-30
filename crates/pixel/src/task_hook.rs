@@ -3001,7 +3001,11 @@ mod tests {
 
     #[test]
     fn a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository() {
-        let root = std::env::temp_dir().join(format!("pixel-hook-brief-{}", std::process::id()));
+        let _root_tmp = tempfile::Builder::new()
+            .prefix("pixel-hook-brief-")
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         let shard_dir = root.join(pixel_index::index::SHARD_DIR);
         std::fs::create_dir_all(&shard_dir).unwrap();
         std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b"x").unwrap();
@@ -3045,13 +3049,17 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    fn indexed_root(tag: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("pixel-hook-{tag}-{}", std::process::id()));
+    fn indexed_root(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let _root_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-hook-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&root);
         let shard_dir = root.join(pixel_index::index::SHARD_DIR);
         std::fs::create_dir_all(&shard_dir).unwrap();
         std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b"x").unwrap();
-        root.canonicalize().unwrap()
+        (_root_tmp, root.canonicalize().unwrap())
     }
 
     #[test]
@@ -3095,7 +3103,7 @@ mod tests {
 
     #[test]
     fn a_pi_brief_should_start_and_a_pi_session_should_warm_only_on_the_brief_only_marker() {
-        let root = indexed_root("pi-brief-only");
+        let (_root_tmp, root) = indexed_root("pi-brief-only");
         let marked = json!({"prompt": "callers of `fetchUser`", "cwd": root, "brief_only": true});
         let plain = json!({"prompt": "callers of `fetchUser`", "cwd": root});
         assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &marked, 1).is_some());
@@ -3118,7 +3126,7 @@ mod tests {
     #[test]
     fn a_brief_only_pi_event_should_bind_no_task_and_answer_observe() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
-        let root = indexed_root("pi-no-ledger");
+        let (_root_tmp, root) = indexed_root("pi-no-ledger");
         for (event, extra) in [
             (
                 TaskHookEvent::PromptSubmit,
@@ -3147,7 +3155,7 @@ mod tests {
 
     #[test]
     fn the_brief_budget_should_be_one_part_unless_a_hook_part_or_the_pi_package_says_more() {
-        let root = indexed_root("pi-budget");
+        let (_root_tmp, root) = indexed_root("pi-budget");
         let marked = json!({"cwd": root, "brief_only": true});
         let plain = json!({"cwd": root});
         std::fs::write(root.join(".pixel/config.yaml"), "brief_parts: 4\n").unwrap();
@@ -3283,7 +3291,11 @@ mod tests {
 
     #[test]
     fn a_session_start_should_name_its_repository_for_the_briefed_providers_only() {
-        let root = std::env::temp_dir().join(format!("pixel-hook-warm-{}", std::process::id()));
+        let _root_tmp = tempfile::Builder::new()
+            .prefix("pixel-hook-warm-")
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         let shard_dir = root.join(pixel_index::index::SHARD_DIR);
         std::fs::create_dir_all(&shard_dir).unwrap();
         std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b"x").unwrap();
@@ -3330,10 +3342,11 @@ mod tests {
 
     #[test]
     fn antigravity_prompt_should_parse_user_text_and_ignore_other_roles() {
-        let path = std::env::temp_dir().join(format!(
-            "pixel-antigravity-transcript-{}",
-            std::process::id()
-        ));
+        let _path_tmp = tempfile::Builder::new()
+            .prefix("pixel-antigravity-transcript-")
+            .tempdir()
+            .unwrap();
+        let path = _path_tmp.path().join("transcript.jsonl");
         for (content, field, expected) in [
             (json!("string prompt"), "content", "string prompt"),
             (json!("text prompt"), "text", "text prompt"),
@@ -3408,10 +3421,11 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let parent = std::env::temp_dir().join(format!(
-            "pixel-antigravity-workspaces-{}-{unique}",
-            std::process::id()
-        ));
+        let _parent_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-antigravity-workspaces-{unique}-"))
+            .tempdir()
+            .unwrap();
+        let parent = _parent_tmp.path().to_path_buf();
         let unindexed = parent.join("first");
         let indexed = parent.join("second");
         let explicit = parent.join("cwd");
@@ -3451,10 +3465,11 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "pixel-antigravity-native-{}-{unique}",
-            std::process::id()
-        ));
+        let _root_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-antigravity-native-{unique}-"))
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/fetch.ts"), "function fetchUser() {}\n").unwrap();
         let initialized = Command::new("git")
@@ -3561,8 +3576,11 @@ mod tests {
 
     #[test]
     fn prompt_dispatch_should_gate_antigravity_and_accept_gemini_before_agent() {
-        let path =
-            std::env::temp_dir().join(format!("pixel-antigravity-dispatch-{}", std::process::id()));
+        let _path_tmp = tempfile::Builder::new()
+            .prefix("pixel-antigravity-dispatch-")
+            .tempdir()
+            .unwrap();
+        let path = _path_tmp.path().join("transcript.jsonl");
         std::fs::write(
             &path,
             json!({"role":"user","content":"where is fetchUser defined?"}).to_string(),
@@ -3628,11 +3646,12 @@ mod tests {
 
     /// A repository (a `.git` directory is enough to be discovered) and the
     /// prompt-submit payload a host would send from it.
-    fn parts_repo(tag: &str) -> (std::path::PathBuf, String) {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-task-hook-parts-{tag}-{}",
-            std::process::id()
-        ));
+    fn parts_repo(tag: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let _root_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-task-hook-parts-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".git")).unwrap();
         let root = root.canonicalize().unwrap();
@@ -3643,7 +3662,7 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
         })
         .to_string();
-        (root, raw)
+        (_root_tmp, root, raw)
     }
 
     fn part(index: u8, count: u8) -> BriefPart {
@@ -3672,7 +3691,7 @@ mod tests {
 
     #[test]
     fn a_later_part_prints_its_slice_in_the_hook_envelope() {
-        let (root, raw) = parts_repo("slice");
+        let (_parts_repo_tmp, root, raw) = parts_repo("slice");
         let brief = big_brief(250);
         brief_parts::store(&brief_path(&root, &raw), &brief, SystemTime::now()).unwrap();
         let mut joined = String::new();
@@ -3693,7 +3712,7 @@ mod tests {
 
     #[test]
     fn a_later_part_waits_for_the_first_and_prints_what_arrives() {
-        let (root, raw) = parts_repo("waits");
+        let (_parts_repo_tmp, root, raw) = parts_repo("waits");
         let path = brief_path(&root, &raw);
         let brief = big_brief(150);
         let writer = {
@@ -3732,7 +3751,7 @@ mod tests {
 
     #[test]
     fn a_later_part_that_times_out_prints_nothing() {
-        let (root, raw) = parts_repo("timeout");
+        let (_parts_repo_tmp, root, raw) = parts_repo("timeout");
         let started = std::time::Instant::now();
         assert_eq!(
             follow(
@@ -3776,7 +3795,7 @@ mod tests {
 
     #[test]
     fn a_later_part_with_no_slice_prints_an_empty_object_and_with_no_prompt_nothing() {
-        let (root, raw) = parts_repo("empty");
+        let (_parts_repo_tmp, root, raw) = parts_repo("empty");
         let path = brief_path(&root, &raw);
         // The brief is one piece long: parts 2 and 3 have nothing.
         brief_parts::store(&path, "[PIXEL:BRIEF]\nshort\n", SystemTime::now()).unwrap();
@@ -3826,7 +3845,7 @@ mod tests {
     /// stored brief of this one.
     #[test]
     fn the_parts_of_one_prompt_never_read_the_brief_of_another() {
-        let (root, raw) = parts_repo("keyed");
+        let (_parts_repo_tmp, root, raw) = parts_repo("keyed");
         brief_parts::store(&brief_path(&root, &raw), &big_brief(150), SystemTime::now()).unwrap();
         let mut other_session: Value = serde_json::from_str(&raw).unwrap();
         other_session["session_id"] = json!("session-10");
@@ -3850,7 +3869,7 @@ mod tests {
 
     #[test]
     fn a_timed_out_first_part_should_emit_its_late_slice_before_releasing_later_parts() {
-        let (root, raw) = parts_repo("late-first");
+        let (_parts_repo_tmp, root, raw) = parts_repo("late-first");
         let path = brief_path(&root, &raw);
         let brief = format!("{}\n", "a".repeat(9_000)).repeat(2);
         let later_raw = raw.clone();
@@ -3923,7 +3942,7 @@ mod tests {
 
     #[test]
     fn a_timed_out_first_part_does_not_recover_a_previous_identical_prompt_cache() {
-        let (root, raw) = parts_repo("stale-first-part");
+        let (_parts_repo_tmp, root, raw) = parts_repo("stale-first-part");
         let path = brief_path(&root, &raw);
         brief_parts::store(&path, "stale cached brief\n", SystemTime::now()).unwrap();
 
@@ -3956,7 +3975,7 @@ mod tests {
 
     #[test]
     fn a_later_part_should_supply_the_head_only_after_an_explicit_missing_head_marker() {
-        let (root, raw) = parts_repo("missing-head-fallback");
+        let (_parts_repo_tmp, root, raw) = parts_repo("missing-head-fallback");
         let path = brief_path(&root, &raw);
         let brief = format!("{}\n", "a".repeat(9_000)).repeat(2);
         brief_parts::mark_done_missing_head(&path);
@@ -3998,7 +4017,7 @@ mod tests {
 
     #[test]
     fn codex_parts_are_cut_by_bytes_and_the_others_by_characters() {
-        let (root, raw) = parts_repo("codex");
+        let (_parts_repo_tmp, root, raw) = parts_repo("codex");
         // Four lines of 9,001 characters, 18,002 bytes each.
         let brief = format!("{}\n", "é".repeat(9_000)).repeat(4);
         brief_parts::store(&brief_path(&root, &raw), &brief, SystemTime::now()).unwrap();
@@ -4043,7 +4062,7 @@ mod tests {
     fn the_first_part_stores_the_whole_brief_and_prints_its_own_slice() {
         // finish_brief reads the debug-only pad variable another test sets.
         let _lock = crate::ENV_LOCK.lock().unwrap();
-        let (root, raw) = parts_repo("first");
+        let (_parts_repo_tmp, root, raw) = parts_repo("first");
         let payload: Value = serde_json::from_str(&raw).unwrap();
         let path = brief_path(&root, &raw);
         let printed = publish_first_part(
@@ -4352,7 +4371,7 @@ mod tests {
 
     #[test]
     fn audited_first_slice_detection_should_require_the_matching_nonempty_cached_head() {
-        let (root, raw) = parts_repo("audited-delivery");
+        let (_parts_repo_tmp, root, raw) = parts_repo("audited-delivery");
         let path = brief_path(&root, &raw);
         brief_parts::store(&path, "head", SystemTime::now()).unwrap();
         let output = json!({"hookSpecificOutput":{"additionalContext":"head"}});
@@ -4394,7 +4413,7 @@ mod tests {
 
     #[test]
     fn audited_cache_forgetting_should_require_a_split_first_prompt_part() {
-        let (root, raw) = parts_repo("audited-forget");
+        let (_parts_repo_tmp, root, raw) = parts_repo("audited-forget");
         let path = brief_path(&root, &raw);
         for (event, part, forgotten) in [
             (TaskHookEvent::SessionStart, part(1, 2), false),

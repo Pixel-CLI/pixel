@@ -66,32 +66,69 @@ pub fn built_in_commands() -> std::collections::BTreeSet<String> {
     names
 }
 
+/// Neutral directories this test process created, removed when it exits.
+static NEUTRAL_DIRS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Removes this process's neutral directories at exit. A test binary has no
+/// teardown hook and, under nextest, each test is its own process, so the
+/// last user of a directory is never known; the process itself is.
+extern "C" fn remove_neutral_dirs() {
+    if let Ok(dirs) = NEUTRAL_DIRS.lock() {
+        for dir in dirs.iter() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Records `dir` for removal at exit, registering the hook on the first one.
+fn remove_at_exit(dir: &Path) {
+    let mut dirs = NEUTRAL_DIRS.lock().unwrap();
+    if dirs.is_empty() {
+        // SAFETY: `remove_neutral_dirs` is a plain `extern "C"` fn with no
+        // arguments, which is all `atexit` requires.
+        unsafe { libc::atexit(remove_neutral_dirs) };
+    }
+    dirs.push(dir.to_path_buf());
+}
+
 /// An empty home, one per test process and created once, like
 /// [`neutral_cwd`]: nothing `pixel setup` deployed on this machine is in it.
+/// Removed when the test process exits.
 pub fn neutral_home() -> &'static Path {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-cli-neutral-home-{}", std::process::id()));
+        // Kept on purpose: this directory outlives every test in the process, so
+        // it is removed by `remove_at_exit` rather than by a guard drop.
+        let dir = tempfile::Builder::new()
+            .prefix("pixel-cli-neutral-home-")
+            .tempdir()
+            .unwrap()
+            .keep();
         std::fs::create_dir_all(&dir)
             .unwrap_or_else(|e| panic!("create neutral home {}: {e}", dir.display()));
+        remove_at_exit(&dir);
         dir
     })
 }
 
 /// A directory outside every repository, one per test process and created
 /// once: where a command given no path, or a path that does not exist,
-/// records itself. The process id keeps it from colliding with a file or a
-/// directory another process left at a fixed name. It is not removed: a test
-/// binary has no teardown hook, and under nextest each test is its own
-/// process, so the next one could not know when the last user has exited.
+/// records itself. The random suffix keeps it from colliding with a file or a
+/// directory another process left at a fixed name. Removed when the test
+/// process exits.
 pub fn neutral_cwd() -> &'static Path {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-cli-neutral-cwd-{}", std::process::id()));
+        // Kept on purpose: this directory outlives every test in the process, so
+        // it is removed by `remove_at_exit` rather than by a guard drop.
+        let dir = tempfile::Builder::new()
+            .prefix("pixel-cli-neutral-cwd-")
+            .tempdir()
+            .unwrap()
+            .keep();
         std::fs::create_dir_all(&dir)
             .unwrap_or_else(|e| panic!("create neutral cwd {}: {e}", dir.display()));
+        remove_at_exit(&dir);
         dir
     })
 }

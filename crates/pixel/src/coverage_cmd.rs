@@ -189,7 +189,11 @@ mod tests {
 
     #[test]
     fn collect_counts_recognized_and_unrecognized() {
-        let dir = std::env::temp_dir().join(format!("px-cov-{}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("px-cov-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/a.rs"), b"fn a() {}\n").unwrap();
@@ -208,7 +212,11 @@ mod tests {
     /// `indexed` — `+=` mutants that subtract or multiply leave it at zero.
     #[test]
     fn collect_reads_indexed_counts_from_the_graph() {
-        let dir = std::env::temp_dir().join(format!("px-cov-graph-{}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("px-cov-graph-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let shard = dir.join(SHARD_DIR);
         std::fs::create_dir_all(&shard).unwrap();

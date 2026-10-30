@@ -219,21 +219,25 @@ mod tests {
 
     #[test]
     fn check_should_pass_without_creating_an_absent_pixel_dir() {
-        let root = tmpdir("check-absent");
+        let root_guard = tmpdir("check-absent");
+        let root = root_guard.path().canonicalize().unwrap();
         check(&root).unwrap();
         assert!(fs::symlink_metadata(dir(&root)).is_err());
     }
 
     #[test]
     fn check_should_refuse_a_linked_or_non_directory_pixel() {
-        let root = tmpdir("check-linked");
-        let elsewhere = tmpdir("check-linked-target");
+        let root_guard = tmpdir("check-linked");
+        let root = root_guard.path().canonicalize().unwrap();
+        let elsewhere_guard = tmpdir("check-linked-target");
+        let elsewhere = elsewhere_guard.path().canonicalize().unwrap();
         symlink(&elsewhere, dir(&root)).unwrap();
         assert_eq!(
             refusal(&check(&root).unwrap_err()),
             Refusal::Linked(dir(&root))
         );
-        let file_root = tmpdir("check-file");
+        let file_root_guard = tmpdir("check-file");
+        let file_root = file_root_guard.path().canonicalize().unwrap();
         fs::write(dir(&file_root), b"").unwrap();
         assert_eq!(
             refusal(&check(&file_root).unwrap_err()),
@@ -243,7 +247,8 @@ mod tests {
 
     #[test]
     fn check_should_refuse_a_pixel_dir_holding_tracked_files() {
-        let root = tmpdir("check-tracked");
+        let root_guard = tmpdir("check-tracked");
+        let root = root_guard.path().canonicalize().unwrap();
         init_repo(&root);
         fs::create_dir_all(dir(&root)).unwrap();
         fs::write(root.join(".pixel/history.db"), b"forged").unwrap();
@@ -265,7 +270,8 @@ mod tests {
 
     #[test]
     fn check_should_name_three_tracked_entries_and_flag_the_rest() {
-        let root = tmpdir("check-more");
+        let root_guard = tmpdir("check-more");
+        let root = root_guard.path().canonicalize().unwrap();
         init_repo(&root);
         fs::create_dir_all(dir(&root)).unwrap();
         for name in ["a", "b", "c", "d"] {
@@ -281,7 +287,8 @@ mod tests {
 
     #[test]
     fn check_should_refuse_a_tracked_link_named_pixel() {
-        let root = tmpdir("check-tracked-link");
+        let root_guard = tmpdir("check-tracked-link");
+        let root = root_guard.path().canonicalize().unwrap();
         init_repo(&root);
         symlink("elsewhere", dir(&root)).unwrap();
         git(&root, &["add", "-f", ".pixel"]);
@@ -293,21 +300,24 @@ mod tests {
 
     #[test]
     fn check_should_accept_an_untracked_pixel_dir_inside_and_outside_a_repository() {
-        let root = tmpdir("check-untracked");
+        let root_guard = tmpdir("check-untracked");
+        let root = root_guard.path().canonicalize().unwrap();
         init_repo(&root);
         fs::write(root.join("a.rs"), b"fn main() {}\n").unwrap();
         git(&root, &["add", "a.rs"]);
         fs::create_dir_all(dir(&root)).unwrap();
         fs::write(root.join(".pixel/history.db"), b"ours").unwrap();
         check(&root).unwrap();
-        let plain = tmpdir("check-no-git");
+        let plain_guard = tmpdir("check-no-git");
+        let plain = plain_guard.path().canonicalize().unwrap();
         fs::create_dir_all(dir(&plain)).unwrap();
         check(&plain).unwrap();
     }
 
     #[test]
     fn private_dir_should_create_and_tighten_owner_only() {
-        let root = tmpdir("private-dir");
+        let root_guard = tmpdir("private-dir");
+        let root = root_guard.path().canonicalize().unwrap();
         let pixel = dir(&root);
         private_dir(&pixel).unwrap();
         assert_eq!(mode_of(&pixel), PRIVATE_DIR_MODE);
@@ -321,7 +331,8 @@ mod tests {
 
     #[test]
     fn check_should_report_an_entry_it_cannot_read() {
-        let base = tmpdir("check-unreadable");
+        let base_guard = tmpdir("check-unreadable");
+        let base = base_guard.path().canonicalize().unwrap();
         let file_root = base.join("not-a-dir");
         fs::write(&file_root, b"").unwrap();
         let error = check(&file_root).unwrap_err();
@@ -330,8 +341,10 @@ mod tests {
 
     #[test]
     fn private_dir_should_not_create_below_a_linked_directory_under_pixel() {
-        let root = tmpdir("private-dir-below-link");
-        let elsewhere = tmpdir("private-dir-below-link-target");
+        let root_guard = tmpdir("private-dir-below-link");
+        let root = root_guard.path().canonicalize().unwrap();
+        let elsewhere_guard = tmpdir("private-dir-below-link-target");
+        let elsewhere = elsewhere_guard.path().canonicalize().unwrap();
         fs::create_dir_all(dir(&root)).unwrap();
         symlink(&elsewhere, dir(&root).join("tasks")).unwrap();
         let error = private_dir(&dir(&root).join("tasks/session-locks")).unwrap_err();
@@ -341,8 +354,10 @@ mod tests {
 
     #[test]
     fn private_dir_should_neither_create_nor_chmod_through_a_link() {
-        let root = tmpdir("private-dir-link");
-        let elsewhere = tmpdir("private-dir-link-target");
+        let root_guard = tmpdir("private-dir-link");
+        let root = root_guard.path().canonicalize().unwrap();
+        let elsewhere_guard = tmpdir("private-dir-link-target");
+        let elsewhere = elsewhere_guard.path().canonicalize().unwrap();
         fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o755)).unwrap();
         symlink(&elsewhere, dir(&root)).unwrap();
         let error = private_dir(&dir(&root)).unwrap_err();

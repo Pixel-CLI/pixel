@@ -5,7 +5,11 @@
 #[cfg(feature = "model2vec")]
 #[test]
 fn ask_reports_cosine_ranking_coverage_and_honest_human_labels() {
-    let repo = std::env::temp_dir().join(format!("pixel-ask-contract-{}", std::process::id()));
+    let _repo_tmp = tempfile::Builder::new()
+        .prefix("pixel-ask-contract-")
+        .tempdir()
+        .unwrap();
+    let repo = _repo_tmp.path().to_path_buf();
     std::fs::create_dir_all(&repo).unwrap();
     let init = std::process::Command::new("git")
         .args(["init", "-q"])
@@ -193,7 +197,11 @@ fn search_meaning_help_states_the_defaults() {
 #[cfg(feature = "model2vec")]
 #[test]
 fn search_meaning_default_searches_every_file_of_a_tree_over_the_old_budget() {
-    let root = std::env::temp_dir().join(format!("pixel-ask-uncapped-{}", std::process::id()));
+    let _root_tmp = tempfile::Builder::new()
+        .prefix("pixel-ask-uncapped-")
+        .tempdir()
+        .unwrap();
+    let root = _root_tmp.path().to_path_buf();
     let _ = std::fs::remove_dir_all(&root);
     let repo = root.as_path();
     std::fs::create_dir_all(repo.join("a")).unwrap();

@@ -717,11 +717,15 @@ impl From<RoleArg> for Role {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("px-ref-{tag}-{}", std::process::id()));
+    fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("px-ref-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(SHARD_DIR)).unwrap();
-        dir.canonicalize().unwrap()
+        (_dir_tmp, dir.canonicalize().unwrap())
     }
 
     fn git(dir: &Path, args: &[&str]) {
@@ -767,7 +771,7 @@ mod tests {
 
     #[test]
     fn two_pinned_versions_of_one_dependency_coexist() {
-        let root = scratch("coexist");
+        let (_root_tmp, root) = scratch("coexist");
         let entry_v1 = make_entry("serde", "v1.0.0", Role::Reference);
         let entry_v2 = make_entry("serde", "v2.0.0", Role::Reference);
 
@@ -807,7 +811,7 @@ mod tests {
 
     #[test]
     fn query_result_identifies_role_repo_revision_and_source() {
-        let root = scratch("identify");
+        let (_root_tmp, root) = scratch("identify");
         let entry = make_entry("tokio", "v1.38.0", Role::Target);
 
         add(
@@ -844,7 +848,7 @@ mod tests {
 
     #[test]
     fn missing_corpus_is_disclosed_individually() {
-        let root = scratch("missing");
+        let (_root_tmp, root) = scratch("missing");
         let entry = make_entry("missing-crate", "v1.0.0", Role::Reference);
 
         add(
@@ -874,7 +878,7 @@ mod tests {
 
     #[test]
     fn wrong_revision_corpus_is_disclosed() {
-        let root = scratch("wrongrev");
+        let (_root_tmp, root) = scratch("wrongrev");
         let entry = make_entry("wrong-crate", "v1.0.0", Role::Reference);
 
         add(
@@ -909,7 +913,7 @@ mod tests {
 
     #[test]
     fn cold_query_does_not_fetch_clone_build_or_modify() {
-        let root = scratch("cold");
+        let (_root_tmp, root) = scratch("cold");
         let entry = make_entry("cold-crate", "v1.0.0", Role::Reference);
 
         add(
@@ -952,7 +956,7 @@ mod tests {
 
     #[test]
     fn setup_clones_and_verifies_corpora() {
-        let root = scratch("setup");
+        let (_root_tmp, root) = scratch("setup");
 
         // Create a "remote" repo to clone from.
         let remote = root.join("remote-repo");
@@ -1013,7 +1017,7 @@ mod tests {
 
     #[test]
     fn setup_reports_each_failed_corpus_with_its_own_error() {
-        let root = scratch("setup-fail");
+        let (_root_tmp, root) = scratch("setup-fail");
 
         // A local path that does not exist: the clone fails, with no network.
         let missing_repo = root.join("no-such-repo");
@@ -1088,7 +1092,7 @@ mod tests {
 
     #[test]
     fn add_duplicate_id_revision_is_rejected() {
-        let root = scratch("dup");
+        let (_root_tmp, root) = scratch("dup");
         let entry = make_entry("serde", "v1.0.0", Role::Reference);
 
         add(
@@ -1122,7 +1126,7 @@ mod tests {
 
     #[test]
     fn remove_specific_revision() {
-        let root = scratch("remove-rev");
+        let (_root_tmp, root) = scratch("remove-rev");
         let entry_v1 = make_entry("serde", "v1.0.0", Role::Reference);
         let entry_v2 = make_entry("serde", "v2.0.0", Role::Reference);
 
@@ -1161,7 +1165,7 @@ mod tests {
 
     #[test]
     fn query_filter_matches_id_and_repo() {
-        let root = scratch("filter");
+        let (_root_tmp, root) = scratch("filter");
         let entry1 = make_entry("serde", "v1.0.0", Role::Reference);
         let entry2 = make_entry("tokio", "v1.38.0", Role::Reference);
 
@@ -1208,7 +1212,7 @@ mod tests {
 
     #[test]
     fn manifest_stored_at_pixel_reference_json() {
-        let root = scratch("path");
+        let (_root_tmp, root) = scratch("path");
         let entry = make_entry("serde", "v1.0.0", Role::Reference);
 
         add(
@@ -1234,7 +1238,7 @@ mod tests {
     /// fast-forward it).
     #[test]
     fn setup_moves_a_fetched_branch_pin_to_the_new_remote_tip() {
-        let root = scratch("branch-move");
+        let (_root_tmp, root) = scratch("branch-move");
         let remote = root.join("remote-repo");
         std::fs::create_dir_all(&remote).unwrap();
         init_repo(&remote);
@@ -1303,7 +1307,7 @@ mod tests {
     /// A flag-shaped revision is refused before it can become git argv.
     #[test]
     fn unsafe_revision_is_rejected_before_it_reaches_git() {
-        let root = scratch("unsafe");
+        let (_root_tmp, root) = scratch("unsafe");
         let err = add(
             &root,
             "evil".to_string(),
@@ -1327,7 +1331,7 @@ mod tests {
     /// load, so `setup` never forwards it to git.
     #[test]
     fn a_flag_shaped_revision_in_a_hand_written_manifest_is_refused_on_load() {
-        let root = scratch("hostile-manifest");
+        let (_root_tmp, root) = scratch("hostile-manifest");
         let path = root.join(SHARD_DIR).join(REFERENCE_FILE);
         std::fs::write(
             &path,
@@ -1342,7 +1346,7 @@ mod tests {
     /// The `--json` listing exposes every documented field per entry.
     #[test]
     fn list_value_reports_every_field_of_every_entry() {
-        let root = scratch("list-value");
+        let (_root_tmp, root) = scratch("list-value");
         let entry = make_entry("serde", "v1.0.0", Role::Reference);
         add(
             &root,

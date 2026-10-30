@@ -980,10 +980,11 @@ mod tests {
 
     #[test]
     fn a_bundle_sees_a_file_written_after_the_previous_bundle() {
-        let root =
-            std::env::temp_dir().join(format!("pixel-evidence-fresh-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("pixel-evidence-fresh-")
+            .tempdir()
+            .unwrap();
+        let root = scratch.path().to_path_buf();
         git(&root, &["init", "-q"]);
         std::fs::write(root.join("a.rs"), "fn early() {}\n").unwrap();
         git(&root, &["add", "a.rs"]);
@@ -1037,10 +1038,11 @@ mod tests {
     /// tells the freshness gate the index covers the new HEAD (#1032).
     #[test]
     fn a_catch_up_after_a_commit_should_read_it_and_cover_the_new_head() {
-        let root =
-            std::env::temp_dir().join(format!("pixel-evidence-commit-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("pixel-evidence-commit-")
+            .tempdir()
+            .unwrap();
+        let root = scratch.path().to_path_buf();
         git(&root, &["init", "-q"]);
         std::fs::write(root.join("a.rs"), "fn early() {}\n").unwrap();
         git(&root, &["add", "a.rs"]);
@@ -1081,10 +1083,11 @@ mod tests {
     /// this machine's model is.
     #[test]
     fn a_meaning_query_should_start_the_build_its_replicas_rank_from() {
-        let root =
-            std::env::temp_dir().join(format!("pixel-evidence-meaning-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("pixel-evidence-meaning-")
+            .tempdir()
+            .unwrap();
+        let root = scratch.path().to_path_buf();
         git(&root, &["init", "-q"]);
         std::fs::write(root.join("a.rs"), "fn early() {}\n").unwrap();
         git(&root, &["add", "a.rs"]);
@@ -1122,8 +1125,11 @@ mod tests {
 
     #[test]
     fn modified_nanos_reads_the_file_mtime_since_the_epoch() {
-        let path =
-            std::env::temp_dir().join(format!("pixel-evidence-mtime-{}", std::process::id()));
+        let scratch = tempfile::Builder::new()
+            .prefix("pixel-evidence-mtime-")
+            .tempdir()
+            .unwrap();
+        let path = scratch.path().join("mtime");
         std::fs::write(&path, b"x").unwrap();
         let when = std::time::Duration::new(1_000_000, 5_000);
         std::fs::OpenOptions::new()

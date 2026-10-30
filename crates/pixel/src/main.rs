@@ -6680,10 +6680,11 @@ mod tests {
 
     #[test]
     fn read_only_targets_refuse_an_absent_daemon_without_creating_an_index() {
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-targets-facts-read-only-{}",
-            std::process::id()
-        ));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("pixel-targets-facts-read-only-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let root = dir.as_path();
@@ -6718,8 +6719,11 @@ mod tests {
         let owned_exit = std::cell::Cell::new(None);
         // Isolated git repo: no pre-existing `.pixel/targets.json`, and the
         // read-only pass-through path (no tuning flags) must not create one.
-        let dir =
-            std::env::temp_dir().join(format!("pixel-read-only-tunings-{}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("pixel-read-only-tunings-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let root = dir.as_path();
@@ -6819,14 +6823,11 @@ mod tests {
     /// journal-only `~/.pixel`).
     #[test]
     fn discover_root_ignores_journal_only_pixel_dir() {
-        let base = std::env::temp_dir().join(format!(
-            "pixel-discover-journal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let _base_tmp = tempfile::Builder::new()
+            .prefix("pixel-discover-journal-")
+            .tempdir()
+            .unwrap();
+        let base = _base_tmp.path().to_path_buf();
         std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(base.join("home/.pixel")).unwrap();
         std::fs::create_dir_all(base.join("home/work")).unwrap();
@@ -7001,7 +7002,11 @@ mod tests {
     #[test]
     fn enrich_with_context_returns_surrounding_lines() {
         // Create a temp file with known content
-        let dir = std::env::temp_dir();
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("pixel-ctx-test-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let path = dir.join("pixel_ctx_test.rs");
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "line 1").unwrap();
@@ -7078,7 +7083,11 @@ mod tests {
 
     #[test]
     fn enrich_with_context_clamps_at_file_boundaries() {
-        let dir = std::env::temp_dir();
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("pixel-ctx-test-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let path = dir.join("pixel_ctx_short.rs");
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "only line").unwrap();
@@ -7108,7 +7117,11 @@ mod tests {
 
     #[test]
     fn enrich_with_context_caches_file_content() {
-        let dir = std::env::temp_dir();
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("pixel-ctx-test-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let path = dir.join("pixel_ctx_cache.rs");
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "line 1").unwrap();
@@ -7134,7 +7147,11 @@ mod tests {
 
     #[test]
     fn resolve_context_covers_full_multiline_span_not_just_start_line() {
-        let dir = std::env::temp_dir();
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("pixel-ctx-test-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let path = dir.join("pixel_resolve_ctx_test.rs");
         let mut f = std::fs::File::create(&path).unwrap();
         for i in 1..=10 {
@@ -7167,17 +7184,21 @@ mod tests {
     }
 
     /// A scratch source file of `lines` numbered lines, and its directory.
-    fn numbered_source(tag: &str, lines: usize) -> (PathBuf, String) {
-        let dir = std::env::temp_dir().join(format!("pixel-resolve-{tag}-{}", std::process::id()));
+    fn numbered_source(tag: &str, lines: usize) -> (tempfile::TempDir, PathBuf, String) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-resolve-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let body: String = (1..=lines).map(|i| format!("line {i}\n")).collect();
         std::fs::write(dir.join("big.rb"), body).unwrap();
-        (dir, "big.rb".to_string())
+        (_dir_tmp, dir, "big.rb".to_string())
     }
 
     #[test]
     fn resolve_context_should_cut_a_long_body_and_name_the_cap() {
-        let (root, rel) = numbered_source("cut", 200);
+        let (_numbered_source_tmp, root, rel) = numbered_source("cut", 200);
         let mut data = serde_json::json!({
             "matches": [{"path": rel, "start_line": 10, "end_line": 150}]
         });
@@ -7203,7 +7224,7 @@ mod tests {
 
     #[test]
     fn resolve_context_should_point_a_match_inside_a_shown_body_back_to_it() {
-        let (root, rel) = numbered_source("inside", 60);
+        let (_numbered_source_tmp, root, rel) = numbered_source("inside", 60);
         let mut data = serde_json::json!({
             "matches": [
                 {"path": rel, "start_line": 5, "end_line": 20},
@@ -7249,7 +7270,7 @@ mod tests {
 
     #[test]
     fn resolve_context_should_keep_the_caps_the_daemon_named_and_add_none_when_nothing_fired() {
-        let (root, rel) = numbered_source("keep", 300);
+        let (_numbered_source_tmp, root, rel) = numbered_source("keep", 300);
         let mut short = serde_json::json!({
             "matches": [{"path": rel, "start_line": 3, "end_line": 6}],
             "caps": ["semantic leads (unverified)"],

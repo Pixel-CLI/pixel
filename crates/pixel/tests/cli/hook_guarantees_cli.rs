@@ -547,7 +547,8 @@ fn task_event_should_exit_0_with_one_json_line_when_pixel_state_is_broken() {
                 // Where `pixel_daemon::socket_path` looks for this root's
                 // daemon: the runtime directory (TMPDIR on macOS,
                 // XDG_RUNTIME_DIR elsewhere), named by the root's hash.
-                let dir = std::env::temp_dir().join(format!("pxh-{}", std::process::id()));
+                let _dir_tmp = tempfile::Builder::new().prefix("pxh-").tempdir().unwrap();
+                let dir = _dir_tmp.path().to_path_buf();
                 std::fs::create_dir_all(&dir).unwrap();
                 let hash = xxhash_rust::xxh3::xxh3_64(root.to_string_lossy().as_bytes());
                 let socket = dir.join(format!("pixel-{hash:016x}.sock"));

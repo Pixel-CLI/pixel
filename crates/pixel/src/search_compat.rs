@@ -567,27 +567,25 @@ pub fn run(tool: SearchTool, argv: Vec<String>) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn args(raw: &[&str]) -> Vec<String> {
         raw.iter().map(ToString::to_string).collect()
     }
 
-    struct Repo(PathBuf);
+    struct Repo(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
     impl Repo {
         fn new() -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!(
-                "pixel-search-compat-unit-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
+            let _root_tmp = tempfile::Builder::new()
+                .prefix("pixel-search-compat-unit-")
+                .tempdir()
+                .unwrap();
+            let root = _root_tmp.path().to_path_buf();
             std::fs::create_dir_all(root.join(".pixel")).unwrap();
             std::fs::create_dir_all(root.join("src/sub")).unwrap();
             std::fs::write(root.join("src/a.rs"), b"needle one\nplain\n").unwrap();
             std::fs::write(root.join("src/sub/b.rs"), b"needle two\n").unwrap();
-            Self(root.canonicalize().unwrap())
+            Self(root.canonicalize().unwrap(), _root_tmp)
         }
     }
 
