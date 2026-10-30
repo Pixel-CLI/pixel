@@ -219,7 +219,14 @@ pixel new-branch release-x.y.z --from "origin/$TARGET" --request-id "release-x.y
 
 `prepare.sh` refuses before writing when the tag or the `## [x.y.z]` heading
 already exists, `.github/changelog.d/` holds no fragment, or `## [Unreleased]` still
-carries a bullet of its own. Otherwise it:
+carries a bullet of its own. It also refuses before writing when
+`scripts/ci/check-claims.py --version x.y.z` fails, naming each claim in
+`docs/bench/claims.toml` the new version would leave more than one minor
+behind with no `tracking` issue: the prepare PR may not edit the registry and
+skips the CI job that checks it, so a stale claim would only turn the merge
+commit red (0.10.0, #1359). Re-measure it (`scripts/bench/refresh-claim.sh
+<id>`) or add `tracking = "#<issue>"` to its entry through a pull request into
+`$TARGET`, merge that, then prepare from the new base. Otherwise it:
 
 1. sets `[package] version` to `x.y.z` in **every** workspace member
    (lockstep, as 0.2.4 did);

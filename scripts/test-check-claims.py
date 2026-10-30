@@ -47,7 +47,8 @@ def claim(**over: str | bool) -> str:
 
 
 class CheckClaims(unittest.TestCase):
-    def run_check(self, version: str, registry: str, doc: str = DOC) -> subprocess.CompletedProcess[str]:
+    def run_check(self, version: str, registry: str, doc: str = DOC,
+                  *extra: str) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "crates/pixel").mkdir(parents=True)
@@ -58,7 +59,7 @@ class CheckClaims(unittest.TestCase):
             (root / "docs/bench/claims.toml").write_text(registry.replace("'", '"'))
             (root / "README.md").write_text(doc)
             return subprocess.run(
-                ["python3", str(SCRIPT), "--root", str(root)], capture_output=True, text=True
+                ["python3", str(SCRIPT), "--root", str(root), *extra], capture_output=True, text=True
             )
 
     def test_a_claim_one_minor_behind_should_pass_quietly(self) -> None:
@@ -74,6 +75,16 @@ class CheckClaims(unittest.TestCase):
             "re-measure it (pixel list-signatures models.py) or name a tracking issue",
             out.stderr,
         )
+
+    def test_a_target_version_should_judge_the_claims_before_the_bump(self) -> None:
+        # prepare.sh asks before it writes the new version: a claim fine under
+        # the crate's 0.7 must fail under the 0.8 the release is about to cut.
+        out = self.run_check("0.7.0", claim(), DOC, "--version", "0.8.0")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("models-outline: README.md quotes pixel 0.6.0, 2 minor releases behind 0.8", out.stderr)
+        out = self.run_check("0.7.0", claim(), DOC, "--version", "v0.8.0")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("is not x.y.z", out.stderr)
 
     def test_a_tracked_stale_claim_should_pass_as_a_warning(self) -> None:
         out = self.run_check("0.8.0", claim(tracking="#1093"))

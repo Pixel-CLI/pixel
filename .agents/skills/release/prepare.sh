@@ -18,7 +18,11 @@
 #    (Security may instead link this repository's GHSA), an optional
 #    `_highlights.md` carries no `## ` heading and fits HIGHLIGHTS_LIMIT, and
 #    `## [Unreleased]` carries no `- ` entry;
-# 3. every workspace member's `[package] version` is set to x.y.z (the
+# 3. `scripts/ci/check-claims.py --version x.y.z` passes: no public number in
+#    docs/bench/claims.toml is left more than one minor behind x.y.z without a
+#    `tracking` issue. The prepare pull request may not edit the registry and
+#    skips the CI job that checks it, so this is the last place to catch it;
+#    then every workspace member's `[package] version` is set to x.y.z (the
 #    members move in lockstep, as 0.2.4 did);
 # 4. the fragments are folded into a new `## [x.y.z] - DATE` under a kept,
 #    empty `## [Unreleased]`, grouped by section and led by `_highlights.md`
@@ -325,6 +329,23 @@ fi
 if [ "$FRAGMENT_COUNT" -eq 0 ]; then
     echo "prepare.sh: .github/changelog.d/ holds no fragment; write one entry per user-visible change as .github/changelog.d/<slug>.<section>.md" >&2
     exit 1
+fi
+
+# A bump that leaves a public number more than one minor behind turns main
+# red on the prepare PR's merge commit: the claims check runs in Test +
+# Format, which the prepare PR skips, and release-prepare-only.py forbids the
+# registry edit that would fix it there (0.10.0: #1357, then #1359). So the
+# claims are judged against the version about to be written, before any
+# write, and the fix goes through its own pull request first. Absent from a
+# disposable fixture that copies only this script.
+if [ -f scripts/ci/check-claims.py ]; then
+    if ! CLAIMS="$(python3 scripts/ci/check-claims.py --root . --version "$VERSION" 2>&1)"; then
+        printf '%s\n' "$CLAIMS" >&2
+        IDS="$(printf '%s\n' "$CLAIMS" | sed -n 's/^error: \([^: ]*\): .*/\1/p' | sort -u | paste -sd ' ' -)"
+        echo "prepare.sh: public claims in docs/bench/claims.toml fail under $VERSION: ${IDS:-see above}; re-measure each (scripts/bench/refresh-claim.sh <id>) or add a \`tracking\` issue to its entry, through a pull request into the target branch, then re-run; no release files written" >&2
+        exit 1
+    fi
+    printf '%s\n' "$CLAIMS" | grep '^warning: ' || true
 fi
 
 # Resolve the canonical repository before searching: a transferred remote's
