@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 rustc-hash = "1"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 pixel-git = { path = "../pixel-git" }
 pixel-index = { path = "../pixel-index" }
 # pixel-mvp's model and store, imported (crates/mvp-*/ORIGIN.md); its
@@ -53,4 +53,4 @@ mutants = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3"
 # `trace`: a test counts the statements one update runs on its connection.
-rusqlite = { version = "0.40", features = ["bundled", "trace"] }
+rusqlite = { version = "0.41", features = ["bundled", "trace"] }
