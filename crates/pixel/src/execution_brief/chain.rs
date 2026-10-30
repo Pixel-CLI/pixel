@@ -5841,7 +5841,11 @@ mod tests {
 
     #[test]
     fn gate_should_read_the_index_from_the_shard_file() {
-        let dir = std::env::temp_dir().join(format!("pixel-brief-gate-{}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("pixel-brief-gate-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let shard_dir = dir.join(pixel_index::index::SHARD_DIR);
         std::fs::create_dir_all(&shard_dir).unwrap();
         assert!(!Gate::read(&dir).indexed);
@@ -6442,11 +6446,14 @@ mod tests {
         calls
     }
 
-    fn scratch_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-brief-chain-{tag}-{}", std::process::id()));
+    fn scratch_dir(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-brief-chain-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        (_dir_tmp, dir)
     }
 
     /// Start `prompt` on `fake` with `judge` and `model`, and wait for the brief.
@@ -7464,7 +7471,7 @@ mod tests {
 
     #[test]
     fn a_decision_should_be_logged_only_when_a_log_is_given() {
-        let dir = scratch_dir("given");
+        let (_dir_tmp, dir) = scratch_dir("given");
         let path = dir.join(decision_log::LOG_FILE);
         let mut fake = Fake::new();
         fake.relevance = Ok(on_topic_answer());
@@ -7492,7 +7499,7 @@ mod tests {
         assert_eq!(provenance["source"], "brief");
         assert_eq!(logged, finished.record.to_json());
         // The same decision with no log leaves nothing behind.
-        let quiet = scratch_dir("absent");
+        let (_quiet_tmp, quiet) = scratch_dir("absent");
         let mut other = Fake::new();
         other.relevance = Ok(on_topic_answer());
         try_start_with(
@@ -7513,7 +7520,7 @@ mod tests {
 
     #[test]
     fn a_prompt_about_nothing_should_be_logged_as_declined_and_a_continuation_should_not() {
-        let dir = scratch_dir("declined");
+        let (_dir_tmp, dir) = scratch_dir("declined");
         let path = dir.join(decision_log::LOG_FILE);
         let open = |_: Instant| -> Box<dyn Evidence> { Box::new(Fake::new()) };
         for prompt in ["ok", "thanks, that works"] {
@@ -7564,7 +7571,7 @@ mod tests {
 
     #[test]
     fn the_log_should_keep_the_last_five_hundred_decisions() {
-        let dir = scratch_dir("capped");
+        let (_dir_tmp, dir) = scratch_dir("capped");
         let path = dir.join(decision_log::LOG_FILE);
         let old: String = (0..decision_log::MAX_LINES)
             .map(|n| format!("{{\"old\":{n}}}\n"))
@@ -8363,7 +8370,7 @@ mod tests {
 
     #[test]
     fn a_briefed_prompt_should_start_an_absent_daemon_and_log_that_it_did() {
-        let dir = scratch_dir("starter-absent");
+        let (_dir_tmp, dir) = scratch_dir("starter-absent");
         let path = dir.join(decision_log::LOG_FILE);
         let daemons = Counting::new(crate::DaemonProbe::Absent, Duration::ZERO);
         let finished = with_starter(
@@ -10540,7 +10547,7 @@ mod tests {
         let _g = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let root = scratch_dir("central-mirror");
+        let (_root_tmp, root) = scratch_dir("central-mirror");
         // SAFETY: under ENV_LOCK, single-threaded test setup.
         unsafe { std::env::set_var(decision_log::LOG_ENV, "1") };
         // The central path derives from HOME, so point it at the scratch dir
@@ -10601,7 +10608,7 @@ mod tests {
 
     #[test]
     fn a_pack_should_be_remembered_for_the_session_and_not_sent_to_it_again() {
-        let root = scratch_dir("sent-once");
+        let (_root_tmp, root) = scratch_dir("sent-once");
         std::fs::create_dir_all(root.join(".pixel")).unwrap();
         let now = || pixel_task::now_ms();
         let first = packed_in(&root, Seen::default());
@@ -10624,7 +10631,7 @@ mod tests {
 
     #[test]
     fn a_brief_with_no_pack_should_remember_nothing() {
-        let root = scratch_dir("sent-none");
+        let (_root_tmp, root) = scratch_dir("sent-none");
         std::fs::create_dir_all(root.join(".pixel")).unwrap();
         let finished = try_start_with(
             PACK_PROMPT,

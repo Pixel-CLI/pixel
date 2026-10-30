@@ -480,8 +480,11 @@ mod tests {
     /// names it, not a failed check.
     #[test]
     fn run_reads_the_workspace_files_and_names_a_missing_one() {
-        let dir = std::env::temp_dir().join(format!("pixel-release-run-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = tempfile::Builder::new()
+            .prefix("pixel-release-run-")
+            .tempdir()
+            .unwrap();
+        let dir = scratch.path().to_path_buf();
         std::fs::create_dir_all(dir.join("crates/pixel")).unwrap();
         std::fs::create_dir_all(dir.join("crates/pixel-ops")).unwrap();
         std::fs::write(

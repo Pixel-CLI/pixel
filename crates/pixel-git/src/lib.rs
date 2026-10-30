@@ -52,20 +52,15 @@ pub use runner::{
 pub(crate) mod testutil {
     //! Git fixtures for this crate's tests: real `git` in a fresh temp dir.
 
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
 
     /// A fresh, empty directory unique to this process and call.
-    pub(crate) fn tmpdir(tag: &str) -> PathBuf {
-        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-git-{tag}-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+    pub(crate) fn tmpdir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("pixel-git-{tag}-"))
+            .tempdir()
+            .unwrap()
     }
 
     /// Run git in `dir` with a fixed identity and no global config.

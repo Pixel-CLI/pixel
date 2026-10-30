@@ -17,6 +17,7 @@ struct Env {
     xdg: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
     scratch: PathBuf,
+    _scratch_guard: tempfile::TempDir,
 }
 
 impl Env {
@@ -24,17 +25,17 @@ impl Env {
         let guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let scratch = std::env::temp_dir().join(format!(
-            "pixel-cache-contract-{label}-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&scratch);
-        fs::create_dir_all(&scratch).unwrap();
+        let scratch_guard = tempfile::Builder::new()
+            .prefix(&format!("pixel-cache-contract-{label}-"))
+            .tempdir()
+            .unwrap();
+        let scratch = scratch_guard.path().to_path_buf();
         Env {
             _guard: guard,
             xdg: std::env::var_os("XDG_CACHE_HOME"),
             home: std::env::var_os("HOME"),
             scratch,
+            _scratch_guard: scratch_guard,
         }
     }
 

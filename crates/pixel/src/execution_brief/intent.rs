@@ -319,7 +319,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn judge_should_send_the_request_as_one_line_on_stdin() {
-        let dir = std::env::temp_dir().join(format!("pixel-intent-stdin-{}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("pixel-intent-stdin-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let sink = dir.join("request.jsonl");
         let mut command = Command::new("sh");

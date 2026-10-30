@@ -20,18 +20,13 @@ use super::*;
 use pixel_proto::evaluate as wire;
 use std::path::{Path, PathBuf};
 
-fn tmpdir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "pixel-evaluate-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            % 1_000_000
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmpdir(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("pixel-evaluate-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let d = scratch.path().to_path_buf();
+    (scratch, d)
 }
 
 /// Drive the fixture's git through [`pixel_git::GitRunner`], the bounded
@@ -66,8 +61,8 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// `work` calls `helper`; `lonely` calls nothing. `spare.ts` is there so a
 /// test can edit a file that appears in no witness.
-fn fixture(tag: &str) -> PathBuf {
-    let dir = tmpdir(tag);
+fn fixture(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let (scratch, dir) = tmpdir(tag);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("src/util.ts"),
@@ -91,7 +86,7 @@ fn fixture(tag: &str) -> PathBuf {
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "baseline"]);
     build_graph(&dir);
-    dir
+    (scratch, dir)
 }
 
 /// Build the graph the way anything else in the repository does.
@@ -162,7 +157,7 @@ fn reason(envelope: &wire::EvaluationEnvelope) -> &wire::Reason {
 
 #[test]
 fn a_reachable_pair_should_be_established_with_the_call_site_as_witness() {
-    let dir = fixture("established");
+    let (_scratch, dir) = fixture("established");
     let mut svc = Service::open(&dir).unwrap();
     let envelope = evaluate(&mut svc, request("work", "helper"));
 
@@ -185,7 +180,7 @@ fn a_reachable_pair_should_be_established_with_the_call_site_as_witness() {
 
 #[test]
 fn an_unreachable_pair_should_be_absent_in_snapshot_with_an_exhaustive_traversal() {
-    let dir = fixture("absent");
+    let (_scratch, dir) = fixture("absent");
     let mut svc = Service::open(&dir).unwrap();
     let envelope = evaluate(&mut svc, request("lonely", "helper"));
 
@@ -207,7 +202,7 @@ fn an_unreachable_pair_should_be_absent_in_snapshot_with_an_exhaustive_traversal
 /// invalidates the answer, whatever that answer was.
 #[test]
 fn a_file_rewritten_during_the_traversal_should_yield_snapshot_changed() {
-    let dir = fixture("race-witness");
+    let (_scratch, dir) = fixture("race-witness");
     let mut svc = Service::open(&dir).unwrap();
     // Warm the graph so the edit lands after the before-check, not before it.
     let _ = evaluate(&mut svc, request("work", "helper"));
@@ -237,7 +232,7 @@ fn a_file_rewritten_during_the_traversal_should_yield_snapshot_changed() {
 /// negative through.
 #[test]
 fn a_file_outside_the_witness_rewritten_during_a_negative_should_yield_snapshot_changed() {
-    let dir = fixture("race-outside");
+    let (_scratch, dir) = fixture("race-outside");
     let mut svc = Service::open(&dir).unwrap();
     let _ = evaluate(&mut svc, request("lonely", "helper"));
 
@@ -262,7 +257,7 @@ fn a_file_outside_the_witness_rewritten_during_a_negative_should_yield_snapshot_
 /// generation: it waives the after-check and says so on the wire.
 #[test]
 fn at_snapshot_should_waive_the_after_check_and_report_before_only() {
-    let dir = fixture("at-snapshot");
+    let (_scratch, dir) = fixture("at-snapshot");
     let mut svc = Service::open(&dir).unwrap();
     let _ = evaluate(&mut svc, request("work", "helper"));
 
@@ -288,7 +283,7 @@ fn at_snapshot_should_waive_the_after_check_and_report_before_only() {
 /// are distinguishable by a reader and by a machine.
 #[test]
 fn a_normal_run_should_report_the_full_before_and_after_check() {
-    let dir = fixture("full-check");
+    let (_scratch, dir) = fixture("full-check");
     let mut svc = Service::open(&dir).unwrap();
     let envelope = evaluate(&mut svc, request("work", "helper"));
 
@@ -308,7 +303,7 @@ fn a_normal_run_should_report_the_full_before_and_after_check() {
 /// conflating them turns a typo into a false negative.
 #[test]
 fn a_uid_that_does_not_exist_should_be_symbol_not_found_never_absent() {
-    let dir = fixture("bad-uid");
+    let (_scratch, dir) = fixture("bad-uid");
     let mut svc = Service::open(&dir).unwrap();
     let envelope = evaluate(&mut svc, request("src/worker.ts#ghost#function", "helper"));
 
@@ -329,7 +324,7 @@ fn a_uid_that_does_not_exist_should_be_symbol_not_found_never_absent() {
 /// dead end.
 #[test]
 fn an_ambiguous_name_should_list_candidates_whose_uid_then_resolves() {
-    let dir = fixture("ambiguous");
+    let (_scratch, dir) = fixture("ambiguous");
     add_second_helper(&dir);
 
     let mut svc = Service::open(&dir).unwrap();
@@ -364,7 +359,7 @@ fn an_ambiguous_name_should_list_candidates_whose_uid_then_resolves() {
 /// stays predictable: a name resolves iff it is unique under the prefix.
 #[test]
 fn the_in_scope_should_disambiguate_a_shared_name() {
-    let dir = fixture("scoped");
+    let (_scratch, dir) = fixture("scoped");
     add_second_helper(&dir);
 
     let mut svc = Service::open(&dir).unwrap();
@@ -383,7 +378,7 @@ fn the_in_scope_should_disambiguate_a_shared_name() {
 /// build one: a rebuild can take minutes and is the caller's decision.
 #[test]
 fn a_repository_with_no_graph_should_be_graph_unavailable() {
-    let dir = fixture("no-graph");
+    let (_scratch, dir) = fixture("no-graph");
     let mut svc = Service::open(&dir).unwrap();
     let db = svc.graph_db_path();
     svc.graph = None;
@@ -403,7 +398,7 @@ fn a_repository_with_no_graph_should_be_graph_unavailable() {
 /// op reports staleness rather than naming a signature that means nothing.
 #[test]
 fn a_withheld_signature_should_be_graph_stale() {
-    let dir = fixture("withheld");
+    let (_scratch, dir) = fixture("withheld");
     let mut svc = Service::open(&dir).unwrap();
     let _ = evaluate(&mut svc, request("work", "helper"));
 
@@ -432,7 +427,7 @@ fn a_withheld_signature_should_be_graph_stale() {
 /// the caller cannot act on.
 #[test]
 fn every_unknown_should_carry_next_actions() {
-    let dir = fixture("actions");
+    let (_scratch, dir) = fixture("actions");
     let mut svc = Service::open(&dir).unwrap();
     let envelope = evaluate(&mut svc, request("ghost_name", "helper"));
 
@@ -446,7 +441,7 @@ fn every_unknown_should_carry_next_actions() {
 /// as a confidence label.
 #[test]
 fn the_domain_should_report_the_relation_that_was_walked() {
-    let dir = fixture("domain");
+    let (_scratch, dir) = fixture("domain");
     let mut svc = Service::open(&dir).unwrap();
     let mut req = request("work", "helper");
     req.tiers = Some("exact,probable".to_string());
@@ -466,7 +461,7 @@ fn the_domain_should_report_the_relation_that_was_walked() {
 /// would otherwise pass every single-direction test.
 #[test]
 fn the_traversal_direction_should_change_the_answer_on_an_asymmetric_pair() {
-    let dir = fixture("direction");
+    let (_scratch, dir) = fixture("direction");
     let mut svc = Service::open(&dir).unwrap();
 
     let forward = evaluate(&mut svc, request("work", "helper"));
@@ -482,7 +477,7 @@ fn the_traversal_direction_should_change_the_answer_on_an_asymmetric_pair() {
 /// relation the caller did not ask for.
 #[test]
 fn an_unknown_tiers_value_should_be_refused_rather_than_widened() {
-    let dir = fixture("bad-tiers");
+    let (_scratch, dir) = fixture("bad-tiers");
     let mut svc = Service::open(&dir).unwrap();
     let mut req = request("work", "helper");
     req.tiers = Some("probable".to_string());
@@ -493,7 +488,7 @@ fn an_unknown_tiers_value_should_be_refused_rather_than_widened() {
 
 #[test]
 fn an_unknown_traversal_value_should_be_refused() {
-    let dir = fixture("bad-traversal");
+    let (_scratch, dir) = fixture("bad-traversal");
     let mut svc = Service::open(&dir).unwrap();
     let mut req = request("work", "helper");
     req.traversal = Some("sideways".to_string());
@@ -506,7 +501,7 @@ fn an_unknown_traversal_value_should_be_refused() {
 /// raises it — never as an absence.
 #[test]
 fn a_depth_cap_that_drops_a_frontier_should_be_unknown_with_the_flag_to_raise() {
-    let dir = fixture("budget");
+    let (_scratch, dir) = fixture("budget");
     let mut svc = Service::open(&dir).unwrap();
     let mut req = request("work", "helper");
     req.max_depth = Some(0);
@@ -527,7 +522,7 @@ fn a_depth_cap_that_drops_a_frontier_should_be_unknown_with_the_flag_to_raise() 
 /// first sentence rather than in a field a reader may never open.
 #[test]
 fn the_summary_should_name_the_snapshot_and_the_relation() {
-    let dir = fixture("summary");
+    let (_scratch, dir) = fixture("summary");
     let mut svc = Service::open(&dir).unwrap();
     let envelope = evaluate(&mut svc, request("lonely", "helper"));
 
@@ -552,7 +547,7 @@ fn the_summary_should_name_the_snapshot_and_the_relation() {
 /// matches no row exercises this one.
 #[test]
 fn a_name_that_matches_no_symbol_should_be_symbol_not_found_never_ambiguous() {
-    let dir = fixture("name-absent");
+    let (_scratch, dir) = fixture("name-absent");
     let mut svc = Service::open(&dir).unwrap();
     let envelope = evaluate(&mut svc, request("work", "noSuchFunctionAnywhere"));
 
@@ -571,7 +566,7 @@ fn a_name_that_matches_no_symbol_should_be_symbol_not_found_never_ambiguous() {
 /// right reason.
 #[test]
 fn a_scope_that_excludes_every_match_should_be_symbol_not_found() {
-    let dir = fixture("scope-empty");
+    let (_scratch, dir) = fixture("scope-empty");
     let mut svc = Service::open(&dir).unwrap();
     let mut req = request("work", "helper");
     req.scope = Some("no/such/dir".to_string());
@@ -594,7 +589,7 @@ fn a_scope_that_excludes_every_match_should_be_symbol_not_found() {
 /// every verification done against it.
 #[test]
 fn a_witness_hash_should_be_the_stored_hash_of_the_file_it_names() {
-    let dir = fixture("witness-hash");
+    let (_scratch, dir) = fixture("witness-hash");
     let mut svc = Service::open(&dir).unwrap();
     let envelope = evaluate(&mut svc, request("work", "helper"));
 
@@ -631,7 +626,7 @@ fn a_witness_hash_should_be_the_stored_hash_of_the_file_it_names() {
 /// indistinguishable from one that ended at the cap with more files left.
 #[test]
 fn the_file_cap_flag_should_track_the_cap_the_build_actually_enforced() {
-    let dir = fixture("file-cap");
+    let (_scratch, dir) = fixture("file-cap");
     let mut svc = Service::open(&dir).unwrap();
     let envelope = evaluate(&mut svc, request("work", "helper"));
     assert!(
@@ -671,7 +666,7 @@ fn the_file_cap_flag_should_track_the_cap_the_build_actually_enforced() {
 /// an envelope that lost it would publish a completeness it cannot back.
 #[test]
 fn every_envelope_should_publish_the_extraction_blind_spots() {
-    let dir = fixture("limits-on-wire");
+    let (_scratch, dir) = fixture("limits-on-wire");
     let mut svc = Service::open(&dir).unwrap();
     let envelope = evaluate(&mut svc, request("work", "helper"));
 
@@ -724,7 +719,7 @@ fn path_of_row(store: &GraphStore, row: &pixel_graph::store::SymbolRow) -> Strin
 /// looking. A technical failure leaves as an error and exits 3.
 #[test]
 fn a_store_that_cannot_answer_should_fail_rather_than_report_a_missing_symbol() {
-    let dir = fixture("store-error");
+    let (_scratch, dir) = fixture("store-error");
     let db = graph_db(&dir);
     // Opened while the database is healthy, then broken underneath it:
     // dropping the table outright would only have the store recreate an
@@ -751,7 +746,7 @@ fn a_store_that_cannot_answer_should_fail_rather_than_report_a_missing_symbol() 
 /// statement at all.
 #[test]
 fn an_unreadable_identity_should_fail_rather_than_report_a_stale_graph() {
-    let dir = fixture("identity-error");
+    let (_scratch, dir) = fixture("identity-error");
     let db = graph_db(&dir);
     let store = GraphStore::open(&db).unwrap();
     break_table(&db, "meta");
@@ -772,7 +767,7 @@ fn an_unreadable_identity_should_fail_rather_than_report_a_stale_graph() {
 /// while claiming exactness.
 #[test]
 fn a_name_with_more_homonyms_than_the_cap_should_still_resolve_inside_its_scope() {
-    let dir = fixture("scope-before-cap");
+    let (_scratch, dir) = fixture("scope-before-cap");
     std::fs::create_dir_all(dir.join("lib")).unwrap();
     // `lib/` sorts before `src/`, so these fill the capped page and push
     // the one that matters out of it.
@@ -805,7 +800,7 @@ fn a_name_with_more_homonyms_than_the_cap_should_still_resolve_inside_its_scope(
 /// the other direction, silently widens what an answer is about.
 #[test]
 fn a_scope_should_not_capture_a_sibling_whose_name_merely_starts_the_same() {
-    let dir = fixture("scope-boundary");
+    let (_scratch, dir) = fixture("scope-boundary");
     std::fs::create_dir_all(dir.join("src/foo")).unwrap();
     std::fs::write(
         dir.join("src/foo/x.ts"),
@@ -855,7 +850,7 @@ fn a_scope_should_not_capture_a_sibling_whose_name_merely_starts_the_same() {
 /// instead of widening it.
 #[test]
 fn the_reported_file_cap_should_be_the_one_the_graph_was_built_under() {
-    let dir = fixture("stored-cap");
+    let (_scratch, dir) = fixture("stored-cap");
     let db = graph_db(&dir);
     // What a build under a ceiling this tree certainly reached would have
     // recorded. Nothing in this process's environment says so.
@@ -876,7 +871,7 @@ fn the_reported_file_cap_should_be_the_one_the_graph_was_built_under() {
 /// And a graph built without a cap never claims one was hit.
 #[test]
 fn a_graph_built_without_a_cap_should_never_report_one_hit() {
-    let dir = fixture("stored-cap-none");
+    let (_scratch, dir) = fixture("stored-cap-none");
     GraphStore::open(&graph_db(&dir))
         .unwrap()
         .meta_set(pixel_graph::build::GRAPH_FILE_CAP_KEY, "none")

@@ -410,10 +410,14 @@ mod tests {
     use super::*;
     use crate::ManagedBy;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("px-upd-{tag}-{}", std::process::id()));
+    fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("px-upd-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
-        dir.join("pixel").join(STATE_FILE)
+        (_dir_tmp, dir.join("pixel").join(STATE_FILE))
     }
 
     fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
@@ -591,7 +595,7 @@ mod tests {
 
     #[test]
     fn a_due_check_should_record_the_tag_and_print_once_per_interval() {
-        let path = scratch("once");
+        let (_path_tmp, path) = scratch("once");
         let now = 2_000_000_000;
         let check = begin(path.clone(), now, || Some("v9.0.0".into()));
         let hint = || Some("mise upgrade pixel".to_string());
@@ -620,7 +624,7 @@ mod tests {
 
     #[test]
     fn a_failed_check_should_still_wait_a_full_interval() {
-        let path = scratch("fail");
+        let (_path_tmp, path) = scratch("fail");
         let now = 2_000_000_000;
         let check = begin(path.clone(), now, || None);
         assert_eq!(
@@ -647,7 +651,7 @@ mod tests {
 
     #[test]
     fn an_up_to_date_or_developer_binary_should_get_no_notice() {
-        let path = scratch("quiet");
+        let (_path_tmp, path) = scratch("quiet");
         let now = 2_000_000_000;
         let check = begin(path.clone(), now, || Some("v0.5.2".into()));
         assert_eq!(
@@ -674,7 +678,7 @@ mod tests {
 
     #[test]
     fn a_slow_check_should_not_hold_the_command_past_the_join_wait() {
-        let path = scratch("slow");
+        let (_path_tmp, path) = scratch("slow");
         let now = 2_000_000_000;
         let check = begin(path.clone(), now, || {
             std::thread::sleep(JOIN_WAIT * 4);
@@ -693,7 +697,7 @@ mod tests {
 
     #[test]
     fn a_corrupt_state_file_should_read_as_a_first_run() {
-        let path = scratch("corrupt");
+        let (_path_tmp, path) = scratch("corrupt");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{not json").unwrap();
         assert_eq!(load(&path), State::default());

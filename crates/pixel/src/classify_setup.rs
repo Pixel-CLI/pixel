@@ -1292,19 +1292,19 @@ mod tests {
         path: PathBuf,
         saved: Option<std::ffi::OsString>,
         _lock: std::sync::MutexGuard<'static, ()>,
+        _tmp: tempfile::TempDir,
     }
 
     impl ScopedHome {
         fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let lock = crate::ENV_LOCK
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let path = std::env::temp_dir().join(format!(
-                "pixel-openai-setup-test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
+            let _path_tmp = tempfile::Builder::new()
+                .prefix("pixel-openai-setup-test-")
+                .tempdir()
+                .unwrap();
+            let path = _path_tmp.path().to_path_buf();
             fs::create_dir_all(&path).unwrap();
             let saved = std::env::var_os("HOME");
             // SAFETY: ENV_LOCK is held until Drop restores HOME.
@@ -1313,6 +1313,7 @@ mod tests {
                 path,
                 saved,
                 _lock: lock,
+                _tmp: _path_tmp,
             }
         }
     }
@@ -2088,8 +2089,11 @@ mod tests {
 
     #[test]
     fn classify_helpers_should_write_the_bundled_skill_and_pi_package_when_accepted() {
-        let home =
-            std::env::temp_dir().join(format!("pixel-classify-helpers-{}", std::process::id()));
+        let _home_tmp = tempfile::Builder::new()
+            .prefix("pixel-classify-helpers-")
+            .tempdir()
+            .unwrap();
+        let home = _home_tmp.path().to_path_buf();
         fs::create_dir_all(home.join(".pi/agent")).unwrap();
         fs::write(
             home.join(".pi/agent/settings.json"),
@@ -2165,10 +2169,11 @@ mod tests {
 
     #[test]
     fn classify_helpers_should_leave_unreadable_pi_settings_untouched() {
-        let home = std::env::temp_dir().join(format!(
-            "pixel-classify-helpers-bad-pi-{}",
-            std::process::id()
-        ));
+        let _home_tmp = tempfile::Builder::new()
+            .prefix("pixel-classify-helpers-bad-pi-")
+            .tempdir()
+            .unwrap();
+        let home = _home_tmp.path().to_path_buf();
         fs::create_dir_all(home.join(".pi/agent")).unwrap();
         fs::write(home.join(".pi/agent/settings.json"), "{ not json").unwrap();
 
@@ -2190,10 +2195,11 @@ mod tests {
 
     #[test]
     fn classify_helpers_should_write_nothing_when_declined() {
-        let home = std::env::temp_dir().join(format!(
-            "pixel-classify-helpers-declined-{}",
-            std::process::id()
-        ));
+        let _home_tmp = tempfile::Builder::new()
+            .prefix("pixel-classify-helpers-declined-")
+            .tempdir()
+            .unwrap();
+        let home = _home_tmp.path().to_path_buf();
 
         let mut output = Vec::new();
         propose_classify_helpers_at(
@@ -2209,10 +2215,11 @@ mod tests {
 
     #[test]
     fn classify_helpers_should_short_circuit_when_every_target_is_current() {
-        let home = std::env::temp_dir().join(format!(
-            "pixel-classify-helpers-idem-{}",
-            std::process::id()
-        ));
+        let _home_tmp = tempfile::Builder::new()
+            .prefix("pixel-classify-helpers-idem-")
+            .tempdir()
+            .unwrap();
+        let home = _home_tmp.path().to_path_buf();
         let skill = home.join(".claude/skills/pixel-classify/SKILL.md");
         fs::create_dir_all(skill.parent().unwrap()).unwrap();
         fs::write(&skill, CLASSIFY_SKILL).unwrap();
@@ -2237,10 +2244,11 @@ mod tests {
 
     #[test]
     fn classify_helpers_should_back_up_a_differing_existing_target() {
-        let home = std::env::temp_dir().join(format!(
-            "pixel-classify-helpers-backup-{}",
-            std::process::id()
-        ));
+        let _home_tmp = tempfile::Builder::new()
+            .prefix("pixel-classify-helpers-backup-")
+            .tempdir()
+            .unwrap();
+        let home = _home_tmp.path().to_path_buf();
         let skill = home.join(".claude/skills/pixel-classify/SKILL.md");
         fs::create_dir_all(skill.parent().unwrap()).unwrap();
         fs::write(&skill, "my edited copy").unwrap();
@@ -2271,10 +2279,11 @@ mod tests {
     fn classify_helpers_should_stop_before_writing_when_the_backup_fails() {
         // A self-referencing symlink fails every read with ELOOP, root or
         // not, so the backup step is the first to fail and must say so.
-        let home = std::env::temp_dir().join(format!(
-            "pixel-classify-helpers-backup-fails-{}",
-            std::process::id()
-        ));
+        let _home_tmp = tempfile::Builder::new()
+            .prefix("pixel-classify-helpers-backup-fails-")
+            .tempdir()
+            .unwrap();
+        let home = _home_tmp.path().to_path_buf();
         let skill = home.join(".claude/skills/pixel-classify/SKILL.md");
         fs::create_dir_all(skill.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&skill, &skill).unwrap();
@@ -2304,8 +2313,11 @@ mod tests {
             crate::decide_ollaya::DEFAULT_BASE
         );
 
-        let temp =
-            std::env::temp_dir().join(format!("pixel-classify-setup-{}", std::process::id()));
+        let _temp_tmp = tempfile::Builder::new()
+            .prefix("pixel-classify-setup-")
+            .tempdir()
+            .unwrap();
+        let temp = _temp_tmp.path().to_path_buf();
         let root = local_root_at(&temp).unwrap();
         assert_eq!(root, temp.join(OLLAYA_ROOT));
         assert!(root.is_dir());

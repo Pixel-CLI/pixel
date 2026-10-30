@@ -293,8 +293,11 @@ mod tests {
 
     #[test]
     fn roundtrip_and_knn() {
-        let dir = std::env::temp_dir().join(format!("gpx-vec-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = tempfile::Builder::new()
+            .prefix("gpx-vec-test-")
+            .tempdir()
+            .unwrap();
+        let dir = scratch.path().to_path_buf();
         let mut store = VectorStore::open(&dir).unwrap();
         let rows = vec![
             (1i64, vec![1.0, 0.0, 0.0]),

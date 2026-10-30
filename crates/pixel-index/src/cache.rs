@@ -261,25 +261,27 @@ mod tests {
 
     use super::CACHE_TEST_LOCK;
 
-    /// Unique temp dir for this test process, used as `XDG_CACHE_HOME` so the
-    /// cache is isolated from the real user cache. `tempfile` is not a
-    /// dependency of this crate, so we roll our own with `std::env::temp_dir`.
+    /// Unique temp dir for this test, used as `XDG_CACHE_HOME` so the cache
+    /// is isolated from the real user cache. The `TempDir` guard is owned by
+    /// the env, so the directory is removed when the test ends.
     struct CacheEnv {
         dir: PathBuf,
+        _tmp: tempfile::TempDir,
     }
 
     impl CacheEnv {
         fn new(label: &str) -> CacheEnv {
-            let dir = std::env::temp_dir()
-                .join(format!("pixel-cache-test-{label}-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
+            let tmp = tempfile::Builder::new()
+                .prefix(&format!("pixel-cache-test-{label}-"))
+                .tempdir()
+                .unwrap();
+            let dir = tmp.path().to_path_buf();
             // SAFETY: tests are single-threaded per process; setting an env
             // var here is benign and isolated to this test process.
             unsafe {
                 std::env::set_var("XDG_CACHE_HOME", &dir);
             }
-            CacheEnv { dir }
+            CacheEnv { dir, _tmp: tmp }
         }
     }
 
@@ -316,9 +318,11 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("roundtrip");
-        let work = std::env::temp_dir().join(format!("pixel-cache-work-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&work);
-        fs::create_dir_all(&work).unwrap();
+        let work_guard = tempfile::Builder::new()
+            .prefix("pixel-cache-work-")
+            .tempdir()
+            .unwrap();
+        let work = work_guard.path().to_path_buf();
         let src = work.join("base.shard");
         fs::write(&src, b"hello shard").unwrap();
 
@@ -336,9 +340,11 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("miss");
-        let work = std::env::temp_dir().join(format!("pixel-cache-miss-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&work);
-        fs::create_dir_all(&work).unwrap();
+        let work_guard = tempfile::Builder::new()
+            .prefix("pixel-cache-miss-")
+            .tempdir()
+            .unwrap();
+        let work = work_guard.path().to_path_buf();
         let dest = work.join("nope.shard");
         assert!(!try_link_from_cache("nonexistent", "trigram", &dest));
         assert!(!dest.exists());
@@ -382,9 +388,11 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("eexist");
-        let work = std::env::temp_dir().join(format!("pixel-cache-eexist-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&work);
-        fs::create_dir_all(&work).unwrap();
+        let work_guard = tempfile::Builder::new()
+            .prefix("pixel-cache-eexist-")
+            .tempdir()
+            .unwrap();
+        let work = work_guard.path().to_path_buf();
         let src1 = work.join("shard1");
         let src2 = work.join("shard2");
         fs::write(&src1, b"first").unwrap();
@@ -406,9 +414,11 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("remove");
-        let work = std::env::temp_dir().join(format!("pixel-cache-rm-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&work);
-        fs::create_dir_all(&work).unwrap();
+        let work_guard = tempfile::Builder::new()
+            .prefix("pixel-cache-rm-")
+            .tempdir()
+            .unwrap();
+        let work = work_guard.path().to_path_buf();
         let src = work.join("shard");
         fs::write(&src, b"data").unwrap();
         link_to_cache(&src, "rmoid", "trigram");
@@ -420,7 +430,11 @@ mod tests {
 
     #[test]
     fn touch_mtime_moves_an_old_mtime_to_now() {
-        let path = std::env::temp_dir().join(format!("pixel-cache-touch-{}", std::process::id()));
+        let touch_guard = tempfile::Builder::new()
+            .prefix("pixel-cache-touch-")
+            .tempdir()
+            .unwrap();
+        let path = touch_guard.path().join("touched");
         fs::write(&path, b"x").unwrap();
         let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
         fs::OpenOptions::new()

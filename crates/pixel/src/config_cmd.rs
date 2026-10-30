@@ -2424,17 +2424,16 @@ mod tests {
         restore_home(saved);
     }
 
-    struct HomeGuard(PathBuf);
+    struct HomeGuard(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
     impl HomeGuard {
         fn set() -> Self {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let dir = std::env::temp_dir().join(format!(
-                "pixel-config-test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            Self(dir)
+            let _dir_tmp = tempfile::Builder::new()
+                .prefix("pixel-config-test-")
+                .tempdir()
+                .unwrap();
+            let dir = _dir_tmp.path().to_path_buf();
+            Self(dir, _dir_tmp)
         }
     }
 

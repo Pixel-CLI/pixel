@@ -215,7 +215,11 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips_and_marks_progress() {
-        let dir = std::env::temp_dir().join(format!("px-plan-{}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("px-plan-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let mut state = PlanState::default();
         merge(
             &mut state,
@@ -241,7 +245,11 @@ mod tests {
     /// an error, not an empty state that would silently drop progress.
     #[test]
     fn load_errors_when_the_state_file_is_not_a_file() {
-        let dir = std::env::temp_dir().join(format!("px-plan-bad-{}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix("px-plan-bad-")
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(state_path(&dir)).unwrap();
         assert!(load(&dir).is_err());

@@ -2573,9 +2573,11 @@ mod tests {
 
     #[test]
     fn open_rejects_database_symlink_without_modifying_target() {
-        let dir = std::env::temp_dir().join(format!("gpx-store-link-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-store-link-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path();
         let external = dir.join("external.db");
         let conn = Connection::open(&external).unwrap();
         conn.execute("CREATE TABLE sentinel (id INTEGER)", [])
@@ -2602,7 +2604,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sentinel, 1);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

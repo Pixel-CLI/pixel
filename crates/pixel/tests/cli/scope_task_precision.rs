@@ -128,12 +128,16 @@ fn rust_labels(repo: &Path, oid: &str) -> Vec<String> {
 struct Worktree {
     repo: PathBuf,
     path: PathBuf,
+    _tmp: tempfile::TempDir,
 }
 
 impl Worktree {
     fn add(repo: &Path, commit: &str) -> Self {
-        let path =
-            std::env::temp_dir().join(format!("pixel-scope-task-corpus-{}", std::process::id()));
+        let _path_tmp = tempfile::Builder::new()
+            .prefix("pixel-scope-task-corpus-")
+            .tempdir()
+            .unwrap();
+        let path = _path_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&path);
         let _ = git(repo, &["worktree", "prune"]);
         let out = git(
@@ -154,6 +158,7 @@ impl Worktree {
         Self {
             repo: repo.to_path_buf(),
             path,
+            _tmp: _path_tmp,
         }
     }
 

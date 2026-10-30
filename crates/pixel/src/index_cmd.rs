@@ -331,17 +331,21 @@ pub fn run(cmd: IndexCmd) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("px-idx-{tag}-{}", std::process::id()));
+    fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("px-idx-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(SHARD_DIR)).unwrap();
-        dir.canonicalize().unwrap()
+        (_dir_tmp, dir.canonicalize().unwrap())
     }
 
     #[test]
     fn pack_then_unpack_round_trips_with_hashes_verified() {
-        let src = scratch("src");
-        let dst = scratch("dst");
+        let (_src_tmp, src) = scratch("src");
+        let (_dst_tmp, dst) = scratch("dst");
         std::fs::write(src.join(SHARD_DIR).join(GRAPH_DB_FILE), b"graph-bytes").unwrap();
         std::fs::write(src.join(SHARD_DIR).join("state.json"), b"{}").unwrap();
         let pack_file = src.join("index.pxpack");
@@ -366,7 +370,7 @@ mod tests {
         std::fs::write(&bad, bytes).unwrap();
         // tar checksum may fail first, or the manifest hash — either way it
         // must not install.
-        let dst2 = scratch("dst2");
+        let (_dst2_tmp, dst2) = scratch("dst2");
         let refused = unpack(&dst2, bad.to_str().unwrap(), true);
         assert!(refused.is_err());
         assert!(!dst2.join(SHARD_DIR).join(GRAPH_DB_FILE).exists());
@@ -377,7 +381,7 @@ mod tests {
 
     #[test]
     fn pack_errors_on_an_empty_index() {
-        let root = scratch("empty");
+        let (_root_tmp, root) = scratch("empty");
         let err = pack(&root, &root.join("x.pxpack"), false).unwrap_err();
         assert!(err.contains("nothing to pack"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
@@ -394,7 +398,7 @@ mod tests {
     /// `--include-history` absent means no `history.*` member at all.
     #[test]
     fn pack_list_gates_history_sidecars_on_the_flag() {
-        let root = scratch("list");
+        let (_root_tmp, root) = scratch("list");
         let shard = root.join(SHARD_DIR);
         let graph_wal = format!("{GRAPH_DB_FILE}-wal");
         for name in [
@@ -437,7 +441,7 @@ mod tests {
     /// mutant on the unsafe-member check would let nested paths land.
     #[test]
     fn unpack_refuses_a_nested_member_name() {
-        let dst = scratch("evil");
+        let (_dst_tmp, dst) = scratch("evil");
         let mut tar_bytes = Vec::new();
         {
             let mut builder = tar::Builder::new(&mut tar_bytes);
@@ -483,7 +487,7 @@ mod tests {
             "state.json.bak",
             "history.db-journal",
         ] {
-            let dst = scratch("foreign");
+            let (_dst_tmp, dst) = scratch("foreign");
             let mut tar_bytes = Vec::new();
             {
                 let mut builder = tar::Builder::new(&mut tar_bytes);
@@ -509,7 +513,7 @@ mod tests {
 
     #[test]
     fn packable_should_accept_every_name_pack_list_can_produce() {
-        let root = scratch("packable");
+        let (_root_tmp, root) = scratch("packable");
         let shard = root.join(SHARD_DIR);
         for db in [GRAPH_DB_FILE, HISTORY_DB_FILE] {
             for suffix in ["", "-wal", "-shm"] {
@@ -536,7 +540,7 @@ mod tests {
     /// Some and equal must yield `Some(true)`, not `Some(false)`.
     #[test]
     fn unpack_reports_a_matching_repo_head() {
-        let root = scratch("git");
+        let (_root_tmp, root) = scratch("git");
         let git = |args: &[&str]| {
             let status = std::process::Command::new("git")
                 .args(args)
@@ -571,8 +575,8 @@ mod tests {
     /// flip would refuse on `!force` alone.
     #[test]
     fn unpack_without_force_proceeds_when_no_daemon_runs() {
-        let dst = scratch("nodae");
-        let src = scratch("nodae-src");
+        let (_dst_tmp, dst) = scratch("nodae");
+        let (_src_tmp, src) = scratch("nodae-src");
         std::fs::write(src.join(SHARD_DIR).join(GRAPH_DB_FILE), b"g").unwrap();
         let pack_file = src.join("p.pxpack");
         pack(&src, &pack_file, false).unwrap();
@@ -586,7 +590,7 @@ mod tests {
     #[test]
     fn unpack_refuses_while_a_daemon_answers() {
         use std::io::{BufRead, BufReader, Write};
-        let root = scratch("live");
+        let (_root_tmp, root) = scratch("live");
         let listener =
             std::os::unix::net::UnixListener::bind(pixel_daemon::daemon::socket_path(&root))
                 .unwrap();
@@ -605,7 +609,7 @@ mod tests {
                 }
             }
         });
-        let src = scratch("live-src");
+        let (_src_tmp, src) = scratch("live-src");
         std::fs::write(src.join(SHARD_DIR).join(GRAPH_DB_FILE), b"g").unwrap();
         let pack_file = src.join("p.pxpack");
         pack(&src, &pack_file, false).unwrap();
@@ -621,7 +625,7 @@ mod tests {
     /// `run` on an empty index must surface pack's error, not Ok(()).
     #[test]
     fn run_propagates_pack_errors() {
-        let root = scratch("run");
+        let (_root_tmp, root) = scratch("run");
         let err = run(IndexCmd::Pack {
             out: root.join("x.pxpack"),
             include_history: false,

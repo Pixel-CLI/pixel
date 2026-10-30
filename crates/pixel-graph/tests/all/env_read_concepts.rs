@@ -5,7 +5,7 @@
 //! reads, extracted, stored with their owner, resolved by name, and kept
 //! current by an incremental update.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use pixel_graph::build::{build_graph, update_file};
 use pixel_graph::concept::{ConceptKind, extract_concepts};
@@ -97,17 +97,11 @@ fn no_concept_should_carry_a_default_value_as_an_env_read() {
     assert_eq!(ConceptKind::EnvRead.as_str(), "env_read");
 }
 
-fn tmpdir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "pixel-env-read-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn tmpdir(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("pixel-env-read-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 /// Two functions reading `PIXEL_FLOW_DIR`, on lines 2 and 5.
@@ -141,11 +135,13 @@ fn env_matches(db: &Path, phrase: &str) -> Vec<(String, u32, Option<String>)> {
 
 #[test]
 fn resolve_should_land_on_every_read_with_its_owner_and_follow_an_edit() {
-    let root = tmpdir("resolve");
+    let root_dir = tmpdir("resolve");
+    let root = root_dir.path();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), lib_source("PIXEL_FLOW_DIR")).unwrap();
-    let db = tmpdir("db").join("graph.db");
-    build_graph(&root, &db).unwrap();
+    let db_dir = tmpdir("db");
+    let db = db_dir.path().join("graph.db");
+    build_graph(root, &db).unwrap();
 
     let expected = vec![
         ("src/lib.rs".to_string(), 2, Some("flow_dir".to_string())),
@@ -166,19 +162,21 @@ fn resolve_should_land_on_every_read_with_its_owner_and_follow_an_edit() {
     // Rename the key and update the one file: the old name is gone, the new
     // one is found, exactly as a full rebuild would have it.
     std::fs::write(root.join("src/lib.rs"), lib_source("PIXEL_FLOW_HOME")).unwrap();
-    update_file(&root, &db, "src/lib.rs").unwrap();
+    update_file(root, &db, "src/lib.rs").unwrap();
     assert_eq!(env_matches(&db, "PIXEL_FLOW_DIR"), Vec::new());
     let incremental = env_matches(&db, "PIXEL_FLOW_HOME");
     assert_eq!(incremental, expected);
-    let rebuilt = tmpdir("db-full").join("graph.db");
-    build_graph(&root, &rebuilt).unwrap();
+    let rebuilt_dir = tmpdir("db-full");
+    let rebuilt = rebuilt_dir.path().join("graph.db");
+    build_graph(root, &rebuilt).unwrap();
     assert_eq!(env_matches(&rebuilt, "PIXEL_FLOW_HOME"), incremental);
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn an_all_caps_name_should_reach_its_reads_before_a_lowercase_function() {
-    let root = tmpdir("caps");
+    let root_dir = tmpdir("caps");
+    let root = root_dir.path();
     std::fs::create_dir_all(root.join("src")).unwrap();
     let source = [
         "pub fn codex_home() -> Option<std::ffi::OsString> {",
@@ -188,8 +186,9 @@ fn an_all_caps_name_should_reach_its_reads_before_a_lowercase_function() {
     ]
     .join("\n");
     std::fs::write(root.join("src/lib.rs"), source).unwrap();
-    let db = tmpdir("db-caps").join("graph.db");
-    build_graph(&root, &db).unwrap();
+    let db_dir = tmpdir("db-caps");
+    let db = db_dir.path().join("graph.db");
+    build_graph(root, &db).unwrap();
     assert_eq!(
         env_matches(&db, "CODEX_HOME"),
         vec![("src/lib.rs".to_string(), 2, Some("codex_home".to_string()))]
@@ -207,5 +206,5 @@ fn an_all_caps_name_should_reach_its_reads_before_a_lowercase_function() {
         Some(Tier::Ident),
         "a mixed-case query retries in lowercase"
     );
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }

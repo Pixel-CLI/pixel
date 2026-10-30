@@ -327,18 +327,11 @@ mod tests {
     use crate::runner::{GitOptions, GitRunner};
     use std::path::{Path, PathBuf};
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "pixel-git-batch-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmpdir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("pixel-git-batch-{tag}-"))
+            .tempdir()
+            .unwrap()
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {
@@ -375,8 +368,9 @@ mod tests {
     }
 
     /// A repository holding every shape a batch answer takes, and its HEAD.
-    fn fixture(tag: &str) -> (PathBuf, String) {
-        let dir = tmpdir(tag);
+    fn fixture(tag: &str) -> (tempfile::TempDir, String) {
+        let guard = tmpdir(tag);
+        let dir = guard.path().to_path_buf();
         git(&dir, &["init", "-q"]);
         std::fs::create_dir_all(dir.join("dir")).unwrap();
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
@@ -388,7 +382,7 @@ mod tests {
         git(&dir, &["add", "."]);
         git(&dir, &["commit", "-qm", "one"]);
         let head = git(&dir, &["rev-parse", "HEAD"]);
-        (dir, head)
+        (guard, head)
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -425,7 +419,8 @@ mod tests {
     /// for a tree or an absent path, with the blobs around them intact.
     #[test]
     fn each_spec_gets_its_own_answer_and_skipped_content_keeps_the_stream_aligned() {
-        let (dir, head) = fixture("answers");
+        let (dir_guard, head) = fixture("answers");
+        let dir = dir_guard.path().to_path_buf();
         let specs: Vec<String> = [
             "a.rs",
             "dir",
@@ -462,7 +457,8 @@ mod tests {
     /// in production; the stream must not depend on that to stay aligned).
     #[test]
     fn the_stream_reads_past_trees_and_oversized_blobs_and_stays_aligned() {
-        let (dir, head) = fixture("stream");
+        let (dir_guard, head) = fixture("stream");
+        let dir = dir_guard.path().to_path_buf();
         let specs: Vec<String> = ["a.rs", "dir", "eleven.txt", "ten.txt", "dir/b.rs"]
             .iter()
             .map(|p| format!("{head}:{p}"))
@@ -493,7 +489,8 @@ mod tests {
     /// is one: git strips it and would answer `a.rs` for `a.rs\r`.
     #[test]
     fn unsendable_specs_are_reported_and_do_not_shift_the_rest() {
-        let (dir, head) = fixture("unsendable");
+        let (dir_guard, head) = fixture("unsendable");
+        let dir = dir_guard.path().to_path_buf();
         let specs = vec![
             format!("{head}:a\nb.rs"),
             format!("{head}:a.rs"),
@@ -520,7 +517,8 @@ mod tests {
 
     #[test]
     fn outside_a_repository_is_an_error_not_a_list_of_missing_blobs() {
-        let dir = tmpdir("not-a-repo");
+        let dir_guard = tmpdir("not-a-repo");
+        let dir = dir_guard.path().to_path_buf();
         let mut visited = 0;
         let result = runner(&dir).cat_file_blobs(&["HEAD:a.rs".to_string()], 1024, |_, _| {
             visited += 1;

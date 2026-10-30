@@ -645,16 +645,13 @@ mod tests {
     use super::*;
     use crate::classify::REMOTE_BASIS;
 
-    fn store() -> HistoryStore {
-        HistoryStore::open(std::env::temp_dir().join(format!(
-            "pixel-history-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )))
-        .unwrap()
+    fn store() -> (tempfile::TempDir, HistoryStore) {
+        let dir = tempfile::Builder::new()
+            .prefix("pixel-history-test-")
+            .tempdir()
+            .unwrap();
+        let store = HistoryStore::open(dir.path().join("history.json")).unwrap();
+        (dir, store)
     }
 
     fn spec(text: &str) -> Spec {
@@ -681,8 +678,11 @@ mod tests {
     /// repository persists instead of failing on a missing directory.
     #[test]
     fn open_in_creates_the_pixel_dir_and_persists_a_first_add() {
-        let root =
-            std::env::temp_dir().join(format!("pixel-history-open-in-{}", std::process::id()));
+        let _root_tmp = tempfile::Builder::new()
+            .prefix("pixel-history-open-in-")
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
@@ -708,7 +708,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_linked_pixel_dir_is_refused_by_both_openers() {
-        let root = std::env::temp_dir().join(format!("pixel-history-link-{}", std::process::id()));
+        let _root_tmp = tempfile::Builder::new()
+            .prefix("pixel-history-link-")
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let elsewhere = root.join("elsewhere");
@@ -729,7 +733,8 @@ mod tests {
 
     #[test]
     fn empty_store_abstains_empty_and_preserves_fallback() {
-        let tier = HistoryTier::new(store());
+        let (_store_dir, store) = store();
+        let tier = HistoryTier::new(store);
         match tier.evaluate(&spec("anything")) {
             HistoryDecision::Abstain(AbstainReason::Empty) => {}
             other => panic!("expected Empty abstention, got {other:?}"),
@@ -738,7 +743,7 @@ mod tests {
 
     #[test]
     fn exact_match_accepts_with_full_confidence_and_no_model() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         store.add(entry("fix the login bug", "yes", &s)).unwrap();
         let tier = HistoryTier::new(store);
@@ -757,7 +762,7 @@ mod tests {
 
     #[test]
     fn stale_schema_version_is_filtered_not_blocking() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         store.add(entry("fix the login bug", "yes", &s)).unwrap();
         // A stale-version entry under the same rubric must not block the
@@ -786,7 +791,7 @@ mod tests {
 
     #[test]
     fn only_stale_schema_version_abstains_schema_mismatch() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         store.add(entry("fix the login bug", "yes", &s)).unwrap();
         // Bump every entry to a future schema version: no candidate at the
@@ -803,7 +808,7 @@ mod tests {
 
     #[test]
     fn paraphrase_votes_from_neighbours() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         store.add(entry("the login is broken", "yes", &s)).unwrap();
         store.add(entry("login broken", "yes", &s)).unwrap();
@@ -821,7 +826,7 @@ mod tests {
 
     #[test]
     fn unfamiliar_input_abstains_novelty() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         store.add(entry("fix the login bug", "yes", &s)).unwrap();
         store.add(entry("the login is broken", "yes", &s)).unwrap();
@@ -834,7 +839,7 @@ mod tests {
 
     #[test]
     fn single_neighbour_abstains_insufficient_support() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         store.add(entry("fix the login bug", "yes", &s)).unwrap();
         let tier = HistoryTier::new(store);
@@ -847,7 +852,7 @@ mod tests {
 
     #[test]
     fn split_neighbours_abstain_disagreement() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         store.add(entry("add dark mode", "no", &s)).unwrap();
         store.add(entry("fix login bug", "yes", &s)).unwrap();
@@ -862,7 +867,7 @@ mod tests {
 
     #[test]
     fn same_text_under_a_different_rubric_cannot_reuse_the_label() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         store.add(entry("fix the login bug", "yes", &s)).unwrap();
         let other = Spec::checked(
@@ -883,7 +888,7 @@ mod tests {
 
     #[test]
     fn changed_labels_cannot_reuse_a_stale_confident_answer() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         store.add(entry("fix the login bug", "yes", &s)).unwrap();
         // A relabelled vocabulary: same text, different label set.
@@ -903,7 +908,7 @@ mod tests {
 
     #[test]
     fn removing_an_entry_changes_the_decision() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         let e = store.add(entry("fix the login bug", "yes", &s)).unwrap();
         let tier = HistoryTier::new(HistoryStore::open(store.path()).unwrap());
@@ -922,7 +927,7 @@ mod tests {
 
     #[test]
     fn correcting_an_entry_supersedes_the_old_label_and_changes_the_decision() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         let e = store.add(entry("fix the login bug", "yes", &s)).unwrap();
         store.correct(&e.id, "no", "human-verified").unwrap();
@@ -948,7 +953,7 @@ mod tests {
 
     #[test]
     fn superseded_entries_do_not_accumulate_voting_weight() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         // Three entries for "yes", then two corrections to "no".
         let e1 = store.add(entry("fix the login bug", "yes", &s)).unwrap();
@@ -972,7 +977,7 @@ mod tests {
 
     #[test]
     fn add_requires_a_source_so_model_predictions_cannot_self_certify() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         let no_source = NewEntry::for_spec(
             "fix the login bug".to_string(),
@@ -987,7 +992,7 @@ mod tests {
 
     #[test]
     fn evaluating_never_writes_back_to_the_store() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         store.add(entry("fix the login bug", "yes", &s)).unwrap();
         let before = store.len();
@@ -1003,7 +1008,7 @@ mod tests {
 
     #[test]
     fn store_is_bounded_by_max_entries_with_fifo_retention() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         let s = spec("fix the login bug");
         let mut first_id = String::new();
         for i in 0..(MAX_ENTRIES + 10) {
@@ -1023,14 +1028,11 @@ mod tests {
 
     #[test]
     fn store_persists_across_reopen() {
-        let path = std::env::temp_dir().join(format!(
-            "pixel-history-persist-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let _path_tmp = tempfile::Builder::new()
+            .prefix("pixel-history-persist-")
+            .tempdir()
+            .unwrap();
+        let path = _path_tmp.path().join("history.json");
         let _ = std::fs::remove_file(&path);
         let s = spec("fix the login bug");
         {
@@ -1044,7 +1046,7 @@ mod tests {
 
     #[test]
     fn remove_of_a_missing_id_is_an_error() {
-        let mut store = store();
+        let (_store_dir, mut store) = store();
         assert!(store.remove("nope").is_err());
     }
 

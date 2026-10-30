@@ -250,12 +250,15 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-session-paths-{tag}-{}", std::process::id()));
+    fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-session-paths-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        dir.canonicalize().unwrap()
+        (_dir_tmp, dir.canonicalize().unwrap())
     }
 
     fn write(root: &Path, name: &str) {
@@ -292,7 +295,7 @@ mod tests {
 
     #[test]
     fn the_transcript_should_give_the_files_of_recent_tool_calls_newest_first_and_no_text() {
-        let root = scratch("transcript");
+        let (_root_tmp, root) = scratch("transcript");
         for name in ["src/a.rs", "src/b.rs", "src/c.rs", "README.md", ".env"] {
             write(&root, name);
         }
@@ -327,7 +330,7 @@ mod tests {
 
     #[test]
     fn the_transcript_tail_should_skip_a_cut_first_line_and_stay_inside_the_cap() {
-        let root = scratch("tail");
+        let (_root_tmp, root) = scratch("tail");
         write(&root, "src/old.rs");
         write(&root, "src/new.rs");
         let transcript = root.join("session.jsonl");
@@ -348,7 +351,7 @@ mod tests {
 
     #[test]
     fn a_missing_or_irregular_transcript_gives_nothing() {
-        let root = scratch("irregular");
+        let (_root_tmp, root) = scratch("irregular");
         assert!(transcript_paths(&root, &root.join("absent.jsonl")).is_empty());
         assert!(
             transcript_paths(&root, &root).is_empty(),
@@ -361,7 +364,7 @@ mod tests {
 
     #[test]
     fn dirty_paths_should_list_modified_and_new_files_without_generated_or_credential_ones() {
-        let root = scratch("dirty");
+        let (_root_tmp, root) = scratch("dirty");
         git(&root, &["init", "-q"]);
         for name in ["src/kept.rs", "src/gone.rs", "Cargo.lock"] {
             write(&root, name);
@@ -380,7 +383,7 @@ mod tests {
 
     #[test]
     fn collect_should_return_both_sources_inside_the_window() {
-        let root = scratch("collect");
+        let (_root_tmp, root) = scratch("collect");
         git(&root, &["init", "-q"]);
         write(&root, "src/seen.rs");
         write(&root, "src/edited.rs");
@@ -407,7 +410,7 @@ mod tests {
 
     #[test]
     fn collect_should_not_wait_past_its_deadline_for_git() {
-        let root = scratch("late");
+        let (_root_tmp, root) = scratch("late");
         let started = Instant::now();
         let paths = collect(&root, None, started);
         assert!(paths.recent.is_empty());

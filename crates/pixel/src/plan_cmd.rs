@@ -764,11 +764,11 @@ mod tests {
     #[test]
     fn gates_of_boundary_does_not_emit_zero_more() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        let flows = std::env::temp_dir().join(format!(
-            "px-plan-gate-boundary-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let _flows_tmp = tempfile::Builder::new()
+            .prefix("px-plan-gate-boundary-")
+            .tempdir()
+            .unwrap();
+        let flows = _flows_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&flows);
         std::fs::create_dir_all(&flows).unwrap();
         // SAFETY: this test owns its unique flow directory and restores the
@@ -881,11 +881,11 @@ mod tests {
         // SAFETY: serialised by a process-wide env lock convention used by
         // the pixel-flow tests too; this test binary does not run them in
         // parallel because `cargo test` schedules one binary at a time.
-        let flows = std::env::temp_dir().join(format!(
-            "px-plan-gate-no-flow-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let _flows_tmp = tempfile::Builder::new()
+            .prefix("px-plan-gate-no-flow-")
+            .tempdir()
+            .unwrap();
+        let flows = _flows_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&flows);
         std::fs::create_dir_all(&flows).unwrap();
         // SAFETY: serialised by the test runner (one test binary at a time
@@ -929,11 +929,11 @@ mod tests {
     #[test]
     fn gates_of_auth_names_no_flow_command_when_the_flow_plugin_does_not_run() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        let flows = std::env::temp_dir().join(format!(
-            "px-plan-gate-no-plugin-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let _flows_tmp = tempfile::Builder::new()
+            .prefix("px-plan-gate-no-plugin-")
+            .tempdir()
+            .unwrap();
+        let flows = _flows_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&flows);
         std::fs::create_dir_all(&flows).unwrap();
         let prereqs = [prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession")];
@@ -970,11 +970,11 @@ mod tests {
     #[test]
     fn gates_of_auth_lists_every_matching_flow_in_lexicographic_order() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        let flows = std::env::temp_dir().join(format!(
-            "px-plan-gate-multi-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let _flows_tmp = tempfile::Builder::new()
+            .prefix("px-plan-gate-multi-")
+            .tempdir()
+            .unwrap();
+        let flows = _flows_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&flows);
         std::fs::create_dir_all(&flows).unwrap();
         for (name, tags) in [
@@ -1019,11 +1019,11 @@ mod tests {
     #[test]
     fn gates_of_auth_lists_every_matching_flow_and_caps_at_three() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        let flows = std::env::temp_dir().join(format!(
-            "px-plan-gate-cap-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let _flows_tmp = tempfile::Builder::new()
+            .prefix("px-plan-gate-cap-")
+            .tempdir()
+            .unwrap();
+        let flows = _flows_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&flows);
         std::fs::create_dir_all(&flows).unwrap();
         // Three `auth`-tagged flows (the cap boundary): the gate label
@@ -1077,8 +1077,11 @@ mod tests {
     #[test]
     fn gates_of_auth_lists_three_names_and_appends_one_more_at_four() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        let flows =
-            std::env::temp_dir().join(format!("px-plan-gate-4-{}-{}", std::process::id(), line!()));
+        let _flows_tmp = tempfile::Builder::new()
+            .prefix("px-plan-gate-4-")
+            .tempdir()
+            .unwrap();
+        let flows = _flows_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&flows);
         std::fs::create_dir_all(&flows).unwrap();
         for (name, tags) in [
@@ -1121,11 +1124,11 @@ mod tests {
     #[test]
     fn auth_flow_names_filters_and_sorts() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        let flows = std::env::temp_dir().join(format!(
-            "px-plan-gate-fns-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let _flows_tmp = tempfile::Builder::new()
+            .prefix("px-plan-gate-fns-")
+            .tempdir()
+            .unwrap();
+        let flows = _flows_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&flows);
         std::fs::create_dir_all(&flows).unwrap();
         for (name, tags) in [
@@ -1165,7 +1168,11 @@ mod tests {
     /// on a root with no index.
     #[test]
     fn each_state_flag_alone_routes_to_state_ops() {
-        let root = std::env::temp_dir().join(format!("px-plan-gate-{}", std::process::id()));
+        let _root_tmp = tempfile::Builder::new()
+            .prefix("px-plan-gate-")
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         // Seed one tracked item so --done has something to mark.

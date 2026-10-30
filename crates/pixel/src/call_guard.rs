@@ -310,12 +310,15 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_dir() -> PathBuf {
+    fn temp_dir() -> (tempfile::TempDir, PathBuf) {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir =
-            std::env::temp_dir().join(format!("pixel-call-guard-test-{}-{n}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-call-guard-test-{n}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         std::fs::create_dir_all(dir.join(".pixel")).unwrap();
-        dir
+        (_dir_tmp, dir)
     }
 
     /// Env mutation is process-global, so the session tests are serialised
@@ -346,7 +349,7 @@ mod tests {
 
     #[test]
     fn allows_first_call() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         with_session(None, || {
             match check_and_record("search-content", "foo .", &dir) {
                 CallGuardResult::Allow => {}
@@ -358,7 +361,7 @@ mod tests {
 
     #[test]
     fn warns_on_repeated_arguments() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         // Call 3 times with same args (threshold is 3). Held under the env
         // lock: counting is scoped by PIXEL_SESSION_ID, and env is global, so
         // a concurrent scoped test would otherwise move these calls into a
@@ -381,7 +384,7 @@ mod tests {
 
     #[test]
     fn warns_on_frequent_retrieval() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         with_session(None, || {
             for i in 0..UNSCOPED_SOFT_LOOP_THRESHOLD {
                 check_and_record("search-content", &format!("query{i} ."), &dir);
@@ -401,7 +404,7 @@ mod tests {
 
     #[test]
     fn does_not_block_different_commands() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         with_session(None, || {
             // One call below the bar for each command, so only a combined count
             // would trip.
@@ -421,7 +424,7 @@ mod tests {
 
     #[test]
     fn unguarded_commands_always_allowed() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         with_session(None, || {
             // `targets` is not in GUARDED_COMMANDS — unlimited calls.
             for _ in 0..20 {
@@ -458,7 +461,7 @@ mod tests {
         // The fan-out case: 18 sibling subagents each make ONE impact call in
         // the same repo. Repo-wide counting used to block everyone after the
         // 5th; scoped counting must let all 18 through.
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         for i in 0..18 {
             let allowed = with_session(Some(&format!("agent-{i}")), || {
                 matches!(
@@ -474,7 +477,7 @@ mod tests {
     #[test]
     fn a_single_session_still_trips_the_soft_loop() {
         // Scoping must not disable the guard: one agent looping is still caught.
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         with_session(Some("looper"), || {
             for i in 0..SOFT_LOOP_THRESHOLD {
                 check_and_record("impact", &format!("q{i} ."), &dir);
@@ -490,7 +493,7 @@ mod tests {
     #[test]
     fn the_soft_bar_is_exact_for_each_kind_of_caller() {
         let prior_then_next = |session: Option<&str>, prior: usize| {
-            let dir = temp_dir();
+            let (_dir_tmp, dir) = temp_dir();
             let out = with_session(session, || {
                 for i in 0..prior {
                     check_and_record("impact", &format!("q{i} ."), &dir);
@@ -517,7 +520,7 @@ mod tests {
 
     #[test]
     fn a_single_session_still_trips_the_hard_loop() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         with_session(Some("looper2"), || {
             check_and_record("impact", "same .", &dir);
             check_and_record("impact", "same .", &dir);
@@ -531,7 +534,7 @@ mod tests {
 
     #[test]
     fn unscoped_callers_keep_the_old_repo_wide_behaviour() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         with_session(None, || {
             for i in 0..UNSCOPED_SOFT_LOOP_THRESHOLD {
                 check_and_record("impact", &format!("q{i} ."), &dir);
@@ -549,7 +552,7 @@ mod tests {
         // calls.json written by an older pixel has no `session` key; those
         // entries must keep counting for unscoped callers and must NOT count
         // against a newly-scoped subagent.
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         let calls_path = dir.join(".pixel").join("calls.json");
         let now = now_unix();
         let legacy: Vec<Value> = (0..UNSCOPED_SOFT_LOOP_THRESHOLD)
@@ -599,7 +602,7 @@ mod tests {
 
     #[test]
     fn diagnostics_are_bounded_and_never_claim_unchanged_results() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         let path = dir.join(".pixel/calls.json");
         let calls: Vec<_> = (0..MAX_CALL_HISTORY + 100)
             .map(|i| CallEntry {
@@ -627,7 +630,7 @@ mod tests {
 
     #[test]
     fn prunes_expired_entries() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         let calls_path = dir.join(".pixel").join("calls.json");
 
         // Write a call from 20 minutes ago (past TTL).

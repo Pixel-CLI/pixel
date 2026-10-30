@@ -769,9 +769,11 @@ mod tests {
     #[test]
     fn backfill_embeds_each_turn_exactly_once() {
         use crate::model::{Role, TsSource, UnifiedSession, UnifiedTurn};
-        let dir = std::env::temp_dir().join(format!("gpx-embed-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("gpx-embed-test-")
+            .tempdir()
+            .unwrap();
+        let dir = scratch.path().to_path_buf();
         let mut store = crate::store::RecallStore::open(&dir.join("recall.db")).unwrap();
         let session = UnifiedSession {
             agent: "claude",

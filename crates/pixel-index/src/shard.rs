@@ -545,8 +545,11 @@ mod tests {
 
     #[test]
     fn roundtrip_metadata_and_postings() {
-        let dir = std::env::temp_dir().join(format!("gpx-shard-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-shard-test-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let files: Vec<(&str, &[u8])> = vec![
             ("src/a.rs", b"fn handleClick() { openMenu(); }" as &[u8]),
             ("src/b.rs", b"fn openMenu() { let x = MAX_FILE_SIZE; }"),
@@ -572,8 +575,11 @@ mod tests {
 
     #[test]
     fn covering_query_finds_containing_files() {
-        let dir = std::env::temp_dir().join(format!("gpx-shard-test2-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-shard-test2-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let files: Vec<(&str, &[u8])> = vec![
             ("a", b"the quick brown fox jumps over handleClick" as &[u8]),
             ("b", b"nothing interesting here at all"),
@@ -602,10 +608,8 @@ mod tests {
             contents in proptest::collection::vec(
                 proptest::collection::vec(any::<u8>(), 0..300), 1..12),
         ) {
-            let dir = std::env::temp_dir().join(format!(
-                "gpx-shard-prop-{}-{:x}", std::process::id(),
-                xxhash_rust::xxh3::xxh3_64(&contents.concat())));
-            std::fs::create_dir_all(&dir).unwrap();
+            let dir_guard = tempfile::Builder::new().prefix("gpx-shard-prop-").tempdir().unwrap();
+            let dir = dir_guard.path().to_path_buf();
             let names: Vec<String> = (0..contents.len()).map(|i| format!("f{i}")).collect();
             let files: Vec<(&str, &[u8])> = names
                 .iter()
@@ -624,8 +628,11 @@ mod tests {
     /// crash or OOM. Test various forms of corruption.
     #[test]
     fn malformed_shard_rejected_gracefully() {
-        let dir = std::env::temp_dir().join(format!("gpx-shard-mal-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-shard-mal-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
 
         // 1. Truncated header (< 192 bytes).
         let p = dir.join("trunc.bin");
@@ -699,9 +706,11 @@ mod tests {
 
     #[test]
     fn corrupt_posting_cannot_escape_section_or_overflow_delta() {
-        let dir =
-            std::env::temp_dir().join(format!("gpx-shard-posting-mal-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-shard-posting-mal-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let path = dir.join("shard.bin");
         let mut builder = ShardBuilder::new("test");
         builder.add_file("a", vec![7]);
@@ -747,9 +756,11 @@ mod tests {
     fn write_replaces_temp_symlink_without_touching_target() {
         use std::os::unix::fs::symlink;
 
-        let dir = std::env::temp_dir().join(format!("gpx-shard-link-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-shard-link-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let external = dir.join("external.txt");
         std::fs::write(&external, b"unchanged").unwrap();
         let dest = dir.join("index.shard");
@@ -764,17 +775,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("gpx-shard-{tag}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("gpx-shard-{tag}-"))
+            .tempdir()
+            .unwrap()
     }
 
     #[test]
     fn open_should_refuse_a_shard_whose_paths_leave_the_repository() {
         use super::{Shard, ShardBuilder, ShardError};
-        let dir = scratch("escape");
+        let dir_guard = scratch("escape");
+        let dir = dir_guard.path().to_path_buf();
         for escaping in ["../../.aws/credentials", "/etc/passwd", "a/./b"] {
             let path = dir.join("forged.shard");
             let mut builder = ShardBuilder::new("ex");
@@ -792,7 +804,8 @@ mod tests {
     #[test]
     fn open_should_refuse_a_shard_reached_through_a_link() {
         use super::{Shard, ShardBuilder, ShardError};
-        let dir = scratch("link");
+        let dir_guard = scratch("link");
+        let dir = dir_guard.path().to_path_buf();
         let real = dir.join("real.shard");
         let mut builder = ShardBuilder::new("ex");
         builder.add_file("ok.rs", vec![1]);
@@ -807,7 +820,8 @@ mod tests {
     #[test]
     fn open_should_accept_a_path_at_the_length_cap_and_refuse_one_past_it() {
         use super::{MAX_PATH_LEN, Shard, ShardBuilder, ShardError};
-        let dir = scratch("path-cap");
+        let dir_guard = scratch("path-cap");
+        let dir = dir_guard.path().to_path_buf();
         let path = dir.join("cap.shard");
         let at_cap = "a".repeat(MAX_PATH_LEN);
         let mut builder = ShardBuilder::new("ex");

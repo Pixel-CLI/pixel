@@ -1472,11 +1472,15 @@ mod tests {
 
     const WINDOW: Duration = Duration::from_secs(5);
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pixel-brief-{tag}-{}", std::process::id()));
+    fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-brief-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        (_dir_tmp, dir.canonicalize().unwrap())
     }
 
     /// A daemon on `root`'s socket that answers each request kind with a
@@ -1778,14 +1782,14 @@ mod tests {
 
     #[test]
     fn index_current_should_be_false_without_a_shard() {
-        let root = scratch("no-shard");
+        let (_root_tmp, root) = scratch("no-shard");
         assert!(!index_current(&root));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn graph_should_be_refused_when_missing_or_not_a_current_graph() {
-        let root = scratch("no-graph");
+        let (_root_tmp, root) = scratch("no-graph");
         assert_eq!(
             open_current_graph(&root).err().as_deref(),
             Some("the graph is not built")
@@ -1802,7 +1806,7 @@ mod tests {
 
     #[test]
     fn graph_should_be_refused_when_its_signature_no_longer_matches_the_tree() {
-        let root = scratch("stale-graph");
+        let (_root_tmp, root) = scratch("stale-graph");
         let dir = root.join(pixel_index::index::SHARD_DIR);
         std::fs::create_dir_all(&dir).unwrap();
         let store = GraphStore::open(&dir.join(pixel_daemon::api::GRAPH_DB_FILE)).unwrap();
@@ -1820,7 +1824,7 @@ mod tests {
     #[test]
     fn daemon_route_word_leads_should_rank_a_current_graph_and_drop_a_stale_graphs() {
         use pixel_graph::store::SymbolKind;
-        let root = scratch("word-leads");
+        let (_root_tmp, root) = scratch("word-leads");
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/rename.rs"), "pub fn rename_symbol() {}\n").unwrap();
         let dir = root.join(pixel_index::index::SHARD_DIR);
@@ -1873,7 +1877,7 @@ mod tests {
     fn brief_should_render_answered_daemon_evidence_without_a_local_graph_and_state_staleness() {
         use super::super::chain::{self, Brief, Plan};
         for lag in [None, Some(0), Some(1500)] {
-            let root = scratch(&format!("chain-staleness-{lag:?}"));
+            let (_root_tmp, root) = scratch(&format!("chain-staleness-{lag:?}"));
             let daemon =
                 FakeDaemon::with_staleness(&root, pixel_daemon::api::PROTOCOL_VERSION, lag);
             let deadline = Instant::now() + WINDOW;
@@ -1902,7 +1906,7 @@ mod tests {
 
     #[test]
     fn failed_daemon_evidence_should_not_mark_the_brief_stale() {
-        let root = scratch("failed-staleness");
+        let (_root_tmp, root) = scratch("failed-staleness");
         let daemon =
             FakeDaemon::with_staleness(&root, pixel_daemon::api::PROTOCOL_VERSION, Some(1500));
         let live = Live::new(&root, Route::Daemon);
@@ -1917,7 +1921,7 @@ mod tests {
 
     #[test]
     fn local_graph_reads_should_still_refuse_a_missing_graph() {
-        let root = scratch("graph-gate");
+        let (_root_tmp, root) = scratch("graph-gate");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Local);
         let deadline = Instant::now() + WINDOW;
@@ -1936,7 +1940,7 @@ mod tests {
 
     #[test]
     fn open_should_choose_the_daemon_only_for_a_ping_on_this_protocol() {
-        let root = scratch("route");
+        let (_root_tmp, root) = scratch("route");
         let deadline = Instant::now() + WINDOW;
         assert!(!daemon_serves(&root, deadline));
         {
@@ -1971,7 +1975,7 @@ mod tests {
     /// of running a request the brief has already given up on.
     #[test]
     fn a_daemon_request_should_carry_the_briefs_deadline() {
-        let root = scratch("deadline-member");
+        let (_root_tmp, root) = scratch("deadline-member");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Daemon);
         let before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -1996,7 +2000,7 @@ mod tests {
 
     #[test]
     fn open_should_name_the_route_it_chose() {
-        let root = scratch("route-name");
+        let (_root_tmp, root) = scratch("route-name");
         let deadline = Instant::now() + WINDOW;
         assert_eq!(open(&root, deadline).route(), "local");
         {
@@ -2009,7 +2013,7 @@ mod tests {
 
     #[test]
     fn daemon_route_should_send_each_operation_as_its_request_and_read_the_reply() {
-        let root = scratch("daemon-route");
+        let (_root_tmp, root) = scratch("daemon-route");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Daemon);
         let deadline = Instant::now() + WINDOW;
@@ -2065,7 +2069,7 @@ mod tests {
 
     #[test]
     fn daemon_route_should_send_the_kind_operations_and_read_their_replies() {
-        let root = scratch("daemon-kinds");
+        let (_root_tmp, root) = scratch("daemon-kinds");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Daemon);
         let deadline = Instant::now() + WINDOW;
@@ -2178,7 +2182,7 @@ mod tests {
 
     #[test]
     fn daemon_flow_should_opt_in_when_falling_back_to_trace() {
-        let root = scratch("stale-trace-fallback");
+        let (_root_tmp, root) = scratch("stale-trace-fallback");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Daemon);
         let flow = live
@@ -2330,7 +2334,7 @@ mod tests {
 
     #[test]
     fn daemon_route_should_fail_instead_of_waiting_when_no_time_is_left() {
-        let root = scratch("daemon-late");
+        let (_root_tmp, root) = scratch("daemon-late");
         let _daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Daemon);
         assert_eq!(
@@ -2341,7 +2345,7 @@ mod tests {
 
     #[test]
     fn local_route_should_refuse_a_concept_search_and_an_uncovered_text_index() {
-        let root = scratch("local-refusals");
+        let (_root_tmp, root) = scratch("local-refusals");
         let live = Live::new(&root, Route::Local);
         let deadline = Instant::now() + WINDOW;
         // The local concept cascade runs on the open graph store: no graph,
@@ -2360,7 +2364,7 @@ mod tests {
     #[test]
     fn daemon_route_should_ask_targets_facts_for_the_relevance_block_and_weigh_it_the_daemons_way()
     {
-        let root = scratch("daemon-relevance");
+        let (_root_tmp, root) = scratch("daemon-relevance");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Daemon);
         let deadline = Instant::now() + WINDOW;
@@ -2434,7 +2438,7 @@ mod tests {
 
     #[test]
     fn daemon_route_should_ask_the_meaning_op_and_read_its_leads() {
-        let root = scratch("daemon-meaning");
+        let (_root_tmp, root) = scratch("daemon-meaning");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Daemon);
         let deadline = Instant::now() + WINDOW;
@@ -2591,7 +2595,7 @@ mod tests {
 
     #[test]
     fn daemon_route_should_ask_for_the_relevance_block_alone_and_the_task_facts_in_full() {
-        let root = scratch("daemon-relevance-only");
+        let (_root_tmp, root) = scratch("daemon-relevance-only");
         let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
         let live = Live::new(&root, Route::Daemon);
         let deadline = Instant::now() + WINDOW;
@@ -2643,7 +2647,7 @@ mod tests {
 
     #[test]
     fn local_route_should_refuse_meaning_and_relevance_without_a_current_index() {
-        let root = scratch("local-prose");
+        let (_root_tmp, root) = scratch("local-prose");
         let live = Live::new(&root, Route::Local);
         let deadline = Instant::now() + WINDOW;
         assert_eq!(
@@ -2824,7 +2828,7 @@ mod tests {
     #[test]
     fn audited_word_leads_should_use_the_selected_local_or_already_open_snapshot() {
         use pixel_graph::store::SymbolKind;
-        let root = scratch("audited-word-snapshot");
+        let (_root_tmp, root) = scratch("audited-word-snapshot");
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/rename.rs"), "pub fn rename_symbol() {}\n").unwrap();
         let dir = root.join(pixel_index::index::SHARD_DIR);

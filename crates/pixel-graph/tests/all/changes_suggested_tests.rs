@@ -5,22 +5,16 @@
 //! (`suggested_tests`): test files reached by walking UPSTREAM callers of
 //! changed symbols, plus changed test files themselves.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use pixel_graph::changes::detect;
 use pixel_graph::store::{EdgeKind, EdgeRow, GraphStore, SymbolKind, Tier};
 
-fn tmpdir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "pixel-graph-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn tmpdir(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("pixel-graph-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -79,8 +73,9 @@ fn call(store: &GraphStore, src: i64, dst: i64) {
 ///   tests/own.test.ts   — `ownTest` (the file will be changed itself)
 /// then modifies src/alpha.ts and tests/own.test.ts in the working tree,
 /// and a hand-built in-memory graph mirroring those files and edges.
-fn fixture(name: &str) -> (PathBuf, GraphStore) {
-    let root = tmpdir(name);
+fn fixture(name: &str) -> (tempfile::TempDir, GraphStore) {
+    let root_dir = tmpdir(name);
+    let root = root_dir.path();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
     let files = [
@@ -93,9 +88,9 @@ fn fixture(name: &str) -> (PathBuf, GraphStore) {
     for f in files {
         std::fs::write(root.join(f), body(f, 1)).unwrap();
     }
-    git(&root, &["init", "-q"]);
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-qm", "baseline"]);
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "baseline"]);
     // Working-tree changes: alpha's file and a test file itself.
     std::fs::write(root.join("src/alpha.ts"), body("src/alpha.ts", 2)).unwrap();
     std::fs::write(root.join("tests/own.test.ts"), body("tests/own.test.ts", 2)).unwrap();
@@ -129,13 +124,14 @@ fn fixture(name: &str) -> (PathBuf, GraphStore) {
     call(&store, mid, alpha); // mid -> alpha
     call(&store, test_alpha, alpha); // testAlpha -> alpha (depth 1)
     call(&store, test_mid, mid); // testMid -> mid -> alpha (depth 2)
-    (root, store)
+    (root_dir, store)
 }
 
 #[test]
 fn changes_suggests_direct_caller_transitive_and_changed_test() {
-    let (root, store) = fixture("sugg-full");
-    let report = detect(&store, &root, None, true).unwrap();
+    let (root_dir, store) = fixture("sugg-full");
+    let root = root_dir.path();
+    let report = detect(&store, root, None, true).unwrap();
 
     let names: Vec<&str> = report.symbols.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"alpha"), "changed symbols: {names:?}");
@@ -177,13 +173,14 @@ fn changes_suggests_direct_caller_transitive_and_changed_test() {
         report.suggested_tests_note
     );
 
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn changes_include_tests_false_yields_empty_suggestions() {
-    let (root, store) = fixture("sugg-off");
-    let report = detect(&store, &root, None, false).unwrap();
+    let (root_dir, store) = fixture("sugg-off");
+    let root = root_dir.path();
+    let report = detect(&store, root, None, false).unwrap();
 
     // Change detection itself still works…
     assert!(
@@ -196,7 +193,7 @@ fn changes_include_tests_false_yields_empty_suggestions() {
     assert!(!report.suggested_tests_lower_bound);
     assert!(report.suggested_tests_note.is_empty());
 
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -204,19 +201,20 @@ fn changes_rust_file_surfaces_extraction_caveat() {
     // A changed .rs symbol must produce the honest note that Rust #[test] /
     // #[cfg(test)] symbols are absent from the graph (extraction skips test
     // containers), instead of silently suggesting nothing.
-    let root = tmpdir("sugg-rs-note");
+    let root_dir = tmpdir("sugg-rs-note");
+    let root = root_dir.path();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), body("src/lib.rs", 1)).unwrap();
-    git(&root, &["init", "-q"]);
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-qm", "baseline"]);
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "baseline"]);
     std::fs::write(root.join("src/lib.rs"), body("src/lib.rs", 2)).unwrap();
 
     let mut store = GraphStore::open_in_memory().unwrap();
     let fid = store.replace_file("src/lib.rs", "oid", "rust").unwrap();
     sym(&store, fid, "src/lib.rs", "alpha");
 
-    let report = detect(&store, &root, None, true).unwrap();
+    let report = detect(&store, root, None, true).unwrap();
     assert!(report.symbols.iter().any(|s| s.name == "alpha"));
     assert!(
         report.suggested_tests_note.contains("#[cfg(test)]"),
@@ -224,5 +222,5 @@ fn changes_rust_file_surfaces_extraction_caveat() {
         report.suggested_tests_note
     );
 
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }

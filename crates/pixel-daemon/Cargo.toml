@@ -30,3 +30,6 @@ notify = "8"
 rusqlite = { version = "0.40", features = ["bundled"] }
 xxhash-rust = { workspace = true }
 fs2 = "0.4.3"
+
+[dev-dependencies]
+tempfile = "3"

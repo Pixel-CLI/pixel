@@ -224,12 +224,13 @@ mod tests {
     }
 
     /// A repository-like root with `.pixel/` and a sentinel beside it.
-    fn layout(tag: &str) -> (PathBuf, PathBuf, Sentinel) {
-        let base = tmpdir(tag);
+    fn layout(tag: &str) -> (tempfile::TempDir, PathBuf, Sentinel) {
+        let guard = tmpdir(tag);
+        let base = guard.path().canonicalize().unwrap();
         let root = base.join("repo");
         fs::create_dir_all(root.join(DIR_NAME)).unwrap();
         let sentinel = Sentinel::new(&base);
-        (base, root, sentinel)
+        (guard, root, sentinel)
     }
 
     fn mode_of(path: &Path) -> u32 {
@@ -242,7 +243,7 @@ mod tests {
 
     #[test]
     fn open_append_should_refuse_a_link_when_it_names_the_log() {
-        let (_base, root, sentinel) = layout("append-link");
+        let (_guard, root, sentinel) = layout("append-link");
         let log = root.join(".pixel/actions.jsonl");
         symlink(&sentinel.0, &log).unwrap();
         let error = open_append(&log).unwrap_err();
@@ -252,7 +253,7 @@ mod tests {
 
     #[test]
     fn open_append_should_create_owner_only_and_tighten_an_existing_file() {
-        let (_base, root, _sentinel) = layout("append-mode");
+        let (_guard, root, _sentinel) = layout("append-mode");
         let log = root.join(".pixel/actions.jsonl");
         open_append(&log).unwrap().write_all(b"one\n").unwrap();
         assert_eq!(mode_of(&log), PRIVATE_MODE);
@@ -264,7 +265,7 @@ mod tests {
 
     #[test]
     fn open_append_should_refuse_a_directory() {
-        let (_base, root, _sentinel) = layout("append-dir");
+        let (_guard, root, _sentinel) = layout("append-dir");
         let dir = root.join(".pixel/actions.jsonl");
         fs::create_dir(&dir).unwrap();
         assert!(open_append(&dir).is_err());
@@ -272,7 +273,8 @@ mod tests {
 
     #[test]
     fn open_lock_should_neither_truncate_nor_create_through_a_link() {
-        let (base, root, sentinel) = layout("lock-link");
+        let (guard, root, sentinel) = layout("lock-link");
+        let base = guard.path().canonicalize().unwrap();
         let lock = root.join(".pixel/history.db.lock");
         symlink(&sentinel.0, &lock).unwrap();
         assert!(is_eloop(&open_lock(&lock).unwrap_err()));
@@ -290,7 +292,7 @@ mod tests {
 
     #[test]
     fn open_lock_should_keep_an_existing_lock_file_content() {
-        let (_base, root, _sentinel) = layout("lock-keep");
+        let (_guard, root, _sentinel) = layout("lock-keep");
         let lock = root.join(".pixel/build.lock");
         fs::write(&lock, b"held").unwrap();
         drop(open_lock(&lock).unwrap());
@@ -302,7 +304,7 @@ mod tests {
 
     #[test]
     fn open_read_should_refuse_a_link_and_read_a_regular_file() {
-        let (_base, root, sentinel) = layout("read");
+        let (_guard, root, sentinel) = layout("read");
         let link = root.join(".pixel/base.shard");
         symlink(&sentinel.0, &link).unwrap();
         assert!(is_eloop(&open_read(&link).unwrap_err()));
@@ -319,7 +321,7 @@ mod tests {
     #[test]
     fn open_rewrite_should_refuse_a_link_and_keep_mode_and_inode_of_a_file() {
         use std::os::unix::fs::MetadataExt;
-        let (_base, root, sentinel) = layout("rewrite");
+        let (_guard, root, sentinel) = layout("rewrite");
         let link = root.join("src.rs");
         symlink(&sentinel.0, &link).unwrap();
         assert!(is_eloop(&open_rewrite(&link).unwrap_err()));
@@ -342,7 +344,7 @@ mod tests {
 
     #[test]
     fn create_new_should_fail_on_a_planted_link() {
-        let (_base, root, sentinel) = layout("create-new");
+        let (_guard, root, sentinel) = layout("create-new");
         let tmp = root.join("a.rs.gpx-rescue-tmp");
         symlink(&sentinel.0, &tmp).unwrap();
         assert_eq!(
@@ -361,7 +363,7 @@ mod tests {
 
     #[test]
     fn write_replace_should_replace_a_link_instead_of_writing_through_it() {
-        let (_base, root, sentinel) = layout("replace");
+        let (_guard, root, sentinel) = layout("replace");
         let target = root.join(".pixel/targets.json");
         symlink(&sentinel.0, &target).unwrap();
         write_replace(&target, b"{\"tasks\":[]}", PRIVATE_MODE).unwrap();
@@ -393,7 +395,8 @@ mod tests {
 
     #[test]
     fn refuse_linked_ancestors_should_refuse_a_linked_directory_below_pixel() {
-        let (base, root, _sentinel) = layout("ancestors");
+        let (guard, root, _sentinel) = layout("ancestors");
+        let base = guard.path().canonicalize().unwrap();
         let outside = base.join("outside");
         fs::create_dir_all(outside.join("t1")).unwrap();
         symlink(&outside, root.join(".pixel/tasks")).unwrap();
@@ -406,7 +409,8 @@ mod tests {
 
     #[test]
     fn refuse_linked_ancestors_should_accept_real_directories_and_paths_outside_pixel() {
-        let (base, root, _sentinel) = layout("ancestors-ok");
+        let (guard, root, _sentinel) = layout("ancestors-ok");
+        let base = guard.path().canonicalize().unwrap();
         fs::create_dir_all(root.join(".pixel/tasks/t1")).unwrap();
         refuse_linked_ancestors(&root.join(".pixel/tasks/t1/journal.jsonl")).unwrap();
         // Outside `.pixel`, a linked directory is the caller's to confine.

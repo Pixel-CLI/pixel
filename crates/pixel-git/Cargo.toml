@@ -13,3 +13,6 @@ workspace = true
 [dependencies]
 libc = "0.2"
 regex = "1.13"
+
+[dev-dependencies]
+tempfile = "3"

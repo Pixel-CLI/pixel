@@ -26,9 +26,12 @@ fn filler() -> Vec<(String, String)> {
         .collect()
 }
 
-fn fixture(tag: &str, files: &[(String, String)]) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("gpx-relevance-{tag}-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok();
+fn fixture(tag: &str, files: &[(String, String)]) -> (tempfile::TempDir, PathBuf) {
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("gpx-relevance-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let root = scratch.path().to_path_buf();
     for (path, body) in files {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -37,10 +40,10 @@ fn fixture(tag: &str, files: &[(String, String)]) -> PathBuf {
     git(&root, &["init", "-q"]);
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "fixture"]);
-    root.canonicalize().unwrap()
+    (scratch, root.canonicalize().unwrap())
 }
 
-fn install_repo(tag: &str) -> PathBuf {
+fn install_repo(tag: &str) -> (tempfile::TempDir, PathBuf) {
     let files = [
         (
             "crates/install/src/claude_settings.rs",
@@ -125,7 +128,7 @@ fn envelope_caps(response: &Response) -> Vec<String> {
 
 #[test]
 fn targets_facts_should_carry_the_relevance_block_and_repeat_it_identically() {
-    let root = install_repo("carries");
+    let (_scratch, root) = install_repo("carries");
     let mut service = ready(&root);
     let task = "how does install handle existing Claude settings";
 
@@ -170,7 +173,7 @@ fn targets_facts_should_carry_the_relevance_block_and_repeat_it_identically() {
 
 #[test]
 fn targets_facts_should_report_exactly_what_the_in_process_reader_reports() {
-    let root = install_repo("agrees");
+    let (_scratch, root) = install_repo("agrees");
     let mut service = ready(&root);
     let index = IndexSet::open_or_build(&root, Box::new(TrigramExtractor)).unwrap();
     let graph = GraphStore::open_read_only(&service.graph_db_path()).unwrap();
@@ -193,7 +196,7 @@ fn targets_facts_should_report_exactly_what_the_in_process_reader_reports() {
 
 #[test]
 fn targets_facts_should_borrow_a_synonym_for_a_french_keyword() {
-    let root = install_repo("french");
+    let (_scratch, root) = install_repo("french");
     let mut service = ready(&root);
 
     let relevance = relevance_of(&facts(&mut service, "la connexion ne marche pas"));
@@ -217,7 +220,7 @@ fn targets_facts_should_name_a_truncated_probe_in_the_block_and_in_the_response(
             )
         })
         .collect();
-    let root = fixture("capped", &files);
+    let (_scratch, root) = fixture("capped", &files);
     let mut service = ready(&root);
 
     let response = facts(&mut service, "needle probe");
@@ -261,7 +264,7 @@ fn targets_facts_should_name_a_truncated_probe_in_the_block_and_in_the_response(
 
 #[test]
 fn targets_facts_should_name_a_task_longer_than_the_keyword_list_once() {
-    let root = install_repo("long");
+    let (_scratch, root) = install_repo("long");
     let mut service = ready(&root);
     let task = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike";
 
@@ -283,7 +286,7 @@ fn targets_facts_should_name_a_task_longer_than_the_keyword_list_once() {
 
 #[test]
 fn targets_facts_should_leave_the_envelope_unchanged_when_the_block_has_no_cap() {
-    let root = install_repo("quiet");
+    let (_scratch, root) = install_repo("quiet");
     let mut service = ready(&root);
 
     let response = facts(&mut service, "install hooks");
@@ -306,7 +309,7 @@ fn targets_facts_should_leave_the_envelope_unchanged_when_the_block_has_no_cap()
 
 #[test]
 fn targets_should_not_carry_a_relevance_block_outside_fact_mode() {
-    let root = install_repo("plain");
+    let (_scratch, root) = install_repo("plain");
     let mut service = ready(&root);
 
     let response = service.handle(Request::Targets {
@@ -340,7 +343,7 @@ fn targets_facts_should_list_a_structural_co_file_that_prose_outweighs() {
         "pub fn run_watchdog() {}\n".to_owned(),
     ));
     files.extend(filler());
-    let root = fixture("structural", &files);
+    let (_scratch, root) = fixture("structural", &files);
     let mut service = ready(&root);
 
     let response = facts(&mut service, "claude install settings watchdog");
@@ -381,7 +384,7 @@ fn targets_facts_should_list_a_structural_co_file_that_prose_outweighs() {
 
 #[test]
 fn relevance_only_should_return_the_block_the_full_answer_carries_byte_for_byte() {
-    let root = install_repo("only-identical");
+    let (_scratch, root) = install_repo("only-identical");
     let mut service = ready(&root);
 
     for task in [
@@ -432,7 +435,7 @@ fn relevance_only_should_surface_the_same_caps_as_the_full_answer() {
             )
         })
         .collect();
-    let root = fixture("only-capped", &files);
+    let (_scratch, root) = fixture("only-capped", &files);
     let mut service = ready(&root);
 
     let full = facts(&mut service, "needle probe");
@@ -474,7 +477,7 @@ fn relevance_only_should_surface_the_same_caps_as_the_full_answer() {
 
 #[test]
 fn relevance_only_should_leave_the_envelope_open_when_the_block_has_no_cap() {
-    let root = install_repo("only-quiet");
+    let (_scratch, root) = install_repo("only-quiet");
     let mut service = ready(&root);
 
     let only = facts_relevance_only(&mut service, "pad hooks");
@@ -487,7 +490,7 @@ fn relevance_only_should_leave_the_envelope_open_when_the_block_has_no_cap() {
 
 #[test]
 fn relevance_only_should_refuse_a_task_with_no_keyword_like_the_full_answer() {
-    let root = install_repo("only-nokeyword");
+    let (_scratch, root) = install_repo("only-nokeyword");
     let mut service = ready(&root);
 
     let ask = |service: &mut Service, relevance_only| {
@@ -509,7 +512,7 @@ fn relevance_only_should_refuse_a_task_with_no_keyword_like_the_full_answer() {
 
 #[test]
 fn relevance_only_should_agree_with_the_in_process_reader() {
-    let root = install_repo("only-in-process");
+    let (_scratch, root) = install_repo("only-in-process");
     let mut service = ready(&root);
     let index = IndexSet::open_or_build(&root, Box::new(TrigramExtractor)).unwrap();
     let graph = GraphStore::open_read_only(&service.graph_db_path()).unwrap();

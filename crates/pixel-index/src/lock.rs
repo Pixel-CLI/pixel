@@ -166,7 +166,8 @@ mod tests {
     /// worktree file or from committed text alike.
     #[test]
     fn pixel_only_gitignore_is_recognised_from_the_file_and_from_text() {
-        let dir = temp_dir();
+        let dir_guard = temp_dir();
+        let dir = dir_guard.path().to_path_buf();
         assert!(!is_pixel_only_gitignore(&dir), "no file is not pixel-only");
         std::fs::write(
             dir.join(".gitignore"),
@@ -184,8 +185,9 @@ mod tests {
     /// A real repository in a fresh temp dir. `core.excludesFile` is set in
     /// the repo's own config so the developer's global excludes (which may
     /// well list `.pixel/`) cannot decide what these tests see.
-    fn git_repo() -> (std::path::PathBuf, GitRunner) {
-        let dir = temp_dir();
+    fn git_repo() -> (tempfile::TempDir, GitRunner) {
+        let guard = temp_dir();
+        let dir = guard.path().to_path_buf();
         let git = GitRunner::new(&dir);
         for args in [
             &["init", "-q"][..],
@@ -195,7 +197,7 @@ mod tests {
         ] {
             git.run(args).unwrap();
         }
-        (dir, git)
+        (guard, git)
     }
 
     fn commit_all(git: &GitRunner) {
@@ -223,7 +225,8 @@ mod tests {
     /// holds, the status stays empty, and `.pixel/` is ignored all the same.
     #[test]
     fn a_tracked_gitignore_is_left_alone_and_the_sidecar_ignored_locally() {
-        let (dir, git) = git_repo();
+        let (dir_guard, git) = git_repo();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
         commit_all(&git);
         std::fs::create_dir_all(dir.join(SHARD_DIR)).unwrap();
@@ -245,7 +248,8 @@ mod tests {
     /// once however many builds follow, and no temporary file is left.
     #[test]
     fn acquire_keeps_the_users_exclude_lines_and_adds_the_entry_once() {
-        let (dir, git) = git_repo();
+        let (dir_guard, git) = git_repo();
+        let dir = dir_guard.path().to_path_buf();
         let exclude = exclude_file(&git);
         std::fs::write(&exclude, "# mine\n*.log\nscratch/\n").unwrap();
 
@@ -269,7 +273,8 @@ mod tests {
     /// untracked file in the status, the very noise the entry is for.
     #[test]
     fn no_gitignore_is_created_and_the_exclude_holds_exactly_the_entry() {
-        let (dir, git) = git_repo();
+        let (dir_guard, git) = git_repo();
+        let dir = dir_guard.path().to_path_buf();
         let exclude = exclude_file(&git);
         std::fs::remove_file(&exclude).ok();
 
@@ -287,7 +292,8 @@ mod tests {
     /// pattern: the entry starts on a line of its own.
     #[test]
     fn an_exclude_without_a_final_newline_keeps_its_last_pattern() {
-        let (dir, git) = git_repo();
+        let (dir_guard, git) = git_repo();
+        let dir = dir_guard.path().to_path_buf();
         let exclude = exclude_file(&git);
         std::fs::write(&exclude, "scratch/").unwrap();
 
@@ -306,7 +312,8 @@ mod tests {
     #[test]
     fn an_already_ignored_sidecar_writes_nothing() {
         for entry in [".pixel/", ".pixel"] {
-            let (dir, git) = git_repo();
+            let (dir_guard, git) = git_repo();
+            let dir = dir_guard.path().to_path_buf();
             std::fs::write(dir.join(".gitignore"), format!("target/\n{entry}\n")).unwrap();
             let exclude = exclude_file(&git);
             let before = std::fs::read_to_string(&exclude).unwrap_or_default();
@@ -320,7 +327,8 @@ mod tests {
             );
             std::fs::remove_dir_all(&dir).ok();
         }
-        let (dir, git) = git_repo();
+        let (dir_guard, git) = git_repo();
+        let dir = dir_guard.path().to_path_buf();
         ensure_pixel_gitignored(&dir);
         let once = std::fs::read_to_string(exclude_file(&git)).unwrap();
         ensure_pixel_gitignored(&dir);
@@ -333,7 +341,8 @@ mod tests {
     /// written once, and the sidecar is left as visible as the user asked.
     #[test]
     fn a_negated_sidecar_gets_one_exclude_entry_not_one_per_build() {
-        let (dir, git) = git_repo();
+        let (dir_guard, git) = git_repo();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join(".gitignore"), "!.pixel/\n").unwrap();
         let exclude = exclude_file(&git);
         std::fs::remove_file(&exclude).ok();
@@ -354,7 +363,8 @@ mod tests {
     /// UTF-8 read of them failed and the file was rewritten from empty.
     #[test]
     fn a_non_utf8_exclude_keeps_its_bytes() {
-        let (dir, git) = git_repo();
+        let (dir_guard, git) = git_repo();
+        let dir = dir_guard.path().to_path_buf();
         let exclude = exclude_file(&git);
         std::fs::write(&exclude, b"caf\xe9/\n").unwrap();
 
@@ -373,7 +383,8 @@ mod tests {
     #[test]
     fn an_unreadable_exclude_is_left_alone() {
         use std::os::unix::fs::PermissionsExt;
-        let (dir, git) = git_repo();
+        let (dir_guard, git) = git_repo();
+        let dir = dir_guard.path().to_path_buf();
         let exclude = exclude_file(&git);
         std::fs::write(&exclude, "keep/\n").unwrap();
         std::fs::set_permissions(&exclude, std::fs::Permissions::from_mode(0o200)).unwrap();
@@ -400,11 +411,12 @@ mod tests {
     /// the worktree's status stays clean.
     #[test]
     fn a_linked_worktree_is_ignored_through_the_common_exclude() {
-        let (dir, git) = git_repo();
+        let (dir_guard, git) = git_repo();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join("a.txt"), "a\n").unwrap();
         commit_all(&git);
-        let linked = temp_dir();
-        std::fs::remove_dir_all(&linked).unwrap();
+        let linked_guard = temp_dir();
+        let linked = linked_guard.path().join("worktree");
         git.run(&[
             "worktree",
             "add",
@@ -431,42 +443,27 @@ mod tests {
 
     #[test]
     fn gitignore_untouched_outside_git_repo() {
-        let dir = temp_dir();
+        let dir_guard = temp_dir();
+        let dir = dir_guard.path().to_path_buf();
         ensure_pixel_gitignored(&dir);
         assert!(!dir.join(".gitignore").exists(), "no .gitignore created");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    fn temp_dir() -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-gitignore-{}-{}-{}",
-            std::process::id(),
-            seq,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("pixel-gitignore-")
+            .tempdir()
+            .unwrap()
     }
 
     #[test]
     fn lock_blocks_second_attempt() {
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-lock-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-lock-test-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
 
         // First acquire succeeds.
         let _guard = BuildLock::acquire(&dir).unwrap();
