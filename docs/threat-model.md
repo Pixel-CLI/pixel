@@ -34,7 +34,7 @@ model providers, and the website under `website/`.
 | Asset | Where | Why it matters |
 | --- | --- | --- |
 | Source and history of indexed repositories | the working tree, read through `pixel-git::GitRunner` and the walkers in `pixel-index`/`pixel-graph` | confidentiality of code the user did not mean to share; integrity of what the agent is told about it |
-| Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `brief-decisions.jsonl`, `brief-feedback.jsonl`, `brief-sessions/`, `config.yaml`, `tasks/` | what the agent reads as ground truth; `actions.jsonl` and `brief-decisions.jsonl` (the typed prompt, or a bounded excerpt from a paste-only prompt) can hold secrets; `brief-feedback.jsonl` holds repository paths and counts only; `brief-sessions/` holds hashes of paths and line numbers; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
+| Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `brief-decisions.jsonl`, `brief-feedback.jsonl`, `brief-sessions/`, `edit-hooks/`, `config.yaml`, `tasks/` | what the agent reads as ground truth; `actions.jsonl` and `brief-decisions.jsonl` (the typed prompt, or a bounded excerpt from a paste-only prompt) can hold secrets; `brief-feedback.jsonl` holds repository paths and counts only; `brief-sessions/` holds hashes of paths and line numbers; `edit-hooks/` holds declaration names and headers, caller paths, lines and content hashes; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.pixel/setup-receipt.json` (original setup-edited configuration, potentially including keys), `~/.pixel/plugins/`, `~/.pixel/trusted.toml` and `~/.pixel/plugins.toml` (the plugin host's installs, trust records and network opt-ins), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/prompts/<project-id>.jsonl` (`pixel prompts`: every repository's typed prompts and brief decisions, key-shaped words masked), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` (0700) on every platform, `/tmp/pixel-<hash of HOME>/` (0700, owner-checked) when that path would not fit `sockaddr_un` | any client of the socket can ask for git mutations on the repository |
 | Agent configurations | what `pixel setup` writes: `~/.claude/settings.json`, `$CODEX_HOME/hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the `pixel` skill (`skills/pixel/SKILL.md`) under the agent config dirs and the cross-harness `~/.agents` (read by every agent that loads personal skills from `~/.agents/skills`, Copilot CLI and Amp among them), the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); `--repo` writes only `.pixel/config.yaml`. `pixel install` adds a plugin's delivered `skill` file (`skills/<plugin>/SKILL.md`) into the same agent config dirs, user tier only. The Antigravity IDE and CLI Pixel plugin dirs carry the `pixel` skill and the metrics hook; where OpenCode is configured, `plugins/pixel-brief.js` under its config dir (`~/.config/opencode`, or `$XDG_CONFIG_HOME/opencode`) runs the prompt-submit brief and shows Pixel's metrics in chat | a hook command runs with the user's privileges on every agent tool call |
@@ -153,6 +153,24 @@ records before returning an `ephemeralMessage`. Host-provided paths and
 conversation identifiers remain untrusted input; this relay executes no
 tool command.
 
+The edit hooks (`pixel run-hook edit-event`, `crates/pixel/src/edit_hook.rs`)
+exist only while `edit_hooks` is on (`pixel config edit_hooks on` in the
+repository's or the global `config.yaml`, or `PIXEL_EDIT_HOOKS=1` for the hook
+alone) and a `pixel setup` registered them, as `PreToolUse` and `PostToolUse`
+entries for Claude Code, Codex and Devin; with the switch off, setup writes
+none and the hook answers nothing. They read the payload through the same
+bounded reader as `task-event` (`hook_input::read_hook_payload`, T10) and
+execute nothing: `pixel_setup::edit_input::targets` reduces the edit tool's
+`tool_input` to file paths and, before the edit, their proposed content. A
+path outside the repository, under `.git`, that is itself a symbolic link or
+a directory, or a file over 1 MiB (`SOURCE_MAX_BYTES`) is dropped. The
+proposed content is parsed in memory by the graph extractor and compared with
+the published graph, opened read-only (`impact_read::open_fresh`: a stale or
+missing graph answers nothing and is neither built nor repaired). The answer is
+one `[PIXEL:EDIT]` or `[PIXEL:STALE-CALLERS]` text of at most 1 200 bytes
+(`TEXT_MAX_BYTES`) as `additionalContext`, or nothing once the 1 s `DEADLINE`
+has passed; what a session remembers is the `edit-hooks/` sidecar of 3.5.
+
 ### 3.4 Repository content: walking, parsing, indexing (B1)
 
 `pixel-index` walks the tree with `ignore::WalkBuilder` (links not followed)
@@ -221,6 +239,16 @@ text reaches a path; the store refuses a `.pixel` or
 through `nofollow::write_replace`, and every part-1 write deletes entries
 older than one hour. The other parts only read their slice, bounded by
 `PART_CHARS`.
+The edit hooks keep one file per host session under `.pixel/edit-hooks/`
+(`edit_hook.rs`, `SESSION_DIR`), named by the first 16 hex digits of the
+SHA-256 of the session id, so no host text reaches a path. A `.pixel` or
+`edit-hooks` that is a symbolic link is refused, the file is opened without
+following links (`nofollow::open_read`) and read back up to 256 KiB
+(`SESSION_MAX_BYTES`; anything larger is ignored), writes go through
+`nofollow::write_replace` with mode 0600, and every write deletes the files
+older than 24 hours (`SESSION_MAX_AGE`). It holds the declarations a card named,
+their old headers and their callers' paths, lines and content hashes: no
+prompt and no source beyond a declaration header.
 
 ### 3.6 Git operations (B1, B2)
 
@@ -742,7 +770,12 @@ stays so references to the later threats hold.
   (files, top-level declarations, call edges) and run one git call through
   `pixel_git::GitRunner` (`show` or `diff` of the repository's own history,
   no network, no write, bounded by the brief's window and a 2 MiB output cap);
-  their file reads go through `Evidence::lines_at` like the pack's. No prompt is deployed. The bundled prompt a user copies by hand
+  their file reads go through `Evidence::lines_at` like the pack's. With `edit_hooks` on (off by default, 3.3), the edit
+  hooks also add text unasked: a `[PIXEL:EDIT]` card before an edit and a
+  `[PIXEL:STALE-CALLERS]` note after it, each at most 1 200 bytes
+  (`TEXT_MAX_BYTES`), quoting declaration names and headers from the edited
+  file and the paths and lines of up to 8 proved and 4 name-matched callers
+  from the published graph. No prompt is deployed. The bundled prompt a user copies by hand
   states that Pixel output is data, not instructions
   (`crates/pixel-setup/assets/pixel-agent-prompt.md`). The explicit impact
   skill and Pi command label graph output as repository data, not
@@ -1041,6 +1074,7 @@ retention remain those described below.
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
 | Hook payload cap and wait | `hook_input::read_within` | the `bounded_read_*` and `timed_read_*` tests in `hook_input.rs`; `hook_guarantees_cli.rs` (exit 0 and one JSON line over hostile payloads, broken state, argument errors, a stdin left open) |
 | Prompt-submit intent judge | `execution_brief::intent::judge` | switch-off, request, subprocess JSON, empty stdout, invalid UTF-8 and timeout fallback tests in `intent.rs`; classifier-on `none` and failure cases in `prompt_brief_cli.rs` |
+| Edit hooks | `edit_hook::respond`, `repo_relative`, `Session` | `a_path_should_stay_inside_the_repository_and_off_links`, `a_session_should_load_up_to_the_size_bound_and_not_a_byte_past_it`, `a_source_should_be_read_up_to_the_size_bound_and_not_a_byte_past_it`, `a_text_should_stop_at_the_byte_bound` (`edit_hook.rs`) |
 | Typed prompts in the brief log | `decision_log::{logged_typed, mask_keys, append}` | `logged_typed_should_mask_a_credential_and_cut_at_the_bound`, `logged_typed_should_keep_only_the_last_paragraph_of_a_pasted_log`, `mask_keys_should_hide_a_prefixed_key_and_a_long_run_and_keep_prose`, `append_should_be_owner_only_and_not_create_a_missing_directory`, `append_should_refuse_a_link_at_the_log_and_leave_its_target_alone`, `append_should_refuse_a_linked_directory_and_write_nothing_through_it` (`decision_log.rs`), `the_decision_log_should_stay_off_when_pixel_brief_log_says_so` (`prompt_brief_cli.rs`) |
 | Secrets in the action log | `logged_args`, `GitError`'s `Display` (`pixel_git::redact`) | `only_the_remote_key_command_starts_the_mask`, `a_plugin_source_url_is_logged_without_its_credentials`, `logged_args_should_mask_the_credentials_of_a_reference_url` (`main.rs`), `display_should_mask_a_credentialed_url_in_every_args_variant` (`pixel-git`), `a_credentialed_reference_url_reaches_no_log_or_report` (CLI) |
 | Repo plugin trust | `pixel_plugin::resolve`, `dir_digest`, `contained_program` | `a_repo_plugin_is_refused_until_trusted_and_again_after_an_edit`, `every_kind_of_change_moves_the_digest`, `a_run_that_escapes_through_a_symlink_is_refused` (`pixel-plugin`); `plugin_cli.rs` |
