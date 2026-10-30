@@ -16,7 +16,11 @@ version of crates/pixel/Cargo.toml. A claim fails when:
 A stale claim with a `tracking` issue passes, printed as a warning, so the
 debt stays visible on every run until a refresh lands.
 
-usage: check-claims.py [--root DIR]
+`--version x.y.z` judges the claims against that version instead of the
+crate's: the release prepare script runs it with the version it is about to
+write, so a cut that would leave a claim stale refuses before any file moves.
+
+usage: check-claims.py [--root DIR] [--version X.Y.Z]
 """
 from __future__ import annotations
 
@@ -31,10 +35,14 @@ REQUIRED = ("id", "doc", "anchor", "version_text", "protocol", "binary_version",
 VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+|x)$")
 
 
+def major_minor(version: str) -> tuple[int, int]:
+    major, minor, _ = version.split(".", 2)
+    return int(major), int(minor)
+
+
 def crate_version(root: Path) -> tuple[int, int]:
     manifest = tomllib.loads((root / "crates/pixel/Cargo.toml").read_text())
-    major, minor, _ = manifest["package"]["version"].split(".", 2)
-    return int(major), int(minor)
+    return major_minor(manifest["package"]["version"])
 
 
 def minors_behind(claimed: str, current: tuple[int, int]) -> int | None:
@@ -48,11 +56,12 @@ def minors_behind(claimed: str, current: tuple[int, int]) -> int | None:
     return current[1] - minor
 
 
-def check(root: Path) -> tuple[list[str], list[str]]:
-    """The errors and the warnings of the registry under `root`."""
+def check(root: Path, version: str | None = None) -> tuple[list[str], list[str]]:
+    """The errors and the warnings of the registry under `root`, judged
+    against `version` when given, else the crate's own."""
     errors: list[str] = []
     warnings: list[str] = []
-    current = crate_version(root)
+    current = major_minor(version) if version else crate_version(root)
     claims = tomllib.loads((root / "docs/bench/claims.toml").read_text()).get("claim", [])
     if not claims:
         errors.append("docs/bench/claims.toml lists no [[claim]]")
@@ -94,8 +103,11 @@ def check(root: Path) -> tuple[list[str], list[str]]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--version", help="judge against this x.y.z instead of crates/pixel's version")
     args = parser.parse_args()
-    errors, warnings = check(args.root)
+    if args.version and not re.match(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$", args.version):
+        parser.error(f"--version {args.version!r} is not x.y.z")
+    errors, warnings = check(args.root, args.version)
     for line in warnings:
         print(f"warning: {line}")
     for line in errors:

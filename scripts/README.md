@@ -22,7 +22,7 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 | `test-pre-push.sh` | `sh scripts/test-pre-push.sh` | publication starts no local validation or fetch |
 | `test-gates.py` | `python3 scripts/test-gates.py` | contract of `gates.sh` (stub cargo in a throwaway repo) |
 | `mutants-gate.py` | `python3 scripts/ci/mutants-gate.py --diff pr.diff --list mutants-list.txt` | the `Mutants` plan/report script; sizes the shard matrix and deals each shard a runner from the `PIXEL_MUTANTS_SHARD_RUNNERS` pool (JSON array of `runs-on` values, round-robin; GitHub-hosted when unset) |
-| `test-prepare.py` | `python3 scripts/test-prepare.py` | contract of `.agents/skills/release/prepare.sh`'s pull request listing (stub gh/cargo, disposable repo, needs `jq`) |
+| `test-prepare.py` | `python3 scripts/test-prepare.py` | contract of `.agents/skills/release/prepare.sh`: its pull request listing and its refusal of a cut that leaves a public claim stale (stub gh/cargo, disposable repo, needs `jq`) |
 | `test-install.py` | `python3 scripts/test-install.py` | contract of `install.sh` (fake curl/uname, local tarball) |
 | `test-clean.py` | `python3 scripts/test-clean.py` | contract of `clean.sh`, mostly what it must *not* remove (disposable repo with a second worktree) |
 | `test-pr-swarm.py` | `python3 scripts/test-pr-swarm.py` | contract of `pr-swarm.sh` (stub `gh`/`rmux`/`claude`, real git in a throwaway repo): idempotency, a `gh` outage never tearing down, merge/teardown rails, branch-rename retitling and agent-name derivation |

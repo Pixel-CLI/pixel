@@ -20,6 +20,7 @@ import tempfile
 import unittest
 
 PREPARE = Path(__file__).resolve().parent.parent / ".agents/skills/release/prepare.sh"
+CHECK_CLAIMS = Path(__file__).resolve().parent / "ci/check-claims.py"
 
 GH = """#!/usr/bin/env python3
 import json, os, subprocess, sys
@@ -400,6 +401,61 @@ class PrepareContract(unittest.TestCase):
         result = self.assert_refused_before_any_write(
             "pushed.fixed.md", "the commit that added it (")
         self.assertIn("fix(thing): pushed straight to main) names none", result.stderr)
+
+    def claims(self, **fields):
+        """A registry of one claim measured with pixel 0.0.3, one minor behind
+        the fixture's 0.1.0 and two behind the 0.2.0 the cut makes, checked
+        by the repository's own check-claims.py."""
+        self.write("scripts/ci/check-claims.py", CHECK_CLAIMS.read_text())
+        self.write("Cargo.toml", '[workspace]\nmembers = ["crates/a", "crates/pixel"]\n')
+        self.write("crates/pixel/Cargo.toml", '[package]\nname = "pixel-cli"\nversion = "0.1.0"\n')
+        self.write("README.md", "Outline: **641 tokens**, measured with pixel 0.0.3.\n")
+        claim = {
+            "id": "readme-outline", "doc": "README.md", "anchor": "**641 tokens**",
+            "version_text": "pixel 0.0.3", "protocol": "docs/bench/read-savings.md",
+            "binary_version": "0.0.3", "commit": "abc1234", "measured": "2026-01-01",
+            "command": "pixel list-signatures models.py", "live": False, **fields,
+        }
+        self.write("docs/bench/claims.toml", "[[claim]]\n" + "".join(
+            f"{k} = {json.dumps(v)}\n" for k, v in claim.items()))
+        self.write(".github/changelog.d/12-thing.fixed.md", "**thing:** thing\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "claims")
+
+    def test_a_claim_the_bump_leaves_stale_is_refused_before_any_write(self):
+        """The 0.10.0 prepare PR merged and turned main red: the bump left four
+        claims two minors behind, and a prepare PR skips the job that checks
+        them, while it may not touch the registry itself. So the cut judges
+        the claims against the version it is about to write, and stops while
+        the fix can still go through its own pull request."""
+        self.claims()
+        self.assertEqual(subprocess.run(
+            ["python3", "scripts/ci/check-claims.py", "--root", "."],
+            cwd=self.repo, capture_output=True, text=True).returncode, 0,
+            "the fixture's claim must pass before the bump")
+        before = self.changelog()
+
+        result = self.prepare()
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fail under 0.2.0: readme-outline;", result.stderr)
+        self.assertIn("`tracking` issue", result.stderr)
+        self.assertIn("pull request into the target branch", result.stderr)
+        self.assertEqual(self.changelog(), before)
+        self.assertEqual(self.fragments(), ["12-thing.fixed.md"])
+        self.assertIn('version = "0.1.0"', (self.repo / "crates/pixel/Cargo.toml").read_text())
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_a_tracked_stale_claim_lets_the_cut_through(self):
+        """A `tracking` issue is the sanctioned way to ship with a known-stale
+        number: the refusal above must not block it."""
+        self.claims(tracking="#1358")
+
+        result = self.prepare()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("re-measure tracked in #1358", result.stdout)
+        self.assertIn('version = "0.2.0"', (self.repo / "crates/pixel/Cargo.toml").read_text())
 
     def test_an_entry_no_commit_added_is_refused_before_any_write(self):
         """An uncommitted fragment was never merged by any pull request."""
