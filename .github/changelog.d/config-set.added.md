@@ -1,1 +1,0 @@
-**config:** `pixel config <key> [<value>] [--global]` reads or writes `daemon_auto_start`, `brief` and `brief_parts` in `config.yaml`, validating the value first; a key that is not a setting is refused and its value is masked in the action log.

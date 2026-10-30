@@ -1,1 +1,0 @@
-**daemon:** a request line may carry `deadline_unix_ms`, the instant its answer stops being wanted; the brief sends one for all its daemon requests, and the daemon answers a queued request past it with `BUSY_REPOSITORY` instead of running it. `PROTOCOL_VERSION` 17: an older daemon is replaced, a newer one is left alone.

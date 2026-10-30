@@ -1,1 +1,0 @@
-**brief:** a low relevance score no longer suppresses the brief. A prompt scored off topic is briefed as a maybe (up to three files, `confidence: low`, no directive) and the decision log keeps its tier, score and `off topic: …` reason under gate `open`; only the intent judge's `none` and a relevance probe that failed or never answered still close it.

@@ -1,1 +1,0 @@
-**setup:** every hook command `pixel setup` writes now ends in `|| true`, not only the prompt-submit one: a `pixel` that exits 2 on a verb or flag it does not know no longer blocks a tool call, a `Stop` or a Gemini turn. Re-running `pixel setup` replaces the old entries in place. Codex keys its hook trust on the command, so review the hooks once with `/hooks` after the upgrade.

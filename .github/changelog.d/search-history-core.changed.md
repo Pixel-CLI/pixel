@@ -1,1 +1,0 @@
-**search-history:** `pixel search-history` is built into the core binary (the `history` op was already there), so it runs without the `pixel-git` plugin and the "moved to a plugin" hint no longer fires for it; `--read-only` never builds the history index.

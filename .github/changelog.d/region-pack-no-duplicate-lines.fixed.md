@@ -1,1 +1,0 @@
-**brief:** a region pack no longer renders the same lines in two blocks: when a locator block, a test body or another block overlaps lines a better-ranked block of the pack already shows, only the better-ranked one is kept.
