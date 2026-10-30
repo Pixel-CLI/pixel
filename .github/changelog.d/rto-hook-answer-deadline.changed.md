@@ -1,1 +1,0 @@
-**hook:** the prompt-submit hook fixes one answer deadline, its decision window less a second to print, and the brief's window and its probes end at or before it even when a floor would extend them; the same instant is what the brief's daemon requests carry.

@@ -1,1 +1,0 @@
-**brief:** with `pixel config classify on` (off by default) the configured classify engine, local or remote, now also judges plain-language prompts, and a confident `none` ends their brief like a weak one's. Switched off, nothing is started; a failed, slow or unsure classifier never suppresses the brief. A remote engine receives the typed prompt.

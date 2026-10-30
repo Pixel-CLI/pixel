@@ -1,1 +1,0 @@
-**metrics:** `pixel metrics [--since 24h|7d|all] [--json]` counts what the briefs did from the existing brief logs: delivered and declined briefs, zero-call turns, and files injected against files the agent then read. Read-only; the JSON carries `epistemics` and `snapshot`.
