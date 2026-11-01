@@ -314,9 +314,7 @@ impl ShardBuilder {
         let (gram_count, postings_len) = {
             self.pairs.sort_unstable();
             let mut sources = Vec::with_capacity(self.runs.len() + 1);
-            sources.push(PairSource::Memory(
-                std::mem::take(&mut self.pairs).into_iter(),
-            ));
+            sources.push(PairSource::Memory(std::mem::take(&mut self.pairs).into_iter()));
             for run in &self.runs {
                 sources.push(PairSource::Disk(BufReader::with_capacity(
                     MERGE_BUF,
@@ -378,10 +376,7 @@ impl ShardBuilder {
             w.write_all(&header)?;
             w.write_all(&files_buf)?;
             io::copy(&mut BufReader::new(fs::File::open(&lookup_tmp.0)?), &mut w)?;
-            io::copy(
-                &mut BufReader::new(fs::File::open(&postings_tmp.0)?),
-                &mut w,
-            )?;
+            io::copy(&mut BufReader::new(fs::File::open(&postings_tmp.0)?), &mut w)?;
             w.flush()?;
             w.get_ref().sync_all()?;
         }
