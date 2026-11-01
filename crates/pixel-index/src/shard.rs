@@ -30,13 +30,11 @@
 //! gram bytes) is safe: a collision can only widen the candidate set, and
 //! regex verification is authoritative.
 
-use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
-use rayon::prelude::*;
 
 pub const MAGIC: &[u8; 8] = b"GPXSHARD";
 pub const VERSION: u32 = 1;
@@ -111,12 +109,14 @@ pub fn read_varint(buf: &[u8], pos: &mut usize) -> Option<u32> {
 
 // --- builder ---
 
-/// The hasher of the builder's gram map. Its keys are already xxh3 hashes
+/// The hasher of the test-only gram map. Its keys are already xxh3 hashes
 /// (`gram_hash`), spread over all 64 bits, so the map uses them as they are
 /// instead of hashing them a second time with SipHash.
+#[cfg(test)]
 #[derive(Default)]
 struct GramKeyHasher(u64);
 
+#[cfg(test)]
 impl std::hash::Hasher for GramKeyHasher {
     // The map's keys are u64: std hashes them through `write_u64`, never
     // here, so no mutation of this body can reach a build.
@@ -136,20 +136,97 @@ impl std::hash::Hasher for GramKeyHasher {
     }
 }
 
-type GramMap<V> = HashMap<u64, V, std::hash::BuildHasherDefault<GramKeyHasher>>;
+/// (gram hash, file id) pairs held in memory before a sorted run spills to
+/// disk. 8 Mi pairs is 128 MiB of 16-byte tuples: together with the merge
+/// buffers this is the builder's whole memory budget, whatever the size of
+/// the tree being indexed.
+pub const DEFAULT_RUN_PAIRS: usize = 8 * 1024 * 1024;
 
+/// One spilled pair on disk: u64 gram hash, u32 file id, little-endian.
+const RUN_RECORD: usize = 12;
+/// Buffer per sorted run during the merge.
+const MERGE_BUF: usize = 64 * 1024;
+
+/// Monotonic suffix so concurrent builders never share a spill file name.
+static SPILL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A temporary file that is removed when dropped, on success and on error.
+struct SpillFile(PathBuf);
+
+impl Drop for SpillFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// One sorted source of (gram hash, file id) pairs during the merge.
+enum PairSource {
+    Memory(std::vec::IntoIter<(u64, u32)>),
+    Disk(BufReader<fs::File>),
+}
+
+impl PairSource {
+    fn next_pair(&mut self) -> io::Result<Option<(u64, u32)>> {
+        match self {
+            PairSource::Memory(it) => Ok(it.next()),
+            PairSource::Disk(reader) => {
+                let mut rec = [0u8; RUN_RECORD];
+                match reader.read_exact(&mut rec) {
+                    Ok(()) => {
+                        let mut hash = [0u8; 8];
+                        hash.copy_from_slice(&rec[..8]);
+                        let mut id = [0u8; 4];
+                        id.copy_from_slice(&rec[8..]);
+                        Ok(Some((u64::from_le_bytes(hash), u32::from_le_bytes(id))))
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+                    Err(e) => Err(e),
+                }
+            }
+        }
+    }
+}
+
+/// Builds a shard with bounded memory.
+///
+/// Postings are accumulated as (gram hash, file id) pairs. Whenever the
+/// buffer reaches `run_pairs`, it is sorted and spilled to a run file in
+/// `spill_dir`. [`ShardBuilder::write`] merges the runs in gram order and
+/// streams the lookup and postings sections through temporary files, so peak
+/// memory is the pair budget plus one buffer per run, and the disk, not the
+/// heap, holds the rest. The output bytes are identical to an in-memory build.
 pub struct ShardBuilder {
-    /// Sorted-on-finish inverted map gram_hash -> sorted file ids.
-    postings: GramMap<Vec<u32>>,
+    /// Unsorted (gram hash, file id) pairs of the current run.
+    pairs: Vec<(u64, u32)>,
+    run_pairs: usize,
+    /// Disk directory for runs and merge sections. Never tmpfs.
+    spill_dir: PathBuf,
+    /// Sorted runs already on disk.
+    runs: Vec<SpillFile>,
+    /// First spill failure. `add_file` cannot return it, so `write` does.
+    spill_error: Option<io::Error>,
     files: Vec<String>,
     extractor_id: String,
     commit_oid: Option<String>,
 }
 
 impl ShardBuilder {
+    /// A builder that spills to the cache's spill directory (or the system
+    /// temp directory when no cache directory can be determined).
     pub fn new(extractor_id: &str) -> Self {
+        let spill_dir = crate::cache::spill_dir().unwrap_or_else(std::env::temp_dir);
+        Self::with_spill(extractor_id, spill_dir, DEFAULT_RUN_PAIRS)
+    }
+
+    /// A builder with an explicit spill directory and run budget. Tests use
+    /// a tiny budget to force many runs.
+    pub fn with_spill(extractor_id: &str, spill_dir: PathBuf, run_pairs: usize) -> Self {
         Self {
-            postings: GramMap::default(),
+            pairs: Vec::new(),
+            run_pairs: run_pairs.max(1),
+            spill_dir,
+            runs: Vec::new(),
+            spill_error: None,
             files: Vec::new(),
             extractor_id: extractor_id.to_string(),
             commit_oid: None,
@@ -167,10 +244,49 @@ impl ShardBuilder {
         self.files.push(path.to_string());
         hashes.sort_unstable();
         hashes.dedup();
-        for h in hashes {
-            self.postings.entry(h).or_default().push(id);
+        self.pairs.extend(hashes.into_iter().map(|h| (h, id)));
+        if self.pairs.len() >= self.run_pairs
+            && self.spill_error.is_none()
+            && let Err(error) = self.spill_run()
+        {
+            self.spill_error = Some(error);
         }
         id
+    }
+
+    fn unique_path(&self, suffix: &str) -> PathBuf {
+        let seq = SPILL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.spill_dir
+            .join(format!(".pixel-{}-{seq}.{suffix}", std::process::id()))
+    }
+
+    /// Sort the current pairs and write them as one run file.
+    fn spill_run(&mut self) -> io::Result<()> {
+        if self.pairs.is_empty() {
+            return Ok(());
+        }
+        self.pairs.sort_unstable();
+        // Recreate the directory if it was removed since the builder was
+        // created: spill files are only ever needed for the build in progress.
+        pixel_git::sidecar::private_dir(&self.spill_dir)?;
+        let run = SpillFile(self.unique_path("run"));
+        {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&run.0)?;
+            let mut w = BufWriter::new(file);
+            let mut rec = [0u8; RUN_RECORD];
+            for &(hash, id) in &self.pairs {
+                rec[..8].copy_from_slice(&hash.to_le_bytes());
+                rec[8..].copy_from_slice(&id.to_le_bytes());
+                w.write_all(&rec)?;
+            }
+            w.flush()?;
+        }
+        self.pairs.clear();
+        self.runs.push(run);
+        Ok(())
     }
 
     /// Write the shard to `dest` atomically (tmp + fsync + rename).
@@ -186,55 +302,57 @@ impl ShardBuilder {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(ShardError::Io(error)),
         }
+        if let Some(error) = self.spill_error.take() {
+            return Err(ShardError::Io(error));
+        }
+
+        // Merge every run plus the in-memory tail into sorted-by-gram
+        // lookup and postings sections, each written to its own temp file.
+        pixel_git::sidecar::private_dir(&self.spill_dir)?;
+        let lookup_tmp = SpillFile(self.unique_path("lookup"));
+        let postings_tmp = SpillFile(self.unique_path("postings"));
+        let (gram_count, postings_len) = {
+            self.pairs.sort_unstable();
+            let mut sources = Vec::with_capacity(self.runs.len() + 1);
+            sources.push(PairSource::Memory(std::mem::take(&mut self.pairs).into_iter()));
+            for run in &self.runs {
+                sources.push(PairSource::Disk(BufReader::with_capacity(
+                    MERGE_BUF,
+                    fs::File::open(&run.0)?,
+                )));
+            }
+            let mut lookup = BufWriter::new(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&lookup_tmp.0)?,
+            );
+            let mut postings = BufWriter::new(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&postings_tmp.0)?,
+            );
+            let counts = merge_pairs(sources, &mut lookup, &mut postings)?;
+            lookup.flush()?;
+            postings.flush()?;
+            counts
+        };
+
         {
             let file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
             let mut w = BufWriter::new(file);
 
-            // Sections are assembled in memory first (v1 simplicity; the
-            // external-sort streaming builder is a later optimization).
             let mut files_buf: Vec<u8> = Vec::new();
             for path in &self.files {
                 files_buf.extend_from_slice(&(path.len() as u32).to_le_bytes());
                 files_buf.extend_from_slice(path.as_bytes());
             }
-
-            let mut hashes: Vec<u64> = self.postings.keys().copied().collect();
-            hashes.sort_unstable();
-
-            // Parallel delta-varint encoding: each gram's posting list is
-            // independent. Encode in parallel, then assemble sequentially.
-            let postings = std::mem::take(&mut self.postings);
-            let encoded: Vec<(u64, Vec<u8>)> = hashes
-                .par_iter()
-                .map(|&h| {
-                    let ids = &postings[&h];
-                    let mut buf = Vec::with_capacity(ids.len() * 2);
-                    let mut prev = 0u32;
-                    for (i, &id) in ids.iter().enumerate() {
-                        let delta = if i == 0 { id } else { id - prev };
-                        write_varint(&mut buf, delta);
-                        prev = id;
-                    }
-                    (h, buf)
-                })
-                .collect();
-            drop(postings);
-
-            let mut lookup_buf: Vec<u8> = Vec::with_capacity(encoded.len() * LOOKUP_RECORD);
-            let total_postings_est: usize = encoded.iter().map(|(_, b)| b.len()).sum();
-            let mut postings_buf: Vec<u8> = Vec::with_capacity(total_postings_est);
-            for (h, buf) in encoded {
-                let start = postings_buf.len() as u64;
-                postings_buf.extend_from_slice(&buf);
-                let len = postings_buf.len() as u64 - start;
-                lookup_buf.extend_from_slice(&h.to_le_bytes());
-                lookup_buf.extend_from_slice(&start.to_le_bytes());
-                lookup_buf.extend_from_slice(&(len as u32).to_le_bytes());
-            }
+            let lookup_len = gram_count * LOOKUP_RECORD as u64;
 
             let files_off = HEADER_LEN as u64;
             let lookup_off = files_off + files_buf.len() as u64;
-            let postings_off = lookup_off + lookup_buf.len() as u64;
+            let postings_off = lookup_off + lookup_len;
 
             let mut header = [0u8; HEADER_LEN];
             header[0..8].copy_from_slice(MAGIC);
@@ -247,24 +365,87 @@ impl ShardBuilder {
             let ex = self.extractor_id.as_bytes();
             header[56..56 + ex.len().min(64)].copy_from_slice(&ex[..ex.len().min(64)]);
             header[120..124].copy_from_slice(&(self.files.len() as u32).to_le_bytes());
-            header[124..132].copy_from_slice(&(hashes.len() as u64).to_le_bytes());
+            header[124..132].copy_from_slice(&gram_count.to_le_bytes());
             header[132..140].copy_from_slice(&files_off.to_le_bytes());
             header[140..148].copy_from_slice(&(files_buf.len() as u64).to_le_bytes());
             header[148..156].copy_from_slice(&lookup_off.to_le_bytes());
-            header[156..164].copy_from_slice(&(lookup_buf.len() as u64).to_le_bytes());
+            header[156..164].copy_from_slice(&lookup_len.to_le_bytes());
             header[164..172].copy_from_slice(&postings_off.to_le_bytes());
-            header[172..180].copy_from_slice(&(postings_buf.len() as u64).to_le_bytes());
+            header[172..180].copy_from_slice(&postings_len.to_le_bytes());
 
             w.write_all(&header)?;
             w.write_all(&files_buf)?;
-            w.write_all(&lookup_buf)?;
-            w.write_all(&postings_buf)?;
+            io::copy(&mut BufReader::new(fs::File::open(&lookup_tmp.0)?), &mut w)?;
+            io::copy(&mut BufReader::new(fs::File::open(&postings_tmp.0)?), &mut w)?;
             w.flush()?;
             w.get_ref().sync_all()?;
         }
         fs::rename(&tmp, dest)?;
         Ok(())
     }
+}
+
+/// Merge sorted pair sources into the lookup and postings streams. Returns
+/// (gram count, postings bytes). Ids within a gram ascend, so each posting
+/// list is delta-varint encoded exactly as the in-memory builder did.
+fn merge_pairs<L: Write, P: Write>(
+    mut sources: Vec<PairSource>,
+    lookup: &mut L,
+    postings: &mut P,
+) -> io::Result<(u64, u64)> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    let mut heap = BinaryHeap::with_capacity(sources.len());
+    for (index, source) in sources.iter_mut().enumerate() {
+        if let Some(pair) = source.next_pair()? {
+            heap.push(Reverse((pair, index)));
+        }
+    }
+
+    // The gram currently being emitted: hash, postings offset, byte length,
+    // last file id written.
+    let mut open: Option<(u64, u64, u32, u32)> = None;
+    let mut grams = 0u64;
+    let mut total = 0u64;
+    let mut scratch = Vec::with_capacity(8);
+
+    while let Some(Reverse(((hash, id), index))) = heap.pop() {
+        if let Some(pair) = sources[index].next_pair()? {
+            heap.push(Reverse((pair, index)));
+        }
+        let delta = match open {
+            Some((open_hash, _, _, prev)) if open_hash == hash => id - prev,
+            _ => {
+                if let Some((open_hash, start, len, _)) = open.take() {
+                    write_lookup(lookup, open_hash, start, len)?;
+                }
+                grams += 1;
+                id
+            }
+        };
+        scratch.clear();
+        write_varint(&mut scratch, delta);
+        postings.write_all(&scratch)?;
+        let written = scratch.len() as u32;
+        total += u64::from(written);
+        open = Some(match open {
+            Some((open_hash, start, len, _)) if open_hash == hash => {
+                (open_hash, start, len + written, id)
+            }
+            _ => (hash, total - u64::from(written), written, id),
+        });
+    }
+    if let Some((hash, start, len, _)) = open {
+        write_lookup(lookup, hash, start, len)?;
+    }
+    Ok((grams, total))
+}
+
+fn write_lookup<L: Write>(lookup: &mut L, hash: u64, start: u64, len: u32) -> io::Result<()> {
+    lookup.write_all(&hash.to_le_bytes())?;
+    lookup.write_all(&start.to_le_bytes())?;
+    lookup.write_all(&len.to_le_bytes())
 }
 
 // --- reader ---
@@ -821,6 +1002,43 @@ mod tests {
         assert!(
             matches!(Shard::open(&path), Err(ShardError::Corrupt(reason)) if reason == "file path exceeds safety cap")
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A build that spills many sorted runs to disk must produce exactly the
+    /// bytes of an in-memory build of the same files, and leave no run files
+    /// behind.
+    #[test]
+    fn spilled_build_is_byte_identical_to_in_memory_build() {
+        let dir = std::env::temp_dir().join(format!("gpx-spill-eq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files: Vec<(String, Vec<u64>)> = (0..300u64)
+            .map(|i| {
+                (
+                    format!("dir/f{i:04}.rs"),
+                    (0..40u64).map(|k| (i * 7919 + k * 104_729) % 97).collect(),
+                )
+            })
+            .collect();
+        let build = |run_pairs: usize, name: &str| {
+            let dest = dir.join(name);
+            let mut builder = ShardBuilder::with_spill("trigram", dir.clone(), run_pairs);
+            builder.set_commit_oid("abc123");
+            for (path, hashes) in &files {
+                builder.add_file(path, hashes.clone());
+            }
+            builder.write(&dest).unwrap();
+            std::fs::read(&dest).unwrap()
+        };
+        let in_memory = build(usize::MAX, "mem.shard");
+        let spilled = build(17, "spill.shard");
+        assert_eq!(in_memory, spilled);
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.ends_with(".shard"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover spill files: {leftovers:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
