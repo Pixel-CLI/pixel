@@ -64,8 +64,8 @@ pub const MAX_FILE_BYTES: usize = 524_288;
 /// or below.
 ///
 /// Sized from measurements (2026-09-27): yespark-rails, the largest
-/// repository at hand, has 11 299 eligible files, and 50 000 is the graph
-/// builder's own walk ceiling (`PIXEL_GRAPH_MAX_FILES`). A home directory
+/// repository at hand, has 11 299 eligible files, and 50 000 was the graph
+/// builder's own walk ceiling until its builds were bounded in memory. A home directory
 /// has 347 611: uncapped, that is about 1.5 million chunks, some 1.5 GB of
 /// vectors held in memory and minutes of embedding, never persisted there.
 pub const UNBUDGETED_FILE_CEILING: usize = 50_000;

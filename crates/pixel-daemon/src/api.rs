@@ -1150,7 +1150,7 @@ impl Service {
     ///
     /// Without a git anchor (no `.git`) the same path applies: the walk
     /// (`policy_walk`, which respects .gitignore in gitless trees) is capped
-    /// by `PIXEL_GRAPH_MAX_FILES` (default 50000) and the signature is
+    /// only when `PIXEL_GRAPH_MAX_FILES` asks for it, and the signature is
     /// file-hash-based, so drift detection works without git.
     fn ensure_graph(&mut self) -> Result<Option<Value>, String> {
         if self.graph.is_some() {

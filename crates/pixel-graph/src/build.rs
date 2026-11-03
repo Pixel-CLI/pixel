@@ -296,24 +296,21 @@ fn rel_path(root: &Path, path: &Path) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// Maximum number of source files to collect in a single walk when there is
-/// no git anchor. With a git repo, `git ls-files` bounds the file set to
-/// tracked files only; without git, the walk could traverse an entire home
-/// directory or a vendored monorepo. This cap prevents pathological cases
-/// from hanging the daemon. Override with `PIXEL_GRAPH_MAX_FILES=0` (disables)
-/// or a positive integer. Default 50000 — generous for any real project,
-/// but stops a runaway walk on a mis-rooted or huge directory.
-const DEFAULT_GRAPH_MAX_FILES: usize = 50_000;
+/// The file cap every full build ran under before builds were bounded in
+/// memory instead: a graph that recorded no cap
+/// ([`GRAPH_FILE_CAP_KEY`]), or one that no longer parses, was built under
+/// it. No build applies it any more.
+const LEGACY_GRAPH_MAX_FILES: usize = 50_000;
 
 /// The build-time file cap in force, as an evaluation reports it: `None`
-/// when the environment lifted it, so "the cap was hit" is never claimed
-/// where no cap applies.
+/// unless `PIXEL_GRAPH_MAX_FILES` asks for one, so "the cap was hit" is
+/// never claimed where no cap applies.
 ///
 /// This reads the *current* environment, so it is only correct at build
 /// time. An evaluation must ask [`stored_graph_file_cap`] what the loaded
 /// graph was actually built under.
 pub fn graph_file_cap() -> Option<usize> {
-    graph_max_files().filter(|&n| n != usize::MAX)
+    graph_max_files()
 }
 
 /// Meta key: the file cap that was in force when the graph was last built
@@ -337,18 +334,15 @@ const GRAPH_FILE_CAP_NONE: &str = "none";
 /// reports `false` for a walk that did stop at a cap, narrowing a published
 /// limit instead of widening it.
 ///
-/// A graph written before this key existed reports the built-in default
-/// rather than today's environment. Both are guesses about a build nobody
-/// recorded, but the constant cannot drift between build and evaluation,
+/// A graph written before this key existed reports the cap every build
+/// then ran under ([`LEGACY_GRAPH_MAX_FILES`]) rather than today's
+/// environment: the constant cannot drift between build and evaluation,
 /// and the next full build replaces it with the truth.
 pub fn stored_graph_file_cap(store: &GraphStore) -> Result<Option<usize>, StoreError> {
     match store.meta_get(GRAPH_FILE_CAP_KEY)? {
         Some(value) if value == GRAPH_FILE_CAP_NONE => Ok(None),
-        Some(value) => Ok(value
-            .parse::<usize>()
-            .ok()
-            .or(Some(DEFAULT_GRAPH_MAX_FILES))),
-        None => Ok(Some(DEFAULT_GRAPH_MAX_FILES)),
+        Some(value) => Ok(value.parse::<usize>().ok().or(Some(LEGACY_GRAPH_MAX_FILES))),
+        None => Ok(Some(LEGACY_GRAPH_MAX_FILES)),
     }
 }
 
@@ -357,15 +351,16 @@ fn graph_file_cap_value(cap: Option<usize>) -> String {
     cap.map_or_else(|| GRAPH_FILE_CAP_NONE.to_string(), |n| n.to_string())
 }
 
+/// The file cap `PIXEL_GRAPH_MAX_FILES` asks for, if any: a positive count.
+/// Unset, `0` or unparsable, the walk is unbounded. The full build holds a
+/// bounded amount of memory whatever the tree's size (`BatchLimits`), so
+/// the cap is an explicit opt-in, never a default.
 fn graph_max_files() -> Option<usize> {
-    match std::env::var("PIXEL_GRAPH_MAX_FILES") {
-        Ok(v) => v
-            .parse::<usize>()
-            .ok()
-            .filter(|&n| n > 0)
-            .or(Some(usize::MAX)),
-        Err(_) => Some(DEFAULT_GRAPH_MAX_FILES),
-    }
+    std::env::var("PIXEL_GRAPH_MAX_FILES")
+        .ok()?
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n > 0)
 }
 
 /// Why the build would not hold a path, or that it would. The variants are
@@ -2284,17 +2279,155 @@ mod tests {
     /// process-global, capping the walk of every graph built concurrently
     /// by another test in this binary.
     #[test]
-    fn the_reported_build_file_cap_should_be_the_default_when_nothing_overrides_it() {
+    fn the_reported_build_file_cap_should_be_none_when_nothing_asks_for_one() {
         assert!(
             std::env::var_os("PIXEL_GRAPH_MAX_FILES").is_none(),
             "this test describes the unconfigured default; the variable is set"
         );
         assert_eq!(
             graph_file_cap(),
-            Some(DEFAULT_GRAPH_MAX_FILES),
-            "an unconfigured build is capped, and the cap it reports is the \
-             one `collect_files` stops at"
+            None,
+            "an unconfigured build walks the whole tree, and reports no cap"
         );
+    }
+
+    /// The build used to stop reading at 50 000 files, the only thing that
+    /// kept its memory in check. A tree past that publishes whole now: every
+    /// file stored, signed fresh, with no cap recorded.
+    #[test]
+    fn a_tree_with_more_files_than_the_old_cap_should_publish_whole() {
+        let root = tmpdir("past-cap");
+        let files = LEGACY_GRAPH_MAX_FILES + 1;
+        for i in 0..files {
+            let dir = root.join(format!("d{}", i / 1000));
+            if i % 1000 == 0 {
+                std::fs::create_dir_all(&dir).unwrap();
+            }
+            std::fs::write(
+                dir.join(format!("f{i}.py")),
+                format!("def f{i}():\n    return g()\n"),
+            )
+            .unwrap();
+        }
+        let db = root.join(".pixel").join("graph.db");
+        let stats = build_graph(&root, &db).unwrap();
+        assert_eq!(stats.files, files as u64);
+        assert_eq!(stats.drifted, 0);
+        assert!(is_fresh(&root, &db));
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(stored_graph_file_cap(&store).unwrap(), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The variable [`a_build_in_small_batches_should_hold_little_memory`]
+    /// hands the tree to build through to the process it starts, and the
+    /// one that says to build it in a single batch.
+    const RSS_PROBE_ROOT: &str = "PIXEL_GRAPH_TEST_RSS_ROOT";
+    const RSS_PROBE_WHOLE: &str = "PIXEL_GRAPH_TEST_RSS_WHOLE";
+
+    /// Not a test on its own: the process
+    /// [`a_build_in_small_batches_should_hold_little_memory`] starts runs
+    /// it, alone, to build the tree it names and print the process's peak
+    /// RSS. Run directly, it has no tree and does nothing.
+    #[test]
+    #[ignore = "run by a_build_in_small_batches_should_hold_little_memory"]
+    fn rss_probe_build() {
+        let Some(root) = std::env::var_os(RSS_PROBE_ROOT) else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let limits = if std::env::var_os(RSS_PROBE_WHOLE).is_some() {
+            BatchLimits {
+                files: usize::MAX,
+                bytes: u64::MAX,
+                resolve: staging::ResolveLimits {
+                    files: usize::MAX,
+                    sites: i64::MAX as usize,
+                    cache_bytes: usize::MAX,
+                },
+            }
+        } else {
+            BatchLimits {
+                files: 64,
+                bytes: 1024 * 1024,
+                resolve: staging::ResolveLimits {
+                    files: 64,
+                    sites: 4096,
+                    cache_bytes: 1024 * 1024,
+                },
+            }
+        };
+        let db = root.join(".pixel").join("graph.db");
+        let _ = std::fs::remove_file(&db);
+        let stats = build_graph_batched(&root, &db, RustSource::V1, RubySource::V1, limits, |_| {
+            Ok(())
+        })
+        .unwrap();
+        println!(
+            "\nfiles={} peak_rss_kb={}",
+            stats.files, stats.phases.peak_rss_kb
+        );
+    }
+
+    /// The build holds a batch at a time, not the tree. Each build runs in
+    /// a process of its own (`ru_maxrss` is per process, and this binary
+    /// runs its tests on threads): over 3 000 files, a build in batches of
+    /// 64 files peaks under half of what the same build peaks at holding
+    /// the whole tree in one batch, the way every build did before (72 MB
+    /// against 183 MB when this was written).
+    #[test]
+    fn a_build_in_small_batches_should_hold_little_memory() {
+        let root = tmpdir("rss");
+        let files = 3_000;
+        // About 2 KB a file: 30 functions, each calling the next.
+        for i in 0..files {
+            let mut body = String::new();
+            for f in 0..30 {
+                body.push_str(&format!(
+                    "def f{i}_{f}(x):\n    return f{i}_{}(x) + 1\n\n",
+                    f + 1
+                ));
+            }
+            std::fs::write(root.join(format!("m{i}.py")), body).unwrap();
+        }
+        let peak = |whole: bool| -> u64 {
+            let mut probe = std::process::Command::new(std::env::current_exe().unwrap());
+            probe
+                .args([
+                    "build::tests::rss_probe_build",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(RSS_PROBE_ROOT, &root);
+            if whole {
+                probe.env(RSS_PROBE_WHOLE, "1");
+            }
+            let out = probe.output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success(),
+                "{stdout}{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let field = |key: &str| -> u64 {
+                stdout
+                    .split_whitespace()
+                    .find_map(|kv| kv.strip_prefix(key))
+                    .unwrap_or_else(|| panic!("no {key} in {stdout}"))
+                    .parse()
+                    .unwrap()
+            };
+            assert_eq!(field("files="), files);
+            field("peak_rss_kb=")
+        };
+        let (small, whole) = (peak(false), peak(true));
+        assert!(
+            small * 2 < whole,
+            "batches of 64 files peak at {small} KiB, one batch at {whole} KiB"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A build that fails before its commit publishes nothing: the rows and
@@ -2431,18 +2564,15 @@ mod tests {
     /// "no cap applies", never "there is one and I lost it": a file absent
     /// from the graph is blamed on the cap only when one was in force.
     #[test]
-    fn graph_file_cap_is_the_build_default_unless_the_environment_lifts_it() {
+    fn graph_file_cap_is_none_unless_the_environment_asks_for_one() {
         assert!(
             std::env::var("PIXEL_GRAPH_MAX_FILES").is_err(),
             "no test in this binary may set PIXEL_GRAPH_MAX_FILES: it is \
              process-global and this assertion is what keeps the default \
              below meaningful"
         );
-        assert_eq!(graph_file_cap(), Some(DEFAULT_GRAPH_MAX_FILES));
-        // The two agree while a cap applies; they part only at `usize::MAX`,
-        // which is how `PIXEL_GRAPH_MAX_FILES=0` spells "no cap".
+        assert_eq!(graph_file_cap(), None);
         assert_eq!(graph_file_cap(), graph_max_files());
-        assert_eq!(Some(usize::MAX).filter(|&n| n != usize::MAX), None);
     }
 
     /// `indexability` is what names the motif of a changed file the graph
@@ -4769,13 +4899,13 @@ mod tests {
         assert_eq!(stored_graph_file_cap(&store).unwrap(), Some(7));
 
         // A graph written before the key existed, and one whose value no
-        // longer parses, both fall back to the built-in default rather than
-        // to whatever this process's environment happens to say.
+        // longer parses, both fall back to the cap builds then ran under
+        // rather than to whatever this process's environment happens to say.
         for unusable in ["", "not-a-number"] {
             store.meta_set(GRAPH_FILE_CAP_KEY, unusable).unwrap();
             assert_eq!(
                 stored_graph_file_cap(&store).unwrap(),
-                Some(DEFAULT_GRAPH_MAX_FILES),
+                Some(LEGACY_GRAPH_MAX_FILES),
                 "`{unusable}` must not be read as a cap"
             );
         }
