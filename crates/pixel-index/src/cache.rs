@@ -56,6 +56,15 @@ fn cache_base_dir() -> Option<PathBuf> {
     Some(base.join("pixel").join("shards"))
 }
 
+/// Disk directory for the builder's spill runs: a sibling of the shard cache,
+/// never scanned by `evict_cache`, so eviction cannot remove a build's
+/// in-flight runs. Created 0700. `None` when no cache directory exists.
+pub fn spill_dir() -> Option<PathBuf> {
+    let dir = cache_dir()?.parent()?.join("spill");
+    pixel_git::sidecar::private_dir(&dir).ok()?;
+    Some(dir)
+}
+
 /// Returns the shard cache directory, creating it (0700) if needed.
 /// Returns `None` when no usable cache directory can be determined —
 /// callers must treat `None` as "cache disabled" and fall through to

@@ -603,6 +603,9 @@ struct BuiltShard {
     unreadable: usize,
 }
 
+/// Files hashed per chunk while building a git-anchored shard.
+const BUILD_CHUNK_FILES: usize = 4096;
+
 /// Build a git-anchored shard from an explicit repo-relative file list,
 /// extracting every blob from the git object store at `commit_oid` (parallel).
 fn build_shard_from(
@@ -613,29 +616,32 @@ fn build_shard_from(
     dest: &Path,
     prune_default: bool,
 ) -> Result<BuiltShard, IndexSetError> {
-    let admitted: Vec<&String> = rel_paths
+    let mut admitted: Vec<&String> = rel_paths
         .iter()
         .filter(|rel| !is_internal(rel))
         .filter(|rel| !prune_default || !rel.split('/').any(crate::index::is_ignored_dir_name))
         .collect();
-    let outcomes: Vec<BlobExtraction> = admitted
-        .par_chunks(batch_len(admitted.len(), rayon::current_num_threads()))
-        .flat_map_iter(|chunk| extract_blobs(root, commit_oid, chunk, extractor))
-        .collect();
-    let mut unreadable = 0;
-    let mut extracted: Vec<(String, Vec<u64>)> = Vec::with_capacity(outcomes.len());
-    for outcome in outcomes {
-        match outcome {
-            BlobExtraction::Indexed(rel, hashes) => extracted.push((rel, hashes)),
-            BlobExtraction::Skipped => {}
-            BlobExtraction::Unreadable => unreadable += 1,
-        }
-    }
-    extracted.sort_by(|a, b| a.0.cmp(&b.0));
+    // File ids follow path order. Blobs are hashed and handed to the builder
+    // a bounded chunk at a time: hashing the whole tree before building held
+    // every file's gram hashes in memory at once.
+    admitted.sort();
     let mut builder = ShardBuilder::new(&extractor.id());
     builder.set_commit_oid(commit_oid);
-    for (rel, hashes) in extracted {
-        builder.add_file(&rel, hashes);
+    let mut unreadable = 0;
+    for chunk in admitted.chunks(BUILD_CHUNK_FILES) {
+        let outcomes: Vec<BlobExtraction> = chunk
+            .par_chunks(batch_len(chunk.len(), rayon::current_num_threads()))
+            .flat_map_iter(|batch| extract_blobs(root, commit_oid, batch, extractor))
+            .collect();
+        for outcome in outcomes {
+            match outcome {
+                BlobExtraction::Indexed(rel, hashes) => {
+                    builder.add_file(&rel, hashes);
+                }
+                BlobExtraction::Skipped => {}
+                BlobExtraction::Unreadable => unreadable += 1,
+            }
+        }
     }
     builder.write(dest)?;
     Ok(BuiltShard {
