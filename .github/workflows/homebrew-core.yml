@@ -80,6 +80,8 @@ jobs:
           PIXEL_SOURCE_URL="file://$src" \
             python3 scripts/release/homebrew-core-formula.py "v$version" "$src" "$RUNNER_TEMP/local.rb"
           brew tap-new --no-git local/core
+          # Homebrew refuses to load a formula from a tap nobody trusted.
+          brew trust local/core
           echo "FORMULA=$(brew --repository)/Library/Taps/local/homebrew-core/Formula/pixel.rb" >> "$GITHUB_ENV"
 
       # On the formula as a homebrew-core pull request would carry it: the
