@@ -295,9 +295,11 @@ mod tests {
 
     #[test]
     fn backup_if_changing_writes_a_copy_only_when_the_content_differs() {
-        let dir = std::env::temp_dir().join(format!("pixel-backup-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-backup-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path();
         let file = dir.join("settings.json");
         assert_eq!(
             backup_if_changing(&file, b"new").unwrap(),
@@ -316,10 +318,10 @@ mod tests {
         assert_eq!(fs::read(&backup).unwrap(), b"old");
         let name = backup.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with("settings.json.pixel-bak."), "{name}");
-        assert_eq!(backup.parent(), Some(dir.as_path()));
+        assert_eq!(backup.parent(), Some(dir));
         let second = backup_if_changing(&file, b"new").unwrap().unwrap();
         assert_ne!(second, backup, "every backup gets a fresh name");
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(dir);
     }
 
     fn flat(command: &str) -> serde_json::Value {

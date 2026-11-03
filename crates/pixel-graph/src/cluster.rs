@@ -299,15 +299,11 @@ mod tests {
     /// daemon's `clusters` op would silently pass on as "no clusters".
     #[test]
     fn compute_persists_a_cluster_for_a_connected_call_group() {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-cluster-compute-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let root_dir = tempfile::Builder::new()
+            .prefix("pixel-cluster-compute-")
+            .tempdir()
+            .unwrap();
+        let root = root_dir.path();
         std::fs::write(
             root.join("ring.ts"),
             "export function alpha() { return beta() + delta() }\n\
@@ -317,7 +313,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let mut store = GraphStore::open(&db).unwrap();
 
         let summaries = compute(&mut store).unwrap();
@@ -351,7 +347,6 @@ mod tests {
         );
 
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

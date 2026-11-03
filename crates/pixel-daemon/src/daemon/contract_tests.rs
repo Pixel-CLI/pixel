@@ -258,7 +258,7 @@ fn default_corpus_should_watch_its_root_and_do_nothing_on_sweep_or_ready() {
 /// directory at the same path (#1107), which `is_dir` alone never saw.
 #[test]
 fn root_replaced_should_follow_the_opened_directory_not_the_path() {
-    let root = tempfile_root("root-replaced");
+    let (_root_scratch, root) = tempfile_root("root-replaced");
     let opened = root_identity(&root);
     assert!(opened.is_some());
     assert!(!root_replaced(&root, opened), "the same directory");
@@ -286,7 +286,7 @@ fn root_replaced_should_follow_the_opened_directory_not_the_path() {
 #[test]
 fn record_event_should_skip_directories_and_mark_a_vanished_path_removed() {
     use notify::event::{DataChange, ModifyKind};
-    let root = tempfile_root("record-dir");
+    let (_root_scratch, root) = tempfile_root("record-dir");
     let dir = root.join("src");
     std::fs::create_dir_all(&dir).unwrap();
     let gone = root.join("gone.rs");
@@ -325,17 +325,17 @@ fn flush_pending_should_apply_nothing_and_keep_the_deadline_when_nothing_is_pend
     assert_eq!(first_pending_at, deadline);
 }
 
-fn tempfile_root(tag: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "pixel-daemon-contract-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+/// A repository root under a fresh scratch directory that is removed when the
+/// returned guard drops. The root sits one level down so a test can make
+/// siblings of it (`root.with_extension(..)`) that are removed with it.
+fn tempfile_root(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("pixel-daemon-contract-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let root = scratch.path().join("root");
     std::fs::create_dir_all(&root).unwrap();
-    root.canonicalize().unwrap()
+    (scratch, root.canonicalize().unwrap())
 }
 
 // -- the repository Service as a corpus -------------------------------------------
@@ -371,7 +371,7 @@ fn search_hits(service: &mut Service, pattern: &str) -> Vec<String> {
 
 #[test]
 fn service_apply_change_should_index_an_added_file_and_drop_a_removed_one() {
-    let root = tempfile_root("service-apply");
+    let (_root_scratch, root) = tempfile_root("service-apply");
     std::fs::write(root.join("a.rs"), "fn zorblax_one() {}\n").unwrap();
     let mut service = Service::open(&root).unwrap();
     assert_eq!(search_hits(&mut service, "zorblax"), vec!["a.rs"]);
@@ -388,9 +388,9 @@ fn service_apply_change_should_index_an_added_file_and_drop_a_removed_one() {
 
 #[test]
 fn service_apply_change_should_ignore_paths_outside_the_root_and_the_root_itself() {
-    let root = tempfile_root("service-outside");
+    let (_root_scratch, root) = tempfile_root("service-outside");
     std::fs::write(root.join("a.rs"), "fn quixel_one() {}\n").unwrap();
-    let outside = tempfile_root("service-outside-other");
+    let (_outside_scratch, outside) = tempfile_root("service-outside-other");
     std::fs::write(outside.join("o.rs"), "fn quixel_two() {}\n").unwrap();
     let mut service = Service::open(&root).unwrap();
 
@@ -409,7 +409,7 @@ fn service_apply_change_should_ignore_paths_outside_the_root_and_the_root_itself
 
 #[test]
 fn service_apply_changes_should_apply_a_batch_of_adds_and_removals() {
-    let root = tempfile_root("service-batch");
+    let (_root_scratch, root) = tempfile_root("service-batch");
     std::fs::write(root.join("a.rs"), "fn vexlor_one() {}\n").unwrap();
     let mut service = Service::open(&root).unwrap();
     std::fs::remove_file(root.join("a.rs")).unwrap();
@@ -426,7 +426,7 @@ fn service_apply_changes_should_apply_a_batch_of_adds_and_removals() {
 /// down, is visible without a profiler.
 #[test]
 fn service_status_should_report_the_watch_once_it_is_live() {
-    let root = tempfile_root("service-watch-report");
+    let (_root_scratch, root) = tempfile_root("service-watch-report");
     let mut service = Service::open(&root).unwrap();
     let status = |service: &mut Service| {
         let resp = Corpus::handle(service, Request::Status {});
@@ -454,7 +454,7 @@ fn service_status_should_report_the_watch_once_it_is_live() {
 
 #[test]
 fn service_watcher_error_should_be_counted_in_status() {
-    let root = tempfile_root("service-watcher-error");
+    let (_root_scratch, root) = tempfile_root("service-watcher-error");
     let mut service = Service::open(&root).unwrap();
     service.watcher_error("queue overflow");
     service.watcher_error("queue overflow");

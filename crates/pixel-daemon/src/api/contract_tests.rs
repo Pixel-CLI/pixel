@@ -9,17 +9,13 @@
 use super::*;
 use std::path::PathBuf;
 
-fn tmpdir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "pixel-daemon-api-contract-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d.canonicalize().unwrap()
+fn tmpdir(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("pixel-daemon-api-contract-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let d = scratch.path().canonicalize().unwrap();
+    (scratch, d)
 }
 
 /// Through `GitRunner`, the one sanctioned git spawner (this file is a
@@ -36,8 +32,8 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// `login` is called once by `go`; `helper` is defined twice, so a bare
 /// `helper` is ambiguous.
-fn fixture(tag: &str) -> PathBuf {
-    let root = tmpdir(tag);
+fn fixture(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let (scratch, root) = tmpdir(tag);
     std::fs::write(
         root.join("login.rs"),
         "pub fn login(user: &str) -> bool { !user.is_empty() }\npub fn helper() {}\n",
@@ -51,7 +47,7 @@ fn fixture(tag: &str) -> PathBuf {
     git(&root, &["init", "-q"]);
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "init"]);
-    root
+    (scratch, root)
 }
 
 /// The envelope of `req`, as the socket would serialize it.
@@ -95,7 +91,7 @@ fn names(candidates: &Value) -> Vec<String> {
 
 #[test]
 fn ping_should_report_the_root_and_the_protocol_version_without_epistemics() {
-    let root = tmpdir("ping");
+    let (_scratch, root) = tmpdir("ping");
     let mut service = Service::open(&root).unwrap();
     let env = call(&mut service, Request::Ping);
     assert_eq!(env["ok"], true);
@@ -112,7 +108,7 @@ fn ping_should_report_the_root_and_the_protocol_version_without_epistemics() {
 
 #[test]
 fn recall_should_be_refused_with_the_daemon_that_serves_it() {
-    let root = tmpdir("recall");
+    let (_scratch, root) = tmpdir("recall");
     let mut service = Service::open(&root).unwrap();
     let (code, message) = err(
         &mut service,
@@ -130,7 +126,7 @@ fn recall_should_be_refused_with_the_daemon_that_serves_it() {
 
 #[test]
 fn a_retrieval_answer_should_carry_epistemics_and_a_compact_snapshot() {
-    let root = fixture("envelope-retrieval");
+    let (_scratch, root) = fixture("envelope-retrieval");
     let mut service = Service::open(&root).unwrap();
     let env = call(
         &mut service,
@@ -161,7 +157,7 @@ fn a_retrieval_answer_should_carry_epistemics_and_a_compact_snapshot() {
 
 #[test]
 fn symbol_should_list_every_definition_of_a_shared_name_with_its_file() {
-    let root = fixture("symbol-shared");
+    let (_scratch, root) = fixture("symbol-shared");
     let mut service = Service::open(&root).unwrap();
     let out = ok(
         &mut service,
@@ -186,7 +182,7 @@ fn symbol_should_list_every_definition_of_a_shared_name_with_its_file() {
 
 #[test]
 fn skeleton_should_accept_an_absolute_path_inside_the_root_and_name_a_missing_file() {
-    let root = fixture("skeleton");
+    let (_scratch, root) = fixture("skeleton");
     let mut service = Service::open(&root).unwrap();
     let out = ok(
         &mut service,
@@ -222,7 +218,7 @@ fn skeleton_should_accept_an_absolute_path_inside_the_root_and_name_a_missing_fi
 
 #[test]
 fn context_should_return_candidates_for_an_ambiguous_name_and_not_found_for_an_unknown_one() {
-    let root = fixture("context");
+    let (_scratch, root) = fixture("context");
     let mut service = Service::open(&root).unwrap();
     let out = ok(
         &mut service,
@@ -269,7 +265,7 @@ fn context_should_return_candidates_for_an_ambiguous_name_and_not_found_for_an_u
 
 #[test]
 fn impact_and_trace_should_stop_at_an_ambiguous_name_with_its_candidates() {
-    let root = fixture("impact-ambiguous");
+    let (_scratch, root) = fixture("impact-ambiguous");
     let mut service = Service::open(&root).unwrap();
     let impact = ok(
         &mut service,
@@ -310,7 +306,7 @@ fn impact_and_trace_should_stop_at_an_ambiguous_name_with_its_candidates() {
 
 #[test]
 fn impact_should_name_a_uid_that_matches_nothing() {
-    let root = fixture("impact-uid");
+    let (_scratch, root) = fixture("impact-uid");
     let mut service = Service::open(&root).unwrap();
     let (code, message) = err(
         &mut service,
@@ -331,7 +327,7 @@ fn impact_should_name_a_uid_that_matches_nothing() {
 
 #[test]
 fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty() {
-    let root = fixture("uses");
+    let (_scratch, root) = fixture("uses");
     let mut service = Service::open(&root).unwrap();
     let callers = ok(
         &mut service,
@@ -404,7 +400,7 @@ fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty()
 
 #[test]
 fn uses_callees_should_mark_a_lower_bound_when_the_symbol_has_unresolved_calls() {
-    let root = tmpdir("uses-unresolved");
+    let (_scratch, root) = tmpdir("uses-unresolved");
     std::fs::write(
         root.join("a.rs"),
         "pub fn outer() { mystery_external(); }\n",
@@ -435,7 +431,7 @@ fn uses_callees_should_mark_a_lower_bound_when_the_symbol_has_unresolved_calls()
 
 #[test]
 fn rename_should_refuse_a_new_name_that_is_not_an_identifier() {
-    let root = fixture("rename-ident");
+    let (_scratch, root) = fixture("rename-ident");
     let mut service = Service::open(&root).unwrap();
     for bad in ["", "9lives", "has-dash", "with space"] {
         let (code, message) = err(
@@ -458,7 +454,7 @@ fn rename_should_refuse_a_new_name_that_is_not_an_identifier() {
 
 #[test]
 fn rename_should_disambiguate_by_file_and_name_what_it_could_not_find() {
-    let root = fixture("rename-scope");
+    let (_scratch, root) = fixture("rename-scope");
     let mut service = Service::open(&root).unwrap();
     let ambiguous = ok(
         &mut service,
@@ -541,7 +537,7 @@ fn rename_should_disambiguate_by_file_and_name_what_it_could_not_find() {
 
 #[test]
 fn rename_dry_run_should_list_the_edits_and_leave_every_file_untouched() {
-    let root = fixture("rename-dry");
+    let (_scratch, root) = fixture("rename-dry");
     let mut service = Service::open(&root).unwrap();
     let before_login = std::fs::read_to_string(root.join("login.rs")).unwrap();
     let before_caller = std::fs::read_to_string(root.join("caller.rs")).unwrap();
@@ -579,7 +575,7 @@ fn rename_dry_run_should_list_the_edits_and_leave_every_file_untouched() {
 
 #[test]
 fn rename_should_rewrite_the_definition_and_its_call_sites_and_answer_from_the_new_tree() {
-    let root = fixture("rename-apply");
+    let (_scratch, root) = fixture("rename-apply");
     let mut service = Service::open(&root).unwrap();
     let out = ok(
         &mut service,
@@ -617,7 +613,7 @@ fn rename_should_rewrite_the_definition_and_its_call_sites_and_answer_from_the_n
 
 #[test]
 fn note_should_round_trip_and_key_absolute_and_dot_relative_paths_alike() {
-    let root = fixture("notes");
+    let (_scratch, root) = fixture("notes");
     let mut service = Service::open(&root).unwrap();
     let note = |action: &str, file: Option<String>, target: Option<&str>, text: Option<&str>| {
         Request::Note {
@@ -674,7 +670,7 @@ fn note_should_round_trip_and_key_absolute_and_dot_relative_paths_alike() {
 
 #[test]
 fn note_should_name_the_arguments_each_action_requires() {
-    let root = tmpdir("notes-usage");
+    let (_scratch, root) = tmpdir("notes-usage");
     let mut service = Service::open(&root).unwrap();
     let cases = [
         (
@@ -739,7 +735,7 @@ fn note_should_name_the_arguments_each_action_requires() {
 
 #[test]
 fn map_should_list_files_in_path_order_and_render_the_markdown_projection() {
-    let root = fixture("map");
+    let (_scratch, root) = fixture("map");
     std::fs::create_dir_all(root.join("sub")).unwrap();
     std::fs::write(root.join("sub/deep.rs"), "pub fn deep() {}\n").unwrap();
     let mut service = Service::open(&root).unwrap();
@@ -782,7 +778,7 @@ fn map_should_list_files_in_path_order_and_render_the_markdown_projection() {
 
 #[test]
 fn lifecycle_should_require_a_path_or_a_token() {
-    let root = fixture("lifecycle");
+    let (_scratch, root) = fixture("lifecycle");
     let mut service = Service::open(&root).unwrap();
     let (code, message) = err(
         &mut service,
@@ -798,7 +794,7 @@ fn lifecycle_should_require_a_path_or_a_token() {
 
 #[test]
 fn lifecycle_should_report_coverage_for_a_token_found_nowhere() {
-    let root = fixture("lifecycle-token");
+    let (_scratch, root) = fixture("lifecycle-token");
     let mut service = Service::open(&root).unwrap();
     let out = ok(
         &mut service,
@@ -833,7 +829,7 @@ fn lifecycle_should_report_coverage_for_a_token_found_nowhere() {
 /// a clean refusal while the same op without the flag still builds it.
 #[test]
 fn read_only_history_ops_should_refuse_a_facts_db_that_was_never_built() {
-    let root = fixture("read-only-absent");
+    let (_scratch, root) = fixture("read-only-absent");
     let mut service = Service::open(&root).unwrap();
     for req in [
         Request::History {
@@ -890,7 +886,7 @@ fn read_only_history_ops_should_refuse_a_facts_db_that_was_never_built() {
 /// newer commit in-band.
 #[test]
 fn read_only_history_should_answer_the_stale_index_without_ingesting() {
-    let root = fixture("read-only-stale");
+    let (_scratch, root) = fixture("read-only-stale");
     let mut facts = FactsStore::open(&root).unwrap();
     let report = pixel_facts::ingest::ingest_until_fresh_within(
         &mut facts,
@@ -969,7 +965,7 @@ fn read_only_history_should_answer_the_stale_index_without_ingesting() {
 
 #[test]
 fn journal_should_record_the_event_with_whichever_fields_were_given() {
-    let root = tmpdir("journal");
+    let (_scratch, root) = tmpdir("journal");
     let mut service = Service::open(&root).unwrap();
     let mut ids = Vec::new();
     for (path, detail) in [
@@ -998,7 +994,7 @@ fn journal_should_record_the_event_with_whichever_fields_were_given() {
 
 #[test]
 fn evaluate_should_refuse_an_unknown_traversal_or_tier_instead_of_answering_another_question() {
-    let root = fixture("evaluate-args");
+    let (_scratch, root) = fixture("evaluate-args");
     let mut service = Service::open(&root).unwrap();
     let request = |traversal: Option<&str>, tiers: Option<&str>| Request::Evaluate {
         from: "go".into(),
@@ -1069,7 +1065,7 @@ fn evaluate_request_parse_should_fill_the_documented_defaults() {
 
 #[test]
 fn status_should_say_the_graph_is_absent_until_one_is_built() {
-    let root = fixture("status");
+    let (_scratch, root) = fixture("status");
     let mut service = Service::open(&root).unwrap();
     let before = ok(&mut service, Request::Status {});
     assert_eq!(before["graph"], json!({"present": false}));
@@ -1086,7 +1082,7 @@ fn status_should_say_the_graph_is_absent_until_one_is_built() {
 
 #[test]
 fn status_should_report_a_graph_file_it_cannot_open() {
-    let root = fixture("status-broken-graph");
+    let (_scratch, root) = fixture("status-broken-graph");
     let mut service = Service::open(&root).unwrap();
     let db = service.graph_db_path();
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
@@ -1107,7 +1103,7 @@ fn status_should_report_a_graph_file_it_cannot_open() {
 /// the machine-wide model cache (`$HOME`), so only its type is pinned.
 #[test]
 fn status_should_report_the_embedding_warmth_probe() {
-    let root = fixture("status-embedding");
+    let (_scratch, root) = fixture("status-embedding");
     let mut service = Service::open(&root).unwrap();
     let out = ok(&mut service, Request::Status {});
     let embedding = &out["embedding"];
@@ -1151,7 +1147,7 @@ fn meaning_until(service: &mut Service, check: impl Fn(&Value) -> bool) -> Value
 /// envelope naming that its leads are unverified.
 #[test]
 fn meaning_should_answer_warming_then_ranked_leads_in_a_lower_bound_envelope() {
-    let root = fixture("meaning-envelope");
+    let (_scratch, root) = fixture("meaning-envelope");
     let mut service = Service::open(&root).unwrap();
     let (meaning, release) = crate::meaning::testing::gated(&root);
     service.set_meaning(meaning);
@@ -1230,7 +1226,7 @@ fn meaning_should_answer_warming_then_ranked_leads_in_a_lower_bound_envelope() {
 
 #[test]
 fn meaning_should_refuse_a_blank_question_as_invalid_input() {
-    let root = fixture("meaning-blank");
+    let (_scratch, root) = fixture("meaning-blank");
     let mut service = Service::open(&root).unwrap();
     service.set_meaning(crate::meaning::testing::meaning(&root));
     let (code, message) = err(
@@ -1251,7 +1247,7 @@ fn meaning_should_refuse_a_blank_question_as_invalid_input() {
 /// starting the build itself.
 #[test]
 fn a_watcher_batch_should_rebuild_the_vectors_that_were_asked_for() {
-    let root = fixture("meaning-nudge");
+    let (_scratch, root) = fixture("meaning-nudge");
     let mut service = Service::open(&root).unwrap();
     let meaning = crate::meaning::testing::meaning(&root);
     service.set_meaning(Arc::clone(&meaning));
@@ -1286,7 +1282,7 @@ fn a_watcher_batch_should_rebuild_the_vectors_that_were_asked_for() {
 /// starts nothing; built, it ranks within the bundle's limit.
 #[test]
 fn read_evidence_should_rank_meaning_from_shared_vectors_and_never_build_them() {
-    let root = fixture("meaning-evidence");
+    let (_scratch, root) = fixture("meaning-evidence");
     let mut service = Service::open(&root).unwrap();
     let (meaning, opened) = crate::meaning::testing::counting(&root);
     service.set_meaning(Arc::clone(&meaning));
@@ -1330,7 +1326,7 @@ fn read_evidence_should_rank_meaning_from_shared_vectors_and_never_build_them() 
 
 #[test]
 fn graph_if_stale_should_keep_a_fresh_graph_and_say_so() {
-    let root = fixture("graph-if-stale");
+    let (_scratch, root) = fixture("graph-if-stale");
     let mut service = Service::open(&root).unwrap();
     let full = ok(&mut service, Request::Graph { if_stale: false });
     assert_eq!(
@@ -1392,7 +1388,7 @@ fn merge_build_info_should_attach_a_build_only_when_there_is_one_and_an_object_t
 
 #[test]
 fn remove_sqlite_files_should_remove_the_database_and_both_sidecars_and_accept_their_absence() {
-    let dir = tmpdir("sqlite-files");
+    let (_scratch, dir) = tmpdir("sqlite-files");
     let db = dir.join("graph.db");
     for path in [
         db.clone(),
@@ -1412,7 +1408,7 @@ fn remove_sqlite_files_should_remove_the_database_and_both_sidecars_and_accept_t
 
 #[test]
 fn remove_sqlite_files_should_report_a_path_it_cannot_remove() {
-    let dir = tmpdir("sqlite-files-dir");
+    let (_scratch, dir) = tmpdir("sqlite-files-dir");
     let db = dir.join("graph.db");
     std::fs::create_dir_all(&db).unwrap();
     let error = remove_sqlite_files(&db).unwrap_err();
@@ -1546,7 +1542,7 @@ fn derive_epistemics_should_name_the_source_basis_staleness_and_confidence() {
 
 #[test]
 fn fan_in_counts_should_count_incoming_calls_per_candidate_file() {
-    let root = fixture("fan-in");
+    let (_scratch, root) = fixture("fan-in");
     let mut service = Service::open(&root).unwrap();
     service.ensure_graph().unwrap();
     let store = service.graph.as_ref().unwrap();
@@ -1631,7 +1627,7 @@ fn fan_in_counts_should_name_a_query_that_failed() {
 /// fan-in and still counts it.
 #[test]
 fn resolve_should_count_no_fan_in_and_targets_should() {
-    let root = fixture("fan-in-ops");
+    let (_scratch, root) = fixture("fan-in-ops");
     let mut service = Service::open(&root).unwrap();
     service.ensure_graph().unwrap();
     let resolved = service.handle(Request::Resolve {
@@ -1659,7 +1655,7 @@ fn resolve_should_count_no_fan_in_and_targets_should() {
 /// build writes both, and status reads them again.
 #[test]
 fn requests_should_still_answer_after_a_panic_poisoned_both_locks() {
-    let root = fixture("poisoned-locks");
+    let (_scratch, root) = fixture("poisoned-locks");
     let mut service = Service::open(&root).unwrap();
     let publication = Arc::clone(&service.publication);
     let index = Arc::clone(&service.index);
@@ -1687,7 +1683,7 @@ fn requests_should_still_answer_after_a_panic_poisoned_both_locks() {
 /// take turns: every rebuild succeeds and one clean database remains.
 #[test]
 fn two_builders_on_one_root_should_take_turns_and_leave_one_clean_graph() {
-    let root = fixture("two-builders");
+    let (_scratch, root) = fixture("two-builders");
     let builders: Vec<_> = (0..2)
         .map(|_| {
             let root = root.clone();
@@ -1721,7 +1717,7 @@ fn two_builders_on_one_root_should_take_turns_and_leave_one_clean_graph() {
 /// A watcher batch never waits on the graph lock; a graph op does.
 #[test]
 fn graph_lock_try_acquire_should_be_refused_while_another_holds_it() {
-    let root = tmpdir("graph-lock");
+    let (_scratch, root) = tmpdir("graph-lock");
     let db = root.join(GRAPH_DB_FILE);
     let held = GraphLock::acquire(&db).unwrap();
     assert!(GraphLock::try_acquire(&db).is_none(), "held elsewhere");

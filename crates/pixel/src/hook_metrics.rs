@@ -827,6 +827,7 @@ mod tests {
         root: PathBuf,
         saved_home: Option<std::ffi::OsString>,
         saved_metrics: Option<std::ffi::OsString>,
+        _tmp: tempfile::TempDir,
     }
 
     impl MetricsFixture {
@@ -834,15 +835,11 @@ mod tests {
         /// record, plus a fake HOME so no real global config leaks in and
         /// no inherited `PIXEL_METRICS` overrides the effective-env tests.
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "pixel-metrics-hook-{}-{}-{}",
-                name,
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let _dir_tmp = tempfile::Builder::new()
+                .prefix(&format!("pixel-metrics-hook-{name}-"))
+                .tempdir()
+                .unwrap();
+            let dir = _dir_tmp.path().to_path_buf();
             let root = dir.join("repo");
             std::fs::create_dir_all(root.join(".pixel")).unwrap();
             let root = canonical(&root);
@@ -859,6 +856,7 @@ mod tests {
                 root,
                 saved_home,
                 saved_metrics,
+                _tmp: _dir_tmp,
             };
             fixture.record("impact", "impact src/login.rs");
             fixture

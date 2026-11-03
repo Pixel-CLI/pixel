@@ -775,17 +775,15 @@ pub(crate) fn replay_frames(events: &[TrajectoryEvent]) -> Result<Vec<ReplayFram
 mod tests {
     use super::*;
 
-    struct Scratch(std::path::PathBuf);
+    struct Scratch(std::path::PathBuf, #[allow(dead_code)] tempfile::TempDir);
     impl Scratch {
         fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!(
-                "pixel-task-bridge-{}-{}",
-                crate::task_commands::request(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            std::fs::create_dir(&root).unwrap();
-            Self(root)
+            let _root_tmp = tempfile::Builder::new()
+                .prefix("pixel-task-bridge-")
+                .tempdir()
+                .unwrap();
+            let root = _root_tmp.path().to_path_buf();
+            Self(root, _root_tmp)
         }
     }
     impl Drop for Scratch {

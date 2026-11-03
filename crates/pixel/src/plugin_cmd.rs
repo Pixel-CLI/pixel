@@ -404,12 +404,15 @@ mod tests {
     use clap::CommandFactory;
     use std::os::unix::fs::PermissionsExt;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-plugin-cmd-{tag}-{}", std::process::id()));
+    fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-plugin-cmd-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        (_dir_tmp, dir)
     }
 
     fn host_at(dir: &Path) -> Host {
@@ -433,7 +436,7 @@ mod tests {
 
     #[test]
     fn a_name_in_the_table_that_no_plugin_provides_gets_the_hint_and_exit_two() {
-        let dir = scratch("hint");
+        let (_dir_tmp, dir) = scratch("hint");
         let host = host_at(&dir);
         let table = [("made-up-cmd", "pixel-made-up")];
         let Plan::Stop(message, code) = plan(&host, "made-up-cmd", &[], env(), &table) else {
@@ -449,7 +452,7 @@ mod tests {
 
     #[test]
     fn a_removed_name_names_its_replacement_and_drops_the_install_once_the_plugin_runs() {
-        let dir = scratch("removed");
+        let (_dir_tmp, dir) = scratch("removed");
         let host = host_at(&dir);
         let table = [("commit-history", "pixel-git")];
         let Plan::Stop(message, code) = plan(&host, "ready", &[], env(), &table) else {
@@ -482,7 +485,7 @@ mod tests {
 
     #[test]
     fn a_name_outside_the_table_is_left_to_clap() {
-        let dir = scratch("unknown");
+        let (_dir_tmp, dir) = scratch("unknown");
         let host = host_at(&dir);
         assert!(matches!(
             plan(
@@ -503,7 +506,7 @@ mod tests {
 
     #[test]
     fn a_plugin_on_path_wins_over_the_hint_and_receives_the_args() {
-        let dir = scratch("path");
+        let (_dir_tmp, dir) = scratch("path");
         let host = host_at(&dir);
         let exe = dir.join("bin/pixel-made-up-cmd");
         std::fs::write(&exe, "#!/bin/sh\n").unwrap();
@@ -525,7 +528,7 @@ mod tests {
 
     #[test]
     fn a_resolution_failure_stops_with_its_reason_and_exit_one() {
-        let dir = scratch("untrusted");
+        let (_dir_tmp, dir) = scratch("untrusted");
         let host = Host {
             repo_root: Some(dir.join("repo")),
             ..host_at(&dir)

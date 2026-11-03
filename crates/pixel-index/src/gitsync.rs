@@ -116,21 +116,13 @@ pub fn status_porcelain(root: &Path) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::process::Command;
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "pixel-index-gitsync-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmpdir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("pixel-index-gitsync-{tag}-"))
+            .tempdir()
+            .unwrap()
     }
 
     fn git(dir: &Path, args: &[&str]) {
@@ -176,7 +168,8 @@ mod tests {
     #[test]
     fn ls_files_sees_every_tracked_file_past_the_old_1mib_cap_for_index_building() {
         const N: usize = 5300; // ~5300 * ~250 bytes ≈ 1.3 MiB of `ls-files -z` output
-        let root = tmpdir("indexset-large-tree");
+        let root_guard = tmpdir("indexset-large-tree");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
 
         let dir = format!("tracked-{}", "x".repeat(240));
@@ -214,7 +207,8 @@ mod tests {
     #[test]
     fn status_porcelain_sees_a_large_untracked_tree_past_the_old_1mib_cap() {
         const N: usize = 5300;
-        let root = tmpdir("gitsync-status-large");
+        let root_guard = tmpdir("gitsync-status-large");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::write(root.join("tracked.txt"), b"hello").unwrap();
         git(&root, &["add", "tracked.txt"]);
@@ -240,7 +234,8 @@ mod tests {
     /// of one over it, and missing for a path the commit lacks.
     #[test]
     fn cat_file_blobs_answers_every_spec_from_the_commit() {
-        let dir = tmpdir("cat-file-blobs");
+        let dir_guard = tmpdir("cat-file-blobs");
+        let dir = dir_guard.path().to_path_buf();
         init_repo(&dir);
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
         std::fs::write(dir.join("big.txt"), "0123456789A").unwrap();
@@ -271,7 +266,8 @@ mod tests {
 
     #[test]
     fn diff_name_status_lists_each_changed_path_with_its_status() {
-        let root = tmpdir("diff-name-status");
+        let root_guard = tmpdir("diff-name-status");
+        let root = root_guard.path().to_path_buf();
         init_repo(&root);
         std::fs::write(root.join("keep.txt"), b"1").unwrap();
         std::fs::write(root.join("gone.txt"), b"1").unwrap();

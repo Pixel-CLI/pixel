@@ -88,7 +88,8 @@ mod tests {
 
     #[test]
     fn confine_should_join_a_plain_path_inside_the_root() {
-        let root = tmpdir("confine-ok");
+        let root_guard = tmpdir("confine-ok");
+        let root = root_guard.path().canonicalize().unwrap();
         fs::create_dir_all(root.join("src")).unwrap();
         assert_eq!(confine(&root, "src/a.rs").unwrap(), root.join("src/a.rs"));
         // A link that stays inside the root is not an escape.
@@ -101,8 +102,10 @@ mod tests {
 
     #[test]
     fn confine_should_refuse_a_path_that_leaves_the_root() {
-        let root = tmpdir("confine-escape");
-        let outside = tmpdir("confine-outside");
+        let root_guard = tmpdir("confine-escape");
+        let root = root_guard.path().canonicalize().unwrap();
+        let outside_guard = tmpdir("confine-outside");
+        let outside = outside_guard.path().canonicalize().unwrap();
         symlink(&outside, root.join("link")).unwrap();
         for rel in ["../x", "/etc/passwd", "link/credentials", "link/a/b"] {
             let error = confine(&root, rel).unwrap_err();

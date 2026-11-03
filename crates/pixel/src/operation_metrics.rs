@@ -364,15 +364,16 @@ mod tests {
     }
 
     /// A scratch directory holding one file of `len` bytes, unique per test.
-    fn scratch_file(name: &str, len: usize) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-operation-metrics-{name}-{}",
-            std::process::id()
-        ));
+    fn scratch_file(name: &str, len: usize) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-operation-metrics-{name}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("big.py");
         std::fs::write(&file, "x".repeat(len)).unwrap();
-        (dir, file)
+        (_dir_tmp, dir, file)
     }
 
     /// `list-signatures` stands in for reading the file it lists, so its
@@ -381,7 +382,7 @@ mod tests {
     /// policy estimate instead of inventing a size.
     #[test]
     fn only_a_whole_file_reader_naming_one_real_file_is_measured() {
-        let (dir, file) = scratch_file("measured", 41);
+        let (_scratch_file_tmp, dir, file) = scratch_file("measured", 41);
         let one = HashSet::from([file.clone()]);
         assert_eq!(whole_file_bytes("list-signatures", &one), Some(41));
         assert_eq!(whole_file_bytes("find-code", &one), None);
@@ -404,7 +405,7 @@ mod tests {
     /// as a full read. Another command keeps the policy fields unchanged.
     #[test]
     fn a_measured_read_carries_the_file_size_and_no_assumed_command() {
-        let (dir, file) = scratch_file("evidence", 41);
+        let (_scratch_file_tmp, dir, file) = scratch_file("evidence", 41);
         let e = Evidence {
             root: dir.clone(),
             files: HashSet::from([file]),

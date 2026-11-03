@@ -2215,10 +2215,11 @@ mod tests {
     /// stdout case each change exactly one of them.
     #[test]
     fn shell_path_check_reports_each_shell_outcome() {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-doctor-shell-path-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-doctor-shell-path-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path();
         let make_shell = |tag: &str, lookup: &str, body: &str| {
             let shell = dir.join(tag);
             std::fs::write(
@@ -2287,7 +2288,7 @@ mod tests {
             .expect_err("a spawn failure is red");
         assert!(err.contains("failed to run shell"), "{err}");
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A login shell stuck in its startup files is reported, never waited
@@ -2295,9 +2296,11 @@ mod tests {
     /// production holds the shell to five seconds.
     #[test]
     fn shell_path_check_reports_a_shell_that_does_not_answer_in_time() {
-        let dir = std::env::temp_dir().join(format!("pixel-doctor-timeout-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-doctor-timeout-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path();
         let shell = dir.join("slow-zsh");
         std::fs::write(&shell, "#!/bin/sh\nsleep 5\n").unwrap();
         #[cfg(unix)]
@@ -2310,7 +2313,7 @@ mod tests {
             .expect_err("a stalled shell is red, not a hang");
         assert!(err.contains("did not answer within"), "{err}");
         assert!(err.contains(&format!("{timeout:?}")), "{err}");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The overview line is the only authority the check trusts: the three
@@ -2415,11 +2418,11 @@ mod tests {
     /// mapping is an error, not a silent `none`.
     #[test]
     fn web_search_config_reads_yaml_or_absent() {
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-doctor-web-search-config-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-doctor-web-search-config-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path();
         let home = dir.join("home");
         std::fs::create_dir_all(home.join(".pixel")).unwrap();
 
@@ -2444,7 +2447,7 @@ mod tests {
             "a malformed config is an error, not a silent none"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The check's verdict over a scratch home: `none` is a yellow
@@ -2452,11 +2455,11 @@ mod tests {
     /// green, and an unreadable config is red.
     #[test]
     fn web_search_provider_check_reads_the_config_and_maps_its_verdict() {
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-doctor-web-search-check-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-doctor-web-search-check-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path();
         let home = dir.join("home");
         std::fs::create_dir_all(home.join(".pixel")).unwrap();
 
@@ -2483,7 +2486,7 @@ mod tests {
             .expect_err("a malformed config is red");
         assert!(err.contains("invalid configuration"), "{err}");
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// `env_non_empty` drives the env leg of the check: a value counts as
@@ -2802,9 +2805,11 @@ mod tests {
     fn probe_daemon_epistemics_reads_one_answer_from_the_socket() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
-        let dir = std::env::temp_dir().join(format!("pixel-probe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-probe-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path();
         for (answer, expected) in [
             (
                 r#"{"ok":true,"op":"search","epistemics":{"basis":"x"}}"#,
@@ -2851,7 +2856,7 @@ mod tests {
         }
         let err = probe_daemon_epistemics(&dir.join("absent.sock")).unwrap_err();
         assert!(err.starts_with("connect: "), "{err}");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // -- rule-vs-binary parity: extraction + normalization ------------------

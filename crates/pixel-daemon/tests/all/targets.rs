@@ -10,9 +10,12 @@ use pixel_daemon::{Request, Service};
 
 use crate::support::git;
 
-fn fixture(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("gpx-targets-{tag}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+fn fixture(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("gpx-targets-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let dir = scratch.path().to_path_buf();
     std::fs::create_dir_all(dir.join("src/auth")).unwrap();
     std::fs::create_dir_all(dir.join("src/util")).unwrap();
     std::fs::write(
@@ -33,7 +36,7 @@ fn fixture(tag: &str) -> std::path::PathBuf {
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "fixture"]);
-    dir
+    (scratch, dir)
 }
 
 fn run_targets(dir: &Path, task: &str) -> serde_json::Value {
@@ -51,7 +54,7 @@ fn run_targets(dir: &Path, task: &str) -> serde_json::Value {
 
 #[test]
 fn targets_tiers_reasons_and_closed_list() {
-    let dir = fixture("main");
+    let (_scratch, dir) = fixture("main");
     let data = run_targets(&dir, "fix `login_user` auth flow");
 
     let targets = data["targets"].as_array().unwrap();
@@ -96,7 +99,7 @@ fn targets_tiers_reasons_and_closed_list() {
 
 #[test]
 fn targets_is_deterministic() {
-    let dir = fixture("det");
+    let (_scratch, dir) = fixture("det");
     let a = run_targets(&dir, "fix `login_user` auth flow");
     let b = run_targets(&dir, "fix `login_user` auth flow");
     // stats.elapsed_ms varies; compare everything else.
@@ -111,7 +114,7 @@ fn targets_is_deterministic() {
 
 #[test]
 fn targets_rejects_empty_task() {
-    let dir = fixture("empty");
+    let (_scratch, dir) = fixture("empty");
     let mut svc = Service::open(&dir).unwrap();
     let resp = svc.handle(Request::Targets {
         task: "fix the code".to_string(),
@@ -144,8 +147,11 @@ fn targets_no_git_builds_graphless() {
     // `Service::open` uses the given path directly (not the upward
     // `discover_root` walk), so the root is precisely this dir.
 
-    let dir = std::env::temp_dir().join(format!("gpx-targets-nogit-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let scratch = tempfile::Builder::new()
+        .prefix("gpx-targets-nogit-")
+        .tempdir()
+        .unwrap();
+    let dir = scratch.path().to_path_buf();
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("src/login.rs"),

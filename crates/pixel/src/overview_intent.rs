@@ -234,27 +234,30 @@ mod tests {
     }
 
     /// A scratch directory holding empty files of the given names.
-    fn fixture(files: &[&str]) -> std::path::PathBuf {
+    fn fixture(files: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir =
-            std::env::temp_dir().join(format!("pixel-overview-intent-{}-{n}", std::process::id()));
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-overview-intent-{n}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         for name in files {
             std::fs::write(dir.join(name), "x").unwrap();
         }
-        dir
+        (_dir_tmp, dir)
     }
 
     #[test]
     fn the_answer_names_only_the_files_that_exist_in_reading_order() {
-        let dir = fixture(&["Cargo.toml", "README.md"]);
+        let (_dir_tmp, dir) = fixture(&["Cargo.toml", "README.md"]);
         assert_eq!(
             overview_answer(&dir),
             "no concept match; read README.md, Cargo.toml"
         );
-        let all = fixture(OVERVIEW_FILES);
+        let (_all_tmp, all) = fixture(OVERVIEW_FILES);
         assert_eq!(
             overview_answer(&all),
             "no concept match; read README.md, ARCHITECTURE.md, Cargo.toml"
@@ -265,7 +268,7 @@ mod tests {
 
     #[test]
     fn a_directory_named_like_a_description_file_is_not_offered() {
-        let dir = fixture(&[]);
+        let (_dir_tmp, dir) = fixture(&[]);
         std::fs::create_dir(dir.join("README.md")).unwrap();
         assert!(!overview_answer(&dir).contains("read README.md"));
         assert!(

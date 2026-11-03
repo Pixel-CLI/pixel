@@ -341,13 +341,16 @@ deleted file mode 100644
         assert!(status.success(), "git {args:?}");
     }
 
-    fn fixture(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-git-changes-{tag}-{}", std::process::id()));
+    fn fixture(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-git-changes-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         git(&dir, &["init", "-q", "-b", "main"]);
-        dir
+        (_dir_tmp, dir)
     }
 
     fn soon() -> Instant {
@@ -356,7 +359,7 @@ deleted file mode 100644
 
     #[test]
     fn changes_should_read_the_latest_commit_the_working_tree_and_the_branch() {
-        let dir = fixture("scopes");
+        let (_dir_tmp, dir) = fixture("scopes");
         std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         git(&dir, &["add", "."]);
         git(&dir, &["commit", "-q", "-m", "first"]);
@@ -431,7 +434,7 @@ deleted file mode 100644
 
     #[test]
     fn changes_should_read_the_only_commit_of_a_repository_and_fail_open_elsewhere() {
-        let dir = fixture("root");
+        let (_dir_tmp, dir) = fixture("root");
         std::fs::write(dir.join("a.txt"), "x\n").unwrap();
         git(&dir, &["add", "."]);
         git(&dir, &["commit", "-q", "-m", "root"]);
@@ -446,8 +449,11 @@ deleted file mode 100644
             "out of time"
         );
         // Not a repository.
-        let plain =
-            std::env::temp_dir().join(format!("pixel-git-changes-plain-{}", std::process::id()));
+        let _plain_tmp = tempfile::Builder::new()
+            .prefix("pixel-git-changes-plain-")
+            .tempdir()
+            .unwrap();
+        let plain = _plain_tmp.path().to_path_buf();
         std::fs::create_dir_all(&plain).unwrap();
         assert!(changes(&plain, ChangeScope::Latest, soon()).is_err());
         std::fs::remove_dir_all(&plain).unwrap();

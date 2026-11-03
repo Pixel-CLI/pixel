@@ -202,12 +202,15 @@ fn last_records(records: &[Value], limit: usize) -> Vec<Value> {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-prompts-cmd-{tag}-{}", std::process::id()));
+    fn scratch(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-prompts-cmd-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        (_dir_tmp, dir)
     }
 
     fn record(root: &str, ts: u64, gate: &str, kind: &str, typed: &str) -> Value {
@@ -216,7 +219,7 @@ mod tests {
 
     #[test]
     fn a_central_file_groups_by_the_root_each_line_carries() {
-        let dir = scratch("group");
+        let (_dir_tmp, dir) = scratch("group");
         let a = "/tmp/repo-a";
         let b = "/tmp/repo-b";
         let file = dir.join("abc.jsonl");
@@ -283,7 +286,8 @@ mod tests {
 
     #[test]
     fn a_missing_store_directory_reads_as_no_projects() {
-        let projects = read_from(&scratch("missing").join("nope"));
+        let (_missing_tmp, missing) = scratch("missing");
+        let projects = read_from(&missing.join("nope"));
         assert!(projects.is_empty());
     }
 }

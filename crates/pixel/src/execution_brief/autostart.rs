@@ -444,12 +444,12 @@ mod tests {
     }
 
     /// A repository on disk with its own settings, and an index when asked.
-    fn repo(tag: &str, settings: &str, indexed: bool) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-autostart-{tag}-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+    fn repo(tag: &str, settings: &str, indexed: bool) -> (tempfile::TempDir, PathBuf) {
+        let _root_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-autostart-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&root);
         let state = root.join(".pixel");
         std::fs::create_dir_all(&state).unwrap();
@@ -459,7 +459,7 @@ mod tests {
             std::fs::create_dir_all(&shard_dir).unwrap();
             std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b"x").unwrap();
         }
-        root
+        (_root_tmp, root)
     }
 
     #[test]
@@ -509,7 +509,7 @@ mod tests {
             ),
         ];
         for (tag, settings, indexed, expected) in cases {
-            let root = repo(tag, settings, indexed);
+            let (_root_tmp, root) = repo(tag, settings, indexed);
             // Names no test sets: the environment decides nothing here.
             let permit = Permit::read_with(
                 &root,
@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn the_environment_should_decide_over_the_settings() {
-        let root = repo("env", "brief: false\ndaemon_auto_start: false\n", true);
+        let (_root_tmp, root) = repo("env", "brief: false\ndaemon_auto_start: false\n", true);
         let brief_env = format!("PIXEL_TEST_AUTOSTART_BRIEF_{}", std::process::id());
         let start_env = format!("PIXEL_TEST_AUTOSTART_START_{}", std::process::id());
         // SAFETY: both names carry this test's process id and line of origin

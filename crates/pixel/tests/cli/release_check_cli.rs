@@ -12,9 +12,12 @@ use std::process::Output;
 
 use crate::support::pixel_command;
 
-fn fixture(tag: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("pixel-release-check-{tag}-{}", std::process::id()));
+fn fixture(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let _dir_tmp = tempfile::Builder::new()
+        .prefix(&format!("pixel-release-check-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let dir = _dir_tmp.path().to_path_buf();
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(dir.join("crates/pixel")).unwrap();
     std::fs::create_dir_all(dir.join("crates/pixel-ops")).unwrap();
@@ -39,7 +42,7 @@ fn fixture(tag: &str) -> PathBuf {
         "# Changelog\n\n## [Unreleased]\n\n## [0.2.3] - 2026-09-12\n\n### Added\n- a thing\n\n## [0.2.2] - 2026-09-11\n- older\n",
     )
     .unwrap();
-    dir
+    (_dir_tmp, dir)
 }
 
 fn write_lock(dir: &Path, cli_version: &str) {
@@ -63,7 +66,7 @@ fn pixel(dir: &Path, args: &[&str]) -> Output {
 
 #[test]
 fn consistent_release_passes_with_the_table_on_stdout() {
-    let dir = fixture("ok");
+    let (_dir_tmp, dir) = fixture("ok");
     let out = pixel(&dir, &["check-release", "v0.2.3"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{out:?}");
@@ -82,7 +85,7 @@ fn consistent_release_passes_with_the_table_on_stdout() {
 
 #[test]
 fn json_is_one_document_with_the_verdict_and_every_check() {
-    let dir = fixture("json");
+    let (_dir_tmp, dir) = fixture("json");
     let out = pixel(&dir, &["check-release", "--json", "refs/tags/v0.2.3"]);
     assert!(out.status.success(), "{out:?}");
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("single JSON document");
@@ -100,7 +103,7 @@ fn json_is_one_document_with_the_verdict_and_every_check() {
 
 #[test]
 fn stale_lock_fails_the_command_and_names_the_fix() {
-    let dir = fixture("stale");
+    let (_dir_tmp, dir) = fixture("stale");
     write_lock(&dir, "0.2.2");
     let out = pixel(&dir, &["check-release", "0.2.3"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -134,8 +137,11 @@ fn stale_lock_fails_the_command_and_names_the_fix() {
 
 #[test]
 fn tag_that_is_not_a_version_is_rejected_before_reading_files() {
-    let dir =
-        std::env::temp_dir().join(format!("pixel-release-check-absent-{}", std::process::id()));
+    let _dir_tmp = tempfile::Builder::new()
+        .prefix("pixel-release-check-absent-")
+        .tempdir()
+        .unwrap();
+    let dir = _dir_tmp.path().to_path_buf();
     std::fs::remove_dir_all(&dir).ok();
     let out = pixel(&dir, &["check-release", "release-candidate"]);
     let stderr = String::from_utf8_lossy(&out.stderr);

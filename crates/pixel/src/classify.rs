@@ -3027,19 +3027,19 @@ mod tests {
         home_dir: std::path::PathBuf,
         saved: Vec<(String, Option<std::ffi::OsString>)>,
         _lock: std::sync::MutexGuard<'static, ()>,
+        _home_dir_tmp: tempfile::TempDir,
     }
 
     impl ScopedEnv {
         fn new(vars: &[(&str, Option<&str>)]) -> Self {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let lock = crate::ENV_LOCK
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let home_dir = std::env::temp_dir().join(format!(
-                "pixel-classify-test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
+            let _home_dir_tmp = tempfile::Builder::new()
+                .prefix("pixel-classify-test-")
+                .tempdir()
+                .unwrap();
+            let home_dir = _home_dir_tmp.path().to_path_buf();
             let mut saved: Vec<(String, Option<std::ffi::OsString>)> =
                 vec![("HOME".to_string(), std::env::var_os("HOME"))];
             for (name, _) in vars {
@@ -3061,6 +3061,7 @@ mod tests {
                 home_dir,
                 saved,
                 _lock: lock,
+                _home_dir_tmp,
             }
         }
 
@@ -3203,24 +3204,24 @@ mod tests {
 
     // ---- verified-history tier (issue #624) ----
 
-    fn history_store() -> crate::classify_history::HistoryStore {
-        crate::classify_history::HistoryStore::open(std::env::temp_dir().join(format!(
-            "pixel-classify-history-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )))
-        .unwrap()
+    fn history_store() -> (tempfile::TempDir, crate::classify_history::HistoryStore) {
+        let dir = tempfile::Builder::new()
+            .prefix("pixel-classify-history-")
+            .tempdir()
+            .unwrap();
+        let store =
+            crate::classify_history::HistoryStore::open(dir.path().join("history.json")).unwrap();
+        (dir, store)
     }
 
     fn history_spec(text: &str) -> Spec {
         spec(text, "the rubric", &["yes", "no"], &[("yes", "affirm")])
     }
 
-    fn history_tier_with(entries: &[(&str, &str)]) -> crate::classify_history::HistoryTier {
-        let mut store = history_store();
+    fn history_tier_with(
+        entries: &[(&str, &str)],
+    ) -> (tempfile::TempDir, crate::classify_history::HistoryTier) {
+        let (dir, mut store) = history_store();
         let s = history_spec("seed");
         for (text, label) in entries {
             store
@@ -3233,7 +3234,7 @@ mod tests {
                 ))
                 .unwrap();
         }
-        crate::classify_history::HistoryTier::new(store)
+        (dir, crate::classify_history::HistoryTier::new(store))
     }
 
     fn history_opts(text: &str) -> ClassifyOptions {
@@ -3259,7 +3260,7 @@ mod tests {
     fn history_accept_answers_before_the_model_and_never_opens_the_engine() {
         let calls: Arc<Mutex<Vec<Spec>>> = Arc::new(Mutex::new(Vec::new()));
         let calls_for_engine = Arc::clone(&calls);
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
+        let (_tier_dir, tier) = history_tier_with(&[("fix the login bug", "yes")]);
         let mut output = RecordingOutput::default();
         run_with(
             history_opts("fix the login bug"),
@@ -3298,7 +3299,7 @@ mod tests {
 
     #[test]
     fn history_accept_json_discloses_source_version_neighbours_and_scores() {
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
+        let (_tier_dir, tier) = history_tier_with(&[("fix the login bug", "yes")]);
         let mut output = RecordingOutput::default();
         let mut opts = history_opts("fix the login bug");
         opts.json = true;
@@ -3412,7 +3413,7 @@ mod tests {
     fn empty_history_preserves_current_behavior_and_consults_the_model() {
         let calls: Arc<Mutex<Vec<Spec>>> = Arc::new(Mutex::new(Vec::new()));
         let calls_for_engine = Arc::clone(&calls);
-        let tier = history_tier_with(&[]);
+        let (_tier_dir, tier) = history_tier_with(&[]);
         let mut output = RecordingOutput::default();
         run_with(
             history_opts("fix the login bug"),
@@ -3467,7 +3468,7 @@ mod tests {
         let calls_for_engine = Arc::clone(&calls);
         // One entry only: a close paraphrase clears the similarity threshold
         // but cannot reach the support threshold.
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
+        let (_tier_dir, tier) = history_tier_with(&[("fix the login bug", "yes")]);
         let mut output = RecordingOutput::default();
         run_with(
             history_opts("fix login bug"),
@@ -3740,7 +3741,7 @@ mod tests {
 
     #[test]
     fn history_json_abstention_discloses_the_reason_on_the_model_document() {
-        let tier = history_tier_with(&[]);
+        let (_tier_dir, tier) = history_tier_with(&[]);
         let mut output = RecordingOutput::default();
         let mut opts = history_opts("fix the login bug");
         opts.json = true;
@@ -3765,7 +3766,7 @@ mod tests {
         // tier is pure local computation, so a history accept returns before
         // any engine is opened and a history abstention keeps the warm-only
         // guarantee (the opener is never called for a cold engine).
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
+        let (_tier_dir, tier) = history_tier_with(&[("fix the login bug", "yes")]);
         let mut output = RecordingOutput::default();
         let mut opts = history_opts("fix the login bug");
         opts.if_warm = true;
@@ -3787,7 +3788,7 @@ mod tests {
     fn history_if_warm_abstention_keeps_the_no_start_no_network_guarantee() {
         // An empty history abstains; --if-warm then refuses the cold engine
         // exactly as it would without the tier — nothing is started.
-        let tier = history_tier_with(&[]);
+        let (_tier_dir, tier) = history_tier_with(&[]);
         let mut output = RecordingOutput::default();
         let mut opts = history_opts("fix the login bug");
         opts.if_warm = true;
@@ -3821,7 +3822,7 @@ mod tests {
     fn history_if_warm_accept_returns_before_any_engine_resolution() {
         // A history accept returns before resolve is called at all, so the
         // warm-only guarantee holds by construction: no probe, no start.
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
+        let (_tier_dir, tier) = history_tier_with(&[("fix the login bug", "yes")]);
         let mut output = RecordingOutput::default();
         let mut opts = history_opts("fix the login bug");
         opts.if_warm = true;
@@ -3841,7 +3842,7 @@ mod tests {
 
     #[test]
     fn history_document_carries_raw_vote_shares_not_calibrated_probabilities() {
-        let tier = history_tier_with(&[("fix the login bug", "yes")]);
+        let (_tier_dir, tier) = history_tier_with(&[("fix the login bug", "yes")]);
         let s = history_spec("fix the login bug");
         let verdict = match tier.evaluate(&s) {
             crate::classify_history::HistoryDecision::Accept(v) => v,

@@ -227,12 +227,15 @@ mod tests {
     const NOW: u64 = 1_800_000_000_000;
     const HOUR: u64 = 60 * 60 * 1_000;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-brief-sent-{tag}-{}", std::process::id()));
+    fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-brief-sent-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(".pixel")).unwrap();
-        dir
+        (_dir_tmp, dir)
     }
 
     fn range(path: &str, first: u64, last: u64) -> (String, u64, u64) {
@@ -260,7 +263,7 @@ mod tests {
 
     #[test]
     fn the_file_should_hold_hashes_and_numbers_and_never_a_path() {
-        let root = scratch("hashes");
+        let (_root_tmp, root) = scratch("hashes");
         record(
             &root,
             "session-one",
@@ -292,7 +295,7 @@ mod tests {
 
     #[test]
     fn what_was_sent_should_be_remembered_for_a_day_and_not_longer() {
-        let root = scratch("ttl");
+        let (_root_tmp, root) = scratch("ttl");
         record(&root, "s", &[range("a.rs", 1, 9)], NOW).unwrap();
         assert!(load(&root, "s", NOW + 23 * HOUR).overlaps("a.rs", 1, 9));
         assert!(!load(&root, "s", NOW + 25 * HOUR).overlaps("a.rs", 1, 9));
@@ -305,7 +308,7 @@ mod tests {
 
     #[test]
     fn a_session_should_never_see_what_another_was_sent() {
-        let root = scratch("sessions");
+        let (_root_tmp, root) = scratch("sessions");
         record(&root, "one", &[range("a.rs", 1, 9)], NOW).unwrap();
         assert!(load(&root, "one", NOW).overlaps("a.rs", 1, 9));
         assert!(load(&root, "two", NOW).is_empty());
@@ -313,7 +316,7 @@ mod tests {
 
     #[test]
     fn reset_should_forget_the_session_and_only_that_one() {
-        let root = scratch("reset");
+        let (_root_tmp, root) = scratch("reset");
         record(&root, "one", &[range("a.rs", 1, 9)], NOW).unwrap();
         record(&root, "two", &[range("a.rs", 1, 9)], NOW).unwrap();
         reset(&root, "one");
@@ -344,7 +347,7 @@ mod tests {
 
     #[test]
     fn a_damaged_or_foreign_file_should_be_nothing_sent() {
-        let root = scratch("damaged");
+        let (_root_tmp, root) = scratch("damaged");
         let path = file_for(&root, "s");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         for text in [
@@ -364,8 +367,8 @@ mod tests {
 
     #[test]
     fn a_linked_directory_should_refuse_the_record_and_leave_the_target_alone() {
-        let root = scratch("linked");
-        let elsewhere = scratch("linked-target");
+        let (_root_tmp, root) = scratch("linked");
+        let (_elsewhere_tmp, elsewhere) = scratch("linked-target");
         std::os::unix::fs::symlink(&elsewhere, root.join(".pixel").join(DIR)).unwrap();
         assert!(record(&root, "s", &[range("a.rs", 1, 2)], NOW).is_err());
         assert_eq!(
@@ -378,8 +381,11 @@ mod tests {
 
     #[test]
     fn a_repository_without_dot_pixel_should_not_get_one() {
-        let root =
-            std::env::temp_dir().join(format!("pixel-brief-sent-bare-{}", std::process::id()));
+        let _root_tmp = tempfile::Builder::new()
+            .prefix("pixel-brief-sent-bare-")
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         assert!(record(&root, "s", &[range("a.rs", 1, 2)], NOW).is_err());
@@ -388,7 +394,7 @@ mod tests {
 
     #[test]
     fn an_old_session_file_of_another_session_should_go_when_a_record_is_written() {
-        let root = scratch("prune");
+        let (_root_tmp, root) = scratch("prune");
         record(&root, "old", &[range("a.rs", 1, 2)], NOW).unwrap();
         let old = file_for(&root, "old");
         let long_ago = SystemTime::now() - TTL - Duration::from_secs(60);

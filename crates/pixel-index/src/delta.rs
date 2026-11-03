@@ -79,9 +79,11 @@ mod tests {
 
     #[test]
     fn save_replaces_temp_symlink_without_touching_target() {
-        let root = std::env::temp_dir().join(format!("gpx-state-link-{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::create_dir_all(&root).unwrap();
+        let root_guard = tempfile::Builder::new()
+            .prefix("gpx-state-link-")
+            .tempdir()
+            .unwrap();
+        let root = root_guard.path().to_path_buf();
         let external = root.join("external.txt");
         std::fs::write(&external, b"unchanged").unwrap();
         symlink(&external, root.join("state.json.tmp")).unwrap();
@@ -100,9 +102,11 @@ mod tests {
 
     #[test]
     fn load_rejects_each_oversized_field_on_its_own() {
-        let root = std::env::temp_dir().join(format!("gpx-state-bounds-{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::create_dir_all(&root).unwrap();
+        let root_guard = tempfile::Builder::new()
+            .prefix("gpx-state-bounds-")
+            .tempdir()
+            .unwrap();
+        let root = root_guard.path().to_path_buf();
         let ok = DeltaState {
             base_oid: "a".repeat(64),
             delta_oid: Some("b".repeat(64)),

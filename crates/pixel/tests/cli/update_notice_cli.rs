@@ -21,8 +21,12 @@ fn now() -> u64 {
 
 /// A cache directory whose state already knows a far newer release, checked
 /// just now: the binary has something to say and no reason to fetch.
-fn cache_knowing_newer_release(tag: &str) -> (PathBuf, String) {
-    let dir = std::env::temp_dir().join(format!("px-notice-{tag}-{}", std::process::id()));
+fn cache_knowing_newer_release(tag: &str) -> (tempfile::TempDir, PathBuf, String) {
+    let _dir_tmp = tempfile::Builder::new()
+        .prefix(&format!("px-notice-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let dir = _dir_tmp.path().to_path_buf();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("pixel")).unwrap();
     let state = format!(
@@ -30,7 +34,7 @@ fn cache_knowing_newer_release(tag: &str) -> (PathBuf, String) {
         now()
     );
     std::fs::write(dir.join("pixel/release-check.json"), &state).unwrap();
-    (dir, state)
+    (_dir_tmp, dir, state)
 }
 
 fn state_of(cache: &Path) -> String {
@@ -39,7 +43,7 @@ fn state_of(cache: &Path) -> String {
 
 #[test]
 fn a_piped_stderr_never_sees_the_notice_nor_starts_a_check() {
-    let (cache, state) = cache_knowing_newer_release("pipe");
+    let (_cache_knowing_newer_release_tmp, cache, state) = cache_knowing_newer_release("pipe");
     let out = pixel_command()
         .args(["doctor", "--list"])
         .env("XDG_CACHE_HOME", &cache)
@@ -94,7 +98,7 @@ fn installed_copy(dir: &Path) -> PathBuf {
 
 #[test]
 fn a_terminal_sees_the_notice_once_with_its_update_command() {
-    let (cache, _) = cache_knowing_newer_release("tty");
+    let (_cache_knowing_newer_release_tmp, cache, _) = cache_knowing_newer_release("tty");
     let bin = cache.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let exe = installed_copy(&bin);
@@ -120,7 +124,7 @@ fn the_opt_out_and_ci_silence_a_terminal_too() {
         ("optout", ("PIXEL_NO_UPDATE_CHECK", "1")),
         ("ci", ("CI", "true")),
     ] {
-        let (cache, state) = cache_knowing_newer_release(tag);
+        let (_cache_knowing_newer_release_tmp, cache, state) = cache_knowing_newer_release(tag);
         let bin = cache.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let exe = installed_copy(&bin);
