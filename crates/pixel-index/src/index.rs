@@ -210,8 +210,6 @@ pub fn indexable_subset(root: &Path, files: &HashSet<String>) -> HashSet<String>
 
 /// Time budget for the un-anchored plain-walk build (see [`build_with_budget`]).
 pub const DEFAULT_BUILD_BUDGET_MS: u64 = 5_000;
-/// Total extracted-bytes budget for the same path (memory bound).
-pub const DEFAULT_BUILD_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name).ok()?.trim().parse().ok()
@@ -223,14 +221,6 @@ pub fn build_budget_from_env() -> Option<std::time::Duration> {
         Some(0) => None,
         Some(ms) => Some(std::time::Duration::from_millis(ms)),
         None => Some(std::time::Duration::from_millis(DEFAULT_BUILD_BUDGET_MS)),
-    }
-}
-
-fn build_max_bytes_from_env() -> Option<u64> {
-    match env_u64("PIXEL_INDEX_MAX_BYTES") {
-        Some(0) => None,
-        Some(n) => Some(n),
-        None => Some(DEFAULT_BUILD_MAX_BYTES),
     }
 }
 
@@ -267,16 +257,6 @@ pub(crate) fn freshness_budget_error(
         elapsed.as_secs_f32(),
         budget.as_secs_f32(),
         files
-    ))
-}
-
-fn budget_bytes_error(files: usize, bytes: u64, cap: u64) -> IndexError {
-    IndexError::Budget(format!(
-        "index build exceeded its total-size cap: {} files / {:.2} GB > cap {:.2} GB, no shard written. \
-         Raise PIXEL_INDEX_MAX_BYTES=<bytes> (0 disables) or scope pixel at a git repo.",
-        files,
-        bytes as f32 / 1e9,
-        cap as f32 / 1e9
     ))
 }
 
@@ -375,11 +355,10 @@ pub fn shard_path(root: &Path) -> PathBuf {
 /// even in gitless trees), extract grams in parallel, write the shard.
 ///
 /// The plain-walk build runs under the time budget from
-/// [`build_budget_from_env`] and the total-bytes cap from
-/// [`build_max_bytes_from_env`] — with no commit OID bounding the file set,
-/// a huge or mis-rooted tree would otherwise walk and extract for minutes
-/// and eat gigabytes. On budget exhaustion it fails with
-/// [`IndexError::Budget`] instead of writing a partial shard.
+/// [`build_budget_from_env`]. There is no total-size cap: memory is bounded by
+/// the streaming shard writer, not by refusing large trees. On budget
+/// exhaustion it fails with [`IndexError::Budget`] instead of writing a
+/// partial shard.
 pub fn build(root: &Path, extractor: &dyn GramExtractor) -> Result<BuildStats, IndexError> {
     build_with_budget(root, extractor, build_budget_from_env())
 }
@@ -389,24 +368,17 @@ pub fn build_with_budget(
     extractor: &dyn GramExtractor,
     budget: Option<std::time::Duration>,
 ) -> Result<BuildStats, IndexError> {
-    build_with_caps(root, extractor, budget, build_max_bytes_from_env())
+    build_with_caps(root, extractor, budget)
 }
 
-/// [`build_with_budget`] with the total-size cap passed in rather than read
-/// from `PIXEL_INDEX_MAX_BYTES` (`None` disables it).
+/// Files extracted per chunk of a plain-walk build.
+const BUILD_CHUNK_FILES: usize = 4096;
+
 fn build_with_caps(
     root: &Path,
     extractor: &dyn GramExtractor,
     budget: Option<std::time::Duration>,
-    max_total_bytes: Option<u64>,
 ) -> Result<BuildStats, IndexError> {
-    /// One extracted file, as the rayon workers hand it back to the writer.
-    struct FileGrams {
-        rel: String,
-        bytes: u64,
-        hashes: Vec<u64>,
-    }
-
     use std::sync::atomic::Ordering;
     let started = std::time::Instant::now();
 
@@ -416,7 +388,6 @@ fn build_with_caps(
     // collection: on ruby/ruby (11 343 files) a one-thread walk costs about
     // 50 ms of a 550-700 ms `build-index`, which bounds what streaming paths
     // into the extraction could save.
-    let total_bytes = std::sync::atomic::AtomicU64::new(0);
     let budget_exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let file_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -462,11 +433,9 @@ fn build_with_caps(
     let extractor_id = extractor.id();
     let root_for_rel = root.to_path_buf();
 
-    let extracted: Vec<FileGrams> = {
+    let all_paths: Vec<PathBuf> = {
         let rx = std::sync::Mutex::new(rx);
-        let total_bytes = &total_bytes;
         let budget_exceeded = &budget_exceeded;
-        let max_total_bytes = &max_total_bytes;
         // Collect every path first, then extract in parallel (see above).
         let mut all_paths: Vec<PathBuf> = Vec::new();
         loop {
@@ -494,37 +463,8 @@ fn build_with_caps(
         }
         // Wait for walker to finish.
         let _ = walker_handle.join();
-
         all_paths.sort();
-
         all_paths
-            .par_iter()
-            .filter_map(|path| {
-                if max_total_bytes.is_some_and(|cap| total_bytes.load(Ordering::Relaxed) > cap) {
-                    return None;
-                }
-                let content = read_regular_bounded(path, MAX_FILE_BYTES).ok()?;
-                if content[..content.len().min(8192)].contains(&0) {
-                    return None;
-                }
-                total_bytes.fetch_add(content.len() as u64, Ordering::Relaxed);
-                let rel = path
-                    .strip_prefix(&root_for_rel)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .into_owned();
-                let mut hits = Vec::new();
-                extractor.grams(&content, &mut hits);
-                let mut hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
-                hashes.sort_unstable();
-                hashes.dedup();
-                Some(FileGrams {
-                    rel,
-                    bytes: content.len() as u64,
-                    hashes,
-                })
-            })
-            .collect()
     };
 
     let paths_count = file_count.load(Ordering::Relaxed);
@@ -536,31 +476,57 @@ fn build_with_caps(
         ));
     }
 
-    let bytes_seen = total_bytes.load(Ordering::Relaxed);
-    if let Some(cap) = max_total_bytes
-        && bytes_seen > cap
-    {
-        return Err(budget_bytes_error(paths_count, bytes_seen, cap));
+    // File ids follow path order. Files are extracted and handed to the
+    // builder a bounded chunk at a time, as `build_shard_from` does: the
+    // build no longer holds every file's gram hashes at once.
+    let mut builder = ShardBuilder::new(&extractor_id);
+    let mut stats = BuildStats {
+        files: 0,
+        bytes: 0,
+        grams: 0,
+        shard_bytes: 0,
+        elapsed_ms: 0,
+    };
+    for chunk in all_paths.chunks(BUILD_CHUNK_FILES) {
+        let extracted: Vec<(String, u64, Vec<u64>)> = chunk
+            .par_iter()
+            .filter_map(|path| {
+                let content = read_regular_bounded(path, MAX_FILE_BYTES).ok()?;
+                if content[..content.len().min(8192)].contains(&0) {
+                    return None;
+                }
+                let rel = path
+                    .strip_prefix(&root_for_rel)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .into_owned();
+                let mut hits = Vec::new();
+                extractor.grams(&content, &mut hits);
+                let mut hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
+                hashes.sort_unstable();
+                hashes.dedup();
+                Some((rel, content.len() as u64, hashes))
+            })
+            .collect();
+        for (rel, bytes, hashes) in extracted {
+            stats.files += 1;
+            stats.bytes += bytes;
+            stats.grams += hashes.len() as u64;
+            builder.add_file(&rel, hashes);
+        }
+        if let Some(d) = budget
+            && started.elapsed() > d
+        {
+            return Err(budget_time_error(started.elapsed(), d, paths_count));
+        }
     }
+
     if let Some(d) = budget
         && started.elapsed() > d
     {
         return Err(budget_time_error(started.elapsed(), d, paths_count));
     }
 
-    let mut builder = ShardBuilder::new(&extractor_id);
-    let mut stats = BuildStats {
-        files: extracted.len(),
-        bytes: 0,
-        grams: 0,
-        shard_bytes: 0,
-        elapsed_ms: 0,
-    };
-    for fg in &extracted {
-        stats.bytes += fg.bytes;
-        stats.grams += fg.hashes.len() as u64;
-        builder.add_file(&fg.rel, fg.hashes.clone());
-    }
     let dest = shard_path(root);
     builder.write(&dest)?;
     stats.shard_bytes = std::fs::metadata(&dest)?.len();
@@ -943,25 +909,5 @@ mod tests {
         let found = policy_file_paths(&dir);
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(found, HashSet::from(["a.rs".to_string()]));
-    }
-
-    #[test]
-    fn build_size_cap_is_inclusive() {
-        let dir_guard = tempfile::Builder::new()
-            .prefix("gpx-index-bytecap-")
-            .tempdir()
-            .unwrap();
-        let dir = dir_guard.path().to_path_buf();
-        std::fs::write(dir.join("a.rs"), "fn byteCapFn() {}\n").unwrap();
-        let len = std::fs::metadata(dir.join("a.rs")).unwrap().len();
-        let ex = SparseGramExtractor::new(Crc32Weigher);
-        let stats = build_with_caps(&dir, &ex, None, Some(len)).unwrap();
-        assert_eq!(stats.files, 1);
-        let err = match build_with_caps(&dir, &ex, None, Some(len - 1)) {
-            Err(e) => e.to_string(),
-            Ok(_) => panic!("a cap under the tree size must trip"),
-        };
-        std::fs::remove_dir_all(&dir).ok();
-        assert!(err.contains("total-size cap"), "{err}");
     }
 }

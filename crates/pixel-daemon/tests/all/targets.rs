@@ -134,7 +134,7 @@ fn targets_rejects_empty_task() {
 }
 
 /// A bare directory (NO `.git`) now builds a graph from the filesystem walk
-/// (capped by PIXEL_GRAPH_MAX_FILES, default 50000) instead of refusing.
+/// (capped only when PIXEL_GRAPH_MAX_FILES asks for it) instead of refusing.
 /// The graph is fresh because the file-hash signature matches; the envelope
 /// reports `graph: "fresh"` and `gitless: true` in the build info. This is a
 /// net improvement over the old behavior (hard refusal → "unavailable"):

@@ -2458,6 +2458,7 @@ dependencies = [
 name = "pixel-graph"
 version = "0.10.0"
 dependencies = [
+ "libc",
  "mutants",
  "mvp-model",
  "mvp-store",

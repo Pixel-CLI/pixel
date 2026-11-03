@@ -625,6 +625,23 @@ impl GraphStore {
         Ok(Self { conn })
     }
 
+    /// Caps this connection's mapping of the database file at `bytes`
+    /// (`mmap_size`; [`Self::open`] maps up to 256 MiB). Every mapped page
+    /// read counts toward the process's resident memory: a writer that reads
+    /// back much of a large store keeps it lower.
+    pub fn set_mmap_bytes(&self, bytes: i64) -> Result<()> {
+        self.conn.pragma_update(None, "mmap_size", bytes)?;
+        Ok(())
+    }
+
+    /// Caps this connection's page cache at `kib` KiB (`cache_size`;
+    /// [`Self::open`] allows 64 MiB). A long write transaction keeps its
+    /// dirty pages there until it spills them to the WAL.
+    pub fn set_cache_kib(&self, kib: i64) -> Result<()> {
+        self.conn.pragma_update(None, "cache_size", -kib)?;
+        Ok(())
+    }
+
     /// Escape hatch for analyses needing bespoke SQL.
     pub fn conn(&self) -> &Connection {
         &self.conn
@@ -696,17 +713,20 @@ impl GraphStore {
                 r.get(0)
             })
             .optional()?;
+        let (basename, dir_base) = path_parts(path);
         let id = if let Some(id) = existing {
             delete_file_rows(&tx, id)?;
             tx.exec_cached(
-                "UPDATE files SET blob_oid = ?2, lang = ?3 WHERE id = ?1",
-                params![id, blob_oid, lang],
+                "UPDATE files SET blob_oid = ?2, lang = ?3, basename = ?4, dir_base = ?5
+                  WHERE id = ?1",
+                params![id, blob_oid, lang, basename, dir_base],
             )?;
             id
         } else {
             tx.exec_cached(
-                "INSERT INTO files (path, blob_oid, lang) VALUES (?1, ?2, ?3)",
-                params![path, blob_oid, lang],
+                "INSERT INTO files (path, blob_oid, lang, basename, dir_base)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![path, blob_oid, lang, basename, dir_base],
             )?;
             tx.last_insert_rowid()
         };
@@ -1896,7 +1916,11 @@ CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY,
   path TEXT NOT NULL UNIQUE,
   blob_oid TEXT NOT NULL,
-  lang TEXT NOT NULL
+  lang TEXT NOT NULL,
+  -- The path's last segment and its directory's last segment (`path_parts`):
+  -- import resolution looks a suffix up through them (`SqlPathLookup`).
+  basename TEXT NOT NULL DEFAULT '',
+  dir_base TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS symbols (
   id INTEGER PRIMARY KEY,
@@ -2058,7 +2082,46 @@ CREATE TABLE IF NOT EXISTS walked_files (
   path TEXT PRIMARY KEY,
   blob_oid TEXT NOT NULL
 );
+-- The full build's snapshot: every file its walk read, with the content hash
+-- (xxh3, as a signed 64-bit integer), size, mtime and inode it had when read.
+-- The freshness signature a full build publishes is computed from these rows
+-- in path order, so it describes the bytes the build parsed, never a later
+-- tree. Rewritten by every full build; incremental updates leave it alone.
+CREATE TABLE IF NOT EXISTS snapshot_files (
+  path TEXT PRIMARY KEY,
+  hash INTEGER NOT NULL,
+  size INTEGER NOT NULL,
+  mtime_ns INTEGER NOT NULL,
+  ino INTEGER NOT NULL
+) WITHOUT ROWID;
+-- A full build's call and reference sites, staged by its writer in walk
+-- order and resolved in batches once every symbol and import is stored.
+-- Empty outside a build.
+CREATE TABLE IF NOT EXISTS pending_calls (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  enclosing_symbol_id INTEGER,
+  site_line INTEGER NOT NULL,
+  receiver TEXT
+);
+CREATE TABLE IF NOT EXISTS pending_refs (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  enclosing_symbol_id INTEGER,
+  site_line INTEGER NOT NULL,
+  arg_of TEXT
+);
 ";
+
+/// The last segment of `path` and the last segment of its directory
+/// (`""` for a file at the root): `a/b/c.rs` is `("c.rs", "b")`. Stored as
+/// `files.basename` and `files.dir_base`.
+pub(crate) fn path_parts(path: &str) -> (&str, &str) {
+    let (dir, basename) = path.rsplit_once('/').unwrap_or(("", path));
+    (basename, dir.rsplit('/').next().unwrap_or(dir))
+}
 
 /// Idempotent schema migrations for graphs created before a column existed.
 /// `CREATE TABLE IF NOT EXISTS` won't add columns to an existing table, so
@@ -2131,6 +2194,32 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
         conn.execute("UPDATE imports SET path = spec", [])?;
     }
+    if !has_column("files", "basename")? {
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN basename TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN dir_base TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        let paths: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare("SELECT id, path FROM files")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, path) in paths {
+            let (basename, dir_base) = path_parts(&path);
+            conn.execute(
+                "UPDATE files SET basename = ?2, dir_base = ?3 WHERE id = ?1",
+                params![id, basename, dir_base],
+            )?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_files_basename ON files(basename, dir_base);
+         CREATE INDEX IF NOT EXISTS idx_files_dir_base ON files(dir_base);",
+    )?;
     if !has_column("imports", "scope")? {
         conn.execute(
             "ALTER TABLE imports ADD COLUMN scope TEXT NOT NULL DEFAULT ''",

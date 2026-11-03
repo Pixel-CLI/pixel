@@ -631,7 +631,7 @@ fn the_file_cap_flag_should_track_the_cap_the_build_actually_enforced() {
     let envelope = evaluate(&mut svc, request("work", "helper"));
     assert!(
         !envelope.coverage.graph_file_cap_hit,
-        "a three-file fixture under the default 50 000-file cap did not hit it"
+        "a three-file fixture with no cap in force did not hit one"
     );
 
     let files = svc

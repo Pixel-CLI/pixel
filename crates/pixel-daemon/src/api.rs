@@ -1154,7 +1154,7 @@ impl Service {
     ///
     /// Without a git anchor (no `.git`) the same path applies: the walk
     /// (`policy_walk`, which respects .gitignore in gitless trees) is capped
-    /// by `PIXEL_GRAPH_MAX_FILES` (default 50000) and the signature is
+    /// only when `PIXEL_GRAPH_MAX_FILES` asks for it, and the signature is
     /// file-hash-based, so drift detection works without git.
     fn ensure_graph(&mut self) -> Result<Option<Value>, String> {
         if self.graph.is_some() {
@@ -3350,6 +3350,7 @@ impl Service {
             "symbols": stats.get("symbols").cloned().unwrap_or(Value::Null),
             "edges": stats.get("edges").cloned().unwrap_or(Value::Null),
             "unresolved": stats.get("unresolved").cloned().unwrap_or(Value::Null),
+            "drifted": stats.get("drifted").cloned().unwrap_or(Value::Null),
             "elapsed_ms": build_ms,
             "build": {"mode": "full", "reason": "requested"},
             "phases": stats.get("phases").cloned().unwrap_or(Value::Null),
@@ -5943,6 +5944,7 @@ mod bridge {
             "symbols": s.symbols,
             "edges": s.edges,
             "unresolved": s.unresolved,
+            "drifted": s.drifted,
             "elapsed_ms": s.elapsed_ms as u64,
             "phases": {
                 "collect_ms": p.collect_ms,
@@ -5953,6 +5955,7 @@ mod bridge {
                 "resolve_calls_ms": p.resolve_calls_ms,
                 "resolve_references_ms": p.resolve_references_ms,
                 "verify_ms": p.verify_ms,
+                "peak_rss_kb": p.peak_rss_kb,
             },
         }))
     }
