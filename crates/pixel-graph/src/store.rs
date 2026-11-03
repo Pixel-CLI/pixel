@@ -612,8 +612,10 @@ impl GraphStore {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
-        conn.pragma_update(None, "busy_timeout", 1000)?;
-        conn.pragma_update(None, "query_only", true)?;
+        // Not `pragma_update`: rusqlite 0.41 validates the name with a query that reads the
+        // schema, which waits out the default 5 s busy timeout on a locked file.
+        conn.busy_timeout(std::time::Duration::from_millis(1000))?;
+        conn.execute_batch("PRAGMA query_only = 1")?;
         Ok(Self { conn })
     }
 
@@ -2259,11 +2261,14 @@ mod tests {
 
     #[test]
     fn a_write_transaction_refreshes_the_planner_statistics_before_it_commits() {
-        let store = super::GraphStore::open_in_memory().unwrap();
-        store.conn().trace_v2(
-            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(record_statement),
-        );
+        let mut store = super::GraphStore::open_in_memory().unwrap();
+        store
+            .conn_mut()
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(record_statement),
+            )
+            .unwrap();
         store.begin_write().unwrap();
         store.meta_set("k", "v").unwrap();
         store.commit_write().unwrap();

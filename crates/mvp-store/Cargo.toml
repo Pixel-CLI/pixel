@@ -20,7 +20,7 @@ dbg_macro = "warn"
 todo = "warn"
 
 [dependencies]
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 mvp-model = { path = "../mvp-model" }
 
 # `O_NOFOLLOW` and `O_NONBLOCK` as the target defines them (C-18): their

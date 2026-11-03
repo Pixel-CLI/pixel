@@ -44,7 +44,7 @@ pixel-task = { path = "../pixel-task" }
 pixel-plugin = { path = "../pixel-plugin" }
 # The brief reads a French prompt with pixel-mvp's rules (execution_brief/french.rs).
 mvp-model = { path = "../mvp-model" }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 fs2 = "0.4.3"
 clap = { version = "4.5", features = ["derive"] }
 # `pixel completions <shell>` and `pixel man`, generated from the same clap tree.
