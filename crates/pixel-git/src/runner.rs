@@ -549,12 +549,11 @@ mod tests {
     #[test]
     fn isolated_git_obeys_root_and_ignores_external_routing_config_and_hooks() {
         use std::os::unix::fs::PermissionsExt;
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let base =
-            std::env::temp_dir().join(format!("pixel-isolated-{}-{nonce}", std::process::id()));
+        let base_guard = tempfile::Builder::new()
+            .prefix("pixel-isolated-")
+            .tempdir()
+            .unwrap();
+        let base = base_guard.path().to_path_buf();
         let root = base.join("root");
         let foreign = base.join("foreign");
         for directory in [&root, &foreign] {
@@ -872,12 +871,11 @@ mod tests {
         // proves the env pairs reach git (what `rebase --continue` relies
         // on to not open an editor) and that a real git non-zero exit
         // (`rev-parse` of an unknown ref) comes back as a code, not an Err.
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-git-runoutput-{}-{}",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-git-runoutput-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let init = Command::new("git")
             .args(["init", "-q"])
             .arg(&dir)
@@ -911,12 +909,11 @@ mod tests {
         // `hash-object --stdin` is the sandbox's use: the OID of "hello\n"
         // is fixed by git's object format, so a wrong or truncated payload
         // (or stdin left closed) gives a different hash, not a flake.
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-git-stdin-{}-{}",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-git-stdin-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let init = Command::new("git")
             .args(["init", "-q"])
             .arg(&dir)
@@ -989,12 +986,11 @@ mod tests {
 
     #[test]
     fn merge_file_performs_a_clean_three_way_merge() {
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-git-mergefile-{}-{}",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-git-mergefile-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join("base.txt"), "line1\nline2\nline3\n").unwrap();
         std::fs::write(dir.join("current.txt"), "line1-mine\nline2\nline3\n").unwrap();
         std::fs::write(dir.join("other.txt"), "line1\nline2\nline3-theirs\n").unwrap();

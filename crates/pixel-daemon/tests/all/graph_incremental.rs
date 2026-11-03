@@ -23,16 +23,12 @@ use crate::support::git;
 /// Five source files, one committed baseline. `worker.ts` calls `helper`
 /// from `util.ts`; the other three are independent filler so a threshold
 /// test can drift a majority of them.
-fn fixture(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "gpx-graph-incr-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::remove_dir_all(&dir).ok();
+fn fixture(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("gpx-graph-incr-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let dir = scratch.path().to_path_buf();
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("src/util.ts"),
@@ -55,7 +51,7 @@ fn fixture(tag: &str) -> PathBuf {
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "baseline"]);
-    dir
+    (scratch, dir)
 }
 
 /// Build index + graph once (the "valid `.pixel/` copy" a CI job restores).
@@ -99,7 +95,7 @@ fn symbol(dir: &Path, name: &str) -> serde_json::Value {
 /// `impact` on the edited method sees its new body (a new callee).
 #[test]
 fn one_edited_file_updates_the_graph_incrementally() {
-    let dir = fixture("edit");
+    let (_scratch, dir) = fixture("edit");
     build_graph(&dir);
 
     // `work` now also calls `alpha`: a new outgoing edge only an
@@ -158,7 +154,7 @@ fn one_edited_file_updates_the_graph_incrementally() {
 /// (b) A deleted file: its symbols disappear without a full rebuild.
 #[test]
 fn deleted_file_drops_its_symbols_incrementally() {
-    let dir = fixture("delete");
+    let (_scratch, dir) = fixture("delete");
     build_graph(&dir);
     assert_eq!(symbol(&dir, "beta")["symbols"].as_array().unwrap().len(), 1);
 
@@ -182,7 +178,7 @@ fn deleted_file_drops_its_symbols_incrementally() {
 /// reported as such so the caller can tell the two paths apart.
 #[test]
 fn drift_above_threshold_rebuilds_from_scratch() {
-    let dir = fixture("threshold");
+    let (_scratch, dir) = fixture("threshold");
     build_graph(&dir);
 
     for name in ["alpha", "beta", "gamma"] {
@@ -207,7 +203,7 @@ fn drift_above_threshold_rebuilds_from_scratch() {
 /// and updated, not rebuilt.
 #[test]
 fn copied_pixel_dir_is_updated_not_rebuilt() {
-    let dir = fixture("copy-src");
+    let (_scratch, dir) = fixture("copy-src");
     build_graph(&dir);
 
     let copy = dir.with_file_name(format!(

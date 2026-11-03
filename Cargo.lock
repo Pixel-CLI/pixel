@@ -2417,6 +2417,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+ "tempfile",
  "xxhash-rust",
 ]
 
@@ -2439,6 +2440,7 @@ version = "0.10.0"
 dependencies = [
  "libc",
  "regex",
+ "tempfile",
 ]
 
 [[package]]
@@ -2495,6 +2497,7 @@ dependencies = [
  "regex-syntax",
  "serde",
  "serde_json",
+ "tempfile",
  "xxhash-rust",
 ]
 
@@ -2585,6 +2588,7 @@ name = "pixel-release"
 version = "0.10.0"
 dependencies = [
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2596,6 +2600,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]

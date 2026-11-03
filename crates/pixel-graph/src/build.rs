@@ -1972,10 +1972,11 @@ mod tests {
     /// build's signature, and a later reader took them for fresh.
     #[test]
     fn a_build_interrupted_by_a_moving_tree_leaves_the_previous_graph_intact() {
-        let root = tmpdir("rollback");
+        let root_dir = tmpdir("rollback");
+        let root = root_dir.path();
         std::fs::write(root.join("a.rs"), "fn kept() -> u32 { 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let snapshot = || {
             let store = GraphStore::open(&db).unwrap();
             let names: Vec<String> = store
@@ -1991,7 +1992,7 @@ mod tests {
         assert_eq!(before.1, ["kept"]);
 
         std::fs::write(root.join("b.rs"), "fn added() -> u32 { 2 }\n").unwrap();
-        let err = build_graph_with(&root, &db, RustSource::V1, RubySource::V1, |_| {
+        let err = build_graph_with(root, &db, RustSource::V1, RubySource::V1, |_| {
             "moved".into()
         })
         .unwrap_err();
@@ -2001,7 +2002,7 @@ mod tests {
             before,
             "no row and no signature of the failed build"
         );
-        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(root).ok();
     }
 
     /// The phases split one build: disjoint ones cannot add up to more than
@@ -2009,13 +2010,14 @@ mod tests {
     /// store pass, not a phase beside it.
     #[test]
     fn build_phases_partition_the_reported_build_time() {
-        let root = tmpdir("phases");
+        let root_dir = tmpdir("phases");
+        let root = root_dir.path();
         std::fs::write(
             root.join("c.rs"),
             "fn helper() -> u32 { 1 }\nfn run() -> u32 { helper() }\n",
         )
         .unwrap();
-        let stats = build_graph(&root, &root.join(".pixel").join("graph.db")).unwrap();
+        let stats = build_graph(root, &root.join(".pixel").join("graph.db")).unwrap();
         let p = &stats.phases;
         let disjoint = p.collect_ms
             + p.extract_ms
@@ -2033,20 +2035,14 @@ mod tests {
             p.concepts_ms <= p.store_ms,
             "concepts are inside store: {p:?}"
         );
-        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(root).ok();
     }
 
-    fn tmpdir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "pixel-graph-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmpdir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("pixel-graph-{tag}-"))
+            .tempdir()
+            .unwrap()
     }
 
     /// The cap change detection and `evaluate` report. `None` must mean
@@ -2072,7 +2068,8 @@ mod tests {
     /// build's own order: a wrong reason here is a wrong published motif.
     #[test]
     fn indexability_names_the_gate_a_file_fails() {
-        let root = tmpdir("indexability");
+        let root_dir = tmpdir("indexability");
+        let root = root_dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/a.rs"), b"fn alpha() -> u32 { 1 }\n").unwrap();
         // Rust-looking content under an extension with no grammar: judged on
@@ -2095,32 +2092,29 @@ mod tests {
         std::fs::write(root.join("src/bundle.js"), minified).unwrap();
         std::os::unix::fs::symlink(root.join("src/a.rs"), root.join("src/link.rs")).unwrap();
 
-        assert_eq!(indexability(&root, "src/a.rs"), Indexability::Indexable);
+        assert_eq!(indexability(root, "src/a.rs"), Indexability::Indexable);
         assert_eq!(
-            indexability(&root, "notes.txt"),
+            indexability(root, "notes.txt"),
             Indexability::UnsupportedLanguage
         );
-        assert_eq!(indexability(&root, "src/blob.rs"), Indexability::Binary);
-        assert_eq!(indexability(&root, "src/huge.rs"), Indexability::TooLarge);
+        assert_eq!(indexability(root, "src/blob.rs"), Indexability::Binary);
+        assert_eq!(indexability(root, "src/huge.rs"), Indexability::TooLarge);
         assert_eq!(
-            indexability(&root, "src/exact.rs"),
+            indexability(root, "src/exact.rs"),
             Indexability::Indexable,
             "a file of exactly MAX_FILE_BYTES is within the cap, not over it"
         );
-        assert_eq!(
-            indexability(&root, "src/bundle.js"),
-            Indexability::Generated
-        );
+        assert_eq!(indexability(root, "src/bundle.js"), Indexability::Generated);
         // A symlink is never indexed, and neither is a path that is not
         // there at all — a deletion asks about the second one.
-        assert_eq!(indexability(&root, "src/link.rs"), Indexability::Absent);
-        assert_eq!(indexability(&root, "src/gone.rs"), Indexability::Absent);
+        assert_eq!(indexability(root, "src/link.rs"), Indexability::Absent);
+        assert_eq!(indexability(root, "src/gone.rs"), Indexability::Absent);
         // A directory reached through a supported-looking name.
         std::fs::create_dir_all(root.join("pkg.rs")).unwrap();
-        assert_eq!(indexability(&root, "pkg.rs"), Indexability::Absent);
+        assert_eq!(indexability(root, "pkg.rs"), Indexability::Absent);
 
         // The verdicts match what the walk actually collects.
-        let collected: Vec<String> = collect_files(&root).into_iter().map(|(r, _)| r).collect();
+        let collected: Vec<String> = collect_files(root).into_iter().map(|(r, _)| r).collect();
         for kept in ["src/a.rs", "src/exact.rs"] {
             assert!(collected.contains(&kept.to_string()), "{collected:?}");
         }
@@ -2136,12 +2130,13 @@ mod tests {
                 "{skipped} is collected but indexability refuses it"
             );
         }
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn smoke_build_graph_ts_and_rust() {
-        let root = tmpdir("smoke");
+        let root_dir = tmpdir("smoke");
+        let root = root_dir.path();
         std::fs::write(
             root.join("a.ts"),
             "export function greet(name: string): string {\n  return \"hi \" + name;\n}\n",
@@ -2159,7 +2154,7 @@ mod tests {
         .unwrap();
 
         let db = root.join(".pixel").join("graph.db");
-        let stats = build_graph(&root, &db).unwrap();
+        let stats = build_graph(root, &db).unwrap();
         assert_eq!(stats.files, 3, "all three files indexed");
         assert!(
             stats.symbols >= 4,
@@ -2189,7 +2184,7 @@ mod tests {
         let (f, s, e, _u) = store.counts().unwrap();
         assert_eq!((f, s, e), (stats.files, stats.symbols, stats.edges));
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The statements [`record_statement`] saw, on the one connection a test
@@ -2208,7 +2203,8 @@ mod tests {
         // used to build the resolve index three times (calls, references,
         // retry), each loading every symbol, and to look up each incoming
         // edge's site file with its own query (#1115).
-        let root = tmpdir("statements");
+        let root_dir = tmpdir("statements");
+        let root = root_dir.path();
         let defs: String = (0..20)
             .map(|i| format!("export function f{i}() {{ return {i} }}\n"))
             .collect();
@@ -2228,7 +2224,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         std::fs::write(root.join("a.ts"), format!("{defs}// saved\n")).unwrap();
 
         let mut store = GraphStore::open(&db).unwrap();
@@ -2237,7 +2233,7 @@ mod tests {
             Some(record_statement),
         );
         store.begin_write().unwrap();
-        write_rows(&root, &mut store, &[("a.ts", false)]).unwrap();
+        write_rows(root, &mut store, &[("a.ts", false)]).unwrap();
         store.commit_write().unwrap();
         let statements = std::mem::take(&mut *STATEMENTS.lock().unwrap());
         let count = |needle: &str| statements.iter().filter(|s| s.contains(needle)).count();
@@ -2261,7 +2257,7 @@ mod tests {
             .sum();
         assert_eq!(callers, 20);
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn pragma(db: &Path, name: &str) -> i64 {
@@ -2276,7 +2272,8 @@ mod tests {
     fn a_rebuild_after_most_files_went_hands_their_pages_back() {
         // Every graph update deletes and rewrites rows; their pages stayed on
         // the free list forever, so `graph.v2.db` only grew (#1089).
-        let root = tmpdir("vacuum");
+        let root_dir = tmpdir("vacuum");
+        let root = root_dir.path();
         for i in 0..40 {
             let body: String = (0..30)
                 .map(|j| {
@@ -2289,22 +2286,23 @@ mod tests {
             std::fs::write(root.join(format!("m{i}.ts")), body).unwrap();
         }
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         assert_eq!(pragma(&db, "auto_vacuum"), 2, "INCREMENTAL");
         let before = pragma(&db, "page_count");
         for i in 5..40 {
             std::fs::remove_file(root.join(format!("m{i}.ts"))).unwrap();
         }
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         assert_eq!(pragma(&db, "freelist_count"), 0, "freed pages handed back");
         let after = pragma(&db, "page_count");
         assert!(after < before, "{after} pages after, {before} before");
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn a_graph_db_made_before_auto_vacuum_is_converted_by_its_next_full_build() {
-        let root = tmpdir("vacuum-legacy");
+        let root_dir = tmpdir("vacuum-legacy");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function f() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
@@ -2314,14 +2312,15 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(pragma(&db, "auto_vacuum"), 0, "a table already existed");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         assert_eq!(pragma(&db, "auto_vacuum"), 2, "INCREMENTAL");
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn smoke_update_file_relinks_callers() {
-        let root = tmpdir("update");
+        let root_dir = tmpdir("update");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function greet() { return 1 }\n").unwrap();
         std::fs::write(
             root.join("b.ts"),
@@ -2329,17 +2328,17 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         // Edit a.ts (same symbol, new body) and update just that file.
         std::fs::write(root.join("a.ts"), "export function greet() { return 2 }\n").unwrap();
-        let published = update_file(&root, &db, "a.ts").unwrap();
+        let published = update_file(root, &db, "a.ts").unwrap();
         assert_eq!(
             published,
             Publication::Signed,
             "an update that matches the tree signs the graph"
         );
-        assert!(is_fresh(&root, &db));
+        assert!(is_fresh(root, &db));
 
         let store = GraphStore::open(&db).unwrap();
         let greet = &store.symbols_by_name("greet", None, 10).unwrap()[0];
@@ -2351,7 +2350,7 @@ mod tests {
         );
         assert_eq!(callers[0].tier, Tier::Exact);
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// `tree_delta` is the one walk behind both the freshness verdict and
@@ -2361,18 +2360,19 @@ mod tests {
     /// (serving stale symbols).
     #[test]
     fn tree_delta_names_added_edited_and_removed_files_only() {
-        let root = tmpdir("delta");
+        let root_dir = tmpdir("delta");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
         std::fs::write(root.join("b.ts"), "export function beta() { return 1 }\n").unwrap();
         std::fs::write(root.join("c.ts"), "export function gamma() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
-        let fresh = tree_delta(&root, &db).unwrap().expect("signed db");
+        let fresh = tree_delta(root, &db).unwrap().expect("signed db");
         assert!(fresh.fresh);
         assert_eq!(fresh.changed_count(), 0);
         assert_eq!(fresh.indexed_files, 3);
-        assert_eq!(fresh.signature, freshness_signature(&root));
+        assert_eq!(fresh.signature, freshness_signature(root));
 
         // Same size, different content (the `touch -t` shape), one new
         // file, one deleted file; `b.ts` untouched.
@@ -2380,18 +2380,18 @@ mod tests {
         std::fs::write(root.join("d.ts"), "export function delta() { return 1 }\n").unwrap();
         std::fs::remove_file(root.join("c.ts")).unwrap();
 
-        let delta = tree_delta(&root, &db).unwrap().expect("signed db");
+        let delta = tree_delta(root, &db).unwrap().expect("signed db");
         assert!(!delta.fresh);
         let changed: Vec<&str> = delta.changed.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(changed, ["a.ts", "d.ts"], "sorted, b.ts untouched");
         assert_eq!(delta.removed, ["c.ts"]);
         assert_eq!(delta.indexed_files, 3, "counts the graph as built");
-        assert_eq!(delta.signature, freshness_signature(&root));
+        assert_eq!(delta.signature, freshness_signature(root));
 
         // Applying it makes the graph fresh again with exactly the
         // surviving files, and the deleted file's symbol is gone.
-        apply_tree_delta(&root, &db, &delta).unwrap();
-        assert!(is_fresh(&root, &db));
+        apply_tree_delta(root, &db, &delta).unwrap();
+        assert!(is_fresh(root, &db));
         let store = GraphStore::open(&db).unwrap();
         let mut paths: Vec<String> = store.files().unwrap().into_iter().map(|f| f.path).collect();
         paths.sort();
@@ -2400,23 +2400,24 @@ mod tests {
         assert_eq!(store.symbols_by_name("delta", None, 5).unwrap().len(), 1);
         drop(store);
 
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// `tree_delta_cached` must produce the SAME delta as `tree_delta` while
     /// hashing only the files whose stat moved — the post-edit hot path.
     #[test]
     fn tree_delta_cached_matches_uncached_and_rehashes_only_changed_files() {
-        let root = tmpdir("delta-cached");
+        let root_dir = tmpdir("delta-cached");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
         std::fs::write(root.join("b.ts"), "export function beta() { return 1 }\n").unwrap();
         std::fs::write(root.join("c.ts"), "export function gamma() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let mut cache = TreeHashCache::default();
         // First cached walk: cold — every file is hashed once.
-        let d1 = tree_delta_cached(&root, &db, &mut cache)
+        let d1 = tree_delta_cached(root, &db, &mut cache)
             .unwrap()
             .expect("signed db");
         assert!(d1.fresh);
@@ -2425,7 +2426,7 @@ mod tests {
 
         // Second walk, nothing changed: identical verdict, zero rehashes —
         // the stat-only path is what makes a post-watcher-batch op cheap.
-        let d2 = tree_delta_cached(&root, &db, &mut cache)
+        let d2 = tree_delta_cached(root, &db, &mut cache)
             .unwrap()
             .expect("signed db");
         assert!(d2.fresh);
@@ -2436,8 +2437,8 @@ mod tests {
         // One same-size edit: only that file is re-hashed, and the delta
         // still names it exactly as the uncached walk does.
         std::fs::write(root.join("b.ts"), "export function beta() { return 2 }\n").unwrap();
-        let uncached = tree_delta(&root, &db).unwrap().expect("signed db");
-        let d3 = tree_delta_cached(&root, &db, &mut cache)
+        let uncached = tree_delta(root, &db).unwrap().expect("signed db");
+        let d3 = tree_delta_cached(root, &db, &mut cache)
             .unwrap()
             .expect("signed db");
         assert_eq!(d3.changed, uncached.changed);
@@ -2446,7 +2447,7 @@ mod tests {
         assert_eq!(cache.rehashed, 1, "only the stat-changed file is re-read");
         assert_eq!(cache.stat_hits, 2);
 
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Parity with a full rebuild, part 1: imports between files of the
@@ -2456,7 +2457,8 @@ mod tests {
     /// edge came out `Probable` or unresolved, unlike after `pixel rebuild-graph`.
     #[test]
     fn incremental_update_resolves_imports_to_files_added_in_the_batch() {
-        let root = tmpdir("delta-imports");
+        let root_dir = tmpdir("delta-imports");
+        let root = root_dir.path();
         // a.ts imports a file that does not exist yet.
         std::fs::write(
             root.join("a.ts"),
@@ -2464,7 +2466,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
         let a_id = store.file_by_path("a.ts").unwrap().unwrap().id;
         let unresolved: i64 = store
@@ -2485,8 +2487,8 @@ mod tests {
             "import { helper } from \"./b\";\nexport function other() { return helper() }\n",
         )
         .unwrap();
-        let delta = tree_delta(&root, &db).unwrap().unwrap();
-        apply_tree_delta(&root, &db, &delta).unwrap();
+        let delta = tree_delta(root, &db).unwrap().unwrap();
+        apply_tree_delta(root, &db, &delta).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         let b_id = store.file_by_path("b.ts").unwrap().unwrap().id;
@@ -2514,7 +2516,7 @@ mod tests {
             "imported unique target: Exact, as after a full rebuild ({callers:?})"
         );
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Parity with a full rebuild, part 2: persisted `processes`/`clusters`
@@ -2523,10 +2525,11 @@ mod tests {
     /// left pointing at deleted symbols.
     #[test]
     fn incremental_update_drops_cached_processes_and_clusters() {
-        let root = tmpdir("delta-analyses");
+        let root_dir = tmpdir("delta-analyses");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
         let alpha = &store.symbols_by_name("alpha", None, 5).unwrap()[0];
         store
@@ -2542,8 +2545,8 @@ mod tests {
         drop(store);
 
         std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
-        let delta = tree_delta(&root, &db).unwrap().unwrap();
-        apply_tree_delta(&root, &db, &delta).unwrap();
+        let delta = tree_delta(root, &db).unwrap().unwrap();
+        apply_tree_delta(root, &db, &delta).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         for table in ["processes", "process_steps", "clusters", "cluster_members"] {
@@ -2554,17 +2557,18 @@ mod tests {
             assert_eq!(n, 0, "{table} must be cleared by the incremental update");
         }
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A db without a freshness signature cannot say what it was built
     /// from: `tree_delta` refuses to guess (None) so the caller rebuilds.
     #[test]
     fn tree_delta_is_none_without_a_signature() {
-        let root = tmpdir("delta-unsigned");
+        let root_dir = tmpdir("delta-unsigned");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         GraphStore::open(&db)
             .unwrap()
             .conn()
@@ -2573,8 +2577,8 @@ mod tests {
                 rusqlite::params![FRESHNESS_KEY],
             )
             .unwrap();
-        assert!(tree_delta(&root, &db).unwrap().is_none());
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(tree_delta(root, &db).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A file edited between the delta walk and its application must not be
@@ -2583,21 +2587,22 @@ mod tests {
     /// only the signature is withheld so the next open detects the drift.
     #[test]
     fn apply_tree_delta_withholds_signature_when_a_file_changed_underneath() {
-        let root = tmpdir("delta-race");
+        let root_dir = tmpdir("delta-race");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
-        let delta = tree_delta(&root, &db).unwrap().unwrap();
+        let delta = tree_delta(root, &db).unwrap().unwrap();
         // The "concurrent" edit: the tree moves on after the walk.
         std::fs::write(root.join("a.ts"), "export function alpha() { return 3 }\n").unwrap();
-        let err = apply_tree_delta(&root, &db, &delta).unwrap_err();
+        let err = apply_tree_delta(root, &db, &delta).unwrap_err();
         assert!(
             err.to_string().contains("changed during incremental"),
             "{err}"
         );
         assert!(
-            !is_fresh(&root, &db),
+            !is_fresh(root, &db),
             "signature must not have been published"
         );
         assert_eq!(
@@ -2605,12 +2610,12 @@ mod tests {
             FRESHNESS_WITHHELD,
             "the previous signature is invalidated, not kept"
         );
-        let repair = tree_delta(&root, &db).unwrap();
+        let repair = tree_delta(root, &db).unwrap();
         assert!(
             repair.is_some_and(|d| !d.fresh),
             "an invalidated signature keeps the incremental repair path"
         );
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn hash_of(content: &[u8]) -> String {
@@ -2634,22 +2639,23 @@ mod tests {
     /// with the new tree's signature.
     #[test]
     fn watcher_update_commits_rows_and_signature_together() {
-        let root = tmpdir("atomic-publish");
+        let root_dir = tmpdir("atomic-publish");
+        let root = root_dir.path();
         let v1 = b"export function alpha() { return 1 }\n";
         let v2 = b"export function alpha() { return 2 }\n";
         std::fs::write(root.join("a.ts"), v1).unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let reader = GraphStore::open(&db).unwrap();
         let old_signature = stored_signature(&reader);
         assert_eq!(stored_hash(&reader, "a.ts"), hash_of(v1));
 
         std::fs::write(root.join("a.ts"), v2).unwrap();
-        let new_signature = freshness_signature(&root);
+        let new_signature = freshness_signature(root);
         assert_ne!(old_signature, new_signature);
         let mut probed = false;
         let published = update_files_probed(
-            &root,
+            root,
             &db,
             &[("a.ts", false)],
             &mut TreeHashCache::default(),
@@ -2675,9 +2681,9 @@ mod tests {
         assert_eq!(published, Publication::Signed);
         assert_eq!(stored_hash(&reader, "a.ts"), hash_of(v2));
         assert_eq!(stored_signature(&reader), new_signature);
-        assert!(is_fresh(&root, &db));
+        assert!(is_fresh(root, &db));
         drop(reader);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The gate a publishing caller takes its readers' lock in runs once, in
@@ -2687,18 +2693,19 @@ mod tests {
     /// the gate sees the new rows as soon as it returns.
     #[test]
     fn update_files_gated_should_run_its_gate_once_right_before_the_commit() {
-        let root = tmpdir("gated-publish");
+        let root_dir = tmpdir("gated-publish");
+        let root = root_dir.path();
         let v1 = b"export function alpha() { return 1 }\n";
         let v2 = b"export function alpha() { return 2 }\n";
         std::fs::write(root.join("a.ts"), v1).unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let reader = GraphStore::open(&db).unwrap();
         std::fs::write(root.join("a.ts"), v2).unwrap();
         let rows_written = std::cell::Cell::new(false);
         let mut gated = 0;
         let published = update_files_probed(
-            &root,
+            root,
             &db,
             &[("a.ts", false)],
             &mut TreeHashCache::default(),
@@ -2718,7 +2725,7 @@ mod tests {
         assert_eq!(published, Publication::Signed);
         assert_eq!(stored_hash(&reader, "a.ts"), hash_of(v2));
         drop(reader);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The watcher path signs with the tree it walks after writing the rows.
@@ -2729,18 +2736,19 @@ mod tests {
     /// file and repairs it.
     #[test]
     fn watcher_update_withholds_signature_when_a_touched_file_changed_underneath() {
-        let root = tmpdir("watcher-race");
+        let root_dir = tmpdir("watcher-race");
+        let root = root_dir.path();
         let v1 = b"export function alpha() { return 1 }\n";
         let v2 = b"export function alpha() { return 2 }\n";
         let v3 = b"export function alpha() { return 3 }\n";
         std::fs::write(root.join("a.ts"), v1).unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let old_signature = stored_signature(&GraphStore::open(&db).unwrap());
 
         std::fs::write(root.join("a.ts"), v2).unwrap();
         let published = update_files_probed(
-            &root,
+            root,
             &db,
             &[("a.ts", false)],
             &mut TreeHashCache::default(),
@@ -2765,15 +2773,15 @@ mod tests {
             "the stored signature is invalidated, never set to the walked tree"
         );
         drop(store);
-        assert!(!is_fresh(&root, &db));
+        assert!(!is_fresh(root, &db));
 
         // Repair: the next delta sees a.ts stored as v2 while the tree has v3.
-        let delta = tree_delta(&root, &db).unwrap().unwrap();
+        let delta = tree_delta(root, &db).unwrap().unwrap();
         let changed: Vec<&str> = delta.changed.iter().map(|(rel, _)| rel.as_str()).collect();
         assert_eq!(changed, ["a.ts"]);
-        apply_tree_delta(&root, &db, &delta).unwrap();
-        assert!(is_fresh(&root, &db));
-        let _ = std::fs::remove_dir_all(&root);
+        apply_tree_delta(root, &db, &delta).unwrap();
+        assert!(is_fresh(root, &db));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A file outside the batch that drifted means the walk's signature would
@@ -2781,17 +2789,18 @@ mod tests {
     /// the batch that brings the last drifted file is the one that signs.
     #[test]
     fn watcher_update_withholds_signature_while_an_unbatched_file_drifted() {
-        let root = tmpdir("watcher-partial");
+        let root_dir = tmpdir("watcher-partial");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
         std::fs::write(root.join("b.ts"), "export function beta() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let a2 = b"export function alpha() { return 2 }\n";
         std::fs::write(root.join("a.ts"), a2).unwrap();
         std::fs::write(root.join("b.ts"), "export function beta() { return 2 }\n").unwrap();
 
-        let first = update_files(&root, &db, &[("a.ts", false)]).unwrap();
+        let first = update_files(root, &db, &[("a.ts", false)]).unwrap();
         assert_eq!(
             first,
             Publication::Withheld,
@@ -2802,12 +2811,12 @@ mod tests {
             hash_of(a2),
             "the batched file's rows land regardless"
         );
-        assert!(!is_fresh(&root, &db));
+        assert!(!is_fresh(root, &db));
 
-        let second = update_files(&root, &db, &[("b.ts", false)]).unwrap();
+        let second = update_files(root, &db, &[("b.ts", false)]).unwrap();
         assert_eq!(second, Publication::Signed);
-        assert!(is_fresh(&root, &db));
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(is_fresh(root, &db));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A one-file watcher batch re-reads only that file: the walk the
@@ -2815,7 +2824,8 @@ mod tests {
     /// previous walk left, and the counters are the proof.
     #[test]
     fn cached_update_rehashes_only_the_batched_file() {
-        let root = tmpdir("watcher-cached");
+        let root_dir = tmpdir("watcher-cached");
+        let root = root_dir.path();
         for (name, body) in [
             ("a.ts", "export function alpha() { return 1 }\n"),
             ("b.ts", "export function beta() { return 1 }\n"),
@@ -2824,35 +2834,33 @@ mod tests {
             std::fs::write(root.join(name), body).unwrap();
         }
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let mut cache = TreeHashCache::default();
-        tree_delta_cached(&root, &db, &mut cache).unwrap();
+        tree_delta_cached(root, &db, &mut cache).unwrap();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
-        let published = update_files_cached(&root, &db, &[("a.ts", false)], &mut cache).unwrap();
+        let published = update_files_cached(root, &db, &[("a.ts", false)], &mut cache).unwrap();
         assert_eq!(published, Publication::Signed);
         assert_eq!(cache.rehashed, 1, "only the edited file is read and hashed");
         assert_eq!(cache.stat_hits, 2, "the untouched files come from the memo");
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// An empty batch changes no row and publishes nothing: signing it would
     /// bind whatever the tree looks like now to rows nobody re-checked.
     #[test]
     fn empty_batch_publishes_nothing() {
-        let root = tmpdir("watcher-empty");
+        let root_dir = tmpdir("watcher-empty");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let before = stored_signature(&GraphStore::open(&db).unwrap());
         std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
-        assert_eq!(
-            update_files(&root, &db, &[]).unwrap(),
-            Publication::Withheld
-        );
+        assert_eq!(update_files(root, &db, &[]).unwrap(), Publication::Withheld);
         assert_eq!(stored_signature(&GraphStore::open(&db).unwrap()), before);
-        assert!(!is_fresh(&root, &db));
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(!is_fresh(root, &db));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// `rows_match_tree` is the gate on signing a watcher update: it accepts a
@@ -2957,14 +2965,15 @@ mod tests {
     /// the tree has.
     #[test]
     fn repeated_path_update_then_remove_ends_removed_and_withholds_while_the_file_exists() {
-        let root = tmpdir("batch-update-remove");
+        let root_dir = tmpdir("batch-update-remove");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
         std::fs::write(root.join("b.ts"), "export function beta() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
 
-        let published = update_files(&root, &db, &[("a.ts", false), ("a.ts", true)]).unwrap();
+        let published = update_files(root, &db, &[("a.ts", false), ("a.ts", true)]).unwrap();
         assert_eq!(published, Publication::Withheld);
         let store = GraphStore::open(&db).unwrap();
         assert!(
@@ -2973,14 +2982,14 @@ mod tests {
         );
         assert_eq!(stored_signature(&store), FRESHNESS_WITHHELD);
         drop(store);
-        assert!(!is_fresh(&root, &db));
+        assert!(!is_fresh(root, &db));
         // The repair re-extracts the file the tree still has.
-        let delta = tree_delta(&root, &db).unwrap().unwrap();
+        let delta = tree_delta(root, &db).unwrap().unwrap();
         let changed: Vec<&str> = delta.changed.iter().map(|(rel, _)| rel.as_str()).collect();
         assert_eq!(changed, ["a.ts"]);
-        apply_tree_delta(&root, &db, &delta).unwrap();
-        assert!(is_fresh(&root, &db));
-        let _ = std::fs::remove_dir_all(&root);
+        apply_tree_delta(root, &db, &delta).unwrap();
+        assert!(is_fresh(root, &db));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Removed then edited in one batch (the file was recreated): the last
@@ -2988,21 +2997,22 @@ mod tests {
     /// signs because the store holds exactly the tree.
     #[test]
     fn repeated_path_remove_then_update_ends_re_extracted_and_signs() {
-        let root = tmpdir("batch-remove-update");
+        let root_dir = tmpdir("batch-remove-update");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let v2 = b"export function alpha() { return 2 }\n";
         std::fs::write(root.join("a.ts"), v2).unwrap();
 
-        let published = update_files(&root, &db, &[("a.ts", true), ("a.ts", false)]).unwrap();
+        let published = update_files(root, &db, &[("a.ts", true), ("a.ts", false)]).unwrap();
         assert_eq!(published, Publication::Signed);
         assert_eq!(
             stored_hash(&GraphStore::open(&db).unwrap(), "a.ts"),
             hash_of(v2)
         );
-        assert!(is_fresh(&root, &db));
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(is_fresh(root, &db));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// ABA: tree A is signed, rows are written for B, the tree is back to A
@@ -3013,17 +3023,18 @@ mod tests {
     /// a full rebuild) naming the file whose row disagrees with the tree.
     #[test]
     fn withheld_update_invalidates_the_previous_signature_so_an_aba_tree_is_not_fresh() {
-        let root = tmpdir("aba");
+        let root_dir = tmpdir("aba");
+        let root = root_dir.path();
         let a = b"export function alpha() { return 1 }\n";
         let b = b"export function alpha() { return 2 }\n";
         std::fs::write(root.join("a.ts"), a).unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let signature_a = stored_signature(&GraphStore::open(&db).unwrap());
 
         std::fs::write(root.join("a.ts"), b).unwrap();
         let published = update_files_probed(
-            &root,
+            root,
             &db,
             &[("a.ts", false)],
             &mut TreeHashCache::default(),
@@ -3044,25 +3055,23 @@ mod tests {
         );
         drop(store);
         assert_eq!(
-            freshness_signature(&root),
+            freshness_signature(root),
             signature_a,
             "the tree is A again"
         );
-        assert!(!is_fresh(&root, &db));
+        assert!(!is_fresh(root, &db));
 
-        let delta = tree_delta(&root, &db)
-            .unwrap()
-            .expect("stale, not unsigned");
+        let delta = tree_delta(root, &db).unwrap().expect("stale, not unsigned");
         assert!(!delta.fresh);
         let changed: Vec<&str> = delta.changed.iter().map(|(rel, _)| rel.as_str()).collect();
         assert_eq!(changed, ["a.ts"]);
-        apply_tree_delta(&root, &db, &delta).unwrap();
-        assert!(is_fresh(&root, &db));
+        apply_tree_delta(root, &db, &delta).unwrap();
+        assert!(is_fresh(root, &db));
         assert_eq!(
             stored_hash(&GraphStore::open(&db).unwrap(), "a.ts"),
             hash_of(a)
         );
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Regression: an existing graph.db must be detected as stale when a
@@ -3070,29 +3079,27 @@ mod tests {
     /// the db is fresh again.
     #[test]
     fn freshness_detects_drift_and_rebuild() {
-        let root = tmpdir("fresh");
+        let root_dir = tmpdir("fresh");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
 
         // Initial build: fresh.
-        build_graph(&root, &db).unwrap();
-        assert!(
-            is_fresh(&root, &db),
-            "graph must be fresh right after build"
-        );
+        build_graph(root, &db).unwrap();
+        assert!(is_fresh(root, &db), "graph must be fresh right after build");
 
         // Edit a source file: now stale.
         std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
         assert!(
-            !is_fresh(&root, &db),
+            !is_fresh(root, &db),
             "graph must be stale after a source file changes"
         );
 
         // Rebuild: fresh again.
-        build_graph(&root, &db).unwrap();
-        assert!(is_fresh(&root, &db), "graph must be fresh after rebuild");
+        build_graph(root, &db).unwrap();
+        assert!(is_fresh(root, &db), "graph must be fresh after rebuild");
 
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Regression: a method call with a real receiver (`x.parse()`) must NOT
@@ -3101,7 +3108,8 @@ mod tests {
     /// The receiver downgrade caps such calls at `Probable` at most.
     #[test]
     fn receiver_call_not_exact_to_same_name_function() {
-        let root = tmpdir("receiver");
+        let root_dir = tmpdir("receiver");
+        let root = root_dir.path();
         // a.ts defines a free function `parse` (unique repo-wide).
         std::fs::write(
             root.join("a.ts"),
@@ -3121,7 +3129,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         let parse = &store.symbols_by_name("parse", None, 10).unwrap()[0];
@@ -3168,7 +3176,7 @@ mod tests {
             other => panic!("bare call to imported unique name should be Exact, got {other:?}"),
         }
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Regression: graph freshness must detect equal-size content changes
@@ -3177,27 +3185,28 @@ mod tests {
     /// signature catches this.
     #[test]
     fn stat_trusting_signature_should_reuse_stored_hashes_only_for_files_older_than_the_build() {
-        let root = tmpdir("fresh-stat");
+        let root_dir = tmpdir("fresh-stat");
+        let root = root_dir.path();
         let body_a = "export function alpha() { return 1 }\n";
         let body_b = "export function alpha() { return 2 }\n";
         std::fs::write(root.join("a.ts"), body_a).unwrap();
         std::fs::write(root.join("b.ts"), "export function beta() {}\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
         let stored = store.meta_get(FRESHNESS_KEY).unwrap().unwrap();
         assert!(store.meta_get(BUILD_STARTED_KEY).unwrap().is_some());
 
         // Nothing moved: the signature matches without reading a.ts again.
         assert_eq!(
-            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            freshness_signature_trusting_stat(root, &store).unwrap(),
             stored
         );
 
         // An edit after the build has a newer mtime and is hashed.
         std::fs::write(root.join("a.ts"), body_b).unwrap();
         assert_ne!(
-            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            freshness_signature_trusting_stat(root, &store).unwrap(),
             stored
         );
 
@@ -3211,10 +3220,10 @@ mod tests {
             .set_modified(old)
             .unwrap();
         assert_eq!(
-            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            freshness_signature_trusting_stat(root, &store).unwrap(),
             stored
         );
-        assert_ne!(freshness_signature(&root), stored);
+        assert_ne!(freshness_signature(root), stored);
 
         // A file the store does not hold is always hashed, whatever its mtime.
         std::fs::write(root.join("c.ts"), "export function gamma() {}\n").unwrap();
@@ -3225,7 +3234,7 @@ mod tests {
             .set_modified(old)
             .unwrap();
         assert_ne!(
-            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            freshness_signature_trusting_stat(root, &store).unwrap(),
             stored
         );
         std::fs::remove_file(root.join("c.ts")).unwrap();
@@ -3233,20 +3242,21 @@ mod tests {
         // Without a usable start time every file is hashed.
         store.meta_set(BUILD_STARTED_KEY, "unknown").unwrap();
         assert_eq!(
-            freshness_signature_trusting_stat(&root, &store).unwrap(),
-            freshness_signature(&root)
+            freshness_signature_trusting_stat(root, &store).unwrap(),
+            freshness_signature(root)
         );
         assert_ne!(
-            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            freshness_signature_trusting_stat(root, &store).unwrap(),
             stored
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn freshness_detects_equal_size_content_change() {
-        let root = tmpdir("fresh-content");
+        let root_dir = tmpdir("fresh-content");
+        let root = root_dir.path();
         // Two different bodies with the same byte length.
         let body_a = "export function alpha() { return 1 }\n";
         let body_b = "export function alpha() { return 2 }\n";
@@ -3258,18 +3268,18 @@ mod tests {
 
         std::fs::write(root.join("a.ts"), body_a).unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
-        assert!(is_fresh(&root, &db), "fresh after initial build");
+        build_graph(root, &db).unwrap();
+        assert!(is_fresh(root, &db), "fresh after initial build");
 
         // Change content, same size. The content hash differs even if mtime
         // is restored, so the signature must change.
         std::fs::write(root.join("a.ts"), body_b).unwrap();
         assert!(
-            !is_fresh(&root, &db),
+            !is_fresh(root, &db),
             "graph must be stale after equal-size content change"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Regression: importing one binding must NOT make unrelated definitions
@@ -3278,7 +3288,8 @@ mod tests {
     /// but NOT imported) must NOT be Exact via T1.
     #[test]
     fn import_binding_specificity_prevents_false_exact() {
-        let root = tmpdir("import-bindings");
+        let root_dir = tmpdir("import-bindings");
+        let root = root_dir.path();
         // a.ts exports two functions: greet and farewell.
         std::fs::write(
             root.join("a.ts"),
@@ -3297,7 +3308,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         let idx = ResolveIndex::build(&store).unwrap();
@@ -3320,7 +3331,7 @@ mod tests {
         }
 
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A Rust `use` binds names like a TS import does: `ship.rs` imports
@@ -3330,7 +3341,8 @@ mod tests {
     /// caller (the demo's `ship.rs` → `push` edge).
     #[test]
     fn a_rust_use_makes_the_imported_same_name_function_exact() {
-        let root = tmpdir("rust-use-bindings");
+        let root_dir = tmpdir("rust-use-bindings");
+        let root = root_dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
             root.join("src/lib.rs"),
@@ -3353,7 +3365,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         let idx = ResolveIndex::build(&store).unwrap();
@@ -3377,7 +3389,7 @@ mod tests {
             "a name the use does not bind never gets the import tier"
         );
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The callers of `push` in `path`, as `(caller name, tier)`.
@@ -3448,7 +3460,8 @@ mod tests {
     /// the typed call.
     #[test]
     fn typed_and_module_receivers_survive_incremental_updates() {
-        let root = tmpdir("typed-receivers");
+        let root_dir = tmpdir("typed-receivers");
+        let root = root_dir.path();
         let files = [
             (
                 "crates/git/src/lib.rs",
@@ -3466,7 +3479,7 @@ mod tests {
             std::fs::write(root.join(path), body).unwrap();
         }
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let both = |db: &Path| {
             let store = GraphStore::open(db).unwrap();
             (
@@ -3484,7 +3497,7 @@ mod tests {
             format!("// v2\n{}", files[3].1),
         )
         .unwrap();
-        update_file(&root, &db, "crates/ops/src/lib.rs").unwrap();
+        update_file(root, &db, "crates/ops/src/lib.rs").unwrap();
         assert_eq!(
             both(&db),
             (run.clone(), wrap.clone(), vec![]),
@@ -3496,13 +3509,13 @@ mod tests {
             format!("// v2\n{}", files[0].1),
         )
         .unwrap();
-        update_file(&root, &db, "crates/git/src/lib.rs").unwrap();
+        update_file(root, &db, "crates/git/src/lib.rs").unwrap();
         std::fs::write(
             root.join("crates/idx/src/gitsync.rs"),
             format!("// v2\n{}", files[2].1),
         )
         .unwrap();
-        update_file(&root, &db, "crates/idx/src/gitsync.rs").unwrap();
+        update_file(root, &db, "crates/idx/src/gitsync.rs").unwrap();
         assert_eq!(
             both(&db),
             (run.clone(), wrap.clone(), vec![]),
@@ -3515,7 +3528,7 @@ mod tests {
             "pub fn current_branch() {}\n",
         )
         .unwrap();
-        update_file(&root, &db, "crates/other/src/idx/gitsync.rs").unwrap();
+        update_file(root, &db, "crates/other/src/idx/gitsync.rs").unwrap();
         assert_eq!(
             both(&db),
             (run, vec![], vec![]),
@@ -3534,7 +3547,7 @@ mod tests {
             1
         );
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// `use crate::push::push as leased;` puts `leased` in scope, not `push`.
@@ -3546,7 +3559,8 @@ mod tests {
     /// it must replay the written `leased`, or the edge would be lost.
     #[test]
     fn a_rust_use_alias_binds_the_alias_and_survives_an_incremental_update() {
-        let root = tmpdir("rust-use-alias");
+        let root_dir = tmpdir("rust-use-alias");
+        let root = root_dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
             root.join("src/lib.rs"),
@@ -3561,7 +3575,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         {
             let store = GraphStore::open(&db).unwrap();
             assert_eq!(
@@ -3573,7 +3587,7 @@ mod tests {
         }
 
         std::fs::write(root.join("src/third.rs"), "pub fn push() {}\n").unwrap();
-        update_file(&root, &db, "src/third.rs").unwrap();
+        update_file(root, &db, "src/third.rs").unwrap();
         {
             let store = GraphStore::open(&db).unwrap();
             assert_eq!(
@@ -3586,7 +3600,7 @@ mod tests {
         // Rewriting push.rs demotes its incoming edges; they must come back
         // under the written `leased`, not the target's `push`.
         std::fs::write(root.join("src/push.rs"), "// v2\npub fn push() {}\n").unwrap();
-        update_file(&root, &db, "src/push.rs").unwrap();
+        update_file(root, &db, "src/push.rs").unwrap();
         let store = GraphStore::open(&db).unwrap();
         assert_eq!(
             callers_of_push_in(&store, "src/push.rs"),
@@ -3594,7 +3608,7 @@ mod tests {
             "rewriting the target file leaves the aliased import's edge"
         );
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The TS form of the alias: `import { push as leased }`. The alias is
@@ -3602,7 +3616,8 @@ mod tests {
     /// names no symbol, so the reference must not be dropped as a plain value.
     #[test]
     fn a_ts_import_alias_binds_the_alias_for_calls_and_references() {
-        let root = tmpdir("ts-import-alias");
+        let root_dir = tmpdir("ts-import-alias");
+        let root = root_dir.path();
         std::fs::write(
             root.join("push.ts"),
             "export function push() {}\nexport const LIMIT = 3;\n",
@@ -3625,7 +3640,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
         assert_eq!(
             callers_of_push_in(&store, "push.ts"),
@@ -3663,7 +3678,7 @@ mod tests {
             );
         }
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The file holding the symbol an `Exact` call edge from `caller` to
@@ -3690,7 +3705,8 @@ mod tests {
     /// `push.rs` although it lives in `push/a.rs`.
     #[test]
     fn a_grouped_rust_use_resolves_each_path_to_its_own_file() {
-        let root = tmpdir("rust-grouped-use");
+        let root_dir = tmpdir("rust-grouped-use");
+        let root = root_dir.path();
         std::fs::create_dir_all(root.join("src/push")).unwrap();
         std::fs::write(
             root.join("src/lib.rs"),
@@ -3713,7 +3729,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
         let landed: Vec<Option<String>> = ["push", "publish", "x", "y"]
             .iter()
@@ -3729,7 +3745,7 @@ mod tests {
             ]
         );
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A path of a grouped `use` whose file is written after the importer
@@ -3737,7 +3753,8 @@ mod tests {
     /// spec, which resolves nothing) and turns the call Exact.
     #[test]
     fn a_dangling_path_of_a_grouped_use_resolves_when_its_file_appears() {
-        let root = tmpdir("rust-grouped-dangling");
+        let root_dir = tmpdir("rust-grouped-dangling");
+        let root = root_dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
             root.join("src/lib.rs"),
@@ -3752,21 +3769,21 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         {
             let store = GraphStore::open(&db).unwrap();
             assert_eq!(exact_callee_file(&store, "ship", "push"), None);
         }
         std::fs::write(root.join("src/left.rs"), "pub fn push() {}\n").unwrap();
-        let delta = tree_delta(&root, &db).unwrap().unwrap();
-        apply_tree_delta(&root, &db, &delta).unwrap();
+        let delta = tree_delta(root, &db).unwrap().unwrap();
+        apply_tree_delta(root, &db, &delta).unwrap();
         let store = GraphStore::open(&db).unwrap();
         assert_eq!(
             exact_callee_file(&store, "ship", "push").as_deref(),
             Some("src/left.rs")
         );
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A Rust `use` binds names for its module or block only. Three files
@@ -3782,7 +3799,8 @@ mod tests {
     /// edge from its stored site line, and must land on the same targets.
     #[test]
     fn a_rust_use_binds_names_only_where_it_is_in_scope() {
-        let root = tmpdir("rust-use-scope");
+        let root_dir = tmpdir("rust-use-scope");
+        let root = root_dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
             root.join("src/lib.rs"),
@@ -3825,7 +3843,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let callers = ["fa", "fb", "top", "t", "u"];
         let left = Some("src/left.rs".to_string());
         let expected = [left.clone(), None, left.clone(), left, None];
@@ -3838,7 +3856,7 @@ mod tests {
             assert_eq!(landed, expected);
         }
         std::fs::write(root.join("src/fourth.rs"), "pub fn push() {}\n").unwrap();
-        update_file(&root, &db, "src/fourth.rs").unwrap();
+        update_file(root, &db, "src/fourth.rs").unwrap();
         let store = GraphStore::open(&db).unwrap();
         let landed: Vec<Option<String>> = callers
             .iter()
@@ -3846,7 +3864,7 @@ mod tests {
             .collect();
         assert_eq!(landed, expected, "after the incremental update");
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// An alias blocks T2 only where it is in scope. `zap` aliases a
@@ -3855,7 +3873,8 @@ mod tests {
     /// nothing; in `mod b` no import binds `zap` and T2 links other.rs's.
     #[test]
     fn an_alias_blocks_the_repo_wide_tier_only_where_it_is_in_scope() {
-        let root = tmpdir("rust-alias-scope");
+        let root_dir = tmpdir("rust-alias-scope");
+        let root = root_dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
             root.join("src/lib.rs"),
@@ -3879,7 +3898,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
         let callers: Vec<(String, String)> = store
             .conn()
@@ -3896,7 +3915,7 @@ mod tests {
             .unwrap();
         assert_eq!(callers, [("fb".to_string(), "probable".to_string())]);
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A block's `use` shadows the file-level one for the calls inside it:
@@ -3905,7 +3924,8 @@ mod tests {
     /// symbol of utils.rs came first).
     #[test]
     fn a_block_use_shadows_the_file_level_alias_of_the_same_name() {
-        let root = tmpdir("rust-use-shadow");
+        let root_dir = tmpdir("rust-use-shadow");
+        let root = root_dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/lib.rs"), "pub mod utils;\npub mod ship;\n").unwrap();
         std::fs::write(
@@ -3927,7 +3947,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
         let edges: Vec<(String, String, String)> = store
             .conn()
@@ -3946,7 +3966,7 @@ mod tests {
             .map(|(src, dst)| (src.to_string(), dst.to_string(), "exact".to_string()));
         assert_eq!(edges, expected);
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// An alias applies only in its own scope: `mod a` aliases a constant as
@@ -3954,7 +3974,8 @@ mod tests {
     /// alias must not turn that reference into a plain value and drop it.
     #[test]
     fn an_out_of_scope_alias_does_not_hide_a_reference_to_a_local_function() {
-        let root = tmpdir("rust-alias-reference-scope");
+        let root_dir = tmpdir("rust-alias-reference-scope");
+        let root = root_dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/lib.rs"), "pub mod consts;\npub mod ship;\n").unwrap();
         std::fs::write(root.join("src/consts.rs"), "pub const VALUE: u32 = 1;\n").unwrap();
@@ -3974,7 +3995,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
         let references: i64 = store
             .conn()
@@ -3989,12 +4010,13 @@ mod tests {
             .unwrap();
         assert_eq!(references, 1, "consume(zap) passes mod b's zap");
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn wildcard_import_does_not_make_unqualified_call_exact() {
-        let root = tmpdir("wildcard-import");
+        let root_dir = tmpdir("wildcard-import");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function target(): void {}\n").unwrap();
         std::fs::write(
             root.join("b.ts"),
@@ -4002,7 +4024,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         let idx = ResolveIndex::build(&store).unwrap();
@@ -4013,12 +4035,13 @@ mod tests {
         );
 
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn incremental_definition_addition_reconsiders_existing_edges() {
-        let root = tmpdir("incremental-ambiguity");
+        let root_dir = tmpdir("incremental-ambiguity");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function target() {}\n").unwrap();
         std::fs::write(
             root.join("b.ts"),
@@ -4026,7 +4049,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         {
             let store = GraphStore::open(&db).unwrap();
             let target = store.symbols_by_name("target", None, 10).unwrap().remove(0);
@@ -4040,7 +4063,7 @@ mod tests {
         }
 
         std::fs::write(root.join("c.ts"), "export function target() {}\n").unwrap();
-        update_file(&root, &db, "c.ts").unwrap();
+        update_file(root, &db, "c.ts").unwrap();
         let store = GraphStore::open(&db).unwrap();
         for target in store.symbols_by_name("target", None, 10).unwrap() {
             assert!(
@@ -4055,45 +4078,43 @@ mod tests {
         assert!(envelope.lower_bound);
         assert!(envelope.unresolved_same_name >= 1);
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A graph written by an older extractor lacks the rows the current one
     /// emits for the same bytes; content hashes alone call it fresh forever.
     #[test]
     fn graph_from_another_extractor_version_is_stale_until_rebuilt() {
-        let root = tmpdir("extractor-version");
+        let root_dir = tmpdir("extractor-version");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function a() { return 1; }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
         assert_eq!(
             store.meta_get(EXTRACTOR_VERSION_KEY).unwrap().as_deref(),
             Some(EXTRACTOR_VERSION)
         );
-        assert!(is_fresh(&root, &db));
-        assert!(tree_delta(&root, &db).unwrap().is_some_and(|d| d.fresh));
+        assert!(is_fresh(root, &db));
+        assert!(tree_delta(root, &db).unwrap().is_some_and(|d| d.fresh));
 
         store.meta_set(EXTRACTOR_VERSION_KEY, "1").unwrap();
-        assert!(!is_fresh(&root, &db), "an older extractor's graph is stale");
+        assert!(!is_fresh(root, &db), "an older extractor's graph is stale");
         assert!(
-            tree_delta(&root, &db).unwrap().is_none(),
+            tree_delta(root, &db).unwrap().is_none(),
             "no delta can repair rows the extractor never wrote: rebuild"
         );
         store
             .conn()
             .execute("DELETE FROM meta WHERE key = ?1", [EXTRACTOR_VERSION_KEY])
             .unwrap();
-        assert!(!is_fresh(&root, &db), "an unversioned graph is stale");
-        assert!(tree_delta(&root, &db).unwrap().is_none());
+        assert!(!is_fresh(root, &db), "an unversioned graph is stale");
+        assert!(tree_delta(root, &db).unwrap().is_none());
         drop(store);
 
-        build_graph(&root, &db).unwrap();
-        assert!(
-            is_fresh(&root, &db),
-            "a rebuild records the current version"
-        );
-        let _ = std::fs::remove_dir_all(&root);
+        build_graph(root, &db).unwrap();
+        assert!(is_fresh(root, &db), "a rebuild records the current version");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// An exact probe of a module name promotes the file that defines the
@@ -4101,11 +4122,12 @@ mod tests {
     /// write both directions of `symbols.module_decl`.
     #[test]
     fn build_marks_external_module_declarations_for_exact_probes() {
-        let root = tmpdir("module-decl");
+        let root_dir = tmpdir("module-decl");
+        let root = root_dir.path();
         std::fs::write(root.join("main.rs"), "mod search_compat;\n").unwrap();
         std::fs::write(root.join("search_compat.rs"), "pub fn search_compat() {}\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         let hits = crate::targets::symbol_hits(
@@ -4125,7 +4147,7 @@ mod tests {
             "`fn search_compat` defines the exact name: {defining:?}"
         );
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn reference_rows(store: &GraphStore) -> Vec<String> {
@@ -4145,7 +4167,8 @@ mod tests {
     /// counted in the envelope.
     #[test]
     fn value_arguments_leave_no_references_and_ambiguous_callbacks_stay_unresolved() {
-        let root = tmpdir("reference-values");
+        let root_dir = tmpdir("reference-values");
+        let root = root_dir.path();
         std::fs::write(
             root.join("name.ts"),
             "export function name() { return 1; }\n",
@@ -4159,7 +4182,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         let name = &store.symbols_by_name("name", None, 10).unwrap()[0];
@@ -4174,14 +4197,15 @@ mod tests {
         assert!(store.envelope_for_name("handler").unwrap().lower_bound);
         assert!(!store.envelope_for_name("value").unwrap().lower_bound);
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// `<Button/>` compiles to a call of `Button`: the component a file
     /// renders is a callee of the renderer, across an import.
     #[test]
     fn rendering_a_component_links_the_renderer_as_its_caller() {
-        let root = tmpdir("jsx-component-call");
+        let root_dir = tmpdir("jsx-component-call");
+        let root = root_dir.path();
         std::fs::write(
             root.join("Button.tsx"),
             "export function Button() { return <button>ok</button>; }\n",
@@ -4193,7 +4217,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         let button = &store.symbols_by_name("Button", None, 10).unwrap()[0];
@@ -4205,7 +4229,7 @@ mod tests {
         assert!(!store.envelope_for_name("div").unwrap().lower_bound);
         assert!(!store.envelope_for_name("button").unwrap().lower_bound);
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// `schema.plugin(tenantScopePlugin)` should create a `References` edge
@@ -4213,7 +4237,8 @@ mod tests {
     /// (`tenantScopePlugin`), with `Tier::Probable`.
     #[test]
     fn callback_arg_creates_references_edge() {
-        let root = tmpdir("references-edge");
+        let root_dir = tmpdir("references-edge");
+        let root = root_dir.path();
         std::fs::write(
             root.join("a.ts"),
             "export function tenantScopePlugin(s: any) { return s; }\n",
@@ -4228,7 +4253,7 @@ mod tests {
         )
         .unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         let plugin = &store
@@ -4252,7 +4277,7 @@ mod tests {
         let call_edges = store.edges_to(plugin.id, Some(EdgeKind::Calls)).unwrap();
         assert!(call_edges.is_empty(), "no Calls edge to tenantScopePlugin");
         drop(store);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The freshness walk hashes files on rayon's pool, so its output must
@@ -4263,7 +4288,8 @@ mod tests {
     /// fresh over the wrong file set.
     #[test]
     fn tree_hashes_matches_a_serial_reference_and_applies_every_exclusion() {
-        let root = tmpdir("parallel-hashes");
+        let root_dir = tmpdir("parallel-hashes");
+        let root = root_dir.path();
         std::fs::create_dir_all(root.join("src/deep")).unwrap();
         let kept: [(&str, &[u8]); 4] = [
             ("b.ts", b"export function beta() { return 2 }\n"),
@@ -4292,7 +4318,7 @@ mod tests {
             .collect();
         expected.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let walked = tree_hashes(&root);
+        let walked = tree_hashes(root);
         assert_eq!(walked, expected, "same set, same hashes, path-sorted");
         let paths: Vec<&str> = walked.iter().map(|(rel, _)| rel.as_str()).collect();
         assert_eq!(
@@ -4306,21 +4332,21 @@ mod tests {
         // Ten more walks give ten identical answers: the sort makes the
         // parallel collection order invisible.
         for _ in 0..10 {
-            assert_eq!(tree_hashes(&root), expected);
+            assert_eq!(tree_hashes(root), expected);
         }
 
         // And `build_graph`, whose input set is `collect_files`, signs the
         // tree with exactly this walk's signature: both sides apply the same
         // exclusions, or the graph would never read as fresh.
         let db = root.join(".pixel").join("graph.db");
-        let stats = build_graph(&root, &db).unwrap();
+        let stats = build_graph(root, &db).unwrap();
         assert_eq!(stats.files, 4, "collect_files kept the same four files");
         assert_eq!(
             stored_signature(&GraphStore::open(&db).unwrap()),
-            freshness_signature(&root)
+            freshness_signature(root)
         );
-        assert!(is_fresh(&root, &db));
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(is_fresh(root, &db));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// `hash_candidates` is the parallel half on its own: a candidate that
@@ -4328,7 +4354,8 @@ mod tests {
     /// the survivors come back sorted.
     #[test]
     fn hash_candidates_drops_vanished_files_and_sorts_the_rest() {
-        let root = tmpdir("hash-candidates");
+        let root_dir = tmpdir("hash-candidates");
+        let root = root_dir.path();
         std::fs::write(root.join("z.rs"), b"fn z() {}\n").unwrap();
         std::fs::write(root.join("a.rs"), b"fn a() {}\n").unwrap();
         let candidates = vec![
@@ -4344,7 +4371,7 @@ mod tests {
                 ("z.rs".to_string(), xxh3_64(b"fn z() {}\n")),
             ]
         );
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The cap a build ran under must survive the process that built it.
@@ -4354,10 +4381,11 @@ mod tests {
     /// graph with a ceiling that never applied to it.
     #[test]
     fn a_full_build_should_record_the_file_cap_it_ran_under() {
-        let root = tmpdir("records-file-cap");
+        let root_dir = tmpdir("records-file-cap");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function target() {}\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
         assert_eq!(
@@ -4374,10 +4402,11 @@ mod tests {
     /// "No cap applied" is a fact the build knows; a missing key is not.
     #[test]
     fn a_recorded_cap_should_be_read_back_including_its_disabled_state() {
-        let root = tmpdir("read-file-cap");
+        let root_dir = tmpdir("read-file-cap");
+        let root = root_dir.path();
         std::fs::write(root.join("a.ts"), "export function target() {}\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
-        build_graph(&root, &db).unwrap();
+        build_graph(root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
 
         store.meta_set(GRAPH_FILE_CAP_KEY, "none").unwrap();
@@ -4586,16 +4615,17 @@ mod tests {
         // `b.py` that defines `later` reads `a.py` again, which links `main`
         // and gives the top-level site its row; a save that removes it puts
         // the name back. After each save the graph is a full build's.
-        let dir = tmpdir("unnamed");
+        let dir_dir = tmpdir("unnamed");
+        let dir = dir_dir.path();
         let a = "def main():\n    return later() + later()\n\n\nlater()\n";
         let mut tree = std::collections::BTreeMap::from([
             ("a.py", a),
             ("b.py", "def other():\n    return 1\n"),
         ]);
         let files: Vec<(&str, &str)> = tree.iter().map(|(k, v)| (*k, *v)).collect();
-        write_tree(&dir, &files);
+        write_tree(dir, &files);
         let db = dir.join(".pixel").join("graph.db");
-        build_graph(&dir, &db).unwrap();
+        build_graph(dir, &db).unwrap();
         let rows = |db: &Path, table: &str| -> Vec<String> {
             graph_rows(db)
                 .into_iter()
@@ -4625,14 +4655,15 @@ mod tests {
             ("later removed", "def other():\n    return ghost()\n"),
         ];
         for (label, body) in steps {
-            write_tree(&dir, &[("b.py", body)]);
+            write_tree(dir, &[("b.py", body)]);
             tree.insert("b.py", body);
-            update_file(&dir, &db, "b.py").unwrap();
-            let full = tmpdir("unnamed-full");
+            update_file(dir, &db, "b.py").unwrap();
+            let full_dir = tmpdir("unnamed-full");
+            let full = full_dir.path();
             let files: Vec<(&str, &str)> = tree.iter().map(|(k, v)| (*k, *v)).collect();
-            write_tree(&full, &files);
+            write_tree(full, &files);
             let full_db = full.join(".pixel").join("graph.db");
-            build_graph(&full, &full_db).unwrap();
+            build_graph(full, &full_db).unwrap();
             assert_same_graph(label, &graph_rows(&db), &graph_rows(&full_db));
             let _ = std::fs::remove_dir_all(full);
             let calls = rows(&db, "unresolved_calls");
@@ -4655,7 +4686,7 @@ mod tests {
                 }
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn assert_same_graph(label: &str, got: &[(&str, Vec<String>)], want: &[(&str, Vec<String>)]) {
@@ -4674,10 +4705,11 @@ mod tests {
     /// graph after its first edit.
     #[test]
     fn an_incremental_update_should_store_what_a_full_build_stores() {
-        let reference = tmpdir("equiv-full");
-        write_tree(&reference, EQUIVALENCE_TREE);
+        let reference_dir = tmpdir("equiv-full");
+        let reference = reference_dir.path();
+        write_tree(reference, EQUIVALENCE_TREE);
         let reference_db = reference.join(".pixel").join("graph.db");
-        build_graph(&reference, &reference_db).unwrap();
+        build_graph(reference, &reference_db).unwrap();
         let want = graph_rows(&reference_db);
         for (table, rows) in &want {
             assert!(!rows.is_empty(), "the fixture must exercise `{table}`");
@@ -4739,46 +4771,49 @@ mod tests {
             .collect();
 
         // One batch holding every file, on top of an empty graph.
-        let batch = tmpdir("equiv-batch");
+        let batch_dir = tmpdir("equiv-batch");
+        let batch = batch_dir.path();
         let batch_db = batch.join(".pixel").join("graph.db");
-        build_graph(&batch, &batch_db).unwrap();
-        write_tree(&batch, EQUIVALENCE_TREE);
-        update_files(&batch, &batch_db, &all).unwrap();
+        build_graph(batch, &batch_db).unwrap();
+        write_tree(batch, EQUIVALENCE_TREE);
+        update_files(batch, &batch_db, &all).unwrap();
         assert_same_graph("one batch", &graph_rows(&batch_db), &want);
 
         // One file at a time, each importer before what it imports, so
         // every import dangles first and is re-resolved when its file lands.
-        let single = tmpdir("equiv-single");
+        let single_dir = tmpdir("equiv-single");
+        let single = single_dir.path();
         let single_db = single.join(".pixel").join("graph.db");
-        build_graph(&single, &single_db).unwrap();
-        write_tree(&single, EQUIVALENCE_TREE);
+        build_graph(single, &single_db).unwrap();
+        write_tree(single, EQUIVALENCE_TREE);
         for (rel, _) in EQUIVALENCE_TREE.iter().rev() {
-            update_file(&single, &single_db, rel).unwrap();
+            update_file(single, &single_db, rel).unwrap();
         }
         assert_same_graph("one file at a time", &graph_rows(&single_db), &want);
 
         // An edit of a call target and of an imported file, then the revert:
         // their incoming edges are demoted and must come back as they were.
-        let edited = tmpdir("equiv-edit");
-        write_tree(&edited, EQUIVALENCE_TREE);
+        let edited_dir = tmpdir("equiv-edit");
+        let edited = edited_dir.path();
+        write_tree(edited, EQUIVALENCE_TREE);
         let edited_db = edited.join(".pixel").join("graph.db");
-        build_graph(&edited, &edited_db).unwrap();
+        build_graph(edited, &edited_db).unwrap();
         write_tree(
-            &edited,
+            edited,
             &[
                 ("src/push.rs", "pub fn pull() {}\n"),
                 ("web/b.ts", "export function other() { return 2 }\n"),
             ],
         );
         update_files(
-            &edited,
+            edited,
             &edited_db,
             &[("src/push.rs", false), ("web/b.ts", false)],
         )
         .unwrap();
-        write_tree(&edited, EQUIVALENCE_TREE);
-        update_file(&edited, &edited_db, "src/push.rs").unwrap();
-        update_file(&edited, &edited_db, "web/b.ts").unwrap();
+        write_tree(edited, EQUIVALENCE_TREE);
+        update_file(edited, &edited_db, "src/push.rs").unwrap();
+        update_file(edited, &edited_db, "web/b.ts").unwrap();
         assert_same_graph("edit then revert", &graph_rows(&edited_db), &want);
 
         for dir in [reference, batch, single, edited] {
@@ -4843,10 +4878,11 @@ mod tests {
     /// - the revert undoes each one.
     #[test]
     fn an_incremental_update_should_retry_every_row_whose_inputs_changed() {
-        let dir = tmpdir("retry-incremental");
-        write_tree(&dir, RETRY_TREE);
+        let dir_dir = tmpdir("retry-incremental");
+        let dir = dir_dir.path();
+        write_tree(dir, RETRY_TREE);
         let db = dir.join(".pixel").join("graph.db");
-        build_graph(&dir, &db).unwrap();
+        build_graph(dir, &db).unwrap();
         let mut tree: std::collections::BTreeMap<&str, &str> = RETRY_TREE.iter().copied().collect();
         let steps: &[RetryStep] = &[
             (
@@ -4899,11 +4935,12 @@ mod tests {
             ),
         ];
         let check = |label: &str, tree: &std::collections::BTreeMap<&str, &str>| {
-            let full = tmpdir("retry-full");
+            let full_dir = tmpdir("retry-full");
+            let full = full_dir.path();
             let files: Vec<(&str, &str)> = tree.iter().map(|(k, v)| (*k, *v)).collect();
-            write_tree(&full, &files);
+            write_tree(full, &files);
             let full_db = full.join(".pixel").join("graph.db");
-            build_graph(&full, &full_db).unwrap();
+            build_graph(full, &full_db).unwrap();
             let want = graph_rows(&full_db);
             assert_same_graph(label, &graph_rows(&db), &want);
             let _ = std::fs::remove_dir_all(full);
@@ -4913,7 +4950,7 @@ mod tests {
             for (rel, body) in *changes {
                 match body {
                     Some(body) => {
-                        write_tree(&dir, &[(rel, body)]);
+                        write_tree(dir, &[(rel, body)]);
                         tree.insert(rel, body);
                     }
                     None => {
@@ -4926,7 +4963,7 @@ mod tests {
                 .iter()
                 .map(|(rel, body)| (*rel, body.is_none()))
                 .collect();
-            update_files(&dir, &db, &batch).unwrap();
+            update_files(dir, &db, &batch).unwrap();
             let want = check(label, &tree);
             let edges = &want.iter().find(|(t, _)| *t == "edges").unwrap().1;
             assert!(
@@ -4936,7 +4973,7 @@ mod tests {
         }
         // Back to the first tree: every edge above becomes a row again, and
         // a file a step added is removed.
-        write_tree(&dir, RETRY_TREE);
+        write_tree(dir, RETRY_TREE);
         let first: HashSet<&str> = RETRY_TREE.iter().map(|(rel, _)| *rel).collect();
         let batch: Vec<(&str, bool)> = steps
             .iter()
@@ -4949,7 +4986,7 @@ mod tests {
                 (rel, added)
             })
             .collect();
-        update_files(&dir, &db, &batch).unwrap();
+        update_files(dir, &db, &batch).unwrap();
         check("revert", &RETRY_TREE.iter().copied().collect());
         let _ = std::fs::remove_dir_all(dir);
     }

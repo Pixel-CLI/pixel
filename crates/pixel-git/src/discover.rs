@@ -153,7 +153,8 @@ mod tests {
 
     #[test]
     fn ancestor_modules_dir_alone_does_not_make_a_submodule() {
-        let root = tmpdir("anc-modules");
+        let root_guard = tmpdir("anc-modules");
+        let root = root_guard.path().to_path_buf();
         let modules = root.join(".git").join("modules");
         std::fs::create_dir_all(modules.join("sub")).unwrap();
         let cur = root.join("sub");
@@ -162,25 +163,19 @@ mod tests {
             &cur,
             &root.join("elsewhere")
         ));
-        let bare = tmpdir("anc-no-modules");
+        let bare_guard = tmpdir("anc-no-modules");
+        let bare = bare_guard.path().to_path_buf();
         assert!(!is_under_ancestor_git_modules(
             &bare.join("sub"),
             &bare.join(".git").join("modules").join("sub")
         ));
     }
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "pixel-git-discover-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmpdir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("pixel-git-discover-{tag}-"))
+            .tempdir()
+            .unwrap()
     }
 
     fn init(dir: &Path) {
@@ -195,7 +190,8 @@ mod tests {
 
     #[test]
     fn resolves_nested_subdirectory_to_repo_root() {
-        let root = tmpdir("nested");
+        let root_guard = tmpdir("nested");
+        let root = root_guard.path().to_path_buf();
         init(&root);
 
         let nested = root.join("a").join("b").join("c");
@@ -215,7 +211,8 @@ mod tests {
         // in CI sandboxes) this test would need a different anchor — assert
         // the weaker, still-meaningful property that it never returns the
         // starting dir when that dir has no .git of its own.
-        let dir = tmpdir("no-git-here");
+        let dir_guard = tmpdir("no-git-here");
+        let dir = dir_guard.path().to_path_buf();
         if let Some(found) = discover_root(&dir) {
             assert_ne!(found, dir.canonicalize().unwrap());
         }
@@ -226,7 +223,8 @@ mod tests {
         if Command::new("git").arg("--version").output().is_err() {
             return; // git unavailable — skip integration-style test
         }
-        let sup = tmpdir("sub-super");
+        let sup_guard = tmpdir("sub-super");
+        let sup = sup_guard.path().to_path_buf();
         init(&sup);
         // Minimal gitlink simulation: drop a `.git` *file* that redirects
         // into the superproject's module store, like a real checked-out

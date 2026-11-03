@@ -565,9 +565,28 @@ pub fn run(root: &Path) -> Result<(), ServeError> {
 /// at daemon start.
 // Detached endless ingest thread; the tick counter only paces WAL checkpoints.
 #[cfg_attr(test, mutants::skip)]
-pub(crate) fn spawn_facts_ingest(root: &Path) {
+/// Sleeps `total`, waking early once `stop` is set, so a stopped warmer ends
+/// within a slice instead of after the whole idle poll.
+fn sleep_unless_stopped(stop: &AtomicBool, total: Duration) {
+    const SLICE: Duration = Duration::from_millis(50);
+    let deadline = std::time::Instant::now() + total;
+    while !stop.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(SLICE);
+    }
+}
+
+/// Starts the keep-fresh warmer for `root`. It runs until `stop` is set, and
+/// the returned handle is joined by whoever owns the store, so no ingest can
+/// recreate `root` after its owner has removed it.
+pub(crate) fn spawn_facts_ingest(
+    root: &Path,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
     let root = root.to_path_buf();
     std::thread::spawn(move || {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
         let mut store = match pixel_facts::FactsStore::open(&root) {
             Ok(s) => s,
             Err(_) => return,
@@ -577,26 +596,26 @@ pub(crate) fn spawn_facts_ingest(root: &Path) {
         // ref move re-triggers ingest. Each tick is budget-bounded, so queries
         // on the same WAL-mode connection are never starved.
         let mut tick_count = 0u64;
-        loop {
+        while !stop.load(Ordering::SeqCst) {
             match pixel_facts::ingest::ingest_tick(&mut store, &opts) {
                 Ok(report) if report.fresh => {
                     let _ = store.wal_checkpoint();
-                    std::thread::sleep(INGEST_IDLE_POLL);
+                    sleep_unless_stopped(&stop, INGEST_IDLE_POLL);
                 }
                 Ok(_) => {
                     tick_count += 1;
                     if tick_count.is_multiple_of(20) {
                         let _ = store.wal_checkpoint();
                     }
-                    std::thread::sleep(Duration::from_millis(250));
+                    sleep_unless_stopped(&stop, Duration::from_millis(250));
                 }
                 Err(_) => {
                     // Transient error (e.g. git lock): back off and retry.
-                    std::thread::sleep(INGEST_ERROR_BACKOFF);
+                    sleep_unless_stopped(&stop, INGEST_ERROR_BACKOFF);
                 }
             }
         }
-    });
+    })
 }
 
 /// Run any corpus daemon in the foreground.
@@ -1830,7 +1849,8 @@ mod tests {
                 .unwrap();
             line
         });
-        let mut corpus = BulkyCorpus(scratch_root("bulky"));
+        let (_bulky_scratch, bulky_root) = scratch_root("bulky");
+        let mut corpus = BulkyCorpus(bulky_root);
         let mut shutdown = false;
         handle_conn(&mut corpus, server, &mut shutdown);
         let line = client_thread.join().unwrap();
@@ -1867,11 +1887,14 @@ mod tests {
         }
     }
 
-    fn scratch_root(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("pixel-daemon-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root.canonicalize().unwrap()
+    /// A canonical scratch root removed when the returned guard drops.
+    fn scratch_root(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let scratch = tempfile::Builder::new()
+            .prefix(&format!("pixel-daemon-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let root = scratch.path().canonicalize().unwrap();
+        (scratch, root)
     }
 
     /// A socket pair carrying a canned reply: the probe's contract is the
@@ -1897,10 +1920,10 @@ mod tests {
     /// daemon listens on: the two halves a constant-returning mutant breaks.
     #[test]
     fn ping_only_sees_a_listening_daemon_and_nothing_else() {
-        let bare = scratch_root("probe-none");
+        let (_bare_scratch, bare) = scratch_root("probe-none");
         assert!(!ping_only(&bare));
 
-        let root = scratch_root("probe-live");
+        let (_root_scratch, root) = scratch_root("probe-live");
         let listener = UnixListener::bind(socket_path(&root)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
@@ -1968,7 +1991,7 @@ mod tests {
     /// filesystem event and no request in between.
     #[test]
     fn corpus_sweep_runs_on_its_interval_without_events() {
-        let root = scratch_root("sweep");
+        let (_root_scratch, root) = scratch_root("sweep");
         let sock = socket_path(&root);
         let sweeps = Arc::new(AtomicUsize::new(0));
         let corpus = SweptCorpus {
@@ -2022,7 +2045,7 @@ mod tests {
     fn the_daemon_socket_should_be_0600_after_bind() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = scratch_root("socket-mode");
+        let (_root_scratch, root) = scratch_root("socket-mode");
         let sock = socket_path(&root);
         let served = root.clone();
         let daemon = std::thread::spawn(move || run_corpus(StubCorpus(served)));
@@ -2053,7 +2076,7 @@ mod tests {
     /// thread still blocked in `accept`.
     #[test]
     fn acceptor_should_forward_connections_and_stop_when_woken() {
-        let root = scratch_root("acceptor");
+        let (_root_scratch, root) = scratch_root("acceptor");
         let sock = root.join("a.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let (tx, rx) = mpsc::channel();
@@ -2115,7 +2138,7 @@ mod tests {
     /// Wait on the production event loop's apply notification, without a client
     /// connection that could force the pending batch to flush prematurely.
     fn autonomous_flush(tag: &str, noise: Option<&str>, limit: Duration) -> Duration {
-        let root = scratch_root(tag);
+        let (_root_scratch, root) = scratch_root(tag);
         let source = root.join("edited.rs");
         std::fs::write(&source, "fn edited() {}\n").unwrap();
         let (applied, flushed) = mpsc::channel();
@@ -2215,7 +2238,7 @@ mod tests {
     #[test]
     fn note_event_should_start_the_debounce_only_for_a_pending_change() {
         use notify::event::{AccessKind, CreateKind, EventKind};
-        let root = scratch_root("note-event");
+        let (_root_scratch, root) = scratch_root("note-event");
         let file = root.join("a.rs");
         std::fs::write(&file, "fn a() {}\n").unwrap();
         let mut pending = BTreeMap::new();
@@ -2254,7 +2277,7 @@ mod tests {
     /// reports that it was left running instead of blocking on `join`.
     #[test]
     fn stop_acceptor_should_not_wait_on_a_removed_socket() {
-        let root = scratch_root("acceptor-gone");
+        let (_root_scratch, root) = scratch_root("acceptor-gone");
         let sock = root.join("a.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let (tx, _rx) = mpsc::channel();
@@ -2274,7 +2297,7 @@ mod tests {
     /// so a regression fails the test instead of hanging it.
     #[test]
     fn stop_acceptor_should_not_wait_on_a_socket_another_daemon_bound() {
-        let root = scratch_root("acceptor-replaced");
+        let (_root_scratch, root) = scratch_root("acceptor-replaced");
         let sock = root.join("a.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let (tx, _rx) = mpsc::channel();
@@ -2296,7 +2319,7 @@ mod tests {
 
     #[test]
     fn socket_identity_should_follow_the_file_not_the_path() {
-        let root = scratch_root("socket-identity");
+        let (_root_scratch, root) = scratch_root("socket-identity");
         let sock = root.join("a.sock");
         assert_eq!(socket_identity(&sock), None);
         let first = UnixListener::bind(&sock).unwrap();
@@ -2382,7 +2405,7 @@ mod tests {
             AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind,
         };
 
-        let root = scratch_root("content-events");
+        let (_root_scratch, root) = scratch_root("content-events");
         let file = root.join("login.rs");
         std::fs::write(&file, "pub fn login() -> bool { true }\n").unwrap();
         std::fs::create_dir_all(root.join(".pixel")).unwrap();
@@ -2446,7 +2469,7 @@ mod tests {
     fn record_event_should_judge_only_the_components_below_the_root() {
         use notify::event::{DataChange, ModifyKind};
 
-        let base = scratch_root("ignored-ancestor");
+        let (_base_scratch, base) = scratch_root("ignored-ancestor");
         for parent in [".cache", "build", "vendor"] {
             let root = base.join(parent).join("repo");
             let source = root.join("app/models/link.rb");
@@ -2474,7 +2497,7 @@ mod tests {
     fn watcher_admits_only_the_root_git_info_exclude_control() {
         use notify::event::{DataChange, ModifyKind};
 
-        let root = scratch_root("git-exclude-event");
+        let (_root_scratch, root) = scratch_root("git-exclude-event");
         let root_exclude = root.join(".git/info/exclude");
         let object = root.join(".git/objects/ab/object");
         let nested_exclude = root.join("nested/.git/info/exclude");
@@ -2503,7 +2526,7 @@ mod tests {
     /// periodic work pays nothing.
     #[test]
     fn corpus_without_interval_is_never_swept() {
-        let root = scratch_root("nosweep");
+        let (_root_scratch, root) = scratch_root("nosweep");
         let sock = socket_path(&root);
         let sweeps = Arc::new(AtomicUsize::new(0));
         let corpus = SweptCorpus {
@@ -2555,14 +2578,11 @@ mod tests {
     /// fixture behind (18 per run, load average past 70 after a few runs).
     #[test]
     fn daemon_exits_once_its_root_is_deleted() {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-daemon-root-gone-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("pixel-daemon-root-gone-")
+            .tempdir()
+            .unwrap();
+        let root = scratch.path().canonicalize().unwrap();
         let sock = socket_path(&root);
         let served = root.clone();
         let daemon = std::thread::spawn(move || run_corpus(StubCorpus(served)));
@@ -2684,7 +2704,7 @@ mod tests {
     /// still ahead, runs as before.
     #[test]
     fn a_request_past_its_deadline_should_run_nothing() {
-        let root = scratch_root("deadline-past");
+        let (_root_scratch, root) = scratch_root("deadline-past");
         let sock = socket_path(&root);
         let ran = Arc::new(AtomicUsize::new(0));
         let (started, _seen) = mpsc::channel();
@@ -2723,7 +2743,7 @@ mod tests {
     /// nobody is reading.
     #[test]
     fn a_request_that_expired_in_the_queue_should_not_run_when_the_writer_frees_up() {
-        let root = scratch_root("deadline-queued");
+        let (_root_scratch, root) = scratch_root("deadline-queued");
         let sock = socket_path(&root);
         let ran = Arc::new(AtomicUsize::new(0));
         let (started, running) = mpsc::channel();
@@ -2805,7 +2825,7 @@ mod tests {
     /// first request at once, and the corpus catches up once the watch lands.
     #[test]
     fn a_slow_watch_registration_should_not_delay_the_first_answer() {
-        let root = scratch_root("slow-watch");
+        let (_root_scratch, root) = scratch_root("slow-watch");
         let sock = socket_path(&root);
         let ready = Arc::new(AtomicUsize::new(0));
         let corpus = WatchedCorpus {
@@ -2856,7 +2876,7 @@ mod tests {
     /// index may go stale) instead of failing the daemon, which keeps serving.
     #[test]
     fn a_failed_watch_registration_should_be_reported_and_keep_serving() {
-        let root = scratch_root("failed-watch");
+        let (_root_scratch, root) = scratch_root("failed-watch");
         let sock = socket_path(&root);
         let ready = Arc::new(AtomicUsize::new(0));
         let errors: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
@@ -2910,7 +2930,7 @@ mod tests {
     /// file are all current afterwards.
     #[test]
     fn service_watch_ready_should_catch_up_on_unwatched_edits() {
-        let root = scratch_root("service-watch-ready");
+        let (_root_scratch, root) = scratch_root("service-watch-ready");
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .arg("-C")
@@ -2969,13 +2989,13 @@ mod tests {
     }
 
     /// One committed `a.rs` defining `alphaNeedle`.
-    fn committed_repo(tag: &str) -> PathBuf {
-        let root = scratch_root(tag);
+    fn committed_repo(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let (scratch, root) = scratch_root(tag);
         git_in(&root, &["init", "-q"]);
         std::fs::write(root.join("a.rs"), "fn alphaNeedle() {}\n").unwrap();
         git_in(&root, &["add", "."]);
         git_in(&root, &["commit", "-qm", "initial"]);
-        root
+        (scratch, root)
     }
 
     /// An edit and a deletion the daemon opened with, both discarded before
@@ -2984,7 +3004,7 @@ mod tests {
     /// restored file unless `watch_ready` re-reads what it held.
     #[test]
     fn service_watch_ready_should_drop_an_edit_discarded_before_the_watch() {
-        let root = committed_repo("watch-ready-discard");
+        let (_root_scratch, root) = committed_repo("watch-ready-discard");
         std::fs::write(root.join("b.rs"), "fn betaNeedle() {}\n").unwrap();
         git_in(&root, &["add", "b.rs"]);
         git_in(&root, &["commit", "-qm", "b"]);
@@ -3011,7 +3031,7 @@ mod tests {
     /// tracked file of a large repository after each daemon start.
     #[test]
     fn index_catch_up_should_report_the_opened_head_and_only_the_overlay_paths() {
-        let root = committed_repo("index-catch-up");
+        let (_root_scratch, root) = committed_repo("index-catch-up");
         std::fs::write(root.join("u.rs"), "fn untrackedNeedle() {}\n").unwrap();
         let svc = Service::open(&root).unwrap();
         let head = String::from_utf8(
@@ -3040,7 +3060,7 @@ mod tests {
     /// diff brings it in.
     #[test]
     fn service_watch_ready_should_pick_up_a_first_commit_before_the_watch() {
-        let root = scratch_root("watch-ready-first-commit");
+        let (_root_scratch, root) = scratch_root("watch-ready-first-commit");
         git_in(&root, &["init", "-q"]);
         let mut svc = Service::open(&root).unwrap();
 
@@ -3056,7 +3076,7 @@ mod tests {
 
     #[test]
     fn service_watch_ready_should_follow_a_head_move_before_the_watch() {
-        let root = committed_repo("watch-ready-head-move");
+        let (_root_scratch, root) = committed_repo("watch-ready-head-move");
         git_in(&root, &["checkout", "-qb", "other"]);
         std::fs::write(root.join("a.rs"), "fn otherNeedle() {}\n").unwrap();
         std::fs::write(root.join("n.rs"), "fn newNeedle() {}\n").unwrap();
@@ -3095,7 +3115,7 @@ mod tests {
     /// keep serving the old index with a dead watch.
     #[test]
     fn daemon_exits_once_its_root_is_replaced_in_place() {
-        let root = scratch_root("root-replaced");
+        let (_root_scratch, root) = scratch_root("root-replaced");
         let sock = socket_path(&root);
         let served = root.clone();
         let daemon = std::thread::spawn(move || run_corpus(StubCorpus(served)));
@@ -3186,7 +3206,7 @@ mod tests {
     /// naming the panic (#1102); the daemon keeps serving the next request.
     #[test]
     fn a_panicking_request_should_fail_alone_and_the_next_ping_should_answer() {
-        let root = scratch_root("panic-once");
+        let (_root_scratch, root) = scratch_root("panic-once");
         let sock = socket_path(&root);
         let served = root.clone();
         let daemon = std::thread::spawn(move || {
@@ -3220,7 +3240,7 @@ mod tests {
     /// pid and lock files, which a dead daemon used to leave behind.
     #[test]
     fn a_panic_out_of_the_loop_should_release_the_daemon_files() {
-        let root = scratch_root("panic-sweep");
+        let (_root_scratch, root) = scratch_root("panic-sweep");
         let sock = socket_path(&root);
         let lock = pid_path(&root).with_extension("lock");
         let served = root.clone();
@@ -3250,8 +3270,8 @@ mod tests {
 
     /// A tree with tracked sources beside ignored directories at the top
     /// and nested inside a source directory.
-    fn mixed_tree(tag: &str) -> PathBuf {
-        let root = scratch_root(tag);
+    fn mixed_tree(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let (scratch, root) = scratch_root(tag);
         for dir in [
             "src/a/b",
             "node_modules/pkg/lib",
@@ -3270,14 +3290,14 @@ mod tests {
         ] {
             std::fs::write(root.join(file), "x\n").unwrap();
         }
-        root
+        (scratch, root)
     }
 
     /// The watch skips every directory the event filter drops anyway, at
     /// any depth, and keeps the sources beside them.
     #[test]
     fn unignored_tree_should_skip_ignored_directories_at_any_depth() {
-        let root = mixed_tree("unignored-tree");
+        let (_root_scratch, root) = mixed_tree("unignored-tree");
         let tree = unignored_tree(&root, true);
         assert_eq!(
             relative(&root, &tree.dirs),
@@ -3295,7 +3315,7 @@ mod tests {
     /// event filter keeps, so its directory is watched on its own.
     #[test]
     fn pruned_watch_dirs_should_add_the_git_info_directory() {
-        let root = mixed_tree("pruned-dirs");
+        let (_root_scratch, root) = mixed_tree("pruned-dirs");
         assert_eq!(
             relative(&root, &pruned_watch_dirs(std::slice::from_ref(&root))),
             [".", ".git", ".git/info", "src", "src/a", "src/a/b"]
@@ -3319,7 +3339,7 @@ mod tests {
 
     #[test]
     fn created_dirs_should_take_existing_directories_from_create_and_rename_events() {
-        let root = mixed_tree("created-dirs");
+        let (_root_scratch, root) = mixed_tree("created-dirs");
         let dir = root.join("src/a");
         let file = root.join("top.rs");
         let event = |kind| {
@@ -3401,7 +3421,7 @@ mod tests {
     /// already inside reaches the corpus with no event of its own.
     #[test]
     fn a_directory_created_before_the_watch_landed_should_be_extended_into_it() {
-        let root = scratch_root("extend-early");
+        let (_root_scratch, root) = scratch_root("extend-early");
         let fresh = root.join("fresh");
         std::fs::create_dir_all(&fresh).unwrap();
         let inside = fresh.join("inside.rs");
@@ -3473,7 +3493,7 @@ mod tests {
     /// watch alone never reports.
     #[test]
     fn a_pruned_watch_should_cover_a_directory_created_after_it() {
-        let root = mixed_tree("pruned-live");
+        let (_root_scratch, root) = mixed_tree("pruned-live");
         let (reports, report) = mpsc::channel();
         let (applied, batches) = mpsc::channel();
         let (moved, head_moves) = mpsc::channel();
@@ -3667,7 +3687,7 @@ mod tests {
     /// queue, it does not abandon what is in it (#1149).
     #[test]
     fn a_shutdown_should_wait_for_the_request_in_flight() {
-        let root = scratch_root("held-shutdown");
+        let (_root_scratch, root) = scratch_root("held-shutdown");
         let sock = socket_path(&root);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -3864,7 +3884,7 @@ mod tests {
     /// daemon is never taken for a dead one (#1152).
     #[test]
     fn ping_should_be_answered_while_the_writer_holds_a_request() {
-        let root = scratch_root("held-ping");
+        let (_root_scratch, root) = scratch_root("held-ping");
         let sock = socket_path(&root);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -3909,7 +3929,7 @@ mod tests {
     /// byte for byte, for the repository and the recall corpus.
     #[test]
     fn pong_should_equal_the_handled_ping() {
-        let root = scratch_root("pong-service");
+        let (_root_scratch, root) = scratch_root("pong-service");
         let mut service = Service::open(&root).unwrap();
         let pong = Corpus::pong(&service).expect("a service answers ping from the loop");
         let handled = Corpus::handle(&mut service, Request::Ping);
@@ -3940,8 +3960,8 @@ mod tests {
 
     #[test]
     fn fit_sun_path_should_keep_a_short_path_and_shorten_a_long_one() {
-        let base = std::env::temp_dir().join(format!("pxfit-{}", std::process::id()));
-        std::fs::create_dir_all(&base).unwrap();
+        let scratch = tempfile::Builder::new().prefix("pxfit-").tempdir().unwrap();
+        let base = scratch.path().to_path_buf();
         let name = "pixel-0123456789abcdef.sock";
         let short_dir = Path::new("/a/b");
         assert_eq!(

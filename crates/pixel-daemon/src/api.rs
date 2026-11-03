@@ -431,6 +431,8 @@ pub struct Service {
     /// facts-consuming request, not at daemon start — users who never touch
     /// history commands never pay for the index.
     facts_warmer_started: AtomicBool,
+    /// The keep-fresh warmer this service started, stopped and joined on drop.
+    facts_warmer: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>,
     /// Fan-in queries run, for the tests that pin which ops count fan-in.
     #[cfg(test)]
     fan_in_queries: usize,
@@ -723,6 +725,7 @@ impl Service {
             #[cfg(test)]
             rev_list_runs: 0,
             facts_warmer_started: AtomicBool::new(false),
+            facts_warmer: None,
             #[cfg(test)]
             fan_in_queries: 0,
             git_state: GitStateCache::new(),
@@ -775,6 +778,7 @@ impl Service {
             #[cfg(test)]
             rev_list_runs: 0,
             facts_warmer_started: AtomicBool::new(true),
+            facts_warmer: None,
             #[cfg(test)]
             fan_in_queries: 0,
             git_state: GitStateCache::new(),
@@ -3918,7 +3922,9 @@ impl Service {
         // serves this request within its budget; the warmer finishes the job
         // in the background and keeps the index fresh for later queries.
         if self.facts_warmer_needed() {
-            crate::daemon::spawn_facts_ingest(&self.root);
+            let stop = Arc::new(AtomicBool::new(false));
+            let handle = crate::daemon::spawn_facts_ingest(&self.root, Arc::clone(&stop));
+            self.facts_warmer = Some((stop, handle));
         }
         // A rebuild during the ingest replaced the file: this reopens it.
         self.cached_facts(true)?
@@ -5847,6 +5853,16 @@ impl GraphLock {
     }
 }
 
+impl Drop for Service {
+    fn drop(&mut self) {
+        // The warmer writes under `root`; the store must not be removed while it runs.
+        if let Some((stop, handle)) = self.facts_warmer.take() {
+            stop.store(true, Ordering::SeqCst);
+            let _ = handle.join();
+        }
+    }
+}
+
 impl Drop for GraphLock {
     fn drop(&mut self) {
         let _ = fs2::FileExt::unlock(&self.0);
@@ -6599,7 +6615,7 @@ mod tests {
 
     #[test]
     fn hybrid_should_load_a_model_cached_after_its_hint_without_restarting() {
-        let root = login_repo("hybrid-late-cache");
+        let (_scratch, root) = login_repo("hybrid-late-cache");
         let mut service = Service::open(&root).unwrap();
         service.ensure_embedder_with(false, false, |_| {
             panic!("a search must not download without opt-in")
@@ -6632,7 +6648,7 @@ mod tests {
 
     #[test]
     fn hybrid_should_report_failed_download_in_status_once_and_allow_external_recovery() {
-        let root = login_repo("hybrid-download-error");
+        let (_scratch, root) = login_repo("hybrid-download-error");
         let mut service = Service::open(&root).unwrap();
         let (release, wait) = std::sync::mpsc::channel();
         service.ensure_embedder_with(false, true, move |download| {
@@ -6671,7 +6687,7 @@ mod tests {
 
     #[test]
     fn hybrid_should_load_after_background_download_and_report_a_corrupt_cache() {
-        let root = login_repo("hybrid-download-ready");
+        let (_scratch, root) = login_repo("hybrid-download-ready");
         let mut service = Service::open(&root).unwrap();
         service.ensure_embedder_with(false, true, |download| {
             assert!(download);
@@ -6729,7 +6745,7 @@ mod tests {
 
     #[test]
     fn read_plane_shares_index_and_observes_published_refresh() {
-        let root = tmpdir("read-plane-shared");
+        let (_scratch, root) = tmpdir("read-plane-shared");
         std::fs::write(root.join("app.rs"), "fn initial_name() {}\n").unwrap();
         let mut writer = Service::open(&root).unwrap();
         let mut first = writer.read_replica();
@@ -6796,7 +6812,7 @@ mod tests {
     /// graph that lags the index (#1150).
     #[test]
     fn read_answer_should_serve_only_read_ops_from_a_published_graph() {
-        let root = login_repo("read-answer");
+        let (_scratch, root) = login_repo("read-answer");
         let mut writer = Service::open(&root).unwrap();
         let mut cold = writer.read_replica();
         assert!(
@@ -6846,7 +6862,7 @@ mod tests {
     /// read goes back to the writer (#1151). Watcher batches publish their own.
     #[test]
     fn a_replica_should_attach_the_published_snapshot_and_run_no_git() {
-        let root = login_repo("published-snapshot");
+        let (_scratch, root) = login_repo("published-snapshot");
         let mut writer = Service::open(&root).unwrap();
         writer.ensure_graph().unwrap();
         let mut reader = writer.read_replica();
@@ -6902,7 +6918,7 @@ mod tests {
     /// see before it runs, and withdraws it afterwards, success or not.
     #[test]
     fn a_repo_write_should_publish_before_and_withdraw_after() {
-        let root = login_repo("repo-write-snapshot");
+        let (_scratch, root) = login_repo("repo-write-snapshot");
         let mut writer = Service::open(&root).unwrap();
         let generation = writer.publication_generation();
         let (seen_tx, seen_rx) = std::sync::mpsc::channel();
@@ -6944,7 +6960,7 @@ mod tests {
     /// its first line, and the replica waited for the whole update.
     #[test]
     fn a_replica_should_answer_from_the_last_generation_while_a_batch_is_held() {
-        let root = login_repo("held-batch");
+        let (_scratch, root) = login_repo("held-batch");
         let mut writer = Service::open(&root).unwrap();
         writer.ensure_graph().unwrap();
         assert!(writer.handle(search_request("login")).ok);
@@ -7026,7 +7042,7 @@ mod tests {
     /// the previous generation available to a deadline-bound brief.
     #[test]
     fn stale_brief_should_answer_during_a_second_batch_without_a_writer_read() {
-        let root = login_repo("consecutive-stale-brief");
+        let (_scratch, root) = login_repo("consecutive-stale-brief");
         let mut writer = Service::open(&root).unwrap();
         writer.ensure_graph().unwrap();
         assert!(writer.handle(search_request("login")).ok);
@@ -7068,6 +7084,8 @@ mod tests {
     /// published), then holds a watcher batch renaming `login` to
     /// `login_v2` right before its swap, with a replica of it.
     struct HeldBatch {
+        /// Owns the repository's directory; removed with the batch.
+        scratch: tempfile::TempDir,
         root: PathBuf,
         reader: Service,
         generation: u64,
@@ -7079,7 +7097,7 @@ mod tests {
 
     impl HeldBatch {
         fn start(tag: &str) -> Self {
-            let root = login_repo(tag);
+            let (scratch, root) = login_repo(tag);
             let mut writer = Service::open(&root).unwrap();
             writer.ensure_graph().unwrap();
             assert!(writer.handle(search_request("login")).ok);
@@ -7102,6 +7120,7 @@ mod tests {
             held.recv_timeout(Duration::from_secs(10))
                 .expect("the batch reaches its swap");
             HeldBatch {
+                scratch,
                 root,
                 reader,
                 generation,
@@ -7112,7 +7131,7 @@ mod tests {
         }
 
         /// Let the batch publish; the writer, now one generation on.
-        fn finish(self) -> (PathBuf, Service, Service) {
+        fn finish(self) -> (tempfile::TempDir, PathBuf, Service, Service) {
             self.release.send(()).unwrap();
             let mut writer = self.batch.join().unwrap();
             assert_eq!(writer.publication_generation(), self.generation + 1);
@@ -7120,7 +7139,7 @@ mod tests {
                 writer.handle(search_request("login_v2")).ok,
                 "publish a snapshot"
             );
-            (self.root, writer, self.reader)
+            (self.scratch, self.root, writer, self.reader)
         }
     }
 
@@ -7136,7 +7155,7 @@ mod tests {
         let response = held.reader.read_answer(&request, &|| Some(HELD_LAG));
         let generation = held.generation;
         let signature = held.signature.clone();
-        let (root, mut writer, mut reader) = held.finish();
+        let (_scratch, root, mut writer, mut reader) = held.finish();
         let response = response.expect("stale_ok graph read must reach the replica");
         assert!(response.ok, "{op}: {response:?}");
         assert_eq!(
@@ -7315,7 +7334,7 @@ mod tests {
             .expect("the replica answers during the batch");
         let elapsed = started.elapsed();
         let generation = held.generation;
-        let (root, _writer, mut reader) = held.finish();
+        let (_scratch, root, _writer, mut reader) = held.finish();
 
         assert!(elapsed < Duration::from_secs(1), "waited {elapsed:?}");
         assert!(old.ok && renamed.ok, "{old:?} {renamed:?}");
@@ -7370,7 +7389,7 @@ mod tests {
         let elapsed = started.elapsed();
         let generation = held.generation;
         let signature = held.signature.clone();
-        let (root, _writer, mut reader) = held.finish();
+        let (_scratch, root, _writer, mut reader) = held.finish();
 
         assert!(elapsed < Duration::from_secs(1), "waited {elapsed:?}");
         assert_eq!(stale.data()["status"], "available", "{stale:?}");
@@ -7413,7 +7432,7 @@ mod tests {
     /// says `graph_stale` rather than serve its rows.
     #[test]
     fn a_replica_should_not_vouch_for_a_graph_another_extractor_built() {
-        let root = login_repo("stale-ok-extractor");
+        let (_scratch, root) = login_repo("stale-ok-extractor");
         let mut writer = Service::open(&root).unwrap();
         writer.ensure_graph().unwrap();
         assert!(writer.handle(search_request("login")).ok);
@@ -7460,7 +7479,7 @@ mod tests {
     /// lag is sampled, the old-generation response must not escape unstamped.
     #[test]
     fn a_replica_should_requeue_when_publication_advances_before_lag_sampling() {
-        let root = login_repo("stale-ok-publish-before-lag");
+        let (_scratch, root) = login_repo("stale-ok-publish-before-lag");
         let mut writer = Service::open(&root).unwrap();
         writer.ensure_graph().unwrap();
         assert!(writer.handle(search_request("login")).ok);
@@ -7483,8 +7502,8 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn login_repo(tag: &str) -> PathBuf {
-        let root = tmpdir(tag);
+    fn login_repo(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let (scratch, root) = tmpdir(tag);
         std::fs::write(
             root.join("login.rs"),
             "pub fn login(user: &str) -> bool { !user.is_empty() }\n",
@@ -7498,12 +7517,12 @@ mod tests {
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "init"]);
-        root
+        (scratch, root)
     }
 
     #[test]
     fn read_plane_answers_each_allowed_kind_and_refuses_any_other() {
-        let root = login_repo("read-plane-kinds");
+        let (_scratch, root) = login_repo("read-plane-kinds");
         let mut writer = Service::open(&root).unwrap();
         writer.ensure_graph().unwrap();
         let mut reader = writer.read_replica();
@@ -7533,7 +7552,7 @@ mod tests {
 
     #[test]
     fn a_failed_graph_update_leaves_readers_text_answers_until_the_graph_is_repaired() {
-        let root = login_repo("read-plane-lagging");
+        let (_scratch, root) = login_repo("read-plane-lagging");
         let mut writer = Service::open(&root).unwrap();
         writer.ensure_graph().unwrap();
         let mut reader = writer.read_replica();
@@ -7570,18 +7589,13 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "pixel-daemon-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmpdir(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let scratch = tempfile::Builder::new()
+            .prefix(&format!("pixel-daemon-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let d = scratch.path().to_path_buf();
+        (scratch, d)
     }
 
     fn git(dir: &Path, args: &[&str]) {
@@ -7608,7 +7622,7 @@ mod tests {
     /// so opening the daemon service cannot create `.pixel/history.db`.
     #[test]
     fn service_open_does_not_create_the_history_index() {
-        let root = tmpdir("lazy-facts-open");
+        let (_scratch, root) = tmpdir("lazy-facts-open");
         git(&root, &["init", "-q"]);
         std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
         let service = Service::open(&root).unwrap();
@@ -7620,7 +7634,7 @@ mod tests {
     /// facts-consuming request spawns it, later ones must not.
     #[test]
     fn facts_warmer_is_claimed_once() {
-        let root = tmpdir("lazy-facts-warmer");
+        let (_scratch, root) = tmpdir("lazy-facts-warmer");
         git(&root, &["init", "-q"]);
         let service = Service::open(&root).unwrap();
         assert!(service.facts_warmer_needed());
@@ -7724,7 +7738,7 @@ mod tests {
     /// with no message (the agent would retry blind).
     #[test]
     fn every_read_op_emits_a_valid_envelope() {
-        let root = tmpdir("envelope-contract");
+        let (_scratch, root) = tmpdir("envelope-contract");
         std::fs::write(
             root.join("login.rs"),
             "pub fn login(user: &str) -> bool { !user.is_empty() }\n",
@@ -7793,7 +7807,7 @@ mod tests {
     /// renderer can keep the `//` comment prefix mute per language.
     #[test]
     fn skeleton_renders_signatures_without_bodies() {
-        let root = tmpdir("skeleton-render");
+        let (_scratch, root) = tmpdir("skeleton-render");
         std::fs::write(
             root.join("mod.rs"),
             concat!(
@@ -7898,7 +7912,7 @@ mod tests {
     /// an unknown query is an error rather than an empty plan.
     #[test]
     fn plan_runs_the_requested_queries_over_the_daemon_graph() {
-        let root = tmpdir("plan-op");
+        let (_scratch, root) = tmpdir("plan-op");
         std::fs::write(
             root.join("app.ts"),
             "export function used() { return 1; }\n\
@@ -7955,7 +7969,7 @@ mod tests {
     /// `Ok(Default::default())`) both collapse to a missing/empty report.
     #[test]
     fn review_gate_reports_the_uncommitted_secret() {
-        let root = tmpdir("review-gate-op");
+        let (_scratch, root) = tmpdir("review-gate-op");
         std::fs::write(root.join("a.rs"), "pub fn idle() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -7979,7 +7993,7 @@ mod tests {
 
     #[test]
     fn ping_reports_daemon_protocol_version() {
-        let root = tmpdir("protocol-version");
+        let (_scratch, root) = tmpdir("protocol-version");
         let mut svc = Service::open(&root).unwrap();
         let resp = svc.handle(Request::Ping);
         assert!(resp.ok);
@@ -7992,7 +8006,7 @@ mod tests {
 
     #[test]
     fn uses_callees_reports_outgoing_uncertainty_without_changing_callers() {
-        let root = tmpdir("uses-outgoing-uncertainty");
+        let (_scratch, root) = tmpdir("uses-outgoing-uncertainty");
         std::fs::write(
             root.join("calls.ts"),
             "export function known() { return 1; }\n\
@@ -8072,7 +8086,7 @@ mod tests {
     /// read as a valid answer about a symbol that does not exist.
     #[test]
     fn resolve_symbol_misses_are_errors_and_hits_resolve() {
-        let root = tmpdir("resolve-protocol");
+        let (_scratch, root) = tmpdir("resolve-protocol");
         std::fs::write(
             root.join("a.ts"),
             "export function alpha(x: number): number { return x + 1 }\n",
@@ -8139,7 +8153,7 @@ mod tests {
     /// failed the same way.
     #[test]
     fn qualified_method_names_resolve_on_every_route_and_misses_hint_the_leaf() {
-        let root = tmpdir("qualified-names");
+        let (_scratch, root) = tmpdir("qualified-names");
         std::fs::write(
             root.join("log.rs"),
             [
@@ -8268,7 +8282,7 @@ mod tests {
 
     #[test]
     fn uses_pages_cover_all_edges_without_overlap() {
-        let root = tmpdir("uses-pages");
+        let (_scratch, root) = tmpdir("uses-pages");
         let mut source = String::from("export function target(): number { return 1 }\n");
         for index in 0..25 {
             source.push_str(&format!(
@@ -8318,7 +8332,7 @@ mod tests {
 
     #[test]
     fn changes_pages_cover_all_symbols_without_overlap() {
-        let root = tmpdir("changes-pages");
+        let (_scratch, root) = tmpdir("changes-pages");
         let make_source = |increment: usize| {
             (0..25)
                 .map(|index| {
@@ -8373,7 +8387,7 @@ mod tests {
     /// sections were not counted.
     #[test]
     fn context_budget_covers_whole_response() {
-        let root = tmpdir("ctx-budget");
+        let (_scratch, root) = tmpdir("ctx-budget");
         std::fs::write(
             root.join("a.ts"),
             "export function alpha(x: number): number { return x + 1 }\n\
@@ -8444,7 +8458,7 @@ mod tests {
     /// error, never an over-budget response.
     #[test]
     fn context_ambiguous_name_obeys_whole_response_budget() {
-        let root = tmpdir("ctx-budget-candidates");
+        let (_scratch, root) = tmpdir("ctx-budget-candidates");
         // Eight same-named declarations: the candidate response is well
         // above a 100-token budget yet comfortably inside the 2000-token
         // default, so the small-budget case exercises the fit check and the
@@ -8535,7 +8549,7 @@ mod tests {
     /// not exceed the budget by more than a small rounding factor.
     #[test]
     fn context_moderate_budget_covers_whole_response() {
-        let root = tmpdir("ctx-budget-moderate");
+        let (_scratch, root) = tmpdir("ctx-budget-moderate");
         std::fs::write(
             root.join("a.ts"),
             "export function alpha(x: number): number { return x + 1 }\n\
@@ -8585,7 +8599,7 @@ mod tests {
     /// unbounded output.
     #[test]
     fn search_broad_pattern_is_bounded() {
-        let root = tmpdir("search-bound");
+        let (_scratch, root) = tmpdir("search-bound");
         git(&root, &["init", "-q"]);
         // 120 files, each with a common needle, so the default 100-row page
         // is exercised rather than merely reported.
@@ -8697,7 +8711,7 @@ mod tests {
     /// the same match count but no filename/symbol signal.
     #[test]
     fn search_scope_code_preserves_hit_set_and_reranks() {
-        let root = tmpdir("search-scope-code");
+        let (_scratch, root) = tmpdir("search-scope-code");
         // login.rs: basename matches "login", defines `login` symbol.
         std::fs::write(
             root.join("login.rs"),
@@ -9085,7 +9099,7 @@ mod tests {
     /// first, so `zzz_needle.rs` would have outranked `needle.rs`.
     #[test]
     fn search_scope_code_ranks_globally_beyond_small_page_and_prefers_exact_filename() {
-        let root = tmpdir("search-scope-global-rank");
+        let (_scratch, root) = tmpdir("search-scope-global-rank");
         for i in 0..30 {
             std::fs::write(
                 root.join(format!("f{i:02}.rs")),
@@ -9151,7 +9165,7 @@ mod tests {
     #[test]
     fn search_scope_code_pagination_has_no_duplicates_or_gaps() {
         const TOTAL: usize = 37;
-        let root = tmpdir("search-scope-pagination");
+        let (_scratch, root) = tmpdir("search-scope-pagination");
         for i in 0..TOTAL {
             std::fs::write(
                 root.join(format!("file{i:03}.rs")),
@@ -9222,7 +9236,7 @@ mod tests {
     /// happened to warm `self.graph` earlier in this same daemon process.
     #[test]
     fn search_scope_code_ranking_is_deterministic_regardless_of_prior_daemon_activity() {
-        let root = tmpdir("search-scope-determinism");
+        let (_scratch, root) = tmpdir("search-scope-determinism");
         // Defines a symbol literally named `needle` -- its rank depends
         // entirely on the graph symbol signal (no filename hit).
         std::fs::write(
@@ -9309,7 +9323,7 @@ mod tests {
     /// case-insensitive.
     #[test]
     fn search_rejects_unknown_scope_instead_of_silently_falling_back() {
-        let root = tmpdir("search-bad-scope");
+        let (_scratch, root) = tmpdir("search-bad-scope");
         std::fs::write(root.join("a.rs"), "// needle\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -9382,7 +9396,7 @@ mod tests {
     /// content match without re-searching (S2 distrust loop).
     #[test]
     fn targets_attach_content_evidence() {
-        let root = tmpdir("targets-evidence");
+        let (_scratch, root) = tmpdir("targets-evidence");
         std::fs::write(
             root.join("ledger.rs"),
             "// gain ledger entry\npub fn ledger() {}\n",
@@ -9430,7 +9444,7 @@ mod tests {
     /// matching lines carries exactly the first two.
     #[test]
     fn targets_cap_content_evidence_at_two_lines_per_target() {
-        let root = tmpdir("targets-evidence-cap");
+        let (_scratch, root) = tmpdir("targets-evidence-cap");
         std::fs::write(
             root.join("ledger.rs"),
             "// ledger one\n// ledger two\n// ledger three\npub fn ledger() {}\n",
@@ -9477,7 +9491,7 @@ mod tests {
     /// 동순위 → 알파벳상 앞선 test 파일이 1위)만 순서를 바꾼다.
     #[test]
     fn targets_rerank_demotes_test_path_only_when_task_is_not_about_tests() {
-        let root = tmpdir("targets-test-penalty");
+        let (_scratch, root) = tmpdir("targets-test-penalty");
         std::fs::write(root.join("a_login_test.rs"), "pub fn login() {}\n").unwrap();
         std::fs::write(root.join("z_login.rs"), "pub fn login() {}\n").unwrap();
         git(&root, &["init", "-q"]);
@@ -9524,7 +9538,7 @@ mod tests {
 
     #[test]
     fn targets_facts_refuse_missing_graph_without_building_it() {
-        let root = tmpdir("targets-facts-missing-graph");
+        let (_scratch, root) = tmpdir("targets-facts-missing-graph");
         std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -9563,7 +9577,7 @@ mod tests {
 
     #[test]
     fn targets_facts_refuse_stale_graph_without_refreshing_it() {
-        let root = tmpdir("targets-facts-stale-graph");
+        let (_scratch, root) = tmpdir("targets-facts-stale-graph");
         std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -9635,7 +9649,7 @@ mod tests {
     /// prompt as `index_stale`.
     #[test]
     fn targets_facts_should_open_once_the_index_caught_up_with_a_commit() {
-        let root = tmpdir("targets-facts-caught-up");
+        let (_scratch, root) = tmpdir("targets-facts-caught-up");
         std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -9680,7 +9694,7 @@ mod tests {
     /// the base shard stays at the commit it was built at.
     #[test]
     fn targets_facts_should_open_on_a_delta_over_an_older_base() {
-        let root = tmpdir("targets-facts-delta");
+        let (_scratch, root) = tmpdir("targets-facts-delta");
         std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -9713,7 +9727,7 @@ mod tests {
     /// the index does not claim a HEAD it did not read.
     #[test]
     fn catch_up_head_should_leave_a_move_wider_than_its_bound_uncovered() {
-        let (root, mut service) = cached_git_service("catch-up-bound");
+        let (_scratch, root, mut service) = cached_git_service("catch-up-bound");
         let opened = head_of(&root);
         std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
         std::fs::write(root.join("b.rs"), "pub fn b() {}\n").unwrap();
@@ -9737,8 +9751,8 @@ mod tests {
 
     /// A committed `login.rs` in a git fixture, served by a service whose
     /// git-state cache outlives the test (no TTL expiry mid-assertion).
-    fn cached_git_service(tag: &str) -> (PathBuf, Service) {
-        let root = tmpdir(tag);
+    fn cached_git_service(tag: &str) -> (tempfile::TempDir, PathBuf, Service) {
+        let (scratch, root) = tmpdir(tag);
         std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -9746,7 +9760,7 @@ mod tests {
         let mut service = Service::open(&root).unwrap();
         service.git_state.ttl = Duration::from_secs(600);
         service.git_state.ref_ttl = Duration::from_secs(600);
-        (root, service)
+        (scratch, root, service)
     }
 
     /// The agent rhythm is edit, then ask: the watcher batch in between
@@ -9754,7 +9768,7 @@ mod tests {
     /// so the snapshot still lists the edited file.
     #[test]
     fn an_edit_should_refresh_only_the_dirty_list_of_the_snapshot() {
-        let (root, mut service) = cached_git_service("snapshot-after-edit");
+        let (_scratch, root, mut service) = cached_git_service("snapshot-after-edit");
         let before = service.repo_snapshot();
         assert_eq!(service.git_state.lookups, 3, "head, branch, dirty");
         assert!(before.dirty.is_empty(), "{before:?}");
@@ -9776,7 +9790,7 @@ mod tests {
     /// looked up again. Within the TTL nothing is.
     #[test]
     fn git_state_cache_should_serve_within_its_ttl_until_cleared() {
-        let (root, mut service) = cached_git_service("snapshot-clear");
+        let (_scratch, root, mut service) = cached_git_service("snapshot-clear");
         let first = service.repo_snapshot();
         let again = service.repo_snapshot();
         assert_eq!(service.git_state.lookups, 3);
@@ -9798,7 +9812,7 @@ mod tests {
     /// the next snapshot names the new commit at once, whatever the TTL.
     #[test]
     fn a_head_move_should_drop_the_cached_head() {
-        let (root, mut service) = cached_git_service("snapshot-head-moved");
+        let (_scratch, root, mut service) = cached_git_service("snapshot-head-moved");
         let primed = service.repo_snapshot();
         std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
         git(&root, &["add", "."]);
@@ -9819,7 +9833,7 @@ mod tests {
     /// and stops as soon as the watcher may have lost an event.
     #[test]
     fn head_should_be_cached_longer_only_while_the_watch_covers_git() {
-        let (root, mut service) = cached_git_service("snapshot-ref-ttl");
+        let (_scratch, root, mut service) = cached_git_service("snapshot-ref-ttl");
         let report = |git_dir| crate::daemon::WatchReport {
             dirs: 1,
             recursive: true,
@@ -9847,7 +9861,7 @@ mod tests {
     /// commit: one read per request, shared.
     #[test]
     fn targets_facts_should_share_its_fresh_head_with_the_snapshot() {
-        let (root, mut service) = cached_git_service("targets-facts-one-head");
+        let (_scratch, root, mut service) = cached_git_service("targets-facts-one-head");
         let primed = service.repo_snapshot();
         std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
         git(&root, &["add", "."]);
@@ -9878,7 +9892,7 @@ mod tests {
 
     #[test]
     fn targets_facts_refuse_stale_index_without_reopening_it() {
-        let root = tmpdir("targets-facts-stale-index");
+        let (_scratch, root) = tmpdir("targets-facts-stale-index");
         std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -9930,7 +9944,7 @@ mod tests {
 
     #[test]
     fn targets_facts_repeat_identically_and_declare_fixed_inputs() {
-        let root = tmpdir("targets-facts-deterministic");
+        let (_scratch, root) = tmpdir("targets-facts-deterministic");
         std::fs::write(
             root.join("login.rs"),
             "pub fn login() {}\n#[cfg(test)] mod tests {}\n",
@@ -10034,7 +10048,7 @@ mod tests {
     /// first. With it, `ledger.ts` ranks first on the filename word.
     #[test]
     fn search_scope_code_matches_per_word_filename() {
-        let root = tmpdir("search-per-word-filename");
+        let (_scratch, root) = tmpdir("search-per-word-filename");
         std::fs::write(root.join("ledger.ts"), "// gain ledger here\n").unwrap();
         std::fs::write(root.join("zzz_other.ts"), "// gain ledger here\n").unwrap();
         git(&root, &["init", "-q"]);
@@ -10077,7 +10091,7 @@ mod tests {
     /// failure, given the choke-point enforcement in `Service::handle`.
     #[test]
     fn every_retrieval_op_response_carries_epistemics_and_snapshot() {
-        let root = tmpdir("epistemics-walk");
+        let (_scratch, root) = tmpdir("epistemics-walk");
         std::fs::write(
             root.join("a.ts"),
             "export function alpha(x: number): number { return x + 1 }\n\
@@ -10601,7 +10615,7 @@ mod tests {
     /// and NAME the cap; the "exhaustive" sentence must not be emitted.
     #[test]
     fn targets_probe_cap_sets_lower_bound_and_names_the_cap() {
-        let root = tmpdir("targets-probe-cap");
+        let (_scratch, root) = tmpdir("targets-probe-cap");
         // 12 files x 100 lines = 1,200 word-bounded matches of "needle" —
         // comfortably beyond CONTENT_PROBE_LIMIT (currently 1,000).
         for f in 0..12 {
@@ -10663,7 +10677,7 @@ mod tests {
     /// must not count "authorized"/"oauthToken" mentions as content signal.
     #[test]
     fn targets_content_probe_is_word_bounded() {
-        let root = tmpdir("targets-word-bound");
+        let (_scratch, root) = tmpdir("targets-word-bound");
         // Only substring mentions of "auth" — no word-bounded occurrence.
         std::fs::write(
             root.join("substr.rs"),
@@ -10713,7 +10727,7 @@ mod tests {
     /// `resolved` (not permanently `ranked`).
     #[test]
     fn resolve_reports_tier_basis_and_resolved_confidence() {
-        let root = tmpdir("resolve-honesty");
+        let (_scratch, root) = tmpdir("resolve-honesty");
         std::fs::write(
             root.join("a.ts"),
             "export function uniqueTargetFn(): number { return 1 }\n",
@@ -10753,7 +10767,7 @@ mod tests {
 
     #[test]
     fn facts_lazy_ingest_failure_is_returned() {
-        let root = tmpdir("facts-lazy-ingest-failure");
+        let (_scratch, root) = tmpdir("facts-lazy-ingest-failure");
         std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -10785,7 +10799,7 @@ mod tests {
     /// rebuild, a reset) is reopened, so its trust check runs again.
     #[test]
     fn facts_requests_should_reuse_the_open_store_until_the_db_file_changes() {
-        let root = tmpdir("facts-store-kept");
+        let (_scratch, root) = tmpdir("facts-store-kept");
         std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -10814,7 +10828,7 @@ mod tests {
     /// store was opened on is replaced, as a checkout of it would.
     #[test]
     fn a_replaced_db_should_be_refused_when_the_repository_tracks_pixel() {
-        let root = tmpdir("facts-store-tracked");
+        let (_scratch, root) = tmpdir("facts-store-tracked");
         std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -10839,7 +10853,7 @@ mod tests {
     /// changes when a ref moves.
     #[test]
     fn status_should_count_commits_again_only_after_a_ref_moves() {
-        let root = tmpdir("facts-status-total");
+        let (_scratch, root) = tmpdir("facts-status-total");
         std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -10869,7 +10883,7 @@ mod tests {
     /// origin. A path answer reads metadata only and carries no coverage.
     #[test]
     fn op_lifecycle_states_the_diff_coverage_of_every_token_answer() {
-        let root = tmpdir("lifecycle-coverage");
+        let (_scratch, root) = tmpdir("lifecycle-coverage");
         std::fs::write(root.join("old.rs"), "fn legacy_token() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -10949,8 +10963,8 @@ mod tests {
     /// Two files, one commit, `login.rs` edited in a second commit and
     /// dirty in the tree: enough history for the signals and the facts
     /// index to have something to report.
-    fn signals_repo(tag: &str) -> PathBuf {
-        let root = tmpdir(tag);
+    fn signals_repo(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let (scratch, root) = tmpdir(tag);
         std::fs::write(
             root.join("login.rs"),
             "pub fn login(user: &str) -> bool { !user.is_empty() }\n",
@@ -10975,14 +10989,14 @@ mod tests {
             "pub fn login(user: &str) -> bool { user.len() > 2 }\n",
         )
         .unwrap();
-        root
+        (scratch, root)
     }
 
     /// `status.facts` is how an agent sees whether history queries are
     /// answerable: phase A done, commit counts, diff text present.
     #[test]
     fn facts_visibility_reports_the_history_index_before_and_after_ingest() {
-        let root = signals_repo("facts-visibility");
+        let (_scratch, root) = signals_repo("facts-visibility");
         // An open service must not have created the db either.
         let _svc = Service::open(&root).unwrap();
         let before = facts_visibility(&root);
@@ -11019,7 +11033,7 @@ mod tests {
 
     #[test]
     fn op_note_sets_gets_lists_and_removes_annotations_keyed_by_repo_path() {
-        let root = signals_repo("op-note");
+        let (_scratch, root) = signals_repo("op-note");
         let mut svc = Service::open(&root).unwrap();
         // The service keys rows by the canonical root (macOS's temp dir is
         // a symlink), so the absolute form must be canonical too.
@@ -11078,7 +11092,7 @@ mod tests {
 
     #[test]
     fn admitted_paths_lists_the_indexed_tree() {
-        let root = signals_repo("admitted-paths");
+        let (_scratch, root) = signals_repo("admitted-paths");
         let svc = Service::open(&root).unwrap();
         let mut paths = svc.admitted_paths();
         paths.sort();
@@ -11090,7 +11104,7 @@ mod tests {
     /// repository whose remote cannot be fetched reports the fetch failure.
     #[test]
     fn op_reconcile_reports_a_fetch_it_cannot_make() {
-        let root = signals_repo("op-reconcile");
+        let (_scratch, root) = signals_repo("op-reconcile");
         let mut svc = Service::open(&root).unwrap();
         let out = svc.op_reconcile(None, None, None, None);
         let _ = std::fs::remove_dir_all(&root);
@@ -11100,7 +11114,7 @@ mod tests {
 
     #[test]
     fn op_map_lists_every_file_with_its_symbols_in_line_order() {
-        let root = signals_repo("op-map");
+        let (_scratch, root) = signals_repo("op-map");
         let mut svc = Service::open(&root).unwrap();
         let map = svc.op_map(false).unwrap();
         assert_eq!(map["file_count"], 2, "{map}");
@@ -11122,7 +11136,7 @@ mod tests {
     /// activity, an untouched candidate does not.
     #[test]
     fn engine_signals_scores_activity_for_files_with_history() {
-        let root = signals_repo("engine-signals");
+        let (_scratch, root) = signals_repo("engine-signals");
         let mut svc = Service::open(&root).unwrap();
         let bundle = svc.engine_signals(&["login.rs".to_string(), "caller.rs".to_string()]);
         let login = bundle.activity.get("login.rs").copied().unwrap_or(0.0);
@@ -11138,7 +11152,7 @@ mod tests {
     /// Before the hand-on, `compute_signals` re-ran the same failing scan.
     #[test]
     fn engine_signals_names_the_activity_failure_instead_of_rescanning() {
-        let root = tmpdir("engine-signals-commitless");
+        let (_scratch, root) = tmpdir("engine-signals-commitless");
         git(&root, &["init", "-q"]);
         std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
         let mut svc = Service::open(&root).unwrap();
@@ -11166,7 +11180,7 @@ mod tests {
 
     #[test]
     fn ignore_control_refresh_reconciles_text_and_graph_stores() {
-        let root = tmpdir("watcher-ignore-transition");
+        let (_scratch, root) = tmpdir("watcher-ignore-transition");
         std::fs::write(root.join("visible.rb"), "def visible\nend\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -11324,7 +11338,7 @@ mod tests {
     #[test]
     fn graph_if_stale_should_keep_update_or_build_the_stored_graph() {
         use std::os::unix::fs::MetadataExt;
-        let root = tmpdir("graph-if-stale");
+        let (_scratch, root) = tmpdir("graph-if-stale");
         for i in 0..10 {
             std::fs::write(
                 root.join(format!("m{i}.rs")),
@@ -11390,7 +11404,7 @@ mod tests {
     /// index open's layers, `graph` every build phase plus the publish.
     #[test]
     fn status_and_graph_should_report_where_the_time_went() {
-        let root = tmpdir("phase-timings");
+        let (_scratch, root) = tmpdir("phase-timings");
         std::fs::write(root.join("login.rs"), "pub fn login() -> bool { true }\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -11438,7 +11452,7 @@ mod tests {
     /// until the next tree walk, so the failure must be visible.
     #[test]
     fn failed_graph_update_is_counted_in_status() {
-        let root = tmpdir("watcher-failures");
+        let (_scratch, root) = tmpdir("watcher-failures");
         std::fs::write(root.join("login.rs"), "pub fn login() -> bool { true }\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
@@ -11663,8 +11677,8 @@ mod tests {
     }
 
     /// Rename fixture: a TS definition plus a caller that imports it.
-    fn rename_root(tag: &str) -> PathBuf {
-        let root = tmpdir(tag);
+    fn rename_root(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let (scratch, root) = tmpdir(tag);
         std::fs::write(
             root.join("login.ts"),
             "export function loginUser(name: string): boolean {\n    return name.length > 0;\n}\n",
@@ -11678,7 +11692,7 @@ mod tests {
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "init"]);
-        root
+        (scratch, root)
     }
 
     fn rename_req(name: &str, new_name: &str) -> Request {
@@ -11695,7 +11709,7 @@ mod tests {
     /// writing, a real call rewrites the files and drops the cached graph.
     #[test]
     fn op_rename_dry_run_then_apply() {
-        let root = rename_root("rename-apply");
+        let (_scratch, root) = rename_root("rename-apply");
         let mut svc = Service::open(&root).unwrap();
         let before = std::fs::read_to_string(root.join("caller.ts")).unwrap();
 
@@ -11740,7 +11754,7 @@ mod tests {
     /// Identifier validation rejects names no grammar could emit.
     #[test]
     fn op_rename_rejects_non_identifiers() {
-        let root = rename_root("rename-ident");
+        let (_scratch, root) = rename_root("rename-ident");
         let mut svc = Service::open(&root).unwrap();
         for bad in ["9bad", "a-b", "has space", ""] {
             let resp = svc.handle(rename_req("loginUser", bad));
@@ -11758,7 +11772,7 @@ mod tests {
     /// picks the declaration in that file only.
     #[test]
     fn op_rename_ambiguity_and_file_disambiguation() {
-        let root = rename_root("rename-amb");
+        let (_scratch, root) = rename_root("rename-amb");
         std::fs::write(
             root.join("other.ts"),
             "export function loginUser(id: number): boolean { return id > 0; }\n",
@@ -11790,7 +11804,7 @@ mod tests {
     /// Renaming a name that is not in the graph is an error, not a no-op.
     #[test]
     fn op_rename_unknown_name_errors() {
-        let root = rename_root("rename-unknown");
+        let (_scratch, root) = rename_root("rename-unknown");
         let mut svc = Service::open(&root).unwrap();
         let resp = svc.handle(rename_req("no_such_fn", "x"));
         assert!(!resp.ok, "{resp:?}");
@@ -11849,7 +11863,7 @@ mod tests {
     /// only, and a malformed rule is an error, never an unfiltered answer.
     #[test]
     fn search_should_filter_files_by_glob_and_type_before_paging() {
-        let root = tmpdir("search-filter");
+        let (_scratch, root) = tmpdir("search-filter");
         git(&root, &["init", "-q"]);
         for name in ["a.md", "b.rs", "c.md", "d.rs"] {
             std::fs::write(root.join(name), "filterWireNeedle\n").unwrap();
@@ -11902,7 +11916,7 @@ mod tests {
     /// `caps` names, in the same order, with the same text.
     #[test]
     fn search_should_name_each_cap_that_fired_by_kind() {
-        let root = tmpdir("search-cap-kinds");
+        let (_scratch, root) = tmpdir("search-cap-kinds");
         git(&root, &["init", "-q"]);
         for i in 0..4 {
             std::fs::write(root.join(format!("f{i}.rs")), "fn capKindNeedle() {}\n").unwrap();
@@ -11994,14 +12008,14 @@ mod tests {
         );
     }
 
-    fn context_fixture(tag: &str, source: &str) -> (PathBuf, Service) {
-        let root = tmpdir(tag);
+    fn context_fixture(tag: &str, source: &str) -> (tempfile::TempDir, PathBuf, Service) {
+        let (scratch, root) = tmpdir(tag);
         std::fs::write(root.join("sample.rs"), source).unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "init"]);
         let svc = Service::open(&root).unwrap();
-        (root, svc)
+        (scratch, root, svc)
     }
 
     fn context_of(svc: &mut Service, uid: &str, budget: usize) -> Value {
@@ -12022,7 +12036,7 @@ mod tests {
             source.push_str(&format!("    let v{i} = x + {i};\n"));
         }
         source.push_str("    x\n}\n\npub fn short_fn(x: i32) -> i32 {\n    x + 1\n}\n");
-        let (root, mut svc) = context_fixture("ctx-cut", &source);
+        let (_scratch, root, mut svc) = context_fixture("ctx-cut", &source);
 
         let long = context_of(&mut svc, "long_fn", 4000);
         let text = long["text"].as_str().unwrap();
@@ -12055,7 +12069,7 @@ mod tests {
                 "\npub fn {name}(first_argument: i32, second_argument: &str) -> Result<i32, String> {{\n    Ok(target(first_argument))\n}}\n"
             ));
         }
-        let (root, mut svc) = context_fixture("ctx-named", &source);
+        let (_scratch, root, mut svc) = context_fixture("ctx-named", &source);
         let mut mixed = 0;
         let mut omitting = 0;
         for budget in (300..1400).step_by(25) {
@@ -12210,7 +12224,7 @@ mod tests {
 
     #[test]
     fn changes_should_page_consumers_with_the_shared_offset() {
-        let root = tmpdir("changes-consumers");
+        let (_scratch, root) = tmpdir("changes-consumers");
         std::fs::write(
             root.join("lib.ts"),
             "export function target(x: number): number { return x + 1 }\n",
@@ -12307,15 +12321,11 @@ mod context_crux_coordinate_tests {
 
     #[test]
     fn context_crux_coordinates_match_real_source_after_shift() {
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-crux-coordinates-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("pixel-crux-coordinates-")
+            .tempdir()
+            .unwrap();
+        let dir = scratch.path().to_path_buf();
         let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
         let crux = vec![(2, "if flag {".to_owned()), (3, "return 1;".to_owned())];
         let files = HashMap::from_iter([(1, "sample.rs".to_owned())]);
@@ -12336,7 +12346,6 @@ mod context_crux_coordinate_tests {
             assert!(rendered.contains(&format!("crux:{} if flag {{", padding + 2)));
             assert!(rendered.contains(&format!("crux:{} return 1;", padding + 3)));
         }
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -12363,15 +12372,11 @@ mod context_crux_coordinate_tests {
 
     #[test]
     fn context_warm_graph_omits_stale_source_and_crux_with_truthful_warning() {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-crux-freshness-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("pixel-crux-freshness-")
+            .tempdir()
+            .unwrap();
+        let root = scratch.path().to_path_buf();
         assert!(
             std::process::Command::new("git")
                 .args(["init", "-q"])

@@ -734,9 +734,11 @@ mod tests {
     /// earlier rewrite cannot shift a later one.
     #[test]
     fn apply_writes_ranges_descending() {
-        let dir = std::env::temp_dir().join(format!("pixel-rename-apply-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-rename-apply-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path();
         std::fs::write(dir.join("a.rs"), b"fn foo() {}\nfn bar() { foo() }\n").unwrap();
         let mut plan = RenamePlan::default();
         plan.files.insert(
@@ -756,21 +758,22 @@ mod tests {
                 },
             ],
         );
-        let written = apply(&dir, &plan, "foo", "baz").unwrap();
+        let written = apply(dir, &plan, "foo", "baz").unwrap();
         assert_eq!(written, vec!["a.rs".to_string()]);
         assert_eq!(
             std::fs::read(dir.join("a.rs")).unwrap(),
             b"fn baz() {}\nfn bar() { baz() }\n"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A file changed between plan and apply is refused, not half-rewritten.
     #[test]
     fn apply_refuses_a_file_that_moved() {
-        let dir = std::env::temp_dir().join(format!("pixel-rename-moved-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-rename-moved-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path();
         std::fs::write(dir.join("a.rs"), b"fn foo() {}\n").unwrap();
         let mut plan = RenamePlan::default();
         plan.files.insert(
@@ -783,9 +786,8 @@ mod tests {
             }],
         );
         std::fs::write(dir.join("a.rs"), b"fn qux() {}\n").unwrap();
-        assert!(apply(&dir, &plan, "foo", "baz").is_err());
+        assert!(apply(dir, &plan, "foo", "baz").is_err());
         assert_eq!(std::fs::read(dir.join("a.rs")).unwrap(), b"fn qux() {}\n");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A stale later file fails the whole rename before any file is written.

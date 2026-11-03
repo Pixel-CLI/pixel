@@ -1731,7 +1731,7 @@ mod tests {
 
     #[test]
     fn the_manual_notes_are_indented_once_too() {
-        let scratch = scratch_dir("notes-indent");
+        let (_scratch_tmp, scratch) = scratch_dir("notes-indent");
         let mut plan = SetupPlan::new(
             &scratch,
             Scope::Global,
@@ -2049,7 +2049,7 @@ mod tests {
 
     #[test]
     fn the_review_prints_every_step_key_and_note_before_the_text() {
-        let scratch = scratch_dir("review");
+        let (_scratch_tmp, scratch) = scratch_dir("review");
         let plan = SetupPlan::new(
             &scratch,
             Scope::Global,
@@ -2119,7 +2119,7 @@ mod tests {
 
     #[test]
     fn the_review_lists_each_hook_step_with_its_file_before_the_confirmation() {
-        let scratch = scratch_dir("review-hooks");
+        let (_scratch_tmp, scratch) = scratch_dir("review-hooks");
         let plan = SetupPlan::new(
             &scratch,
             Scope::Global,
@@ -2240,7 +2240,7 @@ mod tests {
 
     #[test]
     fn the_report_names_each_file_it_wrote_and_says_when_it_wrote_none() {
-        let scratch = scratch_dir("report");
+        let (_scratch_tmp, scratch) = scratch_dir("report");
         let plan = SetupPlan::new(
             &scratch,
             Scope::Global,
@@ -2279,27 +2279,24 @@ mod tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// A scratch directory of this test's own: the crate has no `tempfile`
-    /// dev-dependency, and a shared name would let two tests collide.
-    fn scratch_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-setup-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+    /// A scratch directory of this test's own, removed when the returned guard
+    /// drops; a shared name would let two tests collide.
+    fn scratch_dir(label: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-setup-{label}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        (_dir_tmp, dir)
     }
 
     #[test]
     fn the_defaults_are_the_catalog_defaults_and_the_markers_on_disk() {
         assert_eq!(default_features(Scope::Global).len(), 3);
 
-        let scratch = scratch_dir("defaults");
+        let (_scratch_tmp, scratch) = scratch_dir("defaults");
         // An empty directory evidences no agent, and a human drives none.
         assert!(default_agents(&scratch, Scope::Global, None).is_empty());
         std::fs::create_dir_all(scratch.join(".claude")).unwrap();

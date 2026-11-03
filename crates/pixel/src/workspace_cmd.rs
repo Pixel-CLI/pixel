@@ -192,49 +192,50 @@ pub enum WorkspaceCmd {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("px-ws-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A directory removed when the guard drops, so a failed assert cleans up too.
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("px-ws-{tag}-"))
+            .tempdir()
+            .unwrap()
     }
 
     #[test]
     fn add_dedups_and_remove_reports_non_members() {
         let root = scratch("members");
         let member = scratch("member");
+        let (root_path, member_path) = (root.path(), member.path());
         run(WorkspaceCmd::Add {
-            member: member.clone(),
-            path: root.clone(),
+            member: member_path.to_path_buf(),
+            path: root_path.to_path_buf(),
         })
         .unwrap();
         run(WorkspaceCmd::Add {
-            member: member.clone(),
-            path: root.clone(),
+            member: member_path.to_path_buf(),
+            path: root_path.to_path_buf(),
         })
         .unwrap();
-        assert_eq!(members(&root).unwrap().len(), 1);
+        assert_eq!(members(root_path).unwrap().len(), 1);
         let stranger = scratch("stranger");
         assert!(
             run(WorkspaceCmd::Remove {
-                member: stranger,
-                path: root.clone(),
+                member: stranger.path().to_path_buf(),
+                path: root_path.to_path_buf(),
             })
             .is_err()
         );
         run(WorkspaceCmd::Remove {
-            member,
-            path: root.clone(),
+            member: member_path.to_path_buf(),
+            path: root_path.to_path_buf(),
         })
         .unwrap();
-        assert!(members(&root).unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(members(root_path).unwrap().is_empty());
     }
 
     #[test]
     fn empty_workspace_fans_out_to_an_error() {
         let root = scratch("empty");
-        let result = fan_out(&root, &|| Request::Status {});
+        let result = fan_out(root.path(), &|| Request::Status {});
         assert!(result.is_err());
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

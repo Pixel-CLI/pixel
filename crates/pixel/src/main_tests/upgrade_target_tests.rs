@@ -44,12 +44,15 @@ fn profile_dir_follows_the_build_command() {
 }
 use super::*;
 
-fn sandbox(tag: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("pixel-upgrade-target-{tag}-{}", std::process::id()));
+fn sandbox(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let _dir_tmp = tempfile::Builder::new()
+        .prefix(&format!("pixel-upgrade-target-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let dir = _dir_tmp.path().to_path_buf();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    (_dir_tmp, dir)
 }
 
 fn touch(path: &Path) -> PathBuf {
@@ -77,7 +80,7 @@ fn explicit_flag_wins_verbatim() {
 /// misses PATH.
 #[test]
 fn running_binary_is_the_install_location() {
-    let d = sandbox("running");
+    let (_d_tmp, d) = sandbox("running");
     let managed = touch(&d.join("mise/installs/pixel/rev-abc/bin/pixel"));
     let t = resolve_upgrade_target(None, Some(managed.clone()), None, &d);
     assert_eq!(t.path, managed);
@@ -90,7 +93,7 @@ fn running_binary_is_the_install_location() {
 /// the build output the install location.
 #[test]
 fn cargo_target_binary_falls_through_to_path_then_default() {
-    let d = sandbox("target");
+    let (_d_tmp, d) = sandbox("target");
     let built = touch(&d.join("repo/target/release/pixel"));
     let on_path = touch(&d.join("cellar/bin/pixel"));
     let shim = touch(&d.join("mise/shims/pixel"));
@@ -119,7 +122,7 @@ fn cargo_target_binary_falls_through_to_path_then_default() {
 /// cache tag written by another tool does not.
 #[test]
 fn a_build_dir_reached_through_a_symlink_is_still_build_output() {
-    let d = sandbox("symlinked-target");
+    let (_d_tmp, d) = sandbox("symlinked-target");
     let build = d.join("cache/build");
     std::fs::create_dir_all(&build).unwrap();
     std::fs::write(
@@ -168,7 +171,7 @@ fn a_build_dir_reached_through_a_symlink_is_still_build_output() {
 #[test]
 fn a_build_cache_target_without_the_tag_is_still_build_output() {
     for lock in [".cargo-lock", ".cargo-artifact-lock"] {
-        let d = sandbox("untagged-target");
+        let (_d_tmp, d) = sandbox("untagged-target");
         let build = d.join("cache/build");
         let built = touch(&build.join("debug/pixel"));
         std::fs::write(build.join("debug").join(lock), b"").unwrap();
@@ -188,7 +191,7 @@ fn a_build_cache_target_without_the_tag_is_still_build_output() {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    let d = sandbox("lock-named-dir");
+    let (_d_tmp, d) = sandbox("lock-named-dir");
     let installed = touch(&d.join("opt/bin/pixel"));
     std::fs::create_dir_all(d.join("opt/bin/.cargo-lock")).unwrap();
     assert!(!is_cargo_target_path(&installed));
@@ -199,7 +202,7 @@ fn a_build_cache_target_without_the_tag_is_still_build_output() {
 
 #[test]
 fn shadow_is_reported_only_when_a_different_pixel_comes_first() {
-    let d = sandbox("shadow");
+    let (_d_tmp, d) = sandbox("shadow");
     let stale = touch(&d.join("local/bin/pixel"));
     let managed = touch(&d.join("mise/installs/pixel/bin/pixel"));
     let link_dir = d.join("linkdir");
@@ -235,7 +238,7 @@ fn shadow_is_reported_only_when_a_different_pixel_comes_first() {
 /// false alarm on every dev install.
 #[test]
 fn a_binary_under_another_name_is_never_shadowed() {
-    let d = sandbox("devshadow");
+    let (_d_tmp, d) = sandbox("devshadow");
     let managed = touch(&d.join("mise/installs/pixel/bin/pixel"));
     let dev = touch(&d.join("local/bin/pixel-dev"));
     let path_var = std::env::join_paths([managed.parent().unwrap()]).unwrap();
@@ -303,7 +306,7 @@ fn target(path: PathBuf, explicit: bool) -> UpgradeTarget {
 /// explicit `--install-path` is always the user's call.
 #[test]
 fn refusal_follows_symlinks_into_managed_roots_and_spares_explicit_paths() {
-    let d = sandbox("refusal");
+    let (_d_tmp, d) = sandbox("refusal");
     let cellar = d.join("Cellar");
     let keg = touch(&cellar.join("pixel/1.0/bin/pixel"));
     let roots = vec![ManagedRoot {
@@ -345,7 +348,7 @@ fn refusal_follows_symlinks_into_managed_roots_and_spares_explicit_paths() {
 /// refusal.
 #[test]
 fn refusal_names_the_owning_managers_update_command() {
-    let d = sandbox("manager-command");
+    let (_d_tmp, d) = sandbox("manager-command");
     let mise_root = d.join("Mise");
     let mise_keg = touch(&mise_root.join("pixel/1.0/bin/pixel"));
     let cellar = d.join("Cellar");

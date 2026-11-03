@@ -6,11 +6,15 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::time::Instant;
 
-fn scratch_root(tag: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("pixel-daemon-ping-{tag}-{}", std::process::id()));
+fn scratch_root(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let _root_tmp = tempfile::Builder::new()
+        .prefix(&format!("pixel-daemon-ping-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let root = _root_tmp.path().to_path_buf();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    root.canonicalize().unwrap()
+    (_root_tmp, root.canonicalize().unwrap())
 }
 
 /// Nothing listens: the probe is false and opens nothing — the repository
@@ -18,7 +22,7 @@ fn scratch_root(tag: &str) -> PathBuf {
 /// inside `~/.local/share/pixel/recall`.
 #[test]
 fn daemon_ping_is_false_without_a_daemon() {
-    let root = scratch_root("idle");
+    let (_root_tmp, root) = scratch_root("idle");
     assert!(!daemon_ping(&root));
     assert!(
         !root.join(pixel_index::index::SHARD_DIR).exists(),
@@ -31,7 +35,7 @@ fn daemon_ping_is_false_without_a_daemon() {
 /// a probe that always returned false would pass the idle test.
 #[test]
 fn daemon_ping_is_true_when_a_daemon_answers() {
-    let root = scratch_root("live");
+    let (_root_tmp, root) = scratch_root("live");
     let listener = UnixListener::bind(daemon::socket_path(&root)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
@@ -175,7 +179,7 @@ fn fake_daemon(
 /// phases timed: the probe (the queue ahead) and the request itself.
 #[test]
 fn route_through_daemon_times_the_probe_and_the_request_of_a_current_daemon() {
-    let root = scratch_root("route-current");
+    let (_root_tmp, root) = scratch_root("route-current");
     let server = fake_daemon(&root, PROTOCOL_VERSION, 2, Duration::ZERO);
     let (response, step) = route_through_daemon(&root, &Request::Status {});
     assert!(response.is_some_and(|r| r.ok));
@@ -197,7 +201,7 @@ fn route_through_daemon_times_the_probe_and_the_request_of_a_current_daemon() {
 /// start attempt: the step says so, and times only the probe.
 #[test]
 fn route_through_daemon_names_a_newer_daemon_as_the_in_process_reason() {
-    let root = scratch_root("route-newer");
+    let (_root_tmp, root) = scratch_root("route-newer");
     let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
     let (response, step) = route_through_daemon(&root, &Request::Status {});
     assert!(response.is_none());
@@ -214,7 +218,7 @@ fn route_through_daemon_names_a_newer_daemon_as_the_in_process_reason() {
 /// `probe_ms` holding the retirement would read as a busy daemon.
 #[test]
 fn retiring_a_stale_daemon_counts_toward_the_start_not_the_probe() {
-    let root = scratch_root("route-stale");
+    let (_root_tmp, root) = scratch_root("route-stale");
     let server = fake_daemon(&root, PROTOCOL_VERSION - 1, 100, Duration::from_millis(400));
     let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
         Err(InProcessReason::StartTimedOut)
@@ -236,7 +240,7 @@ fn retiring_a_stale_daemon_counts_toward_the_start_not_the_probe() {
 /// process under the start's own reason, untimed when it never ran.
 #[test]
 fn an_absent_daemon_is_started_or_names_why_it_was_not() {
-    let root = scratch_root("route-absent");
+    let (_root_tmp, root) = scratch_root("route-absent");
     let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
         Ok(Response::success("status", json!({"started": true})))
     });
@@ -259,7 +263,7 @@ fn an_absent_daemon_is_started_or_names_why_it_was_not() {
 
 #[test]
 fn a_newer_daemon_is_left_running_and_declines_without_a_restart() {
-    let root = scratch_root("newer");
+    let (_root_tmp, root) = scratch_root("newer");
     let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
     assert!(matches!(
         try_daemon_inner(&root, &Request::Status {}),
@@ -275,7 +279,7 @@ fn a_newer_daemon_is_left_running_and_declines_without_a_restart() {
 
 #[test]
 fn a_stale_daemon_is_shut_down_so_a_current_one_can_start() {
-    let root = scratch_root("stale");
+    let (_root_tmp, root) = scratch_root("stale");
     let server = fake_daemon(&root, PROTOCOL_VERSION - 1, 100, Duration::from_millis(200));
     let started = Instant::now();
     assert!(
@@ -298,7 +302,7 @@ fn a_stale_daemon_is_shut_down_so_a_current_one_can_start() {
 
 #[test]
 fn daemon_start_refuses_to_fight_a_newer_daemon() {
-    let root = scratch_root("start-newer");
+    let (_root_tmp, root) = scratch_root("start-newer");
     let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
     let error = daemon_start(root.clone(), false, true).unwrap_err();
     assert!(error.contains("newer pixel daemon"), "{error}");
@@ -326,7 +330,7 @@ fn unwrap_response_folds_envelope_warnings_only_when_there_are_some() {
 
 #[test]
 fn only_a_missing_or_refusing_socket_reads_as_no_daemon_to_upgrade() {
-    let root = scratch_root("upgrade-absent");
+    let (_root_tmp, root) = scratch_root("upgrade-absent");
     // On macOS /tmp is a symlink to /private/tmp, and canonicalize() resolves
     // it into a path that already eats ~44 of sockaddr_un's ~104 usable bytes;
     // keep the fixture socket short enough to stay under SUN_LEN.
@@ -426,7 +430,7 @@ fn the_daemon_start_arguments_parse_as_the_start_they_name() {
 /// the daemon of the root, and nothing else.
 #[test]
 fn kick_meaning_asks_the_daemon_one_meaning_question() {
-    let root = scratch_root("kick");
+    let (_root_tmp, root) = scratch_root("kick");
     let server = fake_daemon(&root, PROTOCOL_VERSION, 1, Duration::ZERO);
     kick_meaning(&root);
     assert_eq!(
@@ -444,7 +448,7 @@ fn kick_meaning_asks_the_daemon_one_meaning_question() {
 /// No daemon: the question goes nowhere, opens nothing and fails nothing.
 #[test]
 fn kick_meaning_without_a_daemon_opens_nothing() {
-    let root = scratch_root("kick-idle");
+    let (_root_tmp, root) = scratch_root("kick-idle");
     kick_meaning(&root);
     assert!(!root.join(pixel_index::index::SHARD_DIR).exists());
 }
@@ -455,7 +459,7 @@ fn kick_meaning_without_a_daemon_opens_nothing() {
 #[test]
 fn a_root_without_git_is_never_given_an_auto_started_daemon() {
     let _lock = crate::ENV_LOCK.lock().unwrap();
-    let root = scratch_root("route-no-git");
+    let (_root_tmp, root) = scratch_root("route-no-git");
     let saved = std::env::var_os("PIXEL_DAEMON_AUTO_START");
     // SAFETY: process-wide environment access is serialized by ENV_LOCK.
     unsafe {

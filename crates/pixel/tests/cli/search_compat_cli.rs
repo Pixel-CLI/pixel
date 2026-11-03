@@ -7,23 +7,21 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 const PIXEL: &str = env!("CARGO_BIN_EXE_pixel");
-static NEXT: AtomicU64 = AtomicU64::new(0);
 
-struct Fixture(PathBuf);
+struct Fixture(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
 impl Fixture {
     fn new(content: &[u8]) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-search-compat-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let _root_tmp = tempfile::Builder::new()
+            .prefix("pixel-search-compat-")
+            .tempdir()
+            .unwrap();
+        let root = _root_tmp.path().to_path_buf();
         std::fs::create_dir_all(root.join(".pixel")).unwrap();
         std::fs::write(root.join("a file.rs"), content).unwrap();
-        Self(root.canonicalize().unwrap())
+        Self(root.canonicalize().unwrap(), _root_tmp)
     }
 
     fn command(&self, binary: &str) -> Command {
@@ -353,11 +351,11 @@ fn tracked_dotenv_with_matching_token_is_hidden_from_search_content() {
 fn tracked_credential_fixture() -> TrackedFixture {
     use std::process::Command;
 
-    let root = std::env::temp_dir().join(format!(
-        "pixel-search-content-credential-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed),
-    ));
+    let _root_tmp = tempfile::Builder::new()
+        .prefix("pixel-search-content-credential-")
+        .tempdir()
+        .unwrap();
+    let root = _root_tmp.path().to_path_buf();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("secrets")).unwrap();
     // Synthetic, nonsensitive fixture bytes only — the test never reads
@@ -407,12 +405,12 @@ fn tracked_credential_fixture() -> TrackedFixture {
     git(&["init", "-q"]);
     git(&["add", "."]);
     git(&["commit", "-qm", "fixture"]);
-    TrackedFixture(root.canonicalize().unwrap())
+    TrackedFixture(root.canonicalize().unwrap(), _root_tmp)
 }
 
 /// A git-anchored fixture that is removed on drop, after a daemon-leak
 /// check (the same one `Fixture` and `Scratch` use elsewhere in this suite).
-struct TrackedFixture(PathBuf);
+struct TrackedFixture(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
 impl TrackedFixture {
     fn command(&self, binary: &str) -> Command {

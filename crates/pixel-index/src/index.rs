@@ -629,8 +629,11 @@ mod tests {
 
     #[test]
     fn end_to_end_build_and_search() {
-        let dir = std::env::temp_dir().join(format!("gpx-index-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-index-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
             dir.join("src/a.rs"),
@@ -661,8 +664,11 @@ mod tests {
 
     #[test]
     fn build_skips_default_ignored_dirs() {
-        let dir = std::env::temp_dir().join(format!("gpx-index-ignored-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-index-ignored-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
         std::fs::create_dir_all(dir.join("Pods/ZoomSDK")).unwrap();
@@ -699,9 +705,11 @@ mod tests {
 
     #[test]
     fn build_honors_gitignore_in_gitless_tree() {
-        let dir = std::env::temp_dir().join(format!("gpx-index-gitignore-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-index-gitignore-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join(".gitignore"), "secrets.txt\n").unwrap();
         std::fs::write(dir.join("keep.rs"), "fn keptFunction() {}\n").unwrap();
         std::fs::write(dir.join("secrets.txt"), "gitlessIgnoredUniqueToken()\n").unwrap();
@@ -724,9 +732,11 @@ mod tests {
 
     #[test]
     fn build_budget_failure_names_the_cap() {
-        let dir = std::env::temp_dir().join(format!("gpx-index-budget-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-index-budget-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join("a.rs"), "fn budgetTripFn() {}\n").unwrap();
 
         let ex = SparseGramExtractor::new(Crc32Weigher);
@@ -791,9 +801,11 @@ mod tests {
     /// fails if `git_global(false)` is dropped.
     #[test]
     fn policy_walk_ignores_the_global_excludes_file_but_keeps_project_gitignore() {
-        let base =
-            std::env::temp_dir().join(format!("gpx-index-global-ignore-{}", std::process::id()));
-        std::fs::remove_dir_all(&base).ok();
+        let base_guard = tempfile::Builder::new()
+            .prefix("gpx-index-global-ignore-")
+            .tempdir()
+            .unwrap();
+        let base = base_guard.path().to_path_buf();
         let root = base.join("tree");
         std::fs::create_dir_all(root.join(".claude/hooks")).unwrap();
         std::fs::write(root.join(".claude/hooks/guard.py"), "def guard(): pass\n").unwrap();
@@ -901,9 +913,11 @@ mod tests {
 
     #[test]
     fn regular_bounded_reads_accept_a_file_of_exactly_the_cap() {
-        let dir = std::env::temp_dir().join(format!("gpx-index-bounded-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-index-bounded-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let file = dir.join("f");
         std::fs::write(&file, b"abcd").unwrap();
         assert_eq!(read_regular_bounded(&file, 4).unwrap(), b"abcd");
@@ -915,8 +929,11 @@ mod tests {
 
     #[test]
     fn policy_walk_skips_the_git_and_shard_directories() {
-        let dir = std::env::temp_dir().join(format!("gpx-index-walk-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-index-walk-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         let git_dir = dir.join(".git");
         std::fs::create_dir_all(&git_dir).unwrap();
         std::fs::create_dir_all(dir.join(SHARD_DIR)).unwrap();
@@ -930,9 +947,11 @@ mod tests {
 
     #[test]
     fn build_size_cap_is_inclusive() {
-        let dir = std::env::temp_dir().join(format!("gpx-index-bytecap-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("gpx-index-bytecap-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path().to_path_buf();
         std::fs::write(dir.join("a.rs"), "fn byteCapFn() {}\n").unwrap();
         let len = std::fs::metadata(dir.join("a.rs")).unwrap().len();
         let ex = SparseGramExtractor::new(Crc32Weigher);

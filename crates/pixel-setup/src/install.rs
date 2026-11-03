@@ -610,8 +610,11 @@ mod path_tests {
     #[test]
     fn find_in_paths_returns_the_first_executable_file_only() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("pixel-find-path-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir_guard = tempfile::Builder::new()
+            .prefix("pixel-find-path-")
+            .tempdir()
+            .unwrap();
+        let dir = dir_guard.path();
         let first = dir.join("first");
         let second = dir.join("second");
         std::fs::create_dir_all(&first).unwrap();
@@ -632,7 +635,7 @@ mod path_tests {
         assert_eq!(find_in_paths("absent", &path), None);
         let only_first = std::env::join_paths([&first]).unwrap();
         assert_eq!(find_in_paths("tool", &only_first), None, "not executable");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

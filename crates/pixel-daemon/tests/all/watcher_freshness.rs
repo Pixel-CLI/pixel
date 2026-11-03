@@ -33,16 +33,12 @@ use crate::support::git;
 const WATCHER_SETTLE: Duration = Duration::from_millis(1500);
 
 /// One committed source file defining `helper`.
-fn fixture(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "gpx-watcher-freshness-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::remove_dir_all(&dir).ok();
+fn fixture(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("gpx-watcher-freshness-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let dir = scratch.path().to_path_buf();
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("src/util.ts"),
@@ -53,7 +49,7 @@ fn fixture(tag: &str) -> PathBuf {
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "baseline"]);
-    dir
+    (scratch, dir)
 }
 
 /// One client connection: writes requests, reads one NDJSON reply per request.
@@ -174,7 +170,7 @@ impl Corpus for GatedCorpus {
 
 #[test]
 fn a_file_changed_during_a_held_request_is_visible_to_the_next_request() {
-    let dir = fixture("held");
+    let (_scratch, dir) = fixture("held");
     let sock = socket_path(&dir);
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -259,6 +255,7 @@ fn a_file_changed_during_a_held_request_is_visible_to_the_next_request() {
 /// A daemon over `fixture(tag)` serving a `GatedCorpus`, its watch live and
 /// its graph built (a replica reads the graph, it never builds it).
 struct Gated {
+    _scratch: tempfile::TempDir,
     dir: PathBuf,
     sock: PathBuf,
     started: mpsc::Receiver<()>,
@@ -268,7 +265,7 @@ struct Gated {
 
 impl Gated {
     fn start(tag: &str) -> Self {
-        let dir = fixture(tag);
+        let (scratch, dir) = fixture(tag);
         let sock = socket_path(&dir);
         let (started_tx, started) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
@@ -294,6 +291,7 @@ impl Gated {
         });
         assert!(built.ok, "{built:?}");
         Gated {
+            _scratch: scratch,
             dir,
             sock,
             started,

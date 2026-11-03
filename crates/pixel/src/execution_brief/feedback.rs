@@ -298,12 +298,15 @@ pub(crate) fn tool_targets(root: &Path, cwd: &Path, input: &Value) -> Vec<String
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-brief-feedback-{tag}-{}", std::process::id()));
+    fn scratch(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let _dir_tmp = tempfile::Builder::new()
+            .prefix(&format!("pixel-brief-feedback-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let dir = _dir_tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        (_dir_tmp, dir.canonicalize().unwrap())
     }
 
     fn briefed<'a>(session: &'a str, injected: &'a [String], bytes: usize) -> Prompt<'a> {
@@ -438,7 +441,7 @@ mod tests {
 
     #[test]
     fn tool_targets_should_keep_existing_repository_files_and_nothing_else() {
-        let root = scratch("targets");
+        let (_root_tmp, root) = scratch("targets");
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/a.rs"), "fn a() {}\n").unwrap();
         std::fs::write(root.join("README.md"), "hi\n").unwrap();
@@ -455,7 +458,7 @@ mod tests {
 
     #[test]
     fn tool_targets_should_read_the_file_path_of_a_structured_tool_and_make_it_relative() {
-        let root = scratch("structured");
+        let (_root_tmp, root) = scratch("structured");
         std::fs::write(root.join("a.rs"), "x\n").unwrap();
         let absolute = root.join("a.rs").to_string_lossy().to_string();
         let input = json!({"file_path": absolute, "content": "private body"});
@@ -470,8 +473,8 @@ mod tests {
 
     #[test]
     fn tool_targets_should_not_follow_a_link_out_of_the_repository() {
-        let root = scratch("linked");
-        let outside = scratch("linked-outside");
+        let (_root_tmp, root) = scratch("linked");
+        let (_outside_tmp, outside) = scratch("linked-outside");
         std::fs::write(outside.join("secret.txt"), "outside\n").unwrap();
         std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("link.txt")).unwrap();
         let input = json!({"file_path": "link.txt", "command": "cat link.txt"});
@@ -482,7 +485,7 @@ mod tests {
 
     #[test]
     fn append_with_should_keep_the_cap_when_a_stop_adds_two_lines() {
-        let dir = scratch("cap");
+        let (_dir_tmp, dir) = scratch("cap");
         std::fs::create_dir_all(dir.join(".pixel")).unwrap();
         let path = dir.join(".pixel").join(LOG_FILE);
         for n in 0..5 {

@@ -361,15 +361,16 @@ fn every_hook_part_should_log_the_bytes_it_printed_to_the_host() {
 
 /// A transcript outside the repository (a file inside it would be a dirty file
 /// of the tree) whose last tool call read `file`.
-fn transcript_reading(tag: &str, file: &Path) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "pixel-brief-feedback-{tag}-{}.jsonl",
-        std::process::id()
-    ));
+fn transcript_reading(tag: &str, file: &Path) -> (tempfile::TempDir, std::path::PathBuf) {
+    let _path_tmp = tempfile::Builder::new()
+        .prefix(&format!("pixel-brief-feedback-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let path = _path_tmp.path().join("transcript.jsonl");
     let line = json!({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Read", "input": {"file_path": file}}]}});
     std::fs::write(&path, format!("{line}\n")).unwrap();
-    path
+    (_path_tmp, path)
 }
 
 fn follow_up_payload(root: &Path, transcript: Option<&Path>) -> Value {
@@ -381,7 +382,7 @@ fn follow_up_payload(root: &Path, transcript: Option<&Path>) -> Value {
 fn a_short_follow_up_should_be_briefed_on_the_files_the_transcript_names() {
     let root = indexed("follow-up");
     let page = root.join("apps/web/page.tsx");
-    let transcript = transcript_reading("follow-up", &page);
+    let (_transcript_tmp, transcript) = transcript_reading("follow-up", &page);
     let briefed = hook(
         &root,
         "prompt-submit",

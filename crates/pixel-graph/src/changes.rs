@@ -1312,15 +1312,11 @@ mod tests {
     /// "raise the cap" — so a wrong one misdirects the fix.
     #[test]
     fn absent_motif_names_the_cause_the_build_would_give() {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-motif-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let root_dir = tempfile::Builder::new()
+            .prefix("pixel-motif-")
+            .tempdir()
+            .unwrap();
+        let root = root_dir.path();
         std::fs::write(root.join("ok.rs"), b"fn alpha() -> u32 { 1 }\n").unwrap();
         std::fs::write(root.join("notes.txt"), b"fn looks_like_rust() {}\n").unwrap();
         std::fs::write(root.join("blob.rs"), b"fn x() {}\n\0\0binary\n").unwrap();
@@ -1331,35 +1327,34 @@ mod tests {
 
         // Indexable and absent: the cap is the cause only when one was hit.
         assert_eq!(
-            absent_motif(&root, "ok.rs", false),
+            absent_motif(root, "ok.rs", false),
             UncoveredMotif::NotIndexed
         );
         assert_eq!(
-            absent_motif(&root, "ok.rs", true),
+            absent_motif(root, "ok.rs", true),
             UncoveredMotif::ExcludedByFileCap
         );
         // The cap never explains a file the build would refuse anyway.
         assert_eq!(
-            absent_motif(&root, "notes.txt", true),
+            absent_motif(root, "notes.txt", true),
             UncoveredMotif::UnsupportedLanguage
         );
         assert_eq!(
-            absent_motif(&root, "blob.rs", true),
+            absent_motif(root, "blob.rs", true),
             UncoveredMotif::NonTextChange
         );
         assert_eq!(
-            absent_motif(&root, "huge.rs", true),
+            absent_motif(root, "huge.rs", true),
             UncoveredMotif::ExcludedBySize
         );
         assert_eq!(
-            absent_motif(&root, "bundle.js", true),
+            absent_motif(root, "bundle.js", true),
             UncoveredMotif::NotIndexed
         );
         assert_eq!(
-            absent_motif(&root, "vanished.rs", true),
+            absent_motif(root, "vanished.rs", true),
             UncoveredMotif::NotIndexed
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The motif names are the contract's, shared with
