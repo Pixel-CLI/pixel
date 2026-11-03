@@ -1021,13 +1021,35 @@ fn setup_local_with(
     )?;
 
     // Verify the pull wrote the model into the managed store, not into some
-    // other location picked up by a pre-existing Ollaya server. If the model
-    // is missing, recording the launch would silently select a local engine
-    // that has nothing to serve.
-    let model_dir = models.join(crate::decide_ollaya::DEFAULT_MODEL);
-    if !runtime.exists(&model_dir) {
+    // other location picked up by a pre-existing Ollaya server. Ollaya stores
+    // models Ollama-style under `models/manifests/<registry>/<namespace>/<name>/<tag>`,
+    // not as a top-level `models/<name>:<tag>` directory, so check the manifest
+    // that `ollaya pull` actually writes. If the model is missing, recording
+    // the launch would silently select a local engine that has nothing to serve.
+    let (model_name, tag) = crate::decide_ollaya::DEFAULT_MODEL
+        .split_once(':')
+        .unwrap_or((crate::decide_ollaya::DEFAULT_MODEL, "latest"));
+    let manifest_candidates = [
+        models
+            .join("manifests")
+            .join("ollaya.dev")
+            .join("library")
+            .join(model_name)
+            .join(tag),
+        models
+            .join("manifests")
+            .join("registry.ollama.ai")
+            .join("library")
+            .join(model_name)
+            .join(tag),
+    ];
+    let model_dir = manifest_candidates[0].clone();
+    if !manifest_candidates
+        .iter()
+        .any(|candidate| runtime.exists(candidate))
+    {
         return Err(format!(
-            "ollaya pull reported success but the model directory {} was not found under {}; \
+            "ollaya pull reported success but the model manifest {} was not found under {}; \
              the pull may have written to a different store",
             model_dir.display(),
             models.display(),
