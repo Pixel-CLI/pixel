@@ -371,18 +371,14 @@ pub fn build_with_budget(
     build_with_caps(root, extractor, budget)
 }
 
+/// Files extracted per chunk of a plain-walk build.
+const BUILD_CHUNK_FILES: usize = 4096;
+
 fn build_with_caps(
     root: &Path,
     extractor: &dyn GramExtractor,
     budget: Option<std::time::Duration>,
 ) -> Result<BuildStats, IndexError> {
-    /// One extracted file, as the rayon workers hand it back to the writer.
-    struct FileGrams {
-        rel: String,
-        bytes: u64,
-        hashes: Vec<u64>,
-    }
-
     use std::sync::atomic::Ordering;
     let started = std::time::Instant::now();
 
@@ -392,7 +388,6 @@ fn build_with_caps(
     // collection: on ruby/ruby (11 343 files) a one-thread walk costs about
     // 50 ms of a 550-700 ms `build-index`, which bounds what streaming paths
     // into the extraction could save.
-    let total_bytes = std::sync::atomic::AtomicU64::new(0);
     let budget_exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let file_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -438,9 +433,8 @@ fn build_with_caps(
     let extractor_id = extractor.id();
     let root_for_rel = root.to_path_buf();
 
-    let extracted: Vec<FileGrams> = {
+    let all_paths: Vec<PathBuf> = {
         let rx = std::sync::Mutex::new(rx);
-        let total_bytes = &total_bytes;
         let budget_exceeded = &budget_exceeded;
         // Collect every path first, then extract in parallel (see above).
         let mut all_paths: Vec<PathBuf> = Vec::new();
@@ -469,34 +463,8 @@ fn build_with_caps(
         }
         // Wait for walker to finish.
         let _ = walker_handle.join();
-
         all_paths.sort();
-
         all_paths
-            .par_iter()
-            .filter_map(|path| {
-                let content = read_regular_bounded(path, MAX_FILE_BYTES).ok()?;
-                if content[..content.len().min(8192)].contains(&0) {
-                    return None;
-                }
-                total_bytes.fetch_add(content.len() as u64, Ordering::Relaxed);
-                let rel = path
-                    .strip_prefix(&root_for_rel)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .into_owned();
-                let mut hits = Vec::new();
-                extractor.grams(&content, &mut hits);
-                let mut hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
-                hashes.sort_unstable();
-                hashes.dedup();
-                Some(FileGrams {
-                    rel,
-                    bytes: content.len() as u64,
-                    hashes,
-                })
-            })
-            .collect()
     };
 
     let paths_count = file_count.load(Ordering::Relaxed);
@@ -508,25 +476,57 @@ fn build_with_caps(
         ));
     }
 
+    // File ids follow path order. Files are extracted and handed to the
+    // builder a bounded chunk at a time, as `build_shard_from` does: the
+    // build no longer holds every file's gram hashes at once.
+    let mut builder = ShardBuilder::new(&extractor_id);
+    let mut stats = BuildStats {
+        files: 0,
+        bytes: 0,
+        grams: 0,
+        shard_bytes: 0,
+        elapsed_ms: 0,
+    };
+    for chunk in all_paths.chunks(BUILD_CHUNK_FILES) {
+        let extracted: Vec<(String, u64, Vec<u64>)> = chunk
+            .par_iter()
+            .filter_map(|path| {
+                let content = read_regular_bounded(path, MAX_FILE_BYTES).ok()?;
+                if content[..content.len().min(8192)].contains(&0) {
+                    return None;
+                }
+                let rel = path
+                    .strip_prefix(&root_for_rel)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .into_owned();
+                let mut hits = Vec::new();
+                extractor.grams(&content, &mut hits);
+                let mut hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
+                hashes.sort_unstable();
+                hashes.dedup();
+                Some((rel, content.len() as u64, hashes))
+            })
+            .collect();
+        for (rel, bytes, hashes) in extracted {
+            stats.files += 1;
+            stats.bytes += bytes;
+            stats.grams += hashes.len() as u64;
+            builder.add_file(&rel, hashes);
+        }
+        if let Some(d) = budget
+            && started.elapsed() > d
+        {
+            return Err(budget_time_error(started.elapsed(), d, paths_count));
+        }
+    }
+
     if let Some(d) = budget
         && started.elapsed() > d
     {
         return Err(budget_time_error(started.elapsed(), d, paths_count));
     }
 
-    let mut builder = ShardBuilder::new(&extractor_id);
-    let mut stats = BuildStats {
-        files: extracted.len(),
-        bytes: 0,
-        grams: 0,
-        shard_bytes: 0,
-        elapsed_ms: 0,
-    };
-    for fg in &extracted {
-        stats.bytes += fg.bytes;
-        stats.grams += fg.hashes.len() as u64;
-        builder.add_file(&fg.rel, fg.hashes.clone());
-    }
     let dest = shard_path(root);
     builder.write(&dest)?;
     stats.shard_bytes = std::fs::metadata(&dest)?.len();
