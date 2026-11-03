@@ -448,16 +448,19 @@ fn is_lockfile(rel: &str) -> bool {
 /// hashed and extracted in parallel, then handed to the single writer, so
 /// the build holds the content and extractions of two batches at most (the
 /// one being written and the one being read), whatever the tree's size.
+/// `resolve` bounds the resolution passes the same way.
 #[derive(Debug, Clone, Copy)]
 struct BatchLimits {
     files: usize,
     bytes: u64,
+    resolve: staging::ResolveLimits,
 }
 
 /// The production batch bounds.
 const BATCH_LIMITS: BatchLimits = BatchLimits {
     files: 2048,
     bytes: 64 * 1024 * 1024,
+    resolve: staging::RESOLVE_LIMITS,
 };
 
 /// One file the full build's walk read: regular, within `MAX_FILE_BYTES`,
@@ -801,15 +804,11 @@ fn build_graph_batched(
     resolve_staged_imports(root, &store)?;
     phases.imports_ms = millis(clock.elapsed());
 
-    let clock = Instant::now();
     // Resolving writes edges and unresolved rows, never a symbol or an
-    // import: one index serves both passes.
-    let idx = ResolveIndex::build(&store)?;
-    resolve_calls_in(&store, &idx, &staging::pending_calls(&store)?)?;
-    phases.resolve_calls_ms = millis(clock.elapsed());
+    // import, so every batch reads the graph the walk stored.
+    let (calls, references) = staging::resolve_staged(&store, limits.resolve)?;
+    phases.resolve_calls_ms = millis(calls);
     let clock = Instant::now();
-    resolve_references_in(&store, &idx, &staging::pending_references(&store)?)?;
-    drop(idx);
     staging::clear_pending(&store)?;
     if let Some(mvp) = mvp {
         mvp_adapter::merge_into(&store, mvp)?;
@@ -817,7 +816,7 @@ fn build_graph_batched(
     if let Some(index) = ruby_index {
         ruby_switch::merge_into(&store, index)?;
     }
-    phases.resolve_references_ms = millis(clock.elapsed());
+    phases.resolve_references_ms = millis(references + clock.elapsed());
     let clock = Instant::now();
 
     // Bind freshness to the exact bytes parsed above. If the source tree moved
@@ -4926,10 +4925,13 @@ mod tests {
         }
     }
 
-    /// The full build's walk hands its writer one batch at a time; where the
-    /// batches end must not show in the graph. Batches of one and two files
-    /// store, row for row, what one batch holding the whole tree stores,
-    /// and sign the same snapshot.
+    /// The full build's walk hands its writer one batch at a time, and its
+    /// resolution reads the staged sites a batch at a time against an index
+    /// of that batch's files and names; where the batches end, and what the
+    /// name cache evicted, must not show in the graph. Walk batches of one
+    /// and two files, resolution batches of one file or two sites, an empty
+    /// and a tiny cache store, row for row, what one batch holding the whole
+    /// tree stores, and sign the same snapshot.
     #[test]
     fn a_build_in_small_batches_should_store_what_one_batch_stores() {
         let reference = tmpdir("batches-one");
@@ -4938,6 +4940,11 @@ mod tests {
         let whole = BatchLimits {
             files: usize::MAX,
             bytes: u64::MAX,
+            resolve: staging::ResolveLimits {
+                files: usize::MAX,
+                sites: i64::MAX as usize,
+                cache_bytes: usize::MAX,
+            },
         };
         build_graph_batched(
             &reference,
@@ -4959,8 +4966,21 @@ mod tests {
             BatchLimits {
                 files: 1,
                 bytes: u64::MAX,
+                resolve: staging::ResolveLimits {
+                    files: 1,
+                    sites: i64::MAX as usize,
+                    cache_bytes: 0,
+                },
             },
-            BatchLimits { files: 2, bytes: 1 },
+            BatchLimits {
+                files: 2,
+                bytes: 1,
+                resolve: staging::ResolveLimits {
+                    files: 3,
+                    sites: 2,
+                    cache_bytes: 512,
+                },
+            },
         ] {
             let db = reference
                 .join(".pixel")

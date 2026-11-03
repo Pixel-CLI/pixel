@@ -66,7 +66,10 @@ use crate::store::{
     decode_scope,
 };
 
+mod batch;
 mod ruby;
+
+pub use batch::BatchResolver;
 
 #[derive(Debug, Default, Clone)]
 pub struct ResolveStats {
@@ -172,7 +175,7 @@ fn scope_width(scope: &[(u32, u32)], site_line: Option<u32>) -> u32 {
 pub struct ResolveIndex {
     by_name: HashMap<String, Vec<Candidate>>,
     ruby_files: HashSet<i64>,
-    ruby_constants: ruby::Index,
+    ruby_constants: std::sync::Arc<ruby::Index>,
     /// Class/module symbols supply the owner of a Ruby class-body reference.
     containers: HashSet<i64>,
     /// symbol_id → qualified name, for the type-qualified receiver tiebreak
@@ -325,7 +328,7 @@ impl ResolveIndex {
         Ok(Self {
             by_name,
             ruby_files,
-            ruby_constants: ruby::Index::build(store)?,
+            ruby_constants: std::sync::Arc::new(ruby::Index::build(store)?),
             containers,
             qualified_of,
             import_bindings,

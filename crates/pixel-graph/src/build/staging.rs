@@ -12,7 +12,12 @@ use rusqlite::params;
 use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
 use crate::imports::{PathLookup, has_path_suffix};
-use crate::resolve::{FileCalls, FileReferences, PendingCall, PendingReference};
+use rustc_hash::FxHashSet as HashSet;
+
+use crate::resolve::{
+    BatchResolver, FileCalls, FileReferences, PendingCall, PendingReference, resolve_calls_in,
+    resolve_references_in,
+};
 use crate::store::{ExecCached, GraphStore, StoreError};
 
 /// What the walk knew of one file when it read it: the xxh3 of the bytes
@@ -151,66 +156,145 @@ pub(super) fn signature(store: &GraphStore) -> Result<String, StoreError> {
     Ok(format!("{:016x}", hasher.digest()))
 }
 
-/// Every staged call, grouped by file in staging order.
-pub(super) fn pending_calls(store: &GraphStore) -> Result<Vec<FileCalls>, StoreError> {
-    let mut stmt = store.conn().prepare(
-        "SELECT file_id, name, enclosing_symbol_id, site_line, receiver
-           FROM pending_calls ORDER BY id",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            PendingCall {
-                callee_name: r.get(1)?,
-                enclosing_symbol_id: r.get(2)?,
-                site_line: r.get(3)?,
-                receiver: r.get(4)?,
-            },
-        ))
-    })?;
-    let mut out: Vec<FileCalls> = Vec::new();
-    for row in rows {
-        let (file_id, call) = row?;
-        match out.last_mut() {
-            Some(last) if last.file_id == file_id => last.calls.push(call),
-            _ => out.push(FileCalls {
-                file_id,
-                calls: vec![call],
-            }),
-        }
-    }
-    Ok(out)
+/// The bounds of the full build's resolution passes: at most `files` files
+/// and `sites` staged sites per batch, and about `cache_bytes` of per-name
+/// facts kept between batches.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ResolveLimits {
+    pub files: usize,
+    pub sites: usize,
+    pub cache_bytes: usize,
 }
 
-/// Every staged reference, grouped by file in staging order.
-pub(super) fn pending_references(store: &GraphStore) -> Result<Vec<FileReferences>, StoreError> {
-    let mut stmt = store.conn().prepare(
-        "SELECT file_id, name, enclosing_symbol_id, site_line, arg_of
-           FROM pending_refs ORDER BY id",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            PendingReference {
-                name: r.get(1)?,
-                enclosing_symbol_id: r.get(2)?,
-                site_line: r.get(3)?,
-                arg_of: r.get(4)?,
-            },
-        ))
-    })?;
-    let mut out: Vec<FileReferences> = Vec::new();
-    for row in rows {
-        let (file_id, reference) = row?;
-        match out.last_mut() {
-            Some(last) if last.file_id == file_id => last.references.push(reference),
-            _ => out.push(FileReferences {
-                file_id,
-                references: vec![reference],
-            }),
+/// The production resolution bounds.
+pub(super) const RESOLVE_LIMITS: ResolveLimits = ResolveLimits {
+    files: 2048,
+    sites: 65_536,
+    cache_bytes: 32 * 1024 * 1024,
+};
+
+/// One file's staged sites: its id and the sites, in staging order.
+type FileSites<T> = (i64, Vec<T>);
+
+/// The next batch of staged rows after row `after`, read by `read_row`
+/// from `sql` (which selects `id, file_id, …` ordered by id): at most
+/// `limits.sites` rows of at most `limits.files` files,
+/// grouped by file in staging order. Returns the groups and the last row id
+/// read; empty groups when nothing is left.
+fn next_batch<T>(
+    store: &GraphStore,
+    limits: ResolveLimits,
+    sql: &str,
+    after: i64,
+    read_row: impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Result<(Vec<FileSites<T>>, i64), StoreError> {
+    let mut stmt = store.conn().prepare_cached(sql)?;
+    let mut rows = stmt.query(params![after, limits.sites as i64])?;
+    let mut groups: Vec<FileSites<T>> = Vec::new();
+    let mut last = after;
+    while let Some(row) = rows.next()? {
+        let (id, file_id): (i64, i64) = (row.get(0)?, row.get(1)?);
+        let same_file = groups.last().is_some_and(|(file, _)| *file == file_id);
+        if !same_file && groups.len() == limits.files {
+            break;
         }
+        let site = read_row(row)?;
+        if same_file && let Some((_, sites)) = groups.last_mut() {
+            sites.push(site);
+        } else {
+            groups.push((file_id, vec![site]));
+        }
+        last = id;
     }
-    Ok(out)
+    Ok((groups, last))
+}
+
+/// Resolves every staged call, then every staged reference, a batch at a
+/// time, each batch against an index of the per-file facts of its files and
+/// the per-name facts of the names it reads ([`BatchResolver`]). Returns the
+/// time each pass took.
+pub(super) fn resolve_staged(
+    store: &GraphStore,
+    limits: ResolveLimits,
+) -> Result<(std::time::Duration, std::time::Duration), StoreError> {
+    let mut resolver = BatchResolver::new(store, limits.cache_bytes)?;
+    let clock = std::time::Instant::now();
+    let mut after = 0;
+    loop {
+        let (groups, last) = next_batch(
+            store,
+            limits,
+            "SELECT id, file_id, name, enclosing_symbol_id, site_line, receiver
+               FROM pending_calls WHERE id > ?1 ORDER BY id LIMIT ?2",
+            after,
+            |r| {
+                Ok(PendingCall {
+                    callee_name: r.get(2)?,
+                    enclosing_symbol_id: r.get(3)?,
+                    site_line: r.get(4)?,
+                    receiver: r.get(5)?,
+                })
+            },
+        )?;
+        if groups.is_empty() {
+            break;
+        }
+        after = last;
+        let batch: Vec<FileCalls> = groups
+            .into_iter()
+            .map(|(file_id, calls)| FileCalls { file_id, calls })
+            .collect();
+        let files: HashSet<i64> = batch.iter().map(|f| f.file_id).collect();
+        let idx = resolver.index_for(
+            store,
+            &files,
+            batch
+                .iter()
+                .flat_map(|f| f.calls.iter().map(|c| c.callee_name.as_str())),
+        )?;
+        resolve_calls_in(store, &idx, &batch)?;
+    }
+    let calls = clock.elapsed();
+    let clock = std::time::Instant::now();
+    let mut after = 0;
+    loop {
+        let (groups, last) = next_batch(
+            store,
+            limits,
+            "SELECT id, file_id, name, enclosing_symbol_id, site_line, arg_of
+               FROM pending_refs WHERE id > ?1 ORDER BY id LIMIT ?2",
+            after,
+            |r| {
+                Ok(PendingReference {
+                    name: r.get(2)?,
+                    enclosing_symbol_id: r.get(3)?,
+                    site_line: r.get(4)?,
+                    arg_of: r.get(5)?,
+                })
+            },
+        )?;
+        if groups.is_empty() {
+            break;
+        }
+        after = last;
+        let batch: Vec<FileReferences> = groups
+            .into_iter()
+            .map(|(file_id, references)| FileReferences {
+                file_id,
+                references,
+            })
+            .collect();
+        let files: HashSet<i64> = batch.iter().map(|f| f.file_id).collect();
+        let idx = resolver.index_for(
+            store,
+            &files,
+            batch
+                .iter()
+                .flat_map(|f| f.references.iter().map(|r| r.name.as_str())),
+        )?;
+        resolve_references_in(store, &idx, &batch)?;
+    }
+    Ok((calls, clock.elapsed()))
 }
 
 /// A [`PathLookup`] answered by the store's `files` rows: the full build
