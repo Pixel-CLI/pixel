@@ -612,8 +612,10 @@ impl GraphStore {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
-        conn.pragma_update(None, "busy_timeout", 1000)?;
-        conn.pragma_update(None, "query_only", true)?;
+        // Not `pragma_update`: rusqlite 0.41 validates the name with a query that reads the
+        // schema, which waits out the default 5 s busy timeout on a locked file.
+        conn.busy_timeout(std::time::Duration::from_millis(1000))?;
+        conn.execute_batch("PRAGMA query_only = 1")?;
         Ok(Self { conn })
     }
 
