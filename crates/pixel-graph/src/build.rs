@@ -2232,10 +2232,13 @@ mod tests {
         std::fs::write(root.join("a.ts"), format!("{defs}// saved\n")).unwrap();
 
         let mut store = GraphStore::open(&db).unwrap();
-        store.conn().trace_v2(
-            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(record_statement),
-        );
+        store
+            .conn_mut()
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(record_statement),
+            )
+            .unwrap();
         store.begin_write().unwrap();
         write_rows(&root, &mut store, &[("a.ts", false)]).unwrap();
         store.commit_write().unwrap();

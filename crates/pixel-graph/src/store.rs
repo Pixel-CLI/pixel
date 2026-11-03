@@ -2170,11 +2170,14 @@ mod tests {
 
     #[test]
     fn a_write_transaction_refreshes_the_planner_statistics_before_it_commits() {
-        let store = super::GraphStore::open_in_memory().unwrap();
-        store.conn().trace_v2(
-            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(record_statement),
-        );
+        let mut store = super::GraphStore::open_in_memory().unwrap();
+        store
+            .conn_mut()
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(record_statement),
+            )
+            .unwrap();
         store.begin_write().unwrap();
         store.meta_set("k", "v").unwrap();
         store.commit_write().unwrap();
