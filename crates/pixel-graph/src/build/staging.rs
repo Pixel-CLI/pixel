@@ -42,6 +42,34 @@ impl Snapshot {
     }
 }
 
+impl Snapshot {
+    /// The snapshot of a `snapshot_files` row read as `path, hash, size,
+    /// mtime_ns, ino`.
+    pub fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            hash: row.get::<_, i64>(1)? as u64,
+            size: row.get::<_, i64>(2)? as u64,
+            mtime_ns: row.get(3)?,
+            ino: row.get::<_, i64>(4)? as u64,
+        })
+    }
+
+    /// True iff `meta` is the stat this snapshot recorded: same size,
+    /// mtime and inode. A file that differs was written, replaced or
+    /// truncated after the walk read it.
+    pub fn same_stat(&self, meta: &std::fs::Metadata) -> bool {
+        self.size == meta.size() && self.mtime_ns == mtime_ns(meta) && self.ino == meta.ino()
+    }
+}
+
+/// True iff the walk read `rel`.
+pub(super) fn in_snapshot(store: &GraphStore, rel: &str) -> Result<bool, StoreError> {
+    Ok(store
+        .conn()
+        .prepare_cached("SELECT 1 FROM snapshot_files WHERE path = ?1")?
+        .exists(params![rel])?)
+}
+
 /// `meta`'s mtime in nanoseconds since the epoch, saturating.
 fn mtime_ns(meta: &std::fs::Metadata) -> i64 {
     meta.mtime()

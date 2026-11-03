@@ -232,6 +232,11 @@ pub struct GraphStats {
     pub symbols: u64,
     pub edges: u64,
     pub unresolved: u64,
+    /// Files that moved while a full build ran (edited, removed or added
+    /// after its walk read the tree), as the stat-only pass after its
+    /// commit saw them. The build signs the snapshot it parsed, so the
+    /// graph reads stale until an update applies them (`tree_delta`).
+    pub drifted: u64,
     pub elapsed_ms: u128,
     pub phases: BuildPhases,
 }
@@ -260,8 +265,8 @@ pub struct BuildPhases {
     pub resolve_calls_ms: u64,
     /// Reference resolution.
     pub resolve_references_ms: u64,
-    /// The second walk and hash that proves the tree did not move during
-    /// the build, before the graph is signed fresh.
+    /// The stat-only pass after the commit that names the files that
+    /// moved during the build ([`GraphStats::drifted`]).
     pub verify_ms: u64,
     /// The process's peak resident set size when the build ended, in KiB
     /// (`getrusage`'s `ru_maxrss`): the build's own peak in a one-shot
@@ -456,10 +461,23 @@ struct BatchLimits {
     resolve: staging::ResolveLimits,
 }
 
+/// The full build's mapping of the store, in bytes ([`GraphStore::set_mmap_bytes`]).
+const FULL_BUILD_MMAP_BYTES: i64 = 64 * 1024 * 1024;
+
+/// The full build's page cache, in KiB ([`GraphStore::set_cache_kib`]).
+const FULL_BUILD_CACHE_KIB: i64 = 16 * 1024;
+
+/// The threads that read and parse the walk's batches. One writer stores
+/// what they produce and is the slower side: more threads than this add
+/// parser memory (a tree per file in flight, an allocator arena per
+/// thread) and no speed. On /usr/share, 4 threads build in 9.4 s at
+/// 191 MB peak, 16 threads in 9.3 s at 374 MB.
+const EXTRACT_THREADS: usize = 4;
+
 /// The production batch bounds.
 const BATCH_LIMITS: BatchLimits = BatchLimits {
-    files: 2048,
-    bytes: 64 * 1024 * 1024,
+    files: 512,
+    bytes: 16 * 1024 * 1024,
     resolve: staging::RESOLVE_LIMITS,
 };
 
@@ -535,11 +553,13 @@ fn read_batch(batch: Vec<(String, std::path::PathBuf)>) -> Vec<Walked> {
 }
 
 /// Wall time the walk spent listing the tree (`collect`) and reading,
-/// hashing and extracting its batches (`extract`).
+/// hashing and extracting its batches (`extract`), and whether it stopped
+/// at the file cap (`capped`) rather than at the end of the tree.
 #[derive(Debug, Default, Clone, Copy)]
 struct WalkTimes {
     collect: Duration,
     extract: Duration,
+    capped: bool,
 }
 
 /// Walk `root` for supported source files (skips .git, .pixel,
@@ -564,6 +584,10 @@ fn walk_batches(
     let mut batch: Vec<(String, std::path::PathBuf)> = Vec::new();
     let mut bytes = 0u64;
     let mut clock = Instant::now();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(EXTRACT_THREADS.min(rayon::current_num_threads()))
+        .build()
+        .ok();
     // Reads the batch and hands it over; false once the walk must stop.
     let mut flush = |batch: &mut Vec<(String, std::path::PathBuf)>,
                      taken: &mut usize,
@@ -572,13 +596,18 @@ fn walk_batches(
      -> bool {
         times.collect += clock.elapsed();
         let read = Instant::now();
-        let mut walked = read_batch(std::mem::take(batch));
+        let batch = std::mem::take(batch);
+        let mut walked = match &pool {
+            Some(pool) => pool.install(|| read_batch(batch)),
+            None => read_batch(batch),
+        };
         times.extract += read.elapsed();
         let mut more = true;
         if let Some(cap) = max_files
             && *taken + walked.len() >= cap
         {
             walked.truncate(cap - *taken);
+            times.capped = true;
             more = false;
         }
         *taken += walked.len();
@@ -649,13 +678,7 @@ pub fn build_graph_from(
     db_path: &Path,
     rust: RustSource,
 ) -> Result<GraphStats, BoxErr> {
-    build_graph_with(
-        root,
-        db_path,
-        rust,
-        RubySource::from_env(),
-        freshness_signature,
-    )
+    build_graph_with(root, db_path, rust, RubySource::from_env(), |_| Ok(()))
 }
 
 /// [`build_graph_from`] with the Ruby edges taken from `ruby` too. With
@@ -670,20 +693,20 @@ pub fn build_graph_sources(
     rust: RustSource,
     ruby: RubySource,
 ) -> Result<GraphStats, BoxErr> {
-    build_graph_with(root, db_path, rust, ruby, freshness_signature)
+    build_graph_with(root, db_path, rust, ruby, |_| Ok(()))
 }
 
-/// [`build_graph_from`] with the signature of the tree as it stands after
-/// the writes supplied by `signature_now`: production re-walks the tree, a
-/// test makes it move to reach the rollback.
+/// [`build_graph_from`] with a seam for tests: `probe` runs once every row
+/// is written, before the commit. Production passes a no-op; a test moves
+/// the tree there, or fails to reach the rollback.
 fn build_graph_with(
     root: &Path,
     db_path: &Path,
     rust: RustSource,
     ruby: RubySource,
-    signature_now: impl FnOnce(&Path) -> String,
+    probe: impl FnOnce(&Path) -> Result<(), BoxErr>,
 ) -> Result<GraphStats, BoxErr> {
-    build_graph_batched(root, db_path, rust, ruby, BATCH_LIMITS, signature_now)
+    build_graph_batched(root, db_path, rust, ruby, BATCH_LIMITS, probe)
 }
 
 /// [`build_graph_with`] walking in batches of `limits`.
@@ -694,13 +717,21 @@ fn build_graph_with(
 /// and reference sites (`pending_calls`, `pending_refs`) and its snapshot
 /// row (`snapshot_files`), then frees the batch. Imports, calls and
 /// references are resolved once every file is stored, from those tables.
+///
+/// The graph is signed with the snapshot's signature (`staging::signature`):
+/// it describes the bytes the build parsed, whatever the tree did while it
+/// ran, so a build on a live tree always publishes. A stat-only pass after
+/// the commit counts the files that moved since their read
+/// ([`GraphStats::drifted`]); the signature no longer matches the tree for
+/// them, so the next freshness check (`tree_delta`) names them and an
+/// incremental update applies them.
 fn build_graph_batched(
     root: &Path,
     db_path: &Path,
     rust: RustSource,
     ruby: RubySource,
     limits: BatchLimits,
-    signature_now: impl FnOnce(&Path) -> String,
+    probe: impl FnOnce(&Path) -> Result<(), BoxErr>,
 ) -> Result<GraphStats, BoxErr> {
     let t0 = Instant::now();
     let mut phases = BuildPhases::default();
@@ -713,6 +744,13 @@ fn build_graph_batched(
     // A db made before graph dbs tracked their free pages is converted once,
     // here, where every row is about to be rewritten anyway.
     store.ensure_incremental_vacuum()?;
+    // The build reads back much of what it wrote (imports, staged sites,
+    // symbols by name): every page of a mapping it touches counts toward
+    // the process's resident memory, so its mapping is capped well below
+    // the store's default for readers.
+    store.set_mmap_bytes(FULL_BUILD_MMAP_BYTES)?;
+    // Its dirty pages wait in the page cache until they spill to the WAL.
+    store.set_cache_kib(FULL_BUILD_CACHE_KIB)?;
     // One transaction for the whole build: without it every row below is its
     // own autocommit, and on a 60 000-symbol repository the store and
     // resolution passes spent 43 s of a 49 s build committing (#309).
@@ -817,21 +855,13 @@ fn build_graph_batched(
         ruby_switch::merge_into(&store, index)?;
     }
     phases.resolve_references_ms = millis(references + clock.elapsed());
-    let clock = Instant::now();
 
-    // Bind freshness to the exact bytes parsed above. If the source tree moved
-    // during extraction/storage, publishing this graph as fresh would attach
-    // old symbols to a new filesystem signature.
+    // Sign the snapshot: the exact bytes parsed above, whatever the tree
+    // did meanwhile. A file that moved since its read makes the signature
+    // differ from the tree's, so the graph reads stale, never fresh, until
+    // an update applies it.
     let snapshot_signature = staging::signature(&store)?;
-    let current_signature = signature_now(root);
-    phases.verify_ms = millis(clock.elapsed());
-    if current_signature != snapshot_signature {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "source changed during graph build; graph was not published as fresh",
-        )
-        .into());
-    }
+    probe(root)?;
     store.meta_set(EXTRACTOR_VERSION_KEY, EXTRACTOR_VERSION)?;
     // Before the signature on purpose: a crash between the two leaves the
     // graph unsigned, and an unsigned graph is refused rather than read, so
@@ -843,6 +873,11 @@ fn build_graph_batched(
     // The pages of every row the build deleted or replaced.
     store.reclaim()?;
 
+    let clock = Instant::now();
+    // Files past the cap were never read, so a capped walk has no "added".
+    let drifted = drift(&store, root, !times.capped)?;
+    phases.verify_ms = millis(clock.elapsed());
+
     let (files, symbols, edges, unresolved) = store.counts()?;
     phases.peak_rss_kb = peak_rss_kb();
     Ok(GraphStats {
@@ -850,9 +885,47 @@ fn build_graph_batched(
         symbols,
         edges,
         unresolved,
+        drifted,
         elapsed_ms: t0.elapsed().as_millis(),
         phases,
     })
+}
+
+/// How many files moved since the full build's walk read them, without
+/// reading any file it read: a snapshot row whose file is gone, no longer a
+/// regular file, or of another size, mtime or inode; and, when `added`, a
+/// file the walk would read now that the snapshot lacks (read only to tell
+/// it from a binary, which the walk skips).
+fn drift(store: &GraphStore, root: &Path, added: bool) -> Result<u64, BoxErr> {
+    let mut drifted = 0u64;
+    {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT path, hash, size, mtime_ns, ino FROM snapshot_files")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let snapshot = staging::Snapshot::from_row(row)?;
+            let path = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
+            let same = std::fs::symlink_metadata(root.join(path))
+                .is_ok_and(|meta| meta.file_type().is_file() && snapshot.same_stat(&meta));
+            drifted += u64::from(!same);
+        }
+    }
+    if added {
+        for entry in pixel_index::index::policy_walk(root).flatten() {
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let Some(rel) = rel_path(root, entry.path()) else {
+                continue;
+            };
+            if !is_graph_candidate(&rel) || staging::in_snapshot(store, &rel)? {
+                continue;
+            }
+            drifted += u64::from(read_source_file(entry.path()).is_some_and(|c| !is_binary(&c)));
+        }
+    }
+    Ok(drifted)
 }
 
 /// The process's peak resident set size so far, in KiB (`getrusage`'s
@@ -2224,12 +2297,12 @@ mod tests {
         );
     }
 
-    /// A build that finds the tree moved under it publishes nothing: the rows
-    /// and the signature of the graph it was rebuilding stay as they were.
+    /// A build that fails before its commit publishes nothing: the rows and
+    /// the signature of the graph it was rebuilding stay as they were.
     /// Without the transaction, the rewritten rows stayed under the previous
     /// build's signature, and a later reader took them for fresh.
     #[test]
-    fn a_build_interrupted_by_a_moving_tree_leaves_the_previous_graph_intact() {
+    fn a_build_that_fails_before_its_commit_leaves_the_previous_graph_intact() {
         let root = tmpdir("rollback");
         std::fs::write(root.join("a.rs"), "fn kept() -> u32 { 1 }\n").unwrap();
         let db = root.join(".pixel").join("graph.db");
@@ -2250,15 +2323,62 @@ mod tests {
 
         std::fs::write(root.join("b.rs"), "fn added() -> u32 { 2 }\n").unwrap();
         let err = build_graph_with(&root, &db, RustSource::V1, RubySource::V1, |_| {
-            "moved".into()
+            Err("interrupted".into())
         })
         .unwrap_err();
-        assert!(err.to_string().contains("source changed"), "{err}");
+        assert!(err.to_string().contains("interrupted"), "{err}");
         assert_eq!(
             snapshot(),
             before,
             "no row and no signature of the failed build"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A build on a tree that moves while it runs still publishes: it signs
+    /// the snapshot it parsed, which its rows describe, so the graph reads
+    /// stale (never fresh) for the files that moved, and the build counts
+    /// them. The delta then names exactly those files, and applying it
+    /// makes the graph fresh. The build used to refuse to publish whenever
+    /// anything moved, which on a live tree (a home directory, a repository
+    /// being edited) meant it never published.
+    #[test]
+    fn a_build_on_a_moving_tree_should_publish_its_snapshot_and_count_the_drift() {
+        let root = tmpdir("live");
+        std::fs::write(root.join("a.rs"), "fn edited() -> u32 { 1 }\n").unwrap();
+        std::fs::write(root.join("c.rs"), "fn removed() -> u32 { 3 }\n").unwrap();
+        std::fs::write(root.join("d.rs"), "fn kept() -> u32 { 4 }\n").unwrap();
+        let read = freshness_signature(&root);
+        let db = root.join(".pixel").join("graph.db");
+        let (rust, ruby) = (RustSource::from_env(), RubySource::from_env());
+        let stats = build_graph_with(&root, &db, rust, ruby, |root| {
+            // Another size, so the edit shows in the stat whatever the
+            // clock's granularity.
+            std::fs::write(root.join("a.rs"), "fn edited() -> u32 { 10 }\n")?;
+            std::fs::write(root.join("b.rs"), "fn added() -> u32 { 2 }\n")?;
+            std::fs::remove_file(root.join("c.rs"))?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(stats.files, 3, "the snapshot's files: {stats:?}");
+        assert_eq!(stats.drifted, 3, "a.rs edited, b.rs added, c.rs removed");
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(
+            store.meta_get(FRESHNESS_KEY).unwrap().as_deref(),
+            Some(read.as_str()),
+            "the build signs the tree it read"
+        );
+        drop(store);
+        assert!(!is_fresh(&root, &db));
+        let delta = tree_delta(&root, &db).unwrap().unwrap();
+        let changed: Vec<&str> = delta.changed.iter().map(|(rel, _)| rel.as_str()).collect();
+        assert_eq!(changed, ["a.rs", "b.rs"]);
+        assert_eq!(delta.removed, ["c.rs"]);
+        apply_tree_delta(&root, &db, &delta).unwrap();
+        assert!(is_fresh(&root, &db));
+        // A build of a tree that holds still counts no drift.
+        assert_eq!(build_graph(&root, &db).unwrap().drifted, 0);
+        assert!(is_fresh(&root, &db));
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -4952,7 +5072,7 @@ mod tests {
             RustSource::from_env(),
             RubySource::from_env(),
             whole,
-            freshness_signature,
+            |_| Ok(()),
         )
         .unwrap();
         let want = graph_rows(&reference_db);
@@ -4991,7 +5111,7 @@ mod tests {
                 RustSource::from_env(),
                 RubySource::from_env(),
                 limits,
-                freshness_signature,
+                |_| Ok(()),
             )
             .unwrap();
             assert_same_graph(&format!("{limits:?}"), &graph_rows(&db), &want);

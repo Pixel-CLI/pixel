@@ -3346,6 +3346,7 @@ impl Service {
             "symbols": stats.get("symbols").cloned().unwrap_or(Value::Null),
             "edges": stats.get("edges").cloned().unwrap_or(Value::Null),
             "unresolved": stats.get("unresolved").cloned().unwrap_or(Value::Null),
+            "drifted": stats.get("drifted").cloned().unwrap_or(Value::Null),
             "elapsed_ms": build_ms,
             "build": {"mode": "full", "reason": "requested"},
             "phases": stats.get("phases").cloned().unwrap_or(Value::Null),
@@ -5927,6 +5928,7 @@ mod bridge {
             "symbols": s.symbols,
             "edges": s.edges,
             "unresolved": s.unresolved,
+            "drifted": s.drifted,
             "elapsed_ms": s.elapsed_ms as u64,
             "phases": {
                 "collect_ms": p.collect_ms,

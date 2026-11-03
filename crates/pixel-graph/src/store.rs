@@ -625,6 +625,23 @@ impl GraphStore {
         Ok(Self { conn })
     }
 
+    /// Caps this connection's mapping of the database file at `bytes`
+    /// (`mmap_size`; [`Self::open`] maps up to 256 MiB). Every mapped page
+    /// read counts toward the process's resident memory: a writer that reads
+    /// back much of a large store keeps it lower.
+    pub fn set_mmap_bytes(&self, bytes: i64) -> Result<()> {
+        self.conn.pragma_update(None, "mmap_size", bytes)?;
+        Ok(())
+    }
+
+    /// Caps this connection's page cache at `kib` KiB (`cache_size`;
+    /// [`Self::open`] allows 64 MiB). A long write transaction keeps its
+    /// dirty pages there until it spills them to the WAL.
+    pub fn set_cache_kib(&self, kib: i64) -> Result<()> {
+        self.conn.pragma_update(None, "cache_size", -kib)?;
+        Ok(())
+    }
+
     /// Escape hatch for analyses needing bespoke SQL.
     pub fn conn(&self) -> &Connection {
         &self.conn
