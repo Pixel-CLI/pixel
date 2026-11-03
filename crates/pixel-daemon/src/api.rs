@@ -5937,6 +5937,7 @@ mod bridge {
                 "resolve_calls_ms": p.resolve_calls_ms,
                 "resolve_references_ms": p.resolve_references_ms,
                 "verify_ms": p.verify_ms,
+                "peak_rss_kb": p.peak_rss_kb,
             },
         }))
     }

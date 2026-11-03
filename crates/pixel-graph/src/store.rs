@@ -2058,6 +2058,37 @@ CREATE TABLE IF NOT EXISTS walked_files (
   path TEXT PRIMARY KEY,
   blob_oid TEXT NOT NULL
 );
+-- The full build's snapshot: every file its walk read, with the content hash
+-- (xxh3, as a signed 64-bit integer), size, mtime and inode it had when read.
+-- The freshness signature a full build publishes is computed from these rows
+-- in path order, so it describes the bytes the build parsed, never a later
+-- tree. Rewritten by every full build; incremental updates leave it alone.
+CREATE TABLE IF NOT EXISTS snapshot_files (
+  path TEXT PRIMARY KEY,
+  hash INTEGER NOT NULL,
+  size INTEGER NOT NULL,
+  mtime_ns INTEGER NOT NULL,
+  ino INTEGER NOT NULL
+) WITHOUT ROWID;
+-- A full build's call and reference sites, staged by its writer in walk
+-- order and resolved in batches once every symbol and import is stored.
+-- Empty outside a build.
+CREATE TABLE IF NOT EXISTS pending_calls (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  enclosing_symbol_id INTEGER,
+  site_line INTEGER NOT NULL,
+  receiver TEXT
+);
+CREATE TABLE IF NOT EXISTS pending_refs (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  enclosing_symbol_id INTEGER,
+  site_line INTEGER NOT NULL,
+  arg_of TEXT
+);
 ";
 
 /// Idempotent schema migrations for graphs created before a column existed.

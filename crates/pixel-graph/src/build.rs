@@ -21,6 +21,8 @@ use crate::extract::{
     FileExtraction, RawMixin, RawSymbol, extract_file, is_binstub_candidate, lang_of, lang_of_file,
 };
 use crate::imports::{resolve_import_in, ruby as ruby_projects};
+
+mod staging;
 use crate::mvp_adapter::ruby_switch::{self, RubySource};
 use crate::mvp_adapter::{self, RustSource};
 use crate::resolve::{
@@ -237,18 +239,22 @@ pub struct GraphStats {
 /// Wall time of each phase of a full [`build_graph`], in milliseconds and
 /// in the order the phases run, so a slow build names the phase to work on
 /// instead of one opaque total. `concepts_ms` is the share of `store_ms`
-/// spent in the concept pass; every other field is disjoint from the rest.
+/// spent in the concept pass. The walk reads and extracts each batch on its
+/// own thread while the writer stores the one before, so `collect_ms`,
+/// `extract_ms` and `store_ms` overlap in wall time; every later field is
+/// disjoint from the rest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BuildPhases {
-    /// Walk the tree and read every supported source file.
+    /// List the tree's supported source files.
     pub collect_ms: u64,
-    /// Parse every file (rayon, so wall time, not CPU time).
+    /// Read, hash and parse every file (rayon, so wall time, not CPU time).
     pub extract_ms: u64,
-    /// Pass 1: file, symbol, crux, concept and JSX rows.
+    /// The writer: file, symbol, crux, concept and JSX rows, the snapshot,
+    /// the unresolved imports and the staged call and reference sites.
     pub store_ms: u64,
     /// Part of `store_ms`: the concept extraction and its rows.
     pub concepts_ms: u64,
-    /// Pass 2: import rows and the pending call and reference lists.
+    /// Import resolution.
     pub imports_ms: u64,
     /// Tiered call resolution.
     pub resolve_calls_ms: u64,
@@ -257,6 +263,10 @@ pub struct BuildPhases {
     /// The second walk and hash that proves the tree did not move during
     /// the build, before the graph is signed fresh.
     pub verify_ms: u64,
+    /// The process's peak resident set size when the build ended, in KiB
+    /// (`getrusage`'s `ru_maxrss`): the build's own peak in a one-shot
+    /// process, an upper bound on it in a long-lived one.
+    pub peak_rss_kb: u64,
 }
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -266,25 +276,7 @@ const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// anything else, which the graph never indexes; `pixel audit` reads through
 /// it so a file grown past the cap is never loaded whole.
 pub fn read_source_file(path: &Path) -> Option<Vec<u8>> {
-    let before = std::fs::symlink_metadata(path).ok()?;
-    if !before.file_type().is_file() || before.len() > MAX_FILE_BYTES {
-        return None;
-    }
-    let file = std::fs::File::open(path).ok()?;
-    let opened = file.metadata().ok()?;
-    let after = std::fs::symlink_metadata(path).ok()?;
-    if !after.file_type().is_file()
-        || opened.dev() != after.dev()
-        || opened.ino() != after.ino()
-        || opened.len() > MAX_FILE_BYTES
-    {
-        return None;
-    }
-    let mut content = Vec::with_capacity(opened.len() as usize);
-    file.take(MAX_FILE_BYTES.saturating_add(1))
-        .read_to_end(&mut content)
-        .ok()?;
-    (content.len() as u64 <= MAX_FILE_BYTES).then_some(content)
+    read_source_file_meta(path).map(|(content, _)| content)
 }
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
@@ -451,29 +443,148 @@ fn is_lockfile(rel: &str) -> bool {
     rel == "Gemfile.lock" || rel.ends_with("/Gemfile.lock")
 }
 
-/// Walk `root` collecting supported source files (skips .git, .pixel,
-/// default-ignored dirs, gitignored paths, binaries, oversized files). Hidden
-/// files (dotfiles, `.github/`, `.claude/`, …) ARE collected — they are real
-/// project content. The walk itself is the shared
+/// The bounds of one batch of the full build's walk: at most `files` files,
+/// and once their sizes reach `bytes` the batch is closed. A batch is read,
+/// hashed and extracted in parallel, then handed to the single writer, so
+/// the build holds the content and extractions of two batches at most (the
+/// one being written and the one being read), whatever the tree's size.
+#[derive(Debug, Clone, Copy)]
+struct BatchLimits {
+    files: usize,
+    bytes: u64,
+}
+
+/// The production batch bounds.
+const BATCH_LIMITS: BatchLimits = BatchLimits {
+    files: 2048,
+    bytes: 64 * 1024 * 1024,
+};
+
+/// One file the full build's walk read: regular, within `MAX_FILE_BYTES`,
+/// not binary.
+enum Walked {
+    /// Extraction accepted it: its rows go into the store.
+    Source(Box<Extracted>, staging::Snapshot),
+    /// Extraction refused it (a lockfile, a binstub that is not Ruby, a
+    /// generated blob): only its hash is kept (`walked_files`).
+    Dropped(String, staging::Snapshot),
+}
+
+#[cfg(test)]
+impl Walked {
+    fn rel(&self) -> &str {
+        match self {
+            Self::Source(e, _) => &e.rel,
+            Self::Dropped(rel, _) => rel,
+        }
+    }
+}
+
+/// [`read_source_file`], with the stat of the file it read.
+fn read_source_file_meta(path: &Path) -> Option<(Vec<u8>, std::fs::Metadata)> {
+    let before = std::fs::symlink_metadata(path).ok()?;
+    if !before.file_type().is_file() || before.len() > MAX_FILE_BYTES {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let opened = file.metadata().ok()?;
+    let after = std::fs::symlink_metadata(path).ok()?;
+    if !after.file_type().is_file()
+        || opened.dev() != after.dev()
+        || opened.ino() != after.ino()
+        || opened.len() > MAX_FILE_BYTES
+    {
+        return None;
+    }
+    let mut content = Vec::with_capacity(opened.len() as usize);
+    file.take(MAX_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut content)
+        .ok()?;
+    (content.len() as u64 <= MAX_FILE_BYTES).then_some((content, opened))
+}
+
+/// Reads, hashes and extracts one batch of candidates on rayon's pool,
+/// keeping walk order and dropping what [`read_source_file`] refuses and
+/// the binaries.
+fn read_batch(batch: Vec<(String, std::path::PathBuf)>) -> Vec<Walked> {
+    batch
+        .into_par_iter()
+        .filter_map(|(rel, path)| {
+            let (content, meta) = read_source_file_meta(&path)?;
+            if is_binary(&content) {
+                return None;
+            }
+            let snapshot = staging::Snapshot::of(&content, &meta);
+            Some(match extract_file(&rel, &content) {
+                Some(fx) => Walked::Source(
+                    Box::new(Extracted {
+                        blob_oid: format!("{:016x}", snapshot.hash),
+                        rel,
+                        content,
+                        fx,
+                    }),
+                    snapshot,
+                ),
+                None => Walked::Dropped(rel, snapshot),
+            })
+        })
+        .collect()
+}
+
+/// Wall time the walk spent listing the tree (`collect`) and reading,
+/// hashing and extracting its batches (`extract`).
+#[derive(Debug, Default, Clone, Copy)]
+struct WalkTimes {
+    collect: Duration,
+    extract: Duration,
+}
+
+/// Walk `root` for supported source files (skips .git, .pixel,
+/// default-ignored dirs, gitignored paths, binaries, oversized files), in
+/// batches bounded by `limits`, handing each batch to `sink` in walk order.
+/// Hidden files (dotfiles, `.github/`, `.claude/`, …) ARE walked — they are
+/// real project content. The walk itself is the shared
 /// `pixel_index::index::policy_walk`, so default-ignored-dir pruning and
 /// gitless-tree gitignore handling stay in lockstep with the lexical index.
 ///
-/// When `max_files` is `Some(n)`, the walk stops after collecting `n` source
-/// files — a safety cap for non-git directories where there is no
-/// `git ls-files` to bound the file set. `None` means no cap (git-anchored
-/// builds where `git ls-files` already bounds the set).
-fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
-    let max_files = graph_max_files();
-    let mut out = Vec::new();
-    let walker = pixel_index::index::policy_walk(root);
-    for entry in walker.flatten() {
+/// When `max_files` is `Some(n)`, the walk stops after reading `n` source
+/// files (`PIXEL_GRAPH_MAX_FILES`). It also stops when `sink` returns
+/// `false`: the writer has failed and takes nothing more.
+fn walk_batches(
+    root: &Path,
+    limits: BatchLimits,
+    max_files: Option<usize>,
+    sink: &mut dyn FnMut(Vec<Walked>) -> bool,
+) -> WalkTimes {
+    let mut times = WalkTimes::default();
+    let mut taken = 0usize;
+    let mut batch: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut bytes = 0u64;
+    let mut clock = Instant::now();
+    // Reads the batch and hands it over; false once the walk must stop.
+    let mut flush = |batch: &mut Vec<(String, std::path::PathBuf)>,
+                     taken: &mut usize,
+                     times: &mut WalkTimes,
+                     clock: &mut Instant|
+     -> bool {
+        times.collect += clock.elapsed();
+        let read = Instant::now();
+        let mut walked = read_batch(std::mem::take(batch));
+        times.extract += read.elapsed();
+        let mut more = true;
         if let Some(cap) = max_files
-            && out.len() >= cap
+            && *taken + walked.len() >= cap
         {
-            break;
+            walked.truncate(cap - *taken);
+            more = false;
         }
-        let is_file = entry.file_type().is_some_and(|t| t.is_file());
-        if !is_file {
+        *taken += walked.len();
+        more &= sink(walked);
+        *clock = Instant::now();
+        more
+    };
+    for entry in pixel_index::index::policy_walk(root).flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
         let Some(rel) = rel_path(root, entry.path()) else {
@@ -482,15 +593,23 @@ fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
         if !is_graph_candidate(&rel) {
             continue;
         }
-        let Some(content) = read_source_file(entry.path()) else {
-            continue;
-        };
-        if is_binary(&content) {
-            continue;
+        bytes += entry.metadata().map_or(0, |m| m.len());
+        batch.push((rel, entry.into_path()));
+        if (batch.len() >= limits.files || bytes >= limits.bytes)
+            && !flush(&mut batch, &mut taken, &mut times, &mut clock)
+        {
+            return times;
         }
-        out.push((rel, content));
+        if batch.is_empty() {
+            bytes = 0;
+        }
     }
-    out
+    if !batch.is_empty() {
+        flush(&mut batch, &mut taken, &mut times, &mut clock);
+    } else {
+        times.collect += clock.elapsed();
+    }
+    times
 }
 
 /// The `blob_oid` the store keeps for a file: the xxh3 of its bytes, 16 hex
@@ -507,20 +626,6 @@ struct Extracted {
     blob_oid: String,
     content: Vec<u8>,
     fx: FileExtraction,
-}
-
-fn input_signature(inputs: &[(String, Vec<u8>)]) -> String {
-    let mut entries: Vec<(&str, u64)> = inputs
-        .iter()
-        .map(|(rel, content)| (rel.as_str(), xxh3_64(content)))
-        .collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-    let mut hasher_buf = Vec::with_capacity(entries.len() * 24);
-    for (rel, hash) in entries {
-        hasher_buf.extend_from_slice(rel.as_bytes());
-        hasher_buf.extend_from_slice(&hash.to_le_bytes());
-    }
-    format!("{:016x}", xxh3_64(&hasher_buf))
 }
 
 /// Full graph build: parse everything in parallel, then write files,
@@ -575,45 +680,31 @@ fn build_graph_with(
     ruby: RubySource,
     signature_now: impl FnOnce(&Path) -> String,
 ) -> Result<GraphStats, BoxErr> {
+    build_graph_batched(root, db_path, rust, ruby, BATCH_LIMITS, signature_now)
+}
+
+/// [`build_graph_with`] walking in batches of `limits`.
+///
+/// The walk runs on its own thread, a batch at a time, and hands each batch
+/// to this thread, the single writer, through a rendezvous channel: the
+/// writer stores every file's rows, its imports (unresolved yet), its call
+/// and reference sites (`pending_calls`, `pending_refs`) and its snapshot
+/// row (`snapshot_files`), then frees the batch. Imports, calls and
+/// references are resolved once every file is stored, from those tables.
+fn build_graph_batched(
+    root: &Path,
+    db_path: &Path,
+    rust: RustSource,
+    ruby: RubySource,
+    limits: BatchLimits,
+    signature_now: impl FnOnce(&Path) -> String,
+) -> Result<GraphStats, BoxErr> {
     let t0 = Instant::now();
     let mut phases = BuildPhases::default();
 
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
-    let inputs = collect_files(root);
-    let snapshot_signature = input_signature(&inputs);
-    phases.collect_ms = millis(t0.elapsed());
-    let clock = Instant::now();
-    // A walked file extraction drops is hashed into the signature all the
-    // same, so its hash is kept beside the rows (`walked_files`).
-    let outcomes: Vec<Result<Extracted, (String, String)>> = inputs
-        .into_par_iter()
-        .map(|(rel, content)| {
-            let blob_oid = content_oid(&content);
-            match extract_file(&rel, &content) {
-                Some(fx) => Ok(Extracted {
-                    rel,
-                    blob_oid,
-                    content,
-                    fx,
-                }),
-                None => Err((rel, blob_oid)),
-            }
-        })
-        .collect();
-    let mut extracted: Vec<Extracted> = Vec::with_capacity(outcomes.len());
-    let mut dropped: Vec<(String, String)> = Vec::new();
-    for outcome in outcomes {
-        match outcome {
-            Ok(file) => extracted.push(file),
-            Err(walked) => dropped.push(walked),
-        }
-    }
-    phases.extract_ms = millis(clock.elapsed());
-    let clock = Instant::now();
-
-    let all_paths: Vec<String> = extracted.iter().map(|e| e.rel.clone()).collect();
 
     let mut store = GraphStore::open(db_path)?;
     // A db made before graph dbs tracked their free pages is converted once,
@@ -623,29 +714,57 @@ fn build_graph_with(
     // own autocommit, and on a 60 000-symbol repository the store and
     // resolution passes spent 43 s of a 49 s build committing (#309).
     store.begin_write()?;
+    staging::clear(&store)?;
+    store.clear_walked_files()?;
 
-    // Drop files that vanished since the last build.
-    let known: rustc_hash::FxHashSet<&str> = all_paths.iter().map(String::as_str).collect();
-    let stale: Vec<String> = store
-        .files()?
-        .into_iter()
-        .filter(|f| !known.contains(f.path.as_str()))
-        .map(|f| f.path)
-        .collect();
+    let mut writer = Duration::ZERO;
+    let mut concepts = Duration::ZERO;
+    let max_files = graph_max_files();
+    let (times, written) = std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<Walked>>(0);
+        let walk = scope.spawn(move || {
+            walk_batches(root, limits, max_files, &mut |batch| tx.send(batch).is_ok())
+        });
+        let mut written: Result<(), BoxErr> = Ok(());
+        for batch in rx.iter() {
+            let clock = Instant::now();
+            written = write_walked(&mut store, batch, &mut concepts);
+            writer += clock.elapsed();
+            if written.is_err() {
+                break;
+            }
+        }
+        // Dropping the receiver stops the walk at its next batch.
+        drop(rx);
+        let times = walk
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (times, written)
+    });
+    written?;
+    phases.collect_ms = millis(times.collect);
+    phases.extract_ms = millis(times.extract);
+    let clock = Instant::now();
+
+    // Drop files the walk did not read: vanished since the last build, or
+    // past the file cap.
+    let stale: Vec<String> = {
+        let mut stmt = store.conn().prepare(
+            "SELECT path FROM files f
+              WHERE NOT EXISTS (SELECT 1 FROM snapshot_files s WHERE s.path = f.path)",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
     for path in &stale {
         store.remove_file(path)?;
-    }
-    store.clear_walked_files()?;
-    for (rel, blob_oid) in &dropped {
-        store.record_walked_file(rel, blob_oid)?;
     }
 
     // A merge recorded by an earlier build describes rows this build
     // replaces: it goes, whatever the Ruby switch says now.
     ruby_switch::forget(&store)?;
-    // pixel-mvp's index, read after the walk above: a file it reads newer
-    // than the walk did moves the signature checked below. Rust needs a
-    // crate root (`crate_root`); the Ruby merge does not.
+    // pixel-mvp's index, read after the walk above. Rust needs a crate root
+    // (`crate_root`); the Ruby merge does not.
     let wants_rust = rust == RustSource::Mvp && mvp_adapter::crate_root(root);
     let index = if wants_rust || ruby == RubySource::Hybrid {
         mvp_adapter::refresh(root, &pixel_git::sidecar::dir(root)).ok()
@@ -670,23 +789,28 @@ fn build_graph_with(
         }
         .as_deref(),
     )?;
-
-    let projects = ruby_projects::Projects::load(root, &all_paths);
-    let mut stored = store_batch(&mut store, extracted, &all_paths, &projects)?;
     if mvp.is_some() {
-        without_rust_sites(&store, &mut stored)?;
+        // When the graph's Rust edges are pixel-mvp's, this resolver
+        // decides no Rust site.
+        staging::unstage_lang(&store, "rust")?;
     }
-    phases.store_ms = millis(stored.stored_at.duration_since(clock));
-    phases.concepts_ms = millis(stored.concepts);
-    phases.imports_ms = millis(stored.imports);
+    phases.store_ms = millis(writer + clock.elapsed());
+    phases.concepts_ms = millis(concepts);
+
+    let clock = Instant::now();
+    resolve_staged_imports(root, &store)?;
+    phases.imports_ms = millis(clock.elapsed());
+
     let clock = Instant::now();
     // Resolving writes edges and unresolved rows, never a symbol or an
     // import: one index serves both passes.
     let idx = ResolveIndex::build(&store)?;
-    resolve_calls_in(&store, &idx, &stored.calls)?;
+    resolve_calls_in(&store, &idx, &staging::pending_calls(&store)?)?;
     phases.resolve_calls_ms = millis(clock.elapsed());
     let clock = Instant::now();
-    resolve_references_in(&store, &idx, &stored.references)?;
+    resolve_references_in(&store, &idx, &staging::pending_references(&store)?)?;
+    drop(idx);
+    staging::clear_pending(&store)?;
     if let Some(mvp) = mvp {
         mvp_adapter::merge_into(&store, mvp)?;
     }
@@ -699,6 +823,7 @@ fn build_graph_with(
     // Bind freshness to the exact bytes parsed above. If the source tree moved
     // during extraction/storage, publishing this graph as fresh would attach
     // old symbols to a new filesystem signature.
+    let snapshot_signature = staging::signature(&store)?;
     let current_signature = signature_now(root);
     phases.verify_ms = millis(clock.elapsed());
     if current_signature != snapshot_signature {
@@ -720,6 +845,7 @@ fn build_graph_with(
     store.reclaim()?;
 
     let (files, symbols, edges, unresolved) = store.counts()?;
+    phases.peak_rss_kb = peak_rss_kb();
     Ok(GraphStats {
         files,
         symbols,
@@ -728,6 +854,98 @@ fn build_graph_with(
         elapsed_ms: t0.elapsed().as_millis(),
         phases,
     })
+}
+
+/// The process's peak resident set size so far, in KiB (`getrusage`'s
+/// `ru_maxrss`, which Linux reports in KiB and macOS in bytes). 0 when the
+/// call fails.
+fn peak_rss_kb() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `getrusage` writes one `rusage` through the pointer, which is
+    // valid and sized for it; the struct is only read when the call succeeds.
+    let ok = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } == 0;
+    if !ok {
+        return 0;
+    }
+    // SAFETY: the call succeeded, so the struct is initialised (and it was
+    // zeroed before).
+    let max = unsafe { usage.assume_init() }.ru_maxrss.max(0) as u64;
+    if cfg!(target_os = "macos") {
+        max / 1024
+    } else {
+        max
+    }
+}
+
+/// Writes one batch of the walk: every source file's rows, unresolved
+/// imports and staged sites, every dropped file's hash, and every file's
+/// snapshot row. Each file's content and extraction are freed as soon as
+/// they are written.
+fn write_walked(
+    store: &mut GraphStore,
+    batch: Vec<Walked>,
+    concepts: &mut Duration,
+) -> Result<(), BoxErr> {
+    for walked in batch {
+        match walked {
+            Walked::Source(mut e, snapshot) => {
+                let (file_id, symbol_ids) = store_file_rows(store, &mut e, concepts)?;
+                for imp in &e.fx.imports {
+                    store.insert_import_at(
+                        file_id,
+                        &imp.spec,
+                        &imp.path,
+                        None,
+                        &imp.bindings,
+                        &imp.scope,
+                    )?;
+                }
+                for call in pending_calls_of(&mut e.fx, &symbol_ids) {
+                    staging::stage_call(store, file_id, &call)?;
+                }
+                for reference in pending_references_of(&mut e.fx, &symbol_ids) {
+                    staging::stage_reference(store, file_id, &reference)?;
+                }
+                staging::record_snapshot(store, &e.rel, &snapshot)?;
+            }
+            Walked::Dropped(rel, snapshot) => {
+                // A file stored by an earlier build that extraction now
+                // refuses keeps no row.
+                store.remove_file(&rel)?;
+                store.record_walked_file(&rel, &format!("{:016x}", snapshot.hash))?;
+                staging::record_snapshot(store, &rel, &snapshot)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolves every import the walk stored unresolved against the files the
+/// build stored.
+fn resolve_staged_imports(root: &Path, store: &GraphStore) -> Result<(), BoxErr> {
+    let all_paths: Vec<String> = store.files()?.into_iter().map(|f| f.path).collect();
+    let projects = ruby_projects::Projects::load(root, &all_paths);
+    let path_to_id: HashMap<String, i64> =
+        store.files()?.into_iter().map(|f| (f.path, f.id)).collect();
+    let rows: Vec<(i64, String, String)> = {
+        let mut stmt = store.conn().prepare(
+            "SELECT i.id, i.path, f.path FROM imports i JOIN files f ON f.id = i.file_id
+              WHERE i.resolved_file_id IS NULL ORDER BY i.id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (import_id, import_path, importer) in rows {
+        if let Some(target) = resolve_import_in(&import_path, &importer, &all_paths, &projects)
+            .and_then(|p| path_to_id.get(&p).copied())
+        {
+            store.conn().exec_cached(
+                "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
+                rusqlite::params![import_id, target],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// The uid of each of `symbols`, extracted in this order from `rel`:
@@ -759,42 +977,25 @@ pub fn symbol_uids(rel: &str, symbols: &[RawSymbol]) -> Vec<String> {
 struct StoredBatch {
     calls: Vec<FileCalls>,
     references: Vec<FileReferences>,
-    /// When pass 1, the concept pass included, ended: a caller times its
-    /// store phase from wherever its own setup started.
-    stored_at: Instant,
-    /// The concept pass alone.
-    concepts: Duration,
-    /// Pass 2.
-    imports: Duration,
 }
 
-/// Stores a batch of extracted files, for the full build and the
-/// incremental update alike, so both write the same rows for the same file.
-///
-/// Pass 1 writes each file's row, symbols, crux lines, concepts and JSX
-/// elements, then frees its bytes. Pass 2 runs once every file of the batch
-/// has a row, because an import may target a file stored later in the same
-/// batch: it writes the imports and collects the calls and references left
-/// to resolve.
-///
-/// `all_paths` is every file the graph holds once the batch is stored, in
-/// the order import resolution scans them: a Go package import resolves to
-/// the first of the package's files in that order.
-fn store_batch(
+/// Pass 1 of storing one extracted file, for the full build and the
+/// incremental update alike: its file row, symbols, crux lines, concepts,
+/// Ruby mixins and JSX elements. Frees the file's bytes, and returns its id
+/// and its symbols' ids in extraction order. `concepts` accumulates the
+/// time the concept pass took.
+fn store_file_rows(
     store: &mut GraphStore,
-    mut files: Vec<Extracted>,
-    all_paths: &[String],
-    projects: &ruby_projects::Projects,
-) -> Result<StoredBatch, BoxErr> {
-    let mut concepts = Duration::ZERO;
-    let mut stored_ids: Vec<(i64, Vec<i64>)> = Vec::with_capacity(files.len());
-    for e in &mut files {
-        let file_id = store.replace_file(&e.rel, &e.blob_oid, e.fx.lang)?;
-        if e.fx.lang == "js" {
-            store.set_js_assignment_facts(file_id, &e.fx.js_assignments)?;
-        }
-        let mut ids = Vec::with_capacity(e.fx.symbols.len());
-        let mut lines = Vec::with_capacity(e.fx.symbols.len());
+    e: &mut Extracted,
+    concepts: &mut Duration,
+) -> Result<(i64, Vec<i64>), BoxErr> {
+    let file_id = store.replace_file(&e.rel, &e.blob_oid, e.fx.lang)?;
+    if e.fx.lang == "js" {
+        store.set_js_assignment_facts(file_id, &e.fx.js_assignments)?;
+    }
+    let mut ids = Vec::with_capacity(e.fx.symbols.len());
+    let mut lines = Vec::with_capacity(e.fx.symbols.len());
+    {
         // Decoded and split once per file, not once per symbol: the crux
         // below slices every symbol's body out of the same lines.
         let body_str = String::from_utf8_lossy(&e.content);
@@ -833,35 +1034,84 @@ fn store_batch(
             let crux = extract_crux(&body, 3);
             store.set_symbol_crux(id, &crux)?;
         }
-        // Engine 1: concept pass alongside symbol extraction with O(1) content access.
-        let concept_clock = Instant::now();
-        insert_concepts(store, file_id, &e.rel, &e.content, &ids, &lines)?;
-        concepts += concept_clock.elapsed();
-        for mixin in &e.fx.mixins {
-            store.insert_ruby_mixin(file_id, mixin)?;
-        }
-        // Plan pass: persist JSX elements for dead-interactive queries.
-        for jsx in &e.fx.jsx_elements {
-            store.insert_jsx_element(
-                file_id,
-                &jsx.tag,
-                jsx.has_handler,
-                &jsx.text_content,
-                jsx.start_line,
-                jsx.end_line,
-            )?;
-        }
-        e.content.clear();
-        e.content.shrink_to_fit();
-        stored_ids.push((file_id, ids));
     }
-    let stored_at = Instant::now();
+    // Engine 1: concept pass alongside symbol extraction with O(1) content access.
+    let concept_clock = Instant::now();
+    insert_concepts(store, file_id, &e.rel, &e.content, &ids, &lines)?;
+    *concepts += concept_clock.elapsed();
+    for mixin in &e.fx.mixins {
+        store.insert_ruby_mixin(file_id, mixin)?;
+    }
+    // Plan pass: persist JSX elements for dead-interactive queries.
+    for jsx in &e.fx.jsx_elements {
+        store.insert_jsx_element(
+            file_id,
+            &jsx.tag,
+            jsx.has_handler,
+            &jsx.text_content,
+            jsx.start_line,
+            jsx.end_line,
+        )?;
+    }
+    e.content = Vec::new();
+    Ok((file_id, ids))
+}
 
+/// The call sites of `fx`, taken out of it, with their enclosing symbols'
+/// ids (`symbol_ids`, in extraction order).
+fn pending_calls_of(fx: &mut FileExtraction, symbol_ids: &[i64]) -> Vec<PendingCall> {
+    std::mem::take(&mut fx.calls)
+        .into_iter()
+        .map(|c| PendingCall {
+            callee_name: c.callee_name,
+            enclosing_symbol_id: c.enclosing_index.map(|ix| symbol_ids[ix]),
+            site_line: c.site_line,
+            receiver: c.receiver,
+        })
+        .collect()
+}
+
+/// The reference sites of `fx`, taken out of it, as [`pending_calls_of`].
+fn pending_references_of(fx: &mut FileExtraction, symbol_ids: &[i64]) -> Vec<PendingReference> {
+    std::mem::take(&mut fx.references)
+        .into_iter()
+        .map(|r| PendingReference {
+            name: r.name,
+            enclosing_symbol_id: r.enclosing_index.map(|ix| symbol_ids[ix]),
+            site_line: r.site_line,
+            arg_of: r.arg_of,
+        })
+        .collect()
+}
+
+/// Stores a batch of extracted files, for the full build and the
+/// incremental update alike, so both write the same rows for the same file.
+///
+/// Pass 1 writes each file's row, symbols, crux lines, concepts and JSX
+/// elements, then frees its bytes. Pass 2 runs once every file of the batch
+/// has a row, because an import may target a file stored later in the same
+/// batch: it writes the imports and collects the calls and references left
+/// to resolve.
+///
+/// `all_paths` is every file the graph holds once the batch is stored, in
+/// the order import resolution scans them: a Go package import resolves to
+/// the first of the package's files in that order.
+fn store_batch(
+    store: &mut GraphStore,
+    mut files: Vec<Extracted>,
+    all_paths: &[String],
+    projects: &ruby_projects::Projects,
+) -> Result<StoredBatch, BoxErr> {
+    let mut concepts = Duration::ZERO;
+    let mut stored_ids: Vec<(i64, Vec<i64>)> = Vec::with_capacity(files.len());
+    for e in &mut files {
+        stored_ids.push(store_file_rows(store, e, &mut concepts)?);
+    }
     let path_to_id: HashMap<String, i64> =
         store.files()?.into_iter().map(|f| (f.path, f.id)).collect();
     let mut calls: Vec<FileCalls> = Vec::with_capacity(files.len());
     let mut references: Vec<FileReferences> = Vec::with_capacity(files.len());
-    for (e, (file_id, symbol_ids)) in files.iter().zip(&stored_ids) {
+    for (e, (file_id, symbol_ids)) in files.iter_mut().zip(&stored_ids) {
         let file_id = *file_id;
         for imp in &e.fx.imports {
             let resolved = resolve_import_in(&imp.path, &e.rel, all_paths, projects)
@@ -875,42 +1125,16 @@ fn store_batch(
                 &imp.scope,
             )?;
         }
-        let file_calls =
-            e.fx.calls
-                .iter()
-                .map(|c| PendingCall {
-                    callee_name: c.callee_name.clone(),
-                    enclosing_symbol_id: c.enclosing_index.map(|ix| symbol_ids[ix]),
-                    site_line: c.site_line,
-                    receiver: c.receiver.clone(),
-                })
-                .collect();
         calls.push(FileCalls {
             file_id,
-            calls: file_calls,
+            calls: pending_calls_of(&mut e.fx, symbol_ids),
         });
-        let file_references =
-            e.fx.references
-                .iter()
-                .map(|r| PendingReference {
-                    name: r.name.clone(),
-                    enclosing_symbol_id: r.enclosing_index.map(|ix| symbol_ids[ix]),
-                    site_line: r.site_line,
-                    arg_of: r.arg_of.clone(),
-                })
-                .collect();
         references.push(FileReferences {
             file_id,
-            references: file_references,
+            references: pending_references_of(&mut e.fx, symbol_ids),
         });
     }
-    Ok(StoredBatch {
-        calls,
-        references,
-        stored_at,
-        concepts,
-        imports: stored_at.elapsed(),
-    })
+    Ok(StoredBatch { calls, references })
 }
 
 /// `(repo-relative path, xxh3 content hash)` of every supported source file
@@ -1943,6 +2167,16 @@ mod tests {
     use crate::resolve::Decision;
     use crate::store::{EdgeKind, Tier};
 
+    /// Every file the full build's walk reads under `root`, in walk order.
+    fn walked_paths(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        walk_batches(root, BATCH_LIMITS, graph_max_files(), &mut |batch| {
+            out.extend(batch.iter().map(|w| w.rel().to_string()));
+            true
+        });
+        out
+    }
+
     /// `graph_file_cap` is what an evaluation quotes when it says the build
     /// stopped at the cap, so the number it reports has to be the cap the
     /// walk actually enforces, and `None` has to mean "no cap applies"
@@ -2120,7 +2354,7 @@ mod tests {
         assert_eq!(indexability(&root, "pkg.rs"), Indexability::Absent);
 
         // The verdicts match what the walk actually collects.
-        let collected: Vec<String> = collect_files(&root).into_iter().map(|(r, _)| r).collect();
+        let collected = walked_paths(&root);
         for kept in ["src/a.rs", "src/exact.rs"] {
             assert!(collected.contains(&kept.to_string()), "{collected:?}");
         }
@@ -4665,6 +4899,60 @@ mod tests {
                 "{label}: `{table}` differs from a full build"
             );
         }
+    }
+
+    /// The full build's walk hands its writer one batch at a time; where the
+    /// batches end must not show in the graph. Batches of one and two files
+    /// store, row for row, what one batch holding the whole tree stores,
+    /// and sign the same snapshot.
+    #[test]
+    fn a_build_in_small_batches_should_store_what_one_batch_stores() {
+        let reference = tmpdir("batches-one");
+        write_tree(&reference, EQUIVALENCE_TREE);
+        let reference_db = reference.join(".pixel").join("graph.db");
+        let whole = BatchLimits {
+            files: usize::MAX,
+            bytes: u64::MAX,
+        };
+        build_graph_batched(
+            &reference,
+            &reference_db,
+            RustSource::from_env(),
+            RubySource::from_env(),
+            whole,
+            freshness_signature,
+        )
+        .unwrap();
+        let want = graph_rows(&reference_db);
+        let signature = |db: &Path| {
+            GraphStore::open(db)
+                .unwrap()
+                .meta_get(FRESHNESS_KEY)
+                .unwrap()
+        };
+        for limits in [
+            BatchLimits {
+                files: 1,
+                bytes: u64::MAX,
+            },
+            BatchLimits { files: 2, bytes: 1 },
+        ] {
+            let db = reference
+                .join(".pixel")
+                .join(format!("graph-{}.db", limits.files));
+            build_graph_batched(
+                &reference,
+                &db,
+                RustSource::from_env(),
+                RubySource::from_env(),
+                limits,
+                freshness_signature,
+            )
+            .unwrap();
+            assert_same_graph(&format!("{limits:?}"), &graph_rows(&db), &want);
+            assert_eq!(signature(&db), signature(&reference_db), "{limits:?}");
+        }
+        let _ = std::fs::remove_dir_all(&reference);
     }
 
     /// The full build and the incremental update store the same tree the
