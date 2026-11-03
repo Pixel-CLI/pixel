@@ -20,7 +20,7 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::extract::{
     FileExtraction, RawMixin, RawSymbol, extract_file, is_binstub_candidate, lang_of, lang_of_file,
 };
-use crate::imports::{resolve_import_in, ruby as ruby_projects};
+use crate::imports::{PathSet, resolve_import_in, ruby as ruby_projects};
 
 mod staging;
 use crate::mvp_adapter::ruby_switch::{self, RubySource};
@@ -920,30 +920,54 @@ fn write_walked(
     Ok(())
 }
 
+/// How many unresolved imports one batch of [`resolve_staged_imports`] reads.
+const IMPORT_BATCH: i64 = 4096;
+
 /// Resolves every import the walk stored unresolved against the files the
-/// build stored.
+/// build stored, a batch of rows at a time, asking the store which files
+/// exist ([`staging::SqlPathLookup`]): no file list is held in memory. The
+/// Ruby projects are read from the stored manifests (`Gemfile`,
+/// `*.gemspec`) and the lockfiles beside them.
 fn resolve_staged_imports(root: &Path, store: &GraphStore) -> Result<(), BoxErr> {
-    let all_paths: Vec<String> = store.files()?.into_iter().map(|f| f.path).collect();
-    let projects = ruby_projects::Projects::load(root, &all_paths);
-    let path_to_id: HashMap<String, i64> =
-        store.files()?.into_iter().map(|f| (f.path, f.id)).collect();
-    let rows: Vec<(i64, String, String)> = {
+    let manifests: Vec<String> = {
         let mut stmt = store.conn().prepare(
-            "SELECT i.id, i.path, f.path FROM imports i JOIN files f ON f.id = i.file_id
-              WHERE i.resolved_file_id IS NULL ORDER BY i.id",
+            "SELECT path FROM files WHERE basename = 'Gemfile' OR basename GLOB '?*.gemspec'
+              ORDER BY id",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
-    for (import_id, import_path, importer) in rows {
-        if let Some(target) = resolve_import_in(&import_path, &importer, &all_paths, &projects)
-            .and_then(|p| path_to_id.get(&p).copied())
-        {
-            store.conn().exec_cached(
-                "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
-                rusqlite::params![import_id, target],
+    let projects = ruby_projects::Projects::load(root, &manifests);
+    let lookup = staging::SqlPathLookup::new(store);
+    let mut after = 0i64;
+    loop {
+        let rows: Vec<(i64, String, String)> = {
+            let mut stmt = store.conn().prepare_cached(
+                "SELECT i.id, i.path, f.path FROM imports i JOIN files f ON f.id = i.file_id
+                  WHERE i.resolved_file_id IS NULL AND i.id > ?1 ORDER BY i.id LIMIT ?2",
             )?;
+            let rows = stmt.query_map(rusqlite::params![after, IMPORT_BATCH], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let Some(&(last, _, _)) = rows.last() else {
+            break;
+        };
+        after = last;
+        for (import_id, import_path, importer) in rows {
+            let Some(target) = resolve_import_in(&import_path, &importer, &lookup, &projects)
+            else {
+                continue;
+            };
+            if let Some(target) = lookup.id_of(&target)? {
+                store.conn().exec_cached(
+                    "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
+                    rusqlite::params![import_id, target],
+                )?;
+            }
         }
+        lookup.finish()?;
     }
     Ok(())
 }
@@ -1099,7 +1123,7 @@ fn pending_references_of(fx: &mut FileExtraction, symbol_ids: &[i64]) -> Vec<Pen
 fn store_batch(
     store: &mut GraphStore,
     mut files: Vec<Extracted>,
-    all_paths: &[String],
+    all_paths: &PathSet<'_>,
     projects: &ruby_projects::Projects,
 ) -> Result<StoredBatch, BoxErr> {
     let mut concepts = Duration::ZERO;
@@ -1881,7 +1905,8 @@ fn write_rows_in(
     );
     let added_any = extracted.iter().any(|e| !known_before.contains(&e.rel));
     let projects = ruby_projects::Projects::load(root, &all_paths);
-    let mut stored = store_batch(store, extracted, &all_paths, &projects)?;
+    let lookup = PathSet::new(&all_paths);
+    let mut stored = store_batch(store, extracted, &lookup, &projects)?;
     if walled {
         without_rust_sites(store, &mut stored)?;
     }
@@ -1915,7 +1940,7 @@ fn write_rows_in(
             rows.collect::<std::result::Result<_, _>>()?
         };
         for (import_id, importer_id, import_path, importer) in dangling {
-            if let Some(target) = resolve_import_in(&import_path, &importer, &all_paths, &projects)
+            if let Some(target) = resolve_import_in(&import_path, &importer, &lookup, &projects)
                 .and_then(|p| path_to_id.get(&p).copied())
             {
                 affected.files.insert(importer_id);
@@ -1935,7 +1960,7 @@ fn write_rows_in(
     if files.iter().any(|(rel, _)| {
         ruby_projects::is_manifest(rel) || lang_of(rel) == Some("ruby") || is_binstub_candidate(rel)
     }) {
-        re_resolve_ruby_imports(store, &all_paths, &projects, &mut affected)?;
+        re_resolve_ruby_imports(store, &lookup, &projects, &mut affected)?;
     }
 
     // Every symbol and import of the batch is stored by now, and the passes
@@ -2124,7 +2149,7 @@ fn stage_file(
 /// `affected`.
 fn re_resolve_ruby_imports(
     store: &GraphStore,
-    all_paths: &[String],
+    all_paths: &PathSet<'_>,
     projects: &ruby_projects::Projects,
     affected: &mut Affected,
 ) -> Result<(), BoxErr> {

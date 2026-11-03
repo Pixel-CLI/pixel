@@ -4,9 +4,73 @@
 //! Import-spec → file resolution. Best-effort per language family;
 //! `None` is an acceptable answer (the import simply stays unresolved).
 
+use rustc_hash::FxHashSet as HashSet;
+
 use crate::extract::{is_binstub_candidate, lang_of};
 
 pub mod ruby;
+
+/// The file set an import resolves against: every question import
+/// resolution asks of it. The full build answers from the store
+/// (`files.path`, `files.basename`, `files.dir_base`), so no file list is
+/// held in memory; the incremental update and the tests from a list
+/// ([`PathSet`]). Both must answer alike: the resolution is the same.
+pub trait PathLookup {
+    /// True iff `path` is one of the files.
+    fn contains(&self, path: &str) -> bool;
+    /// The files equal to `suffix` or ending with `/suffix`, at most
+    /// `limit` of them, in no particular order.
+    fn ending_with(&self, suffix: &str, limit: usize) -> Vec<String>;
+    /// The files ending with `ext` whose directory is `dir_suffix` or ends
+    /// with `/dir_suffix`, in no particular order.
+    fn in_dirs_ending_with(&self, dir_suffix: &str, ext: &str) -> Vec<String>;
+}
+
+/// True iff `path` is `suffix` or ends with `/suffix`.
+pub(crate) fn has_path_suffix(path: &str, suffix: &str) -> bool {
+    path == suffix
+        || path
+            .strip_suffix(suffix)
+            .is_some_and(|head| head.ends_with('/'))
+}
+
+/// A [`PathLookup`] over a file list.
+pub struct PathSet<'a> {
+    files: &'a [String],
+    set: HashSet<&'a str>,
+}
+
+impl<'a> PathSet<'a> {
+    pub fn new(files: &'a [String]) -> Self {
+        Self {
+            files,
+            set: files.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+impl PathLookup for PathSet<'_> {
+    fn contains(&self, path: &str) -> bool {
+        self.set.contains(path)
+    }
+
+    fn ending_with(&self, suffix: &str, limit: usize) -> Vec<String> {
+        self.files
+            .iter()
+            .filter(|f| has_path_suffix(f, suffix))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    fn in_dirs_ending_with(&self, dir_suffix: &str, ext: &str) -> Vec<String> {
+        self.files
+            .iter()
+            .filter(|f| f.ends_with(ext) && has_path_suffix(dir_of(f), dir_suffix))
+            .cloned()
+            .collect()
+    }
+}
 
 /// Resolve `spec` (as written in `importer_rel`) to a repo-relative file
 /// path from `all_files`, or `None` when no confident match exists. A Ruby
@@ -16,26 +80,27 @@ pub fn resolve_import(spec: &str, importer_rel: &str, all_files: &[String]) -> O
     resolve_import_in(
         spec,
         importer_rel,
-        all_files,
+        &PathSet::new(all_files),
         &ruby::Projects::from_paths(all_files),
     )
 }
 
-/// [`resolve_import`] with the Ruby projects of the tree, which `Ruby`
-/// requires resolve against (`ruby::Projects::load`). `projects` must
-/// describe `all_files`.
+/// [`resolve_import`] against the files `all_files` answers for, with the
+/// Ruby projects of the tree, which `Ruby` requires resolve against
+/// (`ruby::Projects::load`). `projects` must describe the tree `all_files`
+/// does; it may have been built from its manifests only.
 pub fn resolve_import_in(
     spec: &str,
     importer_rel: &str,
-    all_files: &[String],
+    all_files: &(impl PathLookup + ?Sized),
     projects: &ruby::Projects,
 ) -> Option<String> {
     // A binstub has imports only once its shebang made it Ruby.
     if is_binstub_candidate(importer_rel) {
-        return projects.resolve(spec, importer_rel);
+        return projects.resolve_in(spec, importer_rel, all_files);
     }
     match lang_of(importer_rel)? {
-        "ruby" => projects.resolve(spec, importer_rel),
+        "ruby" => projects.resolve_in(spec, importer_rel, all_files),
         "ts" | "tsx" | "js" => resolve_js(spec, importer_rel, all_files),
         "rust" => resolve_rust(spec, importer_rel, all_files),
         "python" => resolve_python(spec, importer_rel, all_files),
@@ -71,22 +136,15 @@ fn normalize(base_dir: &str, rel: &str) -> String {
     parts.join("/")
 }
 
-fn contains(all_files: &[String], candidate: &str) -> bool {
-    all_files.iter().any(|f| f == candidate)
+fn contains(all_files: &(impl PathLookup + ?Sized), candidate: &str) -> bool {
+    all_files.contains(candidate)
 }
 
-fn first_suffix_match(all_files: &[String], suffix: &str) -> Option<String> {
+fn first_suffix_match(all_files: &(impl PathLookup + ?Sized), suffix: &str) -> Option<String> {
     // A suffix is fallback evidence, not a scope: multiple matches must remain
     // unresolved rather than depend on directory traversal order.
-    let tail = format!("/{suffix}");
-    let mut matches = all_files
-        .iter()
-        .filter(|f| f.as_str() == suffix || f.ends_with(&tail));
-    let first = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    Some(first.clone())
+    let [first] = <[String; 1]>::try_from(all_files.ending_with(suffix, 2)).ok()?;
+    Some(first)
 }
 
 /// Directory-suffix match used by the package imports (Go, Java wildcard):
@@ -97,34 +155,28 @@ fn first_suffix_match(all_files: &[String], suffix: &str) -> Option<String> {
 /// follow directory traversal order. The smallest path, not the first
 /// listed, because the full build lists files in walk order and the
 /// incremental update in store order, and both must store the same row.
-fn first_suffix_dir_match(all_files: &[String], suffix: &str, ext: &str) -> Option<String> {
-    let tail = format!("/{suffix}");
-    let mut dirs: Vec<&str> = Vec::new();
-    for f in all_files {
-        if !f.ends_with(ext) {
-            continue;
-        }
-        let dir = dir_of(f);
-        if dir == suffix || dir.ends_with(&tail) {
-            dirs.push(dir);
-        }
-    }
-    let first_dir = dirs.first()?;
-    if dirs.iter().any(|d| d != first_dir) {
+fn first_suffix_dir_match(
+    all_files: &(impl PathLookup + ?Sized),
+    suffix: &str,
+    ext: &str,
+) -> Option<String> {
+    let files = all_files.in_dirs_ending_with(suffix, ext);
+    let first_dir = dir_of(files.first()?);
+    if files.iter().any(|f| dir_of(f) != first_dir) {
         return None;
     }
-    all_files
-        .iter()
-        .filter(|f| f.ends_with(ext) && dir_of(f) == *first_dir)
-        .min()
-        .cloned()
+    files.iter().min().cloned()
 }
 
 // --- TS / JS --------------------------------------------------------------
 
 const JS_EXTS: [&str; 6] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
-fn resolve_js(spec: &str, importer_rel: &str, all_files: &[String]) -> Option<String> {
+fn resolve_js(
+    spec: &str,
+    importer_rel: &str,
+    all_files: &(impl PathLookup + ?Sized),
+) -> Option<String> {
     if !spec.starts_with('.') {
         return None; // bare specifier: package import, out of scope
     }
@@ -149,7 +201,11 @@ fn resolve_js(spec: &str, importer_rel: &str, all_files: &[String]) -> Option<St
 
 // --- Rust -----------------------------------------------------------------
 
-fn resolve_rust(spec: &str, importer_rel: &str, all_files: &[String]) -> Option<String> {
+fn resolve_rust(
+    spec: &str,
+    importer_rel: &str,
+    all_files: &(impl PathLookup + ?Sized),
+) -> Option<String> {
     // Strip alias / braces: `crate::a::b as c`, `crate::a::{b, c}`.
     let spec = spec.split(" as ").next().unwrap_or(spec);
     let spec = spec
@@ -216,7 +272,11 @@ fn resolve_rust(spec: &str, importer_rel: &str, all_files: &[String]) -> Option<
 
 // --- Python ---------------------------------------------------------------
 
-fn resolve_python(spec: &str, importer_rel: &str, all_files: &[String]) -> Option<String> {
+fn resolve_python(
+    spec: &str,
+    importer_rel: &str,
+    all_files: &(impl PathLookup + ?Sized),
+) -> Option<String> {
     let dots = spec.chars().take_while(|&c| c == '.').count();
     let rest = &spec[dots..];
     let segs: Vec<&str> = rest.split('.').filter(|s| !s.is_empty()).collect();
@@ -259,7 +319,7 @@ fn resolve_python(spec: &str, importer_rel: &str, all_files: &[String]) -> Optio
 
 // --- Go -------------------------------------------------------------------
 
-fn resolve_go(spec: &str, all_files: &[String]) -> Option<String> {
+fn resolve_go(spec: &str, all_files: &(impl PathLookup + ?Sized)) -> Option<String> {
     // Match a directory whose path suffix equals the import path (or its
     // trailing segments); its smallest .go path stands for the package. A suffix
     // shared by several directories names no single package (see
@@ -279,7 +339,7 @@ fn resolve_go(spec: &str, all_files: &[String]) -> Option<String> {
 
 // --- Java -----------------------------------------------------------------
 
-fn resolve_java(spec: &str, all_files: &[String]) -> Option<String> {
+fn resolve_java(spec: &str, all_files: &(impl PathLookup + ?Sized)) -> Option<String> {
     if let Some(pkg) = spec.strip_suffix(".*") {
         let dir_suffix = pkg.replace('.', "/");
         return first_suffix_dir_match(all_files, &dir_suffix, ".java");

@@ -11,6 +11,7 @@ use std::os::unix::fs::MetadataExt;
 use rusqlite::params;
 use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
+use crate::imports::{PathLookup, has_path_suffix};
 use crate::resolve::{FileCalls, FileReferences, PendingCall, PendingReference};
 use crate::store::{ExecCached, GraphStore, StoreError};
 
@@ -210,4 +211,232 @@ pub(super) fn pending_references(store: &GraphStore) -> Result<Vec<FileReference
         }
     }
     Ok(out)
+}
+
+/// A [`PathLookup`] answered by the store's `files` rows: the full build
+/// resolves its imports without holding the file list. A query that fails
+/// answers "no such file" and is kept for [`Self::finish`].
+pub(super) struct SqlPathLookup<'a> {
+    store: &'a GraphStore,
+    error: std::cell::RefCell<Option<StoreError>>,
+}
+
+impl<'a> SqlPathLookup<'a> {
+    pub fn new(store: &'a GraphStore) -> Self {
+        Self {
+            store,
+            error: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// The first query error any answer swallowed.
+    pub fn finish(&self) -> Result<(), StoreError> {
+        self.error.borrow_mut().take().map_or(Ok(()), Err)
+    }
+
+    /// `query`'s answer, or `default` after keeping its error.
+    fn answer<T>(&self, default: T, query: impl FnOnce() -> Result<T, StoreError>) -> T {
+        query().unwrap_or_else(|error| {
+            self.error.borrow_mut().get_or_insert(error);
+            default
+        })
+    }
+
+    /// The paths of the rows `sql` selects with `params`, kept by `keep`.
+    fn paths(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+        keep: impl Fn(&str) -> bool,
+        limit: usize,
+    ) -> Vec<String> {
+        self.answer(Vec::new(), || {
+            let mut stmt = self.store.conn().prepare_cached(sql)?;
+            let mut rows = stmt.query(params)?;
+            let mut out = Vec::new();
+            while out.len() < limit
+                && let Some(row) = rows.next()?
+            {
+                let path: String = row.get(0)?;
+                if keep(&path) {
+                    out.push(path);
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// The id of the file row at `path`.
+    pub fn id_of(&self, path: &str) -> Result<Option<i64>, StoreError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .store
+            .conn()
+            .prepare_cached("SELECT id FROM files WHERE path = ?1")?
+            .query_row(params![path], |r| r.get(0))
+            .optional()?)
+    }
+}
+
+impl PathLookup for SqlPathLookup<'_> {
+    fn contains(&self, path: &str) -> bool {
+        self.answer(false, || Ok(self.id_of(path)?.is_some()))
+    }
+
+    fn ending_with(&self, suffix: &str, limit: usize) -> Vec<String> {
+        // A file ending with `/suffix` has the suffix's last segment, and
+        // its directory the last segment of the suffix's directory.
+        let keep = |path: &str| has_path_suffix(path, suffix);
+        match suffix.rsplit_once('/') {
+            Some((dir, basename)) => self.paths(
+                "SELECT path FROM files WHERE basename = ?1 AND dir_base = ?2",
+                params![basename, dir.rsplit('/').next().unwrap_or(dir)],
+                keep,
+                limit,
+            ),
+            None => self.paths(
+                "SELECT path FROM files WHERE basename = ?1",
+                params![suffix],
+                keep,
+                limit,
+            ),
+        }
+    }
+
+    fn in_dirs_ending_with(&self, dir_suffix: &str, ext: &str) -> Vec<String> {
+        let dir_base = dir_suffix.rsplit('/').next().unwrap_or(dir_suffix);
+        self.paths(
+            "SELECT path FROM files WHERE dir_base = ?1",
+            params![dir_base],
+            |path| {
+                path.ends_with(ext)
+                    && has_path_suffix(path.rsplit_once('/').map_or("", |(dir, _)| dir), dir_suffix)
+            },
+            usize::MAX,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::imports::{PathSet, resolve_import_in, ruby::Projects};
+
+    const FILES: &[&str] = &[
+        "Gemfile",
+        "lib/shop/cart.rb",
+        "lib/shop.rb",
+        "app/models/order.rb",
+        "src/lib.rs",
+        "src/util.rs",
+        "src/net/mod.rs",
+        "src/net/http.rs",
+        "crates/a/src/util.rs",
+        "web/a.ts",
+        "web/b.ts",
+        "web/c/index.tsx",
+        "pkg/__init__.py",
+        "pkg/mod.py",
+        "other/pkg/__init__.py",
+        "go/net/http/a.go",
+        "go/net/http/b.go",
+        "vendor/net/http/c.go",
+        "go/util/u.go",
+        "java/com/acme/Order.java",
+        "java/com/acme/Line.java",
+        "root.go",
+    ];
+
+    /// The store answers every question of import resolution as the file
+    /// list does, so the full build (which asks the store) and the
+    /// incremental update (which asks a list) store the same import rows.
+    #[test]
+    fn the_store_should_resolve_imports_as_the_file_list_does() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        for path in FILES {
+            store.replace_file(path, "0", "x").unwrap();
+        }
+        let files: Vec<String> = FILES.iter().map(ToString::to_string).collect();
+        let list = PathSet::new(&files);
+        let sql = SqlPathLookup::new(&store);
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        for suffix in [
+            "util.rs",
+            "src/util.rs",
+            "net/mod.rs",
+            "__init__.py",
+            "pkg/__init__.py",
+            "b.ts",
+            "nothing.rs",
+            "Gemfile",
+        ] {
+            assert_eq!(
+                sorted(sql.ending_with(suffix, usize::MAX)),
+                sorted(list.ending_with(suffix, usize::MAX)),
+                "{suffix}"
+            );
+        }
+        for (dir, ext) in [
+            ("net/http", ".go"),
+            ("http", ".go"),
+            ("go/util", ".go"),
+            ("com/acme", ".java"),
+            ("", ".go"),
+            ("none", ".go"),
+        ] {
+            assert_eq!(
+                sorted(sql.in_dirs_ending_with(dir, ext)),
+                sorted(list.in_dirs_ending_with(dir, ext)),
+                "{dir} {ext}"
+            );
+        }
+        let projects = Projects::from_paths(&files);
+        for (spec, importer) in [
+            ("crate::util::f", "src/lib.rs"),
+            ("crate::net::http", "src/lib.rs"),
+            ("util::f", "src/net/http.rs"),
+            ("./b", "web/a.ts"),
+            ("./c", "web/a.ts"),
+            ("pkg.mod", "x.py"),
+            ("pkg", "x.py"),
+            ("net/http", "go/util/u.go"),
+            ("github.com/x/util", "go/net/http/a.go"),
+            ("com.acme.*", "java/com/acme/Order.java"),
+            ("com.acme.Line", "java/com/acme/Order.java"),
+            ("shop/cart", "app/models/order.rb"),
+            ("./shop/cart", "lib/shop.rb"),
+        ] {
+            assert_eq!(
+                resolve_import_in(spec, importer, &sql, &projects),
+                resolve_import_in(spec, importer, &list, &projects),
+                "{spec} from {importer}"
+            );
+        }
+        sql.finish().unwrap();
+    }
+
+    /// The streamed signature is the one-shot xxh3 of the same bytes.
+    #[test]
+    fn the_snapshot_signature_should_hash_paths_and_hashes_in_path_order() {
+        let store = GraphStore::open_in_memory().unwrap();
+        let snapshot = |hash| Snapshot {
+            hash,
+            size: 1,
+            mtime_ns: 2,
+            ino: 3,
+        };
+        record_snapshot(&store, "b.rs", &snapshot(7)).unwrap();
+        record_snapshot(&store, "a.rs", &snapshot(u64::MAX)).unwrap();
+        let mut bytes = b"a.rs".to_vec();
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+        bytes.extend_from_slice(b"b.rs");
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        assert_eq!(
+            signature(&store).unwrap(),
+            format!("{:016x}", xxh3_64(&bytes))
+        );
+    }
 }

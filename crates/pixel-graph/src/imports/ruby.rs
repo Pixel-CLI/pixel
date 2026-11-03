@@ -214,12 +214,32 @@ impl Projects {
     /// The repository file a Ruby load of `path` (as `ruby_require_path`
     /// stored it) from `importer` names, or `None`.
     pub fn resolve(&self, path: &str, importer: &str) -> Option<String> {
+        self.resolve_where(path, importer, &|file| self.files.contains(file))
+    }
+
+    /// [`Self::resolve`] against the files `files` answers for, which a
+    /// [`Projects`] built from the tree's manifests alone needs.
+    pub fn resolve_in(
+        &self,
+        path: &str,
+        importer: &str,
+        files: &(impl super::PathLookup + ?Sized),
+    ) -> Option<String> {
+        self.resolve_where(path, importer, &|file| files.contains(file))
+    }
+
+    fn resolve_where(
+        &self,
+        path: &str,
+        importer: &str,
+        exists: &dyn Fn(&str) -> bool,
+    ) -> Option<String> {
         if path.is_empty() {
             return None;
         }
         if path.starts_with("./") || path.starts_with("../") {
             let target = with_rb(&join(dir_of(importer), path));
-            return self.files.contains(&target).then_some(target);
+            return exists(&target).then_some(target);
         }
         if path.starts_with('/') {
             return None;
@@ -233,7 +253,7 @@ impl Projects {
             .load_roots
             .iter()
             .map(|root| with_rb(&join(root, path)))
-            .filter(|candidate| self.files.contains(candidate));
+            .filter(|candidate| exists(candidate));
         let hit = hits.next()?;
         // Two load roots holding the file: Ruby takes the first on
         // `$LOAD_PATH`, an order the manifests do not fix.

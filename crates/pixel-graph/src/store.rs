@@ -696,17 +696,20 @@ impl GraphStore {
                 r.get(0)
             })
             .optional()?;
+        let (basename, dir_base) = path_parts(path);
         let id = if let Some(id) = existing {
             delete_file_rows(&tx, id)?;
             tx.exec_cached(
-                "UPDATE files SET blob_oid = ?2, lang = ?3 WHERE id = ?1",
-                params![id, blob_oid, lang],
+                "UPDATE files SET blob_oid = ?2, lang = ?3, basename = ?4, dir_base = ?5
+                  WHERE id = ?1",
+                params![id, blob_oid, lang, basename, dir_base],
             )?;
             id
         } else {
             tx.exec_cached(
-                "INSERT INTO files (path, blob_oid, lang) VALUES (?1, ?2, ?3)",
-                params![path, blob_oid, lang],
+                "INSERT INTO files (path, blob_oid, lang, basename, dir_base)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![path, blob_oid, lang, basename, dir_base],
             )?;
             tx.last_insert_rowid()
         };
@@ -1896,7 +1899,11 @@ CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY,
   path TEXT NOT NULL UNIQUE,
   blob_oid TEXT NOT NULL,
-  lang TEXT NOT NULL
+  lang TEXT NOT NULL,
+  -- The path's last segment and its directory's last segment (`path_parts`):
+  -- import resolution looks a suffix up through them (`SqlPathLookup`).
+  basename TEXT NOT NULL DEFAULT '',
+  dir_base TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS symbols (
   id INTEGER PRIMARY KEY,
@@ -2091,6 +2098,14 @@ CREATE TABLE IF NOT EXISTS pending_refs (
 );
 ";
 
+/// The last segment of `path` and the last segment of its directory
+/// (`""` for a file at the root): `a/b/c.rs` is `("c.rs", "b")`. Stored as
+/// `files.basename` and `files.dir_base`.
+pub(crate) fn path_parts(path: &str) -> (&str, &str) {
+    let (dir, basename) = path.rsplit_once('/').unwrap_or(("", path));
+    (basename, dir.rsplit('/').next().unwrap_or(dir))
+}
+
 /// Idempotent schema migrations for graphs created before a column existed.
 /// `CREATE TABLE IF NOT EXISTS` won't add columns to an existing table, so
 /// additive columns are patched here. Each step introspects `table_info` and
@@ -2162,6 +2177,32 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
         conn.execute("UPDATE imports SET path = spec", [])?;
     }
+    if !has_column("files", "basename")? {
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN basename TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN dir_base TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        let paths: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare("SELECT id, path FROM files")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, path) in paths {
+            let (basename, dir_base) = path_parts(&path);
+            conn.execute(
+                "UPDATE files SET basename = ?2, dir_base = ?3 WHERE id = ?1",
+                params![id, basename, dir_base],
+            )?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_files_basename ON files(basename, dir_base);
+         CREATE INDEX IF NOT EXISTS idx_files_dir_base ON files(dir_base);",
+    )?;
     if !has_column("imports", "scope")? {
         conn.execute(
             "ALTER TABLE imports ADD COLUMN scope TEXT NOT NULL DEFAULT ''",
