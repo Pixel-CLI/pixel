@@ -3,13 +3,13 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/pixel-index", "crates/pixel", "crates/pixel-graph", "crates/pixel-context", "crates/pixel-daemon", "crates/pixel-recall", "crates/pixel-bench", "crates/pixel-session", "crates/pixel-proto", "crates/pixel-git", "crates/pixel-rank", "crates/pixel-ops", "crates/pixel-facts", "crates/pixel-install", "crates/pixel-actionlog", "crates/pixel-flow", "crates/pixel-ultraflow", "crates/pixel-release", "crates/pixel-task"]
+members = ["crates/pixel-index", "crates/pixel", "crates/pixel-graph", "crates/pixel-context", "crates/pixel-daemon", "crates/pixel-recall", "crates/pixel-bench", "crates/pixel-session", "crates/pixel-proto", "crates/pixel-git", "crates/pixel-rank", "crates/pixel-ops", "crates/pixel-facts", "crates/pixel-setup", "crates/pixel-actionlog", "crates/pixel-release", "crates/pixel-task", "crates/pixel-plugin", "crates/mvp-model", "crates/mvp-store"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Pixel-CLI/pixel"
-rust-version = "1.91"
+rust-version = "1.99"
 
 # Lint policy for every workspace member (each crate opts in with
 # `[lints] workspace = true`). CI runs clippy with `-D warnings`, so every
@@ -75,10 +75,25 @@ mutants = "0.0.4"
 openssl = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
-lto = "thin"
+# Fat LTO optimizes across the dependency graph. The recorded release
+# experiment traded longer builds for a smaller binary and faster startup.
+lto = "fat"
+# No landing pads: 62,887,792 bytes against 67,307,376 (-6.6%) and 5.10 ms
+# per `--version` against 5.20. The cost is the six `catch_unwind` sites
+# (pixel-graph/src/mvp_index/ruby/extract.rs:146,
+# pixel-graph/src/extract.rs:336/359, and the daemon's `answer`): with abort they no longer recover, so a panicking
+# extractor or handler ends the process instead of returning a default or a
+# failure envelope. The daemon is restarted by the next call's auto-start.
+panic = "abort"
 codegen-units = 1
-# Keep macOS release binaries runnable with the current toolchain.
-strip = "none"
+# Ship without the symbol table (~17% of the binary, 76 MB -> 63 MB on
+# aarch64-apple-darwin): no DWARF is built in release, so local symbols are
+# the only weight. The release pipeline builds unstripped instead
+# (CARGO_PROFILE_RELEASE_STRIP=none in scripts/release/release-build-env.sh),
+# publishes that copy as `pixel-<tag>-<target>.symbols.tar.xz` and strips the
+# shipped one with scripts/release/split-symbols.sh, so a backtrace from a
+# released binary can still be symbolized.
+strip = "symbols"
 
 # Local iteration profile for `pixel upgrade`: same optimisation level as
 # release, minus the two settings that dominate an incremental rebuild
@@ -89,3 +104,16 @@ strip = "none"
 inherits = "release"
 lto = false
 codegen-units = 16
+# Keep debug info and symbols so profilers can resolve frames to source lines.
+# This is the local iteration profile, never a shipped one.
+debug = "line-tables-only"
+strip = "none"
+
+# cross reads this instead of a root Cross.toml (workspace.metadata.cross is
+# its documented manifest location). It forwards RUSTFLAGS and the CARGO_*
+# variables into its container by itself, not SOURCE_DATE_EPOCH:
+# crates/pixel/build.rs reads it for the build date `pixel --version`
+# prints, which scripts/release/release-build-env.sh pins to the commit's time so a
+# release build is reproducible.
+[workspace.metadata.cross.build.env]
+passthrough = ["SOURCE_DATE_EPOCH"]

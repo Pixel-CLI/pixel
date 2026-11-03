@@ -6,7 +6,7 @@
 //! No LLM is used for the code analysis: queries run against the graph.db
 //! schema (symbols, edges, imports, jsx_elements, concepts) and git history.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::Path;
 
 #[cfg(test)]
@@ -216,7 +216,7 @@ pub fn run_plan_queries(
     queries: &[PlanQuery],
 ) -> Result<Vec<PlanFinding>, Box<dyn std::error::Error + Send + Sync>> {
     let mut out: Vec<PlanFinding> = Vec::new();
-    let mut seen: HashMap<(String, u32, String), ()> = HashMap::new();
+    let mut seen: HashMap<(String, u32, String), ()> = HashMap::default();
 
     for q in queries {
         let batch = match q {
@@ -606,7 +606,7 @@ fn by_concept(
     // todo per hit: collapse to a single finding per file, anchored to the
     // enclosing symbol when there is one.
     let mut order: Vec<String> = Vec::new();
-    let mut grouped: HashMap<String, ConceptGroup> = HashMap::new();
+    let mut grouped: HashMap<String, ConceptGroup> = HashMap::default();
     for m in outcome
         .matches
         .into_iter()
@@ -888,7 +888,7 @@ pub fn detect_prereqs(
     files: &[String],
 ) -> Result<Vec<Prereq>, Box<dyn std::error::Error + Send + Sync>> {
     let mut scan: Vec<(i64, String)> = Vec::new();
-    let mut seen: HashSet<i64> = HashSet::new();
+    let mut seen: HashSet<i64> = HashSet::default();
     for f in files {
         if let Some(row) = store.file_by_path(f)?
             && seen.insert(row.id)
@@ -933,14 +933,14 @@ pub fn detect_prereqs(
     }
 
     let mut out: Vec<Prereq> = Vec::new();
-    let mut emitted: HashSet<(PrereqKind, String, String)> = HashSet::new();
+    let mut emitted: HashSet<(PrereqKind, String, String)> = HashSet::default();
     // Auth hits share a min-line per (file, detail) so multiple `auth()` or
     // `getServerSession()` calls in one file produce one Prereq that points
     // at the topmost occurrence. Without this, the first-seen line wins
     // and a gate on line 50 can point at line 1 (or vice versa), which
     // misleads an agent running `pixel plan --done N` to land on the wrong
     // line.
-    let mut auth_lines: HashMap<(String, String), u32> = HashMap::new();
+    let mut auth_lines: HashMap<(String, String), u32> = HashMap::default();
     let mut auth_order: Vec<(String, String)> = Vec::new();
     let mut emit = |out: &mut Vec<Prereq>, p: Prereq| {
         if emitted.insert((p.kind, p.file.clone(), p.detail.clone())) {
@@ -1239,7 +1239,7 @@ fn auth_call_hits(text: &str) -> Vec<u32> {
 /// Paths of a `git log --name-only --pretty=format:` output with the number
 /// of commits that touched each, most-touched first, ties by path.
 fn paths_by_churn(log: &str) -> Vec<(String, usize)> {
-    let mut commits: HashMap<&str, usize> = HashMap::new();
+    let mut commits: HashMap<&str, usize> = HashMap::default();
     for path in log.lines().map(str::trim).filter(|l| !l.is_empty()) {
         *commits.entry(path).or_default() += 1;
     }
@@ -1262,7 +1262,7 @@ fn fan_in_for_files(
     let mut ids = file_ids.to_vec();
     ids.sort_unstable();
     ids.dedup();
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for chunk in ids.chunks(FAN_IN_CHUNK) {
         let params: Vec<Box<dyn rusqlite::ToSql>> = chunk
             .iter()
@@ -1280,7 +1280,7 @@ fn fan_in_for_file_paths(
     let mut unique = paths.to_vec();
     unique.sort_unstable();
     unique.dedup();
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for chunk in unique.chunks(FAN_IN_CHUNK) {
         let params: Vec<Box<dyn rusqlite::ToSql>> = chunk
             .iter()
@@ -1314,7 +1314,7 @@ fn fan_in_where(
     let rows = stmt.query_map(refs.as_slice(), |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
     })?;
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for r in rows {
         let (p, c) = r?;
         out.insert(p, c);

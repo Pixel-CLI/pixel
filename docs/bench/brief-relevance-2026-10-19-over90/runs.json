@@ -1,0 +1,106 @@
+{
+  "baseline": {
+    "label": "final-baseline-r3-412d302f",
+    "count": 56,
+    "status": {
+      "status": "failed",
+      "exit_code": 1,
+      "counts": {
+        "ok": 49,
+        "partial": 7
+      },
+      "errors": []
+    }
+  },
+  "candidate": {
+    "label": "final-candidate-df9f39fa",
+    "count": 56,
+    "status": {
+      "status": "failed",
+      "exit_code": 1,
+      "counts": {
+        "ok": 53,
+        "partial": 3
+      },
+      "errors": []
+    }
+  },
+  "supplemental": {
+    "label": "final-supplemental-df9f39fa",
+    "count": 88,
+    "status": {
+      "status": "failed",
+      "exit_code": 1,
+      "counts": {
+        "ok": 17,
+        "partial": 1,
+        "abstained": 70
+      },
+      "errors": []
+    }
+  },
+  "repeat": {
+    "label": "final-repeat-df9f39fa",
+    "count": 16,
+    "status": {
+      "status": "failed",
+      "exit_code": 1,
+      "counts": {
+        "ok": 15,
+        "partial": 1
+      },
+      "errors": []
+    }
+  },
+  "first-candidate": {
+    "label": "candidate-0ddf2a0a",
+    "count": 56,
+    "status": {
+      "status": "complete",
+      "exit_code": 0,
+      "counts": {
+        "ok": 56
+      },
+      "errors": []
+    }
+  },
+  "first-supplemental": {
+    "label": "supplemental-0ddf2a0a",
+    "count": 88,
+    "status": {
+      "status": "failed",
+      "exit_code": 1,
+      "counts": {
+        "ok": 18,
+        "malformed": 42,
+        "abstained": 28
+      },
+      "errors": []
+    }
+  },
+  "diagnostic-baseline": {
+    "label": "baseline45-412d302f",
+    "count": 56,
+    "status": {
+      "status": "failed",
+      "exit_code": 1,
+      "counts": {
+        "ok": 55,
+        "partial": 1
+      },
+      "errors": []
+    }
+  },
+  "earlier-baseline": {
+    "label": "baseline45-r2-412d302f",
+    "count": 56,
+    "status": {
+      "status": "complete",
+      "exit_code": 0,
+      "counts": {
+        "ok": 56
+      },
+      "errors": []
+    }
+  }
+}

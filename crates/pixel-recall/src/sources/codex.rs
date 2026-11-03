@@ -34,6 +34,8 @@ const CODEX_ORCHESTRATOR_PREFIXES: &[&str] = &[
     "<recommended_plugins>",
     "<codex_internal_context",
     "# AGENTS.md instructions",
+    "<heartbeat>",
+    "<ci-monitor-event>",
 ];
 
 pub struct Adapter {
@@ -392,7 +394,7 @@ fn tool_output_text(output: Option<&Value>) -> String {
     }
 }
 
-fn classify_codex_user(text: &str) -> IntentSource {
+pub(crate) fn classify_codex_user(text: &str) -> IntentSource {
     let trimmed = text.trim_start();
     for p in CODEX_ORCHESTRATOR_PREFIXES {
         if trimmed.starts_with(p) {

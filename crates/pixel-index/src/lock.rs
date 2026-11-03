@@ -14,6 +14,7 @@
 
 use std::fs::File;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use fs2::FileExt;
@@ -115,7 +116,10 @@ pub fn ensure_pixel_gitignored(root: &Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, content);
+    // Atomic: a reader (or a crash) never sees a half-written exclude file.
+    // The user's file mode is kept; a new file gets the usual 0o644.
+    let mode = std::fs::metadata(&path).map_or(0o644, |m| m.permissions().mode() & 0o777);
+    let _ = pixel_git::nofollow::write_replace(&path, &content, mode);
 }
 
 impl BuildLock {
@@ -124,9 +128,11 @@ impl BuildLock {
     pub fn acquire(root: &Path) -> io::Result<Self> {
         let dir = root.join(SHARD_DIR);
         pixel_git::sidecar::private_dir(&dir)?;
-        ensure_pixel_gitignored(root);
         let file = pixel_git::nofollow::open_lock(&dir.join("build.lock"))?;
         file.lock_exclusive()?;
+        // Under the lock: two builders never read-modify-write the exclude
+        // file at once.
+        ensure_pixel_gitignored(root);
         Ok(BuildLock { _file: file })
     }
 
@@ -135,12 +141,12 @@ impl BuildLock {
     pub fn try_acquire(root: &Path) -> io::Result<Option<Self>> {
         let dir = root.join(SHARD_DIR);
         pixel_git::sidecar::private_dir(&dir)?;
-        ensure_pixel_gitignored(root);
         let file = pixel_git::nofollow::open_lock(&dir.join("build.lock"))?;
-        match file.try_lock_exclusive() {
-            Ok(()) => Ok(Some(BuildLock { _file: file })),
-            Err(_) => Ok(None),
+        if file.try_lock_exclusive().is_err() {
+            return Ok(None);
         }
+        ensure_pixel_gitignored(root);
+        Ok(Some(BuildLock { _file: file }))
     }
 }
 
@@ -231,6 +237,31 @@ mod tests {
         );
         assert_eq!(status(&git), "", "no tracked edit, no untracked sidecar");
         assert!(git.run_opt(&["check-ignore", "-q", ".pixel/"]).is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The exclude file is edited under the build lock and replaced
+    /// atomically: the user's own lines survive, pixel's entry is added
+    /// once however many builds follow, and no temporary file is left.
+    #[test]
+    fn acquire_keeps_the_users_exclude_lines_and_adds_the_entry_once() {
+        let (dir, git) = git_repo();
+        let exclude = exclude_file(&git);
+        std::fs::write(&exclude, "# mine\n*.log\nscratch/\n").unwrap();
+
+        drop(BuildLock::acquire(&dir).unwrap());
+        drop(BuildLock::try_acquire(&dir).unwrap().expect("lock is free"));
+        drop(BuildLock::acquire(&dir).unwrap());
+
+        assert_eq!(
+            std::fs::read_to_string(&exclude).unwrap(),
+            format!("# mine\n*.log\nscratch/\n{GITIGNORE_HEADER}/.pixel/\n")
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(exclude.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("exclude")]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -956,3 +956,83 @@ end
         assert_eq!(camelize_path("admin/order_items"), "Admin::OrderItems");
     }
 }
+
+#[cfg(test)]
+mod audited_contract_tests {
+    use super::*;
+
+    #[test]
+    fn walking_should_accept_exact_depth_and_visit_caps_and_stop_when_either_is_exceeded() {
+        let source = b"get '/x', to: 'items#show'";
+        let tree = super::super::parse_file("config/routes.rb", source).unwrap();
+        let call = tree.root_node().named_child(0).unwrap();
+        for (depth, visits, expected) in [
+            (MAX_DEPTH, 0, 1),
+            (MAX_DEPTH + 1, 0, 0),
+            (0, MAX_VISITS - 1, 1),
+            (0, MAX_VISITS, 0),
+        ] {
+            let mut walker = RouteWalker {
+                src: source,
+                routes: vec![],
+                visits,
+            };
+            walker.walk(call, &Scope::default(), depth);
+            assert_eq!(
+                walker.routes.len(),
+                expected,
+                "depth={depth} visits={visits}"
+            );
+            assert!(walker.visits > visits);
+        }
+    }
+
+    #[test]
+    fn constraints_and_defaults_blocks_should_preserve_each_route_and_its_target() {
+        let source=b"constraints host: 'example.com' do\n defaults format: :json do\n get '/one', to: 'items#show'\n get '/bad', to: '#show'\n get '/bad2', to: 'items#'\n get '/two', to: 'items#index'\n end\nend";
+        let found = routes(source);
+        assert_eq!(
+            found
+                .iter()
+                .map(|r| (
+                    r.path.as_str(),
+                    r.controller.as_deref(),
+                    r.action.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("/one", Some("items"), Some("show")),
+                ("/two", Some("items"), Some("index"))
+            ]
+        );
+    }
+
+    #[test]
+    fn block_depth_should_advance_before_reading_a_nested_route() {
+        let source = b"constraints do\n get '/one', to: 'items#show'\nend";
+        let tree = super::super::parse_file("config/routes.rb", source).unwrap();
+        let mut walker = RouteWalker {
+            src: source,
+            routes: vec![],
+            visits: 0,
+        };
+        walker.walk(
+            tree.root_node().named_child(0).unwrap(),
+            &Scope::default(),
+            MAX_DEPTH,
+        );
+        assert_eq!(walker.routes, vec![]);
+    }
+
+    #[test]
+    fn wrapper_arguments_should_not_be_walked_as_executed_route_declarations() {
+        let source=b"constraints(-> { get '/decoy', to: 'items#bad' }) do\n get '/real', to: 'items#show'\nend";
+        assert_eq!(
+            routes(source)
+                .iter()
+                .map(|r| r.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/real"]
+        );
+    }
+}

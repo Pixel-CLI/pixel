@@ -4,7 +4,7 @@ Closes #<issue number>
 merge and board-sync.yml moves it on project 3. Use `Refs #<n>` when this
 PR does only part of the issue. Only a typo fix, a CI rerun or an
 emergency revert goes without an issue: then replace the line with why.
-Keep prose brief; delete these comments. See CONTRIBUTING.md,
+Keep prose brief; delete these comments. See .github/CONTRIBUTING.md,
 "Commits and pull requests". -->
 
 ## Summary
@@ -29,7 +29,7 @@ cross-build, the smoke test, an installed-hook check). -->
 
 <!-- Door: two-way when a revert undoes it; one-way when it does not —
 e.g. EXTRACTOR_VERSION or PROTOCOL_VERSION bumps, a file format under
-.pixel/ or ~/.pixel/, what `pixel install` writes into agent configs,
+.pixel/ or ~/.pixel/, what `pixel setup` writes into agent configs,
 a release tag, a deleted or rewritten user file.
 Blast radius: one word, then what a bad merge would break and for whom. -->
 
@@ -39,4 +39,4 @@ Blast radius: one word, then what a bad merge would break and for whom. -->
 
 ## Docs touched
 
-<!-- changelog.d/, ARCHITECTURE.md, agent prompt, README — or why none. -->
+<!-- .github/changelog.d/, ARCHITECTURE.md, agent prompt, README — or why none. -->

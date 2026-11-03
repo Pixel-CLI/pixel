@@ -6,6 +6,16 @@
 //! `extract`/`resolve`/`build` write through this API; analyses read through
 //! it (plus ad-hoc SQL via `conn()` when a bespoke join is clearer). WAL
 //! mode; per-file replacement is transactional.
+//!
+//! Space: a graph db is created with `auto_vacuum = INCREMENTAL`, and one
+//! made before that is converted by a single `VACUUM` at its next full
+//! build ([`GraphStore::ensure_incremental_vacuum`]); a full build then
+//! hands its freed pages back to the file system
+//! ([`GraphStore::reclaim`]), as `history.db` does after an eviction.
+//! Every write transaction ends with `PRAGMA optimize`
+//! ([`GraphStore::commit_write`]), SQLite's bounded planner-statistics
+//! refresh: it analyses only tables whose row counts moved, within
+//! `analysis_limit`.
 
 use std::path::Path;
 
@@ -13,6 +23,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::extract::ImportBinding;
+use crate::extract::js_assignments::Facts as JsAssignmentFacts;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -356,6 +367,25 @@ pub struct JsxElementRow {
 // fingerprint. Deterministic: same input -> same output, no RNG / no LLM.
 
 /// FNV-1a 64-bit hash of a byte slice. Stable across runs and platforms.
+/// The last segment of a qualified name (`finish` for `ActionLog::finish`
+/// or `Builder.finish`), or `None` when `name` is not qualified.
+///
+/// A name is qualified when `::` or `.` splits it into at least two
+/// non-empty segments; `Foo.`, `::finish` and `a..b` are not, so a stray
+/// separator never turns into a search for an empty name.
+pub fn qualified_leaf(name: &str) -> Option<&str> {
+    let mut segments = name.split("::").flat_map(|part| part.split('.'));
+    let first = segments.next()?;
+    let mut leaf = None;
+    for segment in segments {
+        leaf = Some(segment);
+        if segment.is_empty() {
+            return None;
+        }
+    }
+    leaf.filter(|_| !first.is_empty())
+}
+
 pub fn fnv1a64(text: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in text.as_bytes() {
@@ -463,15 +493,28 @@ pub struct GraphStore {
     conn: Connection,
 }
 
+const DELETE_FILE_UNRESOLVED_NAMES: &str = "DELETE FROM unresolved_names WHERE file_id = ?1";
+
+/// `PRAGMA auto_vacuum`'s value for `INCREMENTAL`.
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
 /// The per-file delete [`GraphStore::replace_file`] and
 /// [`GraphStore::remove_file`] run once for every file of an incremental
 /// batch; `idx_unresolved_file` is what keeps it off a full-table scan.
-const DELETE_FILE_UNRESOLVED_CALLS: &str = "DELETE FROM unresolved_calls WHERE file_id = ?1";
+pub(crate) const DELETE_FILE_UNRESOLVED_CALLS: &str =
+    "DELETE FROM unresolved_calls WHERE file_id = ?1";
 
 /// Statements the write path keeps prepared: a cold build runs the same few
 /// dozen once per file, symbol, import and edge, so the connection's cache
 /// holds all of them (rusqlite keeps 16 by default).
 const STATEMENT_CACHE: usize = 64;
+
+/// Read-through mapping of the database file, in bytes: a page read is a
+/// load from the mapping instead of a `pread`.
+const MMAP_BYTES: i64 = 256 * 1024 * 1024;
+/// Page cache for this connection, in KiB (a negative `cache_size` means
+/// KiB rather than pages).
+const CACHE_KIB: i64 = 65_536;
 
 /// `execute` through the connection's statement cache. The build loops run
 /// the same statements hundreds of thousands of times; `Connection::execute`
@@ -528,6 +571,15 @@ impl GraphStore {
             &path,
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
+        // Before the first table exists, or it has no effect: freed pages are
+        // then tracked so `reclaim` can hand them back after a rebuild,
+        // instead of the file keeping its largest size forever. Only on an
+        // empty file: on an existing one the pragma writes the file even when
+        // it changes nothing, and opening a graph to read it must not.
+        let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        if pages == 0 {
+            conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         // WAL serializes writers: a second writer (the daemon's watcher
@@ -537,6 +589,13 @@ impl GraphStore {
         // connection; pinning the same budget pixel-facts uses keeps it
         // explicit and independent of that default.
         conn.pragma_update(None, "busy_timeout", 5000)?;
+        // Reads go through a mapping instead of a `pread` per page and
+        // pages stay cached; the temp b-tree (sorting, grouping) stays off
+        // disk. The cap is per connection, not per database, and 64 MiB is
+        // above anything a single query here touches.
+        conn.pragma_update(None, "mmap_size", MMAP_BYTES)?;
+        conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
@@ -588,9 +647,40 @@ impl GraphStore {
     }
 
     /// Commit the transaction opened by [`Self::begin_write`]. Everything
-    /// written since becomes visible to other connections at once.
+    /// written since becomes visible to other connections at once. The
+    /// planner statistics are refreshed first (`PRAGMA optimize`), inside
+    /// the transaction: it already holds the write lock, so the refresh
+    /// never waits behind another writer.
     pub fn commit_write(&self) -> Result<()> {
-        self.conn.execute_batch("COMMIT")?;
+        self.conn.execute_batch("PRAGMA optimize; COMMIT")?;
+        Ok(())
+    }
+
+    /// Whether freed pages are tracked for [`Self::reclaim`]; a db created
+    /// before that is converted with one `VACUUM`, which rewrites the whole
+    /// file. Outside any transaction; `false` when the conversion could not
+    /// run (another connection busy), to be tried again by the next caller.
+    pub fn ensure_incremental_vacuum(&self) -> Result<bool> {
+        let mode: i64 = self
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        if mode == AUTO_VACUUM_INCREMENTAL {
+            return Ok(true);
+        }
+        self.conn
+            .pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        Ok(self.conn.execute_batch("VACUUM").is_ok())
+    }
+
+    /// Hand the free pages back to the file system; with an empty free list
+    /// it costs one statement and frees nothing. Outside any transaction.
+    ///
+    /// The pragma frees one page per result row it yields, so it is stepped
+    /// to the end: `execute_batch` steps once and would free a single page.
+    pub fn reclaim(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA incremental_vacuum")?;
+        let mut rows = stmt.query([])?;
+        while rows.next()?.is_some() {}
         Ok(())
     }
 
@@ -607,28 +697,7 @@ impl GraphStore {
             })
             .optional()?;
         let id = if let Some(id) = existing {
-            tx.exec_cached(
-                "DELETE FROM edges WHERE src_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached(
-                "DELETE FROM edges WHERE dst_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached(
-                "DELETE FROM symbol_crux WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM imports WHERE file_id = ?1", params![id])?;
-            tx.exec_cached(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
-            tx.exec_cached(
-                "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM ruby_mixins WHERE file_id = ?1", params![id])?;
+            delete_file_rows(&tx, id)?;
             tx.exec_cached(
                 "UPDATE files SET blob_oid = ?2, lang = ?3 WHERE id = ?1",
                 params![id, blob_oid, lang],
@@ -655,29 +724,43 @@ impl GraphStore {
             })
             .optional()?
         {
-            tx.exec_cached(
-                "DELETE FROM edges WHERE src_id IN (SELECT id FROM symbols WHERE file_id = ?1)
-                   OR dst_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached(
-                "DELETE FROM symbol_crux WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM imports WHERE file_id = ?1", params![id])?;
-            tx.exec_cached(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
-            tx.exec_cached(
-                "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
-                params![id],
-            )?;
-            tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
-            tx.exec_cached("DELETE FROM ruby_mixins WHERE file_id = ?1", params![id])?;
+            delete_file_rows(&tx, id)?;
             tx.exec_cached("DELETE FROM files WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Persist syntax separately so assigned method names cannot enter resolution tiers.
+    pub fn set_js_assignment_facts(&self, file_id: i64, facts: &JsAssignmentFacts) -> Result<()> {
+        let json = serde_json::to_string(facts)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        self.conn.exec_cached(
+            "INSERT OR REPLACE INTO js_assignment_facts (file_id, facts) VALUES (?1, ?2)",
+            params![file_id, json],
+        )?;
+        Ok(())
+    }
+
+    /// Read version-bound syntax evidence; absence says nothing about runtime aliases.
+    pub fn js_assignment_facts(&self, file_id: i64) -> Result<Option<JsAssignmentFacts>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT facts FROM js_assignment_facts WHERE file_id = ?1",
+                [file_id],
+                |row| {
+                    let json: String = row.get(0)?;
+                    serde_json::from_str(&json).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// Record that `symbol_id` implements a trait method: it is called
@@ -867,6 +950,52 @@ impl GraphStore {
             params![file_id, name, enclosing_symbol_id, site_line, receiver, kind],
         )?;
         Ok(())
+    }
+
+    /// Counts `n` more unresolved calls from `symbol_id` to names no symbol
+    /// carries, which no `unresolved_calls` row records.
+    pub fn add_unnamed_calls(&self, symbol_id: i64, n: i64) -> Result<()> {
+        self.conn.exec_cached(
+            "UPDATE symbols SET unnamed_calls = unnamed_calls + ?2 WHERE id = ?1",
+            params![symbol_id, n],
+        )?;
+        Ok(())
+    }
+
+    /// The unresolved call sites inside `symbol_id`: its `unresolved_calls`
+    /// rows of kind `calls`, and the calls to names no symbol carries,
+    /// which only a count records. What `uses … callees` reports as the
+    /// callees its answer may miss.
+    pub fn unresolved_outgoing(&self, symbol_id: i64) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM unresolved_calls
+                      WHERE enclosing_symbol_id = ?1 AND kind = 'calls')
+                  + COALESCE((SELECT unnamed_calls FROM symbols WHERE id = ?1), 0)",
+            params![symbol_id],
+            |r| r.get(0),
+        )?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    /// Record that the file `file_id` calls `name`, which no symbol carries
+    /// (`unresolved_names`); once per file and name.
+    pub fn insert_unresolved_name(&self, file_id: i64, name: &str) -> Result<()> {
+        self.conn.exec_cached(
+            "INSERT OR IGNORE INTO unresolved_names (file_id, name) VALUES (?1, ?2)",
+            params![file_id, name],
+        )?;
+        Ok(())
+    }
+
+    /// The paths of the files that call `name` while no symbol carries it
+    /// (`unresolved_names`), sorted.
+    pub fn files_calling_unnamed(&self, name: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.path FROM unresolved_names u JOIN files f ON f.id = u.file_id
+              WHERE u.name = ?1 ORDER BY f.path",
+        )?;
+        let rows = stmt.query_map(params![name], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn insert_jsx_element(
@@ -1360,6 +1489,56 @@ impl GraphStore {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// The symbols `name` designates: those called `name`, else, when `name`
+    /// is qualified (`ActionLog::finish`, `Builder.finish`), those whose
+    /// qualified name ends with it.
+    ///
+    /// Every lookup a user's name reaches goes through here, so an agent
+    /// can write a method the way the graph prints it in a uid. `::` and
+    /// `.` are the same separator: the stored spelling differs by language
+    /// (Rust `Owner::leaf`, Ruby `Module::Class.method`, Python and
+    /// JavaScript `Owner.leaf`), the agent's need not follow it. A stored
+    /// name that ends the input matches too, so a module path the graph
+    /// does not record (`pixel_actionlog::ActionLog::finish`) still finds
+    /// `ActionLog::finish`; the overlap is always at least `Owner.leaf`.
+    pub fn symbols_named(
+        &self,
+        name: &str,
+        scope: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SymbolRow>> {
+        let rows = self.symbols_by_name(name, scope, limit)?;
+        let Some(leaf) = qualified_leaf(name) else {
+            return Ok(rows);
+        };
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+        let dotted = name.replace("::", ".");
+        // `nq` is the stored qualified name in the same dotted spelling.
+        // Either side ends the other on a segment boundary: the input is a
+        // suffix of `nq` (`Log.finish` in `ActionLog.finish` does not
+        // count, the character before must be a dot), or `nq`, qualified
+        // itself, is a suffix of the input.
+        let sql = format!(
+            "SELECT {} FROM (SELECT *, replace(qualified, '::', '.') AS nq FROM symbols \
+               WHERE name = ?1 \
+                 AND (?2 IS NULL OR file_id IN \
+                   (SELECT id FROM files \
+                     WHERE path = ?2 OR substr(path, 1, length(?2) + 1) = ?2 || '/'))) \
+             WHERE (substr(nq, -length(?3)) = ?3 \
+                     AND (length(nq) = length(?3) OR substr(nq, -length(?3) - 1, 1) = '.')) \
+                OR (instr(nq, '.') > 0 AND length(?3) > length(nq) \
+                     AND substr(?3, -length(nq)) = nq \
+                     AND substr(?3, -length(nq) - 1, 1) = '.') \
+             ORDER BY kind, uid LIMIT ?4",
+            Self::SYMBOL_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![leaf, scope, dotted, limit], Self::row_to_symbol)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn symbols_in_file(&self, file_id: i64) -> Result<Vec<SymbolRow>> {
         let sql = format!(
             "SELECT {} FROM symbols WHERE file_id = ?1 ORDER BY start_line",
@@ -1681,7 +1860,38 @@ impl GraphStore {
     }
 }
 
+const DELETE_FILE_JS_ASSIGNMENTS: &str = "DELETE FROM js_assignment_facts WHERE file_id = ?1";
+
+/// Every row a file owns, in the order `replace_file` and `remove_file`
+/// delete them (children before the symbols they point at); each takes the
+/// file id as `?1`. The `files` row itself is the caller's.
+const PER_FILE_DELETES: &[&str] = &[
+    "DELETE FROM edges WHERE src_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+    "DELETE FROM edges WHERE dst_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+    "DELETE FROM symbol_crux WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+    "DELETE FROM symbols WHERE file_id = ?1",
+    "DELETE FROM imports WHERE file_id = ?1",
+    DELETE_FILE_UNRESOLVED_CALLS,
+    DELETE_FILE_UNRESOLVED_NAMES,
+    "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
+    "DELETE FROM concepts WHERE file_id = ?1",
+    "DELETE FROM jsx_elements WHERE file_id = ?1",
+    "DELETE FROM ruby_mixins WHERE file_id = ?1",
+    DELETE_FILE_JS_ASSIGNMENTS,
+];
+
+fn delete_file_rows(conn: &Connection, id: i64) -> Result<()> {
+    for sql in PER_FILE_DELETES {
+        conn.exec_cached(sql, params![id])?;
+    }
+    Ok(())
+}
+
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS js_assignment_facts (
+  file_id INTEGER PRIMARY KEY,
+  facts TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY,
   path TEXT NOT NULL UNIQUE,
@@ -1699,7 +1909,10 @@ CREATE TABLE IF NOT EXISTS symbols (
   end_line INTEGER NOT NULL,
   sig TEXT NOT NULL DEFAULT '',
   trait_impl INTEGER NOT NULL DEFAULT 0,
-  module_decl INTEGER NOT NULL DEFAULT 0
+  module_decl INTEGER NOT NULL DEFAULT 0,
+  -- Unresolved calls the symbol makes to names no symbol carries: counted
+  -- here instead of stored per site (`GraphStore::unresolved_outgoing`).
+  unnamed_calls INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
@@ -1739,6 +1952,15 @@ CREATE INDEX IF NOT EXISTS idx_unresolved_name ON unresolved_calls(name);
 -- per file of an incremental batch; without this index each delete scans the
 -- whole table (552k rows on a 9.6k-file Ruby repository, ~20 ms a file).
 CREATE INDEX IF NOT EXISTS idx_unresolved_file ON unresolved_calls(file_id);
+-- A call whose name no symbol carries, once per file and name instead of
+-- once per site: it can be no symbol's caller, and only a later definition
+-- of the name makes its file worth reading again (`write_rows`).
+CREATE TABLE IF NOT EXISTS unresolved_names (
+  file_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  PRIMARY KEY (file_id, name)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_unresolved_names_name ON unresolved_names(name);
 CREATE TABLE IF NOT EXISTS processes (
   id INTEGER PRIMARY KEY,
   label TEXT NOT NULL,
@@ -1868,6 +2090,12 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if !has_column("symbols", "unnamed_calls")? {
+        conn.execute(
+            "ALTER TABLE symbols ADD COLUMN unnamed_calls INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     if !has_column("symbols", "module_decl")? {
         conn.execute(
             "ALTER TABLE symbols ADD COLUMN module_decl INTEGER NOT NULL DEFAULT 0",
@@ -1930,6 +2158,38 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The statements [`record_statement`] saw, on the one connection a test
+    /// traces.
+    static STATEMENTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    fn record_statement(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            STATEMENTS.lock().unwrap().push(sql.to_string());
+        }
+    }
+
+    #[test]
+    fn a_write_transaction_refreshes_the_planner_statistics_before_it_commits() {
+        let store = super::GraphStore::open_in_memory().unwrap();
+        store.conn().trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(record_statement),
+        );
+        store.begin_write().unwrap();
+        store.meta_set("k", "v").unwrap();
+        store.commit_write().unwrap();
+        let statements = std::mem::take(&mut *STATEMENTS.lock().unwrap());
+        let at = |sql: &str| {
+            statements
+                .iter()
+                .position(|s| s.trim().trim_end_matches(';') == sql)
+        };
+        let optimize = at("PRAGMA optimize");
+        assert!(optimize.is_some(), "{statements:?}");
+        assert!(at("COMMIT") > optimize, "{statements:?}");
+        assert_eq!(store.meta_get("k").unwrap().as_deref(), Some("v"));
+    }
+
     #[test]
     fn concepts_version_reads_the_stamped_schema_version() {
         let store = super::GraphStore::open_in_memory().unwrap();

@@ -168,7 +168,7 @@ gh secret list | grep HOMEBREW_TAP_TOKEN
 
 ## 2. Pick the version
 
-Read `changelog.d/` in the repository root and the last tag. Pre-1.0
+Read `.github/changelog.d/` in the repository root and the last tag. Pre-1.0
 convention in this repo:
 
 - **patch** (`0.2.4` → `0.2.5`): fixes, additions, renames that keep the old
@@ -176,9 +176,7 @@ convention in this repo:
 - **minor** (`0.2.x` → `0.3.0`): something a user of the previous minor must
   act on — a removed command or flag with no alias, a changed JSON output or
   protocol field, a changed on-disk format under `.pixel/`, an install layout
-  that `pixel install` does not migrate.
-- `1.0.0` also removes the hidden pre-rename aliases (0.2.5's `Changed`
-  entry promises it); do not cut it by accident.
+  that `pixel setup` does not migrate.
 
 Pick the version by that convention, state it with its one-line reason in a
 progress line, and go on; stop only on the cases Authority lists. Check that
@@ -188,7 +186,7 @@ tag (`git cat-file -e v<last>:<path>`, or `git grep` the command at the tag):
 had ever held, so it was no reason for a minor and no entry at all. Start the
 record.
 
-Then write `changelog.d/_highlights.md` on the release branch, unless the
+Then write `.github/changelog.d/_highlights.md` on the release branch, unless the
 release is a handful of unrelated fixes: a lead paragraph saying what this
 release is about, then a `### Highlights` list of two or three bullets. It
 becomes the top of the released section and of the GitHub release body, which
@@ -220,14 +218,18 @@ pixel new-branch release-x.y.z --from "origin/$TARGET" --request-id "release-x.y
 ```
 
 `prepare.sh` refuses before writing when the tag or the `## [x.y.z]` heading
-already exists, `changelog.d/` holds no fragment, or `## [Unreleased]` still
-carries a bullet of its own. Otherwise it:
+already exists, `.github/changelog.d/` holds no fragment, or `## [Unreleased]` still
+carries a bullet of its own. It also refuses before writing when
+`scripts/ci/check-claims.py --version x.y.z` fails, naming each claim in
+`docs/bench/claims.toml` the new version would leave more than one minor
+behind with no `tracking` issue: the prepare PR may not edit the registry and
+skips the CI job that checks it, so a stale claim would only turn the merge
+commit red (0.10.0, #1359). Re-measure it (`scripts/bench/refresh-claim.sh
+<id>`) or add `tracking = "#<issue>"` to its entry through a pull request into
+`$TARGET`, merge that, then prepare from the new base. Otherwise it:
 
 1. sets `[package] version` to `x.y.z` in **every** workspace member
-   (lockstep, as 0.2.4 did), and `version` in every plugin manifest
-   (`pixel_release::PLUGIN_MANIFESTS`), then regenerates the plugin prompt
-   surfaces with `scripts/gen-plugin-assets.sh`: Claude Code and Codex deliver
-   a plugin update only when its version changes;
+   (lockstep, as 0.2.4 did);
 2. folds the fragments into a new `## [x.y.z] - DATE` under a kept, now empty
    `## [Unreleased]`, led by `_highlights.md` when there is one and then
    grouped by section in the order the headings have always used, and deletes
@@ -269,12 +271,12 @@ It must end with `release-check: all checks passed`. Then:
   a hook or an install target that the threat model does not name gets a
   `docs` pull request into `main` before the tag, not an edit here (the
   `scope` rule below refuses it).
-- **Diff.** `prepare.sh` ends with `scripts/release-prepare-only.py HEAD`,
+- **Diff.** `prepare.sh` ends with `scripts/release/release-prepare-only.py HEAD`,
   the rule CI's `scope` job applies: only version lines (all member `Cargo.toml`,
-  `Cargo.lock`, the 7 plugin manifests), `CHANGELOG.md` and deleted
-  `changelog.d/*.md` fragments. A refusal names each offending file: it is a
+  `Cargo.lock`), `CHANGELOG.md` and deleted
+  `.github/changelog.d/*.md` fragments. A refusal names each offending file: it is a
   bug in the release branch, not something to push.
-- **Gates.** `GIT_CONFIG_GLOBAL=/dev/null scripts/gates.sh --force` (fmt,
+- **Gates.** `GIT_CONFIG_GLOBAL=/dev/null scripts/ci/gates.sh --force` (fmt,
   clippy, tests). Without `GIT_CONFIG_GLOBAL`, a developer's global git
   config fails tests that CI passes (`blame.ignoreRevsFile`,
   `rerere`/`mergiraf` in the provenance and reconcile tests); a red gate that
@@ -287,7 +289,7 @@ A log wrapper must return the gate's status even after printing its tail:
 
 ```bash
 rc=0
-GIT_CONFIG_GLOBAL=/dev/null scripts/gates.sh --force >"$log" 2>&1 || rc=$?
+GIT_CONFIG_GLOBAL=/dev/null scripts/ci/gates.sh --force >"$log" 2>&1 || rc=$?
 tail -30 "$log"
 exit "$rc"
 ```
@@ -417,7 +419,7 @@ shasum -a 256 -c ./*.sha256                            # 3 × OK
 for f in ./*.sha256; do grep -c "$(awk '{print $1}' "$f")" pixel.rb; done   # darwin 2, each musl 1: the formula carries the real hashes (darwin is also the formula's top-level url)
 for b in ./*.bottle.tar.gz; do grep -c "$(shasum -a 256 "$b" | awk '{print $1}')" pixel.rb; done   # 1 each: the bottle block names the published bottles
 curl -fsSL "https://github.com/Pixel-CLI/pixel/archive/refs/tags/$V.tar.gz" | shasum -a 256 | awk '{print $1}' | xargs -I{} grep -c {} pixel-core.rb   # 1: the core formula names the tag's source archive
-git -C <repo> show "${V}:scripts/install.sh" | diff - install.sh && echo "install.sh == tag's"
+git -C <repo> show "${V}:scripts/release/install.sh" | diff - install.sh && echo "install.sh == tag's"
 gh api repos/LivioGama/homebrew-tap/contents/Formula/pixel.rb --jq .content \
   | base64 -d | diff - pixel.rb && echo "tap == release formula"
 tar xzf pixel-$V-aarch64-apple-darwin.tar.gz
@@ -492,7 +494,7 @@ ship yet:
    (`git push origin vx.y.<last>^{commit}:refs/heads/release/x.y`). On a
    `release-x.y.z` branch from `origin/release/x.y`,
    `git cherry-pick -x <fix merge sha>` (`-m 1` for a merge commit), add its
-   `changelog.d/<slug>.<section>.md` fragment, then `prepare.sh x.y.z` and the
+   `.github/changelog.d/<slug>.<section>.md` fragment, then `prepare.sh x.y.z` and the
    gates as in step 3; PR into `release/x.y`.
 3. Tag that PR's merge commit (step 4) and verify (step 5). `smoke` notices
    install.sh as not checked when a newer line is already the latest release.

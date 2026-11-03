@@ -1,0 +1,1527 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
+//! `pixel classify-eval` — offline go/no-go evaluation of the verified-history
+//! retrieval tier against frozen baselines.
+//!
+//! The dataset, split, baselines and decision criteria are frozen before any
+//! test result is examined. The eval reports per-label precision/recall, macro
+//! scores, a confusion matrix, accepted-coverage vs error curves with Wilson
+//! confidence intervals, and system metrics (fallback rate, model calls
+//! avoided, measured tier and modeled end-to-end latency, storage, error rate).
+//! The evaluation never calls a model, so the fallback path is modeled from the
+//! `--model-error-rate` and `--model-latency-ms` assumptions and labelled as
+//! such. A pre-registered error bound and minimum useful coverage determine
+//! the go/no-go verdict, and even a tier that meets those absolute bounds is
+//! held to a no-go when the strongest frozen baseline already answers with
+//! lower error at equal or better coverage: insufficient data or no measured
+//! gain yields a published no-go result.
+
+use std::collections::BTreeMap;
+use std::time::Instant;
+
+use serde_json::{Value, json};
+
+use crate::classify_history::{self, HistoryDecision, HistoryStore, HistoryTier, NewEntry};
+use crate::prompt_intent;
+
+// ---------------------------------------------------------------------------
+// Frozen dataset
+// ---------------------------------------------------------------------------
+
+/// One curated example in the frozen evaluation dataset.
+#[derive(Debug, Clone)]
+pub struct EvalExample {
+    pub text: &'static str,
+    pub label: &'static str,
+    #[allow(dead_code)]
+    pub family: &'static str,
+    /// Unix timestamp for the temporal split.
+    pub created_unix: u64,
+}
+
+/// The frozen dataset: task-intent examples with verified labels, split by
+/// time and family. This is the complete evaluation set — no examples are
+/// added or removed after the decision criteria are frozen.
+pub static FROZEN_DATASET: &[EvalExample] = &[
+    // --- bugfix family ---
+    EvalExample {
+        text: "fix the login bug",
+        label: "bugfix",
+        family: "bugfix",
+        created_unix: 1_700_000_000,
+    },
+    EvalExample {
+        text: "login is broken",
+        label: "bugfix",
+        family: "bugfix",
+        created_unix: 1_700_100_000,
+    },
+    EvalExample {
+        text: "crash on startup",
+        label: "bugfix",
+        family: "bugfix",
+        created_unix: 1_700_200_000,
+    },
+    EvalExample {
+        text: "null pointer in auth",
+        label: "bugfix",
+        family: "bugfix",
+        created_unix: 1_700_300_000,
+    },
+    EvalExample {
+        text: "fix broken redirect",
+        label: "bugfix",
+        family: "bugfix",
+        created_unix: 1_700_400_000,
+    },
+    // --- feature family ---
+    EvalExample {
+        text: "add dark mode",
+        label: "feature",
+        family: "feature",
+        created_unix: 1_700_000_100,
+    },
+    EvalExample {
+        text: "new export button",
+        label: "feature",
+        family: "feature",
+        created_unix: 1_700_100_100,
+    },
+    EvalExample {
+        text: "support csv upload",
+        label: "feature",
+        family: "feature",
+        created_unix: 1_700_200_100,
+    },
+    EvalExample {
+        text: "add keyboard shortcuts",
+        label: "feature",
+        family: "feature",
+        created_unix: 1_700_300_100,
+    },
+    EvalExample {
+        text: "implement search filter",
+        label: "feature",
+        family: "feature",
+        created_unix: 1_700_400_100,
+    },
+    // --- refactor family ---
+    EvalExample {
+        text: "extract helper function",
+        label: "refactor",
+        family: "refactor",
+        created_unix: 1_700_000_200,
+    },
+    EvalExample {
+        text: "rename variables for clarity",
+        label: "refactor",
+        family: "refactor",
+        created_unix: 1_700_100_200,
+    },
+    EvalExample {
+        text: "simplify conditional logic",
+        label: "refactor",
+        family: "refactor",
+        created_unix: 1_700_200_200,
+    },
+    EvalExample {
+        text: "remove dead code",
+        label: "refactor",
+        family: "refactor",
+        created_unix: 1_700_300_200,
+    },
+    EvalExample {
+        text: "consolidate duplicate handlers",
+        label: "refactor",
+        family: "refactor",
+        created_unix: 1_700_400_200,
+    },
+    // --- investigate family ---
+    EvalExample {
+        text: "why is the build slow",
+        label: "investigate",
+        family: "investigate",
+        created_unix: 1_700_000_300,
+    },
+    EvalExample {
+        text: "trace memory leak",
+        label: "investigate",
+        family: "investigate",
+        created_unix: 1_700_100_300,
+    },
+    EvalExample {
+        text: "profile database queries",
+        label: "investigate",
+        family: "investigate",
+        created_unix: 1_700_200_300,
+    },
+    EvalExample {
+        text: "find root cause of timeout",
+        label: "investigate",
+        family: "investigate",
+        created_unix: 1_700_300_300,
+    },
+    EvalExample {
+        text: "analyze error logs",
+        label: "investigate",
+        family: "investigate",
+        created_unix: 1_700_400_300,
+    },
+    // --- question family ---
+    EvalExample {
+        text: "how do I configure oauth",
+        label: "question",
+        family: "question",
+        created_unix: 1_700_000_400,
+    },
+    EvalExample {
+        text: "what is the deployment process",
+        label: "question",
+        family: "question",
+        created_unix: 1_700_100_400,
+    },
+    EvalExample {
+        text: "where are secrets stored",
+        label: "question",
+        family: "question",
+        created_unix: 1_700_200_400,
+    },
+    EvalExample {
+        text: "how to set up ci",
+        label: "question",
+        family: "question",
+        created_unix: 1_700_300_400,
+    },
+    EvalExample {
+        text: "what does this flag do",
+        label: "question",
+        family: "question",
+        created_unix: 1_700_400_400,
+    },
+    // --- review family ---
+    EvalExample {
+        text: "review this pr",
+        label: "review",
+        family: "review",
+        created_unix: 1_700_000_500,
+    },
+    EvalExample {
+        text: "check code quality",
+        label: "review",
+        family: "review",
+        created_unix: 1_700_100_500,
+    },
+    EvalExample {
+        text: "audit security implications",
+        label: "review",
+        family: "review",
+        created_unix: 1_700_200_500,
+    },
+    EvalExample {
+        text: "verify error handling",
+        label: "review",
+        family: "review",
+        created_unix: 1_700_300_500,
+    },
+    EvalExample {
+        text: "review migration safety",
+        label: "review",
+        family: "review",
+        created_unix: 1_700_400_500,
+    },
+    // --- ops family ---
+    EvalExample {
+        text: "rotate api keys",
+        label: "ops",
+        family: "ops",
+        created_unix: 1_700_000_600,
+    },
+    EvalExample {
+        text: "restart the staging server",
+        label: "ops",
+        family: "ops",
+        created_unix: 1_700_100_600,
+    },
+    EvalExample {
+        text: "update dns records",
+        label: "ops",
+        family: "ops",
+        created_unix: 1_700_200_600,
+    },
+    EvalExample {
+        text: "scale up workers",
+        label: "ops",
+        family: "ops",
+        created_unix: 1_700_300_600,
+    },
+    EvalExample {
+        text: "backup the database",
+        label: "ops",
+        family: "ops",
+        created_unix: 1_700_400_600,
+    },
+];
+
+/// The temporal split threshold: examples before this timestamp form the
+/// training set (stored in history), examples at or after form the test set.
+pub static SPLIT_UNIX: u64 = 1_700_250_000;
+
+/// The pre-registered decision criteria, frozen before any test result is
+/// examined.
+#[derive(Debug, Clone, Copy)]
+pub struct DecisionCriteria {
+    /// Maximum acceptable error rate on the test set (fraction wrong).
+    pub max_error_rate: f64,
+    /// Minimum useful coverage: the fraction of test examples the tier must
+    /// answer (accept) to be worth the added complexity.
+    pub min_coverage: f64,
+    /// Minimum number of test examples required for a statistically
+    /// meaningful evaluation.
+    pub min_test_examples: usize,
+}
+
+impl Default for DecisionCriteria {
+    fn default() -> Self {
+        Self {
+            max_error_rate: 0.15,
+            min_coverage: 0.30,
+            min_test_examples: 10,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Baselines
+// ---------------------------------------------------------------------------
+
+/// A baseline classifier: maps text to a label (or None to abstain).
+pub trait Baseline {
+    fn name(&self) -> &'static str;
+    fn predict(&self, text: &str) -> Option<String>;
+}
+
+/// Keyword baseline: matches text against per-label keyword lists.
+pub struct KeywordBaseline;
+
+impl Baseline for KeywordBaseline {
+    fn name(&self) -> &'static str {
+        "keyword"
+    }
+
+    fn predict(&self, text: &str) -> Option<String> {
+        let text = text.to_lowercase();
+        for (label, keywords) in KEYWORD_MAP {
+            if keywords.iter().any(|kw| text.contains(kw)) {
+                return Some(label.to_string());
+            }
+        }
+        None
+    }
+}
+
+/// Exact lookup baseline: matches text against stored examples verbatim.
+pub struct ExactLookupBaseline {
+    examples: Vec<(String, String)>,
+}
+
+impl ExactLookupBaseline {
+    pub fn new(examples: &[(String, String)]) -> Self {
+        Self {
+            examples: examples.to_vec(),
+        }
+    }
+}
+
+impl Baseline for ExactLookupBaseline {
+    fn name(&self) -> &'static str {
+        "exact-lookup"
+    }
+
+    fn predict(&self, text: &str) -> Option<String> {
+        self.examples
+            .iter()
+            .find(|(t, _)| t == text)
+            .map(|(_, l)| l.clone())
+    }
+}
+
+/// Nearest-neighbour voting baseline: finds the k most similar training
+/// examples and takes a majority vote.
+pub struct NnBaseline {
+    examples: Vec<(String, String)>,
+    k: usize,
+}
+
+impl NnBaseline {
+    pub fn new(examples: &[(String, String)], k: usize) -> Self {
+        Self {
+            examples: examples.to_vec(),
+            k,
+        }
+    }
+}
+
+impl Baseline for NnBaseline {
+    fn name(&self) -> &'static str {
+        "nn-voting"
+    }
+
+    fn predict(&self, text: &str) -> Option<String> {
+        let mut scored: Vec<(f64, &str)> = self
+            .examples
+            .iter()
+            .map(|(t, l)| (classify_history::text_similarity(text, t), l.as_str()))
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut votes: BTreeMap<&str, f64> = BTreeMap::new();
+        for (sim, label) in scored.iter().take(self.k) {
+            *votes.entry(label).or_insert(0.0) += sim;
+        }
+        votes
+            .into_iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(l, _)| l.to_string())
+    }
+}
+
+static KEYWORD_MAP: &[(&str, &[&str])] = &[
+    (
+        "bugfix",
+        &["fix", "bug", "broken", "crash", "error", "null"],
+    ),
+    ("feature", &["add", "new", "implement", "support", "create"]),
+    (
+        "refactor",
+        &[
+            "refactor",
+            "rename",
+            "simplify",
+            "extract",
+            "consolidate",
+            "dead code",
+        ],
+    ),
+    (
+        "investigate",
+        &[
+            "why",
+            "trace",
+            "profile",
+            "find",
+            "analyze",
+            "investigate",
+            "root cause",
+        ],
+    ),
+    ("question", &["how", "what", "where", "when", "which"]),
+    ("review", &["review", "check", "audit", "verify", "inspect"]),
+    (
+        "ops",
+        &["rotate", "restart", "update", "scale", "backup", "deploy"],
+    ),
+];
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+/// Per-label precision and recall.
+#[derive(Debug, Clone, Default)]
+pub struct LabelMetrics {
+    pub precision: f64,
+    pub recall: f64,
+    pub f1: f64,
+    pub support: usize,
+}
+
+/// Confusion matrix: actual label → predicted label → count.
+pub type ConfusionMatrix = BTreeMap<String, BTreeMap<String, usize>>;
+
+/// One point on the coverage-vs-error curve.
+#[derive(Debug, Clone)]
+pub struct CurvePoint {
+    /// Fraction of test examples answered (accepted).
+    pub coverage: f64,
+    /// Error rate among accepted examples.
+    pub error_rate: f64,
+    /// Wilson score interval lower bound.
+    pub ci_low: f64,
+    /// Wilson score interval upper bound.
+    pub ci_high: f64,
+    /// Number of accepted examples at this threshold.
+    pub n_accepted: usize,
+}
+
+/// Complete evaluation metrics for one classifier.
+#[derive(Debug, Clone, Default)]
+pub struct EvalMetrics {
+    pub per_label: BTreeMap<String, LabelMetrics>,
+    pub macro_precision: f64,
+    pub macro_recall: f64,
+    pub macro_f1: f64,
+    pub accuracy: f64,
+    pub coverage: f64,
+    pub error_rate: f64,
+    pub confusion: ConfusionMatrix,
+    pub curve: Vec<CurvePoint>,
+}
+
+/// Compute Wilson score interval for a binomial proportion.
+fn wilson_interval(successes: usize, total: usize, z: f64) -> (f64, f64) {
+    if total == 0 {
+        return (0.0, 1.0);
+    }
+    let n = total as f64;
+    let p = successes as f64 / n;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let centre = (p + z2 / (2.0 * n)) / denom;
+    let margin = (z / denom) * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
+    ((centre - margin).max(0.0), (centre + margin).min(1.0))
+}
+
+/// Evaluate a baseline against the frozen dataset.
+pub fn evaluate_baseline(baseline: &dyn Baseline, test_set: &[&EvalExample]) -> EvalMetrics {
+    let mut metrics = EvalMetrics::default();
+    let mut correct = 0usize;
+    let mut answered = 0usize;
+    let mut label_tp: BTreeMap<String, usize> = BTreeMap::new();
+    let mut label_fp: BTreeMap<String, usize> = BTreeMap::new();
+    let mut label_fn: BTreeMap<String, usize> = BTreeMap::new();
+    let mut label_support: BTreeMap<String, usize> = BTreeMap::new();
+
+    for ex in test_set {
+        *label_support.entry(ex.label.to_string()).or_insert(0) += 1;
+        if let Some(pred) = baseline.predict(ex.text) {
+            answered += 1;
+            if pred == ex.label {
+                correct += 1;
+                *label_tp.entry(ex.label.to_string()).or_insert(0) += 1;
+            } else {
+                *label_fp.entry(pred.clone()).or_insert(0) += 1;
+                *label_fn.entry(ex.label.to_string()).or_insert(0) += 1;
+            }
+            // Every prediction fills its cell, including the diagonal: a
+            // matrix that records only misses cannot be summed per class.
+            *metrics
+                .confusion
+                .entry(ex.label.to_string())
+                .or_default()
+                .entry(pred.clone())
+                .or_insert(0) += 1;
+        } else {
+            *label_fn.entry(ex.label.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let total = test_set.len();
+    metrics.coverage = if total > 0 {
+        answered as f64 / total as f64
+    } else {
+        0.0
+    };
+    metrics.accuracy = if answered > 0 {
+        correct as f64 / answered as f64
+    } else {
+        0.0
+    };
+    metrics.error_rate = if answered > 0 {
+        1.0 - metrics.accuracy
+    } else {
+        1.0
+    };
+
+    for (label, &support) in &label_support {
+        let tp = *label_tp.get(label).unwrap_or(&0);
+        let fp = *label_fp.get(label).unwrap_or(&0);
+        let fn_ = *label_fn.get(label).unwrap_or(&0);
+        let precision = if tp + fp > 0 {
+            tp as f64 / (tp + fp) as f64
+        } else {
+            0.0
+        };
+        let recall = if tp + fn_ > 0 {
+            tp as f64 / (tp + fn_) as f64
+        } else {
+            0.0
+        };
+        let f1 = if precision + recall > 0.0 {
+            2.0 * precision * recall / (precision + recall)
+        } else {
+            0.0
+        };
+        metrics.per_label.insert(
+            label.clone(),
+            LabelMetrics {
+                precision,
+                recall,
+                f1,
+                support,
+            },
+        );
+    }
+
+    let n_labels = metrics.per_label.len().max(1);
+    metrics.macro_precision =
+        metrics.per_label.values().map(|m| m.precision).sum::<f64>() / n_labels as f64;
+    metrics.macro_recall =
+        metrics.per_label.values().map(|m| m.recall).sum::<f64>() / n_labels as f64;
+    metrics.macro_f1 = metrics.per_label.values().map(|m| m.f1).sum::<f64>() / n_labels as f64;
+
+    metrics
+}
+
+/// Evaluate the history tier against the frozen dataset.
+pub fn evaluate_tier(
+    tier: &HistoryTier,
+    test_set: &[&EvalExample],
+    spec_fn: impl Fn(&str) -> crate::classify::Spec,
+) -> EvalMetrics {
+    let mut metrics = EvalMetrics::default();
+    let mut correct = 0usize;
+    let mut answered = 0usize;
+    let mut label_tp: BTreeMap<String, usize> = BTreeMap::new();
+    let mut label_fp: BTreeMap<String, usize> = BTreeMap::new();
+    let mut label_fn: BTreeMap<String, usize> = BTreeMap::new();
+    let mut label_support: BTreeMap<String, usize> = BTreeMap::new();
+    // One (confidence, correct) pair per accepted example: the coverage-vs-error
+    // curve needs per-example correctness, not only the aggregate.
+    let mut accept_results: Vec<(f64, bool)> = Vec::new();
+
+    for ex in test_set {
+        *label_support.entry(ex.label.to_string()).or_insert(0) += 1;
+        let spec = spec_fn(ex.text);
+        match tier.evaluate(&spec) {
+            HistoryDecision::Accept(verdict) => {
+                answered += 1;
+                let is_correct = verdict.label == ex.label;
+                accept_results.push((verdict.confidence, is_correct));
+                if is_correct {
+                    correct += 1;
+                    *label_tp.entry(ex.label.to_string()).or_insert(0) += 1;
+                } else {
+                    *label_fp.entry(verdict.label.clone()).or_insert(0) += 1;
+                    *label_fn.entry(ex.label.to_string()).or_insert(0) += 1;
+                }
+                // Every accepted prediction fills its cell, including the
+                // diagonal, so each row sums to that class's accepted count.
+                *metrics
+                    .confusion
+                    .entry(ex.label.to_string())
+                    .or_default()
+                    .entry(verdict.label.clone())
+                    .or_insert(0) += 1;
+            }
+            HistoryDecision::Abstain(_) => {
+                *label_fn.entry(ex.label.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let total = test_set.len();
+    metrics.coverage = if total > 0 {
+        answered as f64 / total as f64
+    } else {
+        0.0
+    };
+    metrics.accuracy = if answered > 0 {
+        correct as f64 / answered as f64
+    } else {
+        0.0
+    };
+    metrics.error_rate = if answered > 0 {
+        1.0 - metrics.accuracy
+    } else {
+        1.0
+    };
+
+    for (label, &support) in &label_support {
+        let tp = *label_tp.get(label).unwrap_or(&0);
+        let fp = *label_fp.get(label).unwrap_or(&0);
+        let fn_ = *label_fn.get(label).unwrap_or(&0);
+        let precision = if tp + fp > 0 {
+            tp as f64 / (tp + fp) as f64
+        } else {
+            0.0
+        };
+        let recall = if tp + fn_ > 0 {
+            tp as f64 / (tp + fn_) as f64
+        } else {
+            0.0
+        };
+        let f1 = if precision + recall > 0.0 {
+            2.0 * precision * recall / (precision + recall)
+        } else {
+            0.0
+        };
+        metrics.per_label.insert(
+            label.clone(),
+            LabelMetrics {
+                precision,
+                recall,
+                f1,
+                support,
+            },
+        );
+    }
+
+    let n_labels = metrics.per_label.len().max(1);
+    metrics.macro_precision =
+        metrics.per_label.values().map(|m| m.precision).sum::<f64>() / n_labels as f64;
+    metrics.macro_recall =
+        metrics.per_label.values().map(|m| m.recall).sum::<f64>() / n_labels as f64;
+    metrics.macro_f1 = metrics.per_label.values().map(|m| m.f1).sum::<f64>() / n_labels as f64;
+
+    // Coverage-vs-error curve over the accepted examples, highest confidence
+    // first, so every point is a real operating point of the tier's own order.
+    metrics.curve = error_curve(&mut accept_results, total);
+
+    metrics
+}
+
+/// Coverage-vs-error curve over accepted examples.
+///
+/// `accept_results` is one `(confidence, correct)` pair per accepted example;
+/// it is sorted in place by confidence descending. The error count at each
+/// prefix is the number of wrong answers seen so far — a curve that only
+/// repeated the aggregate could not show where the errors actually sit.
+fn error_curve(accept_results: &mut [(f64, bool)], total: usize) -> Vec<CurvePoint> {
+    accept_results.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut cumulative_wrong = 0usize;
+    let mut curve = Vec::with_capacity(accept_results.len());
+    for (i, (_, correct)) in accept_results.iter().enumerate() {
+        let n_accepted = i + 1;
+        if !correct {
+            cumulative_wrong += 1;
+        }
+        let coverage = n_accepted as f64 / total as f64;
+        let error_rate = cumulative_wrong as f64 / n_accepted as f64;
+        let (ci_low, ci_high) = wilson_interval(n_accepted - cumulative_wrong, n_accepted, 1.96);
+        curve.push(CurvePoint {
+            coverage,
+            error_rate,
+            ci_low,
+            ci_high,
+            n_accepted,
+        });
+    }
+    curve
+}
+
+// ---------------------------------------------------------------------------
+// System metrics
+// ---------------------------------------------------------------------------
+
+/// System-level metrics for the tier. Latency and error-after-fallback are
+/// reported twice: the history-tier decision values are *measured* during the
+/// evaluation, while the end-to-end values *model* the fallback by adding the
+/// assumed model latency and error rate to every abstention. The modeled
+/// values are estimates, not measurements, and are labelled as such.
+#[derive(Debug, Clone, Default)]
+pub struct SystemMetrics {
+    /// Fraction of requests that fall through to the model.
+    pub fallback_rate: f64,
+    /// Number of model calls avoided (per 100 requests).
+    pub model_calls_avoided_per_100: f64,
+    /// p50 measured history-tier decision latency in milliseconds.
+    pub p50_tier_latency_ms: f64,
+    /// p95 measured history-tier decision latency in milliseconds.
+    pub p95_tier_latency_ms: f64,
+    /// p50 modeled end-to-end latency in milliseconds (tier decision plus the
+    /// assumed model call on every fallback).
+    pub p50_e2e_latency_ms: f64,
+    /// p95 modeled end-to-end latency in milliseconds.
+    pub p95_e2e_latency_ms: f64,
+    /// Storage footprint in bytes.
+    pub storage_bytes: u64,
+    /// Modeled error rate after fallback (fraction of all requests that are
+    /// wrong), blending measured tier errors with the assumed model error rate.
+    pub error_rate_after_fallback: f64,
+}
+
+/// The modeled fallback assumptions. The offline evaluation never calls a
+/// model, so the fallback path is estimated from these values; they are
+/// surfaced in the report so a machine reader can tell the modeled result
+/// apart from measured runtime evidence.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelAssumptions {
+    /// Assumed model error rate for abstentions (fraction wrong).
+    pub error_rate: f64,
+    /// Assumed model latency for abstentions, in milliseconds.
+    pub latency_ms: f64,
+}
+
+/// A percentile of an already-sorted sample.
+fn percentile(sorted: &[f64], frac: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() as f64 * frac) as usize).min(sorted.len() - 1);
+    sorted[idx]
+}
+
+/// Compute system metrics for the tier.
+pub fn compute_system_metrics(
+    tier: &HistoryTier,
+    test_set: &[&EvalExample],
+    spec_fn: impl Fn(&str) -> crate::classify::Spec,
+    assumptions: ModelAssumptions,
+) -> SystemMetrics {
+    let mut accepted = 0usize;
+    let mut correct = 0usize;
+    let mut tier_latencies_ms: Vec<f64> = Vec::new();
+    let mut e2e_latencies_ms: Vec<f64> = Vec::new();
+
+    for ex in test_set {
+        let start = Instant::now();
+        let spec = spec_fn(ex.text);
+        let decision = tier.evaluate(&spec);
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+
+        match decision {
+            HistoryDecision::Accept(verdict) => {
+                accepted += 1;
+                if verdict.label == ex.label {
+                    correct += 1;
+                }
+                // Accepted: no model call, so tier and end-to-end coincide.
+                tier_latencies_ms.push(elapsed);
+                e2e_latencies_ms.push(elapsed);
+            }
+            HistoryDecision::Abstain(_) => {
+                // Fallback: the model call is modeled, not measured, so the
+                // end-to-end latency adds the assumed model latency.
+                tier_latencies_ms.push(elapsed);
+                e2e_latencies_ms.push(elapsed + assumptions.latency_ms);
+            }
+        }
+    }
+
+    let total = test_set.len();
+    let fallback_rate = if total > 0 {
+        (total - accepted) as f64 / total as f64
+    } else {
+        0.0
+    };
+    let tier_error_rate = if accepted > 0 {
+        1.0 - correct as f64 / accepted as f64
+    } else {
+        0.0
+    };
+    let error_rate_after_fallback = accepted as f64 / total as f64 * tier_error_rate
+        + (total - accepted) as f64 / total as f64 * assumptions.error_rate;
+
+    tier_latencies_ms.sort_by(f64::total_cmp);
+    e2e_latencies_ms.sort_by(f64::total_cmp);
+
+    let storage_bytes = tier.store_len() as u64 * 200; // Approximate bytes per entry.
+
+    SystemMetrics {
+        fallback_rate,
+        model_calls_avoided_per_100: (1.0 - fallback_rate) * 100.0,
+        p50_tier_latency_ms: percentile(&tier_latencies_ms, 0.50),
+        p95_tier_latency_ms: percentile(&tier_latencies_ms, 0.95),
+        p50_e2e_latency_ms: percentile(&e2e_latencies_ms, 0.50),
+        p95_e2e_latency_ms: percentile(&e2e_latencies_ms, 0.95),
+        storage_bytes,
+        error_rate_after_fallback,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Go/no-go decision
+// ---------------------------------------------------------------------------
+
+/// The go/no-go verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Go,
+    NoGo,
+}
+
+impl Verdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Go => "go",
+            Self::NoGo => "no-go",
+        }
+    }
+}
+
+/// The frozen comparator the tier must beat: the baseline with the lowest
+/// error rate (ties broken by higher coverage).
+pub fn strongest_baseline(baselines: &BTreeMap<String, EvalMetrics>) -> Option<&EvalMetrics> {
+    baselines.values().min_by(|a, b| {
+        a.error_rate
+            .total_cmp(&b.error_rate)
+            .then(b.coverage.total_cmp(&a.coverage))
+    })
+}
+
+/// Make the go/no-go decision based on pre-registered criteria. Even when the
+/// tier meets its absolute error and coverage bounds, a `Go` requires measured
+/// gain: if the strongest frozen baseline already answers with lower error at
+/// equal or better coverage, the tier adds nothing and the verdict is `NoGo`.
+pub fn decide(
+    metrics: &EvalMetrics,
+    best_baseline: Option<&EvalMetrics>,
+    criteria: &DecisionCriteria,
+    n_test: usize,
+) -> Verdict {
+    if n_test < criteria.min_test_examples {
+        return Verdict::NoGo;
+    }
+    if metrics.error_rate > criteria.max_error_rate {
+        return Verdict::NoGo;
+    }
+    if metrics.coverage < criteria.min_coverage {
+        return Verdict::NoGo;
+    }
+    if let Some(base) = best_baseline
+        && base.error_rate < metrics.error_rate
+        && base.coverage >= metrics.coverage
+    {
+        return Verdict::NoGo;
+    }
+    Verdict::Go
+}
+
+// ---------------------------------------------------------------------------
+// Report rendering
+// ---------------------------------------------------------------------------
+
+/// The frozen context a report is rendered under: the verdict, the
+/// pre-registered criteria, the split sizes and the modeled fallback
+/// assumptions. Bundled so the renderer signature stays small.
+#[derive(Debug, Clone, Copy)]
+pub struct ReportContext {
+    pub verdict: Verdict,
+    pub criteria: DecisionCriteria,
+    pub n_test: usize,
+    pub n_train: usize,
+    pub assumptions: ModelAssumptions,
+}
+
+/// Render the full evaluation report as a JSON value.
+pub fn render_report(
+    tier_metrics: &EvalMetrics,
+    baseline_metrics: &BTreeMap<String, EvalMetrics>,
+    system: &SystemMetrics,
+    ctx: &ReportContext,
+) -> Value {
+    let mut report = json!({
+        "verdict": ctx.verdict.as_str(),
+        "epistemics": {
+            "closed_world": true,
+            "lower_bound": false,
+            "basis": "synthetic frozen evaluation",
+            "confidence": "complete",
+            "modeled_fallback": true,
+        },
+        "snapshot": {
+            "frozen": true,
+            "deterministic": true,
+            "n_train": ctx.n_train,
+            "n_test": ctx.n_test,
+            "split_unix": SPLIT_UNIX,
+            "model_error_rate_assumption": ctx.assumptions.error_rate,
+            "model_latency_ms_assumption": ctx.assumptions.latency_ms,
+        },
+        "criteria": {
+            "max_error_rate": ctx.criteria.max_error_rate,
+            "min_coverage": ctx.criteria.min_coverage,
+            "min_test_examples": ctx.criteria.min_test_examples,
+        },
+        "n_test": ctx.n_test,
+        "tier": metrics_to_json(tier_metrics),
+        "system": {
+            "fallback_rate": system.fallback_rate,
+            "model_calls_avoided_per_100": system.model_calls_avoided_per_100,
+            "p50_tier_latency_ms": system.p50_tier_latency_ms,
+            "p95_tier_latency_ms": system.p95_tier_latency_ms,
+            "p50_e2e_latency_ms": system.p50_e2e_latency_ms,
+            "p95_e2e_latency_ms": system.p95_e2e_latency_ms,
+            "storage_bytes": system.storage_bytes,
+            "error_rate_after_fallback": system.error_rate_after_fallback,
+        },
+    });
+
+    let mut baselines = serde_json::Map::new();
+    for (name, m) in baseline_metrics {
+        baselines.insert(name.clone(), metrics_to_json(m));
+    }
+    report["baselines"] = Value::Object(baselines);
+
+    report
+}
+
+fn metrics_to_json(m: &EvalMetrics) -> Value {
+    let mut per_label = serde_json::Map::new();
+    for (label, lm) in &m.per_label {
+        per_label.insert(
+            label.clone(),
+            json!({
+                "precision": lm.precision,
+                "recall": lm.recall,
+                "f1": lm.f1,
+                "support": lm.support,
+            }),
+        );
+    }
+    json!({
+        "per_label": Value::Object(per_label),
+        "macro_precision": m.macro_precision,
+        "macro_recall": m.macro_recall,
+        "macro_f1": m.macro_f1,
+        "accuracy": m.accuracy,
+        "coverage": m.coverage,
+        "error_rate": m.error_rate,
+        "confusion": m.confusion,
+        "curve": m.curve.iter().map(|p| json!({
+            "coverage": p.coverage,
+            "error_rate": p.error_rate,
+            "ci_low": p.ci_low,
+            "ci_high": p.ci_high,
+            "n_accepted": p.n_accepted,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// CLI entry point
+// ---------------------------------------------------------------------------
+
+/// Options for `pixel classify-eval`.
+#[derive(Debug, Clone)]
+pub struct ClassifyEvalOptions {
+    pub json: bool,
+    /// Assumed model error rate for the modeled fallback (not measured).
+    pub model_error_rate: f64,
+    /// Assumed model latency in milliseconds for the modeled fallback.
+    pub model_latency_ms: f64,
+}
+
+/// Build the checked task-intent spec for an evaluation example, falling back
+/// to a minimal three-label spec if the built-in battery cannot check it.
+fn eval_spec(text: &str) -> crate::classify::Spec {
+    let spec = prompt_intent::spec(text).unwrap();
+    crate::classify::Spec::checked(spec.text, spec.context, spec.labels, spec.criteria)
+        .unwrap_or_else(|_| {
+            crate::classify::Spec::checked(
+                text.to_string(),
+                "".to_string(),
+                vec![
+                    "bugfix".to_string(),
+                    "feature".to_string(),
+                    "refactor".to_string(),
+                ],
+                Default::default(),
+            )
+            .unwrap()
+        })
+}
+
+/// Run the offline evaluation and return the exit code.
+pub fn run(opts: ClassifyEvalOptions) -> i32 {
+    let criteria = DecisionCriteria::default();
+
+    // Split the frozen dataset.
+    let train_set: Vec<&EvalExample> = FROZEN_DATASET
+        .iter()
+        .filter(|e| e.created_unix < SPLIT_UNIX)
+        .collect();
+    let test_set: Vec<&EvalExample> = FROZEN_DATASET
+        .iter()
+        .filter(|e| e.created_unix >= SPLIT_UNIX)
+        .collect();
+
+    // Build the history store from the training set.
+    let mut store = HistoryStore::empty();
+    for ex in &train_set {
+        let spec = prompt_intent::spec(ex.text).unwrap();
+        store
+            .add(NewEntry::for_spec(
+                ex.text.to_string(),
+                ex.label.to_string(),
+                "task - intent".to_string(),
+                "human - verified".to_string(),
+                &spec,
+            ))
+            .unwrap();
+    }
+    let tier = HistoryTier::new(store);
+
+    // Evaluate the tier.
+    let tier_metrics = evaluate_tier(&tier, &test_set, eval_spec);
+
+    // Evaluate baselines.
+    let mut baseline_metrics = BTreeMap::new();
+    let keyword = KeywordBaseline;
+    baseline_metrics.insert(
+        keyword.name().to_string(),
+        evaluate_baseline(&keyword, &test_set),
+    );
+
+    let train_examples: Vec<(String, String)> = train_set
+        .iter()
+        .map(|e| (e.text.to_string(), e.label.to_string()))
+        .collect();
+    let exact = ExactLookupBaseline::new(&train_examples);
+    baseline_metrics.insert(
+        exact.name().to_string(),
+        evaluate_baseline(&exact, &test_set),
+    );
+
+    let nn = NnBaseline::new(&train_examples, 3);
+    baseline_metrics.insert(nn.name().to_string(), evaluate_baseline(&nn, &test_set));
+
+    // System metrics: the fallback model path is modeled, not measured.
+    let assumptions = ModelAssumptions {
+        error_rate: opts.model_error_rate,
+        latency_ms: opts.model_latency_ms,
+    };
+    let system = compute_system_metrics(&tier, &test_set, eval_spec, assumptions);
+
+    let best_baseline = strongest_baseline(&baseline_metrics).cloned();
+    let verdict = decide(
+        &tier_metrics,
+        best_baseline.as_ref(),
+        &criteria,
+        test_set.len(),
+    );
+    let report = render_report(
+        &tier_metrics,
+        &baseline_metrics,
+        &system,
+        &ReportContext {
+            verdict,
+            criteria,
+            n_test: test_set.len(),
+            n_train: train_set.len(),
+            assumptions,
+        },
+    );
+
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else {
+        print_human_report(&report);
+    }
+
+    if verdict == Verdict::Go { 0 } else { 1 }
+}
+
+fn print_human_report(report: &Value) {
+    println!("classify-eval: verified-history retrieval go / no - go ");
+    println!("verdict: {}", report["verdict"]);
+    println!("n_test: {}", report["n_test"]);
+    println!();
+    println!("tier metrics:");
+    println!("  coverage:  {:.3}", report["tier"]["coverage"]);
+    println!("  error:     {:.3}", report["tier"]["error_rate"]);
+    println!("  macro_f1:  {:.3}", report["tier"]["macro_f1"]);
+    println!();
+    println!("system metrics (fallback model path is modeled, not measured):");
+    println!(
+        "  assumed model error rate: {:.3}",
+        report["snapshot"]["model_error_rate_assumption"]
+    );
+    println!(
+        "  assumed model latency: {:.0} ms",
+        report["snapshot"]["model_latency_ms_assumption"]
+    );
+    println!("  fallback rate:  {:.3}", report["system"]["fallback_rate"]);
+    println!(
+        "  model calls avoided per 100: {:.1}",
+        report["system"]["model_calls_avoided_per_100"]
+    );
+    println!(
+        "  p50 tier latency (measured): {:.2} ms ",
+        report["system"]["p50_tier_latency_ms"]
+    );
+    println!(
+        "  p95 tier latency (measured): {:.2} ms ",
+        report["system"]["p95_tier_latency_ms"]
+    );
+    println!(
+        "  p50 end-to-end latency (modeled): {:.2} ms ",
+        report["system"]["p50_e2e_latency_ms"]
+    );
+    println!(
+        "  p95 end-to-end latency (modeled): {:.2} ms ",
+        report["system"]["p95_e2e_latency_ms"]
+    );
+    println!("  storage: {} bytes ", report["system"]["storage_bytes"]);
+    println!(
+        "  modeled error rate after fallback: {:.3}",
+        report["system"]["error_rate_after_fallback"]
+    );
+    println!();
+    println!("baselines:");
+    if let Some(baselines) = report["baselines"].as_object() {
+        for (name, m) in baselines {
+            println!("  {name}:");
+            println!("    coverage: {:.3}", m["coverage"]);
+            println!("    error:    {:.3}", m["error_rate"]);
+            println!("    macro_f1: {:.3}", m["macro_f1"]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec_for(text: &str) -> crate::classify::Spec {
+        let spec = prompt_intent::spec(text).unwrap();
+        crate::classify::Spec::checked(spec.text, spec.context, spec.labels, spec.criteria).unwrap()
+    }
+
+    #[test]
+    fn frozen_dataset_has_all_seven_labels() {
+        let labels: std::collections::BTreeSet<_> =
+            FROZEN_DATASET.iter().map(|e| e.label).collect();
+        assert_eq!(
+            labels.len(),
+            7,
+            "all seven task-intent labels must be present "
+        );
+    }
+
+    #[test]
+    fn split_produces_nonempty_train_and_test() {
+        let train: Vec<_> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix < SPLIT_UNIX)
+            .collect();
+        let test: Vec<_> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix >= SPLIT_UNIX)
+            .collect();
+        assert!(!train.is_empty(), "training set must be non-empty ");
+        assert!(!test.is_empty(), "test set must be non-empty ");
+    }
+
+    #[test]
+    fn keyword_baseline_answers_something() {
+        let test_set: Vec<&EvalExample> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix >= SPLIT_UNIX)
+            .collect();
+        let keyword = KeywordBaseline;
+        let metrics = evaluate_baseline(&keyword, &test_set);
+        assert!(
+            metrics.coverage > 0.0,
+            "keyword baseline must answer some queries "
+        );
+    }
+
+    #[test]
+    fn exact_lookup_baseline_has_zero_error_on_exact_matches() {
+        let train: Vec<&EvalExample> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix < SPLIT_UNIX)
+            .collect();
+        let train_examples: Vec<(String, String)> = train
+            .iter()
+            .map(|e| (e.text.to_string(), e.label.to_string()))
+            .collect();
+        let exact = ExactLookupBaseline::new(&train_examples);
+        // An exact match on a training example must be correct.
+        let ex = train[0];
+        assert_eq!(exact.predict(ex.text).as_deref(), Some(ex.label));
+    }
+
+    #[test]
+    fn tier_evaluation_produces_valid_metrics() {
+        let train: Vec<&EvalExample> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix < SPLIT_UNIX)
+            .collect();
+        let test_set: Vec<&EvalExample> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix >= SPLIT_UNIX)
+            .collect();
+
+        let mut store = HistoryStore::empty();
+        for ex in &train {
+            let spec = prompt_intent::spec(ex.text).unwrap();
+            store
+                .add(NewEntry::for_spec(
+                    ex.text.to_string(),
+                    ex.label.to_string(),
+                    "task - intent".to_string(),
+                    "human - verified".to_string(),
+                    &spec,
+                ))
+                .unwrap();
+        }
+        let tier = HistoryTier::new(store);
+        let metrics = evaluate_tier(&tier, &test_set, spec_for);
+
+        assert!(metrics.coverage >= 0.0 && metrics.coverage <= 1.0);
+        assert!(metrics.error_rate >= 0.0 && metrics.error_rate <= 1.0);
+        assert!(metrics.macro_f1 >= 0.0 && metrics.macro_f1 <= 1.0);
+    }
+
+    /// A confusion row must carry the correct prediction on its diagonal, not
+    /// only the misses: `ExactLookupBaseline` answers one example right and one
+    /// wrong, so the row has two filled cells.
+    #[test]
+    fn a_confusion_row_counts_the_correct_prediction_too() {
+        let correct = EvalExample {
+            text: "alpha",
+            label: "bugfix",
+            family: "bugfix",
+            created_unix: 0,
+        };
+        let wrong = EvalExample {
+            text: "beta",
+            label: "bugfix",
+            family: "bugfix",
+            created_unix: 0,
+        };
+        let baseline = ExactLookupBaseline::new(&[
+            ("alpha".to_string(), "bugfix".to_string()),
+            ("beta".to_string(), "feature".to_string()),
+        ]);
+        let test_set = vec![&correct, &wrong];
+
+        let metrics = evaluate_baseline(&baseline, &test_set);
+        let row = metrics
+            .confusion
+            .get("bugfix")
+            .expect("the true label has a matrix row");
+        assert_eq!(
+            row.get("bugfix"),
+            Some(&1),
+            "the diagonal counts the correct answer"
+        );
+        assert_eq!(
+            row.get("feature"),
+            Some(&1),
+            "the off-diagonal counts the miss"
+        );
+        let cells: usize = metrics.confusion.values().flat_map(|r| r.values()).sum();
+        assert_eq!(cells, 2, "every prediction fills a cell");
+    }
+
+    /// The curve counts real errors in confidence order: the first point is
+    /// the single most-confident (wrong) answer, not a constant zero.
+    #[test]
+    fn the_error_curve_counts_errors_in_confidence_order() {
+        // Confidences deliberately not in correctness order.
+        let mut accepted = vec![(0.9, false), (0.8, true), (0.7, false)];
+        let curve = error_curve(&mut accepted, 6);
+
+        assert_eq!(curve.len(), 3);
+        assert_eq!(curve[0].n_accepted, 1);
+        assert!(
+            (curve[0].error_rate - 1.0).abs() < 1e-9,
+            "the first accepted example is wrong, so its prefix is fully wrong"
+        );
+        assert!(
+            (curve[2].error_rate - 2.0 / 3.0).abs() < 1e-9,
+            "two of three accepted examples are wrong at the last point"
+        );
+        assert!((curve[2].coverage - 0.5).abs() < 1e-9, "3 of 6 accepted");
+    }
+
+    #[test]
+    fn decide_returns_no_go_when_error_rate_exceeds_bound() {
+        let metrics = EvalMetrics {
+            error_rate: 0.50,
+            coverage: 0.80,
+            ..Default::default()
+        };
+        let criteria = DecisionCriteria::default();
+        assert_eq!(decide(&metrics, None, &criteria, 20), Verdict::NoGo);
+    }
+
+    #[test]
+    fn decide_returns_no_go_when_coverage_below_minimum() {
+        let metrics = EvalMetrics {
+            error_rate: 0.05,
+            coverage: 0.10,
+            ..Default::default()
+        };
+        let criteria = DecisionCriteria::default();
+        assert_eq!(decide(&metrics, None, &criteria, 20), Verdict::NoGo);
+    }
+
+    #[test]
+    fn decide_returns_no_go_when_insufficient_test_examples() {
+        let metrics = EvalMetrics {
+            error_rate: 0.05,
+            coverage: 0.80,
+            ..Default::default()
+        };
+        let criteria = DecisionCriteria::default();
+        assert_eq!(decide(&metrics, None, &criteria, 5), Verdict::NoGo);
+    }
+
+    #[test]
+    fn decide_returns_go_when_all_criteria_met() {
+        let metrics = EvalMetrics {
+            error_rate: 0.05,
+            coverage: 0.50,
+            ..Default::default()
+        };
+        let criteria = DecisionCriteria::default();
+        assert_eq!(decide(&metrics, None, &criteria, 20), Verdict::Go);
+    }
+
+    #[test]
+    fn wilson_interval_is_well_formed() {
+        let (low, high) = wilson_interval(8, 10, 1.96);
+        assert!((0.0..=1.0).contains(&low));
+        assert!((0.0..=1.0).contains(&high));
+        assert!(low <= high);
+    }
+
+    #[test]
+    fn system_metrics_are_computed() {
+        let train: Vec<&EvalExample> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix < SPLIT_UNIX)
+            .collect();
+        let test_set: Vec<&EvalExample> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix >= SPLIT_UNIX)
+            .collect();
+
+        let mut store = HistoryStore::empty();
+        for ex in &train {
+            let spec = prompt_intent::spec(ex.text).unwrap();
+            store
+                .add(NewEntry::for_spec(
+                    ex.text.to_string(),
+                    ex.label.to_string(),
+                    "task - intent".to_string(),
+                    "human - verified".to_string(),
+                    &spec,
+                ))
+                .unwrap();
+        }
+        let tier = HistoryTier::new(store);
+        let system = compute_system_metrics(
+            &tier,
+            &test_set,
+            spec_for,
+            ModelAssumptions {
+                error_rate: 0.20,
+                latency_ms: 1500.0,
+            },
+        );
+
+        assert!(system.fallback_rate >= 0.0 && system.fallback_rate <= 1.0);
+        assert!(system.error_rate_after_fallback >= 0.0 && system.error_rate_after_fallback <= 1.0);
+    }
+
+    #[test]
+    fn render_report_produces_valid_json() {
+        let mut baseline_metrics = BTreeMap::new();
+        baseline_metrics.insert("keyword".to_string(), EvalMetrics::default());
+        let system = SystemMetrics::default();
+        let criteria = DecisionCriteria::default();
+        let report = render_report(
+            &EvalMetrics::default(),
+            &baseline_metrics,
+            &system,
+            &ReportContext {
+                verdict: Verdict::NoGo,
+                criteria,
+                n_test: 0,
+                n_train: 0,
+                assumptions: ModelAssumptions {
+                    error_rate: 0.20,
+                    latency_ms: 1500.0,
+                },
+            },
+        );
+        assert_eq!(report["verdict"], "no-go");
+        assert!(report["tier"].is_object());
+        assert!(report["baselines"].is_object());
+        let _ = report["system"].is_object();
+        // The envelope marks this as a synthetic evaluation with a modeled
+        // fallback, so a machine reader can tell it apart from runtime evidence.
+        assert_eq!(report["epistemics"]["basis"], "synthetic frozen evaluation");
+        assert_eq!(report["epistemics"]["modeled_fallback"], true);
+        assert_eq!(report["snapshot"]["frozen"], true);
+        assert_eq!(report["snapshot"]["model_error_rate_assumption"], 0.20);
+    }
+
+    #[test]
+    fn decide_returns_no_go_when_a_baseline_is_stronger() {
+        // The tier clears its absolute bounds, but the keyword baseline answers
+        // with lower error at equal coverage: no measured gain, so no-go.
+        let metrics = EvalMetrics {
+            error_rate: 0.10,
+            coverage: 0.50,
+            ..Default::default()
+        };
+        let stronger = EvalMetrics {
+            error_rate: 0.05,
+            coverage: 0.50,
+            ..Default::default()
+        };
+        let criteria = DecisionCriteria::default();
+        assert_eq!(
+            decide(&metrics, Some(&stronger), &criteria, 20),
+            Verdict::NoGo
+        );
+        // A weaker baseline (higher error) does not block the go.
+        let weaker = EvalMetrics {
+            error_rate: 0.20,
+            coverage: 0.50,
+            ..Default::default()
+        };
+        assert_eq!(decide(&metrics, Some(&weaker), &criteria, 20), Verdict::Go);
+    }
+
+    #[test]
+    fn e2e_latency_models_the_fallback_call() {
+        // The measured tier latency is far below the modeled end-to-end latency
+        // because every abstention adds the assumed model call.
+        let train: Vec<&EvalExample> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix < SPLIT_UNIX)
+            .collect();
+        let test_set: Vec<&EvalExample> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix >= SPLIT_UNIX)
+            .collect();
+        let mut store = HistoryStore::empty();
+        for ex in &train {
+            let spec = prompt_intent::spec(ex.text).unwrap();
+            store
+                .add(NewEntry::for_spec(
+                    ex.text.to_string(),
+                    ex.label.to_string(),
+                    "task - intent".to_string(),
+                    "human - verified".to_string(),
+                    &spec,
+                ))
+                .unwrap();
+        }
+        let tier = HistoryTier::new(store);
+        let assumptions = ModelAssumptions {
+            error_rate: 0.20,
+            latency_ms: 1500.0,
+        };
+        let system = compute_system_metrics(&tier, &test_set, spec_for, assumptions);
+        assert!(
+            system.p95_tier_latency_ms < 100.0,
+            "tier is pure local compute"
+        );
+        assert!(
+            system.p95_e2e_latency_ms > assumptions.latency_ms,
+            "a fallback-dominated sample models the model call into e2e"
+        );
+    }
+}

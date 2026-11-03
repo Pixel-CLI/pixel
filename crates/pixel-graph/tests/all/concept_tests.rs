@@ -469,7 +469,7 @@ fn make_store_with_symbol_and_string_concept() -> (TempDir, GraphStore) {
     let mut store = GraphStore::open(&db_path).expect("open graph store");
 
     // File 1: the definition file (config.rs equivalent).
-    let file1 = "crates/pixel-install/src/config.rs";
+    let file1 = "crates/pixel-setup/src/config.rs";
     let abs1 = dir.path().join(file1);
     fs::create_dir_all(abs1.parent().unwrap()).unwrap();
     fs::write(
@@ -485,7 +485,7 @@ fn make_store_with_symbol_and_string_concept() -> (TempDir, GraphStore) {
     store
         .insert_symbol(
             fid1,
-            "crates/pixel-install/src/config.rs#GUARD_MATCHER#const",
+            "crates/pixel-setup/src/config.rs#GUARD_MATCHER#const",
             "GUARD_MATCHER",
             "GUARD_MATCHER",
             SymbolKind::Const,

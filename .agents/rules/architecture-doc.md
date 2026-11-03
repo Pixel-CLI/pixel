@@ -24,7 +24,7 @@ section named beside it:
 | changes the socket format, the envelope, an op's invariants, or `PROTOCOL_VERSION` | `## Daemon and wire contract` |
 | changes how the CLI reaches the daemon, the output cap, or a truncation shape | `## Request path from the CLI` |
 | changes index, graph or history freshness, a rebuild threshold or its env var | `## Indexes and freshness` |
-| makes `pixel install` (global or `--repo`) write, stop writing or move a file, hook or managed block, for any agent | `## Agent integration` (and the `pixel-install` row of `## Crates`) |
+| makes `pixel setup` (global or `--repo`) write, stop writing or move a file, hook or managed block, for any agent | `## Agent integration` (and the `pixel-install` row of `## Crates`) |
 | adds, removes or re-scopes a `run-hook` entry point | the hook table in `## Agent integration` |
 | changes a metrics estimator, its version or its defaults | `### Invocation accounting and chat delivery` |
 | adds, removes or moves a CI job, a gate step or a workflow | `## Testing and gates` |

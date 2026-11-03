@@ -2,6 +2,8 @@
 **/*.rs.bk
 .DS_Store
 .pixel/
+.pixel-graph-head
+.pi-ultimate/
 .devin/
 
 # tool-local agent config dirs
@@ -39,3 +41,12 @@ stacklit.json
 stacklit.html
 DEPENDENCIES.md
 run-artifacts/
+
+# Ad-hoc probe-loop questions, traces and answers stay local.
+eval/brief-bench/adhoc/
+
+# The private tool census (#905): its 20 prompts and its database stay on the maintainer's machine.
+scripts/bench/tool-census/manifest.json
+census.db*
+
+/.arena-reports/

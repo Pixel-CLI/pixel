@@ -159,13 +159,3 @@ fn an_overfull_manifest_on_disk_is_trimmed_back_to_the_cap() {
     );
     assert_eq!(names.last(), Some(&"new"));
 }
-
-#[test]
-fn a_line_range_is_one_based_and_ordered() {
-    assert_eq!(parse_line_range("3, 7"), Ok((3, 7)));
-    assert_eq!(parse_line_range("5,5"), Ok((5, 5)));
-    assert!(parse_line_range("0,4").is_err());
-    assert!(parse_line_range("7,3").is_err());
-    assert!(parse_line_range("7").is_err());
-    assert!(parse_line_range("a,3").is_err());
-}

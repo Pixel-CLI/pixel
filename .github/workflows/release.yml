@@ -25,8 +25,11 @@ jobs:
   verify:
     name: Verify tag and tests
     runs-on: ubuntu-26.04
+    # Match ci.yml's Test job so the linux-debug cache key is identical.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
@@ -41,15 +44,19 @@ jobs:
       # Restores the debug cache ci.yml's Test job saves on main (shared key
       # linux-debug); never saves: a tag's cache is unreadable by the next tag.
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: linux-debug
           save-if: false
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y perl make
+          if command -v perl >/dev/null && command -v make >/dev/null; then
+            echo "perl and make already installed"
+          else
+            sudo apt-get update
+            sudo apt-get install -y perl make
+          fi
 
       # Tag = crates/pixel version, Cargo.lock fresh for every member,
       # CHANGELOG has the `## [x.y.z]` heading and an empty Unreleased.
@@ -65,7 +72,7 @@ jobs:
       # release here, before anything is built, until it is fixed or accepted
       # with its reason in deny.toml and osv-scanner.toml.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-deny
 
@@ -118,7 +125,7 @@ jobs:
       # is not updated (a warning is emitted instead of failing the release).
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
@@ -128,7 +135,7 @@ jobs:
       # pixel-core.rb and install.sh, plus the attestation's Sigstore bundle
       # (pixel-<tag>.intoto.jsonl).
       - name: Download the release assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: release-assets
           path: assets
@@ -160,7 +167,8 @@ jobs:
           # assets/pixel-*.tar.gz matches the archives and the Linux
           # bottles (pixel-*.bottle.tar.gz) alike. pixel-*.intoto.jsonl is
           # the provenance bundle, the file Scorecard's Signed-Releases
-          # check looks for. pixel-*.cdx.json is each archive's SBOM.
+          # check looks for. pixel-*.cdx.json is each archive's SBOM, and
+          # pixel-*.symbols.tar.xz each binary before stripping.
           files: |
             assets/pixel-*.tar.gz
             assets/pixel-*.tar.gz.sha256
@@ -169,10 +177,11 @@ jobs:
             assets/install.sh
             assets/pixel-*.intoto.jsonl
             assets/pixel-*.cdx.json
+            assets/pixel-*.symbols.tar.xz
 
       - name: Check out the Homebrew tap
         if: env.HOMEBREW_TAP_TOKEN != ''
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: LivioGama/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -228,7 +237,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-26.04-arm
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-15
     env:
       GH_TOKEN: ${{ github.token }}
     steps:

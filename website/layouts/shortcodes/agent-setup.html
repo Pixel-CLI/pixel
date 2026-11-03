@@ -1,9 +1,8 @@
-{{- /* The setup sections of a /for/<slug>/ page, as Markdown, from the page's `agent` entry in data/agents.toml: install, what Pixel writes and where, the per-repository cleanup, the plugin or rules file, the check, the removal. Called as {{% agent-setup %}} so the sections reach the table of contents. crates/pixel/tests/cli/docs_drift.rs holds the data's paths and checks to a real `pixel install`. */ -}}
+{{- /* The setup sections of a /for/<slug>/ page, as Markdown, from the page's `agent` entry in data/agents.toml: install, what Pixel writes and where, the check, the removal. Called as {{% agent-setup %}} so the sections reach the table of contents. crates/pixel/tests/cli/docs_drift.rs holds the data's paths and checks to a real `pixel setup`. */ -}}
 {{- $slug := .Page.Params.agent -}}
 {{- $a := index (where hugo.Data.agents.agent "slug" $slug) 0 -}}
 {{- if not $a }}{{ errorf "%s: no agent %q in data/agents.toml" .Page.File.Path $slug }}{{ end -}}
 {{- $docs := "docs/" | relURL -}}
-{{- $raw := printf "https://raw.githubusercontent.com/%s/main" site.Params.repo -}}
 {{- $shared := hugo.Data.agents.shared -}}
 ## Install Pixel
 
@@ -15,10 +14,10 @@ curl -fsSL https://github.com/{{ site.Params.repo }}/releases/latest/download/in
 
 [How to read the script before it runs]({{ $docs }}#install). It does not change any agent's configuration.
 {{ if eq $a.wiring "install" }}
-## What pixel install writes
+## What pixel setup writes
 
 ```bash
-pixel install
+pixel setup
 ```
 
 Run it once, from anywhere{{ with $a.when }}; it writes {{ $a.name }}'s files {{ . }}{{ end }}. For {{ $a.name }}:
@@ -28,53 +27,15 @@ Run it once, from anywhere{{ with $a.when }}; it writes {{ $a.name }}'s files {{
 
 {{ strings.TrimSuffix "." $a.wires | strings.FirstUpper }}.
 
-Every `pixel install` also writes {{ range $i, $f := $shared }}{{ if $i }} and {{ end }}`{{ $f }}`{{ end }}. It deploys no prompt and adds no retrieval guard: {{ $a.name }} keeps its native search, and Pixel's commands stay available when you ask for them.
+Every `pixel setup` also writes {{ range $i, $f := $shared }}{{ if $i }} and {{ end }}`{{ $f }}`{{ end }}. No prompt, rules file or retrieval guard is written: {{ $a.name }} keeps its native search, and Pixel's commands stay available when you ask for them.
 {{ else }}
-## What pixel install writes
+## What pixel setup writes
 
-Nothing for {{ $a.name }}: it keeps its native tools, and `pixel install` only removes what an earlier release wrote for it. `pixel doctor` judges only what `pixel install` manages{{ if not $a.checks }}, so it does not see {{ $a.name }}'s {{ if eq $a.wiring "rules" }}rule{{ else }}plugin{{ end }}{{ else }}: its checks pass once those leftovers are gone{{ end }}.
+Nothing for {{ $a.name }}: it keeps its native tools, and `pixel setup` leaves its configuration alone.
 {{ end }}
 {{- with $a.note }}
 {{ . }}
 {{ end }}
-{{- with $a.plugin }}
-## {{ if eq $a.wiring "plugin" }}Install the plugin{{ else }}Or as a plugin{{ end }}
-
-{{ . | strings.FirstUpper }}.
-
-The plugin never installs the `pixel` binary. The protocol it loads starts by checking for it (`command -v pixel`) and tells the agent to work without Pixel's commands when it is missing.
-{{ end }}
-{{- with $a.rules }}
-## Add the rule
-
-Copy the rule the repository ships into your project:
-
-```bash
-mkdir -p {{ path.Dir . }}
-curl -fsSL {{ $raw }}/{{ . }} -o {{ . }}
-```
-
-The rule is the protocol: which `pixel` command replaces `grep`, a whole-file read or `git log`, and when a native tool is still right. It starts by checking for the binary (`command -v pixel`).
-{{ end }}
-{{- if or $a.repo $a.repo_note }}
-## Per repository
-
-```bash
-pixel install --repo .
-```
-
-Updates this repository only, and skips every global step. It removes the retrieval guards and prompt blocks an earlier release wrote, keeps task lifecycle hooks, and never adds a guard that steers the agent toward Pixel.
-{{- with $a.repo }} For {{ $a.name }}:
-{{ range . }}
-- `{{ . }}`
-{{- end }}
-
-Every file that names this machine's `pixel` binary goes into the clone's `.git/info/exclude`, so a `git add -A` cannot publish it.
-{{- end }} [Every per-repository file]({{ $docs }}#per-repository-cleanup)
-{{ with $a.repo_note }}
-{{ . }}
-{{ end }}
-{{- end }}
 ## Check it
 
 ```bash
@@ -88,29 +49,17 @@ pixel doctor .
 pixel doctor .{{ range . }} --only {{ . }}{{ end }}
 ```
 {{- else -}}
-It checks the binary, the daemon and this repository's index, the parts {{ $a.name }} relies on once the {{ if eq $a.wiring "rules" }}rule{{ else }}plugin{{ end }} is in place.
+It checks the binary, the daemon and this repository's index, the parts {{ $a.name }} relies on.
 {{- end }}
 
 ## Remove it
 {{ if eq $a.wiring "install" }}
 ```bash
-pixel uninstall
+pixel setup --remove
 ```
 
-It removes everything `pixel install` wrote, for every agent at once, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it.
-{{- end }}
-{{- with $a.repo }}
-
-`pixel uninstall --repo .` removes only this repository's files.
-{{- end }}
-{{- if and $a.plugin (ne $a.wiring "install") }}
-
-Remove the plugin with {{ $a.name }}'s own plugin or extension command.
-{{- end }}
-{{- with $a.rules }}
-
-Delete `{{ . }}`.
+It removes everything `pixel setup` wrote, for every agent at once, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it.
 {{- end }}
 {{- if eq $a.wiring "none" }}
-Nothing to remove for {{ $a.name }}. `pixel uninstall` also takes out what an earlier release wrote for it.
+Nothing to remove for {{ $a.name }}.
 {{- end }}

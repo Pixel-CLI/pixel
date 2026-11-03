@@ -240,7 +240,6 @@ fn classify_state_should_name_each_ahead_behind_shape() {
 #[test]
 fn ignorable_sidecar_entry_should_ignore_only_untracked_sidecar_files() {
     assert!(ignorable_sidecar_entry("??", ".pixel/index"));
-    assert!(ignorable_sidecar_entry("??", ".gitpixel/old"));
     assert!(!ignorable_sidecar_entry(" M", ".pixel/targets.json"));
     assert!(!ignorable_sidecar_entry("UU", ".pixel/targets.json"));
     assert!(!ignorable_sidecar_entry("??", "src/new.rs"));

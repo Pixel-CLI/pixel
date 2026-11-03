@@ -1,9 +1,9 @@
 # decide-bakeoff — small open decision models on Pixel's surfaces
 
 Measured 2026-09-22 on macOS arm64, CPU only, per the frozen protocol in
-`decide-bakeoff-protocol.md`. Harness: `scripts/bench-decide/` (run1, all 8
+`decide-bakeoff-protocol.md`. Harness: `scripts/bench/bench-decide/` (run1, all 8
 adapters, 239 records each, zero errors). Raw rows and manifest are under
-`scripts/bench-decide/runs/run1/`.
+`scripts/bench/bench-decide/runs/run1/`.
 
 ## Headline answer
 
@@ -88,7 +88,7 @@ serves all three presets via `--remote-preset`:
 
 Env overrides on top of the preset: `PIXEL_REMOTE_MODEL`, `PIXEL_REMOTE_BASE`,
 `PIXEL_REMOTE_KEY_ENV`. The local 4B path is the *same* adapter pointed at a
-`llama-server`/Ollama on localhost (`scripts/decide-local-setup.sh` downloads
+`llama-server`/Ollama on localhost (`scripts/dev/decide-local-setup.sh` downloads
 the GGUF), so no new Rust inference code — a 4B model runs decisions on your
 own CPU/GPU at $0 marginal cost.
 
@@ -197,10 +197,10 @@ route; it was excluded here only by the no-training constraint.
 ```sh
 # The ML adapters need a venv with torch, transformers and the model authors'
 # packages (models.py); keyword-router, remote-cli and score.py need only python3.
-scripts/bench-decide/.venv/bin/python scripts/bench-decide/run.py \
+scripts/bench/bench-decide/.venv/bin/python scripts/bench/bench-decide/run.py \
   --models keyword-router,gavel,verdict,laya,gliformer,openjev-deberta,gte-reranker \
-  --out scripts/bench-decide/runs/run2
-python3 scripts/bench-decide/score.py --run scripts/bench-decide/runs/run2 --baseline keyword-router
+  --out scripts/bench/bench-decide/runs/run2
+python3 scripts/bench/bench-decide/score.py --run scripts/bench/bench-decide/runs/run2 --baseline keyword-router
 ```
 
 `--out` must not exist yet. The `pixel-static` adapter left with the static

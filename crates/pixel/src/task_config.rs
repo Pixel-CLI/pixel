@@ -9,7 +9,7 @@ use pixel_task::model::TaskContract;
 use serde_json::{Value, json};
 
 pub(crate) fn settings(root: &Path) -> Result<Value, String> {
-    let path = crate::config_file::preferred_path(&root.join(".pixel"));
+    let path = crate::config_file::path_in(&root.join(".pixel"));
     let config = crate::config_file::load(&path)?;
     Ok(config.get("task").cloned().unwrap_or_else(|| json!({})))
 }

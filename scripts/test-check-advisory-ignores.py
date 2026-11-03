@@ -16,7 +16,7 @@ import sys
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).with_name("check-advisory-ignores.py")
+SCRIPT = Path(__file__).parent / 'ci' / 'check-advisory-ignores.py'
 
 DENY = """[advisories]
 version = 2

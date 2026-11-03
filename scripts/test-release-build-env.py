@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of the reproducible release build (scripts/release-build-env.sh).
+"""Contract of the reproducible release build (scripts/release/release-build-env.sh).
 
 A release binary is reproducible only if every input that varies between two
 builds of one commit is pinned: the build date crates/pixel/build.rs embeds
-(SOURCE_DATE_EPOCH, from the commit), the checkout and CARGO_HOME paths rustc
+(SOURCE_DATE_EPOCH, from the commit), the unstripped release profile
+(CARGO_PROFILE_RELEASE_STRIP=none), the checkout and CARGO_HOME paths rustc
 writes into panic messages and debug information (--remap-path-prefix), and
 the cross image (its version). reproducible-build.yml proves it by building
 twice; these cases hold what that proof depends on and what a later edit
@@ -14,7 +15,7 @@ could silently drop:
 
 - the script's output: the commit's time, both remaps, an existing RUSTFLAGS
   kept, a path RUSTFLAGS cannot carry refused before anything is written;
-- Cross.toml forwards SOURCE_DATE_EPOCH, which cross does not by itself;
+- [workspace.metadata.cross] forwards SOURCE_DATE_EPOCH, which cross does not by itself;
 - release-build.yml, cross-build.yml and reproducible-build.yml set the
   environment before the cache step and the build, pin the same cross, and
   reproducible-build.yml builds with release-build.yml's exact command.
@@ -29,7 +30,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "release-build-env.sh"
+SCRIPT = ROOT / "scripts" / "release" / "release-build-env.sh"
 WORKFLOWS = ROOT / ".github" / "workflows"
 EPOCH = 1700000000
 
@@ -98,6 +99,8 @@ class ScriptOutput(unittest.TestCase):
                 f"SOURCE_DATE_EPOCH={EPOCH}",
                 f"RUSTFLAGS=--remap-path-prefix={self.repo}=/pixel "
                 f"--remap-path-prefix={self.cargo_home}=/cargo",
+                # one unstripped build: split-symbols.sh makes both assets
+                "CARGO_PROFILE_RELEASE_STRIP=none",
             ],
         )
 
@@ -110,6 +113,7 @@ class ScriptOutput(unittest.TestCase):
                 f"export SOURCE_DATE_EPOCH='{EPOCH}'",
                 f"export RUSTFLAGS='-C target-cpu=x86-64-v2 --remap-path-prefix={self.repo}=/pixel "
                 f"--remap-path-prefix={self.cargo_home}=/cargo'",
+                "export CARGO_PROFILE_RELEASE_STRIP='none'",
             ],
         )
 
@@ -200,7 +204,8 @@ class BuildSteps(unittest.TestCase):
         self.tmp.cleanup()
 
     def stub_env_script(self, body: str) -> None:
-        script = self.root / "scripts" / "release-build-env.sh"
+        script = self.root / "scripts" / "release" / "release-build-env.sh"
+        script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("#!/bin/sh\n" + body)
         script.chmod(0o755)
 
@@ -238,8 +243,8 @@ class BuildSteps(unittest.TestCase):
 
 class Wiring(unittest.TestCase):
     def test_cross_forwards_source_date_epoch(self):
-        text = (ROOT / "Cross.toml").read_text()
-        self.assertRegex(text, r'(?m)^\[build\.env\]\s*\npassthrough = \[[^\]]*"SOURCE_DATE_EPOCH"')
+        text = (ROOT / "Cargo.toml").read_text()
+        self.assertRegex(text, r'(?m)^\[workspace\.metadata\.cross\.build\.env\]\s*\npassthrough = \[[^\]]*"SOURCE_DATE_EPOCH"')
 
     def test_environment_is_set_before_cache_and_build(self):
         for workflow, build in (
@@ -249,7 +254,7 @@ class Wiring(unittest.TestCase):
         ):
             with self.subTest(workflow=workflow):
                 parts = steps(workflow)
-                env_at = index_of(parts, "scripts/release-build-env.sh")
+                env_at = index_of(parts, "scripts/release/release-build-env.sh")
                 self.assertLess(env_at, index_of(parts, build))
                 if any("Swatinem/rust-cache" in p for p in parts):
                     # rust-cache hashes RUSTFLAGS into its key when it restores.
@@ -257,7 +262,7 @@ class Wiring(unittest.TestCase):
 
     def test_macos_release_build_gets_the_environment_too(self):
         parts = steps("release-build.yml")
-        env_step = parts[index_of(parts, "scripts/release-build-env.sh")]
+        env_step = parts[index_of(parts, "scripts/release/release-build-env.sh")]
         self.assertNotIn("runner.os", env_step)
 
     def test_same_cross_version_everywhere(self):
@@ -283,6 +288,67 @@ class Wiring(unittest.TestCase):
         builds = re.findall(r"^\s*(cross build .*)$", repro, re.M)
         self.assertEqual(builds, [expected, expected])
         self.assertIn("TARGET: x86_64-unknown-linux-musl", repro)
+
+    def test_release_verify_matches_ci_debug_cache_environment(self):
+        release = (WORKFLOWS / "release.yml").read_text()
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        value = re.search(r"(?m)^\s+CARGO_PROFILE_DEV_DEBUG: (\S+)$", ci).group(1)
+        verify = release.split("  verify:\n", 1)[1].split("\n  # Dynamic analysis", 1)[0]
+        self.assertRegex(verify, rf"(?m)^\s+CARGO_PROFILE_DEV_DEBUG: {re.escape(value)}$")
+        self.assertLess(verify.index("CARGO_PROFILE_DEV_DEBUG"), verify.index("Swatinem/rust-cache"))
+
+
+class ReleaseSystemDependencies(unittest.TestCase):
+    """Run release.yml's dependency guard with only the required commands stubbed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.calls = self.root / "sudo-calls"
+        sudo = self.bin / "sudo"
+        sudo.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SUDO_CALLS"\n'
+            'case "$*" in *install*) [ "${SUDO_FAIL:-0}" = 0 ] ;; esac\n'
+        )
+        sudo.chmod(0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_guard(self, *, dependencies: bool, fail_sudo: bool = False) -> subprocess.CompletedProcess:
+        if dependencies:
+            for name in ("perl", "make"):
+                command = self.bin / name
+                command.write_text("#!/bin/sh\nexit 0\n")
+                command.chmod(0o755)
+        env = dict(
+            os.environ, PATH=str(self.bin), SUDO_CALLS=str(self.calls),
+            SUDO_FAIL="1" if fail_sudo else "0",
+        )
+        return subprocess.run(
+            ["/bin/bash", "-e", "-c", run_block("release.yml", "Install system dependencies")],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_dependencies_already_present_skip_apt(self):
+        result = self.run_guard(dependencies=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_missing_dependency_installs_both_packages(self):
+        result = self.run_guard(dependencies=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ["apt-get update", "apt-get install -y perl make"])
+
+    def test_failed_install_fails_the_step(self):
+        result = self.run_guard(dependencies=False, fail_sudo=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            self.calls.read_text().splitlines(),
+            ["apt-get update", "apt-get install -y perl make"],
+        )
 
 
 if __name__ == "__main__":

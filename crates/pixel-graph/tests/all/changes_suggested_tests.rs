@@ -101,7 +101,7 @@ fn fixture(name: &str) -> (PathBuf, GraphStore) {
     std::fs::write(root.join("tests/own.test.ts"), body("tests/own.test.ts", 2)).unwrap();
 
     let mut store = GraphStore::open_in_memory().unwrap();
-    let mut ids = std::collections::HashMap::new();
+    let mut ids = rustc_hash::FxHashMap::default();
     for f in files {
         let fid = store.replace_file(f, "oid", "ts").unwrap();
         ids.insert(f, fid);

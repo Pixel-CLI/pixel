@@ -30,7 +30,7 @@ jobs:
       run: ${{ steps.range.outputs.run }}
       diff_range: ${{ steps.range.outputs.diff_range }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -40,7 +40,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           test "$GITHUB_REF" = refs/heads/main
-          python3 scripts/mutants-nightly-range.py plan \
+          python3 scripts/ci/mutants-nightly-range.py plan \
             --repository "$GITHUB_REPOSITORY" --head "$GITHUB_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
@@ -61,7 +61,7 @@ jobs:
       ref: ${{ steps.diff.outputs.ref }}
     steps:
       # Full history so the merge base with the target branch is available.
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
@@ -79,7 +79,7 @@ jobs:
       # every shard must generate the same list. Two cargo-mutants releases
       # can disagree on which mutants a diff produces.
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-mutants@27.1.0
 
@@ -126,7 +126,7 @@ jobs:
         env:
           SRC: ${{ steps.diff.outputs.src }}
           # The pool every shard draws its runner from, one `runs-on` value
-          # per shard round-robin (scripts/mutants-gate.py). Absent or empty
+          # per shard round-robin (scripts/ci/mutants-gate.py). Absent or empty
           # falls back to GitHub's image; a malformed array fails the plan.
           RUNNERS_FILE: ${{ runner.temp }}/shard-runners.json
           # Through the environment, not template expansion: `${{ vars.* }}`
@@ -135,12 +135,12 @@ jobs:
           RUNNER_POOL: ${{ vars.PIXEL_MUTANTS_SHARD_RUNNERS }}
         run: |
           printf '%s' "$RUNNER_POOL" > "$RUNNERS_FILE"
-          python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt \
+          python3 scripts/ci/mutants-gate.py --diff pr.diff --list mutants-list.txt \
             --config mutants-config.toml --runners "$RUNNERS_FILE" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Upload the diff and the listing
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mutants-plan
           path: |
@@ -215,7 +215,7 @@ jobs:
           toolchain: nightly-2026-05-12
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # Same key as the CI test job: both build the Linux debug profile.
           # The shared entry is keyed by rust-cache on the compiler, so the
@@ -239,12 +239,12 @@ jobs:
           fi
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-mutants@27.1.0
 
       - name: Download the diff and the listing
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: mutants-plan
 
@@ -340,7 +340,7 @@ jobs:
       # Artifact names cannot hold the `/` of `k/n`, hence the job index.
       - name: Upload mutants.out
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mutants-out-${{ strategy.job-index }}
           path: mutants.out
@@ -366,12 +366,12 @@ jobs:
           echo "::error title=Mutation gate failed::the plan job did not list the diff's mutants (${{ needs.plan.result }})"
           exit 1
 
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Download the diff and the listing
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: mutants-plan
 
@@ -381,7 +381,7 @@ jobs:
       # without a verdict, and the next step counts them as such.
       - name: Download every shard's mutants.out
         if: needs.plan.outputs.mutants != '0'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: mutants-out-*
           path: shards
@@ -396,7 +396,7 @@ jobs:
       - name: Report what the gate actually tested
         id: report
         run: >
-          python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt
+          python3 scripts/ci/mutants-gate.py --diff pr.diff --list mutants-list.txt
           --outcomes-root shards --summary "$GITHUB_STEP_SUMMARY"
 
       # A failed report may still be a complete campaign (MISSED/TIMEOUT).
@@ -408,13 +408,13 @@ jobs:
         env:
           TIP: ${{ needs.plan.outputs.ref }}
         run: |
-          python3 scripts/mutants-nightly-range.py checkpoint \
+          python3 scripts/ci/mutants-nightly-range.py checkpoint \
             --list mutants-list.txt --outcomes-root shards --sha "$TIP" \
             --output checkpoint.json
 
       - name: Record the completed campaign
         if: always() && steps.checkpoint.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mutants-nightly-checkpoint
           path: checkpoint.json

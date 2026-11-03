@@ -27,6 +27,9 @@ use crate::store::RecallStore;
 const MANIFEST: &str = "manifest.json";
 /// Flush a segment once this many turns are pending.
 const SEGMENT_TARGET: usize = 65_536;
+/// Merge the trailing run of under-full segments once it is longer than this:
+/// the daemon indexes every 5 s sweep, and a search opens every segment.
+const MAX_SMALL_SEGMENTS: usize = 16;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Manifest {
@@ -34,12 +37,20 @@ pub struct Manifest {
     /// Highest turn rowid covered by any segment.
     pub last_turn_id: i64,
     pub segments: Vec<SegmentEntry>,
+    /// Files a merge replaced. Deleted by the next merge, not by this one, so
+    /// a reader that read the previous manifest can still open them.
+    #[serde(default)]
+    pub retired: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentEntry {
     pub file: String,
     pub doc_count: u32,
+    /// Highest turn rowid in this segment (0 in a manifest written before
+    /// merging existed).
+    #[serde(default)]
+    pub last_turn_id: i64,
 }
 
 pub struct SegmentSet {
@@ -91,7 +102,6 @@ impl SegmentSet {
             self.manifest = fresh;
         }
         let started = std::time::Instant::now();
-        let extractor = TrigramExtractor;
         let mut report = IndexReport::default();
         let mut after = self.manifest.last_turn_id;
         loop {
@@ -104,22 +114,17 @@ impl SegmentSet {
             if max_id <= after {
                 break;
             }
-            let mut builder = ShardBuilder::new(&extractor.id());
-            let mut hits = Vec::new();
-            for (id, text) in &batch {
-                hits.clear();
-                extractor.grams(text.as_bytes(), &mut hits);
-                let hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
-                builder.add_file(&id.to_string(), hashes);
+            let mut seq = self.manifest.generation + self.manifest.segments.len() as u64 + 1;
+            // A name a merge retired is still on disk for readers: skip it.
+            while self.dir.join(format!("seg-{seq:06}.gpxshard")).exists() {
+                seq += 1;
             }
-            let seq = self.manifest.generation + self.manifest.segments.len() as u64 + 1;
             let name = format!("seg-{seq:06}.gpxshard");
-            builder
-                .write(&self.dir.join(&name))
-                .map_err(|e| e.to_string())?;
+            self.write_segment(&name, &batch)?;
             self.manifest.segments.push(SegmentEntry {
                 file: name,
                 doc_count: batch.len() as u32,
+                last_turn_id: max_id,
             });
             self.manifest.last_turn_id = max_id;
             self.write_manifest()?;
@@ -127,8 +132,85 @@ impl SegmentSet {
             report.segments_written += 1;
             after = max_id;
         }
+        self.merge_small_segments(store)?;
         report.elapsed_ms = started.elapsed().as_millis();
         Ok(report)
+    }
+
+    fn write_segment(&self, name: &str, batch: &[(i64, String)]) -> Result<(), String> {
+        let extractor = TrigramExtractor;
+        let mut builder = ShardBuilder::new(&extractor.id());
+        let mut hits = Vec::new();
+        for (id, text) in batch {
+            hits.clear();
+            extractor.grams(text.as_bytes(), &mut hits);
+            let hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
+            builder.add_file(&id.to_string(), hashes);
+        }
+        builder
+            .write(&self.dir.join(name))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Rebuild the trailing run of under-full segments from the store as
+    /// full segments once the run exceeds `MAX_SMALL_SEGMENTS`. The new files
+    /// are written first, the manifest switches to them by atomic rename, and
+    /// the replaced files stay on disk until the next merge. Caller holds the
+    /// index lock.
+    fn merge_small_segments(&mut self, store: &RecallStore) -> Result<(), String> {
+        let segs = &self.manifest.segments;
+        let mut first = segs.len();
+        while first > 0 && (segs[first - 1].doc_count as usize) < SEGMENT_TARGET {
+            first -= 1;
+        }
+        if segs.len() - first <= MAX_SMALL_SEGMENTS {
+            return Ok(());
+        }
+        // A manifest from before `last_turn_id` cannot say where the run
+        // starts: merge everything from turn 0 then (once, entries now carry it).
+        let mut after = match first.checked_sub(1).map(|i| segs[i].last_turn_id) {
+            Some(id) if id > 0 => id,
+            _ => {
+                first = 0;
+                0
+            }
+        };
+        let end = self.manifest.last_turn_id;
+        let replaced: Vec<String> = segs[first..].iter().map(|e| e.file.clone()).collect();
+        let mut merged = Vec::new();
+        let mut written = Vec::new();
+        let generation = self.manifest.generation + 1;
+        while after < end {
+            let mut batch = store
+                .turns_for_indexing(after, SEGMENT_TARGET)
+                .map_err(|e| e.to_string())?;
+            batch.retain(|(id, _)| *id <= end);
+            let Some(max_id) = batch.iter().map(|(id, _)| *id).max() else {
+                break;
+            };
+            let name = format!("seg-m{generation}-{}.gpxshard", merged.len());
+            if let Err(e) = self.write_segment(&name, &batch) {
+                for f in &written {
+                    let _ = fs::remove_file(self.dir.join(f));
+                }
+                return Err(e);
+            }
+            written.push(name.clone());
+            merged.push(SegmentEntry {
+                file: name,
+                doc_count: batch.len() as u32,
+                last_turn_id: max_id,
+            });
+            after = max_id;
+        }
+        for f in std::mem::take(&mut self.manifest.retired) {
+            let _ = fs::remove_file(self.dir.join(f));
+        }
+        self.manifest.segments.truncate(first);
+        self.manifest.segments.extend(merged);
+        self.manifest.retired = replaced;
+        self.manifest.generation = generation;
+        self.write_manifest()
     }
 
     /// Force a full rebuild: drop every segment and re-index from turn 0.
@@ -136,6 +218,9 @@ impl SegmentSet {
         let _lock = SegmentLock::acquire(&self.dir)?;
         for entry in &self.manifest.segments {
             let _ = fs::remove_file(self.dir.join(&entry.file));
+        }
+        for f in &self.manifest.retired {
+            let _ = fs::remove_file(self.dir.join(f));
         }
         self.manifest = Manifest {
             generation: self.manifest.generation + 1,
@@ -264,6 +349,97 @@ mod tests {
         assert!(!seg_dir.join("seg-000001.gpxshard").exists());
         let reopened = SegmentSet::open(&seg_dir).unwrap();
         assert_eq!(reopened.manifest.generation, 1);
+    }
+
+    /// A sweep indexes a handful of turns each time: past `MAX_SMALL_SEGMENTS`
+    /// they merge, search answers the same before and after, and every file
+    /// the manifest names exists.
+    #[test]
+    fn index_new_should_merge_small_segments_without_changing_search() {
+        use crate::search::{SearchFilters, search};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        let seg_dir = tmp.path().join("segments");
+        let mut set = SegmentSet::open(&seg_dir).unwrap();
+        let mut merged_at = None;
+        for n in 1..=20_i64 {
+            add_session(
+                &mut store,
+                "claude",
+                &format!("sess{n:04}"),
+                &[(Role::User, "a needle in a haystack")],
+            );
+            let before = set.manifest.segments.len();
+            set.index_new(&store).unwrap();
+            if set.manifest.segments.len() <= before && merged_at.is_none() {
+                merged_at = Some(n);
+            }
+            let found = search(
+                &store,
+                &set,
+                "needle",
+                false,
+                &SearchFilters::default(),
+                0,
+                100,
+            )
+            .unwrap();
+            let mut ids: Vec<i64> = found.hits.iter().map(|h| h.turn_id).collect();
+            ids.sort_unstable();
+            assert_eq!(ids, (1..=n).collect::<Vec<_>>(), "after batch {n}");
+        }
+        assert_eq!(merged_at, Some(MAX_SMALL_SEGMENTS as i64 + 1));
+        assert!(
+            set.manifest.segments.len() <= MAX_SMALL_SEGMENTS,
+            "{:?}",
+            set.manifest
+        );
+        let on_disk = SegmentSet::open(&seg_dir).unwrap();
+        assert_eq!(on_disk.open_shards().len(), on_disk.manifest.segments.len());
+        for f in &on_disk.manifest.retired {
+            assert!(
+                seg_dir.join(f).exists(),
+                "retired {f} must outlive one merge"
+            );
+        }
+    }
+
+    /// A manifest written before segments carried `last_turn_id` merges
+    /// everything from turn 0 and loses nothing.
+    #[test]
+    fn merge_should_cover_a_legacy_manifest_from_turn_zero() {
+        use crate::search::{SearchFilters, search};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        let seg_dir = tmp.path().join("segments");
+        let mut set = SegmentSet::open(&seg_dir).unwrap();
+        for n in 1..=MAX_SMALL_SEGMENTS {
+            add_session(
+                &mut store,
+                "claude",
+                &format!("s{n}"),
+                &[(Role::User, "needle")],
+            );
+            set.index_new(&store).unwrap();
+        }
+        for e in &mut set.manifest.segments {
+            e.last_turn_id = 0;
+        }
+        set.write_manifest().unwrap();
+        add_session(&mut store, "claude", "last", &[(Role::User, "needle")]);
+        set.index_new(&store).unwrap();
+        assert_eq!(set.manifest.segments.len(), 1);
+        let found = search(
+            &store,
+            &set,
+            "needle",
+            false,
+            &SearchFilters::default(),
+            0,
+            100,
+        )
+        .unwrap();
+        assert_eq!(found.hits.len(), MAX_SMALL_SEGMENTS + 1);
     }
 
     /// A held lock is waited for, not failed on: the second indexer gets

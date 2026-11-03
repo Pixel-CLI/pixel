@@ -3,7 +3,7 @@
   "kind": "rename-impact",
   "prompt": "If we rename bounded_output, what breaks?",
   "must": [
-    {"pattern": "pixel-install/src/doctor\\.rs", "points": 4, "why": "all references live in one file"},
+    {"pattern": "pixel-setup/src/doctor\\.rs", "points": 4, "why": "all references live in one file"},
     {"pattern": "shell_path_check_within", "points": 2, "why": "the sole production caller"},
     {"pattern": "3030|bounded_output_times_out", "points": 2, "why": "the test call site and its name"},
     {"pattern": "1585", "points": 1, "why": "definition line"},

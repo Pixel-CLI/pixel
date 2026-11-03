@@ -1,19 +1,13 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! `Op`: a type-level mirror of `pixel_daemon::api::Request`
-//! (`crates/pixel-daemon/src/api.rs`), reproduced here so the shared
-//! contract crate carries the wire-format definition rather than the daemon
-//! crate.
+//! `Op`: the daemon request type, defined in the shared contract crate so
+//! the daemon and CLI share one enum — `crates/pixel-daemon/src/api.rs`
+//! re-exports it (`pub use pixel_proto::Op as Request`) and dispatches on
+//! it.
 //!
-//! This is **not yet wired into `pixel-daemon`** — `Request` there remains
-//! the live type the daemon dispatches on. Swapping the daemon over to this
-//! `Op` (and re-deriving CLI args from it, per `PLAN.md` A2) is a separate future step. Until then, this enum's only job is to
-//! exist, compile, and round-trip identically to `Request`'s current wire
-//! format so it is ready to be swapped in without a contract change.
-//!
-//! Variants, field shapes, and the `#[serde(tag = "op", rename_all =
-//! "snake_case")]` wire convention are copied verbatim from `Request`.
+//! Re-deriving CLI args from it (per `PLAN.md` A2) is a separate future
+//! step.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,6 +25,9 @@ pub enum Op {
         params: Value,
     },
     Search {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         pattern: String,
         #[serde(default)]
         json: bool,
@@ -58,7 +55,8 @@ pub enum Op {
         types: Vec<String>,
     },
     /// Sniper target list: task description in, closed prioritized file
-    /// list (P0/P1/P2) out.
+    /// list (P0/P1/P2) out. With `regions`, the response also carries the
+    /// symbol-level regions manifest (`.pixel/regions.json`).
     Targets {
         task: String,
         #[serde(default)]
@@ -67,41 +65,79 @@ pub enum Op {
         max_tier: Option<String>,
         #[serde(default)]
         precision: bool,
-    },
-    /// Symbol-level regions manifest for safe parallel edits: P0 symbols in,
-    /// regions + conflicts + merge-order layers + shared files out.
-    Regions {
-        task: String,
+        /// Attach the regions manifest: symbol line ranges, conservative
+        /// conflict pairs, merge-order layers, and declared shared files.
         #[serde(default)]
-        limit: Option<usize>,
+        regions: bool,
     },
     /// Deterministic prompt-start file facts from already-published indexes.
     /// This operation never builds or refreshes either index; unavailable or
     /// stale inputs are reported in a typed successful result.
+    ///
+    /// With `relevance_only` the answer carries `facts.relevance` and the
+    /// caps that bound it, and no target list: the same freshness gate, the
+    /// same `inputs`, the same block as the full answer, without ranking
+    /// targets. A daemon that predates the flag ignores it and answers in
+    /// full, so a reader checks `facts.relevance`, not the flag.
     TargetsFacts {
         task: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        relevance_only: bool,
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
+    },
+    /// Natural-language retrieval over the code chunks whose embeddings stay
+    /// resident in the daemon: ranked leads (file, lines, symbol, snippet),
+    /// never a verdict on relevance. Answers `unavailable` with a reason
+    /// instead of waiting while the vectors are cold, stale or rebuilding
+    /// (a background build is started), so a deadline-bounded caller falls
+    /// back. Never downloads the model.
+    Meaning {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
+        query: String,
+        /// Leads returned; the daemon's default when absent, capped.
         #[serde(default)]
         limit: Option<usize>,
     },
     Symbol {
         name: String,
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
     },
     /// All signatures in a file — the "list-signatures" view at ~10% of Read cost.
     Skeleton {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         file: String,
     },
     Context {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         uid: String,
         #[serde(default)]
         budget_tokens: Option<usize>,
     },
     Impact {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         uid_or_name: String,
         direction: String,
         #[serde(default)]
         depth: Option<u32>,
     },
     Uses {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         uid_or_name: String,
         /// "callers" | "callees"
         role: String,
@@ -109,6 +145,9 @@ pub enum Op {
         offset: Option<usize>,
     },
     Trace {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         from: String,
         to: String,
     },
@@ -157,6 +196,9 @@ pub enum Op {
     /// word intersection → T3 trigram), each tier short-circuiting, with
     /// explicit confidence.
     Resolve {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         phrase: String,
         #[serde(default)]
         limit: Option<usize>,
@@ -169,6 +211,13 @@ pub enum Op {
         facet: Option<String>,
         #[serde(default)]
         limit: Option<usize>,
+        /// Answer from the facts db exactly as it stands: never ingest,
+        /// never create it, never spawn the warmer — an absent db is an
+        /// error. Omitted on the wire when false so pre-flag requests
+        /// serialize identically; an older daemon ignores the flag and
+        /// answers the ingesting path.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
     /// Engine 2: lifecycle of a path or token — first-seen, last-changed,
     /// removed-in, present-at-HEAD.
@@ -177,6 +226,9 @@ pub enum Op {
         path: Option<String>,
         #[serde(default)]
         token: Option<String>,
+        /// Same contract as `History::read_only`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
     /// Engine 2: history-wide discovery ("dig-history"). `phrase` may be empty
     /// to list the ingest checkpoint/state only.
@@ -191,6 +243,9 @@ pub enum Op {
         to: Option<String>,
         #[serde(default)]
         limit: Option<usize>,
+        /// Same contract as `History::read_only`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
     /// Engine 4: one-call deterministic branch sync. `strategy` is
     /// "report" (default) or "rebase-if-clean" (explicit opt-in).
@@ -347,6 +402,9 @@ pub enum Op {
     /// to a graph generation whose signature it checks against the working
     /// tree before and after the traversal.
     Evaluate {
+        /// See [`Op::stale_ok`].
+        #[serde(default, skip_serializing_if = "is_false")]
+        stale_ok: bool,
         /// `--from`: a uid (`path#qualified#kind`) or a name.
         from: String,
         /// `--to`: a uid or a name.
@@ -369,6 +427,25 @@ pub enum Op {
         #[serde(default)]
         at_snapshot: bool,
     },
+    /// Bounded recursion-cycle enumeration with witnesses and explicit
+    /// coverage: finds strongly connected components in the call graph
+    /// (potential recursion cycles), bounded by node/edge/time/component
+    /// budgets, each reported cycle carrying a concrete closed-path witness
+    /// re-read from the store.
+    Cycles {
+        /// `exact` or `exact,probable`; selects the relation, not a
+        /// confidence threshold.
+        #[serde(default)]
+        tiers: Option<String>,
+        #[serde(default)]
+        max_nodes: Option<u32>,
+        #[serde(default)]
+        max_edges: Option<u32>,
+        #[serde(default)]
+        time_budget_ms: Option<u64>,
+        #[serde(default)]
+        max_components: Option<u32>,
+    },
     /// IDE-style symbol rename: the graph drives the edit set (definition,
     /// resolved call/reference sites, import bindings) and a tree-sitter
     /// re-parse verifies every rewritten identifier is the symbol — sites
@@ -389,6 +466,29 @@ pub enum Op {
 }
 
 impl Op {
+    /// The caller accepts an answer from the generation published before
+    /// the watcher batches still queued: a read replica may serve it during
+    /// an update instead of the writer after it, and the envelope then says
+    /// so (`epistemics.staleness_ms` and a `STALE_GENERATION` warning). The brief graph reads and
+    /// `targets_facts` carry the field. An older daemon ignores
+    /// it and answers after the batch, as for any request.
+    pub fn stale_ok(&self) -> bool {
+        match self {
+            Op::Search { stale_ok, .. }
+            | Op::Resolve { stale_ok, .. }
+            | Op::Meaning { stale_ok, .. }
+            | Op::TargetsFacts { stale_ok, .. }
+            | Op::Symbol { stale_ok, .. }
+            | Op::Skeleton { stale_ok, .. }
+            | Op::Context { stale_ok, .. }
+            | Op::Impact { stale_ok, .. }
+            | Op::Uses { stale_ok, .. }
+            | Op::Trace { stale_ok, .. }
+            | Op::Evaluate { stale_ok, .. } => *stale_ok,
+            _ => false,
+        }
+    }
+
     /// The wire tag name for this variant — the value serde emits under the
     /// `"op"` field (`"ping"`, `"search-content"`, `"scope-task"`, …). Used to populate
     /// the response envelope's `op` field so every response self-describes
@@ -400,7 +500,7 @@ impl Op {
             Op::Search { .. } => "search",
             Op::Targets { .. } => "targets",
             Op::TargetsFacts { .. } => "targets_facts",
-            Op::Regions { .. } => "regions",
+            Op::Meaning { .. } => "meaning",
             Op::Symbol { .. } => "symbol",
             Op::Skeleton { .. } => "skeleton",
             Op::Context { .. } => "context",
@@ -433,6 +533,7 @@ impl Op {
             Op::Map { .. } => "map",
             Op::Plan { .. } => "plan",
             Op::Evaluate { .. } => "evaluate",
+            Op::Cycles { .. } => "cycles",
             Op::Rename { .. } => "rename",
             Op::Shutdown => "shutdown",
             Op::Reindex { .. } => "reindex",
@@ -443,21 +544,17 @@ impl Op {
 /// The daemon ops a client may send — every real variant's [`Op::op_name`]
 /// except `shutdown` (an internal admin op). These are wire tags, not CLI
 /// commands: the SessionStart hook advertises the parser's subcommands
-/// instead, because several tags name another command or none (`update` is
-/// `fast-forward`, `sync` is `fetch`, `history_op` is `commit-history`). Kept in this file, beside the enum, so adding a
-/// variant is a one-line addition here too; `session_capabilities_track_every_real_op`
-/// below fails loudly if this list and the enum ever drift apart, which is
-/// the specific failure this const exists to make structurally impossible
-/// (a prior hand-maintained copy of this list, kept in the CLI crate with
-/// no link back to `Op`, silently went stale and undermined the exact
-/// anti-false-context guarantee the SessionStart hook is supposed to give).
+/// instead, because several tags name another command (`reindex` is
+/// `build-index`, `update` is `fast-forward`, `sync` is `fetch`, and
+/// `history_op` is `commit-history`). The capability test compares this list
+/// with the wire tags from `Op`'s derived deserializer.
 pub const SESSION_CAPABILITIES: &[&str] = &[
     "ping",
     "recall",
     "search",
     "targets",
     "targets_facts",
-    "regions",
+    "meaning",
     "symbol",
     "skeleton",
     "context",
@@ -490,8 +587,9 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "map",
     "plan",
     "evaluate",
+    "cycles",
     "rename",
-    "flow",
+    "reindex",
 ];
 
 /// The one-paragraph usage doctrine the SessionStart hook injects into every
@@ -502,7 +600,13 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
 ///
 /// Describes what Pixel offers without directing the agent: native tools
 /// stay the default, and Pixel is one option among them.
-pub const SESSION_USAGE: &str = "pixel offers deterministic repository retrieval and git commands: `pixel search-content`, `pixel find-code`, `pixel impact <symbol>` for callers and blast radius, `pixel dig-history` for past code, and `pixel what-changed`. Use one when it answers a question faster than your native tools; native search and reads remain available. `pixel --help` lists every command.";
+pub const SESSION_USAGE: &str = "pixel offers deterministic repository retrieval: `pixel search-content`, `pixel find-code`, `pixel impact <symbol>` for callers and blast radius, and `pixel what-changed`. Use one when it answers a question faster than your native tools; native search and reads remain available. `pixel --help` lists the core commands; one that moved to a plugin needs it installed (`pixel install github:Pixel-CLI/<repo>`).";
+
+/// The `skip_serializing_if` predicate for a flag whose absence means false;
+/// serde hands the field by reference.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[cfg(test)]
 mod tests {
@@ -526,6 +630,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(
@@ -553,6 +659,7 @@ mod tests {
                 limit: None,
                 max_tier: None,
                 precision: false,
+                regions: false,
             }
         );
     }
@@ -562,6 +669,8 @@ mod tests {
         let op = Op::TargetsFacts {
             task: "fix login flow".into(),
             limit: Some(12),
+            relevance_only: false,
+            stale_ok: false,
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(
@@ -580,8 +689,144 @@ mod tests {
             Op::TargetsFacts {
                 task: "fix login flow".into(),
                 limit: None,
+                relevance_only: false,
+                stale_ok: false,
             }
         );
+    }
+
+    /// `limit` is optional on the wire; the daemon applies its default.
+    #[test]
+    fn meaning_round_trips_with_defaulted_limit() {
+        let op = Op::Meaning {
+            query: "how is the index refreshed".into(),
+            limit: Some(5),
+
+            stale_ok: false,
+        };
+        let value = serde_json::to_value(&op).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "meaning", "query": "how is the index refreshed", "limit": 5})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), op);
+
+        let defaulted: Op =
+            serde_json::from_value(json!({"op": "meaning", "query": "refresh"})).unwrap();
+        assert_eq!(
+            defaulted,
+            Op::Meaning {
+                query: "refresh".into(),
+                limit: None,
+
+                stale_ok: false,
+            }
+        );
+    }
+
+    #[test]
+    fn targets_facts_names_relevance_only_on_the_wire_only_when_asked() {
+        let asked = Op::TargetsFacts {
+            task: "how does install work".into(),
+            limit: Some(8),
+            relevance_only: true,
+            stale_ok: false,
+        };
+        let value = serde_json::to_value(&asked).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "targets_facts", "task": "how does install work", "limit": 8, "relevance_only": true})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), asked);
+
+        // A request that does not ask is the request an older daemon knows.
+        let plain = Op::TargetsFacts {
+            task: "how does install work".into(),
+            limit: Some(8),
+            relevance_only: false,
+            stale_ok: false,
+        };
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("relevance_only")
+                .is_none()
+        );
+    }
+
+    /// `stale_ok` is opt-in on the wire: a request that does not ask
+    /// serializes as an older daemon knows it, one that asks round-trips,
+    /// and only operations a replica serves stale report it.
+    #[test]
+    fn brief_graph_stale_ok_should_roundtrip_and_default_to_false() {
+        for op in [
+            "search", "resolve", "meaning", "skeleton", "context", "uses", "impact", "trace",
+            "evaluate",
+        ] {
+            let mut value = serde_json::json!({"op": op, "pattern": "a", "phrase": "a", "query": "a", "file": "a.rs", "uid": "a",
+                "uid_or_name": "a", "direction": "upstream", "role": "callers",
+                "from": "a", "to": "b"});
+            let ordinary: Op = serde_json::from_value(value.clone()).unwrap();
+            assert!(!ordinary.stale_ok(), "{op}");
+            assert!(
+                serde_json::to_value(&ordinary)
+                    .unwrap()
+                    .get("stale_ok")
+                    .is_none()
+            );
+            value["stale_ok"] = serde_json::json!(true);
+            let stale: Op = serde_json::from_value(value).unwrap();
+            assert!(stale.stale_ok(), "{op}");
+            let wire = serde_json::to_value(&stale).unwrap();
+            assert_eq!(wire["stale_ok"], true);
+            assert_eq!(serde_json::from_value::<Op>(wire).unwrap(), stale);
+        }
+    }
+
+    #[test]
+    fn stale_ok_should_reach_the_wire_only_when_asked() {
+        let asked = Op::TargetsFacts {
+            task: "how does install work".into(),
+            limit: Some(8),
+            relevance_only: true,
+            stale_ok: true,
+        };
+        let value = serde_json::to_value(&asked).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "targets_facts", "task": "how does install work", "limit": 8,
+                   "relevance_only": true, "stale_ok": true})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), asked);
+        assert!(asked.stale_ok());
+
+        let symbol = Op::Symbol {
+            name: "login".into(),
+            stale_ok: true,
+        };
+        let value = serde_json::to_value(&symbol).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "symbol", "name": "login", "stale_ok": true})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), symbol);
+        assert!(symbol.stale_ok());
+
+        let plain: Op = serde_json::from_value(json!({"op": "symbol", "name": "login"})).unwrap();
+        assert_eq!(
+            plain,
+            Op::Symbol {
+                name: "login".into(),
+                stale_ok: false
+            }
+        );
+        assert!(!plain.stale_ok());
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            json!({"op": "symbol", "name": "login"})
+        );
+        // Another op never claims it, whatever its other fields say.
+        assert!(!Op::Graph { if_stale: true }.stale_ok());
     }
 
     #[test]
@@ -590,6 +835,8 @@ mod tests {
             uid_or_name: "foo#1".into(),
             direction: "upstream".into(),
             depth: Some(3),
+
+            stale_ok: false,
         };
         let text = serde_json::to_string(&op).unwrap();
         let parsed: Op = serde_json::from_str(&text).unwrap();
@@ -607,6 +854,79 @@ mod tests {
             serde_json::to_value(&reuse).unwrap(),
             json!({"op": "graph", "if_stale": true})
         );
+    }
+
+    /// `read_only` is opt-in on the wire: the history ops deserialize it as
+    /// false when absent and emit it only when set, so a flag-aware client
+    /// and a pre-flag client serialize identically when it is off.
+    #[test]
+    fn history_ops_read_only_defaults_off_and_is_sent_only_when_set() {
+        let bare: Op = serde_json::from_value(json!({"op": "history", "query": "login"})).unwrap();
+        assert_eq!(
+            bare,
+            Op::History {
+                query: "login".into(),
+                facet: None,
+                limit: None,
+                read_only: false,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&Op::History {
+                query: "login".into(),
+                facet: None,
+                limit: None,
+                read_only: true,
+            })
+            .unwrap()["read_only"],
+            json!(true)
+        );
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap().get("read_only"),
+            None,
+            "read_only: false must not reach the wire"
+        );
+
+        for (value, expected) in [
+            (
+                json!({"op": "lifecycle", "path": "a.rs"}),
+                Op::Lifecycle {
+                    path: Some("a.rs".into()),
+                    token: None,
+                    read_only: false,
+                },
+            ),
+            (
+                json!({"op": "excavate", "phrase": "login"}),
+                Op::Excavate {
+                    phrase: Some("login".into()),
+                    path: None,
+                    from: None,
+                    to: None,
+                    limit: None,
+                    read_only: false,
+                },
+            ),
+        ] {
+            assert_eq!(serde_json::from_value::<Op>(value).unwrap(), expected);
+        }
+        for op in [
+            Op::Lifecycle {
+                path: None,
+                token: Some("login".into()),
+                read_only: true,
+            },
+            Op::Excavate {
+                phrase: None,
+                path: None,
+                from: None,
+                to: None,
+                limit: None,
+                read_only: true,
+            },
+        ] {
+            assert_eq!(serde_json::to_value(&op).unwrap()["read_only"], json!(true));
+        }
     }
 
     #[test]
@@ -632,6 +952,8 @@ mod tests {
         let op = Op::Resolve {
             phrase: "the form".into(),
             limit: Some(5),
+
+            stale_ok: false,
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(value["op"], "resolve");
@@ -723,6 +1045,8 @@ mod tests {
                     scope: None,
                     globs: Vec::new(),
                     types: Vec::new(),
+
+                    stale_ok: false,
                 },
                 "search",
             ),
@@ -732,6 +1056,7 @@ mod tests {
                     limit: None,
                     max_tier: None,
                     precision: false,
+                    regions: false,
                 },
                 "targets",
             ),
@@ -739,22 +1064,40 @@ mod tests {
                 Op::TargetsFacts {
                     task: "".into(),
                     limit: None,
+                    relevance_only: false,
+                    stale_ok: false,
                 },
                 "targets_facts",
             ),
             (
-                Op::Regions {
-                    task: "".into(),
+                Op::Meaning {
+                    query: "".into(),
                     limit: None,
+
+                    stale_ok: false,
                 },
-                "regions",
+                "meaning",
             ),
-            (Op::Symbol { name: "".into() }, "symbol"),
-            (Op::Skeleton { file: "".into() }, "skeleton"),
+            (
+                Op::Symbol {
+                    name: "".into(),
+                    stale_ok: false,
+                },
+                "symbol",
+            ),
+            (
+                Op::Skeleton {
+                    file: "".into(),
+                    stale_ok: false,
+                },
+                "skeleton",
+            ),
             (
                 Op::Context {
                     uid: "".into(),
                     budget_tokens: None,
+
+                    stale_ok: false,
                 },
                 "context",
             ),
@@ -763,6 +1106,8 @@ mod tests {
                     uid_or_name: "".into(),
                     direction: "".into(),
                     depth: None,
+
+                    stale_ok: false,
                 },
                 "impact",
             ),
@@ -771,6 +1116,8 @@ mod tests {
                     uid_or_name: "".into(),
                     role: "".into(),
                     offset: None,
+
+                    stale_ok: false,
                 },
                 "uses",
             ),
@@ -778,6 +1125,8 @@ mod tests {
                 Op::Trace {
                     from: "".into(),
                     to: "".into(),
+
+                    stale_ok: false,
                 },
                 "trace",
             ),
@@ -794,10 +1143,13 @@ mod tests {
             (Op::ReviewGate { base: None }, "review_gate"),
             (Op::Graph { if_stale: false }, "graph"),
             (Op::Status {}, "status"),
+            (Op::Reindex {}, "reindex"),
             (
                 Op::Resolve {
                     phrase: "".into(),
                     limit: None,
+
+                    stale_ok: false,
                 },
                 "resolve",
             ),
@@ -806,6 +1158,7 @@ mod tests {
                     query: "".into(),
                     facet: None,
                     limit: None,
+                    read_only: false,
                 },
                 "history",
             ),
@@ -813,6 +1166,7 @@ mod tests {
                 Op::Lifecycle {
                     path: None,
                     token: None,
+                    read_only: false,
                 },
                 "lifecycle",
             ),
@@ -823,6 +1177,7 @@ mod tests {
                     from: None,
                     to: None,
                     limit: None,
+                    read_only: false,
                 },
                 "excavate",
             ),
@@ -942,8 +1297,20 @@ mod tests {
                     time_budget_ms: None,
                     scope: None,
                     at_snapshot: false,
+
+                    stale_ok: false,
                 },
                 "evaluate",
+            ),
+            (
+                Op::Cycles {
+                    tiers: None,
+                    max_nodes: None,
+                    max_edges: None,
+                    time_budget_ms: None,
+                    max_components: None,
+                },
+                "cycles",
             ),
             (
                 Op::Rename {
@@ -955,8 +1322,23 @@ mod tests {
                 },
                 "rename",
             ),
+            (
+                Op::Note {
+                    action: "list".into(),
+                    file: None,
+                    target: None,
+                    note: None,
+                },
+                "note",
+            ),
+            (Op::Map { markdown: false }, "map"),
             (Op::Shutdown, "shutdown"),
         ];
+        let mut covered: Vec<_> = cases.iter().map(|(_, tag)| *tag).collect();
+        let mut variants = real_op_tags().to_vec();
+        covered.sort_unstable();
+        variants.sort_unstable();
+        assert_eq!(covered, variants, "every Op needs a serialization case");
         for (op, expected) in cases {
             assert_eq!(op.op_name(), *expected);
             let serialized = serde_json::to_value(op).unwrap();
@@ -966,14 +1348,13 @@ mod tests {
 
     #[test]
     fn session_usage_describes_pixel_without_mandating_it() {
-        for command in [
-            "search-content",
-            "find-code",
-            "impact",
-            "dig-history",
-            "what-changed",
-        ] {
+        for command in ["search-content", "find-code", "impact", "what-changed"] {
             assert!(SESSION_USAGE.contains(command), "{command}");
+        }
+        // It names no command that a plugin provides: nothing here knows
+        // whether one is installed.
+        for moved in ["dig-history", "git commands"] {
+            assert!(!SESSION_USAGE.contains(moved), "{moved}");
         }
         for directive in ["mandatory", "must", "before any", "before editing"] {
             assert!(
@@ -982,77 +1363,56 @@ mod tests {
             );
         }
         assert!(SESSION_USAGE.contains("native search and reads remain available"));
+        assert!(
+            SESSION_USAGE.contains("`pixel --help` lists the core commands")
+                && !SESSION_USAGE.contains("lists every command"),
+            "--help does not list the commands that moved to plugins"
+        );
+    }
+
+    /// Serde supplies the enum's wire tags to `unknown_variant`, including
+    /// future variants and renames, without parsing an error message or source.
+    fn real_op_tags() -> &'static [&'static str] {
+        #[derive(Debug)]
+        struct Variants(&'static [&'static str]);
+
+        impl std::fmt::Display for Variants {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "wire variants: {:?}", self.0)
+            }
+        }
+
+        impl std::error::Error for Variants {}
+
+        impl serde::de::Error for Variants {
+            fn custom<T: std::fmt::Display>(message: T) -> Self {
+                panic!("expected an unknown Op variant, got: {message}");
+            }
+
+            fn unknown_variant(_variant: &str, expected: &'static [&'static str]) -> Self {
+                Self(expected)
+            }
+        }
+
+        let input = serde::de::value::MapDeserializer::<_, Variants>::new(
+            [("op", "__unknown_capability_probe__")].into_iter(),
+        );
+        Op::deserialize(input).unwrap_err().0
     }
 
     #[test]
     fn session_capabilities_track_every_real_op() {
-        // The exhaustive real variant set, independent of SESSION_CAPABILITIES
-        // itself — this must be updated by hand whenever a variant is added,
-        // same as op_name_matches_serde_tag's `cases` above, so the two lists
-        // can't silently drift in the same direction and still agree.
-        let all_real_ops: &[&str] = &[
-            "ping",
-            "recall",
-            "search",
-            "targets",
-            "targets_facts",
-            "regions",
-            "symbol",
-            "skeleton",
-            "context",
-            "impact",
-            "uses",
-            "trace",
-            "processes",
-            "clusters",
-            "changes",
-            "review_gate",
-            "graph",
-            "status",
-            "resolve",
-            "history",
-            "lifecycle",
-            "excavate",
-            "reconcile",
-            "journal",
-            "inspect",
-            "review",
-            "diff",
-            "history_op",
-            "publish",
-            "push",
-            "ship",
-            "branch_op",
-            "update",
-            "sync",
-            "note",
-            "map",
-            "plan",
-            "evaluate",
-            "flow",
-            "rename",
-            "shutdown",
-        ];
-        // Every advertised capability must be a real op.
-        for cap in SESSION_CAPABILITIES {
-            assert!(
-                all_real_ops.contains(cap),
-                "SESSION_CAPABILITIES advertises '{cap}', which is not a real Op variant — \
-                 this is exactly the false-context bug this list exists to prevent"
-            );
-        }
-        // Every real, user-facing op (everything except the internal `shutdown`)
-        // must be advertised — an op silently missing from the capability
-        // block is a quieter version of the same failure.
-        for op in all_real_ops {
-            if *op == "shutdown" {
-                continue;
-            }
-            assert!(
-                SESSION_CAPABILITIES.contains(op),
-                "'{op}' is a real Op variant but missing from SESSION_CAPABILITIES — \
-                 an agent reading the SessionStart block won't know it exists"
-            );
-        }
+        // Shutdown controls the daemon lifecycle, rather than repository work.
+        // Reindex is public: build-index sends it to reuse the daemon's writer.
+        let mut expected: Vec<_> = real_op_tags()
+            .iter()
+            .copied()
+            .filter(|tag| *tag != "shutdown")
+            .collect();
+        let mut advertised = SESSION_CAPABILITIES.to_vec();
+        expected.sort_unstable();
+        advertised.sort_unstable();
+        // Comparing vectors also rejects duplicate advertisements.
+        assert_eq!(advertised, expected);
     }
 }

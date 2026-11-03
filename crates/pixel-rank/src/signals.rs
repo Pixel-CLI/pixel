@@ -31,7 +31,7 @@
 //! None` and no events (as `pixel-daemon` does today) leaves both channels
 //! empty by construction — only the activity channel is live in production.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use pixel_git::GitRunner;
 use pixel_session::store::Store;
@@ -141,6 +141,10 @@ pub struct SignalBundle {
     /// "Unavailable" is not "clean repository": the caller must not read an
     /// empty `activity` map as "no recent churn" without checking this.
     pub activity_unavailable: Option<String>,
+    /// Named reason the graph's fan-in query produced no map, `None` when it
+    /// ran or was not asked for. As for activity, an empty `fan_in` map is
+    /// not "nothing calls these files" without checking this.
+    pub fan_in_unavailable: Option<String>,
 }
 
 /// Errors from gathering signals.
@@ -298,6 +302,7 @@ pub fn score_signals(
         // `score_signals` is pure and runs no scan: only `compute_signals`
         // can report an unavailable activity channel.
         activity_unavailable: None,
+        fan_in_unavailable: None,
     }
 }
 
@@ -325,7 +330,7 @@ pub fn compute_signals(
         Some(m) => (m.clone(), None),
         None => match activity_from_git_log(runner, opts.now_ms, opts.activity_half_life_days) {
             Ok(m) => (m, None),
-            Err(e) => (HashMap::new(), Some(e.to_string())),
+            Err(e) => (HashMap::default(), Some(e.to_string())),
         },
     };
     let error_records = match session_store {
@@ -372,7 +377,7 @@ pub fn activity_from_git_log(
     now_ms: i64,
     half_life_days: f64,
 ) -> Result<HashMap<String, f64>, SignalError> {
-    let mut activity: HashMap<String, f64> = HashMap::new();
+    let mut activity: HashMap<String, f64> = HashMap::default();
     let out = runner.run(&["log", "--since=90.days", "--name-only", "--format=%x00%ct"])?;
     let text = String::from_utf8_lossy(&out);
     for block in text.split('\0') {
@@ -413,7 +418,7 @@ fn session_score(
     half_life_minutes: f64,
     window_ms: i64,
 ) -> HashMap<String, f64> {
-    let mut score: HashMap<String, f64> = HashMap::new();
+    let mut score: HashMap<String, f64> = HashMap::default();
     for e in events {
         let age_ms = now_ms - e.ts_ms;
         if age_ms < 0 || age_ms > window_ms {
@@ -440,7 +445,7 @@ fn error_sink_join(
     now_ms: i64,
     half_life_minutes: f64,
 ) -> (HashMap<String, f64>, Vec<String>) {
-    let mut weights: HashMap<String, f64> = HashMap::new();
+    let mut weights: HashMap<String, f64> = HashMap::default();
     let mut reasons: Vec<String> = Vec::new();
     for path in candidates {
         for err in errors {
@@ -549,7 +554,7 @@ fn path_concepts(path: &str) -> Vec<String> {
 fn normalize(map: &HashMap<String, f64>) -> HashMap<String, f64> {
     let max = map.values().copied().fold(0.0, f64::max);
     if max <= 0.0 {
-        return HashMap::new();
+        return HashMap::default();
     }
     map.iter().map(|(k, v)| (k.clone(), v / max)).collect()
 }
@@ -679,7 +684,7 @@ mod tests {
             ..Default::default()
         };
         let bundle = score_signals(
-            &HashMap::new(),
+            &HashMap::default(),
             &[],
             &[],
             &[],
@@ -729,7 +734,7 @@ mod tests {
         .into_iter()
         .collect();
         let signals = score_signals(
-            &HashMap::new(),
+            &HashMap::default(),
             &[],
             &[],
             &[],

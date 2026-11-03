@@ -7,7 +7,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 
-spec = importlib.util.spec_from_file_location('mixed', Path(__file__).with_name('bench-plan-mixed.py'))
+spec = importlib.util.spec_from_file_location('mixed', Path(__file__).parent / 'bench' / 'bench-plan-mixed.py')
 mixed = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mixed)
 

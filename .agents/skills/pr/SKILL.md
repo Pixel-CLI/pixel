@@ -100,7 +100,7 @@ when it does not. In this repository the usual one-way doors are:
 - a format or a path under `.pixel/`, `~/.pixel/` or
   `~/.local/{share,state}/pixel/` (a revert leaves files the old code
   cannot read, or orphans them);
-- what `pixel install` writes into Claude, Codex or pi configuration, and
+- what `pixel setup` writes into Claude, Codex or pi configuration, and
   what `uninstall` removes (users' own settings are in those files);
 - a release tag, a published changelog entry, a security advisory;
 - anything that deletes or rewrites a user's file.
@@ -116,6 +116,6 @@ workflow change can block every pull request.
 
 ## Docs touched
 
-`changelog.d/` (or why the change ships nothing), `ARCHITECTURE.md` with
+`.github/changelog.d/` (or why the change ships nothing), `ARCHITECTURE.md` with
 the section `.agents/rules/architecture-doc.md` maps the change to (or why
 it moves nothing the map describes), the agent prompt, the README.

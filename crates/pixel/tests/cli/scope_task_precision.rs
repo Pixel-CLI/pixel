@@ -361,8 +361,8 @@ const CORPUS: &[Case] = &[
         oid: "e531744ca74364fc10adea85c2f6d3a5bcca75d0",
         task: "fix(install): pass the codex prompt through developer_instructions, not model_instructions_file",
         labels: &[
-            "crates/pixel-install/src/install.rs",
-            "crates/pixel-install/tests/install_tests.rs",
+            "crates/pixel-setup/src/install.rs",
+            "crates/pixel-setup/tests/install_tests.rs",
         ],
     },
     Case {
@@ -435,7 +435,7 @@ const CORPUS: &[Case] = &[
     },
     Case {
         oid: "45577565ccf2e5aa2e9883a383efaf8c1bc6be7b",
-        task: "docs(skill): fold Apollo's rust-best-practices into rust-guidelines, add refresh script and id drift test\n\nSKILL.md gains the points Microsoft's guidelines do not cover, restated\nfrom Apollo GraphQL's rust-best-practices (MIT, ideas not text): a\n\"Borrowing and ownership\" block, the type-state pattern under API shape,\nTODO(#NN) under Docs, test naming and insta snapshot rules under Tests.\nThe precedence paragraph resolves the one known conflict: M-PANIC-ON-BUG\nwins over Apollo's \"never unwrap outside tests\". \"Out of scope\" records\nwhy async rules are not applied and when to revisit (the daemon going\nasync).\n\nscripts/refresh-guidelines.sh re-downloads the upstream text and prints\nthe diff of `## … (M-…)` headings. Running it refreshed guidelines.txt:\nupstream dropped M-INTEGRATION-TEST-UTILS (folded into M-TEST-UTIL), so\nthe skill no longer names it. The docs_drift test now fails the build\nwhen SKILL.md names an id that is not a heading of guidelines.txt.\nNOTICE credits Apollo.",
+        task: "docs(skill): fold Apollo's rust-best-practices into rust-guidelines, add refresh script and id drift test\n\nSKILL.md gains the points Microsoft's guidelines do not cover, restated\nfrom Apollo GraphQL's rust-best-practices (MIT, ideas not text): a\n\"Borrowing and ownership\" block, the type-state pattern under API shape,\nTODO(#NN) under Docs, test naming and insta snapshot rules under Tests.\nThe precedence paragraph resolves the one known conflict: M-PANIC-ON-BUG\nwins over Apollo's \"never unwrap outside tests\". \"Out of scope\" records\nwhy async rules are not applied and when to revisit (the daemon going\nasync).\n\nscripts/dev/refresh-guidelines.sh re-downloads the upstream text and prints\nthe diff of `## … (M-…)` headings. Running it refreshed guidelines.txt:\nupstream dropped M-INTEGRATION-TEST-UTILS (folded into M-TEST-UTIL), so\nthe skill no longer names it. The docs_drift test now fails the build\nwhen SKILL.md names an id that is not a heading of guidelines.txt.\nNOTICE credits Apollo.",
         labels: &["crates/pixel/tests/cli/docs_drift.rs"],
     },
     Case {
@@ -509,19 +509,19 @@ const CORPUS: &[Case] = &[
         oid: "4c5281dfe66d32461ef3956c03f580a84bd25def",
         task: "test(install): kill NotFound guard mutants in pi prompt read paths\n\nAdd tests that an unreadable (write-only) pi prompt file is an error for both write_pi_prompt and remove_agent_prompt, not treated as absent.",
         labels: &[
-            "crates/pixel-install/src/install.rs",
-            "crates/pixel-install/src/uninstall.rs",
+            "crates/pixel-setup/src/install.rs",
+            "crates/pixel-setup/src/uninstall.rs",
         ],
     },
     Case {
         oid: "50197d558989dd18776f5d65ed779b8fc674b884",
         task: "fmt(install): fix rustfmt on antigravity path assertions",
-        labels: &["crates/pixel-install/src/antigravity.rs"],
+        labels: &["crates/pixel-setup/src/antigravity.rs"],
     },
     Case {
         oid: "00173dfcd2bedacf62f7c45ea8fa2625886e7fcb",
         task: "fmt(install): cargo fmt antigravity.rs",
-        labels: &["crates/pixel-install/src/antigravity.rs"],
+        labels: &["crates/pixel-setup/src/antigravity.rs"],
     },
     Case {
         oid: "81692580ddcab39c56e2a957a5bbcdd0c9d8a37e",
@@ -552,8 +552,8 @@ const CORPUS: &[Case] = &[
         oid: "d86e8f274f29302611b5860e6b78f6ba01153249",
         task: "fix(install): format the guard tests and pin the unreadable prompt contract (#157)",
         labels: &[
-            "crates/pixel-install/src/install.rs",
-            "crates/pixel-install/src/uninstall.rs",
+            "crates/pixel-setup/src/install.rs",
+            "crates/pixel-setup/src/uninstall.rs",
         ],
     },
     Case {
@@ -573,7 +573,7 @@ const CORPUS: &[Case] = &[
     },
     Case {
         oid: "03fe1526cf4a6bcc960f97c1b088c29d6f88d647",
-        task: "feat(self-update): guide upgrades through the owning package manager\n\n`pixel self-update` refuses to overwrite a mise or Homebrew install, but\nthe refusal only offered the developer escape hatches (`--install-path`,\n`--dev`). A user who typed the old `pixel upgrade` alias got no path\nforward: the command that updates that install is the package manager's\nown. The refusal now names it (`mise upgrade pixel`,\n`brew update && brew upgrade LivioGama/tap/pixel`).\n\nEvery upgrade channel replaces the binary only. The agent prompt, shell\nwrapper and per-agent config keys stay on the old release until\n`pixel install` runs, which is the step a team upgrading through brew\nforgets. The generated Homebrew formula now carries that follow-up as\ncaveats, printed by Homebrew after both install and upgrade, and the\nREADME gains a per-channel Updating section.",
+        task: "feat(self-update): guide upgrades through the owning package manager\n\n`pixel self-update` refuses to overwrite a mise or Homebrew install, but\nthe refusal only offered the developer escape hatches (`--install-path`,\n`--dev`). A user who typed the old `pixel upgrade` alias got no path\nforward: the command that updates that install is the package manager's\nown. The refusal now names it (`mise upgrade pixel`,\n`brew update && brew upgrade LivioGama/tap/pixel`).\n\nEvery upgrade channel replaces the binary only. The agent prompt, shell\nwrapper and per-agent config keys stay on the old release until\n`pixel setup` runs, which is the step a team upgrading through brew\nforgets. The generated Homebrew formula now carries that follow-up as\ncaveats, printed by Homebrew after both install and upgrade, and the\nREADME gains a per-channel Updating section.",
         labels: &[
             "crates/pixel/src/main.rs",
             "crates/pixel/tests/cli/upgrade_cli.rs",

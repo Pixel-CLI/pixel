@@ -114,5 +114,5 @@ on a busy host. Do not stop user processes. New artifact root:
 `.pixel/experiments/plan-routing-real-v1/`; preserve all previous runs.
 
 Run meaningful prototype tests, frozen-corpus validation, actual source-daemon
-contract checks and scripts/gates.sh. Rust/build/defaults unchanged: no install
+contract checks and scripts/ci/gates.sh. Rust/build/defaults unchanged: no install
 loop or local mutants. No push, PR, publication or global configuration changes.

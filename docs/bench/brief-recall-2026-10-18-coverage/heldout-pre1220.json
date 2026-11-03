@@ -1,0 +1,1996 @@
+{
+  "label": "heldout-pre1220",
+  "date": "2026-10-18",
+  "binary": {
+    "path": "<pixel @7887b9e6 (before #1220), dev-release; its --version names 1f9f8423 because a build cache replayed build.rs>",
+    "sha256": "bb32d8818a21cb74821c5c51698f5a74d5f9d15e6f0b0e187a14662ecfddd1b4",
+    "version": "pixel 0.8.0\ncommit: 1f9f84230159c9c30e9ab324baff41da5fc7a291\ntarget: aarch64-apple-darwin\nrustc: rustc 1.99.0 (b940084d7 2026-09-28)\nbuilt: 2026-10-18"
+  },
+  "labels": {
+    "path": "~/.local/share/pixel/brief-recall/labels-2026-10-18-heldout.jsonl (private, not published)",
+    "sha256": "05a472f492436c06dcfc67f6e30bcbcd1023f5f002b4c369251170c73b88ced7"
+  },
+  "window": [
+    1791989369.981,
+    1792348842.448
+  ],
+  "command": "python3 -I scripts/bench/brief-recall.py score --labels <labels-2026-10-18-heldout.jsonl> --bin <pixel-7887b9e6> --out <dir> --label heldout-pre1220",
+  "unindexed": 14,
+  "passes": 3,
+  "unstable": 0,
+  "daemons": {
+    "own": 10,
+    "foreign": 0,
+    "none": 0
+  },
+  "means": {
+    "rows": 191,
+    "labels": {
+      "project": 29,
+      "follow-up": 66,
+      "other": 96
+    },
+    "briefed": 120,
+    "project_recall": 0.6896551724137931,
+    "follow_up_recall": 0.696969696969697,
+    "precision": 0.55,
+    "hit_at_8": 0.6428571428571429,
+    "hit_pool": 14
+  },
+  "by_source": {
+    "claude": {
+      "rows": 77,
+      "labels": {
+        "project": 10,
+        "follow-up": 23,
+        "other": 44
+      },
+      "briefed": 49,
+      "project_recall": 1.0,
+      "follow_up_recall": 0.6521739130434783,
+      "precision": 0.5102040816326531,
+      "hit_at_8": 0.6,
+      "hit_pool": 10
+    },
+    "codex": {
+      "rows": 113,
+      "labels": {
+        "project": 19,
+        "follow-up": 43,
+        "other": 51
+      },
+      "briefed": 71,
+      "project_recall": 0.5263157894736842,
+      "follow_up_recall": 0.7209302325581395,
+      "precision": 0.5774647887323944,
+      "hit_at_8": 0.75,
+      "hit_pool": 4
+    },
+    "pi": {
+      "rows": 1,
+      "labels": {
+        "project": 0,
+        "follow-up": 0,
+        "other": 1
+      },
+      "briefed": 0,
+      "project_recall": null,
+      "follow_up_recall": null,
+      "precision": null,
+      "hit_at_8": null,
+      "hit_pool": 0
+    }
+  },
+  "rows": [
+    {
+      "id": "bfef874e17b84839",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "576d1da6e04bbccb",
+      "label": "project",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 4,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "1fc28765b38c3d31",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2087,
+      "touched": 25,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "2dbd70479c1bb722",
+      "label": "project",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 28221,
+      "touched": 40,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "a2b99208258295bf",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 6,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "6089a2060059d577",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 1076,
+      "touched": 9,
+      "named": 3,
+      "hit": true
+    },
+    {
+      "id": "139b125d287983d7",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 7,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "f65ae27d7c873107",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 2,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "e0d1b4b6d2ac4f6a",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 5,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "3653c95ade2624b5",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 1,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "c2a168938f74732d",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 4,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "632c6d8b58e36384",
+      "label": "project",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 4983,
+      "touched": 10,
+      "named": 5,
+      "hit": true
+    },
+    {
+      "id": "a28af723e285d6ef",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 2252,
+      "touched": 20,
+      "named": 7,
+      "hit": false
+    },
+    {
+      "id": "32eb26616f727bdf",
+      "label": "project",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 2746,
+      "touched": 15,
+      "named": 5,
+      "hit": true
+    },
+    {
+      "id": "3d7fabf14d03b304",
+      "label": "project",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 5735,
+      "touched": 2,
+      "named": 4,
+      "hit": false
+    },
+    {
+      "id": "c85eae89a7bf9047",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 28983,
+      "touched": 8,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "dab3968da9b7d87c",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "438e244ba2e0a32b",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 4,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "9e7829d2d26f1ccb",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 7083,
+      "touched": 3,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "f1cb1ba70296d191",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "fd2b1ea8c951e01f",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "72333dde9ed408a5",
+      "label": "project",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 6915,
+      "touched": 10,
+      "named": 4,
+      "hit": true
+    },
+    {
+      "id": "f6bc7b3b839c3459",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 11173,
+      "touched": 0,
+      "named": 7,
+      "hit": false
+    },
+    {
+      "id": "bf414ac13ee2e8ee",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 14010,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "2cd5b9f4f50304f0",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "e7db153d9c3ba13c",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3033,
+      "touched": 3,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "7690573554d86355",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3459,
+      "touched": 1,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "65c2ab84f76fc1ea",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 2783,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "ab644cc9fdf6c1a1",
+      "label": "project",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 14134,
+      "touched": 0,
+      "named": 3,
+      "hit": false
+    },
+    {
+      "id": "958b7065634831f8",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 1199,
+      "touched": 0,
+      "named": 2,
+      "hit": false
+    },
+    {
+      "id": "b8638fb202debd65",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "f401e0e52a34d087",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "cbaf90d732e00070",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "8790c5b379307e5f",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "dd509cdcf634e1f4",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 4675,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "8f5140f0bee43146",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 1282,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "a34158dd46d454ee",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 1222,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "ebb3dec352cf5b3e",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 1389,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "f717319707367ebd",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "31228bacaa1074c0",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 6003,
+      "touched": 0,
+      "named": 6,
+      "hit": false
+    },
+    {
+      "id": "6ccf00f749231f72",
+      "label": "project",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "ff573f3677e52039",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2400,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "7f13b8a003eeddbc",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "820f0787d76bfa91",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "66fc477acaa2bd07",
+      "label": "project",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 12752,
+      "touched": 0,
+      "named": 6,
+      "hit": false
+    },
+    {
+      "id": "7a2d0963a0f1856b",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2862,
+      "touched": 0,
+      "named": 4,
+      "hit": false
+    },
+    {
+      "id": "bf4a0d8df8c8158f",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 7971,
+      "touched": 0,
+      "named": 5,
+      "hit": false
+    },
+    {
+      "id": "383fbac396148e83",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 4088,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "884a496fe4caeecd",
+      "label": "project",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 14784,
+      "touched": 0,
+      "named": 4,
+      "hit": false
+    },
+    {
+      "id": "39a0c52c5028e699",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 5615,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "915f7fa345127550",
+      "label": "project",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "1c38042a3fc20838",
+      "label": "project",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2708,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "8f618d67f1496099",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2202,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "954ed76a3b85c83c",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 8955,
+      "touched": 0,
+      "named": 6,
+      "hit": false
+    },
+    {
+      "id": "f8dfa5446c7fd321",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "50918dd670c1ede9",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 7543,
+      "touched": 0,
+      "named": 3,
+      "hit": false
+    },
+    {
+      "id": "a6ed80b545ab850d",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 1502,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "4f62e3661fe113eb",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 5651,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "93d207104d4a199f",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 8963,
+      "touched": 0,
+      "named": 3,
+      "hit": false
+    },
+    {
+      "id": "921d73dd64cdbc72",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 12538,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "8c842462ce4c795e",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2388,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "e1742d08b4613612",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2513,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "a6a60d7878967375",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 8004,
+      "touched": 0,
+      "named": 2,
+      "hit": false
+    },
+    {
+      "id": "054a6a801c1d0c64",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 17272,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "7db8c401c136f11b",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3405,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "fe20a8c61aa62b49",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3826,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "d87a673078d7db0f",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 4987,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "3327f9680ae952f1",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2329,
+      "touched": 0,
+      "named": 6,
+      "hit": false
+    },
+    {
+      "id": "8ef9681ba52d8938",
+      "label": "project",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3532,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "cd71ceb01b2e5bd6",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2039,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "55de3f0739920945",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "bf2f67fffcc2b907",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2603,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "f42834a4820c8334",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3551,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "36177d155fa67e5e",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "09fb6385559dec41",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 1125,
+      "touched": 0,
+      "named": 6,
+      "hit": false
+    },
+    {
+      "id": "dde2194a30c18f1d",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3518,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "0fb765c4d8475639",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "db032b0fb0ca21d2",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "bab7c1246cce943a",
+      "label": "project",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 9219,
+      "touched": 0,
+      "named": 3,
+      "hit": false
+    },
+    {
+      "id": "28057cd5baf677bf",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "cd2479b596d1ba0c",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "79f35584ee7ec38b",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "6be6829f572d9a58",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "ce6742a48437f675",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "16bbeaaabcab559d",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3551,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "f1bb6d9e490fe2da",
+      "label": "project",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "05246befa8262e7e",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2650,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "ddaea388f24fb1b1",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "4a7b7e62994d5da1",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 4087,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "6d05fb5b5b483fed",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "f53cf1c24f2a1804",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "6df78ead85f389fe",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 6686,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "11c37512e04ea550",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 1372,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "a6fdd451c863b618",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "e151281a14f27e92",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "35f37e7fc8dc16fe",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3206,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "73d7e7772fc07c90",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2914,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "1beae76f696ebda1",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "0e91abd3182cc484",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3133,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "b526c2eb4920be15",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 956,
+      "touched": 0,
+      "named": 5,
+      "hit": false
+    },
+    {
+      "id": "b287f61fa20222b9",
+      "label": "project",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 13914,
+      "touched": 24,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "4ddf7f96f02f640f",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3232,
+      "touched": 51,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "770cb121081e8b06",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "84de5cf268e6d8a2",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "0290dee652d28abf",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3565,
+      "touched": 10,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "6e8e999984d103e5",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3253,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "1f41fb532197d5b6",
+      "label": "project",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 12871,
+      "touched": 9,
+      "named": 7,
+      "hit": true
+    },
+    {
+      "id": "75a28d9a4c84fb46",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3301,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "d21025e841f0a0ba",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 8238,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "d5f7bbb988b08ae6",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 15416,
+      "touched": 11,
+      "named": 7,
+      "hit": true
+    },
+    {
+      "id": "7f0960a8914bfc5f",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2729,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "673901d4ec19801c",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 6468,
+      "touched": 3,
+      "named": 3,
+      "hit": false
+    },
+    {
+      "id": "32a846d8a50de9ba",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "1f58c499192bf356",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 1,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "b07328ceaa959141",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 4184,
+      "touched": 31,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "afcfab96b64d8271",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "df562abf4ff2df01",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 5375,
+      "touched": 57,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "9eeaaa4b2edce336",
+      "label": "project",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3433,
+      "touched": 34,
+      "named": 7,
+      "hit": false
+    },
+    {
+      "id": "ec81b158bc9ec449",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 10334,
+      "touched": 2,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "a7e26e5bedf7592b",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3962,
+      "touched": 17,
+      "named": 3,
+      "hit": false
+    },
+    {
+      "id": "e00601d7d5ccb15c",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2950,
+      "touched": 57,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "739702764a617575",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "88381f4c63fd9e1d",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 15383,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "a822b67384a62033",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 3399,
+      "touched": 5,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "933dfcfb4913839c",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "4aeb4e508628a529",
+      "label": "project",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 4931,
+      "touched": 6,
+      "named": 2,
+      "hit": false
+    },
+    {
+      "id": "99b3ba10d658a0c3",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3476,
+      "touched": 1,
+      "named": 3,
+      "hit": true
+    },
+    {
+      "id": "698169adc9026b4a",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "1db93c55ce218f81",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "2ef75bc01d7a6b1d",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "f526a15abb0f92f3",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 841,
+      "touched": 1,
+      "named": 2,
+      "hit": false
+    },
+    {
+      "id": "1a44cc9926cf846f",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 6163,
+      "touched": 2,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "05f70d74556946bc",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "cb4ae17bbefc8d8e",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 5414,
+      "touched": 8,
+      "named": 3,
+      "hit": false
+    },
+    {
+      "id": "dcfbb200b915ae96",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 2758,
+      "touched": 18,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "902abdc13f6aeb7a",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 14340,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "2d8864e358ccef26",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 4142,
+      "touched": 13,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "48a13942362dcc73",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 1923,
+      "touched": 39,
+      "named": 4,
+      "hit": true
+    },
+    {
+      "id": "f96db51e87b8598d",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 17027,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "7d9ad1209c569a2f",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 9561,
+      "touched": 0,
+      "named": 4,
+      "hit": false
+    },
+    {
+      "id": "dab9d650efe3e647",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3375,
+      "touched": 7,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "82c62480c75dc4d9",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 1814,
+      "touched": 6,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "b47525e6cd528ed5",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 18444,
+      "touched": 1,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "28349d28812585fe",
+      "label": "project",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 12829,
+      "touched": 16,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "cbf3a48b9d3cc153",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 2816,
+      "touched": 1,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "d7d1dfa5d646aebd",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 1,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "c8e000ef417571ef",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "28492669c5a4f8e1",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "19f737ea0d05f24c",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 7021,
+      "touched": 0,
+      "named": 5,
+      "hit": false
+    },
+    {
+      "id": "8bf8115f8029c2e7",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3903,
+      "touched": 6,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "8329235cda1fc9dd",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "711cf71eea3b321b",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 24630,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "b466be858a5d0702",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 4090,
+      "touched": 5,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "f4df748cfe6632ed",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 6,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "afceb4ba0327d7dd",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "c38e715d08916f1e",
+      "label": "project",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 6530,
+      "touched": 4,
+      "named": 5,
+      "hit": false
+    },
+    {
+      "id": "f98595b80abf32be",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 2,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "23c84bd3b9a84de8",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 4594,
+      "touched": 39,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "62abdf771d8e38e3",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "ac351913681490a8",
+      "label": "project",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 6645,
+      "touched": 21,
+      "named": 5,
+      "hit": true
+    },
+    {
+      "id": "eed270618c47fadf",
+      "label": "project",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 7775,
+      "touched": 11,
+      "named": 3,
+      "hit": true
+    },
+    {
+      "id": "cdbcac8b164bd671",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2084,
+      "touched": 13,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "7270af90985882e3",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 6,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "e504c1d349bf32ff",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "81276bd98ae28747",
+      "label": "project",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 64,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "69062d45839615ab",
+      "label": "project",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 20,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "70ea9aec2c7d2789",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 2639,
+      "touched": 4,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "2e079ee7c4b0717c",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 14615,
+      "touched": 52,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "ad93e5c71e7fca0b",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3070,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "2d57f026d30ca0f1",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 9275,
+      "touched": 15,
+      "named": 5,
+      "hit": false
+    },
+    {
+      "id": "832d5247c2907d74",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2631,
+      "touched": 43,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "92161306d63ab38a",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 850,
+      "touched": 1,
+      "named": 5,
+      "hit": false
+    },
+    {
+      "id": "384aa7642f3435ca",
+      "label": "project",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 7636,
+      "touched": 4,
+      "named": 5,
+      "hit": false
+    },
+    {
+      "id": "85627550291f0bb8",
+      "label": "project",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 7,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "8e5ff605d079ed35",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 22,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "d896aa7c952a2207",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 8852,
+      "touched": 0,
+      "named": 5,
+      "hit": false
+    },
+    {
+      "id": "6b2645982c1bb2b5",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 15,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "136248b90648ad5c",
+      "label": "project",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 155,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "95137d244351a3af",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3273,
+      "touched": 22,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "002279c931fd3599",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 4515,
+      "touched": 2,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "5b92d423902d5bff",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 18229,
+      "touched": 3,
+      "named": 7,
+      "hit": true
+    },
+    {
+      "id": "6a8167672a29af06",
+      "label": "project",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "205cedf3efe8b84f",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 1278,
+      "touched": 0,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "1ce0b918c3b902c1",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "ce5cce3bf880c724",
+      "label": "follow-up",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 12102,
+      "touched": 59,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "756ce090795f3bdd",
+      "label": "follow-up",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 3156,
+      "touched": 5,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "92dd52f0a416fa75",
+      "label": "other",
+      "source": "claude",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "6b0b43ba10effa0c",
+      "label": "other",
+      "source": "claude",
+      "briefed": true,
+      "bytes": 2860,
+      "touched": 9,
+      "named": 8,
+      "hit": false
+    },
+    {
+      "id": "c218eb162f0cd048",
+      "label": "other",
+      "source": "pi",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    },
+    {
+      "id": "5d59d72e1375775b",
+      "label": "other",
+      "source": "codex",
+      "briefed": true,
+      "bytes": 2481,
+      "touched": 3,
+      "named": 8,
+      "hit": true
+    },
+    {
+      "id": "1cdf2c0e0aeeeff1",
+      "label": "other",
+      "source": "codex",
+      "briefed": false,
+      "bytes": 0,
+      "touched": 0,
+      "named": 0,
+      "hit": false
+    }
+  ]
+}

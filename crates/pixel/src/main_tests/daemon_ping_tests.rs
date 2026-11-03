@@ -327,8 +327,13 @@ fn unwrap_response_folds_envelope_warnings_only_when_there_are_some() {
 #[test]
 fn only_a_missing_or_refusing_socket_reads_as_no_daemon_to_upgrade() {
     let root = scratch_root("upgrade-absent");
+    // On macOS /tmp is a symlink to /private/tmp, and canonicalize() resolves
+    // it into a path that already eats ~44 of sockaddr_un's ~104 usable bytes;
+    // keep the fixture socket short enough to stay under SUN_LEN.
+    let short = PathBuf::from("/tmp").join(format!("px-upg-{}", std::process::id()));
+    let _ = std::fs::remove_file(&short);
     assert_eq!(
-        upgrade_daemon_request(&root.join("absent.sock"), &Request::Shutdown).map(|r| r.is_none()),
+        upgrade_daemon_request(&short, &Request::Shutdown).map(|r| r.is_none()),
         Ok(true)
     );
     std::fs::write(root.join("file"), b"").unwrap();
@@ -363,4 +368,110 @@ fn a_closed_stdout_is_not_a_failure_but_another_write_error_is() {
     let mut sink = Vec::new();
     write_text(&mut sink, "hello").unwrap();
     assert_eq!(sink, b"hello");
+}
+
+/// The one spelling of the daemon commands: the CLI's auto-start, `pixel
+/// daemon start` and the hooks launch these argument lists, so each must be
+/// what the parser reads back as the start it names.
+#[test]
+fn the_daemon_start_arguments_parse_as_the_start_they_name() {
+    // The parser of the whole command tree outgrows a test thread's stack.
+    const PARSER_TEST_STACK: usize = 16_777_216;
+    std::thread::Builder::new()
+        .stack_size(PARSER_TEST_STACK)
+        .spawn(|| {
+            let root = Path::new("/work/repo with space");
+            let parse = |args: Vec<OsString>| {
+                let argv = std::iter::once(OsString::from("pixel")).chain(args);
+                Cli::try_parse_from(argv).map(|cli| cli.command)
+            };
+            let start = |args| match parse(args) {
+                Ok(Command::Daemon {
+                    cmd:
+                        DaemonCmd::Start {
+                            path,
+                            foreground,
+                            warm_meaning,
+                        },
+                }) => (path, foreground, warm_meaning),
+                _ => panic!("the arguments are not a daemon start"),
+            };
+            assert_eq!(
+                start(daemon_args(root)),
+                (root.to_path_buf(), true, false),
+                "the foreground daemon"
+            );
+            assert_eq!(
+                start(daemon_warm_args(root)),
+                (root.to_path_buf(), false, true),
+                "the warming start"
+            );
+            // The two never combine: the foreground daemon never returns to ask.
+            assert!(
+                parse(vec![
+                    "daemon".into(),
+                    "start".into(),
+                    "--foreground".into(),
+                    "--warm-meaning".into()
+                ])
+                .is_err()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// Waking the vectors is one `meaning` question with a limit of one, sent to
+/// the daemon of the root, and nothing else.
+#[test]
+fn kick_meaning_asks_the_daemon_one_meaning_question() {
+    let root = scratch_root("kick");
+    let server = fake_daemon(&root, PROTOCOL_VERSION, 1, Duration::ZERO);
+    kick_meaning(&root);
+    assert_eq!(
+        server.join().unwrap(),
+        vec![Request::Meaning {
+            query: MEANING_WARM_QUERY.to_string(),
+            limit: Some(1),
+
+            stale_ok: false,
+        }]
+    );
+    let _ = std::fs::remove_file(daemon::socket_path(&root));
+}
+
+/// No daemon: the question goes nowhere, opens nothing and fails nothing.
+#[test]
+fn kick_meaning_without_a_daemon_opens_nothing() {
+    let root = scratch_root("kick-idle");
+    kick_meaning(&root);
+    assert!(!root.join(pixel_index::index::SHARD_DIR).exists());
+}
+
+/// A root without `.git` is served in this process: the auto-start refuses
+/// before spawning anything, and the step names the reason without timing a
+/// start that never ran.
+#[test]
+fn a_root_without_git_is_never_given_an_auto_started_daemon() {
+    let _lock = crate::ENV_LOCK.lock().unwrap();
+    let root = scratch_root("route-no-git");
+    let saved = std::env::var_os("PIXEL_DAEMON_AUTO_START");
+    // SAFETY: process-wide environment access is serialized by ENV_LOCK.
+    unsafe {
+        std::env::set_var("PIXEL_DAEMON_AUTO_START", "1");
+    }
+    let (response, step) = route_through_daemon(&root, &Request::Status {});
+    // SAFETY: same lock as above.
+    unsafe {
+        match saved {
+            Some(value) => std::env::set_var("PIXEL_DAEMON_AUTO_START", value),
+            None => std::env::remove_var("PIXEL_DAEMON_AUTO_START"),
+        }
+    }
+    assert!(response.is_none());
+    assert_eq!(step.route, ServeRoute::InProcess);
+    assert_eq!(step.reason, Some(InProcessReason::NotARepository));
+    assert_eq!(step.start_ms, None, "{step:?}");
+    assert!(!daemon::socket_path(&root).exists());
 }

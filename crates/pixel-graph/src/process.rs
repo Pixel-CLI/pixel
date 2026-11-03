@@ -4,7 +4,8 @@
 //! Process discovery — entry-point-seeded BFS traces over `calls` edges,
 //! persisted to `processes`/`process_steps` and readable back as summaries.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use rustc_hash::FxHashSet as HashSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use rusqlite::params;
 use serde::Serialize;
@@ -95,7 +96,7 @@ fn bfs_trace(
     max_depth: u32,
     max_branching: usize,
 ) -> Result<Vec<(i64, Option<EdgeKind>)>, StoreError> {
-    let mut visited: HashSet<i64> = HashSet::new();
+    let mut visited: HashSet<i64> = HashSet::default();
     visited.insert(entry);
     let mut steps: Vec<(i64, Option<EdgeKind>)> = vec![(entry, None)];
     let mut queue: VecDeque<(i64, u32)> = VecDeque::new();
@@ -155,7 +156,7 @@ pub fn discover(
     store.conn().execute("DELETE FROM processes", [])?;
 
     let entries = entry_points(store, max_processes.saturating_mul(4).max(16))?;
-    let mut seen_sets: HashSet<BTreeSet<i64>> = HashSet::new();
+    let mut seen_sets: HashSet<BTreeSet<i64>> = HashSet::default();
     let mut summaries = Vec::new();
 
     for entry in entries {

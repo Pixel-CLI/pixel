@@ -32,7 +32,7 @@ Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
   that file exists after the tests. It also points `HOME` at an empty
   directory (`support::neutral_home()`): a test that spawns the binary
   itself sets `HOME` too, or a machine with another release's
-  `pixel install` adds a stale-prompt note to every stderr it reads.
+  `pixel setup` adds a stale-prompt note to every stderr it reads.
 - **A fixture's commit is not unique.** Two fixtures with the same tree,
   committed in the same second by the same identity, get the same OID, and
   the base-shard cache (`$XDG_CACHE_HOME/pixel/shards`, else under the
@@ -65,3 +65,8 @@ Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
   build and one through each incremental route that re-derives it
   (`change-propagation.md`); the full build alone passed on #262 while the
   incremental update lost the edge.
+- **Exercise consecutive publications without a warm-up read.** A stale-read
+  test must include a second watcher batch with no writer request between
+  batches: the first batch must publish both its generation and envelope
+  snapshot. Verified 2026-10-20 (#1203): single-batch tests passed while the
+  second batch could still return no brief because its snapshot was missing.

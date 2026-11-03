@@ -1,0 +1,83 @@
+drop: .
+### event flow: prompt-submit -> PromptSubmit -> hook output
+### crates/pixel/src/task_hook.rs:62-84 — typed event and host-name mapping
+62| pub enum TaskHookEvent {
+63|     SessionStart,
+64|     PromptSubmit,
+65|     PreToolUse,
+66|     PostToolUse,
+67|     ToolFailure,
+68|     Stop,
+69|     SessionEnd,
+70|     Interrupt,
+71|     SubagentStart,
+72|     SubagentStop,
+73|     ModelResponse,
+74|     UserBash,
+75| }
+76| 
+77| impl TaskHookEvent {
+78|     pub fn as_str(self) -> &'static str {
+79|         match self {
+80|             Self::SessionStart => "session-start",
+81|             Self::PromptSubmit => "prompt-submit",
+82|             Self::PreToolUse => "pre-tool-use",
+83|             Self::PostToolUse => "post-tool-use",
+84|             Self::ToolFailure => "tool-failure",
+### crates/pixel/src/task_hook.rs:1523-1525 — runner receives typed event
+1523| pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>) -> ! {
+1524|     if provider == TaskProvider::Claude && imported_config_host().is_some() {
+1525|         std::process::exit(0);
+### crates/pixel/src/task_hook.rs:1538-1544 — runner passes event to processing
+1538|                 event,
+1539|                 raw,
+1540|                 DECISION_TIMEOUT,
+1541|                 move || process(provider, event, &input, part),
+1542|                 |payload| enforcement_applies(provider, payload),
+1543|             ))
+1544|         }
+### crates/pixel/src/task_hook.rs:1084-1091 — brief processing call chain
+1084|     }
+1085|     // The brief runs beside the ledger: it needs neither, and a slow ledger
+1086|     // must not use up its window.
+1087|     let brief = start_brief(provider, event, &payload, part.map_or(1, |part| part.count));
+1088|     forget_sent(event, &payload);
+1089|     if let Some(root) = session_start_root(provider, event, &payload) {
+1090|         // A start is a nicety: whatever it came to, the hook goes on.
+1091|         let _ = crate::execution_brief::autostart::warm(&root);
+### crates/pixel/src/task_hook.rs:1109-1116 — brief processing call chain
+1109|         })
+1110|     } else {
+1111|         let decision = ledger();
+1112|         (decision, finish_brief(provider, event, &payload, brief))
+1113|     };
+1114|     envelope(provider, event, &with_context(decision, text))
+1115| }
+1116| 
+### crates/pixel/src/task_hook.rs:1524-1531 — hook reads the incoming event
+1524|     if provider == TaskProvider::Claude && imported_config_host().is_some() {
+1525|         std::process::exit(0);
+1526|     }
+1527|     let raw = crate::hook_input::read_bounded(&mut std::io::stdin(), MAX_INPUT);
+1528|     let output = if let Some(raw) = &raw {
+1529|         let later = part.filter(|part| part.index > 1 && event == TaskHookEvent::PromptSubmit);
+1530|         if let Some(part) = later {
+1531|             // Nothing to say is nothing printed: a hook that cannot get its
+### crates/pixel/src/task_hook.rs:1546-1554 — hook writes and flushes output
+1546|         Some(envelope(provider, event, &unavailable(event, None, true)))
+1547|     };
+1548|     // Flush the only response before exit terminates any stalled evaluator.
+1549|     if let Some(output) = &output {
+1550|         let mut stdout = std::io::stdout().lock();
+1551|         let _ = writeln!(stdout, "{output}");
+1552|         let _ = stdout.flush();
+1553|     }
+1554|     // The first of several parts has said its piece: the others may now.
+### crates/pixel/src/main.rs:5657-5663 — command passes event to hook runner
+5657|                 provider,
+5658|                 event,
+5659|                 part,
+5660|             } => task_hook::run(provider, event, part),
+5661|             // Retired verbs: drain the payload the host wrote, answer nothing.
+5662|             HookCmd::Retired(_) => {
+5663|                 let _ = hook_input::read_hook_payload();

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! Configuration storage with legacy JSON support and comment-preserving YAML writes.
+//! Configuration storage: YAML reads and comment-preserving YAML writes.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -9,18 +9,10 @@ use std::str::FromStr;
 use serde_json::{Value, json};
 
 pub const FILE_NAME: &str = "config.yaml";
-/// The JSON file read until an install or an edit writes the YAML one.
-pub const LEGACY_FILE_NAME: &str = "config.json";
 const TEMPLATE: &str = include_str!("config.yaml");
 
-pub fn preferred_path(directory: &Path) -> PathBuf {
-    let yaml = directory.join(FILE_NAME);
-    let legacy = directory.join(LEGACY_FILE_NAME);
-    if !yaml.exists() && legacy.exists() {
-        legacy
-    } else {
-        yaml
-    }
+pub fn path_in(directory: &Path) -> PathBuf {
+    directory.join(FILE_NAME)
 }
 
 pub fn load(path: &Path) -> Result<Value, String> {
@@ -34,14 +26,9 @@ pub fn load(path: &Path) -> Result<Value, String> {
 
 fn parse(text: &str, path: &Path) -> Result<Value, String> {
     // Parser diagnostics can include source lines containing credentials.
-    let value: Value = if path.extension().is_some_and(|ext| ext == "json") {
-        serde_json::from_str(text).map_err(|_| ())
-    } else {
-        serde_saphyr::from_str(text).map_err(|_| ())
-    }
-    .map_err(|()| {
+    let value: Value = serde_saphyr::from_str(text).map_err(|_| {
         format!(
-            "invalid configuration {}; expected a YAML/JSON mapping",
+            "invalid configuration {}; expected a YAML mapping",
             path.display()
         )
     })?;
@@ -57,23 +44,17 @@ fn parse(text: &str, path: &Path) -> Result<Value, String> {
     Ok(value)
 }
 
-/// Create a template or copy legacy values once; never overwrite an existing YAML file.
+/// Create the template once; never overwrite an existing YAML file.
 pub fn ensure(path: &Path) -> Result<(), String> {
     if path.exists() {
         return Ok(());
     }
-    let legacy = load(&path.with_extension("json"))?;
-    let values = if legacy == json!({}) {
-        String::new()
-    } else {
-        serde_saphyr::to_string(&legacy).map_err(|_| "cannot serialize configuration")?
-    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     finish_create(
         path,
-        create_private(path, format!("{TEMPLATE}\n{values}").as_bytes()),
+        create_private(path, format!("{TEMPLATE}\n").as_bytes()),
     )
 }
 
@@ -99,9 +80,6 @@ pub fn create_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 pub fn render(path: &Path, before: &Value, after: &Value) -> Result<String, String> {
-    if path.extension().is_some_and(|ext| ext == "json") {
-        return Ok(format!("{after}\n"));
-    }
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),

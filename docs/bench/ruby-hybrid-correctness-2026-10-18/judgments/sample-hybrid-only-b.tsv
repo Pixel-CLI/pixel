@@ -1,0 +1,39 @@
+call-hybrid-only-05313	correct	described_class TaxRemittances::QuarterlyLiabilityCalculator (spec:5, no nested class describe); .new runs its own #initialize at :101 (class at :33)
+call-self-hybrid-only-00252	correct	self helper def claim at spec:27 in top describe TestRedisIsolation; no let/local/nested def named claim in .claim_slot group (160-166)
+call-hybrid-only-03078	correct	described_class Collaborator::CreateService (spec:5); .new(seller:, params:) returns instance; #process defined at create_service.rb:9
+call-hybrid-only-02804	correct	described_class Charge::PresentmentAllocator (spec:3); instance from .new (init :170); #allocations defined at :178
+call-hybrid-only-00227	correct	let(:chargeable) { Chargeable.new(...) } at spec:8, not overridden in describe "#visual"; Chargeable#visual at chargeable.rb:52
+call-hybrid-only-02680	correct	subject at spec:11 is described_class.new (BestOfferCodeService), not overridden in context 81-87; #result at :12
+call-hybrid-only-04930	correct	described_class RobotsService (spec:5); .new(storefront_host: true) runs RobotsService#initialize at :15
+call-hybrid-only-03658	correct	described_class Onetime::BackfillCustomReceiptText (spec:5); def self.process at :48 in that class (module Onetime :44, class :45)
+call-hybrid-only-04433	correct	describe Product::VariantCategoryUpdaterService, "..." (spec:12) sets described_class; .new runs its #initialize at :53
+call-hybrid-only-02369	correct	described_class AffiliateEarningsCache (spec:5); cache_key public singleton method in class << self (:86) at :215
+call-self-hybrid-only-01177	correct	self helper def build_client_confirmed_order at spec:38 in top describe; context at 108 defines no same-name helper
+call-self-hybrid-only-01590	correct	self helper def create_subscription_purchase at spec:22 in top describe ElasticsearchFetcher; no shadowing in #initial_active_counts group
+call-self-hybrid-only-01921	correct	self helper def create_duplicate_of at spec:19 in top describe; only definition, no let/local shadowing at 275
+call-hybrid-only-05790	correct	described_class UsernameGeneratorService (spec:5); .new(user) instance; #username at :10
+call-hybrid-only-02068	correct	described_class PaginatedUtmLinksPresenter (spec:5); .new(seller:, sort:) runs #initialize at :20
+call-hybrid-only-05874	correct	described_class Workflow::SaveInstallmentsService (spec:5, nested describes are strings); .new runs #initialize at :8
+call-self-hybrid-only-03379	correct	self helper def create_intent at spec:11 in top describe ScheduleWorkflowInstallmentJob; call at 139 in same group
+call-hybrid-only-06870	correct	described_class ReindexSellerOfferCodesJob (spec:5); def self.enqueue at :16
+call-hybrid-only-06964	correct	described_class RequeueTransientlyFailedPayoutsJob (spec:3); instance #perform at :29 (Sidekiq::Job/RecurringLockTtl define no perform)
+call-self-hybrid-only-02426	correct	self helper def call(dry_run:) at spec:24 in top describe; group at 718 defines only block_account_ip, no let/local call
+call-self-hybrid-only-00686	correct	def build_event at spec:212 inside describe "#handle_event_refund_updated!" (117-811) enclosing "canonical purchases" (304-346); no other build_event
+call-self-hybrid-only-00923	correct	self helper def verify_balance at spec:9 in top describe "PurchaseBalances"; own group method precedes included helpers
+call-self-hybrid-only-02975	correct	self helper def residue_row at spec:14 in top describe AutoTopUpNegativeDestinationBalancesJob; call in top-level it
+call-hybrid-only-02876	correct	described_class Checkout::BuyerCurrencyEligibility (spec:5); public def self.buyer_presentment_display? at :265
+call-self-hybrid-only-00228	correct	def pause_for_chargeback_rate! at spec:6 in top describe; inherited by nested describe Payouts/".create_payment under the hold"; no redefinition
+call-self-hybrid-only-02016	correct	self helper def call at spec:8 in top describe PiracyReports::CounterNoticeService; no local/let named call at 83
+call-hybrid-only-02155	correct	described_class ProfilePresenter::PublicApiProps (spec:5); .new(seller:) instance; #props at :40
+call-self-hybrid-only-01478	correct	self helper def resolve at spec:8 in top describe Checkout::PaymentMethodResolver; only definition, no let/local resolve
+call-hybrid-only-06192	correct	described_class AutoTopUpNegativeDestinationBalancesJob (spec:5); instance #perform at :38
+call-self-hybrid-only-01369	correct	def create_payment at spec:139 in top describe CursorPagination body (defined before examples run); only definition
+call-hybrid-only-04623	correct	described_class Purchase::HandleFailedRefundService (spec:5); .new(refund:) runs #initialize at :70
+call-self-hybrid-only-02819	correct	def block_value at spec:185 inside describe at 181 that still encloses line 527; no other definition
+call-hybrid-only-02691	correct	subject overridden at spec:175 as described_class.new(..., buyer:) still BestOfferCodeService; #result at :12
+call-hybrid-only-05482	correct	described_class TrnValidationService (spec:5); .new(nil) instance; #process at :10
+call-self-hybrid-only-03366	correct	self helper def add_note at spec:11 in top describe; let!(:note) block at 698 evaluates on the example, no shadowing
+call-hybrid-only-06730	correct	described_class ReconcilePendingPaypalRefundsJob (spec:5); instance #perform at :27
+call-self-hybrid-only-01929	correct	self helper def stub_stripe at spec:19 in top describe Onetime::ReconcileStuckStripeDisputes; only definition
+call-hybrid-only-04480	correct	described_class ProductReview::UpdateService (RSpec.describe spec:5); .new(...) instance; #update at :12 (shadows nothing earlier)
+call-hybrid-only-07028	correct	described_class RetryStripeRejectedPayoutSetupForSellerJob (spec:5); instance #perform(user_id) at :41

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use pixel_daemon::api::Request;
 use pixel_graph::plan::{FindingKind, PlanFinding, Prereq, PrereqKind, Severity};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::plan_state;
 
@@ -54,7 +54,11 @@ pub fn run(opts: PlanOptions) -> Result<(), String> {
     let gates = if opts.no_gates {
         Vec::new()
     } else {
-        gates_of(&prereqs_of(&data)?, &findings)
+        gates_of(
+            &prereqs_of(&data)?,
+            &findings,
+            &crate::plugin_cmd::available(),
+        )
     };
     // Persist the checklist before rendering: a failed state write must not
     // swallow the plan itself, so a write error is a warning, not a failure.
@@ -170,19 +174,46 @@ fn prereqs_of(data: &serde_json::Value) -> Result<Vec<Prereq>, String> {
     }
 }
 
-/// Names of saved flows tagged `auth` or `login` — the replays a gate can
-/// name. Sorted lexicographically and deduplicated so the gate label is
-/// reproducible across runs (filesystem order from `pixel_flow::list` is
-/// not a stable ordering). A missing or unreadable flow dir is "no flows",
-/// never a failure.
-fn auth_flow_names() -> Vec<String> {
-    let Ok(value) = pixel_flow::list() else {
+/// Where the `pixel-flow` plugin saves flows: `$PIXEL_FLOW_DIR`, else
+/// `~/.local/share/pixel/flows/`. The core only reads it, to name a login
+/// replay in a plan gate.
+fn flow_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("PIXEL_FLOW_DIR").filter(|d| !d.is_empty()) {
+        return Some(dir.into());
+    }
+    std::env::var_os("HOME").map(|home| {
+        std::path::PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("pixel")
+            .join("flows")
+    })
+}
+
+/// The saved flows' JSON documents in `dir` (corrupt files skipped).
+fn saved_flows(dir: &std::path::Path) -> Vec<Value> {
+    let Ok(read) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut names: Vec<String> = value
-        .as_array()
-        .into_iter()
-        .flatten()
+    read.flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .collect()
+}
+
+/// Names of saved flows tagged `auth` or `login` — the replays a gate can
+/// name. Sorted lexicographically and deduplicated so the gate label is
+/// reproducible across runs (filesystem order is not a stable ordering).
+/// A missing or unreadable flow dir is "no flows", never a failure.
+fn auth_flow_names() -> Vec<String> {
+    auth_flow_names_in(&flow_dir().map(|dir| saved_flows(&dir)).unwrap_or_default())
+}
+
+fn auth_flow_names_in(flows: &[Value]) -> Vec<String> {
+    let mut names: Vec<String> = flows
+        .iter()
         .filter(|f| {
             f["tags"].as_array().into_iter().flatten().any(|t| {
                 t.as_str().is_some_and(|t| {
@@ -202,7 +233,11 @@ fn auth_flow_names() -> Vec<String> {
 /// saved login flow when there is one, each provider gets its own item, and
 /// database drivers share one. Gate labels start with `Gate:` so they are
 /// recognizable in `--status` output.
-fn gates_of(prereqs: &[Prereq], findings: &[PlanFinding]) -> Vec<PlanFinding> {
+fn gates_of(
+    prereqs: &[Prereq],
+    findings: &[PlanFinding],
+    plugins: &pixel_plugin::Available,
+) -> Vec<PlanFinding> {
     let fan_in_of = |file: &str| {
         findings
             .iter()
@@ -239,7 +274,18 @@ fn gates_of(prereqs: &[Prereq], findings: &[PlanFinding]) -> Vec<PlanFinding> {
         };
         let flow_names = auth_flow_names();
         let how = match flow_names.as_slice() {
+            // `pixel flow` is the pixel-flow plugin's: a replay is offered
+            // only where it runs, a saved login flow is otherwise a reason
+            // to install it.
+            [] if !plugins.has("flow") => {
+                "no `auth`-tagged flow saved — ask the human for a test account".to_string()
+            }
             [] => "no `auth`-tagged flow saved — ask the human for a test account, or record one with `pixel flow save`".to_string(),
+            saved if !plugins.has("flow") => format!(
+                "{} saved login flow(s) cannot be replayed until the pixel-flow plugin is installed ({}) — or ask the human for a test account",
+                saved.len(),
+                pixel_plugin::install_command("pixel-flow")
+            ),
             [first] => format!("run `pixel flow run {first}`"),
             many => {
                 let shown = many
@@ -478,6 +524,26 @@ fn file_count(findings: &[PlanFinding]) -> usize {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn auth_flows_should_be_read_from_the_flow_dir_sorted_and_deduplicated() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| std::fs::write(dir.path().join(name), body).unwrap();
+        write("b.json", r#"{"name":"sso-login","tags":["Login"]}"#);
+        write("a.json", r#"{"name":"admin","tags":["auth","x"]}"#);
+        write("c.json", r#"{"name":"checkout","tags":["cart"]}"#);
+        write("d.json", r#"{"name":"admin","tags":["AUTH"]}"#);
+        write("e.json", "not json");
+        write("f.txt", r#"{"name":"ignored","tags":["auth"]}"#);
+        let flows = saved_flows(dir.path());
+        assert_eq!(flows.len(), 4);
+        assert_eq!(auth_flow_names_in(&flows), ["admin", "sso-login"]);
+        assert!(saved_flows(&dir.path().join("missing")).is_empty());
+    }
+    fn flow_plugin() -> pixel_plugin::Available {
+        pixel_plugin::Available::of(&["flow"])
+    }
+
     use super::*;
     use pixel_graph::plan::Severity;
 
@@ -668,7 +734,7 @@ mod tests {
             prereq(PrereqKind::Db, "b.rs", "sqlx"),
         ];
         let findings = [finding("a.rs", 3, 4), finding("b.rs", 9, 0)];
-        let gates = gates_of(&prereqs, &findings);
+        let gates = gates_of(&prereqs, &findings, &flow_plugin());
         assert_eq!(gates.len(), 3, "{gates:?}");
         let env = &gates[0];
         assert_eq!(
@@ -717,7 +783,7 @@ mod tests {
             prereq(PrereqKind::Auth, "src/b.ts", "auth()"),
             prereq(PrereqKind::Auth, "src/c.ts", "auth()"),
         ];
-        let gates = gates_of(&auth3, &[]);
+        let gates = gates_of(&auth3, &[], &flow_plugin());
         assert_eq!(gates.len(), 1);
         assert!(
             !gates[0].label.contains("more"),
@@ -732,7 +798,7 @@ mod tests {
             prereq(PrereqKind::Auth, "src/c.ts", "auth()"),
             prereq(PrereqKind::Auth, "src/d.ts", "auth()"),
         ];
-        let gates = gates_of(&auth4, &[]);
+        let gates = gates_of(&auth4, &[], &flow_plugin());
         assert!(
             gates[0].label.contains(" +1 more"),
             "4 files must append +1 more: {}",
@@ -743,7 +809,7 @@ mod tests {
         let envs12: Vec<Prereq> = (0..12)
             .map(|i| prereq(PrereqKind::Env, "src/x.rs", &format!("KEY_{i:02}")))
             .collect();
-        let gates = gates_of(&envs12, &[]);
+        let gates = gates_of(&envs12, &[], &flow_plugin());
         assert_eq!(gates.len(), 1);
         assert!(
             !gates[0].label.contains("more"),
@@ -755,7 +821,7 @@ mod tests {
         let envs13: Vec<Prereq> = (0..13)
             .map(|i| prereq(PrereqKind::Env, "src/x.rs", &format!("KEY_{i:02}")))
             .collect();
-        let gates = gates_of(&envs13, &[]);
+        let gates = gates_of(&envs13, &[], &flow_plugin());
         assert!(
             gates[0].label.contains(" +1 more"),
             "13 env keys must append +1 more: {}",
@@ -768,7 +834,7 @@ mod tests {
             prereq(PrereqKind::Db, "src/x.rs", "prisma"),
             prereq(PrereqKind::Db, "src/x.rs", "sqlx"),
         ];
-        let gates = gates_of(&dbs3, &[]);
+        let gates = gates_of(&dbs3, &[], &flow_plugin());
         assert!(
             !gates[0].label.contains("more"),
             "exactly 3 db drivers must not append `more`: {}",
@@ -782,7 +848,7 @@ mod tests {
             prereq(PrereqKind::Db, "src/x.rs", "sqlx"),
             prereq(PrereqKind::Db, "src/x.rs", "rusqlite"),
         ];
-        let gates = gates_of(&dbs4, &[]);
+        let gates = gates_of(&dbs4, &[], &flow_plugin());
         assert!(
             gates[0].label.contains(" +1 more"),
             "4 db drivers must append +1 more: {}",
@@ -834,7 +900,7 @@ mod tests {
             prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession"),
             prereq(PrereqKind::Auth, "src/page.tsx", "auth()"), // same file again
         ];
-        let gates = gates_of(&prereqs, &[]);
+        let gates = gates_of(&prereqs, &[], &flow_plugin());
         // SAFETY: serialised by the test runner (see set_var comment); removes
         // the var so the next test in this binary starts from a clean slate.
         unsafe {
@@ -855,6 +921,45 @@ mod tests {
             gates[0].label.contains("no `auth`-tagged flow saved"),
             "{}",
             gates[0].label
+        );
+    }
+
+    /// Without the pixel-flow plugin no replay command runs: the label never
+    /// names `pixel flow …`, and a saved login flow says what installs it.
+    #[test]
+    fn gates_of_auth_names_no_flow_command_when_the_flow_plugin_does_not_run() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let flows = std::env::temp_dir().join(format!(
+            "px-plan-gate-no-plugin-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&flows);
+        std::fs::create_dir_all(&flows).unwrap();
+        let prereqs = [prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession")];
+        // SAFETY: env lock convention shared with pixel-flow's own tests.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", &flows);
+        }
+        let empty = gates_of(&prereqs, &[], &pixel_plugin::Available::none());
+        std::fs::write(
+            flows.join("alpha-auth.json"),
+            r#"{"name":"alpha-auth","title":"t","description":"d","tags":["auth"],"steps":[],"created_unix":1,"revised_unix":1}"#,
+        )
+        .unwrap();
+        let saved = gates_of(&prereqs, &[], &pixel_plugin::Available::none());
+        // SAFETY: same serialisation contract as the set_var above.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&flows);
+        assert_eq!(
+            empty[0].label,
+            "Gate: auth-gated code (src/page.tsx) — verify needs a logged-in session: no `auth`-tagged flow saved — ask the human for a test account"
+        );
+        assert_eq!(
+            saved[0].label,
+            "Gate: auth-gated code (src/page.tsx) — verify needs a logged-in session: 1 saved login flow(s) cannot be replayed until the pixel-flow plugin is installed (pixel install github:Pixel-CLI/pixel-flow) — or ask the human for a test account"
         );
     }
 
@@ -891,7 +996,7 @@ mod tests {
             std::env::set_var("PIXEL_FLOW_DIR", &flows);
         }
         let prereqs = [prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession")];
-        let gates = gates_of(&prereqs, &[]);
+        let gates = gates_of(&prereqs, &[], &flow_plugin());
         // SAFETY: same serialisation contract as the set_var above; restores
         // the env so the next test in this binary starts clean.
         unsafe {
@@ -943,7 +1048,7 @@ mod tests {
             std::env::set_var("PIXEL_FLOW_DIR", &flows);
         }
         let prereqs = [prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession")];
-        let gates = gates_of(&prereqs, &[]);
+        let gates = gates_of(&prereqs, &[], &flow_plugin());
         // SAFETY: same serialisation contract as the set_var above;
         // restores the env so the next test in this binary starts clean.
         unsafe {
@@ -995,7 +1100,7 @@ mod tests {
             std::env::set_var("PIXEL_FLOW_DIR", &flows);
         }
         let prereqs = [prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession")];
-        let gates = gates_of(&prereqs, &[]);
+        let gates = gates_of(&prereqs, &[], &flow_plugin());
         // SAFETY: as above.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");

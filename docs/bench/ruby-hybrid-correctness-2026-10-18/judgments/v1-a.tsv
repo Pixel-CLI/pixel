@@ -1,0 +1,41 @@
+id	verdict	reason
+v1-001	correct	ActionController::TestCase < ActiveSupport::TestCase, which includes ModelFactories; no other create_product in the chain
+v1-002	correct	@original_tier = @product.default_tier (has_one through tier_category, class Variant < BaseVariant including ExternalId)
+v1-003	correct	Link extends ExternalId (concern class_methods) find_by_external_id; no other definition
+v1-004	correct	system spec; Capybara DSL forwards click_on to Node::Actions#click_on, which the repo reopens and aliases to click_command at aria_extensions.rb:336
+v1-005	correct	helper defined in the top-level describe of the same spec; only definition
+v1-006	correct	product is validated to be a Link; Link belongs_to :user -> User includes User::StripeConnect
+v1-007	correct	SalesTaxCalculatorTest extends NestedMinitestContext, whose test comes before ActiveSupport's Declarative#test in the singleton chain
+v1-008	correct	Subscription extends Subscription::Restartable
+v1-009	wrong	response is ActionDispatch::TestResponse; Rails parsed_body, not a helper defined in another spec file
+v1-010	wrong	RSpec mocks receive matcher, not UserChannel#receive
+v1-011	correct	let!(:purchase1) is create(:purchase) -> Purchase includes ExternalId
+v1-012	correct	helper defined in the enclosing describe "POST refund_balance"
+v1-013	correct	type: :system spec; spec_helper includes CapybaraHelpers for type :system
+v1-014	wrong	names is a collection (Array#map), not StripeUserComplianceInfoFieldMap.map
+v1-015	correct	PurchaseTest < ActiveSupport::TestCase, which includes ModelFactories#unique_ip
+v1-016	wrong	errors is a Struct member holding a collection; it is not a DashboardProductsPagePresenter
+v1-017	wrong	seller is create(:named_seller), a User; ActiveRecord update!
+v1-018	correct	FilesController < Api::V2::BaseController, which defines error_400
+v1-019	correct	same-class private method, called on self
+v1-020	correct	let(:custom_domain) is create(:custom_domain) -> CustomDomain#set_routability!
+v1-021	wrong	RSpec mocks receive matcher, not UserChannel#receive
+v1-022	wrong	receiver is a UserComplianceInfoRequest record (attribute due_at), not a helper in dispute_evidence_spec
+v1-023	wrong	ActiveRecord relation .last, not a TS function
+v1-024	wrong	charge_counts is a Hash; Hash#empty?
+v1-025	correct	StripeChargeProcessor.charge_processor_id is a class method defined there
+v1-026	wrong	Rails routing DSL resource, not SavePublicFilesService#resource
+v1-027	wrong	recap is a CommunityChatRecap; ActiveRecord update!
+v1-028	correct	attr_reader :product in Purchase::CreateService; no local variable shadows it
+v1-029	correct	helper defined in the top-level describe of the same spec; only definition
+v1-030	wrong	controller spec response is ActionDispatch::TestResponse; Rails parsed_body
+v1-031	wrong	RSpec before hook, not Onetime::BackfillRadarValueLists#before
+v1-032	correct	helper defined in the top-level describe of the same spec; only definition
+v1-033	wrong	RSpec mocks receive matcher, not UserChannel#receive
+v1-034	correct	def requests in the top-level describe of the same spec
+v1-035	correct	def self.perform_payment on StripePayoutProcessor
+v1-036	correct	Country includes CurrencyHelper; get_rate is defined there only
+v1-037	correct	sellers are Users at every call site (User.find, User.where, product.user); User#stripe_connect_account
+v1-038	wrong	parsed is a Hash (is_a? guard); Hash#dig, not GlobalConfig.dig
+v1-039	correct	every caller passes create_product (a Link); Link#long_url
+v1-040	wrong	RSpec change matcher .from, not Pages::BuyButtonParams.from

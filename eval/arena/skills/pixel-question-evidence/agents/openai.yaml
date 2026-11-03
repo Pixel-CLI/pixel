@@ -1,0 +1,5 @@
+interface:
+  display_name: "Pixel Question Evidence"
+  short_description: "Find and verify exact code evidence"
+policy:
+  allow_implicit_invocation: false

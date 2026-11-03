@@ -1,21 +1,21 @@
 ---
 paths:
-  - "scripts/pr-swarm.sh"
+  - "scripts/dev/pr-swarm.sh"
   - ".claude/settings.json"
 ---
 
 # One rmux Pane Per Open-PR Worktree
 
-Loaded when `scripts/pr-swarm.sh` or the Claude settings are in play. This
+Loaded when `scripts/dev/pr-swarm.sh` or the Claude settings are in play. This
 This page **documents** the swarm; it does not register its hook. To enable
-automatic startup, add the repository's `scripts/pr-swarm.sh hook-session-start`
+automatic startup, add the repository's `scripts/dev/pr-swarm.sh hook-session-start`
 command to the user's Claude `SessionStart` configuration, such as
 `~/.claude/settings.json`. Do not commit `.claude/settings.json`; it is
 per-worktree, tool-local configuration.
 
 ## The tool
 
-`scripts/pr-swarm.sh` keeps one rmux pane per open pull request, each pane a
+`scripts/dev/pr-swarm.sh` keeps one rmux pane per open pull request, each pane a
 `claude` session sitting in that PR's worktree. Session `pr-swarm`, single
 window `swarm`, `tiled` layout. A pane is titled `PR#<N> <branch>` and the
 session inside it is named `claude -n pr-<N>-<branch-slug>`. The PR number

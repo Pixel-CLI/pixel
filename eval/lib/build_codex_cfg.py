@@ -20,7 +20,7 @@ def main() -> None:
     src, dst, mode = sys.argv[1], sys.argv[2], sys.argv[3]
     text = open(src, encoding="utf-8").read()
     if mode == "keep":
-        # The installed block as `pixel install` wrote it (quiet/full arms).
+        # The installed block as `pixel setup` wrote it (quiet/full arms).
         open(dst, "w", encoding="utf-8").write(text)
         return
     b = text.find(BEGIN)

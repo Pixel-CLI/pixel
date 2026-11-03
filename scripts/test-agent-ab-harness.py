@@ -502,7 +502,7 @@ class OfflinePipeline(unittest.TestCase):
             self.assertEqual(r["quality"], 1.0 if r["arm"] != "baseline" else 0.0)
 
     def test_files_changed_counts_the_agent_edits_only(self):
-        # The arm's setup (stripped AGENTS.md block, `pixel install --repo`),
+        # The arm's setup (stripped AGENTS.md block, `pixel setup --repo`),
         # the warm step and the verifier's held-out tests all touch the tree;
         # none of them is the agent's work, and counting them would differ
         # per arm for an identical agent.

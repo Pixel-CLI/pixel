@@ -3,7 +3,7 @@
 
 [package]
 name = "pixel-daemon"
-version = "0.7.1"
+version = "0.10.0"
 edition.workspace = true
 license.workspace = true
 
@@ -11,6 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+rustc-hash = "1"
 mutants = { workspace = true }
 pixel-index = { path = "../pixel-index" }
 pixel-graph = { path = "../pixel-graph" }
@@ -24,6 +25,7 @@ pixel-recall = { path = "../pixel-recall", default-features = false }
 pixel-git = { path = "../pixel-git" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+memchr = "2"
 notify = "8"
 rusqlite = { version = "0.40", features = ["bundled"] }
 xxhash-rust = { workspace = true }

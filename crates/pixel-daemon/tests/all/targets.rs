@@ -5,23 +5,10 @@
 //! built for real, list closed, tiers assigned, output deterministic.
 
 use std::path::Path;
-use std::process::Command;
 
 use pixel_daemon::{Request, Service};
 
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {args:?}: {out:?}");
-}
+use crate::support::git;
 
 fn fixture(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("gpx-targets-{tag}-{}", std::process::id()));
@@ -56,6 +43,7 @@ fn run_targets(dir: &Path, task: &str) -> serde_json::Value {
         limit: Some(10),
         max_tier: None,
         precision: false,
+        regions: false,
     });
     assert!(resp.ok, "targets op failed: {:?}", resp.error);
     resp.into_data()
@@ -130,6 +118,7 @@ fn targets_rejects_empty_task() {
         limit: None,
         max_tier: None,
         precision: false,
+        regions: false,
     });
     assert!(!resp.ok);
     assert!(
@@ -175,6 +164,7 @@ fn targets_no_git_builds_graphless() {
         limit: Some(10),
         max_tier: None,
         precision: false,
+        regions: false,
     });
     assert!(
         resp.ok,

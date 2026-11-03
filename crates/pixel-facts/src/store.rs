@@ -21,6 +21,13 @@ use pixel_git::GitRunner;
 /// SQLite flags of an open of the existing history db: read-write, no
 /// mutex (one connection per thread), and never through a link at the db
 /// file (`SQLITE_OPEN_NOFOLLOW`).
+/// Read-through mapping of the database file, in bytes: a page read is a
+/// load from the mapping instead of a `pread`.
+const MMAP_BYTES: i64 = 256 * 1024 * 1024;
+/// Page cache for this connection, in KiB (a negative `cache_size` means
+/// KiB rather than pages).
+const CACHE_KIB: i64 = 65_536;
+
 const OPEN_EXISTING: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
     .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
     .union(OpenFlags::SQLITE_OPEN_NOFOLLOW);
@@ -445,6 +452,13 @@ impl FactsStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
+        // Reads go through a mapping instead of a `pread` per page and
+        // pages stay cached; the temp b-tree (sorting, grouping) stays off
+        // disk. The cap is per connection, not per database, and 64 MiB is
+        // above anything a single query here touches.
+        conn.pragma_update(None, "mmap_size", MMAP_BYTES)?;
+        conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.execute_batch(DDL)?;
         let stored: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let upgraded = stored == UPGRADES_IN_PLACE_FROM;
@@ -500,8 +514,16 @@ impl FactsStore {
 
     /// Snapshot of how much of history is indexed. Cheap: a few counts.
     pub fn index_state(&self) -> IndexState {
+        self.index_state_at(self.refs_hash().ok().as_deref())
+    }
+
+    /// [`FactsStore::index_state`] judged against `refs`, a
+    /// [`FactsStore::refs_hash`] the caller already holds: the refs are read
+    /// once (two `git` spawns) instead of once per freshness check. `None`
+    /// (the refs could not be read) is never fresh.
+    pub fn index_state_at(&self, refs: Option<&str>) -> IndexState {
         let (total, indexed, _skipped, pending_diff) = self.diff_counts();
-        let phase = self.current_phase();
+        let phase = self.current_phase(refs);
         // diff_indexed_pct = fraction of non-structurally-skipped commits that
         // have their diff text ingested (phase C progress).
         let diff_total = indexed + pending_diff;
@@ -515,7 +537,7 @@ impl FactsStore {
             commits_indexed: total as u64,
             total_commits: total as u64,
             diff_indexed_pct,
-            fresh: pending_diff == 0 && self.phase_a_fresh() && self.phase_b_done(),
+            fresh: pending_diff == 0 && self.phase_a_fresh(refs) && self.phase_b_done(),
             schema_version: FACTS_SCHEMA_VERSION,
             diffs_evicted: self.count_in_state(DIFF_STATE_EVICTED) as u64,
             diff_coverage_since: self
@@ -539,8 +561,8 @@ impl FactsStore {
             .unwrap_or(0)
     }
 
-    fn current_phase(&self) -> &'static str {
-        if !self.phase_a_fresh() {
+    fn current_phase(&self, refs: Option<&str>) -> &'static str {
+        if !self.phase_a_fresh(refs) {
             return "phase_a";
         }
         if !self.phase_b_done() {
@@ -573,12 +595,12 @@ impl FactsStore {
     /// refs. A ref move since the last phase-A run makes us stale (phase_a
     /// again) even though the ingest_jobs row says 'done' — this is what fixes
     /// the frozen-at-commit-11 class permanently.
-    fn phase_a_fresh(&self) -> bool {
+    fn phase_a_fresh(&self, refs: Option<&str>) -> bool {
         if !self.phase_a_done() {
             return false;
         }
-        match self.current_refs_hash() {
-            Ok(current) => {
+        match refs {
+            Some(current) => {
                 let stored: Option<String> = self
                     .conn
                     .query_row(
@@ -587,19 +609,23 @@ impl FactsStore {
                         |r| r.get(0),
                     )
                     .ok();
-                stored.as_deref() == Some(current.as_str())
+                stored.as_deref() == Some(current)
             }
-            Err(_) => false,
+            None => false,
         }
     }
 
     /// xxh3 hash of the current refs state (`for-each-ref` + HEAD). Stored at
     /// phase-A completion; a differing hash means refs moved and phase A must
-    /// re-run.
-    pub(crate) fn current_refs_hash(&self) -> Result<String> {
+    /// re-run. It changes exactly when a ref or HEAD moves, so a value
+    /// derived from the refs (a commit count) can be cached under it.
+    ///
+    /// # Errors
+    ///
+    /// Either `git` call failed.
+    pub fn refs_hash(&self) -> Result<String> {
         let mut buf = Vec::new();
-        let refs = self
-            .runner
+        let refs = crate::ingest::enumeration_runner(self)
             .run(&["for-each-ref", "--format=%(refname)%00%(objectname)"])?;
         buf.extend_from_slice(&refs);
         let head = self.runner.run(&["rev-parse", "HEAD"])?;
@@ -654,6 +680,10 @@ impl FactsStore {
 
     /// Close the connection (flushes WAL).
     pub fn close(self) {
+        // Refresh the planner's statistics if the ingest moved them, then
+        // flush: `optimize` costs a few reads and saves a bad plan on every
+        // later query.
+        let _ = self.conn.execute_batch("PRAGMA optimize;");
         let _ = self.conn.pragma_update(None, "wal_checkpoint", "TRUNCATE");
         drop(self.conn);
     }
@@ -799,15 +829,15 @@ mod tests {
     fn current_refs_hash_is_stable_until_a_ref_or_head_moves() {
         let (dir, _, _) = two_commit_repo();
         let store = FactsStore::open(dir.path()).unwrap();
-        let before = store.current_refs_hash().unwrap();
+        let before = store.refs_hash().unwrap();
         assert_eq!(before.len(), 16);
         assert!(before.chars().all(|c| c.is_ascii_hexdigit()), "{before}");
-        assert_eq!(store.current_refs_hash().unwrap(), before);
+        assert_eq!(store.refs_hash().unwrap(), before);
         commit(dir.path(), &[("b.txt", b"b\n")], "third");
-        let after_commit = store.current_refs_hash().unwrap();
+        let after_commit = store.refs_hash().unwrap();
         assert_ne!(after_commit, before);
         git(dir.path(), &["tag", "v1"]);
-        assert_ne!(store.current_refs_hash().unwrap(), after_commit);
+        assert_ne!(store.refs_hash().unwrap(), after_commit);
     }
 
     #[test]
@@ -852,6 +882,44 @@ mod tests {
             .unwrap()
             .expect("present");
         assert_eq!(store.path(), db.as_path());
+    }
+
+    #[test]
+    fn open_should_preserve_history_when_the_repository_parent_is_a_symlink() {
+        let (dir, first, _) = two_commit_repo();
+        let alias = tempfile::tempdir().unwrap();
+        let linked_parent = alias.path().join("projects");
+        std::os::unix::fs::symlink(
+            dir.path().parent().unwrap().canonicalize().unwrap(),
+            &linked_parent,
+        )
+        .unwrap();
+        // Use a repository below the linked component, as with /var/folders
+        // on macOS, so SQLite must not see a link in any parent component.
+        let root = linked_parent.join(dir.path().file_name().unwrap());
+        let store = FactsStore::open(&root).unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO commits (oid, message) VALUES (?1, 'retained history')",
+                [&first],
+            )
+            .unwrap();
+        drop(store);
+
+        let canonical_root = root.canonicalize().unwrap();
+        for path in [&root, &canonical_root] {
+            let reopened = FactsStore::open_existing(path).unwrap().unwrap();
+            let row: (String, String) = reopened
+                .conn()
+                .query_row("SELECT oid, message FROM commits", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(row.0, first);
+            assert_eq!(row.1, "retained history");
+            assert_eq!(reopened.index_state().total_commits, 1);
+        }
     }
 
     /// Freed pages must be reclaimable, or an eviction never shrinks the
@@ -1096,7 +1164,8 @@ mod tests {
     #[test]
     fn needs_rebuild_should_follow_the_marker_and_the_schema_version() {
         let dir = tempfile::TempDir::new().unwrap();
-        let db = dir.path().join("h.db");
+        // NOFOLLOW rejects symlinks in parent components too (/var on macOS).
+        let db = dir.path().canonicalize().unwrap().join("h.db");
         assert!(!FactsStore::needs_rebuild(&db).unwrap(), "absent");
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(

@@ -1,0 +1,14 @@
+name = "workspace-overview"
+version = "0.1.0"
+api = 1
+description = "Answers a workspace overview or a named-member question from the manifests"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "pixel"
+skip_kinds = ["history", "impact"]
+when_prompt = "(?i)\\b(crates?|workspace|monorepo|packages?|members?|modules?|depend\\w*|made up|make up|consists?)\\b"
+when_gate_closed = true
+budget_ms = 1500
+mode = "lead"

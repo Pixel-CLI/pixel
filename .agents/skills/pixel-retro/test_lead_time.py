@@ -11,10 +11,15 @@ while a check still runs, idle time charged to the wrong command.
 """
 
 import datetime
+import contextlib
+import io
+import tempfile
 import json
 import pathlib
 import sys
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import lead_time as lt  # noqa: E402
@@ -79,6 +84,99 @@ class Units(unittest.TestCase):
         self.assertEqual([(u["pr"], u["start"]) for u in found], [(9, T0 + datetime.timedelta(minutes=1))])
 
 
+class Repository(unittest.TestCase):
+    """The 2026-10-16 retro measured pixel-mvp's #33 and #36 as this
+    repository's #33 and #36 (the project-directory glob took the sibling
+    `pixel-mvp` for a worktree) and read their month-old checks: a lead time
+    of -48 269 min. A PR is this repository's by its URL, nothing else."""
+
+    def session(self, url, command="gh pr create --fill"):
+        return lt.load_events([
+            assistant(1, ("e1", "Edit", {})),
+            result(2, "e1"),
+            assistant(5, ("p1", "Bash", bash(command))),
+            result(6, "p1", url),
+        ])
+
+    def test_a_pr_of_another_repository_with_the_same_number_is_not_this_ones(self):
+        events = self.session("https://github.com/Pixel-CLI/pixel-mvp/pull/33")
+        self.assertEqual(lt.units(events, "Pixel-CLI/pixel"), [])
+        self.assertEqual([u["pr"] for u in lt.units(self.session("https://github.com/pixel-cli/PIXEL/pull/33"),
+                                                    "Pixel-CLI/pixel")], [33])
+
+    def test_gh_pr_create_quoted_inside_another_command_opens_nothing(self):
+        # The retro's own `grep 'gh pr create'` over a rollout printed PR URLs.
+        events = self.session("https://github.com/Pixel-CLI/pixel/pull/1012", "grep -o 'gh pr create' rollout.jsonl")
+        self.assertEqual(lt.units(events, "Pixel-CLI/pixel"), [])
+        for command in ("cd /x && gh pr create --fill", "git push -u origin b\ngh pr create --base main",
+                        "GH_PAGER= gh pr create --fill"):
+            events = self.session("https://github.com/Pixel-CLI/pixel/pull/7", command)
+            self.assertEqual([u["pr"] for u in lt.units(events, "Pixel-CLI/pixel")], [7], command)
+
+    def test_a_subagents_prompt_is_not_the_human(self):
+        lines = [user(0, "open the PR for #12"), assistant(1, text="on it")]
+        self.assertEqual([lt.next_kind(e) for e in lt.load_events(lines)], ["human", "model"])
+        self.assertEqual([lt.next_kind(e) for e in lt.load_events(lines, subagent=True)], ["idle", "model"])
+
+
+def codex(minutes, kind, **payload):
+    return json.dumps({"timestamp": at(minutes), "type": "response_item", "payload": {"type": kind, **payload}})
+
+
+def codex_exec(minutes, call_id, *calls):
+    script = "\n".join(f"text(await tools.{call});" for call in calls)
+    return codex(minutes, "custom_tool_call", name="exec", call_id=call_id, input=script)
+
+
+def codex_output(minutes, call_id, text):
+    return codex(minutes, "custom_tool_call_output", call_id=call_id, output=[{"type": "input_text", "text": text}])
+
+
+class Codex(unittest.TestCase):
+    """Every PR of the 2026-10-16 window came from Codex, and lead_time.py
+    measured none: it read Claude Code transcripts only."""
+
+    def rollout(self):
+        return [
+            json.dumps({"timestamp": at(0), "type": "session_meta", "payload": {"id": "01a14247-x", "cwd": "/r"}}),
+            codex(0, "message", role="user", content=[{"type": "input_text", "text": "# AGENTS.md instructions for /r"}]),
+            codex(0, "message", role="user", content=[{"type": "input_text", "text": "<heartbeat>tick</heartbeat>"}]),
+            codex(1, "message", role="user", content=[{"type": "input_text", "text": "fix #1011"}]),
+            codex_exec(2, "c1", 'exec_command({cmd:"rg -n write_settings crates"})'),
+            codex_output(3, "c1", "crates/a.rs:1"),
+            # Codex edits from a heredoc script as often as with apply_patch.
+            codex_exec(4, "c2", 'exec_command({cmd:"python3 - <<\'PY\'\\np=Path(\'a.rs\');p.write_text(s)\\nPY"})'),
+            codex_output(5, "c2", "ok"),
+            # gh pr create still runs when the call returns: the URL comes back
+            # through the poll of the same session.
+            codex_exec(10, "c3", 'exec_command({cmd:"git push -u origin b\\ngh pr create --base main --body-file /tmp/b.md",yield_time_ms:1000})'),
+            codex_output(11, "c3", '{"session_id":16372,"output":"[b 79f657ca] fix"}'),
+            codex(12, "function_call", name="wait", call_id="w1", arguments='{"cell_id":"3"}'),
+            codex(20, "function_call_output", call_id="w1", output="Wall time: 8 min"),
+            codex_exec(21, "c4", 'write_stdin({session_id:16372,chars:"",yield_time_ms:1000})'),
+            codex_output(22, "c4", '{"output":"https://github.com/Pixel-CLI/pixel/pull/1012\\n"}'),
+        ]
+
+    def test_a_codex_pr_starts_at_its_first_shell_edit_and_ends_at_the_poll_that_names_it(self):
+        session, cwd, events = lt.load_codex(self.rollout())
+        self.assertEqual((session, cwd), ("01a14247-x", "/r"))
+        found = lt.units(events, "Pixel-CLI/pixel")
+        self.assertEqual([(u["pr"], u["start"], u["opened"]) for u in found],
+                         [(1012, T0 + datetime.timedelta(minutes=4), T0 + datetime.timedelta(minutes=10))])
+
+    def test_codex_context_is_not_the_human_and_a_wait_is_idle(self):
+        _, _, events = lt.load_codex(self.rollout())
+        buckets, blocking, pushes = lt.breakdown(events, T0, T0 + datetime.timedelta(minutes=22))
+        # Only "fix #1011" (minute 0 → 1) is a human gap; the injected
+        # AGENTS.md and heartbeat messages are not.
+        self.assertEqual(buckets["human"], 60.0)
+        # The wait (minute 12 → 20) and the poll that only reads a running
+        # command (21 → 22) are idle, charged to the wait.
+        self.assertEqual(buckets["idle"], 9 * 60.0)
+        self.assertEqual(blocking["wait (background)"], 9 * 60.0)
+        self.assertEqual(pushes, 1)
+
+
 class Gaps(unittest.TestCase):
     def test_injected_user_text_is_never_the_human(self):
         kinds = [lt.next_kind(e) for e in lt.load_events([
@@ -114,19 +212,20 @@ class Gaps(unittest.TestCase):
 
 
 class Validation(unittest.TestCase):
-    def check(self, status, completed):
-        return {"__typename": "CheckRun", "name": "Test", "status": status, "completedAt": completed}
+    def check(self, status, completed, conclusion="SUCCESS"):
+        return {"__typename": "CheckRun", "name": "Test", "status": status, "completedAt": completed, "conclusion": conclusion}
 
     def test_an_open_pr_with_a_running_check_is_not_validated(self):
         view = {"mergedAt": None, "statusCheckRollup": [self.check("COMPLETED", at(5)), self.check("IN_PROGRESS", None)]}
         self.assertIsNone(lt.validated_at(view))
 
-    def test_a_merged_pr_ignores_a_review_status_left_pending(self):
+    def test_a_merged_pr_with_a_pending_review_has_unknown_validation(self):
         view = {"mergedAt": at(9), "statusCheckRollup": [
             self.check("COMPLETED", at(5)), self.check("COMPLETED", at(8)),
             {"__typename": "StatusContext", "context": "CodeRabbit", "state": "PENDING", "startedAt": at(1)},
         ]}
-        self.assertEqual(lt.validated_at(view), T0 + datetime.timedelta(minutes=8))
+        self.assertIsNone(lt.validated_at(view))
+        self.assertIsNone(lt.completed_at(view))
 
     def test_a_finished_commit_status_counts_at_its_start_and_no_check_is_no_answer(self):
         view = {"mergedAt": None, "statusCheckRollup": [
@@ -136,12 +235,87 @@ class Validation(unittest.TestCase):
         self.assertEqual(lt.validated_at(view), T0 + datetime.timedelta(minutes=7))
         self.assertIsNone(lt.validated_at({"mergedAt": None, "statusCheckRollup": []}))
 
+    def test_failed_checks_finish_but_never_validate_even_after_merge(self):
+        for merged in [None, at(9)]:
+            for conclusion in ["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE", None, ""]:
+                with self.subTest(merged=merged, conclusion=conclusion):
+                    view = {"mergedAt": merged, "statusCheckRollup": [
+                        self.check("COMPLETED", at(5)), self.check("COMPLETED", at(8), conclusion)]}
+                    self.assertEqual(lt.completed_at(view), T0 + datetime.timedelta(minutes=8))
+                    self.assertIsNone(lt.validated_at(view))
+
+    def test_accepted_conclusions_need_completed_checks_and_real_timestamps(self):
+        for conclusion in ["SUCCESS", "NEUTRAL", "SKIPPED"]:
+            with self.subTest(conclusion=conclusion):
+                view = {"statusCheckRollup": [self.check("COMPLETED", at(5), conclusion)]}
+                self.assertEqual(lt.validated_at(view), T0 + datetime.timedelta(minutes=5))
+                for status, done in [("IN_PROGRESS", at(5)), ("COMPLETED", None), ("COMPLETED", "0001-01-01T00:00:00Z")]:
+                    self.assertIsNone(lt.validated_at({"statusCheckRollup": [self.check(status, done, conclusion)]}))
+        self.assertIsNone(lt.validated_at({"statusCheckRollup": [self.check("COMPLETED", at(5)), self.check("IN_PROGRESS", None)]}))
+
+    def test_failed_commit_statuses_are_not_validation(self):
+        for state in ["FAILURE", "ERROR", "PENDING", "EXPECTED", "UNKNOWN"]:
+            with self.subTest(state=state):
+                view = {"mergedAt": at(9), "statusCheckRollup": [
+                    {"state": state, "startedAt": at(5)}]}
+                self.assertIsNone(lt.validated_at(view))
+                expected = T0 + datetime.timedelta(minutes=5) if state in ("FAILURE", "ERROR") else None
+                self.assertEqual(lt.completed_at(view), expected)
+
+
+class Coverage(unittest.TestCase):
+    def test_report_distinguishes_unobserved_prs_from_unvalidated_heads(self):
+        rows = [{"pr": 1, "open_to_green_s": 0}, {"pr": 2, "open_to_green_s": None},
+                {"pr": 1, "open_to_green_s": 0}]
+        self.assertEqual(lt.coverage(rows, {1, 2, 3}), {
+            "local_prs": 2, "validated_prs": 1, "github_prs": 3, "missing_local_prs": [3]})
+        self.assertEqual(lt.coverage([], None), {
+            "local_prs": 0, "validated_prs": 0, "github_prs": None, "missing_local_prs": None})
+
+    def test_json_and_table_keep_failed_completion_out_of_green_median(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            (root / "empty").mkdir()
+            (root / "session.jsonl").write_text("\n".join([
+                assistant(1, ("e1", "Edit", {})), result(2, "e1"),
+                assistant(5, ("p1", "Bash", bash("gh pr create"))),
+                result(6, "p1", "https://github.com/o/r/pull/7")]))
+            view = {"headRefOid": "head-7", "statusCheckRollup": [
+                {"status": "COMPLETED", "conclusion": "FAILURE", "completedAt": at(8)}]}
+            for json_mode in [True, False]:
+                output = io.StringIO()
+                with patch.object(lt, "repo_slug", return_value="o/r"), patch.object(lt, "gh_view", return_value=view), \
+                        patch.object(lt, "github_pr_numbers", return_value={7, 8}), contextlib.redirect_stdout(output):
+                    lt.main(["lead_time.py", at(0), "--projects", str(root), "--codex", str(root / "empty")]
+                            + (["--json"] if json_mode else []))
+                if json_mode:
+                    report = json.loads(output.getvalue())
+                    self.assertEqual(report["units"][0]["open_to_completed_s"], 180)
+                    self.assertIsNone(report["units"][0]["open_to_green_s"])
+                    self.assertEqual(report["units"][0]["head_sha"], "head-7")
+                    self.assertEqual(report["coverage"], {"local_prs": 1, "validated_prs": 0,
+                                                        "github_prs": 2, "missing_local_prs": [8]})
+                else:
+                    self.assertIn("coverage: 0 validated / 1 local PRs; GitHub total: 2", output.getvalue())
+                    self.assertIn("open→done", output.getvalue())
+                    self.assertNotIn("median", output.getvalue())
+
+    def test_listing_failure_and_cap_are_unknown_not_complete_coverage(self):
+        for code, body, expected in [(0, '[{"number": 7}]', {7}), (0, '[]', set()),
+                                     (1, '[]', None), (0, 'invalid', None),
+                                     (0, json.dumps([{"number": n} for n in range(1000)]), None)]:
+            with self.subTest(code=code, expected=expected):
+                with patch.object(lt.subprocess, "run", return_value=SimpleNamespace(returncode=code, stdout=body)) as run:
+                    self.assertEqual(lt.github_pr_numbers("o/r", T0), expected)
+                    self.assertIn("created:>=" + T0.isoformat(), run.call_args.args[0])
+
+
 
 class Keys(unittest.TestCase):
     def test_commands_group_by_what_actually_ran(self):
         for command, key in [
             ("cd /x && cargo nextest run --workspace", "cargo nextest run"),
-            ("S=/tmp/a && sh scripts/gates.sh --force", "sh gates.sh"),
+            ("S=/tmp/a && sh scripts/ci/gates.sh --force", "sh gates.sh"),
             ("bash -c 'cargo test -p pixel-cli'", "cargo test"),
             ("timeout 600 python3 lead_time.py 3d", "python3 lead_time.py"),
             # Three words at most: every PR's watch lands in one group.

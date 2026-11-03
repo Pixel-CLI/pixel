@@ -29,13 +29,13 @@ concurrency:
 
 jobs:
   build:
-    # A hosted runner: blacksmith self-hosted labels are not registered for
+    # A GitHub-hosted runner: self-hosted labels are not registered for
     # this repo, so they queue the deploy forever and the live
     # site goes stale (2026-10-04: #608's website merge sat un-published
     # >13h, still serving Gemini/Windsurf/LivioGama URLs).
     runs-on: ubuntu-26.04
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           # The whole history: enableGitInfo dates each page by the last
@@ -43,7 +43,7 @@ jobs:
           # by HEAD.
           fetch-depth: 0
       # Installs the Hugo pin from website/mise.toml.
-      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           working_directory: website
       - id: pages
@@ -59,7 +59,7 @@ jobs:
 
   deploy:
     needs: build
-    # A hosted runner: blacksmith self-hosted labels are not registered for
+    # A GitHub-hosted runner: self-hosted labels are not registered for
     # this repo, so they queue the deploy forever and the live
     # site goes stale (2026-10-04: #608's website merge sat un-published
     # >13h, still serving Gemini/Windsurf/LivioGama URLs).

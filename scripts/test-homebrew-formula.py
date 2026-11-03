@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/homebrew-formula.py, the step release.yml runs to write
+"""Contract of scripts/release/homebrew-formula.py, the step release.yml runs to write
 the Homebrew formula and the Linux bottles, checked without a tag.
 
 What must hold for a release to install through the tap:
@@ -33,7 +33,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCRIPT = HERE / "homebrew-formula.py"
+SCRIPT = HERE / "release" / "homebrew-formula.py"
 TEMPLATE = HERE / "fixtures/homebrew/pixel.rb.template"
 TAG = "v9.8.7"
 TARGETS = ("aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl")

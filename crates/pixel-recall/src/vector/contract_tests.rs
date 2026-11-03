@@ -6,7 +6,7 @@
 //! scores in order within the allowed set.
 
 use super::*;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 fn store() -> (tempfile::TempDir, VectorStore) {
     let dir = tempfile::tempdir().unwrap();

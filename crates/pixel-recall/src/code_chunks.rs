@@ -42,10 +42,47 @@ pub const PACK_MAX: usize = 400;
 /// non-blank line of `text`; ranges never overlap except between the
 /// windows of one oversize piece, which overlap as [`chunk_offsets`] does.
 pub fn code_chunks(path: &str, text: &str) -> Vec<(usize, usize)> {
-    let Some(extraction) = pixel_graph::extract::extract_file(path, text.as_bytes()) else {
-        return chunk_offsets(text);
-    };
+    named_chunks(path, text)
+        .into_iter()
+        .map(|chunk| (chunk.start, chunk.end))
+        .collect()
+}
+
+/// One chunk of [`named_chunks`]: its byte range, its inclusive 1-based line
+/// range and the symbol it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedChunk {
+    pub start: usize,
+    pub end: usize,
+    pub first_line: u32,
+    pub last_line: u32,
+    /// The name of the first symbol that starts inside the chunk (the
+    /// outermost on a tie); for a window cut from inside a larger symbol,
+    /// the innermost symbol around it. `None` for lines between symbols and
+    /// for a file the extraction does not read.
+    pub symbol: Option<String>,
+}
+
+/// [`code_chunks`] with the symbol each chunk belongs to, from the same
+/// extraction.
+pub fn named_chunks(path: &str, text: &str) -> Vec<NamedChunk> {
     let lines = Lines::new(text);
+    let named = |start: usize, end: usize, symbol: Option<String>| {
+        let first_line = lines.line_of(start);
+        NamedChunk {
+            start,
+            end,
+            first_line,
+            last_line: lines.line_of(end.saturating_sub(1)).max(first_line),
+            symbol,
+        }
+    };
+    let Some(extraction) = pixel_graph::extract::extract_file(path, text.as_bytes()) else {
+        return chunk_offsets(text)
+            .into_iter()
+            .map(|(start, end)| named(start, end, None))
+            .collect();
+    };
     let spans = symbol_spans(&extraction.symbols, lines.count());
     let mut pieces = Vec::new();
     cut(
@@ -56,6 +93,30 @@ pub fn code_chunks(path: &str, text: &str) -> Vec<(usize, usize)> {
         &mut pieces,
     );
     pack(text, &lines, &pieces)
+        .into_iter()
+        .map(|(start, end)| {
+            let chunk = named(start, end, None);
+            let symbol = chunk_symbol(&extraction.symbols, (chunk.first_line, chunk.last_line));
+            NamedChunk { symbol, ..chunk }
+        })
+        .collect()
+}
+
+/// The name [`NamedChunk::symbol`] gives the chunk on `lines` (inclusive,
+/// 1-based), among the extraction's `symbols`.
+fn chunk_symbol(symbols: &[pixel_graph::extract::RawSymbol], lines: Span) -> Option<String> {
+    let around = || {
+        symbols.iter().filter(|symbol| {
+            symbol.kind != pixel_graph::SymbolKind::Script
+                && symbol.start_line <= lines.1
+                && symbol.end_line >= lines.0
+        })
+    };
+    around()
+        .filter(|symbol| symbol.start_line >= lines.0)
+        .min_by_key(|symbol| (symbol.start_line, std::cmp::Reverse(symbol.end_line)))
+        .or_else(|| around().max_by_key(|symbol| symbol.start_line))
+        .map(|symbol| symbol.name.clone())
 }
 
 /// An inclusive, 1-based line range.
@@ -92,6 +153,12 @@ impl<'a> Lines<'a> {
             .copied()
             .unwrap_or(self.text.len());
         (self.starts[first as usize - 1], end)
+    }
+
+    /// The 1-based line holding the byte at `offset`.
+    fn line_of(&self, offset: usize) -> u32 {
+        let passed = self.starts.partition_point(|&start| start <= offset);
+        u32::try_from(passed).unwrap_or(u32::MAX).max(1)
     }
 
     /// The text of line `line`, without its newline.
@@ -697,5 +764,124 @@ mod tests {
                 ((22, 22), &spans[6..6]),
             ]
         );
+    }
+
+    fn named(
+        name: &str,
+        kind: pixel_graph::SymbolKind,
+        start_line: u32,
+        end_line: u32,
+    ) -> pixel_graph::extract::RawSymbol {
+        pixel_graph::extract::RawSymbol {
+            name: name.into(),
+            ..symbol(kind, start_line, end_line)
+        }
+    }
+
+    /// A chunk takes the name of the first symbol that starts inside it,
+    /// the outermost on a tie, however many others it holds or touches.
+    #[test]
+    fn chunk_symbol_should_name_the_first_symbol_starting_in_the_chunk() {
+        use pixel_graph::SymbolKind::{Class, Function, Method};
+        let symbols = [
+            named("Outer", Class, 2, 9),
+            named("inner", Method, 3, 4),
+            named("later", Function, 5, 9),
+        ];
+        assert_eq!(chunk_symbol(&symbols, (1, 12)).as_deref(), Some("Outer"));
+        assert_eq!(chunk_symbol(&symbols, (3, 4)).as_deref(), Some("inner"));
+        // Starting on the chunk's last line counts; the one enclosing it does not.
+        assert_eq!(chunk_symbol(&symbols, (3, 5)).as_deref(), Some("inner"));
+        assert_eq!(chunk_symbol(&symbols, (4, 5)).as_deref(), Some("later"));
+    }
+
+    /// A window cut from inside a symbol has no symbol starting in it and
+    /// takes the innermost one around it; a chunk between symbols has none.
+    #[test]
+    fn chunk_symbol_should_name_the_innermost_enclosing_symbol_or_none() {
+        use pixel_graph::SymbolKind::{Class, Function, Method, Script};
+        let symbols = [
+            named("Outer", Class, 2, 9),
+            named("inner", Method, 5, 8),
+            named("script", Script, 1, 20),
+        ];
+        assert_eq!(chunk_symbol(&symbols, (6, 7)).as_deref(), Some("inner"));
+        assert_eq!(chunk_symbol(&symbols, (9, 9)).as_deref(), Some("Outer"));
+        assert_eq!(chunk_symbol(&symbols, (10, 12)), None, "between symbols");
+        assert_eq!(
+            chunk_symbol(&symbols, (1, 1)),
+            None,
+            "only the script scope"
+        );
+        let touching = [named("f", Function, 1, 3)];
+        assert_eq!(chunk_symbol(&touching, (3, 5)).as_deref(), Some("f"));
+        assert_eq!(chunk_symbol(&touching, (4, 5)), None);
+    }
+
+    /// Each chunk reports its inclusive lines and its symbol: imports above
+    /// the first function have none, a function with its doc comment has its
+    /// own name, and the windows of one long function all have it.
+    #[test]
+    fn named_chunks_should_give_each_chunk_its_lines_and_symbol() {
+        let padding = |count: usize| -> String {
+            (0..count)
+                .map(|n| format!("    let value_{n} = {n}; // padding padding padding\n"))
+                .collect()
+        };
+        let text = format!(
+            "use std::fmt;\n\n/// Bills the parking.\npub fn bill() -> u32 {{\n{}    0\n}}\n\npub fn long() -> u32 {{\n{}    0\n}}\n",
+            padding(8),
+            padding(70)
+        );
+        let chunks = named_chunks("src/lib.rs", &text);
+        let lines = Lines::new(&text);
+        let summary: Vec<(u32, u32, Option<&str>)> = chunks
+            .iter()
+            .map(|chunk| (chunk.first_line, chunk.last_line, chunk.symbol.as_deref()))
+            .collect();
+        assert_eq!(
+            summary[0],
+            (1, 2, None),
+            "the import and the blank line stay apart from the function: {summary:?}"
+        );
+        assert_eq!(summary[1], (3, 14, Some("bill")), "{summary:?}");
+        assert_eq!(
+            chunks[1].start,
+            lines.bytes(3, 3).0,
+            "the doc comment opens the chunk"
+        );
+        let windows = &summary[2..];
+        assert!(windows.len() >= 3, "a long function is cut: {summary:?}");
+        assert!(
+            windows.iter().all(|window| window.2 == Some("long")),
+            "{summary:?}"
+        );
+        assert_eq!(windows.last().unwrap().1, lines.count(), "{summary:?}");
+        assert!(
+            windows.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "windows advance: {summary:?}"
+        );
+        assert_eq!(
+            code_chunks("src/lib.rs", &text),
+            chunks
+                .iter()
+                .map(|chunk| (chunk.start, chunk.end))
+                .collect::<Vec<_>>(),
+            "the same cut as code_chunks"
+        );
+    }
+
+    /// A file the extraction does not read is cut into windows with lines
+    /// and no symbol.
+    #[test]
+    fn named_chunks_should_cut_an_unparsed_file_into_windows_without_symbols() {
+        let text: String = (1..=120)
+            .map(|n| format!("line {n} of the manual with some padding words\n"))
+            .collect();
+        let chunks = named_chunks("docs/manual.md", &text);
+        assert!(chunks.len() >= 3, "{chunks:?}");
+        assert!(chunks.iter().all(|chunk| chunk.symbol.is_none()));
+        assert_eq!(chunks[0].first_line, 1);
+        assert_eq!(chunks.last().unwrap().last_line, 120);
     }
 }

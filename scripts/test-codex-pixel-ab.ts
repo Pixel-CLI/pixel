@@ -20,7 +20,7 @@ const fakeBin = (name: string, body: string) => { const path = join(bin, name); 
 fakeBin("pixel", "case \"$1\" in install|build-index) exit 0;; classify) printf '%s\\n' '{\"marker\":\"complete\",\"predicted\":\"pixel\",\"probs\":{\"pixel\":0.8,\"none\":0.1,\"native\":0.1}}'; exit 0;; esac");
 fakeBin("codex", "[ \"${PIXEL_POLICY:-}\" = enforce ] && printf '%s\\n' '{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"pixel find-code\"}}'\nfor arg in \"$@\"; do [ \"$arg\" = --output-last-message ] && next=1 || { [ \"${next:-}\" = 1 ] && { printf answer > \"$arg\"; break; }; }; done");
 fakeBin("tmux", "case \"$1\" in has-session) exit 1;; new-session|split-window) last=\"${!#}\"; bash -c \"$last\" >/dev/null 2>&1 & exit 0;; select-layout) exit 0;; esac");
-const script = join(process.cwd(), "scripts/codex-pixel-ab.sh");
+const script = join(process.cwd(), "scripts/bench/codex-pixel-ab.sh");
 const result = Bun.spawnSync([script, "--repo", repo, "--prompt", "Does Pixel help?", "--pixel-bin", join(bin, "pixel"), "--pixel-policy", "classify", "--classify-min-confidence", "0.60", "--session", "stub-ab", "--detach", "--timeout", "3"], { cwd: repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
 if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr));
 const reportPath = new TextDecoder().decode(result.stdout).match(/A\/B report: (.+)/)?.[1]?.trim();

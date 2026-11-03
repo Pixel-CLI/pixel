@@ -1,0 +1,11 @@
+{
+  "observed_unix": 1792414692.126587,
+  "load_average": [
+    261.8154296875,
+    217.50341796875,
+    167.9052734375
+  ],
+  "logical_cpus": 16,
+  "observation": "Shared host has concurrent unrelated Python test workers, GUI processes and other Pixel processes; no unrelated process was stopped.",
+  "consequence": "Native and direct source replay windows are serialized. Deadline failures are retained; no enlarged native hook window is used."
+}

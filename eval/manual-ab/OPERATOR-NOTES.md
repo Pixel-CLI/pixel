@@ -53,3 +53,10 @@ Treat as standing instructions for this process.
   in background this session before the manual setup was understood — running
   as shell `97911b`, results → `eval/results/ab626-codex`. Keep or kill:
   awaiting operator decision.
+
+## Watch automation (2026-10-06)
+- `eval/arena/herdr_watch.py` codifies the Herdr drill so `--watch` does it
+  all: close stale arena-*/ab-* panes first, equal-width columns on one row
+  (resize-probe + boundary drag — herdr only nests binary splits), tab label
+  `arena: <arms>`, pinned codex model, auto-trust including usage-limit
+  dismiss. Never hand-build the layout again.

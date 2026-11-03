@@ -1,0 +1,5 @@
+# Audit artifacts stay local: everything under docs/audit/ is ignored
+# except this file and the committed prompt templates.
+*
+!.gitignore
+!language-alternatives.md

@@ -1,7 +1,7 @@
 # Abstention of a whole-change negative (`evaluate diff-reaches`, d2-5)
 
 Measured 2026-09-26, before Delivery 2 of `pixel evaluate`
-([design note](../design/evaluate.md), decision C3). The question is how
+([design note](../archive/design/evaluate.md), decision C3). The question is how
 often `diff-reaches` would have to answer `unknown` rather than
 `absent_in_snapshot` because part of a change has no symbol in the graph. If
 the answer is "almost always", the whole-change promise leaves no real use
@@ -21,7 +21,7 @@ which refreshes the graph to the checked-out tree and maps the commit's diff
 onto it (`changes::detect`). A commit **abstains** when the report carries a
 non-empty `uncovered_changes` or `unanchored`: under C3 either one turns any
 `diff-reaches` negative into `unknown`. The scripts are in
-[`scripts/bench-abstention/`](../../scripts/bench-abstention/):
+[`scripts/bench/bench-abstention/`](../../scripts/bench/bench-abstention/):
 `run.sh <name> <tree> <n>`, `rerun.sh` for checkouts that failed, and
 `aggregate.py <name>=<clone> …`.
 

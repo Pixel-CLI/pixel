@@ -23,7 +23,7 @@
 //! <https://bundler.io/v2.5/man/gemfile.5.html>
 //! <https://guides.rubygems.org/specification-reference/#require_paths=>
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::Path;
 
 use tree_sitter::Node;
@@ -108,7 +108,7 @@ impl Projects {
     }
 
     fn build(files: &[String], read: impl Fn(&str) -> Option<Vec<u8>>) -> Self {
-        let mut roots: HashMap<String, Manifest> = HashMap::new();
+        let mut roots: HashMap<String, Manifest> = HashMap::default();
         for file in files {
             if is_gemfile(file) || is_gemspec(file) {
                 roots.entry(dir_of(file).to_string()).or_default();
@@ -127,7 +127,7 @@ impl Projects {
                 }
             }
         }
-        let mut locks: HashMap<String, Vec<String>> = HashMap::new();
+        let mut locks: HashMap<String, Vec<String>> = HashMap::default();
         for dir in roots.keys() {
             if let Some(content) = read(&join(dir, "Gemfile.lock")) {
                 locks.insert(dir.clone(), lock_gems(&String::from_utf8_lossy(&content)));
@@ -154,7 +154,7 @@ impl Projects {
                     local.insert(last.to_string());
                 }
             }
-            let mut external = HashSet::new();
+            let mut external = HashSet::default();
             let declared = manifest
                 .gems
                 .iter()
@@ -180,7 +180,7 @@ impl Projects {
             }
             // A root listed twice (`gemspec path: "."`, two path gems on one
             // directory) is one root: keep its first place.
-            let mut listed = HashSet::new();
+            let mut listed = HashSet::default();
             load_roots.retain(|root| listed.insert(root.clone()));
             projects.push(Project {
                 root: dir.clone(),

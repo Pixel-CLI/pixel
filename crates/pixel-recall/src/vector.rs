@@ -208,7 +208,7 @@ impl VectorStore {
         &self,
         query: &[f32],
         k: usize,
-        allowed: Option<&std::collections::HashSet<i64>>,
+        allowed: Option<&rustc_hash::FxHashSet<i64>>,
     ) -> Vec<(i64, f32)> {
         let mut best: Vec<(i64, f32)> = Vec::with_capacity(k + 1);
         for seg in self.open_segments() {
@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(hits[0].0, 1);
         assert_eq!(hits[1].0, 3);
         // Filtering excludes the best hit.
-        let allowed: std::collections::HashSet<i64> = [2, 3].into_iter().collect();
+        let allowed: rustc_hash::FxHashSet<i64> = [2, 3].into_iter().collect();
         let hits = store.knn(&[1.0, 0.0, 0.0], 2, Some(&allowed));
         assert_eq!(hits[0].0, 3);
         // Model mismatch is a loud error.

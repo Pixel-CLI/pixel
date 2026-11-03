@@ -26,5 +26,5 @@ if ! grep -q 'pub const GRAPH_DB_FILENAME: &str = "graph.v2.db";' crates/pixel-d
   fail=1
 fi
 [ "$fail" = 0 ] || exit 1
-cargo check -q -p pixel-daemon -p pixel-install -p pixel-cli --all-targets || { echo "FAIL: cargo check"; exit 1; }
+cargo check -q -p pixel-daemon -p pixel-setup -p pixel-cli --all-targets || { echo "FAIL: cargo check"; exit 1; }
 echo PASS

@@ -107,6 +107,8 @@ fn evaluate(opts: EvaluateOptions) -> Result<wire::Output, wire::ErrorEnvelope> 
         time_budget_ms: opts.time_budget_ms,
         scope: opts.scope,
         at_snapshot: opts.at_snapshot,
+
+        stale_ok: false,
     };
     let data = crate::execute(&opts.path, request, false).map_err(technical)?;
     parse(data)

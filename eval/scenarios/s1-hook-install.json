@@ -3,7 +3,7 @@
   "kind": "how-does-X-work",
   "prompt": "How does pixel decide which hook entries to write into ~/.claude/settings.json during install?",
   "must": [
-    {"pattern": "pixel-install/src/routing\\.rs", "points": 3, "why": "mechanism location"},
+    {"pattern": "pixel-setup/src/routing\\.rs", "points": 3, "why": "mechanism location"},
     {"pattern": "configure_scoped", "points": 3, "why": "the function that writes the entries"},
     {"pattern": "session-start", "points": 1, "why": "lifecycle verb written for claude"},
     {"pattern": "prompt-submit", "points": 1, "why": "lifecycle verb written for claude"},

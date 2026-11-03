@@ -1,0 +1,128 @@
+{
+  "base": {
+    "v1": {
+      "early": {
+        "n": 20,
+        "content": 20,
+        "answered": 20,
+        "p50_ms": 368.2,
+        "p95_ms": 2256.6,
+        "max_ms": 2688.8,
+        "routes": {
+          "daemon": 20
+        },
+        "stale_notice": 18
+      },
+      "later": {
+        "n": 40,
+        "content": 40,
+        "answered": 40,
+        "p50_ms": 383.8,
+        "p95_ms": 745.7,
+        "max_ms": 771.6,
+        "routes": {
+          "daemon": 40
+        },
+        "stale_notice": 2
+      },
+      "published": 20,
+      "publication_checks": 20
+    },
+    "hybrid": {
+      "early": {
+        "n": 20,
+        "content": 18,
+        "answered": 18,
+        "p50_ms": 304.4,
+        "p95_ms": 3021.0,
+        "max_ms": 3031.3,
+        "routes": {
+          "daemon": 20
+        },
+        "stale_notice": 18
+      },
+      "later": {
+        "n": 40,
+        "content": 40,
+        "answered": 40,
+        "p50_ms": 379.0,
+        "p95_ms": 1495.4,
+        "max_ms": 2238.1,
+        "routes": {
+          "daemon": 40
+        },
+        "stale_notice": 17
+      },
+      "published": 20,
+      "publication_checks": 20
+    },
+    "load1": {
+      "min": 8.8359375,
+      "median": 13.069580078125,
+      "max": 18.38525390625
+    }
+  },
+  "head": {
+    "v1": {
+      "early": {
+        "n": 20,
+        "content": 20,
+        "answered": 20,
+        "p50_ms": 280.5,
+        "p95_ms": 2075.3,
+        "max_ms": 2674.7,
+        "routes": {
+          "daemon": 20
+        },
+        "stale_notice": 20
+      },
+      "later": {
+        "n": 40,
+        "content": 40,
+        "answered": 40,
+        "p50_ms": 428.8,
+        "p95_ms": 642.1,
+        "max_ms": 724.0,
+        "routes": {
+          "daemon": 40
+        },
+        "stale_notice": 3
+      },
+      "published": 20,
+      "publication_checks": 20
+    },
+    "hybrid": {
+      "early": {
+        "n": 20,
+        "content": 20,
+        "answered": 20,
+        "p50_ms": 283.4,
+        "p95_ms": 3018.8,
+        "max_ms": 3021.4,
+        "routes": {
+          "daemon": 20
+        },
+        "stale_notice": 20
+      },
+      "later": {
+        "n": 40,
+        "content": 40,
+        "answered": 40,
+        "p50_ms": 331.3,
+        "p95_ms": 1598.4,
+        "max_ms": 2357.8,
+        "routes": {
+          "daemon": 40
+        },
+        "stale_notice": 20
+      },
+      "published": 20,
+      "publication_checks": 20
+    },
+    "load1": {
+      "min": 6.189453125,
+      "median": 10.3095703125,
+      "max": 14.09033203125
+    }
+  }
+}

@@ -186,6 +186,19 @@ CREATE TABLE IF NOT EXISTS raw_fallbacks (
 CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
+/// A database worth deleting: corrupt, not a database, or another schema
+/// version (`open_conn` reports the latter as `InvalidQuery`).
+fn is_rebuildable(e: &StoreError) -> bool {
+    use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
+    match e {
+        StoreError::Sql(rusqlite::Error::InvalidQuery) => true,
+        StoreError::Sql(rusqlite::Error::SqliteFailure(f, _)) => {
+            matches!(f.code, DatabaseCorrupt | NotADatabase)
+        }
+        _ => false,
+    }
+}
+
 pub struct Store {
     conn: Connection,
     path: PathBuf,
@@ -233,8 +246,9 @@ impl Store {
 
         let conn = match Self::open_conn(&file) {
             Ok(conn) => conn,
-            Err(_) => {
+            Err(e) if is_rebuildable(&e) => {
                 // Self-heal: corrupt or mismatched database → delete + rebuild.
+                // Any other failure (BUSY, ENOSPC, EACCES) leaves the file alone.
                 for suffix in ["", "-wal", "-shm"] {
                     let mut victim = file.clone().into_os_string();
                     victim.push(suffix);
@@ -242,6 +256,7 @@ impl Store {
                 }
                 Self::open_conn(&file)?
             }
+            Err(e) => return Err(e),
         };
         set_mode(&file, 0o600)?;
         let store = Store {
@@ -263,7 +278,9 @@ impl Store {
             return Err(rusqlite::Error::InvalidQuery.into());
         }
         conn.execute_batch(DDL)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        if version != SCHEMA_VERSION {
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         Ok(conn)
     }
 

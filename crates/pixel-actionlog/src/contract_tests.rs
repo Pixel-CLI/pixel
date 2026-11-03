@@ -144,3 +144,17 @@ fn savings_ratio_should_refuse_an_empty_pool_and_clamp_at_zero() {
     let ev = ActionEvent::new("search", "x").with_savings(150, 100);
     assert_eq!(ev.savings_ratio(), Some(0.0));
 }
+
+/// Historical records remain readable without pretending their build is known.
+#[test]
+fn historical_actions_should_have_unknown_provenance() {
+    let legacy = r#"{"ts_ms":1,"pid":2,"command":"status","args":".","cwd":"/repo","outcome":"ok","duration_ms":3}"#;
+    let event: ActionEvent = serde_json::from_str(legacy).unwrap();
+    assert_eq!(event.provenance, None);
+    assert!(
+        serde_json::to_value(event)
+            .unwrap()
+            .get("provenance")
+            .is_none()
+    );
+}

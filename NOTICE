@@ -35,7 +35,7 @@ This project bundles or depends on the following notable components:
   tree-sitter-rust, tree-sitter-go, tree-sitter-java, tree-sitter-python,
   tree-sitter-c. Source: https://github.com/tree-sitter/
 - **Embedding models** — downloaded from Hugging Face Hub on first use
-  via `pixel recall setup`:
+  via `pixel recall setup` (the pixel-recall plugin):
   - Multilingual E5 Small (fastembed default)
   - potion-base-2M (model2vec)
   These models have their own licenses; see the Hugging Face model pages.

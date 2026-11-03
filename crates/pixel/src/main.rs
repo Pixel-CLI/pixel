@@ -5,6 +5,7 @@
 //! per-root daemon over its Unix socket when one is up, else in-process.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -29,41 +30,49 @@ macro_rules! eprintln {
 macro_rules! eprint {
     ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!($($arg)*)) };
 }
-// Dev tool behind the `readify` feature: probing and rewriting agents'
-// CLI configs is not part of the shipped binary (issue #602).
-#[cfg(feature = "readify")]
-mod ai_cli_readify;
 mod audit_cmd;
+mod brief_parts;
 mod call_guard;
 mod classify;
+mod classify_eval;
+mod classify_history;
+mod classify_history_cmd;
 mod classify_setup;
 mod config_cmd;
 mod config_file;
 mod coverage_cmd;
+mod cycles_cmd;
+mod decide_clef;
 mod decide_infisical;
 mod decide_jev;
 mod decide_ollaya;
 mod decide_remote;
+mod edit_hook;
 mod evaluate_cmd;
 mod execution_brief;
+mod graph_shadow_cmd;
+mod history_index;
 mod hook_input;
+mod hook_metrics;
 mod impact_read;
 mod index_cmd;
-mod install_intro;
+mod metrics_cmd;
+
 mod operation_metrics;
 mod overview_intent;
 mod plan_cmd;
 mod plan_state;
+mod plugin_cmd;
 mod prompt_continuation;
 mod prompt_intent;
 mod prompt_key;
-mod recall_cmd;
-mod rescue_cmd;
+mod prompts_cmd;
+mod reference_cmd;
+mod removed_commands;
 mod search_compat;
 mod search_filter;
 mod serve_trace;
-mod sniper_cmd;
-mod space_cmd;
+mod setup_cmd;
 mod task_bridge;
 mod task_commands;
 mod task_config;
@@ -71,8 +80,9 @@ mod task_hook;
 mod task_prepare;
 mod task_route;
 mod task_runtime;
+mod task_verify;
+mod usage_journal;
 use task_commands::TaskCmd;
-mod ultraflow_cmd;
 
 mod select;
 mod update_notice;
@@ -82,8 +92,7 @@ mod workspace_cmd;
 use pixel_actionlog::{InProcessReason, ServeRoute, ServeStep};
 use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service, failure_response};
 use pixel_daemon::daemon;
-use pixel_index::index::{build, shard_path};
-use pixel_index::shard::Shard;
+use pixel_index::index::build;
 use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtractor};
 use pixel_proto::{
     QueryKind, QueryStatus, TargetsFactsResult, TargetsFactsUnavailableReason, compile_query,
@@ -169,10 +178,10 @@ impl ReviewFailOn {
 }
 
 impl FailOn {
-    fn threshold(self) -> pixel_install::doctor::CheckStatus {
+    fn threshold(self) -> pixel_setup::doctor::CheckStatus {
         match self {
-            Self::Yellow => pixel_install::doctor::CheckStatus::Yellow,
-            Self::Red => pixel_install::doctor::CheckStatus::Red,
+            Self::Yellow => pixel_setup::doctor::CheckStatus::Yellow,
+            Self::Red => pixel_setup::doctor::CheckStatus::Red,
         }
     }
 }
@@ -186,7 +195,6 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[derive(Subcommand)]
 enum Command {
     /// Build (or rebuild) the text index for a directory tree.
-    #[command(alias = "index")]
     BuildIndex {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -202,7 +210,6 @@ enum Command {
     /// Search the indexed tree with a regex pattern. Accepts any number of
     /// paths (repo roots, subdirectories, or files) — ripgrep-style; the repo
     /// root is discovered automatically for each.
-    #[command(alias = "search")]
     SearchContent {
         pattern: String,
         /// Paths to search: repo roots, subdirectories, or files (any mix).
@@ -265,7 +272,6 @@ enum Command {
     },
     /// Native-output literal file search for automatic routing; unsupported
     /// inputs execute the original rg/grep command without modification.
-    #[command(alias = "search-compat")]
     SearchLikeRg {
         #[arg(value_enum)]
         tool: search_compat::SearchTool,
@@ -273,7 +279,6 @@ enum Command {
         args: Vec<String>,
     },
     /// Compile and execute one bounded deterministic retrieval recipe.
-    #[command(alias = "query")]
     RunRecipe {
         intent: String,
         #[arg(long, default_value = ".")]
@@ -297,7 +302,6 @@ enum Command {
     /// question embeds only the code that changed. Tests, configuration and
     /// data files and docs rank below code unless the question names them
     /// ("test", "config", "readme"...); a JSON hit's `demoted` says which.
-    #[command(alias = "ask")]
     SearchMeaning {
         /// The natural-language question.
         question: String,
@@ -312,10 +316,34 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Search commit messages, paths and diffs through the history index.
+    /// The index is built on the first query; `--read-only` answers from it as
+    /// it stands and never builds it.
+    SearchHistory {
+        /// Words to look for; a "double quoted phrase" stays whole.
+        query: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// What to search: `message`, `path`, `diff` or `all` (default).
+        #[arg(long, value_parser = ["message", "path", "diff", "all"])]
+        facet: Option<String>,
+        /// Hits to return (default and ceiling: 200).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Answer from the history index as it stands: never ingest, never
+        /// create it. An absent index is an error.
+        #[arg(long)]
+        read_only: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Sniper target list: task description in, closed prioritized file list
     /// out (P0 = start here, P1 = likely, P2 = droppable). Writes the
     /// enforcement manifest .pixel/targets.json unless --no-manifest.
-    #[command(alias = "targets")]
+    /// With --regions, also writes .pixel/regions.json: symbol-level edit
+    /// territories with conservative conflict pairs, merge-order layers, and
+    /// declared shared files (evidence for a parallel-edit harness, never an
+    /// action recommendation).
     ScopeTask {
         /// Task/feature description (omit with --clear).
         task: Option<String>,
@@ -329,6 +357,11 @@ enum Command {
         /// Skip writing the enforcement manifest.
         #[arg(long)]
         no_manifest: bool,
+        /// Also write .pixel/regions.json: symbol line ranges, conservative
+        /// conflict pairs, merge-order layers, and shared files. Suppressed
+        /// by --no-manifest and --read-only.
+        #[arg(long)]
+        regions: bool,
         /// Serve only already-published deterministic facts from a compatible
         /// running daemon. Never starts a daemon or builds/refreshes indexes.
         /// This mode never writes a targets manifest.
@@ -344,11 +377,26 @@ enum Command {
         /// score gap after P0. Improves precision on simple tasks.
         #[arg(long)]
         precision: bool,
-        /// Emit a symbol-level regions manifest (.pixel/regions.json) beside
-        /// targets.json: regions, conflict pairs, merge-order layers, and
-        /// shared files for safe parallel edits.
+    },
+    /// `pixel brief "<prompt>"` — the evidence brief a prompt-submit hook
+    /// injects for Claude and Codex, on stdout. Harnesses without a
+    /// prompt-submit hook (OpenCode's `pixel-brief` plugin) call this
+    /// directly. Empty output means no brief (a non-code prompt,
+    /// an unindexed repository, or `PIXEL_BRIEF=0`).
+    Brief {
+        /// The user's prompt, verbatim.
+        prompt: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Print the decision (signal, gate, score, judge, cost) and the
+        /// rendered brief as one JSON object, also when no brief was made.
         #[arg(long)]
-        regions: bool,
+        json: bool,
+        /// Hook-sized parts the caller accepts (1 = one message under 4 000
+        /// bytes). Above 1 the brief and its probes get the budget of an
+        /// N-part prompt hook, printed as one text.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=8))]
+        parts: u8,
     },
     /// Build a deterministic, bounded execution brief from scope-task evidence.
     ExecutionBrief {
@@ -383,115 +431,7 @@ enum Command {
         #[arg(long)]
         jsonl: bool,
     },
-    /// Surgical revert planner: locate the files a problem points at, list
-    /// recent versions with the likely-breaking commit flagged, recommend a
-    /// last-known-good candidate. Plan only — nothing is written without
-    /// --apply. Never resets; never touches the index or HEAD.
-    #[command(alias = "rescue")]
-    PlanRollback {
-        /// Problem description ("login was working before ...").
-        problem: Option<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Explicit target file(s), repo-relative; skips target discovery.
-        #[arg(long = "file")]
-        files: Vec<String>,
-        /// Commits of per-file history to inspect.
-        #[arg(long, default_value_t = 10)]
-        depth: usize,
-        /// Restore the --file targets to this commit (gated action).
-        #[arg(long)]
-        apply: Option<String>,
-        /// With --apply on dirty files: deterministic 3-way merge that keeps
-        /// in-progress edits (may leave conflict markers).
-        #[arg(long)]
-        merge: bool,
-        /// With --apply: `git stash push` the dirty planned files first.
-        #[arg(long)]
-        stash_first: bool,
-        /// With --apply: overwrite dirty files (loses in-progress work).
-        #[arg(long)]
-        allow_dirty: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Probe provider readiness for Codex, Claude Code, Antigravity, and
-    /// Devin by sending one real `POST /chat/completions` ("Reply exactly
-    /// READY.", a 1024-token reservation, 20 s timeout) to Ollama Cloud. A
-    /// 200 that answers with the READY it asked for means the provider is
-    /// ready; a 200 whose body reaches no model carries its own failure
-    /// rather than counting as one. With
-    /// `--apply`, the provider that answered is written into
-    /// `~/.codex/config.toml` (`model`, `model_provider`,
-    /// `[model_providers.recording_cloud]`),
-    /// `~/.claude/settings.json` (`env.ANTHROPIC_BASE_URL` and the model
-    /// slots), and
-    /// `~/.gemini/antigravity-cli/settings.json`
-    /// (`AGY_LLM_GATEWAY_URL`); Devin is verified-only, never rewritten.
-    /// Claude's gateway credential and its `x-litellm-api-key` header are
-    /// left to the shell — a settings file expands neither, and would
-    /// replace the working value — so the report names both exports instead.
-    /// With `--approve`, the workspace named by `--workspace` has its
-    /// startup gate cleared as well.
-    #[cfg(feature = "readify")]
-    AiCliReadify {
-        /// Also rewrite the agents' config files; without this flag the
-        /// command only probes and verifies (safe to re-run).
-        #[arg(long)]
-        apply: bool,
-        /// Probe timeout per provider, in seconds.
-        #[arg(long, default_value_t = 20)]
-        timeout: u64,
-        /// Verify only this subset of agents (repeatable). Default: all
-        /// four (codex, claude, antigravity, devin).
-        #[arg(long = "agent", value_enum)]
-        agents: Vec<ai_cli_readify::AgentFlag>,
-        /// Emit a machine-readable JSON report on stdout.
-        #[arg(long)]
-        json: bool,
-        /// Answer the startup prompts this command knows the key for, instead
-        /// of reporting them and stopping. Off by default: a trust dialog is
-        /// not this command's decision to take, and a prompt with no verified
-        /// answer is reported either way.
-        #[arg(long)]
-        answer_prompts: bool,
-        /// Clear each agent's own startup gate for `--workspace`: Codex's
-        /// workspace trust and its hooks' trust at their current hashes
-        /// (through Codex's own `config/batchWrite` RPC, never by editing
-        /// `config.toml`), and Claude's onboarding and trust dialog in
-        /// `~/.claude.json`. Off by default — a trust write outlives the run,
-        /// and it means "run this folder's hooks and code without asking
-        /// again". Antigravity and Devin have no approval path: their trust
-        /// state is only ever read. `~/.claude.json` belongs to Claude Code,
-        /// so close a running one first: the file is read, merged and
-        /// rewritten, and a write Claude Code makes in between is lost.
-        #[arg(long)]
-        approve: bool,
-        /// The folder `--approve` is about. Defaults to the working
-        /// directory. Exactly this path is written, never a parent: a trust
-        /// level granted to a directory covers everything below it, so a run
-        /// that walked up would grant more than it was asked to.
-        #[arg(long, default_value = ".")]
-        workspace: PathBuf,
-        /// Hand a Claude lane stuck on an auth wall to the installed
-        /// `claude-code-auth-flow`: spawn `claude auth login`, replay the
-        /// flow with the authorize URL it prints (which drives `agent-browser`
-        /// against the user's real browser profile), wait for the login to
-        /// exit, then re-probe the lane once. Off by default, and it fires
-        /// only for the two auth wordings — a quota, a rate limit, a
-        /// transport error or a model-not-found failure leaves the browser
-        /// untouched. A login that prints no authorize URL is refused rather
-        /// than opened at an empty one.
-        #[arg(long)]
-        authenticate: bool,
-        /// The account `--authenticate` should use: passed to
-        /// `claude auth login --email` and to the flow's own account
-        /// shortcut. Only consulted when the chain runs.
-        #[arg(long)]
-        account: Option<String>,
-    },
     /// Look up symbols by name in the code graph.
-    #[command(alias = "symbol")]
     FindSymbol {
         name: String,
         #[arg(default_value = ".")]
@@ -500,7 +440,6 @@ enum Command {
         json: bool,
     },
     /// All signatures in a file — the skeleton view at ~10% of Read cost.
-    #[command(alias = "skeleton")]
     ListSignatures {
         file: String,
         #[arg(default_value = ".")]
@@ -508,28 +447,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Human notes on the map: durable annotations keyed by file + symbol
-    /// name (or concept norm). Survive rebuilds; merged into `resolve` and
-    /// `targets` results. `pixel note set <file> <target> <note>`,
-    /// `get`/`rm <file> <target>`, `list [file]`.
-    Note {
-        /// set | get | rm | list
-        action: String,
-        /// File the note is attached to (repo-relative or absolute).
-        file: Option<String>,
-        /// Symbol name or concept norm the note targets.
-        target: Option<String>,
-        /// Note text (required for `set`).
-        note: Option<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
     /// Structural repo map: every indexed file with its symbols. `--markdown`
     /// emits the exportable document form — the human-editable projection of
-    /// the graph that `note` annotations key onto.
-    #[command(alias = "map")]
+    /// the graph.
     RepoMap {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -540,7 +460,6 @@ enum Command {
         json: bool,
     },
     /// Budget-fitted context for a symbol uid.
-    #[command(alias = "context")]
     PackContext {
         uid: String,
         #[arg(default_value = ".")]
@@ -571,7 +490,6 @@ enum Command {
         json: bool,
     },
     /// Direct callers or callees of a symbol.
-    #[command(alias = "uses")]
     WhoCalls {
         uid_or_name: String,
         #[arg(default_value = ".")]
@@ -617,7 +535,6 @@ enum Command {
     /// `evaluate path` asks the same question and tells an exhaustive
     /// absence from a search the depth cap cut; the output's `successor`
     /// field names that command for these two symbols.
-    #[command(alias = "trace")]
     CallPath {
         from: String,
         to: String,
@@ -637,8 +554,40 @@ enum Command {
         #[command(subcommand)]
         cmd: EvaluateCmd,
     },
+    /// Enumerate recursion cycles in the call graph with witnesses and
+    /// explicit coverage.
+    ///
+    /// Finds strongly connected components (potential recursion cycles)
+    /// over `Calls` edges only — `HasMethod` ownership is excluded because
+    /// ownership is not runtime invocation. Bounded by node, edge, time,
+    /// and component budgets; each reported cycle carries a concrete
+    /// closed-path witness re-read from the store. The coverage report
+    /// states whether the enumeration was exhaustive or which budget
+    /// stopped it, so an incomplete graph is never read as proof of
+    /// safety.
+    Cycles {
+        /// `exact` or `exact,probable`; selects the relation, not a
+        /// confidence threshold.
+        #[arg(long, default_value = "exact")]
+        tiers: String,
+        /// Maximum number of nodes to visit.
+        #[arg(long)]
+        max_nodes: Option<u32>,
+        /// Maximum number of edges to follow.
+        #[arg(long)]
+        max_edges: Option<u32>,
+        /// Wall-clock budget in milliseconds.
+        #[arg(long)]
+        time_budget_ms: Option<u64>,
+        /// Maximum number of components to report.
+        #[arg(long)]
+        max_components: Option<u32>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Discovered execution flows.
-    #[command(alias = "processes")]
     ListFlows {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -648,7 +597,6 @@ enum Command {
         json: bool,
     },
     /// Functional-area clusters.
-    #[command(alias = "clusters")]
     ListAreas {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -658,7 +606,6 @@ enum Command {
         json: bool,
     },
     /// Symbols/flows affected by working-tree changes.
-    #[command(alias = "changes")]
     WhatChanged {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -675,10 +622,23 @@ enum Command {
         json: bool,
     },
     /// Force (re)build of the code graph db.
-    #[command(alias = "graph")]
     RebuildGraph {
         #[arg(default_value = ".")]
         path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare this graph's Rust edges with pixel-mvp's index, or (`--lang ruby`) count what merging its Ruby answer site by site would change (both built in a scratch directory).
+    GraphShadow {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// `rust`: pixel-mvp's edges against this graph's; `ruby`: what
+        /// merging them site by site does to this graph's.
+        #[arg(long, value_enum, default_value = "rust")]
+        lang: graph_shadow_cmd::Lang,
+        /// How many edges each graph alone holds to show as examples.
+        #[arg(long, default_value_t = 5)]
+        examples: usize,
         #[arg(long)]
         json: bool,
     },
@@ -711,6 +671,12 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Manage version-pinned reference corpora (.pixel/reference.json) for
+    /// multi-repo analysis on top of workspaces and index packs.
+    Reference {
+        #[command(subcommand)]
+        cmd: reference_cmd::ReferenceCmd,
+    },
     /// Index + graph freshness status.
     Status {
         #[arg(default_value = ".")]
@@ -741,24 +707,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Audit how much disk the pixel index (`.pixel/`) takes across every
-    /// project under this tree: per-project shard size plus the accumulated
-    /// total, and a one-shot `--delete` cleanup of the rebuildable shards.
-    Space {
+    /// What the prompt-submit briefs did, counted from the logs the hooks
+    /// already write: briefs delivered and declined, zero-call turns, and the
+    /// files injected against the files the agent then read. Read-only.
+    Metrics {
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Emit structured JSON instead of the table.
+        /// Window to count: `30m`, `24h`, `7d` or `all`.
+        #[arg(long, default_value = metrics_cmd::DEFAULT_SINCE)]
+        since: String,
         #[arg(long)]
         json: bool,
-        /// Remove every found index shard after a single confirmation.
-        #[arg(long)]
-        delete: bool,
-        /// Skip the deletion confirmation (assume yes).
-        #[arg(long)]
-        yes: bool,
     },
     /// Make a repository ready for agent work: index, graph, and warm daemon.
-    #[command(alias = "ready")]
     PrepareRepo {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -773,27 +734,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show raw shard metadata (legacy).
-    #[command(alias = "stats")]
-    IndexStats {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
     /// Manage the per-root background daemon.
     Daemon {
         #[command(subcommand)]
         cmd: DaemonCmd,
-    },
-    /// Search and browse LLM CLI transcripts (machine-wide corpus).
-    Recall {
-        #[command(subcommand)]
-        cmd: recall_cmd::RecallCmd,
-    },
-    /// One-look error capture: query the sniper error sink.
-    #[command(alias = "sniper")]
-    ListErrors {
-        #[command(subcommand)]
-        cmd: sniper_cmd::SniperCmd,
     },
     /// Decision over a bounded label set through a remote LLM: one
     /// OpenAI-compatible chat completion maps the state, shared framing,
@@ -802,50 +746,28 @@ enum Command {
     /// network-bound; `--remote-preset` picks the provider. `--jsonl`
     /// serves one decision per stdin line.
     Classify(classify::ClassifyOptions),
-    /// Deterministic web lookup for terms the index cannot know — the
-    /// refine step of a gated `pixel plan`. No LLM, no daemon.
-    WebSearch {
-        /// The term or question to resolve.
-        query: String,
-        #[arg(long, default_value_t = web_search::DEFAULT_LIMIT)]
-        limit: usize,
+    /// Offline go/no-go evaluation of the verified-history retrieval tier
+    /// against frozen baselines. Reports per-label precision/recall, macro
+    /// scores, confusion matrix, coverage-vs-error curves with Wilson CIs,
+    /// and system metrics. Exits 0 on go, 1 on no-go.
+    ClassifyEval {
         #[arg(long)]
         json: bool,
+        /// Assumed model error rate (0-1) for the modeled fallback path. The
+        /// offline evaluation never calls a model, so this assumption is
+        /// disclosed in the report rather than presented as measured.
+        #[arg(long, default_value_t = 0.20)]
+        model_error_rate: f64,
+        /// Assumed model latency in milliseconds for the modeled fallback path.
+        #[arg(long, default_value_t = 1500.0)]
+        model_latency_ms: f64,
     },
-    // -----------------------------------------------------------------
-    // M2 — safe git mutation ops (pixel-ops)
-    // -----------------------------------------------------------------
-    /// Show repo state: HEAD, branch, dirty files, fingerprints.
-    ///
-    /// The answer is compact: the exact `dirty_count`/`clean_count` and the
-    /// dirty files. The tracked-clean file list (200 paths, the bulk of the
-    /// answer on a clean tree) needs `--include-clean`.
-    #[command(alias = "inspect")]
-    RepoState {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Restrict the snapshot to these repo-relative paths.
-        #[arg(long = "files")]
-        files: Vec<String>,
-        /// Include the capped tracked-clean file list (default: count only).
-        #[arg(long)]
-        include_clean: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Review working-tree changes (staged, unstaged, untracked, conflicted).
-    #[command(alias = "review")]
-    ReviewChanges {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Pagination cursor (opaque).
-        #[arg(long)]
-        cursor: Option<String>,
-        /// Cap output bytes.
-        #[arg(long)]
-        byte_cap: Option<usize>,
-        #[arg(long)]
-        json: bool,
+    /// Manage the verified-history store: list, add, remove, correct, or
+    /// clear stored examples. The store is a bounded project-local file
+    /// under `.pixel/classify-history.jsonl`.
+    ClassifyHistory {
+        #[command(subcommand)]
+        cmd: ClassifyHistoryCmd,
     },
     /// Deterministic pre-review: `what-changed` plus the mechanical rules
     /// (credential-shaped added lines, changed symbols whose callers were
@@ -866,182 +788,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Commit history with detail levels and byte caps.
-    #[command(alias = "history")]
-    CommitHistory {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Ref to log (default HEAD).
-        #[arg(long = "ref")]
-        ref_: Option<String>,
-        /// Max commits (capped at 100).
-        #[arg(long)]
-        limit: Option<usize>,
-        /// compact (oid+subject) or full (oid+author+date+subject+body).
-        #[arg(long, default_value = "compact")]
-        detail: String,
-        /// Pagination cursor (skip N commits).
-        #[arg(long)]
-        cursor: Option<String>,
-        /// Cap output bytes.
-        #[arg(long)]
-        byte_cap: Option<usize>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Structured diff between two refs (or ref → working tree).
-    Diff {
-        from: String,
-        /// Optional target ref; if omitted, diff to working tree.
-        to: Option<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Restrict diff to these paths.
-        #[arg(long)]
-        paths: Vec<String>,
-        /// Cap diff text bytes.
-        #[arg(long)]
-        byte_cap: Option<usize>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Stage files, commit, and optionally push (crash-safe, idempotent).
-    #[command(alias = "publish")]
-    Commit {
-        /// Commit message. Use `--message-file` for a multi-paragraph body.
-        #[arg(
-            short = 'm',
-            long = "message",
-            required_unless_present = "message_file"
-        )]
-        message: Option<String>,
-        /// Read the commit message from this file (`-` for stdin), verbatim
-        /// except for trailing whitespace. Mutually exclusive with `-m`.
-        #[arg(short = 'F', long = "message-file", conflicts_with = "message")]
-        message_file: Option<PathBuf>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Files to stage (repo-relative). Repeat the flag once per file
-        /// (`--files a --files b`) — a single `--files a b` does NOT work:
-        /// `b` silently becomes the trailing PATH argument instead of a
-        /// second file, or errors if a PATH was already given.
-        #[arg(long = "files")]
-        files: Vec<String>,
-        /// Also push after committing.
-        #[arg(long)]
-        push: bool,
-        /// Amend the current commit instead of creating a new one.
-        #[arg(long)]
-        amend: bool,
-        /// Reject if HEAD does not match this OID.
-        #[arg(long)]
-        expected_head: Option<String>,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Leased push to a remote (crash-safe, idempotent).
-    Push {
-        remote: String,
-        refspec: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        force_with_lease: bool,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Publish + push in one op (commit then leased push).
-    #[command(alias = "ship")]
-    CommitAndPush {
-        /// Commit message. Use `--message-file` for a multi-paragraph body.
-        #[arg(
-            short = 'm',
-            long = "message",
-            required_unless_present = "message_file"
-        )]
-        message: Option<String>,
-        /// Read the commit message from this file (`-` for stdin), verbatim
-        /// except for trailing whitespace. Mutually exclusive with `-m`.
-        #[arg(short = 'F', long = "message-file", conflicts_with = "message")]
-        message_file: Option<PathBuf>,
-        // Positional order matches Push: required remote + refspec first,
-        // then the defaulted path. (A defaulted positional BEFORE required
-        // ones trips clap's debug assertions — every debug-build parse
-        // panicked before this reorder.)
-        remote: String,
-        refspec: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Files to stage (repo-relative). Repeat the flag once per file
-        /// (`--files a --files b`) — a single `--files a b` does NOT work:
-        /// `b` silently becomes the trailing PATH argument instead of a
-        /// second file, or errors if a PATH was already given.
-        #[arg(long = "files")]
-        files: Vec<String>,
-        /// Leased force-push (`--force-with-lease`) for the push phase.
-        #[arg(long)]
-        force_with_lease: bool,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Create a new branch from HEAD (or --from <ref>).
-    #[command(alias = "branch")]
-    NewBranch {
-        name: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Base ref (default HEAD).
-        #[arg(long)]
-        from: Option<String>,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Fast-forward merge to a target OID (refuses non-ff + dirty intersection).
-    #[command(alias = "update")]
-    FastForward {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Reject if HEAD does not match this OID.
-        #[arg(long)]
-        expected_head: String,
-        /// Fast-forward target OID.
-        #[arg(long)]
-        target_oid: String,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Fetch from a remote (idempotent).
-    #[command(alias = "sync")]
-    Fetch {
-        remote: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Optional refspec.
-        #[arg(long)]
-        refspec: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
     // -----------------------------------------------------------------
     // M3/M4 — engines (resolve, history, lifecycle, excavate, reconcile)
     // -----------------------------------------------------------------
     /// Engine 1: resolve a phrase to code via the concept index.
-    #[command(alias = "resolve")]
     FindCode {
         phrase: String,
         #[arg(default_value = ".")]
@@ -1051,162 +801,145 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// M3: history-wide fact + diff search.
-    #[command(alias = "history-search")]
-    SearchHistory {
-        query: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// message | path | diff | all
-        #[arg(long, default_value = "all")]
-        facet: String,
-        #[arg(long)]
-        limit: Option<usize>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Engine 2: lifecycle of a path or token.
-    #[command(alias = "lifecycle")]
-    FileHistory {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Repo-relative path to inspect.
-        #[arg(long)]
-        file: Option<String>,
-        /// Token to inspect.
-        #[arg(long)]
-        token: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Engine 2: history-wide discovery (rescue v2).
-    #[command(alias = "excavate")]
-    DigHistory {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Phrase to search for in diff text.
-        #[arg(long)]
-        phrase: Option<String>,
-        /// Restrict to a repo-relative path (with --show: the path to read).
-        #[arg(long)]
-        file: Option<String>,
-        #[arg(long)]
-        from: Option<String>,
-        #[arg(long)]
-        to: Option<String>,
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Print the FULL content of --file at this commit (safe
-        /// `git show <oid>:<path>` equivalent). When the file does not
-        /// exist at <oid> but does at <oid>^ — i.e. <oid> is the deletion
-        /// commit — the parent's pre-deletion content is returned and
-        /// flagged. One pixel call replaces the `git show` follow-ups.
-        #[arg(long, value_name = "OID")]
-        show: Option<String>,
-        /// With --show: read from the commit's first parent (<oid>^)
-        /// directly, skipping the read at <oid> itself.
-        #[arg(long)]
-        parent: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Engine 4: one-call deterministic branch sync.
-    #[command(alias = "reconcile")]
-    SyncBranch {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// report (default) | rebase-if-clean
-        #[arg(long, default_value = "report")]
-        strategy: String,
-        /// auto (default) | none
-        #[arg(long, default_value = "auto")]
-        push: String,
-        /// Integrate: rebase current branch onto origin/<TARGET>, then
-        /// fast-forward local <TARGET> to the rebased head (never merge).
-        /// `--strategy` is ignored in this mode.
-        #[arg(long, value_name = "TARGET")]
-        into: Option<String>,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// M5: journal a session event (fire-and-forget).
-    #[command(alias = "journal")]
-    RecordEvent {
-        kind: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Repo-relative path the event concerns.
-        #[arg(long)]
-        file: Option<String>,
-        #[arg(long)]
-        detail: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
     // -----------------------------------------------------------------
-    // M5/M6 — install / doctor / migrate / hook
+    // M5/M6 — setup / doctor / hook
     // -----------------------------------------------------------------
-    /// Idempotently deploy agent integrations while preserving native retrieval.
-    Install {
+    /// Set pixel up for your agents, on this machine or in one repository
+    /// (`--repo`). `--remove` takes everything back out.
+    ///
+    /// In a terminal this is a guided setup: it detects the agent CLIs, asks
+    /// which of them to write for and which features to switch on, lists every
+    /// skill file, hook, setting and note it would write, and writes nothing
+    /// until you confirm. Cancelling writes nothing.
+    ///
+    /// Without a terminal on stdin and stdout, in CI, or with `--yes`,
+    /// `--json` or `--print`, it does not ask: it deploys the agent
+    /// integrations while preserving native retrieval (the `pixel` skill, task
+    /// lifecycle hooks, the Pi package when Pi is configured) and reports what
+    /// changed.
+    ///
+    /// ## Examples
+    ///
+    /// Set up this machine (guided in a terminal, unattended otherwise):
+    ///
+    /// ```text
+    /// pixel setup
+    /// ```
+    ///
+    /// Set up one repository (its `.pixel/config.yaml`):
+    ///
+    /// ```text
+    /// pixel setup --repo .
+    /// ```
+    ///
+    /// Never ask, whatever the terminal:
+    ///
+    /// ```text
+    /// pixel setup --yes
+    /// ```
+    ///
+    /// Print the skill the default answers deploy, changing nothing:
+    ///
+    /// ```text
+    /// pixel setup --print
+    /// ```
+    ///
+    /// Take everything back out:
+    ///
+    /// ```text
+    /// pixel setup --remove
+    /// ```
+    Setup {
+        /// Install only these agents (repeat the flag or use a comma-separated list).
+        /// Targets: claude, codex, devin, cursor, gemini, antigravity, opencode, pi, agents-md.
+        #[arg(long, value_delimiter = ',', requires = "yes",
+              conflicts_with_all = ["repo", "remove", "print", "selected_agents"])]
+        agent: Vec<pixel_setup::setup::AgentTarget>,
         #[arg(long)]
         json: bool,
-        /// Shell whose profile is checked for the retired `claude()` wrapper
-        /// (default: account login shell, then $SHELL). Pass e.g. `fish`
-        /// to select the profile explicitly.
-        #[arg(long)]
-        shell: Option<String>,
-        /// Install project-local integrations into this repository only,
-        /// skipping every global step. Remove retired Claude and Codex
-        /// retrieval hooks, restore adopted RTK/foreign hooks from matching
-        /// backups, and preserve independent task controls. Tracked Codex
-        /// hooks are left alone. Remove the retired Devin guard and Pi project
-        /// extension, and retired Pixel retrieval blocks from AGENTS.md and
-        /// Codex config. Adds no guard. Foreign instructions and native tools
-        /// are preserved.
-        /// Files: `.claude/settings.local.json`, `.claude/pixel-rtk-hooks.json`,
-        /// `.codex/config.toml`, `.codex/hooks.json`,
-        /// `.codex/pixel-composed-guard-backup.json`, and `AGENTS.md`.
-        /// Machine-specific files naming this binary go into `info/exclude`.
-        #[arg(long)]
+        /// Set up this repository instead of the machine, skipping every
+        /// global step: it writes the repository's `.pixel/config.yaml`.
+        /// Pixel keeps no repo-local hooks, so nothing else is written under
+        /// the repository.
+        #[arg(long, value_name = "PATH", conflicts_with = "remove")]
         repo: Option<PathBuf>,
-    },
-    /// Remove everything `pixel install` wrote: managed blocks from
-    /// agent-config files, hook entries from all settings files, hook
-    /// scripts, the Pi impact package, the rule source file, and the
-    /// pixel binary itself. Idempotent: safe to re-run.
-    Uninstall {
+        /// Do not ask: deploy the integrations as an unattended run does,
+        /// even in a terminal.
+        #[arg(long, conflicts_with_all = ["remove", "print"])]
+        yes: bool,
+        /// Print the skill the default answers deploy, without prompting or
+        /// writing anything.
+        #[arg(long, conflicts_with = "remove")]
+        print: bool,
+        /// Remove everything `pixel setup` wrote: the `pixel` skill, hook
+        /// entries from the settings files, the Pi package, the brief probes,
+        /// and the pixel binary itself. Idempotent: safe to re-run.
         #[arg(long)]
-        json: bool,
-        /// Preview what would be removed without making any changes.
-        #[arg(long)]
+        remove: bool,
+        /// With `--remove`: preview what would be removed without making any
+        /// changes.
+        #[arg(long, requires = "remove")]
         dry_run: bool,
-        /// Path to the pixel binary to remove (default: the running binary,
-        /// left in place when Homebrew or mise installed it).
-        #[arg(long)]
+        /// With `--remove`: path to the pixel binary to remove (default: the
+        /// running binary, left in place when Homebrew or mise installed it).
+        #[arg(long, requires = "remove")]
         binary_path: Option<PathBuf>,
-        /// Shell whose wrapper block should be removed (default: the
-        /// account's login shell, then $SHELL).
+        // TEMPORARY (dev-flags) start: three development-only args, removed
+        // before the release. The removal recipe is in `setup_cmd.rs`; the
+        // three args below and the `dev:` field at the construction site are
+        // the whole command-surface part of it.
+        /// Answer the agent question with 1-based indices into the list
+        /// `pixel setup` prints, comma-separated, and run the guided setup
+        /// without a terminal or a confirmation. Needs
+        /// `--selected-features`. Temporary.
+        #[arg(
+            long,
+            value_name = "LIST",
+            hide = true,
+            requires = "selected_features",
+            conflicts_with_all = ["remove", "yes", "print"]
+        )]
+        selected_agents: Option<String>,
+        /// Answer the feature question with 1-based indices into the list
+        /// `pixel setup` prints, comma-separated. Needs `--selected-agents`.
+        /// Temporary.
+        #[arg(long, value_name = "LIST", hide = true, requires = "selected_agents")]
+        selected_features: Option<String>,
+        /// Redirect every write under `tests/setup/` in this repository
+        /// instead of a real home or repository, and leave the real global
+        /// configuration and hook files alone. Temporary.
+        #[arg(long, hide = true, conflicts_with_all = ["remove", "yes", "print"])]
+        dummy_apply: bool,
+        // TEMPORARY (dev-flags) end.
+    },
+    /// Install a plugin from `github:<owner>/<repo>[@<ref>]`, a git URL
+    /// (https://, ssh://, file://, git@host:path) or a local directory
+    /// holding `pixel-plugin.toml`. `pixel uninstall <name>` removes it.
+    Install {
+        /// The plugin source. `npm:<package>` is not supported yet.
+        source: String,
+        /// The plugin to install, when the source holds several.
         #[arg(long)]
-        shell: Option<String>,
-        /// Remove only that shell's wrapper block and keep everything else
-        /// installed: the fix for a block `pixel doctor` reports in a
-        /// profile the login shell never loads.
+        name: Option<String>,
+        /// Install a `github:` release asset even when its release publishes
+        /// no `.sha256` to check it against (reported as unverified).
         #[arg(long)]
-        wrappers_only: bool,
-        /// Remove only the project-local artifacts `pixel install --repo`
-        /// wrote in this repository. Skips all global removal steps.
+        allow_unverified: bool,
+        /// Print what was installed as JSON (the downloaded asset's URL,
+        /// sha256 and whether a published digest verified it).
         #[arg(long)]
-        repo: Option<PathBuf>,
+        json: bool,
+    },
+    /// Delete an installed plugin and forget its source and network opt-in.
+    Uninstall {
+        /// The plugin's name, as `pixel plugin list` shows it.
+        name: String,
     },
     /// Check that a release tag is consistent with the tree before anything
     /// is built or published: crates/pixel/Cargo.toml carries the version,
     /// Cargo.lock is fresh for every workspace member, CHANGELOG.md has the
     /// `## [x.y.z]` heading and an empty Unreleased section. Exit 1 on any
     /// failed check.
-    #[command(alias = "release-check")]
     CheckRelease {
         /// The version or tag: `1.2.3`, `v1.2.3` or `refs/tags/v1.2.3`.
         version: String,
@@ -1220,7 +953,6 @@ enum Command {
     /// Rebuild the binary, stop the daemon, copy the new binary to the
     /// install path, and optionally restart the daemon. Solves the
     /// "Text file busy" error when the daemon holds the binary open.
-    #[command(alias = "upgrade")]
     SelfUpdate {
         /// Cargo build command to run (default: `cargo build --release -p pixel-cli`).
         /// The built binary is read from `target/<profile>/pixel`, with the
@@ -1259,7 +991,8 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         json: bool,
-        /// Shell whose wrapper block should be checked (default: $SHELL).
+        /// Shell asked whether `pixel` is on its PATH (default: the account's
+        /// login shell, then $SHELL).
         #[arg(long)]
         shell: Option<String>,
         /// Run only this check id, or every check of a group as `<group>.*`
@@ -1284,143 +1017,34 @@ enum Command {
         #[arg(long, conflicts_with = "list")]
         fix: bool,
     },
-    /// Removed: the legacy `.gitpixel/` migration. Hidden and kept only so a
-    /// script that still calls it exits 0 with a note instead of failing
-    /// with "unrecognized subcommand".
-    #[command(hide = true)]
-    Migrate {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Host hook entry points (task-event) registered by `pixel install`.
-    #[command(alias = "hook")]
+    /// Host hook entry points (task-event) registered by `pixel setup`.
     RunHook {
         #[command(subcommand)]
         cmd: HookCmd,
     },
     /// Show effective settings and paths, or edit persistent YAML configuration.
+    /// `pixel config <key> [<value>]` reads or writes one setting
+    /// (`daemon_auto_start`, `brief`, `edit_hooks`, `brief_parts`); the other forms are the
+    /// subcommands below.
+    #[command(args_conflicts_with_subcommands = true)]
     Config {
         #[command(subcommand)]
         cmd: Option<ConfigCmd>,
+        /// The setting to show or change (default: the overview).
+        key: Option<String>,
+        /// The new value: `on` or `off`, or a number for `brief_parts`.
+        value: Option<String>,
+        /// Write the global `~/.pixel/config.yaml`, not the repository's.
+        #[arg(long)]
+        global: bool,
+        /// The repository (default: the current one, if any).
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
     },
     /// Completion contracts, verification, task trajectories and Claude packets.
-    #[command(alias = "task")]
     TaskState {
         #[command(subcommand)]
         cmd: TaskCmd,
-    },
-    /// Self-assessment: pixel's own action log (what ran, what went wrong).
-    /// Reads <path>/.pixel/actions.jsonl, written asynchronously by every
-    /// pixel invocation.
-    #[command(alias = "log")]
-    ActionLog {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Most recent entries to show.
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-        /// Only show entries that ended in an error.
-        #[arg(long)]
-        errors_only: bool,
-        #[arg(long)]
-        json: bool,
-        /// Delete the action log for this root and exit.
-        #[arg(long)]
-        clear: bool,
-    },
-    /// Token-savings report: for retrieval-shaped commands (search/query/
-    /// context/resolve) that recorded snippet-vs-pool volumes, aggregate the
-    /// fraction of the candidate pool the agent did NOT have to read. A
-    /// measured counter to semble's '99% fewer tokens' claim — own numbers,
-    /// same format.
-    #[command(alias = "savings")]
-    TokenSavings {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-        /// Only consider events from the last N hours.
-        #[arg(long)]
-        since_hours: Option<u64>,
-    },
-    /// Squash every commit on the current branch since its base into ONE
-    /// commit (crash-safe, backup-ref'd), optionally force-pushing with lease.
-    #[command(alias = "rewrite")]
-    SquashBranch {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Explicit base ref (squash <onto>..HEAD). Default: merge-base with
-        /// the branch upstream, else with the remote default branch.
-        #[arg(long)]
-        onto: Option<String>,
-        /// Squash commit message (default: auto-generated subject list).
-        #[arg(short = 'm', long = "message")]
-        message: Option<String>,
-        /// Push the rewritten branch with --force-with-lease afterwards.
-        #[arg(long)]
-        push: bool,
-        /// Remote name.
-        #[arg(long, default_value = "origin")]
-        remote: String,
-        /// Reject if HEAD does not match this OID.
-        #[arg(long)]
-        expected_head: Option<String>,
-        /// Allow rewriting the default branch and published mainline commits.
-        /// Overrides both default-branch and published-mainline protection.
-        #[arg(long)]
-        allow_default_branch: bool,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Per-region blame attribution: who introduced/owns each region of a file.
-    #[command(alias = "provenance")]
-    WhoWrote {
-        /// Repo-relative file to attribute.
-        file: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Restrict to lines a,b (1-based inclusive), e.g. --lines 10,40.
-        #[arg(long, value_parser = parse_line_range)]
-        lines: Option<(u32, u32)>,
-        /// Author query (case-insensitive substring on name or email) —
-        /// adds a did-they-touch-this verdict.
-        #[arg(long)]
-        author: Option<String>,
-        /// Max regions emitted (default 200); truncation sets lower_bound.
-        #[arg(long, default_value_t = 200)]
-        limit_regions: usize,
-        #[arg(long)]
-        json: bool,
-    },
-    /// One-call read-only branch inventory: ahead/behind, merged, stale,
-    /// unpushed — the deterministic "did you push everything?" answer.
-    #[command(alias = "branches")]
-    ListBranches {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Run `git fetch --prune <remote>` first for a live view.
-        #[arg(long)]
-        fetch: bool,
-        /// Remote name.
-        #[arg(long, default_value = "origin")]
-        remote: String,
-        /// Days after which a branch counts as stale.
-        #[arg(long, default_value_t = 30)]
-        stale_days: u64,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Additive-only, key-level .env mutations with snapshots and restore.
-    /// Values are NEVER printed in any output.
-    #[command(alias = "env")]
-    EditEnv {
-        #[command(subcommand)]
-        cmd: EnvCmd,
     },
     /// Deterministic todo list generation from code analysis.
     Plan {
@@ -1464,25 +1088,37 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Drive a browser toward a goal with `pixel classify` one operation at
-    /// a time, save what worked as a `pixel flow`, and replay that saved
-    /// document later — its branch conditions decided by `pixel classify`
-    /// instead of matched text.
-    ///
-    /// `discover` is the jev-style loop: one question per cycle whose
-    /// options are the operation-target pairs the page currently offers.
-    /// `replay` follows the composed document, and re-decides a step whose
-    /// page moved on, recording the new branch with `--update`.
-    Ultraflow(ultraflow_cmd::UltraflowOptions),
-    /// Save, retrieve, list, revise, run, and replay proven agent-browser
-    /// paths (auth flows, config flows) so the agent follows a deterministic
-    /// shortcut instead of re-discovering the UI from scratch every time.
-    /// For a classify-decided replay with repair, use `pixel ultraflow replay`.
-    #[command(alias = "replay-flow")]
-    Flow {
-        #[command(subcommand)]
-        cmd: FlowCmd,
+    /// Read the central prompt decision store (`~/.local/share/pixel/prompts`)
+    /// grouped by project: the path, the record count and the last `--limit`
+    /// decisions as one line each.
+    Prompts {
+        /// Emit the grouped structure as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        /// How many of each project's newest records to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
+    /// List, enable and trust plugins: external commands that `pixel <name>`
+    /// [args…]` runs when the core has no such command. `pixel install
+    /// <source>` adds one and `pixel uninstall <name>` removes it. A repo
+    /// plugin (`<repo>/.pixel/plugins/<name>/`) runs only after `pixel plugin
+    /// trust <name>`; your own live in `~/.pixel/plugins/`; an executable
+    /// `pixel-<name>` on PATH is a plugin too.
+    Plugin {
+        #[command(subcommand)]
+        cmd: plugin_cmd::PluginCmd,
+    },
+    /// Print a shell completion script for `pixel` to stdout, e.g.
+    /// `pixel completions fish > ~/.config/fish/completions/pixel.fish`.
+    Completions {
+        /// The shell to complete for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Print the `pixel(1)` man page (roff) to stdout, e.g.
+    /// `pixel man > ~/.local/share/man/man1/pixel.1`.
+    Man,
 }
 
 #[derive(Subcommand)]
@@ -1525,192 +1161,44 @@ enum EvaluateCmd {
     },
 }
 
-#[derive(Subcommand)]
-enum EnvCmd {
-    /// List .env files under root — key NAMES only, never values.
-    Inventory {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Set one key (snapshot-first; every other line byte-preserved).
-    Set {
-        #[arg(long)]
-        file: PathBuf,
-        #[arg(long)]
-        key: String,
-        #[arg(long)]
-        value: String,
-        /// Create the file if it does not exist.
-        #[arg(long)]
-        create_file: bool,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Restore from a snapshot (latest if --snapshot omitted; undoable).
-    Restore {
-        #[arg(long)]
-        file: PathBuf,
-        #[arg(long)]
-        snapshot: Option<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// List snapshots recorded for a file.
-    Snapshots {
-        #[arg(long)]
-        file: PathBuf,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Verify required keys exist (names only).
-    Check {
-        #[arg(long)]
-        file: PathBuf,
-        /// Required key name; repeat the flag once per key.
-        #[arg(long = "require")]
-        require: Vec<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
+/// Clap value parser for a stored-history label: rejects anything outside the
+/// built-in task-intent vocabulary at parse time, before the store is touched.
+fn label_in_vocabulary(label: &str) -> Result<String, String> {
+    classify_history_cmd::checked_label(label)?;
+    Ok(label.to_string())
 }
 
 #[derive(Subcommand)]
-enum FlowCmd {
-    /// Create a new flow. Refuses to overwrite — use `revise` to update.
-    Save {
-        /// Flow name (kebab-case recommended, e.g. "github-auth-device-flow").
-        name: String,
-        #[arg(long)]
-        title: String,
-        #[arg(long, default_value = "")]
-        description: String,
-        /// Tag; repeat the flag once per tag (`--tag auth --tag github`).
-        #[arg(long = "tag")]
-        tags: Vec<String>,
-        #[arg(long)]
-        url: Option<String>,
-        /// Path to a JSON file containing the steps array.
-        #[arg(long)]
-        from_file: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Retrieve a flow by name (for the agent to follow deterministically).
-    Get {
-        name: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// List all saved flows, optionally filtered by tag.
+enum ClassifyHistoryCmd {
+    /// List all stored history entries.
     List {
         #[arg(long)]
-        tag: Option<String>,
-        #[arg(long)]
         json: bool,
     },
-    /// Update an existing flow's metadata and/or steps. Bumps revision.
-    Revise {
-        name: String,
-        #[arg(long)]
-        title: Option<String>,
-        #[arg(long)]
-        description: Option<String>,
-        /// Path to a JSON file containing the new steps array.
-        #[arg(long)]
-        from_file: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
+    /// Add a verified example to the store.
+    Add {
+        text: String,
+        /// The label must be one of the built-in task-intent labels.
+        #[arg(value_parser = label_in_vocabulary)]
+        label: String,
+        #[arg(long, default_value = "human-verified")]
+        source: String,
     },
-    /// Run a flow by driving agent-browser (the plain, deterministic
-    /// executor: refs resolved from fresh snapshots, conditions matched as
-    /// text). For a classify-decided replay with repair, use
-    /// `pixel ultraflow replay`.
-    Run {
-        name: String,
-        /// Variable substitution: `--var key=value`. Repeat per var.
-        #[arg(long = "var")]
-        vars: Vec<String>,
-        /// Shortcut for `--var google_account=<value>` (or `openai_account`
-        /// depending on the flow). Picks which account to use.
-        /// Accepts a full email address (e.g. user@example.com).
-        #[arg(long)]
-        account: Option<String>,
-        #[arg(long)]
-        json: bool,
+    /// Remove an entry by ID.
+    Remove { id: String },
+    /// Correct an entry's label (supersedes the old entry).
+    Correct {
+        id: String,
+        /// The label must be one of the built-in task-intent labels.
+        #[arg(value_parser = label_in_vocabulary)]
+        label: String,
+        #[arg(long, default_value = "human-verified")]
+        source: String,
     },
-    /// Emit ready-to-run agent-browser commands with variable substitution.
-    /// Pixel does NOT run agent-browser — it outputs the deterministic
-    /// command sequence for the agent to execute (or to hand to
-    /// `pixel flow run`).
-    Replay {
-        name: String,
-        /// Variable substitution: `--var key=value`. Repeat per var.
-        #[arg(long = "var")]
-        vars: Vec<String>,
-        /// Shortcut for `--var google_account=<value>` (or `openai_account`
-        /// depending on the flow). Picks which account to use.
-        /// Accepts a full email address (e.g. user@example.com).
-        #[arg(long)]
-        account: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Delete a flow by name.
-    Delete {
-        name: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Pretty-print the full flow document (human-readable).
-    Show {
-        name: String,
-        #[arg(long)]
-        json: bool,
-    },
+    /// Clear all entries from the store.
+    Clear,
 }
 
-/// The variables a flow verb carries: `--var key=value` pairs, plus the
-/// `--account` shortcut resolved to whichever account variable the flow
-/// declares (`openai_account` for Codex, `google_account` for the rest).
-fn flow_vars(
-    name: &str,
-    vars: &[String],
-    account: &Option<String>,
-) -> Result<std::collections::HashMap<String, String>, String> {
-    let mut var_map = std::collections::HashMap::new();
-    for v in vars {
-        let (k, val) = v
-            .split_once('=')
-            .ok_or_else(|| format!("--var expects key=value, got '{v}'"))?;
-        var_map.insert(k.to_string(), val.to_string());
-    }
-    if let Some(acct) = account {
-        // Check which var the flow expects by loading it.
-        let var_name = pixel_flow::load(name)
-            .ok()
-            .and_then(|f| {
-                f.vars.iter().find_map(|v| {
-                    (v.name == "openai_account" || v.name == "google_account")
-                        .then(|| v.name.clone())
-                })
-            })
-            .unwrap_or_else(|| "google_account".to_string());
-        var_map.insert(var_name, acct.clone());
-    }
-    Ok(var_map)
-}
-
-/// Parse a 1-based inclusive line range "a,b" for `provenance --lines`.
 /// `pixel search-meaning --max-files` help: an optional budget, and the
 /// ceiling that applies without one, spelled from its constant.
 fn max_files_help() -> String {
@@ -1723,21 +1211,6 @@ fn max_files_help() -> String {
     )
 }
 
-fn parse_line_range(s: &str) -> Result<(u32, u32), String> {
-    let (a, b) = s
-        .split_once(',')
-        .ok_or_else(|| format!("expected 'start,end', got '{s}'"))?;
-    let a: u32 = a
-        .trim()
-        .parse()
-        .map_err(|e| format!("bad start line: {e}"))?;
-    let b: u32 = b.trim().parse().map_err(|e| format!("bad end line: {e}"))?;
-    if a == 0 || b < a {
-        return Err(format!("invalid range {a},{b}: need 1 <= start <= end"));
-    }
-    Ok((a, b))
-}
-
 #[derive(Subcommand)]
 enum HookCmd {
     /// Durable task lifecycle and completion gate for supported agent hosts.
@@ -1746,66 +1219,41 @@ enum HookCmd {
         provider: task_hook::TaskProvider,
         #[arg(long, value_enum)]
         event: task_hook::TaskHookEvent,
+        /// Serve slice K of N of the prompt-submit brief (`--part 2/3`), for a
+        /// host that caps what one hook may inject. Part 1 computes the brief
+        /// and stores it; the others print their slice of it. Without the
+        /// flag the one hook prints the whole brief.
+        #[arg(long, value_name = "K/N")]
+        part: Option<brief_parts::BriefPart>,
     },
-    #[command(flatten)]
-    Retired(RetiredHookCmd),
-}
-
-/// Hook verbs that older releases registered in agent settings. Each one is
-/// accepted and does nothing; the per-prompt brief and the task gates replaced
-/// them.
-#[derive(Subcommand)]
-enum RetiredHookCmd {
-    /// Retired: the guard.
-    #[command(hide = true)]
-    Guard(RetiredHook),
-    /// Retired: the sealed foreign-hook composition of the Codex guard.
-    #[command(hide = true)]
-    ComposedGuard(RetiredHook),
-    /// Retired: the capability block, replaced by the installed agent prompt.
-    #[command(hide = true)]
-    SessionStart(RetiredHook),
-    /// Retired: the prompt-time task context, replaced by the per-prompt brief.
-    #[command(hide = true)]
-    PromptSubmit(RetiredHook),
-    /// Retired: the targets re-injection after context compaction.
-    #[command(hide = true)]
-    PostCompaction(RetiredHook),
-    /// Retired: the blast-radius note after an edit.
-    #[command(hide = true)]
-    PostToolUse(RetiredHook),
-    /// Retired: the hook relay of the metrics line.
-    #[command(hide = true)]
-    Metrics(RetiredHook),
-}
-
-/// The arguments of a retired hook verb: whatever an older release wrote into
-/// a settings file (`--provider`, `--backup`, `--delegate-rtk`, a path) is
-/// accepted and ignored. A verb that stopped parsing would exit 2, and a host
-/// treats a `PreToolUse` hook that exits 2 as a block on the tool call.
-#[derive(clap::Args)]
-#[command(disable_help_flag = true)]
-struct RetiredHook {
-    #[arg(num_args = 0.., allow_hyphen_values = true, trailing_var_arg = true)]
-    _ignored: Vec<std::ffi::OsString>,
+    /// The optional edit hooks (`pre-edit`, `post-edit`), registered by
+    /// `pixel setup` only when `edit_hooks` is on: the callers a change to a
+    /// declaration strands, before and after the agent writes the file.
+    EditEvent {
+        #[arg(long, value_enum)]
+        provider: task_hook::TaskProvider,
+        #[arg(long, value_enum)]
+        event: edit_hook::EditEvent,
+    },
+    /// Relay finalized 🟩 metrics lines through a provider's hook contract.
+    Metrics {
+        /// Provider whose hook-response contract to emit under.
+        #[arg(long, value_enum)]
+        provider: Option<hook_metrics::Provider>,
+        /// Hook event (Antigravity defers PostToolUse lines until PostInvocation).
+        #[arg(long, value_enum, default_value = "post-tool-use")]
+        event: hook_metrics::MetricsEvent,
+    },
 }
 
 #[derive(Subcommand)]
 enum ConfigCmd {
-    /// Guided global setup in a terminal; also offered by pixel install.
+    /// Guided global setup in a terminal; also offered by pixel setup.
     Setup,
     /// Enable or disable all classify calls, including explicit --engine flags.
     Classify {
         #[arg(value_parser = ["on", "off"])]
         value: String,
-    },
-    /// Open the global YAML configuration in $VISUAL or $EDITOR (default: vi).
-    Edit {
-        /// Edit repository overrides instead of global settings.
-        #[arg(long)]
-        repo: bool,
-        #[arg(default_value = ".")]
-        path: PathBuf,
     },
     /// Live 🟩 metrics footer: `pixel config metrics` reports the effective
     /// setting and its layer; `on|off` persists it to `<root>/.pixel/
@@ -1817,24 +1265,6 @@ enum ConfigCmd {
         /// Write to the machine-wide configuration.
         #[arg(long)]
         global: bool,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// Retired retrieval policy: no hook reads it any more. `pixel config
-    /// policy` reports the effective setting and the layer that set it
-    /// (environment, repository, global, or the advisory default); `advisory`,
-    /// `enforce` or `off` persists it to `<root>/.pixel/config.yaml` — or
-    /// `~/.pixel/config.yaml` with `--global`.
-    Policy {
-        /// New value; omit to report the effective setting.
-        #[arg(value_enum)]
-        value: Option<config_cmd::PolicyMode>,
-        /// Write to the machine-wide configuration.
-        #[arg(long)]
-        global: bool,
-        /// Print the effective setting as JSON, for the Pi extension.
-        #[arg(long)]
-        json: bool,
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -1860,7 +1290,7 @@ enum ConfigCmd {
     /// the previous provider's stale choice.
     RemotePreset {
         /// Remote provider preset (openrouter, ollama, deepseek,
-        /// opencode-go, jev, local).
+        /// opencode-go, openai, jev, clef-ollama, clef-cloudflare, local).
         #[arg(value_enum)]
         preset: decide_remote::Preset,
         /// Model id the preset runs (default: the preset's own).
@@ -1873,12 +1303,14 @@ enum ConfigCmd {
     /// Which engine answers `pixel classify` when no `--engine` flag is
     /// given: `local` (an installed Ollaya server), `remote` (a hosted LLM
     /// behind a stored key), `jev` (TypeSafe's hosted decision model —
-    /// remote engine on the `jev` preset), or `auto` (probe local, fall
-    /// back to remote — the default). `pixel install` sets this when you
-    /// choose an engine.
+    /// remote engine on the `jev` preset), `clef-ollama` / `clef-cloudflare`
+    /// (Cloudflare's Clef-flash decision model through Ollama, or on Workers
+    /// AI behind a Cloudflare API token — remote engine on that preset), or
+    /// `auto` (probe local, fall back to remote — the default). `pixel
+    /// setup` sets this when you choose an engine.
     ClassifyEngine {
         /// The engine preference to store.
-        #[arg(value_parser = ["local", "remote", "jev", "auto"])]
+        #[arg(value_parser = ["local", "remote", "jev", "clef-ollama", "clef-cloudflare", "auto"])]
         value: String,
     },
 }
@@ -1891,6 +1323,11 @@ enum DaemonCmd {
         path: PathBuf,
         #[arg(long)]
         foreground: bool,
+        /// Once the daemon answers, ask it a question so its resident
+        /// `meaning` vectors start building: what the hooks pass, because a
+        /// daemon nobody asks keeps them cold.
+        #[arg(long, hide = true, conflicts_with = "foreground")]
+        warm_meaning: bool,
     },
     /// Stop a running daemon.
     Stop {
@@ -1910,7 +1347,17 @@ enum DaemonCmd {
 
 /// One NDJSON round trip on an open stream.
 fn roundtrip(stream: &mut UnixStream, req: &Request) -> Option<Response> {
-    let mut line = serde_json::to_string(req).ok()?;
+    roundtrip_by(stream, req, None)
+}
+
+/// [`roundtrip`] for a request whose answer is worth nothing after
+/// `deadline_unix_ms`: the daemon runs nothing for it once that has passed.
+fn roundtrip_by(
+    stream: &mut UnixStream,
+    req: &Request,
+    deadline_unix_ms: Option<u64>,
+) -> Option<Response> {
+    let mut line = pixel_proto::request_line(req, deadline_unix_ms).ok()?;
     line.push('\n');
     stream.write_all(line.as_bytes()).ok()?;
     stream.flush().ok()?;
@@ -1967,7 +1414,10 @@ fn route_through_daemon_with(
                 Ok(response) => (Some(response), ServeStep::new(ServeRoute::DaemonStarted)),
                 Err(reason) => (None, ServeStep::in_process(reason)),
             };
-            if step.reason != Some(InProcessReason::AutoStartDisabled) {
+            if !matches!(
+                step.reason,
+                Some(InProcessReason::AutoStartDisabled | InProcessReason::NotARepository)
+            ) {
                 step.start_ms = Some(start_ms);
             }
             (response, step)
@@ -1984,23 +1434,22 @@ fn auto_start_daemon(root: &Path, req: &Request) -> Result<Response, InProcessRe
         // background and retry once. This makes the fast path transparent —
         // no need for the user to run `pixel daemon start` manually.
         // `PIXEL_DAEMON_AUTO_START=0` disables auto-start.
-        if !config_cmd::feature_enabled(Some(root), "daemon_auto_start", "PIXEL_DAEMON_AUTO_START")
-        {
+        if !config_cmd::feature_enabled(
+            Some(root),
+            config_cmd::DAEMON_AUTO_START_FEATURE,
+            config_cmd::DAEMON_AUTO_START_ENV,
+        ) {
             return Err(InProcessReason::AutoStartDisabled);
         }
-        let exe = std::env::current_exe().map_err(|_| InProcessReason::StartFailed)?;
+        // A root without `.git` is a plain-walk tree (or an ancestor's shard
+        // that re-rooted a run in `/tmp`): no commit bounds its file set, so
+        // no daemon watches or indexes it for a command that did not ask.
+        // `pixel daemon start <dir>` still can.
+        if !root.join(".git").exists() {
+            return Err(InProcessReason::NotARepository);
+        }
         let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        let mut command = std::process::Command::new(exe);
-        command
-            .arg("daemon")
-            .arg("start")
-            .arg(&abs)
-            .arg("--foreground")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0);
-        command.spawn().map_err(|_| InProcessReason::StartFailed)?;
+        spawn_daemon(&abs).map_err(|_| InProcessReason::StartFailed)?;
         // Wait up to 5s for the socket to come up.
         for _ in 0..50 {
             if let DaemonRoute::Served(resp) = try_daemon_inner(root, req) {
@@ -2010,6 +1459,70 @@ fn auto_start_daemon(root: &Path, req: &Request) -> Result<Response, InProcessRe
         }
         Err(InProcessReason::StartTimedOut)
     }
+}
+
+/// Run this binary with `args` as a background process of its own: no
+/// standard streams, and a process group of its own so a terminal or an agent
+/// supervisor that tears down the caller's group leaves it alone.
+fn spawn_detached(args: &[OsString]) -> std::io::Result<()> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0);
+    command.spawn().map(drop)
+}
+
+/// The arguments that run the daemon of `root` in the foreground.
+fn daemon_args(root: &Path) -> Vec<OsString> {
+    vec![
+        "daemon".into(),
+        "start".into(),
+        root.as_os_str().to_owned(),
+        "--foreground".into(),
+    ]
+}
+
+/// The arguments of the start process the hooks launch: `pixel daemon start`
+/// for `root` in the background, which retires a stale daemon, waits for the
+/// new one and asks it the question that wakes its `meaning` vectors.
+fn daemon_warm_args(root: &Path) -> Vec<OsString> {
+    vec![
+        "daemon".into(),
+        "start".into(),
+        root.as_os_str().to_owned(),
+        "--warm-meaning".into(),
+    ]
+}
+
+/// Start the daemon of `root` (an absolute path) in the background. The one
+/// spelling of that command: the CLI's auto-start, `pixel daemon start` and
+/// the hooks all come here.
+fn spawn_daemon(root: &Path) -> std::io::Result<()> {
+    spawn_detached(&daemon_args(root))
+}
+
+/// The question that wakes the daemon's `meaning` vectors: any non-empty one
+/// does, and the answer (`unavailable` while they build) is not read.
+const MEANING_WARM_QUERY: &str = "how is this repository organised";
+
+/// Ask the daemon of `root` one `meaning` question so its resident vectors
+/// start building. Best effort: a daemon that is gone, slow or without the
+/// model changes nothing.
+fn kick_meaning(root: &Path) {
+    let _ = open_daemon_stream(root).and_then(|mut stream| {
+        roundtrip(
+            &mut stream,
+            &Request::Meaning {
+                query: MEANING_WARM_QUERY.to_string(),
+                limit: Some(1),
+
+                stale_ok: false,
+            },
+        )
+    });
 }
 
 fn open_daemon_stream(root: &Path) -> Option<UnixStream> {
@@ -2028,7 +1541,7 @@ fn open_daemon_stream(root: &Path) -> Option<UnixStream> {
 }
 
 /// What answers on a root's daemon socket, from this CLI's point of view.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DaemonProbe {
     /// Nothing answers a Ping.
     Absent,
@@ -2125,11 +1638,6 @@ fn send_to_daemon(root: &Path, req: &Request) -> DaemonRoute {
     })
 }
 
-/// Check if an env var is explicitly set to "0"/"false"/"off".
-fn env_flag_off(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|v| matches!(v.as_str(), "0" | "false" | "off"))
-}
-
 /// Prefer the daemon; fall back to an in-process Service. The given path may
 /// be anywhere inside a repo — the root is discovered automatically, so
 /// pointing any command at a subdirectory or file just works.
@@ -2178,7 +1686,15 @@ fn execute_targets_facts_read_only(
     if probe_daemon(&root) != DaemonProbe::Current {
         return unavailable();
     }
-    match send_to_daemon(&root, &Request::TargetsFacts { task, limit }) {
+    match send_to_daemon(
+        &root,
+        &Request::TargetsFacts {
+            task,
+            limit,
+            relevance_only: false,
+            stale_ok: false,
+        },
+    ) {
         DaemonRoute::Served(response) => unwrap_response(*response).or_else(|_| unavailable()),
         DaemonRoute::Absent | DaemonRoute::Declined => unavailable(),
     }
@@ -2292,7 +1808,7 @@ fn write_text(out: &mut impl Write, text: &str) -> Result<(), String> {
 /// Whether the parsed invocation asked for JSON on stdout. Read from the
 /// parsed matches, never from argv: `--json` is a flag only where a command
 /// declares it. The walk reaches the deepest subcommand so a nested command
-/// (`list-errors last --json`) answers for its own flag, and a command with no
+/// (`reference list --json`) answers for its own flag, and a command with no
 /// `json` argument reads as `false`.
 fn json_requested(matches: &ArgMatches) -> bool {
     let mut deepest = matches;
@@ -2600,7 +2116,7 @@ fn render_data(data: &Value, raw_json: bool, cap: usize) -> Rendered {
 /// The `successor` field `call-path` adds to its output: the `evaluate path`
 /// command asking the same question of the same repository, ready to run,
 /// and what it adds. The rest of the output is untouched: `call-path` stays
-/// compatible for two minor versions (`docs/design/evaluate.md`,
+/// compatible for two minor versions (`docs/archive/design/evaluate.md`,
 /// "`call-path` migration").
 fn call_path_successor(from: &str, to: &str, repo: &Path) -> Value {
     json!({
@@ -2646,6 +2162,50 @@ fn finish_graph_cmd(
     } else {
         print_data(&data, false)
     }
+}
+
+/// `pixel search-history` as text: one line per hit (short oid, date,
+/// subject, kind), then its path and the first lines of its snippet.
+fn history_text(data: &Value) -> String {
+    const SNIPPET_LINES: usize = 6;
+    let text = |hit: &Value, key: &str| {
+        hit.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_owned()
+    };
+    let mut out = String::new();
+    for hit in data
+        .get("candidates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (oid, at) = (text(hit, "oid"), text(hit, "at"));
+        out.push_str(&format!(
+            "{} {} {} [{}]\n",
+            oid.chars().take(10).collect::<String>(),
+            at.get(..10).unwrap_or(&at),
+            text(hit, "subject"),
+            text(hit, "kind"),
+        ));
+        if let Some(path) = hit.get("path").and_then(Value::as_str) {
+            out.push_str(&format!("    {path}\n"));
+        }
+        for line in hit
+            .get("snippet")
+            .and_then(Value::as_str)
+            .into_iter()
+            .flat_map(str::lines)
+            .take(SNIPPET_LINES)
+        {
+            out.push_str(&format!("    {line}\n"));
+        }
+    }
+    if out.is_empty() {
+        out.push_str("no commits match\n");
+    }
+    out
 }
 
 fn symbol_line(s: &Value) -> String {
@@ -2930,6 +2490,67 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
     Ok(active)
 }
 
+/// Issue #814: write `.pixel/regions.json` beside `targets.json`. The
+/// manifest is single-task (each `--regions` run replaces it): it describes
+/// the symbol territories of the CURRENT task's P0 set, and a harness mixing
+/// two tasks' regions would lose the association. It is evidence for
+/// orchestration — agent count, scheduling and merging stay with the harness.
+fn write_regions_manifest(root: &Path, task: &str, data: &Value) -> Result<(), String> {
+    let report = data.get("regions").cloned().unwrap_or(Value::Null);
+    if report.is_null() {
+        return Err("the daemon returned no regions manifest".to_string());
+    }
+    // A regions generation failure arrives as {"error": "..."} — reject it
+    // rather than publishing a manifest with null regions/conflicts/layers.
+    if let Some(err) = report.get("error").and_then(Value::as_str) {
+        return Err(format!("regions generation failed: {err}"));
+    }
+    let created_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let manifest = serde_json::json!({
+        "version": 1,
+        "kind": "evidence",
+        "note": "evidence for orchestration (agent count, scheduling, merging); not an action recommendation",
+        "task": task,
+        "created_unix": created_unix,
+        "head_oid": data
+            .get("stats")
+            .and_then(|s| s.get("commit_oid"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "regions": report.get("regions").cloned().unwrap_or(Value::Null),
+        "conflicts": report.get("conflicts").cloned().unwrap_or(Value::Null),
+        "merge_order": {
+            "layers": report.get("layers").cloned().unwrap_or(Value::Null),
+        },
+        "shared_files": report.get("shared_files").cloned().unwrap_or(Value::Null),
+        "epistemics": {
+            "lower_bound": report.get("lower_bound").cloned().unwrap_or(Value::Null),
+            "caps": report.get("caps").cloned().unwrap_or(Value::Null),
+        },
+    });
+    let regions_path = root
+        .join(pixel_index::index::SHARD_DIR)
+        .join("regions.json");
+    if let Some(parent) = regions_path.parent() {
+        pixel_git::sidecar::private_dir(parent)
+            .map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    // A fresh temporary file renamed over the name, as for targets.json.
+    pixel_git::nofollow::write_replace(
+        &regions_path,
+        &serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+        pixel_git::nofollow::PRIVATE_MODE,
+    )
+    .map_err(|e| format!("publish {}: {e}", regions_path.display()))?;
+    eprintln!(
+        "regions manifest active: {} — evidence for orchestration, not an action recommendation",
+        regions_path.display()
+    );
+    Ok(())
+}
+
 /// Circuit-breaker guard for retrieval commands. Call at the top of
 /// each guarded command handler. If the breaker fires, prints the
 /// guidance message to stderr and returns `true` (caller should return
@@ -3023,26 +2644,6 @@ fn make_extractor(kind: ExtractorKind, max_gram: usize) -> Box<dyn GramExtractor
         )),
         ExtractorKind::Trigram => Box::new(TrigramExtractor),
     }
-}
-
-fn extractor_for_shard(shard: &Shard) -> Result<Box<dyn GramExtractor>, String> {
-    let id = shard.extractor_id();
-    if id == "trigram" {
-        return Ok(Box::new(TrigramExtractor));
-    }
-    if let Some(rest) = id.strip_prefix("sparse-crc32-")
-        && let Some((min, max)) = rest.split_once('-')
-        && let (Ok(min), Ok(max)) = (min.parse::<usize>(), max.parse::<usize>())
-    {
-        return Ok(Box::new(SparseGramExtractor::with_lengths(
-            Crc32Weigher,
-            min,
-            max,
-        )));
-    }
-    Err(format!(
-        "index built with unsupported extractor {id:?}; re-run `pixel build-index`"
-    ))
 }
 
 /// One stdout line for a `search` match: the compact object in `--json`
@@ -3215,19 +2816,35 @@ fn enrich_with_context(
     enriched
 }
 
+/// Lines of context `find-code` prints for its best match: a class or module
+/// span runs to hundreds of lines, and printing every match whole made a
+/// Ruby answer 20 KB for eight matches (#1098). The best match gets enough to
+/// read what it does; the rest stays one read away.
+const RESOLVE_CONTEXT_TOP_LINES: usize = 16;
+/// Lines of context for every other match: the margin and the definition's
+/// head, which name what the match is.
+const RESOLVE_CONTEXT_OTHER_LINES: usize = 4;
+
 /// Attach inline source context to every `resolve` match, same rationale as
 /// `enrich_with_context` for `search`: without this, a `resolve` response
 /// gives only a location, forcing a mandatory follow-up Read on every call —
 /// measured as a real cost on trivial lookups (docs/bench/agent-ab-2026-08-30
 /// clean-postfix.txt, s1-locate). Spans `[start_line - MARGIN, end_line +
 /// MARGIN]` (not a fixed radius around one line) so a multi-line symbol's
-/// full body is included, not just its first line.
+/// body is included, not just its first line — up to
+/// [`RESOLVE_CONTEXT_TOP_LINES`] for the first match printed and
+/// [`RESOLVE_CONTEXT_OTHER_LINES`] for the others. A match whose span lies inside a body
+/// an earlier match already printed points there instead of repeating it.
+/// Either bound, when it fires, is named in the envelope's `caps`.
 fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
     const MARGIN: usize = 2;
     let Some(matches) = data.get_mut("matches").and_then(Value::as_array_mut) else {
         return;
     };
     let mut cache: HashMap<PathBuf, Option<String>> = HashMap::new();
+    // The spans printed so far, per file: (first, last, the match's start).
+    let mut shown: HashMap<String, Vec<(usize, usize, usize)>> = HashMap::new();
+    let (mut cut, mut inside) = (0_usize, 0_usize);
     for m in matches.iter_mut() {
         let rel = m
             .get("path")
@@ -3246,6 +2863,15 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
         if start_line == 0 {
             continue;
         }
+        if let Some(&(_, _, at)) = shown.get(&rel).and_then(|spans| {
+            spans
+                .iter()
+                .find(|&&(first, last, _)| first <= start_line && end_line <= last)
+        }) {
+            m["context"] = Value::String(format!("   (inside {rel}:{at}, shown above)"));
+            inside += 1;
+            continue;
+        }
         let abs = root.join(&rel);
         let content = match cache.entry(abs.clone()) {
             std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
@@ -3256,8 +2882,14 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
         let Some(content) = content else { continue };
         let lines: Vec<&str> = content.lines().collect();
         let from = start_line.saturating_sub(MARGIN + 1).min(lines.len());
-        let to = (end_line + MARGIN).min(lines.len());
-        let mut ctx_lines = Vec::with_capacity(to - from);
+        let full = (end_line + MARGIN).min(lines.len());
+        let budget = if shown.is_empty() {
+            RESOLVE_CONTEXT_TOP_LINES
+        } else {
+            RESOLVE_CONTEXT_OTHER_LINES
+        };
+        let to = full.min(from + budget);
+        let mut ctx_lines = Vec::with_capacity(to - from + 1);
         for (i, l) in lines[from..to].iter().enumerate() {
             let ln = from + i + 1;
             let marker = if ln >= start_line && ln <= end_line {
@@ -3267,7 +2899,41 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
             };
             ctx_lines.push(format!("{marker} {ln:>5}: {l}"));
         }
+        // Only lost body lines are worth a pointer: a cut trailing margin is
+        // not, and its pointer would cost more than the lines it replaced.
+        if to < end_line {
+            ctx_lines.push(format!(
+                "   … {} more lines, to {rel}:{end_line}",
+                end_line - to
+            ));
+            cut += 1;
+        }
         m["context"] = Value::String(ctx_lines.join("\n"));
+        // Only what was printed can be pointed back to.
+        shown
+            .entry(rel)
+            .or_default()
+            .push((from + 1, to, start_line));
+    }
+    let mut fired = Vec::new();
+    if cut > 0 {
+        fired.push(format!(
+            "context: {cut} match bodies cut ({RESOLVE_CONTEXT_TOP_LINES} lines for the first, {RESOLVE_CONTEXT_OTHER_LINES} for the others)"
+        ));
+    }
+    if inside > 0 {
+        fired.push(format!(
+            "context: {inside} matches inside a body shown above, not repeated"
+        ));
+    }
+    if !fired.is_empty() {
+        let mut caps = data
+            .get("caps")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        caps.extend(fired.into_iter().map(Value::String));
+        data["caps"] = Value::Array(caps);
     }
 }
 
@@ -3331,6 +2997,11 @@ fn print_resolve_human(data: &Value) -> Result<(), String> {
         .unwrap_or("unknown");
     let basis = data.get("basis").and_then(Value::as_str).unwrap_or("");
     output.push_str(&format!("Confidence: {confidence} ({basis})\n"));
+    if let Some(caps) = data.get("caps").and_then(Value::as_array) {
+        for cap in caps.iter().filter_map(Value::as_str) {
+            output.push_str(&format!("cap: {cap}\n"));
+        }
+    }
     write_stdout(&output)
 }
 
@@ -3339,9 +3010,13 @@ fn print_resolve_human(data: &Value) -> Result<(), String> {
 fn group_by_root(paths: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<String>)>, String> {
     let mut groups: Vec<(PathBuf, Vec<String>)> = Vec::new();
     for p in paths {
-        let abs = p
-            .canonicalize()
-            .map_err(|e| format!("bad path {}: {e}", p.display()))?;
+        let abs = p.canonicalize().map_err(|e| {
+            let cwd = std::env::current_dir().map_or_else(
+                |error| format!("unavailable: {error}"),
+                |cwd| cwd.display().to_string(),
+            );
+            format!("bad path {}: {e} (process cwd: {cwd})", p.display())
+        })?;
         let root = discover_root(&abs)?;
         let rel = abs
             .strip_prefix(&root)
@@ -3452,6 +3127,8 @@ fn run_task_aware_search_fallback(
         Request::Resolve {
             phrase: phrase.to_string(),
             limit,
+
+            stale_ok: false,
         },
         no_daemon,
     )?;
@@ -3536,6 +3213,8 @@ fn run_search_one(
             scope,
             globs: globs.to_vec(),
             types: types.to_vec(),
+
+            stale_ok: false,
         },
         no_daemon,
     )?;
@@ -3746,23 +3425,10 @@ fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), Stri
         DaemonProbe::Stale => retire_stale_daemon_within(&path, STALE_DAEMON_EXIT_CAP),
         DaemonProbe::Absent => {}
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let abs = path
         .canonicalize()
         .map_err(|e| format!("bad path {}: {e}", path.display()))?;
-    let mut command = std::process::Command::new(exe);
-    command
-        .arg("daemon")
-        .arg("start")
-        .arg(&abs)
-        .arg("--foreground")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    // Detach from the caller's process group so terminal/agent supervisors
-    // do not tear down the daemon when the short-lived start command exits.
-    command.process_group(0);
-    command.spawn().map_err(|e| format!("spawn daemon: {e}"))?;
+    spawn_daemon(&abs).map_err(|e| format!("spawn daemon: {e}"))?;
     // Wait for the socket to come up (index build can take a moment).
     for _ in 0..100 {
         if daemon_ping(&abs) {
@@ -3938,7 +3604,7 @@ fn upgrade_target_refusal(target: &UpgradeTarget, roots: &[ManagedRoot]) -> Opti
 /// can be exercised as `pixel-dev` while `pixel` stays the managed one.
 fn dev_install_path(home: &Path) -> PathBuf {
     home.join(".local/bin")
-        .join(pixel_install::config::PIXEL_DEV_EXECUTABLE)
+        .join(pixel_setup::config::PIXEL_DEV_EXECUTABLE)
 }
 
 /// The opening of the `CACHEDIR.TAG` cargo writes at the root of every
@@ -3968,12 +3634,11 @@ fn is_cargo_target_path(path: &Path) -> bool {
 
 /// True when `exe` is a build a developer runs from a checkout rather than
 /// a release install: cargo build output ([`is_cargo_target_path`]) or the
-/// `pixel-dev` side build ([`pixel_install::config::is_side_build`]). Such a
-/// build carries its branch's prompts under the release's version, so
-/// whatever a release install owns (the deployed prompts, the upgrade
-/// notice) is not its to judge.
+/// `pixel-dev` side build ([`pixel_setup::config::is_side_build`]). Such a
+/// build carries its branch's code under the release's version, so
+/// whatever a release install owns (the upgrade notice) is not its to judge.
 pub(crate) fn is_developer_build(exe: &Path) -> bool {
-    is_cargo_target_path(exe) || pixel_install::config::is_side_build(exe)
+    is_cargo_target_path(exe) || pixel_setup::config::is_side_build(exe)
 }
 
 /// `dir` holds the `CACHEDIR.TAG` cargo writes at the root of a target
@@ -4110,6 +3775,94 @@ fn resolve_upgrade_target(
     }
 }
 
+/// The first bytes of an executable `self-update` may install: ELF, and the
+/// four Mach-O headers (32/64-bit, either byte order) plus a universal binary.
+const EXECUTABLE_MAGICS: [[u8; 4]; 6] = [
+    [0x7f, b'E', b'L', b'F'],
+    [0xfe, 0xed, 0xfa, 0xce],
+    [0xfe, 0xed, 0xfa, 0xcf],
+    [0xce, 0xfa, 0xed, 0xfe],
+    [0xcf, 0xfa, 0xed, 0xfe],
+    [0xca, 0xfe, 0xba, 0xbe],
+];
+
+/// Put the built binary `src` at `dest` so that `dest` is, at every moment
+/// and across a crash or power loss, either the previous binary or the
+/// complete new one. The bytes go to `.<name>.tmp.<pid>` beside `dest` (same
+/// filesystem, so the rename is atomic), are checked to be as long as `src`
+/// and to start like an executable, and are `fsync`ed before the rename;
+/// the directory is `fsync`ed after it, so the rename itself is durable.
+/// A symbolic link at `dest` is refused: the rename would replace the link
+/// and leave the binary it points to as it was. Any failure before the
+/// rename removes the temp and leaves `dest` untouched.
+fn install_staged(src: &Path, dest: &Path, pid: u32) -> Result<(), String> {
+    if let Ok(target) = std::fs::read_link(dest) {
+        return Err(format!(
+            "{} is a symbolic link to {}: pass --install-path with the binary it points to",
+            dest.display(),
+            target.display()
+        ));
+    }
+    let tmp = dest.with_file_name(format!(
+        ".{}.tmp.{pid}",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("pixel"),
+    ));
+    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        std::fs::create_dir_all(parent).map_err(|e| format!("install directory: {e}"))?;
+    }
+    let staged = std::fs::copy(src, &tmp)
+        .map_err(|e| format!("copy failed: {e}"))
+        .and_then(|_| check_staged(src, &tmp));
+    if let Err(error) = staged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    std::fs::rename(&tmp, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename failed: {e}")
+    })?;
+    // Best effort: a filesystem that cannot fsync a directory still holds
+    // the renamed, already synced file.
+    if let Some(parent) = parent
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// Check the staged copy `tmp` of `src` before it may replace anything: as
+/// long as `src`, starting with one of [`EXECUTABLE_MAGICS`], then flushed
+/// to disk.
+fn check_staged(src: &Path, tmp: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let expected = std::fs::metadata(src)
+        .map_err(|e| format!("read {}: {e}", src.display()))?
+        .len();
+    let mut file = std::fs::File::open(tmp).map_err(|e| format!("read {}: {e}", tmp.display()))?;
+    let staged = file
+        .metadata()
+        .map_err(|e| format!("read {}: {e}", tmp.display()))?
+        .len();
+    if staged != expected {
+        return Err(format!(
+            "staged copy {} holds {staged} bytes, {} has {expected}",
+            tmp.display(),
+            src.display()
+        ));
+    }
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_err() || !EXECUTABLE_MAGICS.contains(&magic) {
+        return Err(format!(
+            "{} is not an executable ({expected} bytes, no ELF or Mach-O header): refusing to install it",
+            src.display()
+        ));
+    }
+    file.sync_all()
+        .map_err(|e| format!("fsync {}: {e}", tmp.display()))
+}
+
 /// The `pixel` that a shell would run INSTEAD of `installed`, if any: the
 /// first PATH hit that is a different file. This is how a stale copy in
 /// `~/.local/bin` silently kept serving an old version after an upgrade
@@ -4192,20 +3945,6 @@ fn compact_snapshot(data: &mut Value) {
     {
         let n = dirty.as_array().map_or(0, Vec::len);
         snap.insert("dirty_count".into(), json!(n));
-    }
-}
-
-/// Drop the tracked-clean file list from a `repo-state` answer.
-///
-/// On a clean tree the list is the bulk of the answer (200 of 351 paths,
-/// ~7 KB measured on this repository) and no consumer reads it: `repo-state`
-/// answers "HEAD + branch + dirty" and `clean_count` is what says how clean
-/// the rest of the tree is. `--include-clean` asks for the full, capped list.
-fn compact_repo_state(data: &mut Value) {
-    if let Some(obj) = data.as_object_mut() {
-        obj.remove("clean");
-        obj.remove("clean_list_cap");
-        obj.remove("clean_list_truncated");
     }
 }
 
@@ -4360,24 +4099,26 @@ fn operation_path(matches: &clap::ArgMatches) -> Option<PathBuf> {
         .and_then(|mut paths| paths.next().cloned())
 }
 
-/// What `pixel migrate` prints now that the command does nothing.
-const MIGRATE_REMOVED_NOTE: &str = "note: 'migrate' was removed and does nothing; pixel no longer \
-     reads legacy .gitpixel/ state, so delete that directory by hand if it is still there";
-
-/// The pre-rename subcommand this invocation was spelled with, and its
-/// current name. Only the first word that is not an option names the
-/// command (`pixel prepare-repo ready` runs `prepare-repo` on a path called
-/// `ready`); `--metrics` is the one option taking a separate value before it.
-fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
-    let mut words = argv.iter().skip(1);
-    while let Some(word) = words.next() {
-        if word == "--metrics" {
-            words.next();
-        } else if !word.starts_with('-') {
-            return pixel_proto::commands::renamed_to(word).map(|new| (word.as_str(), new));
-        }
-    }
-    None
+/// Where the arguments of `pixel config <key> <value>` that must not be logged
+/// begin: the value of a key that is neither a setting `config` writes nor one
+/// of its subcommands. Such an attempt is refused, but a credential typed as
+/// `remote_keys.openai sk-…` would already be in the log. Only the command
+/// word counts: `search-content config x y` is a query.
+fn config_value_from(args: &[String]) -> Option<usize> {
+    let with_program: Vec<String> = std::iter::once(String::new())
+        .chain(args.iter().cloned())
+        .collect();
+    let (at, _) =
+        pixel_plugin::command_word(&with_program).filter(|(_, word)| *word == "config")?;
+    let (key_at, key) = args
+        .iter()
+        .enumerate()
+        .skip(at)
+        .find(|(_, arg)| !arg.starts_with("--"))?;
+    // `has_subcommand` reads the derive's names, never the whole `Cli` tree,
+    // which overflows a 2 MiB test thread in a debug build.
+    let known = config_cmd::is_setting(key) || <ConfigCmd as clap::Subcommand>::has_subcommand(key);
+    (!known).then_some(key_at + 1)
 }
 
 /// The arguments as the action log records them. An API key is a secret:
@@ -4385,18 +4126,27 @@ fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
 /// `config remote-key <preset>` is masked.
 ///
 /// The auth flow's URL variable is masked for the same reason: its
-/// `code`/`state` query is a bearer token for one login, and
-/// `ai-cli-readify --authenticate` is not the only writer — a `pixel flow
-/// replay` typed by hand would land here too. The name stays readable, the
-/// value never does.
+/// `code`/`state` query is a bearer token for one login, and any command
+/// given `--var auth_url=…` lands here, and so does a plugin run: the core
+/// logs the arguments of `pixel flow …` through this function before any
+/// plugin sees a log of its own. The name stays readable, the value never
+/// does.
 fn logged_args(args: &[String]) -> String {
     let secret_from = args
         .windows(2)
         .position(|pair| pair[0] == "config" && pair[1] == "remote-key")
         .map(|at| at + 3);
-    #[cfg(feature = "readify")]
-    let url_name = ai_cli_readify::auth::AUTH_URL_VAR;
-    #[cfg(not(feature = "readify"))]
+    let config_value_from = config_value_from(args);
+    // `install https://user:token@host/…` and `reference add <id>
+    // https://user:token@host/… <rev>` carry the credential of a private
+    // repository in its URL. Only the command word counts:
+    // `search-content install` is a query.
+    let with_program: Vec<String> = std::iter::once(String::new())
+        .chain(args.iter().cloned())
+        .collect();
+    let source_url_from = pixel_plugin::command_word(&with_program)
+        .filter(|(_, word)| matches!(*word, "install" | "reference"))
+        .map(|(at, _)| at);
     let url_name = "auth_url";
     let url_var = format!("{url_name}=");
     // Clap takes `--var auth_url=…` and `--var=auth_url=…` as the same
@@ -4411,8 +4161,15 @@ fn logged_args(args: &[String]) -> String {
                 format!("--var={url_name}=<redacted>")
             } else if arg.starts_with(&url_var) {
                 format!("{url_name}=<redacted>")
-            } else if secret_from.is_some_and(|from| i >= from) && !arg.starts_with("--") {
+            } else if secret_from
+                .into_iter()
+                .chain(config_value_from)
+                .any(|from| i >= from)
+                && !arg.starts_with("--")
+            {
                 "<redacted>".to_string()
+            } else if source_url_from.is_some_and(|from| i >= from) {
+                pixel_plugin::redact_source(arg)
             } else {
                 arg.clone()
             }
@@ -4421,47 +4178,22 @@ fn logged_args(args: &[String]) -> String {
         .join(" ")
 }
 
-/// The one stderr line announcing that an old command name was used, or
-/// `None` when the name is current or the stream is protected (hooks,
-/// `search-like-rg`, the statusline), so the note never lands in a hook
-/// response or a byte-compatible rg output. The note is not a metrics line:
-/// `--metrics off`, `PIXEL_METRICS=0` and the persistent `metrics` opt-out
-/// silence reporting, not the rename teaching signal.
-fn rename_note(argv: &[String], unprotected: bool) -> Option<String> {
-    if !unprotected {
-        return None;
-    }
-    let (old, new) = renamed_invocation(argv)?;
-    Some(format!(
-        "note: '{old}' is now '{new}'; the old name stays accepted until {}\n",
-        pixel_proto::commands::ALIAS_REMOVAL_VERSION
-    ))
-}
-
-/// Whether this invocation checks the prompts `pixel install` deployed:
-/// every command but the protected streams, the three that already deal
-/// with them (`install` rewrites them, `doctor` reports them, `uninstall`
-/// removes them), and any command of a developer build
-/// ([`is_developer_build`]: `pixel-dev`, or a binary run from `target/`).
-/// The deployed prompts are the managed `pixel`'s: a build from another
-/// commit differs from them by construction while printing the same
-/// version, and the fix the note names, `pixel install`, would hand the
-/// whole machine's hooks and prompts to that build (#549).
-fn checks_deployed_prompts(command_label: &str, protected: bool, developer_build: bool) -> bool {
-    !protected && !developer_build && !matches!(command_label, "install" | "doctor" | "uninstall")
-}
-
 /// The command labels the update close may relaunch. The relaunch executes
 /// the command again, so only the read-only surface — retrieval, graph
 /// queries, git and pixel reporting — is ever offered; a mutating command
-/// (`push`, `install`, `scope-task --clear`, ...) finishes and stays
+/// (`build-index`, `install`, `scope-task --clear`, ...) finishes and stays
 /// finished, and its notice stays informative without a prompt. Labels are
 /// clap's kebab-case subcommand names, the same strings
-/// `matches.subcommand_name()` reports.
+/// `matches.subcommand_name()` reports. A plugin's commands are not here and
+/// need not be: a plugin run never reaches the update close (the dispatch
+/// returns the plugin's own exit code first), so what such a command may do
+/// to an agent's task gate is `pixel_plugin::read_only_invocation`, which
+/// `task_hook` consults.
 const READ_ONLY_COMMANDS: &[&str] = &[
     "search-content",
     "search-like-rg",
     "search-meaning",
+    "search-history",
     "find-code",
     "find-symbol",
     "list-signatures",
@@ -4478,39 +4210,18 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "status",
     "coverage",
     "audit",
-    "index-stats",
-    "recall",
-    "list-errors",
-    "repo-state",
-    "review-changes",
-    "commit-history",
-    "diff",
-    "file-history",
-    "search-history",
-    "dig-history",
-    "who-wrote",
-    "list-branches",
-    "token-savings",
+    "metrics",
 ];
 
-/// Whether the parsed invocation may be executed again by the relaunch:
-/// the top-level label and every nested mode must be read-only. A mutating
-/// nested mode (`recall index` ingests, `list-errors gc` applies
-/// retention) or a flag that reaches outward (`list-branches --fetch`
-/// runs `git fetch --prune`) makes the invocation mutating.
+/// Whether the parsed invocation may be executed again by the relaunch: the
+/// top-level label must be read-only. Every retained command in
+/// [`READ_ONLY_COMMANDS`] is a leaf (no nested mode that mutates), so the
+/// label alone decides.
 fn read_only_invocation(matches: &ArgMatches) -> bool {
     let Some(label) = matches.subcommand_name() else {
         return false;
     };
-    if !READ_ONLY_COMMANDS.contains(&label) {
-        return false;
-    }
-    match matches.subcommand() {
-        Some(("recall", nested)) => nested.subcommand_name() != Some("index"),
-        Some(("list-errors", nested)) => nested.subcommand_name() != Some("gc"),
-        Some(("list-branches", nested)) => !nested.get_flag("fetch"),
-        _ => true,
-    }
+    READ_ONLY_COMMANDS.contains(&label)
 }
 
 /// The bounded-result note for search's line output, with the caps the
@@ -4540,54 +4251,25 @@ fn bounded_result_note(basis: &str, cap_hits: &[Value], truncation_warned: bool)
     (!rest.is_empty()).then(|| format!("{tier}; caps: {}", rest.join("; ")))
 }
 
-/// One stderr line naming the prompts an earlier `pixel install` deployed:
-/// this release deploys none, and nothing outside `pixel doctor` said so.
-fn stale_prompt_note(stale: &[&str]) -> Option<String> {
-    if stale.is_empty() {
-        return None;
-    }
-    let (verb, pronoun) = if stale.len() == 1 {
-        ("is", "it")
-    } else {
-        ("are", "them")
-    };
-    Some(format!(
-        "note: {} deployed by an earlier `pixel install` {verb} retired in this pixel ({}) — run `pixel install` to remove {pronoun}\n",
-        stale.join(" and "),
-        env!("CARGO_PKG_VERSION")
-    ))
-}
-
-/// What a missing `--request-id` means, for an agent that copied a command
-/// without it: clap's bare "required arguments were not provided" left one
-/// retrying the same line, or moving on as if the branch existed.
-const REQUEST_ID_TIP: &str = "mutation ops need --request-id <id>: any stable string naming this operation, passed unchanged on a retry so pixel replays its result instead of running it twice";
-
-/// `error` with [`REQUEST_ID_TIP`] as its `tip:` line when the argument it
-/// reports missing is `--request-id`; any other error is returned untouched.
-fn with_request_id_tip(mut error: clap::Error) -> clap::Error {
-    use clap::error::{ContextKind, ContextValue, ErrorKind};
-    let lacks_request_id = error.kind() == ErrorKind::MissingRequiredArgument
-        && matches!(
-            error.get(ContextKind::InvalidArg),
-            Some(ContextValue::Strings(missing))
-                if missing.iter().any(|arg| arg.starts_with("--request-id"))
-        );
-    if lacks_request_id {
-        error.insert(
-            ContextKind::Suggested,
-            ContextValue::StyledStrs(vec![REQUEST_ID_TIP.into()]),
-        );
-    }
-    error
-}
-
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
-    let matches = Cli::command()
-        .try_get_matches()
-        .unwrap_or_else(|error| with_request_id_tip(error).exit());
+    let matches = Cli::command().try_get_matches().unwrap_or_else(|error| {
+        // A hook the host cannot parse the arguments of (a newer install's
+        // flag given to this older binary, or the reverse) says so on stderr
+        // and exits 0: Claude Code blocks the prompt on exit 2, which is
+        // what clap exits with.
+        if fails_open(&argv, &error) {
+            eprintln!("{error}");
+            std::process::exit(0);
+        }
+        // An unknown subcommand may be a plugin; its exit code is the
+        // plugin's own, or 1/2 for a refusal or a moved-command hint.
+        if let Some(code) = plugin_cmd::dispatch(&error, &argv) {
+            std::process::exit(code);
+        }
+        error.exit()
+    });
     let command_label = matches.subcommand_name().unwrap_or("unknown").to_string();
     let path = operation_path(&matches).unwrap_or_else(|| PathBuf::from("."));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
@@ -4605,13 +4287,17 @@ fn run() -> Result<(), String> {
                     ..
                 }
             }
-            | Command::ListErrors {
-                cmd: sniper_cmd::SniperCmd::Run { .. }
+            // The start a hook launches is not an operation of the user's.
+            | Command::Daemon {
+                cmd: DaemonCmd::Start {
+                    warm_meaning: true,
+                    ..
+                }
             }
     );
     let root = discover_root(&path).or_else(|_| discover_root(Path::new(".")));
     // `--metrics=off` and `PIXEL_METRICS=0` veto one invocation; the
-    // `metrics` key in `.pixel/config.json` (repo, then `~/.pixel/` global)
+    // `metrics` key in `.pixel/config.yaml` (repo, then `~/.pixel/` global)
     // is the persistent opt-out layer beneath them.
     let live = !protected
         && cli.metrics != "off"
@@ -4633,32 +4319,15 @@ fn run() -> Result<(), String> {
             update_notice::fetch_latest_tag,
         )
     });
-    // After `begin`, which zeroes the byte counters: both notes are rendered
-    // output the caller reads.
-    if let Some(note) = rename_note(&argv, !protected) {
-        eprint!("{note}");
-    }
-    let developer_build = std::env::current_exe().is_ok_and(|exe| is_developer_build(&exe));
-    if checks_deployed_prompts(&command_label, protected, developer_build)
-        && let Some(home) = std::env::var_os("HOME")
-        && let Some(note) =
-            stale_prompt_note(&pixel_install::install::retired_prompts(Path::new(&home)))
-    {
-        eprint!("{note}");
-    }
     // Compatibility fallback must exec the original before any logging changes
     // its search corpus; its successful Pixel branch retains existing logging.
     let mut logger = match &root {
-        // The compatibility search and the retired hook verbs exit through
-        // their own path before any event is logged; spawning the writer
-        // would only create `.pixel` in unindexed repos, which the search
-        // then mistakes for an index.
+        // The compatibility search exits through its own path before any
+        // event is logged; spawning the writer would only create `.pixel` in
+        // unindexed repos, which the search then mistakes for an index.
         _ if matches!(
             &cli.command,
-            Command::SearchLikeRg { .. }
-                | Command::RunHook {
-                    cmd: HookCmd::Retired(_)
-                }
+            Command::SearchLikeRg { .. } | Command::Brief { .. }
         ) =>
         {
             pixel_actionlog::ActionLog::noop()
@@ -4721,7 +4390,7 @@ fn run() -> Result<(), String> {
         Some(code) if code != 0 => Err(format!("{command_label} exited {code}")),
         _ => result.clone(),
     };
-    let mut event = pixel_actionlog::ActionEvent::new(&command_label, logged_args(&argv[1..]))
+    let mut event = usage_journal::action(&command_label, logged_args(&argv[1..]), "cli")
         .with_result(&logged_result, elapsed);
     if let Ok(root) = &root
         && let Some(correlation) = task_commands::action_correlation(root)
@@ -4788,7 +4457,7 @@ fn run() -> Result<(), String> {
             // the versioned store path `current_exe` resolves to.
             exe: std::env::current_exe()
                 .ok()
-                .map(pixel_install::install::stable_exe_path),
+                .map(pixel_setup::install::stable_exe_path),
             args: &argv[1..],
         },
         |name| std::env::var_os(name),
@@ -4805,6 +4474,72 @@ fn run() -> Result<(), String> {
         std::process::exit(code);
     }
     result
+}
+
+/// `pixel setup`: deploy the agent integrations (globally, or into one
+/// repository with `--repo`) and report what changed.
+fn setup_install(
+    json: bool,
+    repo: Option<PathBuf>,
+    agents: Vec<pixel_setup::setup::AgentTarget>,
+) -> Result<(), String> {
+    let is_global_install = repo.is_none();
+    let config_root = repo.clone();
+    let stdout_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let interactive_banner = should_render_install_banner(json, stdout_tty);
+    let color = banner_color(std::env::var_os("NO_COLOR").as_deref());
+    if interactive_banner {
+        // #863: the four-act intro animation is retired; the card header
+        // (logo over version line) is the whole preamble now.
+        write_stdout(&pixel_setup::banner::render_start(color))?;
+    }
+    let install = pixel_setup::install::InstallOptions {
+        repo,
+        ..Default::default()
+    };
+    let receipt = pixel_setup::receipt::Snapshot::begin(&install).map_err(|e| e.to_string())?;
+    let selection = (!agents.is_empty()).then_some(pixel_setup::install::InstallSelection {
+        agents,
+        task_hooks: true,
+        codex_hooks: true,
+        pi_extension: true,
+    });
+    let report = pixel_setup::install::install_selected(&install, selection.as_ref())
+        .map_err(|e| e.to_string())?;
+    config_cmd::ensure_template(config_root.as_deref())?;
+    // Interactive UX goes to stderr so `--json` stdout stays pure.
+    let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let stderr_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    if should_offer_classify_setup(is_global_install, json, stdin_tty, stderr_tty) {
+        config_cmd::setup()?;
+    }
+    if let Some(receipt) = receipt {
+        receipt.finish().map_err(|e| e.to_string())?;
+    }
+    let report_value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+    // A person at a terminal reads the banner; `--json` and a piped
+    // stdout keep the machine-readable report an agent parses.
+    if json || !stdout_tty {
+        print_data(&report_value, json)
+    } else {
+        operation_metrics::observe(&report_value);
+        write_stdout(&pixel_setup::banner::render_result(&report, color))
+    }
+}
+
+/// `pixel setup --remove`: take back everything `pixel setup` wrote.
+fn setup_remove(json: bool, dry_run: bool, binary_path: Option<PathBuf>) -> Result<(), String> {
+    let report = pixel_setup::uninstall::uninstall(&pixel_setup::uninstall::UninstallOptions {
+        binary_path,
+        running_binary: std::env::current_exe().ok(),
+        dry_run,
+        ..Default::default()
+    })
+    .map_err(|e| e.to_string())?;
+    print_data(
+        &serde_json::to_value(&report).map_err(|e| e.to_string())?,
+        json,
+    )
 }
 
 fn run_command(
@@ -4838,18 +4573,7 @@ fn run_command(
                         .unwrap_or(0),
                 );
                 if history {
-                    let mut store =
-                        pixel_facts::FactsStore::open(&path).map_err(|e| e.to_string())?;
-                    let opts = pixel_facts::ingest::IngestOptions::default();
-                    let report = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts)
-                        .map_err(|e| e.to_string())?;
-                    eprintln!(
-                        "facts: phase={} commits={} diff_coverage={:.0}% fresh={}",
-                        report.phase,
-                        report.commits_indexed,
-                        report.diff_indexed_pct * 100.0,
-                        report.fresh
-                    );
+                    history_index::build(&path)?;
                 }
                 return Ok(());
             }
@@ -4864,17 +4588,7 @@ fn run_command(
                 stats.files, stats.bytes, stats.grams, stats.shard_bytes, stats.elapsed_ms
             );
             if history {
-                let mut store = pixel_facts::FactsStore::open(&path).map_err(|e| e.to_string())?;
-                let opts = pixel_facts::ingest::IngestOptions::default();
-                let report = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts)
-                    .map_err(|e| e.to_string())?;
-                eprintln!(
-                    "facts: phase={} commits={} diff_coverage={:.0}% fresh={}",
-                    report.phase,
-                    report.commits_indexed,
-                    report.diff_indexed_pct * 100.0,
-                    report.fresh
-                );
+                history_index::build(&path)?;
             }
             Ok(())
         }
@@ -4946,6 +4660,31 @@ fn run_command(
             max_files,
             json,
         } => run_ask(question, path, limit, max_files, json),
+        Command::SearchHistory {
+            query,
+            path,
+            facet,
+            limit,
+            read_only,
+            json,
+        } => {
+            let data = execute(
+                &path,
+                Request::History {
+                    query,
+                    facet,
+                    limit,
+                    read_only,
+                },
+                false,
+            )?;
+            // Not `finish_graph_cmd`: its `candidates` are ambiguous symbol uids.
+            if json {
+                return print_data(&data, true);
+            }
+            operation_metrics::observe(&data);
+            write_stdout(&history_text(&data))
+        }
         Command::ScopeTask {
             task,
             path,
@@ -4973,15 +4712,22 @@ fn run_command(
                     None => path,
                 };
                 let root = discover_root(&clear_path)?;
-                let manifest_path = root
-                    .join(pixel_index::index::SHARD_DIR)
-                    .join("targets.json");
+                let shard_dir = root.join(pixel_index::index::SHARD_DIR);
+                let manifest_path = shard_dir.join("targets.json");
+                let regions_path = shard_dir.join("regions.json");
                 if manifest_path.exists() {
                     std::fs::remove_file(&manifest_path)
                         .map_err(|e| format!("remove {}: {e}", manifest_path.display()))?;
                     println!("targets manifest cleared");
                 } else {
                     println!("no active targets manifest");
+                }
+                // The regions manifest is single-task evidence — clear it
+                // alongside targets.json so a stale task's regions never
+                // outlives its enforcement manifest.
+                if regions_path.exists() {
+                    std::fs::remove_file(&regions_path)
+                        .map_err(|e| format!("remove {}: {e}", regions_path.display()))?;
                 }
                 return Ok(());
             }
@@ -5010,6 +4756,7 @@ fn run_command(
                         limit,
                         max_tier: max_tier.clone(),
                         precision,
+                        regions,
                     },
                     false,
                 )?
@@ -5019,6 +4766,22 @@ fn run_command(
             } else {
                 Some(write_targets_manifest(&manifest_path, &task, &data)?)
             };
+            // Issue #814: the regions manifest rides beside targets.json.
+            // --no-manifest and --read-only suppress it with the enforcement
+            // manifest; the JSON output still carries the regions either way.
+            // A new targets.json without --regions removes any stale
+            // regions.json so the two files stay coherent.
+            if regions && !no_manifest && !read_only {
+                write_regions_manifest(&root, &task, &data)?;
+            } else if !no_manifest && !read_only {
+                let regions_path = root
+                    .join(pixel_index::index::SHARD_DIR)
+                    .join("regions.json");
+                if regions_path.exists() {
+                    std::fs::remove_file(&regions_path)
+                        .map_err(|e| format!("remove stale {}: {e}", regions_path.display()))?;
+                }
+            }
             if read_only {
                 print_data(&data, true)?;
             } else {
@@ -5030,34 +4793,36 @@ fn run_command(
                     manifest_path.display()
                 );
             }
-            if regions && !read_only {
-                let regions_path = root
-                    .join(pixel_index::index::SHARD_DIR)
-                    .join("regions.json");
-                let regions_data = execute(
-                    &path,
-                    Request::Regions {
-                        task: task.clone(),
-                        limit,
-                    },
-                    false,
-                )?;
-                if let Some(parent) = regions_path.parent() {
-                    pixel_git::sidecar::private_dir(parent)
-                        .map_err(|e| format!("create {}: {e}", parent.display()))?;
-                }
-                pixel_git::nofollow::write_replace(
-                    &regions_path,
-                    &serde_json::to_vec_pretty(&regions_data).unwrap_or_default(),
-                    pixel_git::nofollow::PRIVATE_MODE,
-                )
-                .map_err(|e| format!("publish {}: {e}", regions_path.display()))?;
-                eprintln!(
-                    "regions manifest written: {}",
-                    regions_path.display()
-                );
-            }
             Ok(())
+        }
+        Command::Brief {
+            prompt,
+            path,
+            json,
+            parts,
+        } => {
+            let root = discover_root(&path)?;
+            if json {
+                let finished = execution_brief::chain::try_start_for_command(&prompt, &root, parts)
+                    .map(execution_brief::chain::Pending::finish_with_record);
+                let (record, text) = match finished {
+                    Ok(finished) => (finished.record, finished.text),
+                    Err(declined) => (
+                        execution_brief::chain::declined_record(declined, &prompt),
+                        None,
+                    ),
+                };
+                let mut decision = record.to_json();
+                decision["brief"] = text.map_or(Value::Null, Value::from);
+                write_stdout(&format!("{decision}\n"))
+            } else if let Some(text) =
+                execution_brief::chain::start_for_command(&prompt, &root, parts)
+                    .and_then(execution_brief::chain::Pending::finish)
+            {
+                write_stdout(&text)
+            } else {
+                Ok(())
+            }
         }
         Command::ExecutionBrief {
             task,
@@ -5076,6 +4841,7 @@ fn run_command(
                     limit,
                     max_tier,
                     precision,
+                    regions: false,
                 },
                 no_daemon,
             )?;
@@ -5086,180 +4852,15 @@ fn run_command(
                 write_stdout(&execution_brief::pretty(&brief))
             }
         }
-        Command::PlanRollback {
-            problem,
-            path,
-            files,
-            depth,
-            apply,
-            merge,
-            stash_first,
-            allow_dirty,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            if let Some(oid) = apply {
-                let result = rescue_cmd::apply(
-                    &root,
-                    &oid,
-                    &files,
-                    &rescue_cmd::ApplyOptions {
-                        merge,
-                        stash_first,
-                        allow_dirty,
-                    },
-                )?;
-                if json {
-                    return print_data(&result, true);
-                }
-                if let Some(applied) = result["files"].as_array() {
-                    for f in applied {
-                        println!(
-                            "{}: {}{}",
-                            f["path"].as_str().unwrap_or("?"),
-                            f["action"].as_str().unwrap_or("?"),
-                            f["conflicts"]
-                                .as_i64()
-                                .filter(|c| *c > 0)
-                                .map(|c| format!(" ({c} conflict hunk(s) — resolve the markers)"))
-                                .unwrap_or_default(),
-                        );
-                    }
-                }
-                println!("{}", result["note"].as_str().unwrap_or(""));
-                return Ok(());
-            }
-            let problem = problem.ok_or_else(|| "missing problem description".to_string())?;
-            // Locate targets: explicit --file hints win; otherwise the sniper
-            // target engine points the problem at files (P0 slice).
-            let (target_paths, keywords) = if files.is_empty() {
-                let data = execute(
-                    &path,
-                    Request::Targets {
-                        task: problem.clone(),
-                        limit: Some(10),
-                        max_tier: None,
-                        precision: false,
-                    },
-                    false,
-                )?;
-                let all = data["targets"].as_array().cloned().unwrap_or_default();
-                let mut paths: Vec<String> = all
-                    .iter()
-                    .filter(|t| t["tier"] == "P0")
-                    .filter_map(|t| t["path"].as_str().map(str::to_string))
-                    .take(5)
-                    .collect();
-                if paths.is_empty() {
-                    paths = all
-                        .iter()
-                        .filter_map(|t| t["path"].as_str().map(str::to_string))
-                        .take(5)
-                        .collect();
-                }
-                let kws: Vec<String> = data["keywords"]
-                    .as_array()
-                    .map(|ks| {
-                        ks.iter()
-                            .filter_map(|k| k.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (paths, kws)
-            } else {
-                let q = pixel_rank::tokenize_task(&problem).unwrap_or_default();
-                (files.clone(), q.keywords)
-            };
-            if target_paths.is_empty() {
-                return Err(
-                    "could not locate target files for this problem — pass --file <path>"
-                        .to_string(),
-                );
-            }
-            let plan = rescue_cmd::plan(&root, &problem, &target_paths, &keywords, depth)?;
-            if json {
-                return print_data(&plan, true);
-            }
-            for t in plan["targets"].as_array().cloned().unwrap_or_default() {
-                println!(
-                    "{}{}",
-                    t["path"].as_str().unwrap_or("?"),
-                    if t["dirty"].as_bool().unwrap_or(false) {
-                        "  [DIRTY — has uncommitted changes]"
-                    } else {
-                        ""
-                    }
-                );
-                for v in t["versions"].as_array().cloned().unwrap_or_default() {
-                    println!(
-                        "  {}  {}{}",
-                        v["short"].as_str().unwrap_or("?"),
-                        v["subject"].as_str().unwrap_or(""),
-                        if v["suspect"].as_bool().unwrap_or(false) {
-                            "  [SUSPECT]"
-                        } else {
-                            ""
-                        }
-                    );
-                }
-                if let Some(rec) = t["recommended"].as_object() {
-                    println!(
-                        "  → recommended: {} ({})",
-                        rec.get("oid").and_then(Value::as_str).unwrap_or("?"),
-                        rec.get("reason").and_then(Value::as_str).unwrap_or(""),
-                    );
-                }
-                println!();
-            }
-            for c in plan["decision"]["caveats"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-            {
-                eprintln!("⚠ {}", c.as_str().unwrap_or(""));
-            }
-            if let Some(cmd) = plan["decision"]["options"][0]["command"].as_str() {
-                println!("revert: {cmd}");
-            }
-            println!("fix forward: keep current code and fix the bug in place");
-            Ok(())
-        }
-        #[cfg(feature = "readify")]
-        Command::AiCliReadify {
-            apply,
-            timeout,
-            agents,
-            json,
-            answer_prompts,
-            approve,
-            workspace,
-            authenticate,
-            account,
-        } => {
-            let opts = ai_cli_readify::Options {
-                apply,
-                timeout: Duration::from_secs(timeout),
-                agents: agents
-                    .into_iter()
-                    .map(ai_cli_readify::Agent::from)
-                    .collect(),
-                answer_prompts,
-                approve,
-                workspace,
-                authenticate,
-                account,
-            };
-            let report = ai_cli_readify::run(&opts)?;
-            if json {
-                let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
-                print_data(&value, true)
-            } else {
-                ai_cli_readify::print_report(&report);
-                Ok(())
-            }
-        }
         Command::FindSymbol { name, path, json } => {
-            let data = execute(&path, Request::Symbol { name }, false)?;
+            let data = execute(
+                &path,
+                Request::Symbol {
+                    name,
+                    stale_ok: false,
+                },
+                false,
+            )?;
             finish_graph_cmd(data, json, |d| {
                 let syms = d.get("symbols")?.as_array()?;
                 let mut output = String::new();
@@ -5277,7 +4878,14 @@ fn run_command(
             Ok(())
         }
         Command::ListSignatures { file, path, json } => {
-            let data = execute(&path, Request::Skeleton { file }, false)?;
+            let data = execute(
+                &path,
+                Request::Skeleton {
+                    file,
+                    stale_ok: false,
+                },
+                false,
+            )?;
             finish_graph_cmd(data, json, |d| {
                 let syms = d.get("symbols")?.as_array()?;
                 let fname = d.get("file")?.as_str().unwrap_or("");
@@ -5293,63 +4901,6 @@ fn run_command(
                     })
                     .collect::<Option<Vec<_>>>()?;
                 Some(audit_cmd::render_outline(fname, lang, rows))
-            })?;
-            Ok(())
-        }
-        Command::Note {
-            action,
-            file,
-            target,
-            note,
-            path,
-            json,
-        } => {
-            let data = execute(
-                &path,
-                Request::Note {
-                    action: action.clone(),
-                    file,
-                    target,
-                    note,
-                },
-                false,
-            )?;
-            finish_graph_cmd(data, json, |d| {
-                if let Some(notes) = d.get("notes").and_then(Value::as_array) {
-                    // `note list` output: grouped by file.
-                    if notes.is_empty() {
-                        return Some("no notes\n".to_string());
-                    }
-                    let mut output = String::new();
-                    for n in notes {
-                        output.push_str(&format!(
-                            "{}  {}  {}\n",
-                            n.get("file_path").and_then(Value::as_str).unwrap_or("?"),
-                            n.get("target").and_then(Value::as_str).unwrap_or("?"),
-                            n.get("note").and_then(Value::as_str).unwrap_or("?"),
-                        ));
-                    }
-                    return Some(output);
-                }
-                if let Some(n) = d.get("note") {
-                    // `note get` / `note set` echo.
-                    return Some(match n.as_str() {
-                        Some(text) => format!(
-                            "{}  {}  {}\n",
-                            d.get("file").and_then(Value::as_str).unwrap_or("?"),
-                            d.get("target").and_then(Value::as_str).unwrap_or("?"),
-                            text
-                        ),
-                        None => "no note\n".to_string(),
-                    });
-                }
-                if d.get("removed").is_some() {
-                    return Some(format!(
-                        "removed {}\n",
-                        d.get("removed").and_then(Value::as_bool).unwrap_or(false)
-                    ));
-                }
-                None
             })?;
             Ok(())
         }
@@ -5403,6 +4954,8 @@ fn run_command(
                 Request::Context {
                     uid,
                     budget_tokens: budget,
+
+                    stale_ok: false,
                 },
                 false,
             )?;
@@ -5461,6 +5014,8 @@ fn run_command(
                     uid_or_name: uid_or_name.clone(),
                     direction: dir.to_string(),
                     depth,
+
+                    stale_ok: false,
                 })?;
                 return workspace_cmd::print_fan_out(&results, json);
             }
@@ -5470,6 +5025,8 @@ fn run_command(
                     uid_or_name,
                     direction: dir.to_string(),
                     depth,
+
+                    stale_ok: false,
                 },
                 no_daemon,
             )?;
@@ -5494,6 +5051,8 @@ fn run_command(
                     uid_or_name: uid_or_name.clone(),
                     role: role_s.to_string(),
                     offset: Some(offset),
+
+                    stale_ok: false,
                 })?;
                 return workspace_cmd::print_fan_out(&results, json);
             }
@@ -5503,6 +5062,8 @@ fn run_command(
                     uid_or_name,
                     role: role_s.to_string(),
                     offset: Some(offset),
+
+                    stale_ok: false,
                 },
                 no_daemon,
             )?;
@@ -5617,7 +5178,15 @@ fn run_command(
             json,
         } => {
             let successor = call_path_successor(&from, &to, &path);
-            let mut data = execute(&path, Request::Trace { from, to }, false)?;
+            let mut data = execute(
+                &path,
+                Request::Trace {
+                    from,
+                    to,
+                    stale_ok: false,
+                },
+                false,
+            )?;
             if let Some(fields) = data.as_object_mut() {
                 fields.insert("successor".into(), successor);
             }
@@ -5648,6 +5217,26 @@ fn run_command(
                 time_budget_ms,
                 scope,
                 at_snapshot,
+                path,
+                json,
+            })));
+            Ok(())
+        }
+        Command::Cycles {
+            tiers,
+            max_nodes,
+            max_edges,
+            time_budget_ms,
+            max_components,
+            path,
+            json,
+        } => {
+            owned_exit.set(Some(cycles_cmd::run(cycles_cmd::CyclesOptions {
+                tiers,
+                max_nodes,
+                max_edges,
+                time_budget_ms,
+                max_components,
                 path,
                 json,
             })));
@@ -5724,18 +5313,21 @@ fn run_command(
             print_data(&v, json)?;
             Ok(())
         }
+        Command::GraphShadow {
+            lang,
+            path,
+            examples,
+            json,
+        } => graph_shadow_cmd::run(&path, lang, examples, json),
         Command::Coverage { path, json } => {
             coverage_cmd::run(coverage_cmd::CoverageOptions { path, json })
         }
         Command::Audit { path, top, json } => {
             audit_cmd::run(audit_cmd::AuditOptions { path, top, json })
         }
-        Command::Space {
-            path,
-            json,
-            delete,
-            yes,
-        } => space_cmd::run(path, json, delete, yes),
+        Command::Metrics { path, since, json } => {
+            metrics_cmd::run(metrics_cmd::MetricsOptions { path, since, json })
+        }
         Command::Workspace { cmd } => workspace_cmd::run(cmd),
         Command::IndexPack {
             out,
@@ -5755,6 +5347,7 @@ fn run_command(
             force,
             path,
         }),
+        Command::Reference { cmd } => reference_cmd::run(cmd),
         Command::Status {
             path,
             json,
@@ -5923,227 +5516,40 @@ fn run_command(
             let root = discover_root(&path)?;
             pixel_daemon::evidence::serve(&root, std::io::stdin().lock(), std::io::stdout())
         }
-        Command::IndexStats { path } => {
-            let path = discover_root(&path)?;
-            let shard = Shard::open(&shard_path(&path)).map_err(|e| e.to_string())?;
-            let _ = extractor_for_shard(&shard); // validates extractor id
-            write_stdout(&format!(
-                "files={} grams={} extractor={} commit={}\n",
-                shard.file_count(),
-                shard.gram_count(),
-                shard.extractor_id(),
-                shard.commit_oid().unwrap_or("-")
-            ))?;
-            Ok(())
-        }
         Command::Daemon { cmd } => match cmd {
-            DaemonCmd::Start { path, foreground } => {
-                daemon_start(discover_root(&path)?, foreground, false)
+            DaemonCmd::Start {
+                path,
+                foreground,
+                warm_meaning,
+            } => {
+                let root = discover_root(&path)?;
+                daemon_start(root.clone(), foreground, false)?;
+                if warm_meaning {
+                    kick_meaning(&root);
+                }
+                Ok(())
             }
             DaemonCmd::Stop { path } => daemon_stop(discover_root(&path)?),
             DaemonCmd::Status { path } => daemon_status(discover_root(&path)?),
         },
-        Command::Recall { cmd } => recall_cmd::run_recall(cmd),
-        Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
         Command::Classify(options) => classify::run(options),
-        Command::WebSearch { query, limit, json } => {
-            web_search::run(web_search::WebSearchOptions { query, limit, json })
-        }
-        // -------------------------------------------------------------
-        // M2 — safe git mutation ops (pixel-ops)
-        // -------------------------------------------------------------
-        Command::RepoState {
-            path,
-            files,
-            include_clean,
+        Command::ClassifyEval {
             json,
+            model_error_rate,
+            model_latency_ms,
         } => {
-            let root = discover_root(&path)?;
-            let mut data = pixel_ops::inspect::inspect(&root)?;
-            if !files.is_empty() {
-                // Filter the dirty/clean lists to the requested paths.
-                if let Some(dirty) = data.get_mut("dirty").and_then(Value::as_array_mut) {
-                    dirty.retain(|d| {
-                        d.get("path")
-                            .and_then(Value::as_str)
-                            .is_some_and(|p| files.iter().any(|f| f == p))
-                    });
-                }
-                if let Some(clean) = data.get_mut("clean").and_then(Value::as_array_mut) {
-                    clean.retain(|c| c.as_str().is_some_and(|p| files.iter().any(|f| f == p)));
-                }
-                data["dirty_count"] = json!(
-                    data.get("dirty")
-                        .and_then(Value::as_array)
-                        .map_or(0, Vec::len)
-                );
-                data["clean_count"] = json!(
-                    data.get("clean")
-                        .and_then(Value::as_array)
-                        .map_or(0, Vec::len)
-                );
-            }
-            if !include_clean {
-                compact_repo_state(&mut data);
-            }
-            print_data(&data, json)
+            // The evaluation's verdict is its exit code (0 Go, 1 NoGo); keep
+            // it rather than returning success for a NoGo.
+            owned_exit.set(Some(classify_eval::run(
+                classify_eval::ClassifyEvalOptions {
+                    json,
+                    model_error_rate,
+                    model_latency_ms,
+                },
+            )));
+            Ok(())
         }
-        Command::ReviewChanges {
-            path,
-            cursor,
-            byte_cap,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let data = pixel_ops::review::review(&root, cursor.as_deref(), byte_cap)?;
-            print_data(&data, json)
-        }
-        Command::CommitHistory {
-            path,
-            ref_,
-            limit,
-            detail,
-            cursor,
-            byte_cap,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let data = pixel_ops::history::history(
-                &root,
-                ref_.as_deref(),
-                limit,
-                &detail,
-                cursor.as_deref(),
-                byte_cap,
-            )?;
-            print_data(&data, json)
-        }
-        Command::Diff {
-            from,
-            to,
-            path,
-            paths,
-            byte_cap,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let paths_opt = if paths.is_empty() {
-                None
-            } else {
-                Some(paths.as_slice())
-            };
-            let data = pixel_ops::diff::diff(&root, &from, to.as_deref(), paths_opt, byte_cap)?;
-            print_data(&data, json)
-        }
-        Command::Commit {
-            message,
-            message_file,
-            path,
-            files,
-            push,
-            amend,
-            expected_head,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let message = commit_message(message, message_file.as_deref())?;
-            let opts = pixel_ops::publish::PublishOptions {
-                message,
-                files,
-                expected_head,
-                expected_fingerprints: std::collections::BTreeMap::new(),
-                push,
-                amend,
-                request_id,
-            };
-            let data = pixel_ops::publish::publish(&root, &opts, None)?;
-            print_data(&data, json)
-        }
-        Command::Push {
-            remote,
-            refspec,
-            path,
-            force_with_lease,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::push::PushOptions {
-                remote,
-                refspec,
-                request_id,
-                force_with_lease,
-            };
-            let data = pixel_ops::push::push(&root, &opts, None)?;
-            print_data(&data, json)
-        }
-        Command::CommitAndPush {
-            message,
-            message_file,
-            path,
-            files,
-            remote,
-            refspec,
-            force_with_lease,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let message = commit_message(message, message_file.as_deref())?;
-            let data = pixel_ops::ship::ship_with_lease(
-                &root,
-                &message,
-                &files,
-                &remote,
-                &refspec,
-                &request_id,
-                force_with_lease,
-            )?;
-            print_data(&data, json)
-        }
-        Command::NewBranch {
-            name,
-            path,
-            from,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::branch::BranchOptions {
-                name,
-                from,
-                request_id,
-            };
-            let data = pixel_ops::branch::branch(&root, &opts)?;
-            print_data(&data, json)
-        }
-        Command::FastForward {
-            path,
-            expected_head,
-            target_oid,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::update::UpdateOptions {
-                expected_head,
-                target_oid,
-                request_id,
-            };
-            let data = pixel_ops::update::update(&root, &opts)?;
-            print_data(&data, json)
-        }
-        Command::Fetch {
-            remote,
-            path,
-            refspec,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let data = pixel_ops::sync::sync(&root, &remote, refspec.as_deref())?;
-            print_data(&data, json)
-        }
+        Command::ClassifyHistory { cmd } => classify_history_cmd::run_classify_history(cmd),
         // -------------------------------------------------------------
         // M3/M4 — engines
         // -------------------------------------------------------------
@@ -6166,7 +5572,15 @@ fn run_command(
                     Ok(())
                 };
             }
-            let mut data = execute(&path, Request::Resolve { phrase, limit }, false)?;
+            let mut data = execute(
+                &path,
+                Request::Resolve {
+                    phrase,
+                    limit,
+                    stale_ok: false,
+                },
+                false,
+            )?;
             if let Ok(root) = discover_root(&path) {
                 enrich_resolve_matches_with_context(&mut data, &root);
             }
@@ -6176,163 +5590,63 @@ fn run_command(
                 print_resolve_human(&data)
             }
         }
-        Command::SearchHistory {
-            query,
-            path,
-            facet,
-            limit,
-            json,
-        } => {
-            let data = execute(
-                &path,
-                Request::History {
-                    query,
-                    facet: Some(facet),
-                    limit,
-                },
-                false,
-            )?;
-            print_data(&data, json)
-        }
-        Command::FileHistory {
-            path,
-            file,
-            token,
-            json,
-        } => {
-            let data = execute(&path, Request::Lifecycle { path: file, token }, false)?;
-            print_data(&data, json)
-        }
-        Command::DigHistory {
-            path,
-            phrase,
-            file,
-            from,
-            to,
-            limit,
-            show,
-            parent,
-            json,
-        } => {
-            if let Some(oid) = show {
-                return excavate_show(&path, &oid, file.as_deref(), parent, json);
-            }
-            let data = execute(
-                &path,
-                Request::Excavate {
-                    phrase,
-                    path: file,
-                    from,
-                    to,
-                    limit,
-                },
-                false,
-            )?;
-            print_data(&data, json)
-        }
-        Command::SyncBranch {
-            path,
-            strategy,
-            push,
-            into,
-            request_id,
-            json,
-        } => {
-            let data = execute(
-                &path,
-                Request::Reconcile {
-                    strategy: Some(strategy),
-                    push: Some(push),
-                    into,
-                    request_id,
-                },
-                false,
-            )?;
-            print_data(&data, json)
-        }
-        Command::RecordEvent {
-            kind,
-            path,
-            file,
-            detail,
-            json,
-        } => {
-            let data = execute(
-                &path,
-                Request::Journal {
-                    kind,
-                    path: file,
-                    detail,
-                },
-                false,
-            )?;
-            print_data(&data, json)
-        }
         // -------------------------------------------------------------
-        // M5/M6 — install / doctor / migrate / hook
+        // M5/M6 — install / doctor / hook
         // -------------------------------------------------------------
-        Command::Install { json, shell, repo } => {
-            let is_global_install = repo.is_none();
-            let config_root = repo.clone();
-            let stdout_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-            let interactive_banner = should_render_install_banner(json, stdout_tty);
-            let color = banner_color(std::env::var_os("NO_COLOR").as_deref());
-            if interactive_banner {
-                let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
-                if install_intro::should_play(json, stdout_tty, stdin_tty, |key| {
-                    std::env::var_os(key)
-                }) {
-                    install_intro::play();
-                }
-                write_stdout(&pixel_install::banner::render_start(color))?;
-            }
-            let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
-                shell,
-                repo,
-                ..Default::default()
-            })
-            .map_err(|e| e.to_string())?;
-            config_cmd::ensure_template(config_root.as_deref())?;
-            // Interactive UX goes to stderr so `--json` stdout stays pure.
-            let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
-            let stderr_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
-            if should_offer_classify_setup(is_global_install, json, stdin_tty, stderr_tty) {
-                config_cmd::setup()?;
-            }
-            let report_value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
-            // A person at a terminal reads the banner; `--json` and a piped
-            // stdout keep the machine-readable report an agent parses.
-            if json || !stdout_tty {
-                print_data(&report_value, json)
-            } else {
-                operation_metrics::observe(&report_value);
-                write_stdout(&pixel_install::banner::render_result(&report, color))
-            }
-        }
-        Command::Uninstall {
+        Command::Setup {
+            agent,
             json,
+            repo,
+            yes,
+            print,
+            remove,
             dry_run,
             binary_path,
-            shell,
-            wrappers_only,
-            repo,
+            selected_agents,
+            selected_features,
+            dummy_apply,
         } => {
-            let report =
-                pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
-                    binary_path,
-                    running_binary: std::env::current_exe().ok(),
-                    dry_run,
-                    shell,
-                    wrappers_only,
+            if remove {
+                setup_remove(json, dry_run, binary_path)
+            } else {
+                let options = setup_cmd::SetupOptions {
                     repo,
-                    ..Default::default()
-                })
-                .map_err(|e| e.to_string())?;
-            print_data(
-                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
-                json,
-            )
+                    print,
+                    // TEMPORARY (dev-flags): this one field, the three args above
+                    // and the three clap args in the `Setup` variant are the
+                    // whole removal in the command surface.
+                    dev: setup_cmd::DevOptions {
+                        selected_agents,
+                        selected_features,
+                        dummy_apply,
+                    },
+                };
+                // TEMPORARY (dev-flags): a released binary refuses the flags
+                // here, before the guided/unattended decision, so a refused
+                // flag never reaches a write.
+                match setup_cmd::refuse_dev_flags(&options.dev) {
+                    Some(refusal) => Err(refusal),
+                    None if print || setup_cmd::is_guided(&options, yes, json) => {
+                        setup_cmd::run(options)
+                    }
+                    None => setup_install(json, options.repo, agent),
+                }
+            }
         }
+        Command::Install {
+            source,
+            name,
+            allow_unverified,
+            json,
+        } => {
+            let unverified = if allow_unverified {
+                pixel_plugin::Unverified::Allow
+            } else {
+                pixel_plugin::Unverified::Refuse
+            };
+            plugin_cmd::install(&source, name.as_deref(), unverified, json, owned_exit)
+        }
+        Command::Uninstall { name } => plugin_cmd::uninstall(&name),
         Command::CheckRelease {
             version,
             repo,
@@ -6431,23 +5745,8 @@ fn run_command(
             // `$$` is a shell idiom and is NOT expanded by Rust, so a literal
             // name would collide between concurrent upgrades. Use the real pid,
             // and keep the temp file in `dest`'s directory so the rename stays
-            // atomic (same filesystem). Mirrors scripts/install.sh's `.pixel.tmp.$$`.
-            let tmp = dest.with_file_name(format!(
-                ".{}.tmp.{}",
-                dest.file_name().and_then(|n| n.to_str()).unwrap_or("pixel"),
-                std::process::id()
-            ));
-            if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent).map_err(|e| format!("install directory: {e}"))?;
-            }
-            std::fs::copy(&src, &tmp).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                format!("copy failed: {e}")
-            })?;
-            std::fs::rename(&tmp, &dest).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                format!("rename failed: {e}")
-            })?;
+            // atomic (same filesystem). Mirrors scripts/release/install.sh's `.pixel.tmp.$$`.
+            install_staged(&src, &dest, std::process::id())?;
             eprintln!("Installed binary: {} -> {}", src.display(), dest.display());
             if let Some(other) = upgrade_shadowed_by(&dest, path_var.as_deref()) {
                 eprintln!(
@@ -6503,37 +5802,37 @@ fn run_command(
             fix,
         } => {
             if list {
-                let catalogue = serde_json::to_value(pixel_install::doctor::CHECKS)
-                    .map_err(|e| e.to_string())?;
+                let catalogue =
+                    serde_json::to_value(pixel_setup::doctor::CHECKS).map_err(|e| e.to_string())?;
                 return if json {
                     print_data(&catalogue, true)
                 } else {
-                    write_stdout(&pixel_install::doctor::render_catalogue(
-                        pixel_install::doctor::CHECKS,
+                    write_stdout(&pixel_setup::doctor::render_catalogue(
+                        pixel_setup::doctor::CHECKS,
                     ))
                 };
             }
-            let options = discover_root(&path).map(|root| pixel_install::doctor::DoctorOptions {
+            let options = discover_root(&path).map(|root| pixel_setup::doctor::DoctorOptions {
                 repo_root: Some(root),
                 shell,
                 only,
                 skip,
                 ..Default::default()
             });
-            let run = |options: &pixel_install::doctor::DoctorOptions| {
-                pixel_install::doctor::doctor(options).map_err(|e| e.to_string())
+            let run = |options: &pixel_setup::doctor::DoctorOptions| {
+                pixel_setup::doctor::doctor(options).map_err(|e| e.to_string())
             };
             // Exit 2 keeps "the checks could not run" apart from exit 1,
             // "a check found a problem", for a script gating on doctor.
             let options = options.inspect_err(|_| owned_exit.set(Some(2)))?;
             let mut report = run(&options).inspect_err(|_| owned_exit.set(Some(2)))?;
-            let plan = pixel_install::doctor::repair_plan(&report);
+            let plan = pixel_setup::doctor::repair_plan(&report);
             let mut outcomes = None;
             if fix {
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                let (plan, left) = pixel_install::doctor::split_home_repairs(
+                let (plan, left) = pixel_setup::doctor::split_home_repairs(
                     plan.clone(),
-                    pixel_install::config::is_side_build(&exe),
+                    pixel_setup::config::is_side_build(&exe),
                 );
                 for repair in &left {
                     eprintln!(
@@ -6545,7 +5844,7 @@ fn run_command(
                     .iter()
                     .map(|repair| {
                         eprintln!("pixel doctor --fix: running {}", repair.command);
-                        pixel_install::doctor::run_repair(&exe, repair)
+                        pixel_setup::doctor::run_repair(&exe, repair)
                     })
                     .collect();
                 if !plan.is_empty() {
@@ -6556,7 +5855,7 @@ fn run_command(
                         .cloned()
                         .zip(runs)
                         .map(|(repair, ran)| {
-                            pixel_install::doctor::judge_repair(repair, ran, &report)
+                            pixel_setup::doctor::judge_repair(repair, ran, &report)
                         })
                         .collect::<Vec<_>>(),
                 );
@@ -6571,7 +5870,7 @@ fn run_command(
                 operation_metrics::observe(&value);
                 let mut text = String::new();
                 if let Some(outcomes) = &outcomes {
-                    text.push_str(&pixel_install::doctor::render_repairs(outcomes));
+                    text.push_str(&pixel_setup::doctor::render_repairs(outcomes));
                 }
                 text.push_str(&report.to_string());
                 if outcomes.is_none() && !plan.is_empty() {
@@ -6587,34 +5886,35 @@ fn run_command(
             }
             Ok(())
         }
-        Command::Migrate { .. } => {
-            eprintln!("{MIGRATE_REMOVED_NOTE}");
-            Ok(())
-        }
         Command::RunHook { cmd } => match cmd {
-            HookCmd::TaskEvent { provider, event } => task_hook::run(provider, event),
-            // Retired verbs: drain the payload the host wrote, answer nothing.
-            HookCmd::Retired(_) => {
-                let _ = hook_input::read_hook_payload();
-                std::process::exit(0);
+            HookCmd::TaskEvent {
+                provider,
+                event,
+                part,
+            } => task_hook::run(provider, event, part),
+            HookCmd::EditEvent { provider, event } => edit_hook::run(provider, event),
+            HookCmd::Metrics { provider, event } => {
+                hook_metrics::run_metrics_hook(provider, event);
             }
         },
-        Command::Config { cmd } => match cmd {
-            None => config_cmd::overview(Path::new(".")),
+        Command::Config {
+            cmd,
+            key,
+            value,
+            global,
+            path,
+        } => match cmd {
+            None => match key {
+                None => config_cmd::overview(Path::new(".")),
+                Some(key) => config_cmd::run_setting(&key, value.as_deref(), global, &path),
+            },
             Some(ConfigCmd::Setup) => config_cmd::setup(),
             Some(ConfigCmd::Classify { value }) => config_cmd::set_classify_enabled(value == "on"),
-            Some(ConfigCmd::Edit { repo, path }) => config_cmd::edit(&path, repo),
             Some(ConfigCmd::Metrics {
                 value,
                 global,
                 path,
             }) => config_cmd::run_metrics(&path, global, value.as_deref().map(|v| v == "on")),
-            Some(ConfigCmd::Policy {
-                value,
-                global,
-                json,
-                path,
-            }) => config_cmd::run_policy(&path, global, value, json),
             Some(ConfigCmd::RemoteKey {
                 preset,
                 value,
@@ -6631,9 +5931,12 @@ fn run_command(
                 Ok(())
             }
             Some(ConfigCmd::ClassifyEngine { value }) => {
-                if value == "jev" {
-                    config_cmd::set_classify_remote_model(decide_remote::Preset::Jev, None, None)?;
-                    println!("classify engine: remote (jev) stored");
+                // `jev` and the `clef-*` names are remote engines on that preset.
+                let hosted = decide_remote::Preset::parse_name(&value)
+                    .filter(|preset| *preset == decide_remote::Preset::Jev || preset.is_clef());
+                if let Some(preset) = hosted {
+                    config_cmd::set_classify_remote_model(preset, None, None)?;
+                    println!("classify engine: remote ({}) stored", preset.display());
                 } else {
                     config_cmd::set_classify_engine(&value)?;
                     println!("classify engine: {value} stored");
@@ -6642,117 +5945,6 @@ fn run_command(
             }
         },
         Command::TaskState { cmd } => task_commands::run(cmd),
-        Command::ActionLog {
-            path,
-            limit,
-            errors_only,
-            json,
-            clear,
-        } => run_log(&path, limit, errors_only, json, clear),
-        Command::TokenSavings {
-            path,
-            json,
-            since_hours,
-        } => run_savings(&path, json, since_hours),
-        Command::SquashBranch {
-            path,
-            onto,
-            message,
-            push,
-            remote,
-            expected_head,
-            allow_default_branch,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::rewrite::RewriteOptions {
-                onto,
-                message,
-                push,
-                remote,
-                request_id,
-                expected_head,
-                allow_default_branch,
-            };
-            let data = pixel_ops::rewrite::rewrite(&root, &opts)?;
-            print_data(&data, json)
-        }
-        Command::WhoWrote {
-            file,
-            path,
-            lines,
-            author,
-            limit_regions,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::provenance::ProvenanceOptions {
-                file,
-                lines,
-                author,
-                limit_regions,
-            };
-            let data = pixel_ops::provenance::provenance(&root, &opts)?;
-            print_data(&data, json)
-        }
-        Command::ListBranches {
-            path,
-            fetch,
-            remote,
-            stale_days,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::branches::BranchesOptions {
-                fetch,
-                remote,
-                stale_days,
-            };
-            let data = pixel_ops::branches::branches(&root, &opts)?;
-            print_data(&data, json)
-        }
-        Command::EditEnv { cmd } => {
-            use pixel_ops::envfile::EnvAction;
-            let (path, json, action) = match cmd {
-                EnvCmd::Inventory { path, json } => (path, json, EnvAction::Inventory),
-                EnvCmd::Set {
-                    file,
-                    key,
-                    value,
-                    create_file,
-                    path,
-                    json,
-                } => (
-                    path,
-                    json,
-                    EnvAction::Set {
-                        file,
-                        key,
-                        value,
-                        create_file,
-                    },
-                ),
-                EnvCmd::Restore {
-                    file,
-                    snapshot,
-                    path,
-                    json,
-                } => (path, json, EnvAction::Restore { file, snapshot }),
-                EnvCmd::Snapshots { file, path, json } => {
-                    (path, json, EnvAction::Snapshots { file })
-                }
-                EnvCmd::Check {
-                    file,
-                    require,
-                    path,
-                    json,
-                } => (path, json, EnvAction::Check { file, require }),
-            };
-            let root = discover_root(&path)?;
-            let data = pixel_ops::envfile::envfile(&root, &action)?;
-            print_data(&data, json)
-        }
         Command::Plan {
             prompt,
             path,
@@ -6787,134 +5979,33 @@ fn run_command(
                 json,
             })
         }
-        Command::Ultraflow(options) => ultraflow_cmd::run(options),
-        Command::Flow { cmd } => {
-            use pixel_flow::FlowAction;
-            let json = match &cmd {
-                FlowCmd::Save { json, .. }
-                | FlowCmd::Get { json, .. }
-                | FlowCmd::List { json, .. }
-                | FlowCmd::Revise { json, .. }
-                | FlowCmd::Replay { json, .. }
-                | FlowCmd::Run { json, .. }
-                | FlowCmd::Delete { json, .. }
-                | FlowCmd::Show { json, .. } => *json,
-            };
-            let action = match cmd {
-                FlowCmd::Save {
-                    name,
-                    title,
-                    description,
-                    tags,
-                    url,
-                    from_file,
-                    json: _,
-                } => FlowAction::Save {
-                    name,
-                    title,
-                    description,
-                    tags,
-                    url,
-                    from_file: Some(from_file),
-                },
-                FlowCmd::Get { name, json: _ } => FlowAction::Get { name },
-                FlowCmd::List { tag, json: _ } => FlowAction::List { tag },
-                FlowCmd::Revise {
-                    name,
-                    title,
-                    description,
-                    from_file,
-                    json: _,
-                } => FlowAction::Revise {
-                    name,
-                    title,
-                    description,
-                    from_file,
-                },
-                FlowCmd::Replay {
-                    name,
-                    vars,
-                    account,
-                    json: _,
-                } => {
-                    let vars = flow_vars(&name, &vars, &account)?;
-                    FlowAction::Run {
-                        name,
-                        vars,
-                        dry_run: false,
-                    }
-                }
-                FlowCmd::Run {
-                    name,
-                    vars,
-                    account,
-                    json: _,
-                } => {
-                    let vars = flow_vars(&name, &vars, &account)?;
-                    FlowAction::Execute { name, vars }
-                }
-                FlowCmd::Delete { name, json: _ } => FlowAction::Delete { name },
-                FlowCmd::Show { name, json: _ } => FlowAction::Show { name },
-            };
-            let data = pixel_flow::flow(&action)?;
-            if matches!(action, FlowAction::Execute { .. })
-                && data.get("success").and_then(serde_json::Value::as_bool) != Some(true)
-            {
-                return Err(format!(
-                    "flow execution failed: {}",
-                    data.get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("flow did not complete successfully")
-                ));
-            }
-            if json {
-                return print_data(&data, true);
-            }
-            // For replay and show, the output field contains human-readable
-            // text — print it directly to stdout. For everything else, use
-            // the standard print_data path (JSON or pretty).
-            match &action {
-                FlowAction::Run { .. } | FlowAction::Show { .. } => {
-                    if let Some(output) = data.get("output").and_then(|v| v.as_str()) {
-                        println!("{output}");
-                        Ok(())
-                    } else {
-                        print_data(&data, true)
-                    }
-                }
-                FlowAction::Execute { .. } => {
-                    // Print the execution log to stderr, result summary to stdout.
-                    if let Some(log) = data.get("log").and_then(|v| v.as_str()) {
-                        eprintln!("{log}");
-                    }
-                    let success = data
-                        .get("success")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false);
-                    let steps = data
-                        .get("steps_executed")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
-                    let skipped = data
-                        .get("steps_skipped")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
-                    if success {
-                        println!("✓ Flow executed: {} steps, {} skipped", steps, skipped);
-                    } else if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
-                        println!("✗ Flow failed after {} steps: {}", steps, err);
-                    } else {
-                        println!(
-                            "~ Flow completed with warnings: {} steps, {} skipped",
-                            steps, skipped
-                        );
-                    }
-                    Ok(())
-                }
-                _ => print_data(&data, true),
-            }
+        Command::Prompts { json, limit } => {
+            prompts_cmd::run(json, limit);
+            Ok(())
         }
+        Command::Plugin { cmd } => plugin_cmd::run(cmd),
+        Command::Completions { shell } => write_stdout(&completion_script(shell)),
+        Command::Man => write_stdout(&man_page()?),
     }
+}
+
+/// The completion script for `shell`, generated from the live clap tree so
+/// every subcommand and flag of this binary is in it. Rendered to memory
+/// first: clap_complete panics on a write error, and a reader that closes
+/// the pipe early (`| head`) is not one.
+fn completion_script(shell: clap_complete::Shell) -> String {
+    let mut out = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "pixel", &mut out);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The `pixel(1)` man page (roff), generated from the live clap tree.
+fn man_page() -> Result<String, String> {
+    let mut out = Vec::new();
+    clap_mangen::Man::new(Cli::command())
+        .render(&mut out)
+        .map_err(|e| format!("pixel man: {e}"))?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 fn should_offer_classify_setup(
@@ -6964,6 +6055,8 @@ fn run_query(
                 Request::Resolve {
                     phrase: phrase.into(),
                     limit: None,
+
+                    stale_ok: false,
                 },
                 no_daemon,
             )?
@@ -6975,6 +6068,7 @@ fn run_query(
                 limit: None,
                 max_tier: None,
                 precision: false,
+                regions: false,
             },
             no_daemon,
         )?,
@@ -6986,6 +6080,8 @@ fn run_query(
                     uid_or_name: target.into(),
                     direction: "upstream".into(),
                     depth: Some(3),
+
+                    stale_ok: false,
                 },
                 no_daemon,
             )?
@@ -6998,6 +6094,7 @@ fn run_query(
                 from: None,
                 to: None,
                 limit: None,
+                read_only: false,
             },
             no_daemon,
         )?,
@@ -7020,6 +6117,12 @@ const LOCATE_MAX_TARGETS: usize = 3;
 /// What every locate answer says about the test files it lists.
 const LOCATE_TESTS_NOTE: &str = "test files among the callers at depth 1; Rust #[test] \
      functions are not indexed, so an empty list is not an absence of tests";
+
+/// Tokens a rendered value costs, by the bytes/4 convention
+/// `pixel_context::estimate_tokens` uses.
+fn estimate_tokens(text: &str) -> usize {
+    text.len().div_ceil(4)
+}
 
 /// `run-recipe --kind locate`: resolve the phrase, show the context of the
 /// symbols it singles out (fresh source only, one shared budget), list the
@@ -7052,6 +6155,8 @@ fn run_locate(
         Request::Resolve {
             phrase: phrase.clone(),
             limit: None,
+
+            stale_ok: false,
         },
         no_daemon,
     )?;
@@ -7070,6 +6175,8 @@ fn run_locate(
                 Request::Context {
                     uid,
                     budget_tokens: Some(share),
+
+                    stale_ok: false,
                 },
                 no_daemon,
             )
@@ -7150,6 +6257,8 @@ fn run_locate(
                 uid_or_name: uid.clone(),
                 role: "callers".into(),
                 offset: None,
+
+                stale_ok: false,
             },
             no_daemon,
         )?;
@@ -7169,6 +6278,7 @@ fn run_locate(
                 limit: Some(5),
                 max_tier: None,
                 precision: false,
+                regions: false,
             },
             no_daemon,
         )?;
@@ -7209,7 +6319,7 @@ fn run_locate(
         "next_action": next_action,
         "limits": limits,
     });
-    let tokens = |v: &Value| recall_cmd::estimate_tokens(&v.to_string());
+    let tokens = |v: &Value| estimate_tokens(&v.to_string());
     fit_locate_to_budget(&mut locate, budget, tokens);
     result.evidence.clear();
     let output = json!({
@@ -7277,227 +6387,6 @@ fn render_locate(locate: &Value) -> String {
         out.push_str(&format!("limit: {}\n", limit.as_str().unwrap_or_default()));
     }
     out
-}
-
-/// How many trailing log entries `pixel log` reads. Over-fetch when
-/// filtering to errors so `limit` still means "the last N errors", not "the
-/// last N entries, some of which happen to be errors".
-fn log_fetch_count(limit: usize, errors_only: bool) -> usize {
-    if errors_only {
-        limit.max(1) * 20
-    } else {
-        limit.max(1)
-    }
-}
-
-/// The last `limit` of the tailed entries, errors only when asked.
-fn select_log_events(
-    mut events: Vec<pixel_actionlog::ActionEvent>,
-    limit: usize,
-    errors_only: bool,
-) -> Vec<pixel_actionlog::ActionEvent> {
-    if errors_only {
-        events.retain(|e| e.outcome == pixel_actionlog::Outcome::Error);
-    }
-    if events.len() > limit {
-        let start = events.len() - limit;
-        events.drain(0..start);
-    }
-    events
-}
-
-/// `pixel log` — the self-assessment surface over the async action log every
-/// pixel invocation writes to `<root>/.pixel/actions.jsonl`.
-fn run_log(
-    path: &Path,
-    limit: usize,
-    errors_only: bool,
-    json: bool,
-    clear: bool,
-) -> Result<(), String> {
-    let root = discover_root(path)?;
-    let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
-    if clear {
-        return match std::fs::remove_file(&log_path) {
-            Ok(()) => {
-                println!("action log cleared: {}", log_path.display());
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                println!("no action log at {}", log_path.display());
-                Ok(())
-            }
-            Err(e) => Err(format!("remove {}: {e}", log_path.display())),
-        };
-    }
-    let tailed = pixel_actionlog::tail(&log_path, log_fetch_count(limit, errors_only))
-        .map_err(|e| format!("read {}: {e}", log_path.display()))?;
-    let events = select_log_events(tailed, limit, errors_only);
-    if json {
-        for e in &events {
-            println!("{}", serde_json::to_string(e).map_err(|e| e.to_string())?);
-        }
-        return Ok(());
-    }
-    if events.is_empty() {
-        println!("no recorded actions at {}", log_path.display());
-        return Ok(());
-    }
-    let now = pixel_actionlog::now_ms();
-    for e in &events {
-        let when = relative_time(e.ts_ms, now);
-        match e.outcome {
-            pixel_actionlog::Outcome::Ok => {
-                println!(
-                    "{when:>8}  ok     {:<10} {} ({} ms)",
-                    e.command, e.args, e.duration_ms
-                );
-            }
-            pixel_actionlog::Outcome::Error => {
-                println!(
-                    "{when:>8}  ERROR  {:<10} {} ({} ms) — {}",
-                    e.command,
-                    e.args,
-                    e.duration_ms,
-                    e.error.as_deref().unwrap_or("?")
-                );
-            }
-        }
-        if let Some(line) = pixel_actionlog::format_metrics_line(e) {
-            println!("  {line}");
-        }
-    }
-    Ok(())
-}
-
-/// Per-command aggregate of `pixel savings`: invocations, pool chars,
-/// snippet chars.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct SavingsAgg {
-    count: u64,
-    pool: u64,
-    snippet: u64,
-}
-
-/// The events at or after `cutoff_ms` (all of them without a cutoff).
-fn savings_window(
-    events: &[pixel_actionlog::ActionEvent],
-    cutoff_ms: Option<i64>,
-) -> Vec<pixel_actionlog::ActionEvent> {
-    events
-        .iter()
-        .filter(|e| cutoff_ms.is_none_or(|c| e.ts_ms >= c))
-        .cloned()
-        .collect()
-}
-
-/// Pool and snippet chars per command, over the events that recorded both.
-fn savings_by_command(
-    events: &[pixel_actionlog::ActionEvent],
-) -> std::collections::BTreeMap<String, SavingsAgg> {
-    let mut by_cmd = std::collections::BTreeMap::<String, SavingsAgg>::new();
-    for e in events {
-        let (Some(snippet), Some(pool)) = (e.snippet_cap_chars, e.pool_chars) else {
-            continue; // not retrieval-shaped (or volumes not recorded)
-        };
-        let agg = by_cmd.entry(e.command.clone()).or_default();
-        agg.count += 1;
-        agg.pool = agg.pool.saturating_add(pool);
-        agg.snippet = agg.snippet.saturating_add(snippet);
-    }
-    by_cmd
-}
-
-/// The share of the pool the snippets did not return; 0 for an empty pool.
-fn savings_ratio(snippet: u64, pool: u64) -> f64 {
-    if pool > 0 {
-        1.0 - (snippet as f64 / pool as f64)
-    } else {
-        0.0
-    }
-}
-
-/// Preserve legacy snippet/pool reports, separately aggregate versioned
-/// invocation metrics. Old measurements are never silently reclassified as a workflow version.
-fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), String> {
-    let root = discover_root(path)?;
-    let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
-    // Over-fetch; savings is a lightweight aggregate read.
-    let events = pixel_actionlog::tail(&log_path, 1_000_000)
-        .map_err(|e| format!("read {}: {e}", log_path.display()))?;
-    let cutoff_ms = since_hours.map(|h| {
-        pixel_actionlog::now_ms().saturating_sub(
-            i64::try_from(h)
-                .unwrap_or(i64::MAX)
-                .saturating_mul(3_600_000),
-        )
-    });
-    let filtered = savings_window(&events, cutoff_ms);
-    let workflow_metrics = pixel_actionlog::summarize_metrics(&filtered);
-    let by_cmd = savings_by_command(&filtered);
-
-    let tot_pool: u64 = by_cmd.values().map(|a| a.pool).sum();
-    let tot_snippet: u64 = by_cmd.values().map(|a| a.snippet).sum();
-    let overall = savings_ratio(tot_snippet, tot_pool);
-
-    if json {
-        let rows: Vec<serde_json::Value> = by_cmd
-            .iter()
-            .map(|(cmd, a)| {
-                let ratio = savings_ratio(a.snippet, a.pool);
-                serde_json::json!({
-                    "command": cmd,
-                    "calls": a.count,
-                    "pool_chars": a.pool,
-                    "snippet_chars": a.snippet,
-                    "savings": ratio,
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::json!({
-                "overall_savings": overall,
-                "total_pool_chars": tot_pool,
-                "total_snippet_chars": tot_snippet,
-                "by_command": rows,
-                "legacy_basis": "legacy snippet/pool byte comparison; not a workflow estimate",
-                "workflow_metrics": workflow_metrics,
-            })
-        );
-        return Ok(());
-    }
-
-    println!("workflow metrics (measured bytes/duration; versioned byte-based token estimates)");
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&workflow_metrics).map_err(|e| e.to_string())?
-    );
-    println!("legacy savings (snippet vs candidate-pool chars; not a workflow estimate)");
-    println!(
-        "{:<14} {:>5}  {:>12}  {:>14}  {:>7}",
-        "command", "calls", "pool_chars", "snippet_chars", "savings"
-    );
-    for (cmd, a) in &by_cmd {
-        let ratio = savings_ratio(a.snippet, a.pool);
-        println!(
-            "{:<14} {:>5}  {:>12}  {:>14}  {:>6.1}%",
-            cmd,
-            a.count,
-            a.pool,
-            a.snippet,
-            ratio * 100.0
-        );
-    }
-    println!(
-        "{:<14} {:>5}  {:>12}  {:>14}  {:>6.1}%",
-        "TOTAL",
-        by_cmd.values().map(|a| a.count).sum::<u64>(),
-        tot_pool,
-        tot_snippet,
-        overall * 100.0
-    );
-    Ok(())
 }
 
 /// `pixel ask "<question>"` — semantic code search via static embeddings.
@@ -7573,61 +6462,41 @@ fn run_ask(
     Ok(())
 }
 
-fn relative_time(ts_ms: i64, now_ms: i64) -> String {
-    let delta_ms = (now_ms - ts_ms).max(0);
-    let secs = delta_ms / 1000;
-    if secs < 5 {
-        "just now".to_string()
-    } else if secs < 60 {
-        format!("{secs}s ago")
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
+/// Whether a parse error belongs to a `run-hook` invocation and is a real
+/// error (help and version requests are not): a host hook never fails with
+/// clap's exit code 2. `hook` is the verb old installs registered.
+fn fails_open(argv: &[String], error: &clap::Error) -> bool {
+    matches!(subcommand_token(argv), Some("run-hook" | "hook")) && error.use_stderr()
 }
+
+/// The subcommand a raw argv names: its first token that is neither an
+/// option nor the value of a global option taking one (`--metrics off`). An
+/// option this binary does not know (a newer install's global flag) is
+/// skipped as a switch, so `pixel -v run-hook …` still names `run-hook`.
+fn subcommand_token(argv: &[String]) -> Option<&str> {
+    let mut args = argv.iter().skip(1).map(String::as_str);
+    while let Some(arg) = args.next() {
+        if arg == "--metrics" {
+            args.next();
+        } else if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
+}
+
+/// The system allocator is a general-purpose one; pixel's allocation shape
+/// is not. The daemon answers many small requests from several connection
+/// threads at once, and `prepare-repo` allocates a row per symbol, so the
+/// allocator sits on both hot paths.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
     }
-}
-
-/// Dry-run parse one `pixel …` argv (including the leading "pixel") against
-/// this binary's real clap definition — nothing is executed. Used by
-/// `pixel doctor`'s rule-vs-binary parity check so the installed rule text
-/// can never document syntax the parser would reject.
-/// The commit message of `publish`/`ship`: `-m <text>`, or the content of
-/// `--message-file <path>` (`-` reads stdin). Clap guarantees exactly one
-/// of the two is present.
-fn commit_message(inline: Option<String>, file: Option<&Path>) -> Result<String, String> {
-    let raw = match (inline, file) {
-        (Some(text), _) => text,
-        (None, Some(path)) if path == Path::new("-") => {
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
-                .map_err(|e| format!("cannot read commit message from stdin: {e}"))?;
-            text
-        }
-        (None, Some(path)) => std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read commit message file {}: {e}", path.display()))?,
-        (None, None) => return Err("a commit message is required (-m or --message-file)".into()),
-    };
-    normalize_commit_message(&raw)
-}
-
-/// Trailing whitespace goes (an editor's final newline would otherwise
-/// become a blank trailer line); a blank message is refused before git
-/// sees it, so no journal entry is written for a commit git would reject.
-fn normalize_commit_message(raw: &str) -> Result<String, String> {
-    let text = raw.trim_end();
-    if text.trim().is_empty() {
-        return Err("commit message is empty".into());
-    }
-    Ok(text.to_string())
 }
 
 /// Dry-runs one `pixel …` argv against the real clap definition; the
@@ -7671,7 +6540,7 @@ fn parse_error_summary(rendered: &str) -> String {
 /// `None` when the argv has no sentinel or both values bound to one argument.
 #[cfg(test)]
 fn variadic_sentinel_misfit(args: &[String]) -> Option<String> {
-    use pixel_install::doctor::VARIADIC_SENTINEL;
+    use pixel_setup::doctor::VARIADIC_SENTINEL;
     let sentinel = args.iter().position(|a| a == VARIADIC_SENTINEL)?;
     let mut root = Cli::command();
     root.build();
@@ -7699,67 +6568,6 @@ fn variadic_sentinel_misfit(args: &[String]) -> Option<String> {
             arg.get_id()
         )
     })
-}
-
-/// `pixel excavate --show <oid> --file <path>`: full historical file content
-/// in ONE call — the follow-up to an excavate candidate list that previously
-/// forced agents into raw `git show`/`git log` rounds. Reads `<oid>:<path>`
-/// through the safe `pixel_git::GitRunner` (ref-validated, output-capped);
-/// when the file does not exist at `<oid>` (e.g. `<oid>` is the deletion
-/// commit itself) it falls back to `<oid>^:<path>` — the pre-deletion
-/// content — and says so. `--parent` skips straight to the parent read.
-/// Implemented CLI-side (no daemon/proto round-trip): the content lives in
-/// the object store, not the facts db, so a direct git read is exact.
-fn excavate_show(
-    path: &Path,
-    oid: &str,
-    file: Option<&str>,
-    parent: bool,
-    json: bool,
-) -> Result<(), String> {
-    let Some(file) = file else {
-        return Err("dig-history --show requires --file <repo-relative path>".to_string());
-    };
-    let root = discover_root(path)?;
-    let runner = pixel_git::GitRunner::new(&root);
-    let (content, source, parent_fallback) = if parent {
-        let c = runner
-            .show_blob_string_at_parent(oid, file)
-            .map_err(|e| format!("cannot read {oid}^:{file}: {e}"))?;
-        (c, format!("{oid}^:{file}"), false)
-    } else {
-        match runner.show_blob_string(oid, file) {
-            Ok(c) => (c, format!("{oid}:{file}"), false),
-            Err(at_oid_err) => match runner.show_blob_string_at_parent(oid, file) {
-                Ok(c) => (c, format!("{oid}^:{file}"), true),
-                Err(_) => {
-                    return Err(format!(
-                        "{file} exists neither at {oid} nor at {oid}^: {at_oid_err}"
-                    ));
-                }
-            },
-        }
-    };
-    if json {
-        let data = serde_json::json!({
-            "oid": oid,
-            "file": file,
-            "source": source,
-            "parent_fallback": parent_fallback,
-            "content": content,
-        });
-        print_data(&data, true)
-    } else {
-        if parent_fallback {
-            eprintln!(
-                "pixel: {file} does not exist at {oid}; showing the parent's \
-                 pre-deletion content ({source})"
-            );
-        } else {
-            eprintln!("pixel: {source}");
-        }
-        write_stdout(&content)
-    }
 }
 
 #[cfg(test)]
@@ -7979,7 +6787,7 @@ mod tests {
 
     /// The `--json` failure envelope is decided from the parsed flag, not
     /// from argv: `--json` counts only where the command declares it, and it
-    /// counts through a nested subcommand (`list-errors last --json`), whose
+    /// counts through a nested subcommand (`reference list --json`), whose
     /// flag the top-level matches cannot see. Parsed on a thread with a 4 MiB
     /// stack — the derived command tree overflows the 2 MiB a test thread
     /// gets, the same reason `validate_cli_syntax` spawns one.
@@ -7996,7 +6804,7 @@ mod tests {
         }
 
         assert!(parsed(&["pixel", "status", ".", "--json"]));
-        assert!(parsed(&["pixel", "list-errors", "last", "--json"]));
+        assert!(parsed(&["pixel", "reference", "list", "--json"]));
         assert!(!parsed(&["pixel", "status", "."]));
         // A nested command with no `json` argument of its own: false, not a
         // flag inherited from somewhere in argv.
@@ -8048,37 +6856,20 @@ mod tests {
     #[test]
     fn canonical_rule_command_lines_parse_against_the_real_cli() {
         let canonical = [
-            // NOTE: the historical rule text wrote `[--path <path>]` here —
-            // the real flag is `--file`. That drift is exactly what the
-            // runtime `rule.parity` doctor check flags.
-            r#"pixel dig-history --phrase "<what you're looking for>" [--file <path>] [--json]"#,
-            r#"pixel plan-rollback "<what broke, in the user's words>" /path/to/repo [--json]"#,
-            r#"pixel plan-rollback --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]"#,
             r#"pixel find-code "<phrase>" /path/to/repo [--json] [--limit N]"#,
             r#"pixel search-content "<pattern>" /path/to/repo --context 5 [--json] [--limit N]"#,
-            r#"pixel sync-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"#,
             r#"pixel scope-task "<one-line task description>" /path/to/repo [--json] [--limit N]"#,
             r#"pixel scope-task --clear /path/to/repo"#,
             r#"pixel impact <symbol_name_or_uid> /path/to/repo [--direction upstream|downstream] [--depth N] [--json]"#,
             r#"pixel what-changed /path/to/repo [--base <ref>] [--json]"#,
-            r#"pixel repo-state /path/to/repo [--json]"#,
-            r#"pixel review-changes /path/to/repo [--json]"#,
-            r#"pixel commit-history /path/to/repo [--ref <ref>] [--limit N] [--json]"#,
-            r#"pixel diff <from> /path/to/repo [--paths <p1> --paths <p2>] [--json]"#,
-            r#"pixel commit --files <f1> --files <f2> --message "<msg>" --request-id <id> /path/to/repo"#,
-            r#"pixel push <remote> <refspec> /path/to/repo --request-id <id>"#,
-            r#"pixel commit-and-push --files <f1> --files <f2> --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
-            r#"pixel new-branch <name> /path/to/repo --request-id <id>"#,
-            r#"pixel fetch <remote> /path/to/repo [--json]"#,
-            r#"pixel fast-forward /path/to/repo --expected-head <oid> --target-oid <oid> --request-id <id>"#,
             r#"pixel status /path/to/repo"#,
             r#"pixel build-index --history ."#,
-            r#"pixel install"#,
+            r#"pixel setup"#,
             r#"pixel doctor"#,
         ];
         let mut failures = Vec::new();
         for line in canonical {
-            match pixel_install::doctor::normalize_rule_command(line) {
+            match pixel_setup::doctor::normalize_rule_command(line) {
                 None => failures.push(format!("`{line}` did not normalize")),
                 Some(argv) => {
                     if let Err(e) = validate_cli_syntax(&argv) {
@@ -8094,30 +6885,20 @@ mod tests {
         );
     }
 
-    /// `--files` and `--paths` take one value per occurrence, so a rule line
-    /// that shows several values after one flag teaches an agent a command
-    /// the CLI rejects: the parity check must go red on it, not validate the
-    /// single-value reading, even where the extra value parses as a PATH.
+    /// A flag that takes one value per occurrence must not be shown with
+    /// `...`: a rule line that does teaches an agent a command the CLI
+    /// rejects, so the parity check must go red on it, not validate the
+    /// single-value reading. The extra value lands in a multi-value
+    /// positional (`paths`), which takes several values but not this flag's.
     #[test]
     fn variadic_single_value_flags_are_rejected_as_documented() {
-        for line in [
-            r#"pixel commit --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
-            r#"pixel commit-and-push --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
-            // No explicit PATH: the second value would bind to the defaulted
-            // positional and parse, so only the sentinel's trace catches it.
-            r#"pixel commit --files <f>... --message "<msg>" --request-id <id>"#,
-            r#"pixel diff <from> [--paths <p>...] [--json]"#,
-            // The second value lands in a multi-value positional (`paths`),
-            // which takes several values but not this flag's.
-            r#"pixel search-content "<re>" --glob <g>..."#,
-        ] {
-            let argv = pixel_install::doctor::normalize_rule_command(line)
-                .unwrap_or_else(|| panic!("`{line}` did not normalize"));
-            assert!(
-                validate_cli_syntax(&argv).is_err(),
-                "`{line}` → argv {argv:?} should be rejected by the CLI parser"
-            );
-        }
+        let line = r#"pixel search-content "<re>" --glob <g>..."#;
+        let argv = pixel_setup::doctor::normalize_rule_command(line)
+            .unwrap_or_else(|| panic!("`{line}` did not normalize"));
+        assert!(
+            validate_cli_syntax(&argv).is_err(),
+            "`{line}` → argv {argv:?} should be rejected by the CLI parser"
+        );
     }
 
     /// An argument that does take several values per occurrence keeps its
@@ -8127,7 +6908,7 @@ mod tests {
         // The sentinel is the last value, so it is held only if its first
         // value's argument is found at the index just before it.
         let line = "pixel search-content \"<re>\" <path>...";
-        let argv = pixel_install::doctor::normalize_rule_command(line)
+        let argv = pixel_setup::doctor::normalize_rule_command(line)
             .unwrap_or_else(|| panic!("`{line}` did not normalize"));
         assert_eq!(validate_cli_syntax(&argv), Ok(()), "argv {argv:?}");
     }
@@ -8157,12 +6938,6 @@ mod tests {
                 "worker-start".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "plan-rollback".into(),
-                "--limit".into(),
-                "3".into(),
             ],
         ] {
             assert!(
@@ -8217,28 +6992,6 @@ mod tests {
                 "session-123".into(),
                 "/repo".into(),
                 "--json".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "reset".into(),
-                "--session".into(),
-                "session-123".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "run-hook".into(),
-                "prompt-submit".into(),
-                "--provider".into(),
-                "claude".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "run-hook".into(),
-                "post-compaction".into(),
-                "--provider".into(),
-                "claude".into(),
             ],
         ] {
             assert!(validate_cli_syntax(&argv).is_ok(), "argv {argv:?}");
@@ -8413,6 +7166,119 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// A scratch source file of `lines` numbered lines, and its directory.
+    fn numbered_source(tag: &str, lines: usize) -> (PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("pixel-resolve-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body: String = (1..=lines).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("big.rb"), body).unwrap();
+        (dir, "big.rb".to_string())
+    }
+
+    #[test]
+    fn resolve_context_should_cut_a_long_body_and_name_the_cap() {
+        let (root, rel) = numbered_source("cut", 200);
+        let mut data = serde_json::json!({
+            "matches": [{"path": rel, "start_line": 10, "end_line": 150}]
+        });
+        enrich_resolve_matches_with_context(&mut data, &root);
+        let ctx = data["matches"][0]["context"].as_str().unwrap();
+        let lines: Vec<&str> = ctx.lines().collect();
+        // Two margin lines, then the body up to the cap, then where it ends.
+        assert_eq!(lines.len(), RESOLVE_CONTEXT_TOP_LINES + 1, "{ctx}");
+        assert_eq!(lines[0], "       8: line 8");
+        assert_eq!(lines[RESOLVE_CONTEXT_TOP_LINES - 1], ">>    23: line 23");
+        assert_eq!(
+            lines[RESOLVE_CONTEXT_TOP_LINES],
+            "   … 127 more lines, to big.rb:150"
+        );
+        assert_eq!(
+            data["caps"],
+            serde_json::json!([
+                "context: 1 match bodies cut (16 lines for the first, 4 for the others)"
+            ])
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_context_should_point_a_match_inside_a_shown_body_back_to_it() {
+        let (root, rel) = numbered_source("inside", 60);
+        let mut data = serde_json::json!({
+            "matches": [
+                {"path": rel, "start_line": 5, "end_line": 20},
+                {"path": rel, "start_line": 8, "end_line": 12},
+                // Inside the first span, but past what the cap printed.
+                {"path": rel, "start_line": 40, "end_line": 41},
+                {"path": "other.rb", "start_line": 8, "end_line": 12},
+            ]
+        });
+        std::fs::write(root.join("other.rb"), "a\n".repeat(20)).unwrap();
+        enrich_resolve_matches_with_context(&mut data, &root);
+        assert_eq!(
+            data["matches"][1]["context"],
+            "   (inside big.rb:5, shown above)"
+        );
+        // Its body fits: only the trailing margin is dropped, with no pointer.
+        assert_eq!(
+            data["matches"][2]["context"],
+            "      38: line 38\n      39: line 39\n>>    40: line 40\n>>    41: line 41"
+        );
+        // The same lines in another file are another body, and as a later
+        // match it gets the shorter head.
+        let other: Vec<&str> = data["matches"][3]["context"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .collect();
+        assert_eq!(other.len(), RESOLVE_CONTEXT_OTHER_LINES + 1, "{other:?}");
+        assert_eq!(other[0], "       6: a");
+        assert_eq!(
+            other[RESOLVE_CONTEXT_OTHER_LINES],
+            "   … 3 more lines, to other.rb:12"
+        );
+        assert_eq!(
+            data["caps"],
+            serde_json::json!([
+                "context: 2 match bodies cut (16 lines for the first, 4 for the others)",
+                "context: 1 matches inside a body shown above, not repeated"
+            ])
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_context_should_keep_the_caps_the_daemon_named_and_add_none_when_nothing_fired() {
+        let (root, rel) = numbered_source("keep", 300);
+        let mut short = serde_json::json!({
+            "matches": [{"path": rel, "start_line": 3, "end_line": 6}],
+            "caps": ["semantic leads (unverified)"],
+        });
+        enrich_resolve_matches_with_context(&mut short, &root);
+        assert_eq!(
+            short["caps"],
+            serde_json::json!(["semantic leads (unverified)"])
+        );
+        let mut bare = serde_json::json!({
+            "matches": [{"path": rel, "start_line": 3, "end_line": 6}]
+        });
+        enrich_resolve_matches_with_context(&mut bare, &root);
+        assert!(bare.get("caps").is_none(), "{bare}");
+        let mut long = serde_json::json!({
+            "matches": [{"path": rel, "start_line": 3, "end_line": 290}],
+            "caps": ["semantic leads (unverified)"],
+        });
+        enrich_resolve_matches_with_context(&mut long, &root);
+        assert_eq!(
+            long["caps"],
+            serde_json::json!([
+                "semantic leads (unverified)",
+                "context: 1 match bodies cut (16 lines for the first, 4 for the others)"
+            ])
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn resolve_context_skips_match_with_no_start_line() {
         let mut data = serde_json::json!({
@@ -8501,16 +7367,16 @@ mod tests {
 /// fail the build.
 #[cfg(test)]
 mod prompt_asset_parity {
-    use pixel_install::doctor::{extract_rule_commands, normalize_rule_command};
+    use pixel_setup::doctor::{extract_rule_commands, normalize_rule_command};
 
     const ASSETS: [(&str, &str); 2] = [
         (
             "pixel-agent-prompt.md",
-            include_str!("../../pixel-install/assets/pixel-agent-prompt.md"),
+            include_str!("../../pixel-setup/assets/pixel-agent-prompt.md"),
         ),
         (
             "pixel-subagent-prompt.md",
-            include_str!("../../pixel-install/assets/pixel-subagent-prompt.md"),
+            include_str!("../../pixel-setup/assets/pixel-subagent-prompt.md"),
         ),
     ];
 
@@ -8581,32 +7447,33 @@ mod prompt_asset_parity {
         );
     }
 
-    /// The REPLACEMENT MAP rows that shipped in 0.6.0 must go red, each
-    /// named with clap's reason, or the test above cannot catch their like.
+    /// Rows that show a command without its required arguments must go red,
+    /// each named with clap's reason, or the test above cannot catch their
+    /// like.
     #[test]
     fn the_shipped_replacement_map_rows_are_rejected_by_name() {
         let text = "\
 | Instead of | Run |
 | --- | --- |
-| `git checkout -b` / `git fetch` / `git merge --ff-only` | `pixel new-branch name` / `pixel fetch` / `pixel fast-forward …` |
+| `git log --oneline` | `pixel search-content --json` / `pixel impact` / `pixel find-code …` |
 ";
         let (_, failures) = asset_failures("sample.md", text);
         assert_eq!(failures.len(), 3, "{failures:#?}");
         assert!(
-            failures[0].starts_with("sample.md: `pixel new-branch name` → ")
-                && failures[0].contains("--request-id"),
+            failures[0].starts_with("sample.md: `pixel search-content --json` → ")
+                && failures[0].contains("required"),
             "{}",
             failures[0]
         );
         assert!(
-            failures[1].starts_with("sample.md: `pixel fetch` → ")
-                && failures[1].contains("<REMOTE>"),
+            failures[1].starts_with("sample.md: `pixel impact` → ")
+                && failures[1].contains("required"),
             "{}",
             failures[1]
         );
         assert_eq!(
             failures[2],
-            "sample.md: `pixel fast-forward …` elides its arguments, but no full `pixel fast-forward …` line in this asset parses"
+            "sample.md: `pixel find-code …` elides its arguments, but no full `pixel find-code …` line in this asset parses"
         );
     }
 
@@ -8614,7 +7481,7 @@ mod prompt_asset_parity {
     /// substitutes a real id, so the dummy must not be what fails it.
     #[test]
     fn a_placeholder_for_an_integer_argument_parses() {
-        let text = "| a | `pixel list-errors show <id>` / `pixel list-errors since <cursor>` |\n";
+        let text = "| a | `pixel scope-task \"<task>\" . --limit <n>` / `pixel search-content \"<re>\" . --limit <n>` |\n";
         assert_eq!(asset_failures("sample.md", text), (2, vec![]));
     }
 
@@ -8624,8 +7491,8 @@ mod prompt_asset_parity {
     #[test]
     fn an_elision_needs_a_full_form_and_an_unreadable_line_is_reported() {
         let text = "\
-| a | `pixel recall …` |
-| b | `pixel recall search \"token\" --since 30d` |
+| a | `pixel find-code …` |
+| b | `pixel find-code \"token\" .` |
 | c | `pixel impact a…b` |
 ";
         let (checked, failures) = asset_failures("sample.md", text);
@@ -8635,164 +7502,15 @@ mod prompt_asset_parity {
             vec!["sample.md: `pixel impact a…b` has placeholders the normalizer cannot read"]
         );
     }
-
-    /// The kill switches (`PIXEL_DAEMON_AUTO_START=0`, `PIXEL_GUARD_*=off`)
-    /// fire only on an explicit off value: unset and any other value keep
-    /// the feature on.
-    #[test]
-    fn env_flag_off_fires_only_on_an_explicit_off_value() {
-        let name = format!("PIXEL_TEST_FLAG_{}_{}", std::process::id(), line!());
-        assert!(!crate::env_flag_off(&name), "unset");
-        for (value, expected) in [
-            ("0", true),
-            ("false", true),
-            ("off", true),
-            ("1", false),
-            ("", false),
-            ("no", false),
-        ] {
-            // SAFETY: the variable name is unique to this test (pid + line),
-            // so no other thread in the process reads or writes it.
-            unsafe {
-                std::env::set_var(&name, value);
-            }
-            assert_eq!(crate::env_flag_off(&name), expected, "{value:?}");
-        }
-        // SAFETY: as above.
-        unsafe {
-            std::env::remove_var(&name);
-        }
-    }
 }
 
 #[cfg(test)]
-mod renamed_command_tests {
-    use super::{
-        Cli, bounded_result_note, checks_deployed_prompts, is_developer_build, logged_args,
-        rename_note, renamed_invocation, stale_prompt_note,
-    };
-    use clap::CommandFactory;
-    use std::collections::BTreeSet;
-
-    /// The full `Cli` definition overflows a 2 MiB test thread in debug
-    /// builds (the reason `validate_cli_syntax` runs on 4 MiB); build and
-    /// parse it on a thread sized the same way.
-    fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(f)
-            .unwrap()
-            .join()
-            .unwrap()
-    }
+mod hook_prompt_tests {
+    use super::{bounded_result_note, history_text, is_developer_build, logged_args};
+    use serde_json::json;
 
     fn argv(words: &[&str]) -> Vec<String> {
         words.iter().map(ToString::to_string).collect()
-    }
-
-    #[test]
-    fn clap_aliases_are_exactly_the_rename_table() {
-        // Every hidden alias the parser accepts must be a documented rename,
-        // and every documented rename must parse: a variant renamed again
-        // without updating the table fails here, not in a user's script.
-        let registered = on_big_stack(|| {
-            let cli = Cli::command();
-            let mut registered = BTreeSet::new();
-            for sub in cli.get_subcommands() {
-                for alias in sub.get_all_aliases() {
-                    registered.insert((alias.to_string(), sub.get_name().to_string()));
-                }
-            }
-            registered
-        });
-        let table: BTreeSet<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
-            .iter()
-            .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
-            .collect();
-        assert_eq!(registered, table);
-    }
-
-    #[test]
-    fn an_old_name_parses_to_the_current_subcommand() {
-        let name = |words: &'static [&'static str]| {
-            on_big_stack(move || {
-                Cli::command()
-                    .try_get_matches_from(words)
-                    .unwrap()
-                    .subcommand_name()
-                    .map(str::to_string)
-            })
-        };
-        // The action log and the metrics evidence key on this name, so an
-        // alias invocation is recorded exactly like the current spelling.
-        assert_eq!(
-            name(&["pixel", "ready", "--no-daemon", "--json"]).as_deref(),
-            Some("prepare-repo")
-        );
-        assert_eq!(
-            name(&["pixel", "hook", "session-start"]).as_deref(),
-            Some("run-hook")
-        );
-    }
-
-    /// A mutation op run without `--request-id` names the flag and says
-    /// what value to give it; an error about another argument, even one of
-    /// a mutation op, carries no such tip.
-    #[test]
-    fn a_missing_request_id_carries_the_tip_and_nothing_else_does() {
-        let rendered = |words: &'static [&'static str]| {
-            on_big_stack(move || {
-                let error = Cli::command().try_get_matches_from(words).unwrap_err();
-                super::with_request_id_tip(error).render().to_string()
-            })
-        };
-        let tip = format!("tip: {}", super::REQUEST_ID_TIP);
-        for words in [
-            &["pixel", "new-branch", "feat/x"][..],
-            &["pixel", "commit", "--files", "a", "-m", "msg"][..],
-            &[
-                "pixel",
-                "fast-forward",
-                "--expected-head",
-                "a",
-                "--target-oid",
-                "b",
-            ][..],
-        ] {
-            let text = rendered(words);
-            assert!(text.contains("--request-id <REQUEST_ID>"), "{text}");
-            assert!(text.contains(&tip), "{words:?}: {text}");
-        }
-        let fetch = rendered(&["pixel", "fetch"]);
-        assert!(fetch.contains("<REMOTE>"), "{fetch}");
-        assert!(!fetch.contains("tip:"), "{fetch}");
-        let unknown = rendered(&["pixel", "new-branch", "x", "--request-id", "r", "--nope"]);
-        assert!(!unknown.contains(super::REQUEST_ID_TIP), "{unknown}");
-    }
-
-    #[test]
-    fn renamed_invocation_reads_the_command_word_only() {
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "ready"])),
-            Some(("ready", "prepare-repo"))
-        );
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "--metrics", "off", "changes", "."])),
-            Some(("changes", "what-changed")),
-            "the value of --metrics is not the command"
-        );
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "--metrics=off", "symbol", "x"])),
-            Some(("symbol", "find-symbol"))
-        );
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "prepare-repo", "ready"])),
-            None,
-            "a path named like an old command is not a renamed invocation"
-        );
-        assert_eq!(renamed_invocation(&argv(&["pixel", "impact", "x"])), None);
-        assert_eq!(renamed_invocation(&argv(&["pixel", "--help"])), None);
-        assert_eq!(renamed_invocation(&argv(&["pixel"])), None);
     }
 
     #[test]
@@ -8822,6 +7540,81 @@ mod renamed_command_tests {
     }
 
     #[test]
+    fn a_plugin_source_url_is_logged_without_its_credentials() {
+        let argv = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            logged_args(&argv(&[
+                "install",
+                "https://user:ghp_secret@github.com/acme/private.git",
+                "--name",
+                "x"
+            ])),
+            "install https://github.com/acme/private.git --name x"
+        );
+        assert_eq!(
+            logged_args(&argv(&[
+                "--metrics",
+                "off",
+                "install",
+                "https://t@h.test/p"
+            ])),
+            "--metrics off install https://h.test/p",
+            "a global option before the command does not move the mask"
+        );
+        assert_eq!(
+            logged_args(&argv(&["search-content", "https://a:b@c.test/d"])),
+            "search-content https://a:b@c.test/d",
+            "other commands are logged verbatim"
+        );
+        assert_eq!(
+            logged_args(&argv(&[
+                "search-content",
+                "install",
+                "https://a:b@c.test/d"
+            ])),
+            "search-content install https://a:b@c.test/d",
+            "the word `install` in a query does not start the mask"
+        );
+    }
+
+    #[test]
+    fn logged_args_should_mask_the_credentials_of_a_reference_url() {
+        let argv = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            logged_args(&argv(&[
+                "reference",
+                "add",
+                "lib",
+                "https://user:ghp_secret@github.com/acme/private.git",
+                "v1"
+            ])),
+            "reference add lib https://github.com/acme/private.git v1"
+        );
+        assert_eq!(
+            logged_args(&argv(&[
+                "--metrics",
+                "off",
+                "reference",
+                "add",
+                "lib",
+                "https://ghp_token_only@h.test/p",
+                "main"
+            ])),
+            "--metrics off reference add lib https://h.test/p main",
+            "a token-only userinfo is masked too"
+        );
+        assert_eq!(
+            logged_args(&argv(&[
+                "search-content",
+                "reference",
+                "https://a:b@c.test/d"
+            ])),
+            "search-content reference https://a:b@c.test/d",
+            "the word `reference` in a query does not start the mask"
+        );
+    }
+
+    #[test]
     fn only_the_remote_key_command_starts_the_mask() {
         // The mask starts at the pair `config remote-key`, not at either
         // word on its own: `config metrics off .` names no key at all, and
@@ -8839,6 +7632,66 @@ mod renamed_command_tests {
             "search-content remote-key src crates",
             "the word `remote-key` in someone else's argument is a search term"
         );
+    }
+
+    #[test]
+    fn the_value_of_a_config_key_pixel_does_not_write_never_reaches_the_action_log() {
+        // `pixel config <key> <value>` is refused for a key that is not a
+        // setting, but a credential typed that way is already in argv.
+        for (argv_words, logged) in [
+            (
+                vec!["config", "remote_keys.openai", "sk-secret"],
+                "config remote_keys.openai <redacted>",
+            ),
+            (
+                vec!["config", "--global", "remote_keys.openai", "sk-secret"],
+                "config --global remote_keys.openai <redacted>",
+            ),
+            (
+                vec!["--metrics", "off", "config", "typo", "sk-secret"],
+                "--metrics off config typo <redacted>",
+            ),
+            // A setting, and the subcommands of `config`, keep their values readable.
+            (vec!["config", "brief_parts", "4"], "config brief_parts 4"),
+            (
+                vec!["config", "--global", "daemon_auto_start", "off"],
+                "config --global daemon_auto_start off",
+            ),
+            (
+                vec!["config", "metrics", "off", "--global", "."],
+                "config metrics off --global .",
+            ),
+            (vec!["config", "classify", "on"], "config classify on"),
+            (vec!["config"], "config"),
+            // Someone else's argument is a query, not a config key.
+            (
+                vec!["search-content", "config", "x", "y"],
+                "search-content config x y",
+            ),
+        ] {
+            assert_eq!(logged_args(&argv(&argv_words)), logged, "{argv_words:?}");
+        }
+    }
+
+    #[test]
+    fn history_text_prints_each_hit_with_its_path_and_six_snippet_lines_at_most() {
+        let data = json!({"candidates": [
+            {"oid": "0123456789abcdef", "at": "2026-10-25T05:29:06+01:00", "subject": "tune limits",
+             "kind": "diff", "path": "a.rs", "snippet": "1\n2\n3\n4\n5\n6\n7\n"},
+            {"oid": "abc", "at": "x", "subject": "s", "kind": "message", "path": null, "snippet": null},
+        ]});
+        assert_eq!(
+            history_text(&data),
+            concat!(
+                "0123456789 2026-10-25 tune limits [diff]\n",
+                "    a.rs\n",
+                "    1\n    2\n    3\n    4\n    5\n    6\n",
+                "abc x s [message]\n",
+            )
+        );
+        for none in [json!({"candidates": []}), json!({})] {
+            assert_eq!(history_text(&none), "no commits match\n");
+        }
     }
 
     #[test]
@@ -8877,27 +7730,6 @@ mod renamed_command_tests {
             logged_args(&argv(&["flow", "replay", "x", "--var", "token=kept"])),
             "flow replay x --var token=kept"
         );
-    }
-
-    #[test]
-    fn stale_prompt_note_names_each_stale_file_in_one_line() {
-        assert_eq!(stale_prompt_note(&[]), None);
-        let one = stale_prompt_note(&["agent-prompt.md"]).unwrap();
-        assert_eq!(
-            one,
-            format!(
-                "note: agent-prompt.md deployed by an earlier `pixel install` is retired in this pixel ({}) — run `pixel install` to remove it\n",
-                env!("CARGO_PKG_VERSION")
-            )
-        );
-        let both = stale_prompt_note(&["agent-prompt.md", "subagent-prompt.md"]).unwrap();
-        assert!(
-            both.starts_with(
-                "note: agent-prompt.md and subagent-prompt.md deployed by an earlier `pixel install` are retired"
-            ) && both.ends_with("remove them\n"),
-            "{both}"
-        );
-        assert_eq!(both.lines().count(), 1, "{both}");
     }
 
     const ROW_CAP: &str =
@@ -8977,30 +7809,10 @@ mod renamed_command_tests {
         assert_eq!(bounded_result_note(&basis, &hits, true), None);
     }
 
-    #[test]
-    fn deployed_prompts_are_checked_except_by_the_commands_that_own_them() {
-        assert!(checks_deployed_prompts("search-content", false, false));
-        assert!(checks_deployed_prompts("self-update", false, false));
-        assert!(!checks_deployed_prompts("search-content", true, false));
-        for owner in ["install", "doctor", "uninstall"] {
-            assert!(!checks_deployed_prompts(owner, false, false), "{owner}");
-        }
-    }
-
-    /// A `pixel-dev` built from a branch differs from the release's deployed
-    /// prompts by construction: the note would be noise on every command,
-    /// and the fix it names would move every repository's hooks and prompts
-    /// onto that branch build.
-    #[test]
-    fn deployed_prompts_are_never_checked_by_a_side_build() {
-        assert!(!checks_deployed_prompts("search-content", false, true));
-        assert!(!checks_deployed_prompts("self-update", false, true));
-    }
-
     /// #549: a binary run from a checkout's `target/` prints the release's
-    /// version over its branch's prompts, so it is a developer build like
+    /// version over its branch's code, so it is a developer build like
     /// `pixel-dev`; a `pixel` anywhere else is an install and keeps the
-    /// stale-prompt note.
+    /// upgrade notice.
     #[test]
     fn a_cargo_build_is_a_developer_build_and_an_install_is_not() {
         let dir = std::path::Path::new("/nonexistent-pixel-549");
@@ -9014,21 +7826,7 @@ mod renamed_command_tests {
             &dir.join("mise/installs/pixel/0.6.1/bin/pixel")
         ));
     }
-
-    #[test]
-    fn rename_note_is_one_line_and_skips_only_protected_streams() {
-        assert_eq!(
-            rename_note(&argv(&["pixel", "ready", "--json"]), true).as_deref(),
-            Some("note: 'ready' is now 'prepare-repo'; the old name stays accepted until 1.0\n")
-        );
-        assert_eq!(rename_note(&argv(&["pixel", "ready"]), false), None);
-        assert_eq!(rename_note(&argv(&["pixel", "prepare-repo"]), true), None);
-    }
 }
-
-#[cfg(test)]
-#[path = "main_tests/flow_vars_tests.rs"]
-mod flow_vars_tests;
 
 #[cfg(test)]
 #[path = "main_tests/render_data_tests.rs"]
@@ -9055,13 +7853,13 @@ mod update_close_tests;
 mod classify_setup_prompt_tests;
 
 #[cfg(test)]
-#[path = "main_tests/commit_message_tests.rs"]
-mod commit_message_tests;
-
-#[cfg(test)]
 #[path = "main_tests/review_gate_pretty_tests.rs"]
 mod review_gate_pretty_tests;
 
 #[cfg(test)]
 #[path = "main_tests/search_fallback_gate_tests.rs"]
 mod search_fallback_gate_tests;
+
+#[cfg(test)]
+#[path = "main_tests/hook_fail_open_tests.rs"]
+mod hook_fail_open_tests;

@@ -13,6 +13,21 @@ inputs:
   prepare:
     description: 'Build text and code indexes without a daemon. Set false for install only.'
     default: 'true'
+  cache:
+    description: 'Restore/save text and graph indexes. Requires prepare; cache outages are non-fatal.'
+    default: 'false'
+  cache-version:
+    description: 'Change to invalidate the index cache.'
+    default: '1'
+  minimum-symbols:
+    description: 'Minimum graph symbol count required before saving the cache.'
+    default: '0'
+  install-hooks:
+    description: 'Run global pixel setup for agent hooks, skills and bundled probes on this runner.'
+    default: 'false'
+  hooks-agent:
+    description: 'Agent integrations to install: all, or comma-separated setup --agent targets (for example claude,codex). Selection requires a supporting CLI release.'
+    default: 'all'
 outputs:
   version:
     description: Installed release tag.
@@ -23,9 +38,28 @@ outputs:
   report:
     description: Absolute path to prepare-repo JSON (empty for install only).
     value: ${{ steps.prepare.outputs.report }}
+  cache-hit:
+    description: 'Whether the exact daily index cache was restored.'
+    value: ${{ steps.cache.outputs.cache-hit }}
+  cache-matched-key:
+    description: 'Restored cache key, empty on miss or when caching is disabled.'
+    value: ${{ steps.cache.outputs.cache-matched-key }}
 runs:
   using: composite
   steps:
+    - name: Validate inputs and resolve index paths
+      id: config
+      shell: bash
+      env:
+        PIXEL_ACTION_PATH: ${{ inputs.path }}
+        PIXEL_ACTION_VERSION: ${{ inputs.version }}
+        PIXEL_ACTION_PREPARE: ${{ inputs.prepare }}
+        PIXEL_ACTION_CACHE: ${{ inputs.cache }}
+        PIXEL_ACTION_CACHE_VERSION: ${{ inputs.cache-version }}
+        PIXEL_ACTION_MINIMUM_SYMBOLS: ${{ inputs.minimum-symbols }}
+        PIXEL_ACTION_INSTALL_HOOKS: ${{ inputs.install-hooks }}
+        PIXEL_ACTION_HOOKS_AGENT: ${{ inputs.hooks-agent }}
+      run: python3 "$GITHUB_ACTION_PATH/configure.py"
     - name: Install verified Pixel release
       id: install
       shell: bash
@@ -33,16 +67,41 @@ runs:
         PIXEL_ACTION_VERSION: ${{ inputs.version }}
         PIXEL_ACTION_PREPARE: ${{ inputs.prepare }}
       run: bash "$GITHUB_ACTION_PATH/install.sh"
+    - name: Restore Pixel indexes
+      id: cache
+      if: inputs.cache == 'true' && inputs.prepare == 'true'
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ steps.config.outputs.cache-paths }}
+        key: ${{ steps.config.outputs.cache-key }}
+        restore-keys: ${{ steps.config.outputs.cache-prefix }}
     - name: Prepare Pixel indexes
       id: prepare
       if: inputs.prepare == 'true'
       shell: bash
       env:
-        PIXEL_ACTION_PATH: ${{ inputs.path }}
+        PIXEL_ACTION_PATH: ${{ steps.config.outputs.path }}
         PIXEL_ACTION_BIN: ${{ steps.install.outputs.bin }}
+        PIXEL_ACTION_MINIMUM_SYMBOLS: ${{ inputs.minimum-symbols }}
         PIXEL_DAEMON_AUTO_START: '0'
       run: |
         report=$(mktemp "$RUNNER_TEMP/pixel-ready.XXXXXX")
         "$PIXEL_ACTION_BIN" prepare-repo "$PIXEL_ACTION_PATH" --no-daemon --metrics off --json > "$report"
         cat "$report"
         echo "report=$report" >> "$GITHUB_OUTPUT"
+        python3 "$GITHUB_ACTION_PATH/configure.py" validate-report "$report"
+    - name: Install agent integrations
+      if: inputs.install-hooks == 'true'
+      shell: bash
+      env:
+        PIXEL_ACTION_BIN: ${{ steps.install.outputs.bin }}
+        PIXEL_ACTION_HOOKS_AGENT: ${{ inputs.hooks-agent }}
+      run: bash "$GITHUB_ACTION_PATH/install-hooks.sh"
+    - name: Save Pixel indexes
+      if: inputs.cache == 'true' && inputs.prepare == 'true' && steps.cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ steps.config.outputs.cache-paths }}
+        key: ${{ steps.config.outputs.cache-key }}

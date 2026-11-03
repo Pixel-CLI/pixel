@@ -14,7 +14,7 @@ seconds and would have caught the case beside it.
   conclusion drawn from it ("the gate passes now, nothing to do") was false.
 - **Report the number, never the colour.** "Mutants is green" is not a
   result; "107 tested, 79 caught, 28 unviable, 0 missed, verdict `tested`"
-  is. A gate can pass having tested nothing at all — `scripts/mutants-gate.py`
+  is. A gate can pass having tested nothing at all — `scripts/ci/mutants-gate.py`
   exists because that happened, and calls the two cases `not-applicable` and
   `vacuous`. The count is the only part of a green check that carries
   information.
@@ -47,3 +47,9 @@ seconds and would have caught the case beside it.
   changelog entry that explains a trap wrongly is worse than one that says
   nothing: the next reader goes looking for the wrong cause. When a
   measurement corrects a merged claim, correct the merged text too.
+
+- **Pin the probes as well as the binary for a brief baseline.** The brief runs
+  installed programs from `~/.pixel/plugins/`; a binary at a known commit
+  can still execute older probes. Freeze the bundled manifests and programs
+  from that commit in a separate home, record their hashes, and use it for
+  every arm. Verified 2026-10-17: two installed probes differed from main.

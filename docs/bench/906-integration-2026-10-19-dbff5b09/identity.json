@@ -1,0 +1,238 @@
+{
+  "protocol": {
+    "name": "brief-oracle",
+    "version": 4
+  },
+  "source_sha": "dbff5b09d35a00a07572751d556b330a9da38acd",
+  "scorer": {
+    "sha256": "95bf349407a86091b7627f0d7726697478408b743345b32d4ed919da36233106",
+    "commit": "dbff5b09d35a00a07572751d556b330a9da38acd"
+  },
+  "replay_tool_sha256": "410a1c11933a82952420a0ae1cb8a8c7d44382e057ecfe8773bdc5f18bf299a7",
+  "binary": {
+    "sha256": "20bc41f6c9f2767733589ee6852e47c8400301f4835a8ad2edf996dda3c00988",
+    "source_sha": "dbff5b09d35a00a07572751d556b330a9da38acd",
+    "profile": "dev-release",
+    "features": "default (fastembed, model2vec)",
+    "version": "pixel 0.8.0\ncommit: dbff5b09d35a00a07572751d556b330a9da38acd\ntarget: aarch64-apple-darwin\nrustc: rustc 1.99.0 (b940084d7 2026-09-28)\nbuilt: 2026-10-19\n"
+  },
+  "probe_home": {
+    "commit": "dbff5b09d35a00a07572751d556b330a9da38acd",
+    "probes": [
+      "cand-j-callers",
+      "cand-j-chain",
+      "cand-j-stop-cause",
+      "cand-k-code-sites",
+      "cand-k-commit-patch",
+      "config-registry",
+      "doc-sections",
+      "error-origin",
+      "flow-rank",
+      "history-fallback",
+      "name-files",
+      "overview-answer-evidence",
+      "rank-blocks",
+      "test-bodies"
+    ],
+    "probe_files": {
+      "cand-j-callers/pixel-plugin.toml": "4535fb5b9935b31ea72219c476dea36944022c163b948630d7b87ec0a43fec30",
+      "cand-j-callers/probe": "cf14ec0a61e34b8870a1c8421b0fde17e3e88870a3859e7b4cb5f7cd06e77ded",
+      "cand-j-chain/pixel-plugin.toml": "36940a8b4be105293d3c6aae9c4bd6db30bf3f5867765c6f8f0e1e836c286231",
+      "cand-j-chain/probe": "6a88df37b0cc2b95b1d05f3094d9197a7ad5a14c24102ae23e9e96b548bfba44",
+      "cand-j-stop-cause/pixel-plugin.toml": "60cc795e085b65800467713223553ad68f7f02ce4bcc48d3cb978e508a52bfad",
+      "cand-j-stop-cause/probe": "2fa455eaa2eba65815f0765ed3e2a92ecaec85f7e7621310dedfcb75f5f6e38b",
+      "cand-k-code-sites/pixel-plugin.toml": "4b6934d13a144eb7fbae56091112dff1024910a5942263c30d33eb33e94e6966",
+      "cand-k-code-sites/probe": "1475af5454eaf32311734f48107f0a9612907d0d53e1f2c059a057323826e127",
+      "cand-k-commit-patch/pixel-plugin.toml": "c184afb77ce51ced638eb42b2910a64e67a8a7349badb21f644f2f24e285499c",
+      "cand-k-commit-patch/probe": "e2d0a606f544aad1c3ec96ff755bb74d0ca89def9e5ba3c14238ff2cc8e5c7d1",
+      "config-registry/pixel-plugin.toml": "81a31387e718aed5e8229ebb2b7cb16dfb3941be79c40a3bf742f290b8cfbb04",
+      "config-registry/probe": "f1cb1d961f4b80f1c5de67b7e6dbd4f4292164e577f0ee7581a63f242e8d7fb1",
+      "doc-sections/pixel-plugin.toml": "cec670ad784c63d579b7f8cccab2e35c253d96abe4168efba925b69b5e69631a",
+      "doc-sections/probe": "97b89c2521e10c95f5077b71f0abf7c82473be608178bb41571cf34c23d4ec99",
+      "error-origin/pixel-plugin.toml": "56f8b3a0f3258d1b647e47e6763bb663e216200e45433e0d4cf98f713f38be06",
+      "error-origin/probe": "5ed40604621a1d3f6ece8b7eeae3669a91521d946fc0522d013535a78feb5ffc",
+      "flow-rank/pixel-plugin.toml": "78e574d59e33613dd6cd72522c4135f2c9000882121a89e11a1add7c82fadc9f",
+      "flow-rank/probe": "6fdd598ae2b9fae7b3430f8284e6fb69f992390b10e7476738b048d74afff456",
+      "history-fallback/pixel-plugin.toml": "bd45e81583779cb3d58476e67661fdeb131b1fe91ef48a4c0ddfcbd97b155b82",
+      "history-fallback/probe": "e376833deb44fbb2e68f704cd239229e62268e9edaaa920fda677ae8e319f7c4",
+      "name-files/pixel-plugin.toml": "6311975835f54880785c5c9d0611af1bd3084090c6a0ae27ab91a9d384e5adb0",
+      "name-files/probe": "42781445e638b4e1bde9075db5a77b2cf9330f5651889621d3a3eb9ec2055474",
+      "overview-answer-evidence/pixel-plugin.toml": "bad7296859efc2e4da03b9c0ed59cb6af56a1380409610891b02101c7c922926",
+      "overview-answer-evidence/probe": "7f5f1be8239240a3ba92f20d3527fa80dcb3d74f32405c75b077d704e966d052",
+      "rank-blocks/pixel-plugin.toml": "fca68611008fc8b35facd2081197e51afa8d04ccb3ab9b5316930a37792c6060",
+      "rank-blocks/probe": "854f122c9733d5c87080ce2f015c84cbfc20e219f59d09fe0f468c5d5640068c",
+      "test-bodies/pixel-plugin.toml": "713ea81bbecbcc7c2e37ec623757902fb30df0624d0ef9f971e0c7a257d20c85",
+      "test-bodies/probe": "0ed7c49a317f54ed72e64400b6f059c76beba6b891f4c180bbae99d82983c15e"
+    }
+  },
+  "probe_changes_from_reference": {
+    "config-registry/probe": {
+      "before": "9ae398ef690ad181d005173f5f81c159b286ab8e80741dff8cc0f804860c8b4b",
+      "after": "f1cb1d961f4b80f1c5de67b7e6dbd4f4292164e577f0ee7581a63f242e8d7fb1"
+    },
+    "error-origin/pixel-plugin.toml": {
+      "before": "92e36132a2a0895ec67f77c0a7b7f85e62306c82be91de0137ba70423461f681",
+      "after": "56f8b3a0f3258d1b647e47e6763bb663e216200e45433e0d4cf98f713f38be06"
+    },
+    "error-origin/probe": {
+      "before": "1ea2b825e5b912708564f4001b8df897f498cbfc35e342e09c7d7881f6039e00",
+      "after": "5ed40604621a1d3f6ece8b7eeae3669a91521d946fc0522d013535a78feb5ffc"
+    }
+  },
+  "questions": {
+    "path": "eval/brief-bench/questions.jsonl",
+    "sha256": "984a632e96f5f32891279d58f872c3a891bfeabaee110b3993be313c63e17069",
+    "n": 56
+  },
+  "repository_pins": {
+    "Pixel-CLI__pixel": "fe0a1eab44420768a8b8a115fb91c4148292fd9f",
+    "BurntSushi__ripgrep": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+    "psf__requests": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+    "excalidraw__excalidraw": "541653c7c9d587d463a47daacff9fb30e45a52e7",
+    "pallets__flask": "d086db856be187255b8ec61ef409357393020f32",
+    "sharkdp__fd": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc",
+    "expressjs__express": "a419aa7350389a275ab45fde2e849ed1f02449ef"
+  },
+  "parameters": {
+    "route": "hook",
+    "warm": true,
+    "provider": "pi",
+    "brief_only": true,
+    "parts": 3,
+    "window_ms": 3000,
+    "process_timeout_s": 300,
+    "dedupe": false,
+    "lock": "/tmp/pixel-benchmark.lock"
+  },
+  "baseline": {
+    "reference_commit": "7b178f5a7e584563d474e8a6056a4a9f7e5f891b",
+    "binary": {
+      "source_commit": "a0d99d6268b770b49bf44effef415ac95b1252aa",
+      "sha256": "fcde2a41d4d0e7017acdba2ee58e4803afa9379b8b3995b68e24b71ec14d8e64",
+      "profile": "dev-release",
+      "target": "aarch64-apple-darwin",
+      "rustc": "1.99.0"
+    },
+    "probe_source": "a0d99d6268b770b49bf44effef415ac95b1252aa",
+    "files": {
+      "native-repeat.jsonl": "89e31fc6e319aada85c14125bf1a137065dd1f23b34eb0c259719696f231c435",
+      "per-question.jsonl": "15ad7d690e14b009f52ecfe140bc2fb7dfb3815271ca8fee494c188405f749d6",
+      "README.md": "216415673f950861e0afdf4ceff1b1d5bda2586268d020da2fd44d4ae696964d",
+      "identity.json": "c7bc8677d01f61c2f34126f8358af42f1c1f17bc8fb7e19399631e28a77be9d9",
+      "per-category.jsonl": "2df1d17b216e86e3de2e534be18bf329b623f22c43a56212785718e7fdf17f16"
+    }
+  },
+  "results": [
+    {
+      "status": "complete",
+      "exit_code": 0,
+      "counts": {
+        "ok": 53,
+        "abstained": 3
+      },
+      "errors": []
+    },
+    {
+      "status": "complete",
+      "exit_code": 0,
+      "counts": {
+        "ok": 53,
+        "abstained": 3
+      },
+      "errors": []
+    }
+  ],
+  "repeat_stable_questions": 56,
+  "byte_identical_repeat_questions": 56,
+  "changed_metrics_questions": [
+    "ripgrep-07",
+    "requests-07",
+    "flask-03",
+    "flask-07"
+  ],
+  "changed_brief_questions": [
+    "ripgrep-03",
+    "ripgrep-07",
+    "requests-07",
+    "excalidraw-03",
+    "excalidraw-07",
+    "flask-03",
+    "flask-04",
+    "flask-07",
+    "fd-07"
+  ],
+  "toolchain": {
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+    "python": "3.15.0 (main, Oct  9 2026, 15:11:47) [Clang 22.1.3 ]",
+    "macos": "27.0.1",
+    "machine": "arm64"
+  },
+  "build_exit": 0,
+  "measurement_exit": 0,
+  "rejected_build": {
+    "exit": 0,
+    "accepted": false,
+    "reason": "reported commit differs from clean source dbff5b09",
+    "version": "pixel 0.8.0\ncommit: 0669a76a985125e1f572a9b97e2afdfbd1ad2bd8\ntarget: aarch64-apple-darwin\nrustc: rustc 1.99.0 (b940084d7 2026-09-28)\nbuilt: 2026-10-19\n",
+    "sha256": "45b320eb83da6590a7fecd17ea208a3e506f6b827f026fb371bd9c1d27caf38c"
+  },
+  "graph_facts": [
+    {
+      "repo": "BurntSushi__ripgrep-3fce3b5b",
+      "extractor_version": "30",
+      "js_files": 0,
+      "assignments": 0,
+      "parsed": 0,
+      "truncated": 0
+    },
+    {
+      "repo": "Pixel-CLI__pixel-fe0a1eab",
+      "extractor_version": "30",
+      "js_files": 4,
+      "assignments": 7,
+      "parsed": 4,
+      "truncated": 0
+    },
+    {
+      "repo": "excalidraw__excalidraw-541653c7",
+      "extractor_version": "30",
+      "js_files": 26,
+      "assignments": 47,
+      "parsed": 26,
+      "truncated": 0
+    },
+    {
+      "repo": "expressjs__express-a419aa73",
+      "extractor_version": "30",
+      "js_files": 141,
+      "assignments": 595,
+      "parsed": 141,
+      "truncated": 0
+    },
+    {
+      "repo": "pallets__flask-d086db85",
+      "extractor_version": "30",
+      "js_files": 0,
+      "assignments": 0,
+      "parsed": 0,
+      "truncated": 0
+    },
+    {
+      "repo": "psf__requests-611c6162",
+      "extractor_version": "30",
+      "js_files": 0,
+      "assignments": 0,
+      "parsed": 0,
+      "truncated": 0
+    },
+    {
+      "repo": "sharkdp__fd-14dcd92f",
+      "extractor_version": "30",
+      "js_files": 0,
+      "assignments": 0,
+      "parsed": 0,
+      "truncated": 0
+    }
+  ],
+  "expanded_commands_sha256": "b49bf317bbe14d938364d2c8005e997ce3722af281073f456757757d2fe9a54a"
+}

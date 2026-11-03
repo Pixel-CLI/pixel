@@ -35,7 +35,8 @@ enum Key {
     EscapeMore,
 }
 
-/// Byte-at-a-time decoder: arrows are the three-byte sequence `ESC [ A/B`,
+/// Byte-at-a-time decoder: arrows are the three-byte sequence `ESC [ A/B/C/D`
+/// (horizontal arrows move the same way as vertical ones),
 /// digits and Enter are single bytes. State lives in `escape`, so a partial
 /// sequence never consumes the following keystroke. A CSI sequence keeps
 /// consuming while it carries parameter or intermediate bytes
@@ -68,11 +69,11 @@ impl Keys {
                     // sequence (`ESC [ 1 ; 5 A`); staying in state 2 keeps
                     // its digits from decoding as an option choice.
                     0x20..=0x3f => Key::EscapeMore,
-                    b'A' => {
+                    b'A' | b'D' => {
                         self.escape = 0;
                         Key::Up
                     }
-                    b'B' => {
+                    b'B' | b'C' => {
                         self.escape = 0;
                         Key::Down
                     }
@@ -194,6 +195,19 @@ pub fn pick(
     raw: &mut dyn RawMode,
     stdin_is_terminal: bool,
 ) -> Result<Option<usize>, String> {
+    pick_at(options, 0, keys, stdout, raw, stdin_is_terminal)
+}
+
+/// [`pick`] with the cursor starting on `initial` rather than the first row:
+/// a stored choice is pre-highlighted so Enter keeps it (clamped into range).
+pub fn pick_at(
+    options: &[&str],
+    initial: usize,
+    keys: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+    raw: &mut dyn RawMode,
+    stdin_is_terminal: bool,
+) -> Result<Option<usize>, String> {
     if options.is_empty() {
         return Ok(None);
     }
@@ -206,7 +220,7 @@ pub fn pick(
     // newline that would leak into the next prompt, so drain it there only.
     let drain_digit_line = !stdin_is_terminal;
     let result = (|| -> Result<Option<usize>, String> {
-        let mut current = 0usize;
+        let mut current = initial.min(options.len() - 1);
         for (index, label) in options.iter().enumerate() {
             writeln!(stdout, "{}", row(index, current, label, cols)).map_err(|e| e.to_string())?;
         }

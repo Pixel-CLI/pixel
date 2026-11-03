@@ -20,14 +20,7 @@ import tempfile
 import unittest
 
 PREPARE = Path(__file__).resolve().parent.parent / ".agents/skills/release/prepare.sh"
-MANIFESTS = [
-    ".claude-plugin/plugin.json",
-    ".codex-plugin/plugin.json",
-    ".devin-plugin/plugin.json",
-    ".qoder-plugin/plugin.json",
-    "gemini-extension.json",
-    "package.json",
-]
+CHECK_CLAIMS = Path(__file__).resolve().parent / "ci/check-claims.py"
 
 GH = """#!/usr/bin/env python3
 import json, os, subprocess, sys
@@ -87,12 +80,8 @@ class PrepareContract(unittest.TestCase):
         }
         self.write("Cargo.toml", '[workspace]\nmembers = ["crates/a"]\n')
         self.write("crates/a/Cargo.toml", '[package]\nname = "a"\nversion = "0.1.0"\n')
-        for manifest in MANIFESTS:
-            self.write(manifest, '{\n  "name": "a",\n  "version": "0.1.0"\n}\n')
-        self.write("plugin.yaml", "name: a\nversion: 0.1.0\n")
-        self.write("scripts/gen-plugin-assets.sh", "#!/bin/sh\n")
         self.write("CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n")
-        self.write("changelog.d/.gitkeep", "")
+        self.write(".github/changelog.d/.gitkeep", "")
         self.git("init", "-q", "-b", "main")
         self.git("add", ".")
         self.git("commit", "-qm", "base")
@@ -132,7 +121,7 @@ class PrepareContract(unittest.TestCase):
         return (self.repo / "CHANGELOG.md").read_text()
 
     def fragments(self):
-        return sorted(p.name for p in (self.repo / "changelog.d").glob("*.md"))
+        return sorted(p.name for p in (self.repo / ".github/changelog.d").glob("*.md"))
 
     def listed(self, stdout):
         return self.block(stdout, "pull requests merged into main since v0.1.0")
@@ -156,7 +145,7 @@ class PrepareContract(unittest.TestCase):
         released = self.merge_pr("release-0.1.0", "released.txt")
         self.git("tag", "-a", "v0.1.0", "-m", "v0.1.0", released)
         fixed = self.merge_pr("fix-thing", "fixed.txt")
-        self.write("changelog.d/12-fix-thing.fixed.md", "**thing:** thing\n")
+        self.write(".github/changelog.d/12-fix-thing.fixed.md", "**thing:** thing\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
         self.prs.write_text(json.dumps([
@@ -179,7 +168,7 @@ class PrepareContract(unittest.TestCase):
     def test_nothing_unreleased_says_none(self):
         released = self.merge_pr("release-0.1.0", "released.txt")
         self.git("tag", "-a", "v0.1.0", "-m", "v0.1.0", released)
-        self.write("changelog.d/11-thing.fixed.md", "**thing:** thing\n")
+        self.write(".github/changelog.d/11-thing.fixed.md", "**thing:** thing\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
         self.prs.write_text(json.dumps([
@@ -196,7 +185,7 @@ class PrepareContract(unittest.TestCase):
         be described as part of a frozen candidate either."""
         self.git("remote", "add", "origin", "https://github.com/old/fixture.git")
         self.git("tag", "v0.1.0")
-        self.write("changelog.d/12-fix.fixed.md", "**thing:** fixed.\n")
+        self.write(".github/changelog.d/12-fix.fixed.md", "**thing:** fixed.\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fix: thing (#12)")
         candidate = self.git("rev-parse", "HEAD")
@@ -218,7 +207,7 @@ class PrepareContract(unittest.TestCase):
         self.git("tag", "v0.1.0")
         prs = []
         for number in (12, 13):
-            self.write(f"changelog.d/{number}-fix.fixed.md", "**thing:** fixed.\n")
+            self.write(f".github/changelog.d/{number}-fix.fixed.md", "**thing:** fixed.\n")
             self.git("add", ".")
             self.git("commit", "-qm", f"fix: thing (#{number})")
             prs.append({"number": number, "title": "fix: thing",
@@ -236,7 +225,7 @@ class PrepareContract(unittest.TestCase):
         """An API failure, truncated search or false empty result must not
         consume fragments and leave an apparently complete release."""
         self.git("tag", "v0.1.0")
-        self.write("changelog.d/12-fix.fixed.md", "**thing:** fixed.\n")
+        self.write(".github/changelog.d/12-fix.fixed.md", "**thing:** fixed.\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fix: thing (#12)")
         pr = {"number": 12, "title": "fix: thing",
@@ -256,9 +245,9 @@ class PrepareContract(unittest.TestCase):
 
     def test_the_fragments_become_the_release_section_by_section(self):
         """One fragment per entry, filed under the heading its name names."""
-        self.write("changelog.d/12-add-a-flag.added.md", "**thing:** `pixel thing --flag` is new.\n")
-        self.write("changelog.d/13-fix-a-thing.fixed.md", "**thing:** `pixel thing` no longer breaks.\n")
-        self.write("changelog.d/14-change-a-thing.changed.md", "**thing:** `pixel thing` says less.\n")
+        self.write(".github/changelog.d/12-add-a-flag.added.md", "**thing:** `pixel thing --flag` is new.\n")
+        self.write(".github/changelog.d/13-fix-a-thing.fixed.md", "**thing:** `pixel thing` no longer breaks.\n")
+        self.write(".github/changelog.d/14-change-a-thing.changed.md", "**thing:** `pixel thing` says less.\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragments")
 
@@ -289,7 +278,7 @@ class PrepareContract(unittest.TestCase):
 
     def test_a_long_entry_keeps_every_line(self):
         """A wrapped entry keeps its continuation lines, indented under the bullet."""
-        self.write("changelog.d/12-long.fixed.md", "**thing:** first line\ncontinued here\n")
+        self.write(".github/changelog.d/12-long.fixed.md", "**thing:** first line\ncontinued here\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
 
@@ -306,8 +295,8 @@ class PrepareContract(unittest.TestCase):
         ends with `(#<n>)`, so the cut appends the link there, at the end of
         the entry's last line, where a written one sits.
         """
-        self.write("changelog.d/thing.fixed.md", "**thing:** it no longer breaks.\n")
-        self.write("changelog.d/wrapped.added.md", "**thing:** a flag\nthat wraps.\n\n")
+        self.write(".github/changelog.d/thing.fixed.md", "**thing:** it no longer breaks.\n")
+        self.write(".github/changelog.d/wrapped.added.md", "**thing:** a flag\nthat wraps.\n\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fix(thing): stop breaking (#42)")
 
@@ -328,12 +317,12 @@ class PrepareContract(unittest.TestCase):
         GitHub's `Merge pull request #<n>` subject, and a later pull request
         that only edits the entry does not take its credit."""
         self.git("switch", "-q", "-c", "topic")
-        self.write("changelog.d/thing.fixed.md", "**thing:** it no longer breaks.\n")
+        self.write(".github/changelog.d/thing.fixed.md", "**thing:** it no longer breaks.\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fix(thing): stop breaking (#99)")
         self.git("switch", "-q", "main")
         self.git("merge", "-q", "--no-ff", "-m", "Merge pull request #7 from someone/topic", "topic")
-        self.write("changelog.d/thing.fixed.md", "**thing:** it no longer breaks, at all.\n")
+        self.write(".github/changelog.d/thing.fixed.md", "**thing:** it no longer breaks, at all.\n")
         self.git("add", ".")
         self.git("commit", "-qm", "docs(changelog): reword (#8)")
 
@@ -347,8 +336,8 @@ class PrepareContract(unittest.TestCase):
     def test_a_written_reference_is_kept_as_written(self):
         """A link in the text or a number in the slug is the entry's own: the
         cut adds nothing to it, whatever the commit says."""
-        self.write("changelog.d/12-numbered.fixed.md", "**thing:** numbered.\n")
-        self.write("changelog.d/linked.fixed.md",
+        self.write(".github/changelog.d/12-numbered.fixed.md", "**thing:** numbered.\n")
+        self.write(".github/changelog.d/linked.fixed.md",
                    "**thing:** linked. ([#13](https://github.com/Pixel-CLI/pixel/pull/13))\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fix(thing): both (#42)")
@@ -365,7 +354,7 @@ class PrepareContract(unittest.TestCase):
 
     def test_an_advisory_import_keeps_its_security_reference_without_a_public_pr(self):
         entry = "**security:** refuse hostile sidecars. ([GHSA-c9f5-vxc4-wjph](https://github.com/Pixel-CLI/pixel/security/advisories/GHSA-c9f5-vxc4-wjph))\n"
-        self.write("changelog.d/trust.security.md", entry)
+        self.write(".github/changelog.d/trust.security.md", entry)
         self.git("add", ".")
         self.git("commit", "-qm", "Merge commit from fork")
         result = self.prepare()
@@ -385,9 +374,9 @@ class PrepareContract(unittest.TestCase):
         ):
             with self.subTest(section=section, link=link):
                 name = "trust." + section + ".md"
-                self.write("changelog.d/" + name, "**security:** fix. (" + link + ")\n")
+                self.write(".github/changelog.d/" + name, "**security:** fix. (" + link + ")\n")
                 self.assert_refused_before_any_write(name, "no commit added it")
-                (self.repo / "changelog.d" / name).unlink()
+                (self.repo / ".github/changelog.d" / name).unlink()
 
     def assert_refused_before_any_write(self, name, reason):
         """No entry ships without its reference: the cut stops on `name`,
@@ -406,16 +395,71 @@ class PrepareContract(unittest.TestCase):
 
     def test_an_entry_pushed_straight_to_main_is_refused_before_any_write(self):
         """A commit that names no pull request leaves the cut nothing to link."""
-        self.write("changelog.d/pushed.fixed.md", "**thing:** it no longer breaks.\n")
+        self.write(".github/changelog.d/pushed.fixed.md", "**thing:** it no longer breaks.\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fix(thing): pushed straight to main")
         result = self.assert_refused_before_any_write(
             "pushed.fixed.md", "the commit that added it (")
         self.assertIn("fix(thing): pushed straight to main) names none", result.stderr)
 
+    def claims(self, **fields):
+        """A registry of one claim measured with pixel 0.0.3, one minor behind
+        the fixture's 0.1.0 and two behind the 0.2.0 the cut makes, checked
+        by the repository's own check-claims.py."""
+        self.write("scripts/ci/check-claims.py", CHECK_CLAIMS.read_text())
+        self.write("Cargo.toml", '[workspace]\nmembers = ["crates/a", "crates/pixel"]\n')
+        self.write("crates/pixel/Cargo.toml", '[package]\nname = "pixel-cli"\nversion = "0.1.0"\n')
+        self.write("README.md", "Outline: **641 tokens**, measured with pixel 0.0.3.\n")
+        claim = {
+            "id": "readme-outline", "doc": "README.md", "anchor": "**641 tokens**",
+            "version_text": "pixel 0.0.3", "protocol": "docs/bench/read-savings.md",
+            "binary_version": "0.0.3", "commit": "abc1234", "measured": "2026-01-01",
+            "command": "pixel list-signatures models.py", "live": False, **fields,
+        }
+        self.write("docs/bench/claims.toml", "[[claim]]\n" + "".join(
+            f"{k} = {json.dumps(v)}\n" for k, v in claim.items()))
+        self.write(".github/changelog.d/12-thing.fixed.md", "**thing:** thing\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "claims")
+
+    def test_a_claim_the_bump_leaves_stale_is_refused_before_any_write(self):
+        """The 0.10.0 prepare PR merged and turned main red: the bump left four
+        claims two minors behind, and a prepare PR skips the job that checks
+        them, while it may not touch the registry itself. So the cut judges
+        the claims against the version it is about to write, and stops while
+        the fix can still go through its own pull request."""
+        self.claims()
+        self.assertEqual(subprocess.run(
+            ["python3", "scripts/ci/check-claims.py", "--root", "."],
+            cwd=self.repo, capture_output=True, text=True).returncode, 0,
+            "the fixture's claim must pass before the bump")
+        before = self.changelog()
+
+        result = self.prepare()
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fail under 0.2.0: readme-outline;", result.stderr)
+        self.assertIn("`tracking` issue", result.stderr)
+        self.assertIn("pull request into the target branch", result.stderr)
+        self.assertEqual(self.changelog(), before)
+        self.assertEqual(self.fragments(), ["12-thing.fixed.md"])
+        self.assertIn('version = "0.1.0"', (self.repo / "crates/pixel/Cargo.toml").read_text())
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_a_tracked_stale_claim_lets_the_cut_through(self):
+        """A `tracking` issue is the sanctioned way to ship with a known-stale
+        number: the refusal above must not block it."""
+        self.claims(tracking="#1358")
+
+        result = self.prepare()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("re-measure tracked in #1358", result.stdout)
+        self.assertIn('version = "0.2.0"', (self.repo / "crates/pixel/Cargo.toml").read_text())
+
     def test_an_entry_no_commit_added_is_refused_before_any_write(self):
         """An uncommitted fragment was never merged by any pull request."""
-        self.write("changelog.d/loose.fixed.md", "**thing:** it no longer breaks.\n")
+        self.write(".github/changelog.d/loose.fixed.md", "**thing:** it no longer breaks.\n")
         self.assert_refused_before_any_write("loose.fixed.md", "no commit added it")
 
     def test_the_highlights_lead_the_released_section(self):
@@ -427,9 +471,9 @@ class PrepareContract(unittest.TestCase):
         release body from the version heading to the next `## `, so the body
         opens on it.
         """
-        self.write("changelog.d/_highlights.md",
+        self.write(".github/changelog.d/_highlights.md",
                    "This release is about the changelog.\n\n### Highlights\n- one thing.\n")
-        self.write("changelog.d/12-thing.fixed.md", "**thing:** thing\n")
+        self.write(".github/changelog.d/12-thing.fixed.md", "**thing:** thing\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragments")
 
@@ -444,7 +488,7 @@ class PrepareContract(unittest.TestCase):
         # It is consumed by the cut like any fragment: left behind, it would
         # lead the next release with the previous release's narrative.
         self.assertEqual(self.fragments(), [])
-        self.assertIn("led by changelog.d/_highlights.md", result.stdout)
+        self.assertIn("led by .github/changelog.d/_highlights.md", result.stdout)
 
     def test_the_highlights_are_not_counted_as_an_entry(self):
         """A chapeau is not a changelog entry: alone, there is nothing to release.
@@ -453,17 +497,17 @@ class PrepareContract(unittest.TestCase):
         narrative and no bullet -- and be filed under a section its name does
         not have.
         """
-        self.write("changelog.d/_highlights.md", "Only a narrative.\n")
+        self.write(".github/changelog.d/_highlights.md", "Only a narrative.\n")
         self.git("add", ".")
         self.git("commit", "-qm", "highlights only")
 
         result = self.prepare()
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("changelog.d/ holds no fragment", result.stderr)
+        self.assertIn(".github/changelog.d/ holds no fragment", result.stderr)
 
     def test_a_fragment_without_a_known_section_is_refused(self):
-        self.write("changelog.d/12-thing.fized.md", "**thing:** thing\n")
+        self.write(".github/changelog.d/12-thing.fized.md", "**thing:** thing\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
 
@@ -474,7 +518,7 @@ class PrepareContract(unittest.TestCase):
         self.assertIn("fixed", result.stderr)
 
     def test_a_nameless_fragment_is_refused(self):
-        self.write("changelog.d/12-thing.md", "**thing:** thing\n")
+        self.write(".github/changelog.d/12-thing.md", "**thing:** thing\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
 
@@ -484,7 +528,7 @@ class PrepareContract(unittest.TestCase):
         self.assertIn("name it <slug>.<section>.md", result.stderr)
 
     def test_an_empty_fragment_is_refused(self):
-        self.write("changelog.d/12-thing.fixed.md", "")
+        self.write(".github/changelog.d/12-thing.fixed.md", "")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
 
@@ -499,7 +543,7 @@ class PrepareContract(unittest.TestCase):
                            ("13-spaces.fixed.md", "   \n"),
                            ("14-blanks.fixed.md", "\n\n\n")):
             with self.subTest(name=name):
-                self.write("changelog.d/" + name, body)
+                self.write(".github/changelog.d/" + name, body)
                 self.git("add", ".")
                 self.git("commit", "-qm", "fragment")
 
@@ -511,7 +555,7 @@ class PrepareContract(unittest.TestCase):
 
     def test_a_fragment_whose_first_line_is_blank_is_refused(self):
         """The first line is the bullet; a blank one files `- ` and an indent."""
-        self.write("changelog.d/12-thing.fixed.md", "\nthe entry on the second line\n")
+        self.write(".github/changelog.d/12-thing.fixed.md", "\nthe entry on the second line\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
 
@@ -521,7 +565,7 @@ class PrepareContract(unittest.TestCase):
         self.assertIn("starts with a blank line", result.stderr)
 
     def test_an_entry_left_under_unreleased_is_refused(self):
-        self.write("changelog.d/12-thing.fixed.md", "**thing:** thing\n")
+        self.write(".github/changelog.d/12-thing.fixed.md", "**thing:** thing\n")
         self.write("CHANGELOG.md",
                    "# Changelog\n\n## [Unreleased]\n\n### Fixed\n- written straight into the file\n\n## [0.1.0] - 2026-01-01\n")
         self.git("add", ".")
@@ -531,7 +575,7 @@ class PrepareContract(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("bullet(s) still under ## [Unreleased]", result.stderr)
-        self.assertIn("entries live in changelog.d/", result.stderr)
+        self.assertIn("entries live in .github/changelog.d/", result.stderr)
         # Refused before any write: the stray line is still there, and so is
         # the fragment nobody cut.
         self.assertIn("- written straight into the file", self.changelog())
@@ -541,10 +585,10 @@ class PrepareContract(unittest.TestCase):
         result = self.prepare()
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("changelog.d/ holds no fragment", result.stderr)
+        self.assertIn(".github/changelog.d/ holds no fragment", result.stderr)
 
     def test_a_version_check_still_runs_before_the_fragments_are_touched(self):
-        self.write("changelog.d/12-thing.fixed.md", "**thing:** thing\n")
+        self.write(".github/changelog.d/12-thing.fixed.md", "**thing:** thing\n")
         self.write("CHANGELOG.md",
                    "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-02\n\n## [0.1.0] - 2026-01-01\n")
         self.git("add", ".")
@@ -565,11 +609,11 @@ class PrepareContract(unittest.TestCase):
         conflict, and a rebase does the same -- so the entry is published in a
         release it was never part of. A fragment is simply not in the cut.
         """
-        self.write("changelog.d/12-shipped.fixed.md", "**thing:** shipped before the cut\n")
+        self.write(".github/changelog.d/12-shipped.fixed.md", "**thing:** shipped before the cut\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment to release")
         self.git("switch", "-q", "-c", "in-flight")
-        self.write("changelog.d/13-later.fixed.md", "**thing:** for the release after this one\n")
+        self.write(".github/changelog.d/13-later.fixed.md", "**thing:** for the release after this one\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment for the next release")
 
@@ -612,9 +656,9 @@ class FragmentContract(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix="pixel-prepare-check-")
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        (root / "changelog.d").mkdir()
+        (root / ".github/changelog.d").mkdir(parents=True)
         for name, text in fragments.items():
-            (root / "changelog.d" / name).write_text(text)
+            (root / ".github/changelog.d" / name).write_text(text)
         (root / "CHANGELOG.md").write_text(self.CHANGELOG if changelog is None else changelog)
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
         return root
@@ -626,7 +670,7 @@ class FragmentContract(unittest.TestCase):
         self.assertIn("## [Unreleased] empty", result.stdout)
 
     def test_check_accepts_the_empty_directory_a_release_leaves_behind(self):
-        """A release pull request is the one that empties changelog.d/.
+        """A release pull request is the one that empties .github/changelog.d/.
 
         The cut deletes every fragment, so the commit `--check` runs on has an
         empty directory. While the no-fragment refusal sat above the `--check`
@@ -652,14 +696,14 @@ class FragmentContract(unittest.TestCase):
             cwd=root, capture_output=True, text=True, timeout=30,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("changelog.d/ holds no fragment", result.stderr)
+        self.assertIn(".github/changelog.d/ holds no fragment", result.stderr)
 
     def test_check_writes_nothing(self):
-        before = {p: p.read_bytes() for p in sorted(self.ROOT.glob("changelog.d/*.md"))}
+        before = {p: p.read_bytes() for p in sorted(self.ROOT.glob(".github/changelog.d/*.md"))}
         self.run_check(self.ROOT)
         self.assertEqual(
             before,
-            {p: p.read_bytes() for p in sorted(self.ROOT.glob("changelog.d/*.md"))},
+            {p: p.read_bytes() for p in sorted(self.ROOT.glob(".github/changelog.d/*.md"))},
         )
 
     def test_check_refuses_a_repository_whose_fragments_are_misnamed(self):
@@ -758,7 +802,7 @@ class FragmentContract(unittest.TestCase):
         self.assertIn(
             "2 entries take their pull request link from the commit that merges it at the cut",
             result.stdout)
-        self.assertIn("3 fragment(s) under changelog.d/, all well formed", result.stdout)
+        self.assertIn("3 fragment(s) under .github/changelog.d/, all well formed", result.stdout)
 
     def test_an_issue_number_is_not_a_pull_request_reference(self):
         """`#42` alone may be an issue: the text counts only with the URL, so
@@ -791,7 +835,7 @@ class FragmentContract(unittest.TestCase):
         })
         result = self.run_check(root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1 fragment(s) under changelog.d/ plus _highlights.md", result.stdout)
+        self.assertIn("1 fragment(s) under .github/changelog.d/ plus _highlights.md", result.stdout)
 
     def test_check_refuses_a_misspelt_highlights_file(self):
         """Skipping it silently would drop the chapeau from its own release.
@@ -805,7 +849,7 @@ class FragmentContract(unittest.TestCase):
         })
         result = self.run_check(root)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("the only underscore-named file changelog.d/ takes is _highlights.md",
+        self.assertIn("the only underscore-named file .github/changelog.d/ takes is _highlights.md",
                       result.stderr)
 
     def test_check_refuses_a_heading_that_would_end_the_release_body(self):

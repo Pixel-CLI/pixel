@@ -44,13 +44,6 @@ pub fn millis_since(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Run `f`, returning its value and the whole milliseconds it took.
-pub fn timed<T>(f: impl FnOnce() -> T) -> (T, u64) {
-    let clock = Instant::now();
-    let value = f();
-    (value, millis_since(clock))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,15 +80,5 @@ mod tests {
         let ms = millis_since(start);
         assert!(ms >= 5, "{ms}");
         assert!(ms < 5_000, "{ms}");
-    }
-
-    #[test]
-    fn timed_returns_the_value_and_the_time_it_took() {
-        let (value, ms) = timed(|| {
-            std::thread::sleep(Duration::from_millis(5));
-            42
-        });
-        assert_eq!(value, 42);
-        assert!((5..5_000).contains(&ms), "{ms}");
     }
 }

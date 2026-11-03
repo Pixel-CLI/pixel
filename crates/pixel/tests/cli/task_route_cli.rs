@@ -59,6 +59,14 @@ impl Classifier {
                 if reader.read_line(&mut first).unwrap_or(0) == 0 {
                     continue; // The warm probe opens a connection without an HTTP request.
                 }
+                if first.starts_with("GET ") {
+                    // A liveness probe, not a decision: answer it and count nothing.
+                    // It can arrive under load, so it must not fail the fixture.
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
                 assert!(first.starts_with("POST /v1/systemone HTTP/1.1"), "{first}");
                 let mut length = None;
                 loop {
@@ -144,7 +152,7 @@ fn fixture(tag: &str, base: &str, enabled: bool, engine: &str) -> (Scratch, Scra
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "initial"]);
     std::fs::create_dir_all(home.join(".pixel")).unwrap();
-    std::fs::write(home.join(".pixel/config.json"), json!({"classify":{"enabled":enabled,"engine":engine,"ollaya":{"base":base,"argv":["/usr/bin/false"]}}}).to_string()).unwrap();
+    std::fs::write(home.join(".pixel/config.yaml"), json!({"classify":{"enabled":enabled,"engine":engine,"ollaya":{"base":base,"argv":["/usr/bin/false"]}}}).to_string()).unwrap();
     let contract = serde_json::from_value(json!({"objective":"fix source","checks":[{"id":"check","argv":["/usr/bin/true"]}],"criteria":[{"id":"acceptance","description":"source is fixed","checks":["check"]}]})).unwrap();
     let task = Store::open(&root)
         .unwrap()
@@ -162,7 +170,7 @@ fn command(root: &Path, home: &Path, task: &Task, policy: &str) -> Command {
         .env("PIXEL_TASK_POLICY", policy)
         .env_remove("PIXEL_TASK_CONTRACT")
         .env_remove("PIXEL_TASK_TELEMETRY_PATH")
-        .args(["task", "route", &task.task_id, "--json"])
+        .args(["task-state", "route", &task.task_id, "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command

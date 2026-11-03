@@ -35,9 +35,7 @@ impl Fixture {
             // and no deployed prompt adds a note to stderr.
             .env("HOME", crate::support::neutral_home())
             .env_remove("RIPGREP_CONFIG_PATH")
-            .env_remove("GREP_OPTIONS")
-            .env_remove("PIXEL_POLICY")
-            .env_remove("PIXEL_TARGETS_GUARD");
+            .env_remove("GREP_OPTIONS");
         command
     }
 
@@ -63,9 +61,21 @@ impl Fixture {
         assert_output_eq(&native, &routed, &format!("{tool} {args:?}"));
         if backend == "pixel" {
             let log = std::fs::read_to_string(self.0.join(".pixel/actions.jsonl")).unwrap();
+            let record: serde_json::Value =
+                serde_json::from_str(log.lines().last().unwrap()).unwrap();
+            assert_eq!(record["provenance"]["source"], "cli");
+            assert_eq!(
+                record["provenance"]["invocation_id"],
+                record["invocation_id"]
+            );
             assert!(
                 log.contains("backend=pixel"),
                 "Pixel backend not observed: {log}"
+            );
+            assert!(
+                log.contains(r#""command":"search-like-rg""#)
+                    && !log.contains(r#""command":"search-compat""#),
+                "the row must carry the command's current name: {log}"
             );
         } else {
             assert!(
@@ -414,9 +424,7 @@ impl TrackedFixture {
             // and no deployed prompt adds a note to stderr.
             .env("HOME", crate::support::neutral_home())
             .env_remove("RIPGREP_CONFIG_PATH")
-            .env_remove("GREP_OPTIONS")
-            .env_remove("PIXEL_POLICY")
-            .env_remove("PIXEL_TARGETS_GUARD");
+            .env_remove("GREP_OPTIONS");
         command
     }
 }

@@ -45,9 +45,9 @@ Pixel has a `pixel-qa` bot that uses Pixel to fix pull requests efficiently: the
 - **We use it before you do**: Pixel is built with coding agents that run Pixel. Its hooks are active in every session we open on its repository, so a regression hits us first.
 - **We write down our mistakes**: the rules in the repository's [`.agents/rules/`](https://github.com/Pixel-CLI/pixel/tree/main/.agents/rules) come from things that went wrong, often with the pull request that paid for them. Our agents read them before editing, and so can you.
 - **Open source**: the code, its history and every review are public on [GitHub](https://github.com/Pixel-CLI/pixel), under the [MIT License](https://github.com/Pixel-CLI/pixel/blob/main/LICENSE).
-- **Local by design**: the index stays in `.pixel/` on your machine, and the binary sends no telemetry ([Privacy Policy](/legal/privacy-policy/)).
+- **Local by design**: the index stays in `.pixel/` on your machine, and the binary sends no telemetry beyond an optional release check ([Privacy Policy](/legal/privacy-policy/)).
 - **Public releases**: each version is a tag on `main`, with its [changelog](https://github.com/Pixel-CLI/pixel/blob/main/CHANGELOG.md) and a [release](https://github.com/Pixel-CLI/pixel/releases) you can follow as a feed.
-- **Easy to leave**: one `pixel uninstall` undoes the setup.
+- **Easy to leave**: one `pixel setup --remove` undoes the setup.
 
 ## Try it on your own code
 
@@ -67,8 +67,8 @@ A question about how you use Pixel is as welcome as a bug report.
 | --- | --- |
 | a question, an idea, or feedback on how you use Pixel | [GitHub Discussions](https://github.com/Pixel-CLI/pixel/discussions) |
 | a bug, with the command and its output | [GitHub Issues](https://github.com/Pixel-CLI/pixel/issues) |
-| a pull request | [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/CONTRIBUTING.md) lists what a pull request needs to be merged |
-| a security vulnerability, privately | [a private security advisory](https://github.com/Pixel-CLI/pixel/security/advisories/new) ([SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md)) |
+| a pull request | [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/.github/CONTRIBUTING.md) lists what a pull request needs to be merged |
+| a security vulnerability, privately | [a private security advisory](https://github.com/Pixel-CLI/pixel/security/advisories/new) ([SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/.github/SECURITY.md)) |
 | a request about your data | as the [Privacy Policy](/legal/privacy-policy/#who-is-responsible) says |
 
 There is no contact form, so the site keeps nothing you send. Every channel above is on GitHub, where you can read past threads before you post.

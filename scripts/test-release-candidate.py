@@ -24,11 +24,11 @@ class CandidateContract(unittest.TestCase):
         self.git('config', 'user.name', 'Release test')
         self.git('config', 'user.email', 'release@example.invalid')
         self.write('CHANGELOG.md', '## [Unreleased]\n')
-        self.write('changelog.d/1.fixed.md', '**cli:** fixed\n')
+        self.write('.github/changelog.d/1.fixed.md', '**cli:** fixed\n')
         self.base = self.commit()
         self.git('switch', '-qc', 'prepare')
         self.write('CHANGELOG.md', '## [Unreleased]\n\n## [0.7.0]\n- fixed\n')
-        (self.repo / 'changelog.d/1.fixed.md').unlink()
+        (self.repo / '.github/changelog.d/1.fixed.md').unlink()
         self.head = self.commit()
         self.git('switch', '-q', 'main')
 
@@ -89,7 +89,7 @@ class CandidateContract(unittest.TestCase):
         self.assertNotEqual(self.run_guard(self.base, merge).returncode, 0)
 
     def test_unreleased_fragments_and_code_changes_refuse_premerge(self):
-        for name in ('changelog.d/missing.fixed.md', 'code.py'):
+        for name in ('.github/changelog.d/missing.fixed.md', 'code.py'):
             with self.subTest(name=name):
                 self.git('switch', '-q', 'prepare')
                 self.write(name, 'left out of the release')
@@ -99,7 +99,7 @@ class CandidateContract(unittest.TestCase):
 
     def test_a_preexisting_fragment_left_uncut_refuses(self):
         self.git('switch', '-q', 'prepare')
-        self.git('restore', '--source', self.base, '--', 'changelog.d')
+        self.git('restore', '--source', self.base, '--', '.github/changelog.d')
         self.head = self.commit()
         result = self.run_guard(self.base)
         self.assertNotEqual(result.returncode, 0)

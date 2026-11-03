@@ -5,7 +5,7 @@
 //! (calls ∪ has_method ∪ symbol-level imports ∪ file-import projection),
 //! persisted to `clusters`/`cluster_members`.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use rusqlite::params;
 use serde::Serialize;
@@ -96,7 +96,7 @@ fn propagate(g: &Graph, iterations: usize) -> Vec<usize> {
             if g.adj[v].is_empty() {
                 continue;
             }
-            let mut freq: HashMap<usize, usize> = HashMap::new();
+            let mut freq: HashMap<usize, usize> = HashMap::default();
             for &u in &g.adj[v] {
                 *freq.entry(labels[u]).or_insert(0) += 1;
             }
@@ -119,7 +119,7 @@ fn propagate(g: &Graph, iterations: usize) -> Vec<usize> {
 }
 
 fn dominant_dir(paths: &[String]) -> String {
-    let mut freq: HashMap<&str, usize> = HashMap::new();
+    let mut freq: HashMap<&str, usize> = HashMap::default();
     for p in paths {
         let dir = match p.rfind('/') {
             Some(i) => &p[..i],
@@ -133,7 +133,7 @@ fn dominant_dir(paths: &[String]) -> String {
 }
 
 fn top_keywords(names: &[String], k: usize) -> String {
-    let mut freq: HashMap<String, usize> = HashMap::new();
+    let mut freq: HashMap<String, usize> = HashMap::default();
     for n in names {
         for w in split_ident_words(n) {
             if w.len() < 2 {
@@ -164,7 +164,7 @@ pub fn compute(store: &mut GraphStore) -> Result<Vec<ClusterSummary>, StoreError
     let labels = propagate(&g, 10);
 
     // group members by final label
-    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::default();
     for (v, &l) in labels.iter().enumerate() {
         groups.entry(l).or_default().push(v);
     }

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/clean.sh: what it reclaims, and what it must not touch.
+"""Contract of scripts/dev/clean.sh: what it reclaims, and what it must not touch.
 
 Every case runs the real script against a disposable git repository that has a
 second worktree, because the scopes cover every worktree and not only the one
@@ -26,7 +26,7 @@ import subprocess
 import tempfile
 import unittest
 
-CLEAN = Path(__file__).with_name("clean.sh")
+CLEAN = Path(__file__).parent / 'dev' / 'clean.sh'
 
 # The fixture's ignore rules, deliberately not a copy of the repository's:
 # DEPENDENCIES.md is missing from it so that a name clean.sh collects is, in
@@ -58,8 +58,8 @@ class CleanContract(unittest.TestCase):
         # the script matches paths it built against paths git printed.
         self.root = Path(self.tmp.name).resolve()
         self.repo = self.root / "repo"
-        (self.repo / "scripts").mkdir(parents=True)
-        shutil.copy(CLEAN, self.repo / "scripts/clean.sh")
+        (self.repo / "scripts" / "dev").mkdir(parents=True)
+        shutil.copy(CLEAN, self.repo / "scripts/dev/clean.sh")
         (self.repo / ".gitignore").write_text(IGNORES)
         (self.repo / "src").mkdir()
         (self.repo / "src/lib.rs").write_text("pub fn a() {}\n")
@@ -97,7 +97,7 @@ class CleanContract(unittest.TestCase):
 
     def clean(self, *args, **extra_env):
         return subprocess.run(
-            ["sh", str(self.repo / "scripts/clean.sh"), *args],
+            ["sh", str(self.repo / "scripts/dev/clean.sh"), *args],
             cwd=self.repo, env={**self.env, **extra_env},
             capture_output=True, text=True, timeout=120,
         )

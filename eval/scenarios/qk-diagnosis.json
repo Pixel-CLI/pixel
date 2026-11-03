@@ -1,0 +1,71 @@
+{
+  "id": "qk-diagnosis",
+  "suite": "brief-question-kinds",
+  "task_class": "explanation",
+  "mode": "answer",
+  "commit": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+  "max_turns": 30,
+  "prompt": "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+  "must": [
+    {
+      "pattern": "(?i)(?:current|fresh|up.to.date|covers? HEAD|matches HEAD).{0,80}(?:text )?(?:index|shard)|(?:text )?(?:index|shard).{0,80}(?:current|fresh|up.to.date|covers? HEAD|matches HEAD)",
+      "points": 1,
+      "why": "qualifies the text shard as current for this repository revision"
+    },
+    {
+      "pattern": "(?i)(?:at least one|one|a successful|successful).{0,40}(?:operation|search|query).{0,50}(?:succeeds|answers?|returns evidence)|(?:operation|search|query).{0,50}(?:succeeds|answers?|returns evidence)",
+      "points": 1,
+      "why": "requires an evidence operation to succeed before a brief can render"
+    },
+    {
+      "pattern": "(?i)(?:(?:stale|missing).{0,80}(?:graph|index)|(?:graph|index).{0,80}(?:stale|missing)).{0,160}(?:files|text evidence).{0,60}(?:remain|still|leave|available)|(?:files|text evidence).{0,60}(?:remain|still|leave|available).{0,160}(?:stale|missing).{0,80}(?:graph|index)",
+      "points": 1,
+      "why": "states the tested fallback when current text search succeeds"
+    },
+    {
+      "pattern": "(?i)unresolved.{0,100}(?:graph is stale|graph is not built|stale|not built)|(?:graph is stale|graph is not built).{0,100}unresolved",
+      "points": 2,
+      "why": "locates the stale/missing graph reason in unresolved"
+    },
+    {
+      "pattern": "(?i)(?:never|does not|doesn't|without).{0,50}(?:rebuild|build).{0,50}(?:graph|index)|(?:graph|index).{0,50}(?:never|not rebuilt|not built)",
+      "points": 2,
+      "why": "states that the hook does not build the graph/index"
+    },
+    {
+      "pattern": "(?i)(?:(?:all|every).{0,40}(?:ops|operations|searches).{0,50}(?:fail|unanswered)|no operation answered|answered\\s*(?:=|==)\\s*0).{0,100}(?:empty|no brief|renders? nothing|does not render)|(?:empty|no brief|renders? nothing|does not render).{0,100}(?:(?:all|every).{0,40}(?:ops|operations|searches).{0,50}(?:fail|unanswered)|no operation answered|answered\\s*(?:=|==)\\s*0)",
+      "points": 1,
+      "why": "records the all-operations-failed empty-brief case"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "(?im)^(?!.*\\b(?:not|never|doesn't|does not|without|no|cannot|can't)\\b).*(?:any|every|just an?|merely).{0,50}(?:existing|present|on.disk).{0,30}(?:text )?(?:index|shard).{0,100}(?:guarantees?|ensures?|always|is enough).{0,50}(?:brief|render)",
+      "penalty": 2,
+      "why": "a shard's presence alone does not prove it is current or usable"
+    },
+    {
+      "pattern": "(?im)^(?!.*\\b(?:not|never|doesn't|does not|without|no|cannot|can't|fails? to)\\b).*(?:stale|missing).{0,80}(?:graph|index).{0,80}(?:brief disappears|no brief|empty brief|text evidence is discarded)",
+      "penalty": 2,
+      "why": "a current usable text index can still answer while the graph is stale or absent"
+    },
+    {
+      "pattern": "(?im)^(?!.*\\b(?:not|never|doesn't|does not|without|no|cannot|can't|fails? to)\\b).*(?:hook|prompt brief).{0,80}(?:rebuilds?|refreshes?|builds?)\\s+(?:the\\s+)?(?:graph|index)",
+      "penalty": 2,
+      "why": "the prompt hook does not repair indexes"
+    },
+    {
+      "pattern": "(?im)^(?!.*\\b(?:not|never|doesn't|does not|without|no|cannot|can't)\\b).*(?:all|every).{0,40}(?:ops|operations|searches).{0,50}(?:fail|unanswered).{0,100}(?:brief|render)",
+      "penalty": 2,
+      "why": "when all evidence operations fail, no brief is rendered"
+    }
+  ],
+  "semantic_review": {
+    "criteria": [
+      "Shard presence alone is insufficient: the index must cover HEAD, and at least one evidence operation must answer for render to produce a brief. If all operations fail, it renders no brief.",
+      "The source snapshot for this run was freshly prepared; stale/missing behavior is supported by existing CLI tests, not by corrupting this run's graph.",
+      "With a stale graph and a current text index whose search succeeds, the brief can retain file evidence and names the graph failure under unresolved; graph callers are absent.",
+      "With no graph and a current text shard whose search succeeds, text file evidence remains, unresolved says the graph is not built, and the hook leaves the graph absent."
+    ]
+  }
+}

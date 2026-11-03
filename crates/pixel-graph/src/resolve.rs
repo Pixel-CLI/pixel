@@ -55,7 +55,7 @@
 //! Ruby constant receivers use lexical class/module scopes instead of name tiers.
 //! Their unique methods are Exact; Rails dispatch conventions remain Probable.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use rusqlite::params;
 
@@ -188,6 +188,14 @@ pub struct ResolveIndex {
     /// root (`rust_crate_depth`, `None` outside `src/`), for the module-path
     /// receiver rule (`module_match`).
     rust_modules: HashMap<i64, (Vec<String>, Option<usize>)>,
+    /// The graph's Rust edges are pixel-mvp's (`mvp_adapter::rust_is_walled`).
+    walled: bool,
+    /// Every name some symbol carries, whatever its kind or language
+    /// ([`ResolveIndex::records_once`]).
+    carried: HashSet<String>,
+    /// (file_id, local name) of every import binding, resolved or not: a
+    /// call through one names its source, not itself.
+    bound: HashSet<(i64, String)>,
 }
 
 fn callable(kind: SymbolKind) -> bool {
@@ -217,6 +225,10 @@ fn best(cands: &[Candidate]) -> Option<i64> {
 impl ResolveIndex {
     pub fn build(store: &GraphStore) -> Result<Self, StoreError> {
         let conn = store.conn();
+        // A graph whose Rust edges are pixel-mvp's offers no Rust symbol to
+        // this resolver: it decides no Rust site, and a caller of another
+        // language never reaches Rust by name.
+        let walled = crate::mvp_adapter::rust_is_walled(store)?;
         let ruby_files = {
             let mut stmt = conn.prepare("SELECT id FROM files WHERE lang = 'ruby'")?;
             let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
@@ -233,9 +245,10 @@ impl ResolveIndex {
             })?;
             rows.collect::<Result<HashMap<_, _>, _>>()?
         };
-        let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::new();
-        let mut qualified_of: HashMap<i64, String> = HashMap::new();
-        let mut containers = HashSet::new();
+        let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::default();
+        let mut qualified_of: HashMap<i64, String> = HashMap::default();
+        let mut containers = HashSet::default();
+        let mut carried: HashSet<String> = HashSet::default();
         {
             let mut stmt = conn.prepare(
                 "SELECT name, file_id, id, kind, start_line, trait_impl, qualified FROM symbols",
@@ -259,12 +272,24 @@ impl ResolveIndex {
                     containers.insert(cand.symbol_id);
                 }
                 qualified_of.insert(cand.symbol_id, qualified);
-                if callable(cand.kind) {
-                    by_name.entry(name).or_default().push(cand);
+                if callable(cand.kind) && !(walled && rust_modules.contains_key(&cand.file_id)) {
+                    by_name.entry(name.clone()).or_default().push(cand);
+                }
+                carried.insert(name);
+            }
+        }
+        let mut bound: HashSet<(i64, String)> = HashSet::default();
+        {
+            let mut stmt = conn.prepare("SELECT file_id, bindings FROM imports")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (fid, bindings_csv) = row?;
+                for b in decode_bindings(&bindings_csv) {
+                    bound.insert((fid, b.local));
                 }
             }
         }
-        let mut import_bindings: HashMap<(i64, String), Vec<ImportTarget>> = HashMap::new();
+        let mut import_bindings: HashMap<(i64, String), Vec<ImportTarget>> = HashMap::default();
         {
             let mut stmt = conn.prepare(
                 "SELECT file_id, resolved_file_id, bindings, scope FROM imports
@@ -305,7 +330,31 @@ impl ResolveIndex {
             qualified_of,
             import_bindings,
             rust_modules,
+            walled,
+            carried,
+            bound,
         })
+    }
+
+    /// True iff an unresolved call to `name` in `file_id` is recorded once
+    /// per file and name (`GraphStore::insert_unresolved_name`) instead of
+    /// per site: no symbol carries the name, of any kind or language, so
+    /// only a later definition of that very name can link it, and the
+    /// update that defines it reads the file again (`write_rows`). Not in a
+    /// Ruby file, whose rules reach a callee the call does not name
+    /// (`perform_later` reads `#perform`, `new` reads `#initialize`), nor
+    /// through an import binding (`push as ship`), whose source may be
+    /// defined later under another name.
+    pub fn records_once(&self, file_id: i64, name: &str) -> bool {
+        !self.carried.contains(name)
+            && !self.ruby_files.contains(&file_id)
+            && !self.bound.contains(&(file_id, name.to_string()))
+    }
+
+    /// True iff `file_id` is a Rust file of a graph whose Rust edges are
+    /// pixel-mvp's.
+    fn walled_file(&self, file_id: i64) -> bool {
+        self.walled && self.rust_modules.contains_key(&file_id)
     }
 
     /// True iff some symbol in the graph is named `name`.
@@ -1005,12 +1054,27 @@ pub fn resolve_calls(
     store: &GraphStore,
     pending: &[FileCalls],
 ) -> Result<ResolveStats, StoreError> {
-    let idx = ResolveIndex::build(store)?;
+    resolve_calls_in(store, &ResolveIndex::build(store)?, pending)
+}
+
+/// [`resolve_calls`] against an index the caller built ([`ResolveIndex::build`])
+/// over the symbols and imports `pending` is decided against: one update
+/// builds it once for its three passes.
+pub fn resolve_calls_in(
+    store: &GraphStore,
+    idx: &ResolveIndex,
+    pending: &[FileCalls],
+) -> Result<ResolveStats, StoreError> {
     let mut stats = ResolveStats::default();
     for fc in pending {
         for call in &fc.calls {
             let Some(src_id) = call.enclosing_symbol_id else {
                 // Top-level call site: no source symbol to hang an edge on.
+                if idx.records_once(fc.file_id, &call.callee_name) {
+                    store.insert_unresolved_name(fc.file_id, &call.callee_name)?;
+                    stats.unresolved += 1;
+                    continue;
+                }
                 store.insert_unresolved_call(
                     fc.file_id,
                     &call.callee_name,
@@ -1053,6 +1117,13 @@ pub fn resolve_calls(
                     })?;
                     stats.probable += 1;
                 }
+                Decision::Unresolved if idx.records_once(fc.file_id, &call.callee_name) => {
+                    // Counted on the caller: `uses … callees` still reports
+                    // it as a site its answer may miss.
+                    store.insert_unresolved_name(fc.file_id, &call.callee_name)?;
+                    store.add_unnamed_calls(src_id, 1)?;
+                    stats.unresolved += 1;
+                }
                 Decision::Unresolved => {
                     store.insert_unresolved_call(
                         fc.file_id,
@@ -1083,7 +1154,16 @@ pub fn resolve_references(
     store: &GraphStore,
     pending: &[FileReferences],
 ) -> Result<ResolveStats, StoreError> {
-    let idx = ResolveIndex::build(store)?;
+    resolve_references_in(store, &ResolveIndex::build(store)?, pending)
+}
+
+/// [`resolve_references`] against an index the caller built, as
+/// [`resolve_calls_in`].
+pub fn resolve_references_in(
+    store: &GraphStore,
+    idx: &ResolveIndex,
+    pending: &[FileReferences],
+) -> Result<ResolveStats, StoreError> {
     let mut stats = ResolveStats::default();
     for fr in pending {
         for r#ref in &fr.references {
@@ -1169,7 +1249,11 @@ pub fn resolve_references(
 ///
 /// `replayed` holds the names of the rows the update itself moved back to
 /// `unresolved_calls` (a demoted incoming edge, a reconsidered one): under
-/// an alias the name the call wrote is not the target's.
+/// an alias the name the call wrote is not the target's. `rows_moved`
+/// holds the files of those rows, and of every import row the update
+/// pointed elsewhere outside its batch: the files whose rows a pass below
+/// changed although the batch did not touch them, which pixel-mvp's Rust
+/// rows are written again for (`mvp_adapter::merge_again`).
 ///
 /// Over-inclusion only costs time (an unchanged input gives the same
 /// decision); omission leaves a stale row, which
@@ -1180,6 +1264,7 @@ pub struct Affected {
     pub files: HashSet<i64>,
     pub constants: HashSet<String>,
     pub replayed: HashSet<String>,
+    pub rows_moved: HashSet<i64>,
     /// The batch changed a Ruby ancestor declaration, or a class or module
     /// a stored declaration names: every Ruby call to `self` (bare or
     /// written) or to a constant receiver, and every Ruby method-symbol
@@ -1197,7 +1282,7 @@ impl Affected {
     /// new symbol ids and lines are the demotion's concern (`write_rows`
     /// moves every incoming edge back and records it in `replayed`).
     pub fn record_changed_definitions(&mut self, before: &[Definition], after: &[Definition]) {
-        let mut count: HashMap<&Definition, i64> = HashMap::new();
+        let mut count: HashMap<&Definition, i64> = HashMap::default();
         for definition in before {
             *count.entry(definition).or_default() -= 1;
         }
@@ -1227,7 +1312,8 @@ impl Affected {
         before: &[(String, usize, crate::extract::RawMixin)],
         after: &[(String, usize, crate::extract::RawMixin)],
     ) -> Result<(), StoreError> {
-        let mut count: HashMap<&(String, usize, crate::extract::RawMixin), i64> = HashMap::new();
+        let mut count: HashMap<&(String, usize, crate::extract::RawMixin), i64> =
+            HashMap::default();
         for mixin in before {
             *count.entry(mixin).or_default() -= 1;
         }
@@ -1361,7 +1447,8 @@ fn retry_rows(
 /// the reference that one is held equal to.
 pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
     let rows = retry_rows(store, "", None)?;
-    retry(store, rows)
+    let idx = ResolveIndex::build(store)?;
+    retry(store, &idx, rows)
 }
 
 /// [`resolve_all`] restricted to the rows whose decision reads something
@@ -1373,7 +1460,20 @@ pub fn resolve_affected(
     store: &mut GraphStore,
     affected: &Affected,
 ) -> Result<ResolveStats, StoreError> {
-    let mut rows: HashMap<i64, RetryRow> = HashMap::new();
+    let idx = ResolveIndex::build(store)?;
+    resolve_affected_in(store, &idx, affected)
+}
+
+/// [`resolve_affected`] against an index the caller built, as
+/// [`resolve_calls_in`]. Retrying writes edges and deletes rows, never a
+/// symbol or an import, so the index the update's first pass read still
+/// holds.
+pub fn resolve_affected_in(
+    store: &mut GraphStore,
+    idx: &ResolveIndex,
+    affected: &Affected,
+) -> Result<ResolveStats, StoreError> {
+    let mut rows: HashMap<i64, RetryRow> = HashMap::default();
     for name in affected.call_names() {
         for row in retry_rows(store, " AND u.name = ?1", Some(&name))? {
             rows.insert(row.id, row);
@@ -1402,7 +1502,46 @@ pub fn resolve_affected(
     }
     let mut rows: Vec<RetryRow> = rows.into_values().collect();
     rows.sort_by_key(|row| row.id);
-    retry(store, rows)
+    retry(store, idx, rows)
+}
+
+/// Moves the `calls` rows named by one of `names` that the batch left
+/// defined nowhere from `unresolved_calls` to `unresolved_names`, once per
+/// file and name, where [`ResolveIndex::records_once`] holds: what a full
+/// build records for such a call ([`resolve_calls_in`]). A row without an
+/// enclosing symbol moves too, though no retry reads it. pixel-mvp's Rust
+/// rows are left to the adapter, which drops them itself.
+pub fn shelve_unnamed_calls<'a>(
+    store: &GraphStore,
+    idx: &ResolveIndex,
+    names: impl IntoIterator<Item = &'a String>,
+) -> Result<(), StoreError> {
+    for name in names {
+        if idx.carried.contains(name.as_str()) {
+            continue;
+        }
+        let rows: Vec<(i64, i64, Option<i64>)> = {
+            let mut stmt = store.conn().prepare_cached(
+                "SELECT id, file_id, enclosing_symbol_id FROM unresolved_calls
+                  WHERE name = ?1 AND kind = 'calls'",
+            )?;
+            let rows = stmt.query_map(params![name], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for (id, file_id, enclosing) in rows {
+            if idx.walled_file(file_id) || !idx.records_once(file_id, name) {
+                continue;
+            }
+            store.insert_unresolved_name(file_id, name)?;
+            if let Some(symbol) = enclosing {
+                store.add_unnamed_calls(symbol, 1)?;
+            }
+            store
+                .conn()
+                .exec_cached("DELETE FROM unresolved_calls WHERE id = ?1", params![id])?;
+        }
+    }
+    Ok(())
 }
 
 /// The `unresolved_calls` rows a Ruby ancestor chain decides: calls on
@@ -1414,10 +1553,18 @@ const RUBY_SELF_ROWS: &str = " AND u.file_id IN (SELECT id FROM files WHERE lang
             OR substr(TRIM(u.receiver), 1, 1) BETWEEN 'A' AND 'Z'
             OR TRIM(u.receiver) LIKE '::%')";
 
-fn retry(store: &mut GraphStore, rows: Vec<RetryRow>) -> Result<ResolveStats, StoreError> {
-    let idx = ResolveIndex::build(store)?;
+fn retry(
+    store: &mut GraphStore,
+    idx: &ResolveIndex,
+    rows: Vec<RetryRow>,
+) -> Result<ResolveStats, StoreError> {
     let mut stats = ResolveStats::default();
     for row in &rows {
+        // pixel-mvp's row: this resolver does not decide it again.
+        if idx.walled_file(row.file_id) {
+            stats.unresolved += 1;
+            continue;
+        }
         let decision = if row.kind == "references" {
             idx.decide_reference(
                 row.file_id,
@@ -1603,6 +1750,7 @@ pub fn reconsider_resolved_calls(
     }
     for call in calls {
         affected.replayed.insert(call.name.clone());
+        affected.rows_moved.insert(call.file_id);
         store.insert_unresolved_call(
             call.file_id,
             &call.name,
@@ -2875,7 +3023,7 @@ mod tests {
         );
         for (constant, expected) in [("Delta", 1), ("Gamma", 1), ("Gam", 0), ("Widget", 2)] {
             let affected = Affected {
-                constants: HashSet::from([constant.to_string()]),
+                constants: HashSet::from_iter([constant.to_string()]),
                 ..Affected::default()
             };
             assert_eq!(
@@ -2885,7 +3033,7 @@ mod tests {
             );
         }
         let replayed = Affected {
-            replayed: HashSet::from(["zeta".to_string()]),
+            replayed: HashSet::from_iter(["zeta".to_string()]),
             ..Affected::default()
         };
         assert_eq!(
@@ -2894,7 +3042,7 @@ mod tests {
             "a row the update moved back"
         );
         let files = Affected {
-            files: HashSet::from([file]),
+            files: HashSet::from_iter([file]),
             ..Affected::default()
         };
         assert_eq!(

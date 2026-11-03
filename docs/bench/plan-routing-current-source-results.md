@@ -128,7 +128,7 @@ PIXEL_DAEMON_AUTO_START=0 target/release/pixel build-index /new/runtime/repo
 # Launch this exact binary for the isolated repo and verify its socket owner.
 target/release/pixel daemon start /new/runtime/repo
 # Use the venv Python path without resolving its interpreter symlink.
-.pixel/experiments/plan-routing-pilot-v1/venv/bin/python scripts/bench-plan-routing.py evaluate \
+.pixel/experiments/plan-routing-pilot-v1/venv/bin/python scripts/bench/bench-plan-routing.py evaluate \
   --model .pixel/experiments/plan-routing-pilot-v1/fit \
   --test scripts/fixtures/plan-routing-test.jsonl \
   --output /new/results/eval --socket /socket/reported/for/new/runtime/repo
@@ -136,7 +136,7 @@ target/release/pixel daemon start /new/runtime/repo
 ```
 
 Executed checks: successful default-feature source build; **8 prototype tests**;
-`scripts/gates.sh` **67 tests (36+12+9+10), exit 0**, explicitly skipping Cargo
+`scripts/ci/gates.sh` **67 tests (36+12+9+10), exit 0**, explicitly skipping Cargo
 fmt/test/clippy for docs/bench-only changes; 100-row source/release baseline
 comparison and 40-vector learned-model parity. No Rust edits, full workspace
 tests, mutants, install/doctor, push, PR or publication. No shared target dir.

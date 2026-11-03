@@ -11,7 +11,7 @@
 # permissions from any settings file), no skills, no MCP server, no
 # sub-agents and no editing tools, and both are told to answer in English.
 #
-# The only difference: the `pixel` arm gets the hooks `pixel install` writes
+# The only difference: the `pixel` arm gets the hooks `pixel setup` writes
 # for Claude Code (SessionStart injects the agent prompt, UserPromptSubmit
 # adds the task packet, PostToolUse records metrics), passed with
 # --settings, so it measures Pixel as a user installs it.

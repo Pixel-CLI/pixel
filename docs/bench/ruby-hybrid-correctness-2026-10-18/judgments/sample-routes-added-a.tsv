@@ -1,0 +1,22 @@
+route-hybrid-only-00006	correct	namespace :settings (726) resource :totp only create, controller "totp" (732) -> Settings::TotpController#create defined l.7
+route-hybrid-only-00044	correct	top-level resource :profile only show, controller "settings/profile" (782), no enclosing module -> Settings::ProfileController#show l.11
+route-hybrid-only-00048	correct	namespace :checkout (787) resources :discounts only destroy (788) -> Checkout::DiscountsController#destroy l.105
+route-hybrid-only-00056	correct	namespace :checkout resources :upsells only update (792) -> Checkout::UpsellsController#update l.57
+route-hybrid-only-00046	correct	nested resources :products only show, controller "settings/profile/products" (783) -> Settings::Profile::ProductsController#show l.4
+route-hybrid-only-00081	correct	resources :communities only index (1131), no module -> CommunitiesController#index l.11
+route-hybrid-only-00084	correct	scope module "communities" (1132) resources :chat_messages incl. update (1133) -> Communities::ChatMessagesController#update l.25
+route-hybrid-only-00079	correct	scope module "subscriptions" (1121) resource :magic_link only new create (1122) -> Subscriptions::MagicLinksController#create l.15
+route-hybrid-only-00045	correct	resource :profile only show update, controller "settings/profile" (782) -> Settings::ProfileController#update l.18
+route-hybrid-only-00052	correct	get :statistics on: :member of checkout/discounts (788-790) -> Checkout::DiscountsController#statistics l.34
+route-hybrid-only-00049	correct	namespace :checkout resources :discounts only index (788) -> Checkout::DiscountsController#index l.14
+route-hybrid-only-00074	correct	post :approve in member of marketing_actions under scope module: :products (995-1001) -> Products::MarketingActionsController#approve l.25
+route-hybrid-only-00053	correct	namespace :checkout resources :upsells only create (792) -> Checkout::UpsellsController#create l.44
+route-hybrid-only-00055	correct	namespace :checkout resources :upsells only index (792) -> Checkout::UpsellsController#index l.10
+route-hybrid-only-00027	correct	post :remove_credit_card inside settings resource :payments (746-752) -> Settings::PaymentsController#remove_credit_card l.279
+route-hybrid-only-00043	correct	put :restore on member of settings/team resources :members (774-776) -> Settings::Team::MembersController#restore l.31
+route-hybrid-only-00047	correct	namespace :checkout resources :discounts only create (788) -> Checkout::DiscountsController#create l.59
+route-hybrid-only-00007	correct	namespace :settings resource :totp only destroy, controller "totp" (732) -> Settings::TotpController#destroy l.62
+route-hybrid-only-00083	correct	scope module "communities" resources :chat_messages incl. destroy (1133) -> Communities::ChatMessagesController#destroy l.38
+route-hybrid-only-00062	correct	namespace :checkout resource :form only show, controller :form (804) -> Checkout::FormController#show l.6
+route-hybrid-only-00001	correct	namespace :settings resource :main only show, controller "main" (727) -> Settings::MainController#show l.9
+route-hybrid-only-00037	correct	namespace settings/team, scope format json, resources :invitations only create update destroy (771) -> Settings::Team::InvitationsController#update l.43

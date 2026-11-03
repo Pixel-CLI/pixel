@@ -11,6 +11,143 @@
 
 use std::io::IsTerminal;
 
+/// One decoded keypress in a list picker: several rows, each independently
+/// checked, and a cursor that moves rather than a single Yes/No highlight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListKey {
+    /// Move the cursor up.
+    Up,
+    /// Move the cursor down.
+    Down,
+    /// Toggle the row under the cursor.
+    Space,
+    /// Check every row this scope can use.
+    All,
+    /// Uncheck every row this scope can use.
+    None,
+    /// Answer with what is checked.
+    Enter,
+    /// Stop without answering.
+    Cancel,
+}
+
+/// Decode one byte in a list picker. `None` is noise to ignore, so a paste or
+/// a stray byte never answers for the user.
+pub fn decode_list_byte(byte: u8) -> Option<ListKey> {
+    match byte {
+        b'\r' | b'\n' => Some(ListKey::Enter),
+        b' ' => Some(ListKey::Space),
+        b'a' | b'A' => Some(ListKey::All),
+        b'n' | b'N' => Some(ListKey::None),
+        b'k' => Some(ListKey::Up),
+        b'j' => Some(ListKey::Down),
+        b'q' | 0x03 | 0x04 => Some(ListKey::Cancel),
+        _ => None,
+    }
+}
+
+/// Decode a complete `ESC [` sequence in a list picker: `[A`/`[B` are the
+/// vertical arrows and `[D`/`[C` the horizontal ones, which the Apply/Cancel
+/// row reads as its left/right pick (in a vertical list they move the same
+/// way). A sequence that died before its second byte is a lone Esc press,
+/// and cancels.
+pub fn decode_list_escape(second: Option<u8>, third: Option<u8>) -> Option<ListKey> {
+    match (second, third) {
+        (Some(b'['), Some(b'A' | b'D')) => Some(ListKey::Up),
+        (Some(b'['), Some(b'B' | b'C')) => Some(ListKey::Down),
+        (None, _) => Some(ListKey::Cancel),
+        _ => None,
+    }
+}
+
+/// What a keystroke did to the list, so the caller knows whether to repaint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListOutcome {
+    /// The cursor or a checkbox moved: repaint the rows.
+    Redraw,
+    /// Answer with the checked rows.
+    Confirm,
+    /// Stop without answering.
+    Cancel,
+    /// Nothing this picker uses: repaint nothing.
+    Ignored,
+}
+
+/// The state of a list picker: where the cursor is and what is checked. Pure,
+/// so the key map is tested without a terminal.
+#[derive(Debug, Clone)]
+pub struct ListState {
+    /// The row the cursor is on.
+    pub cursor: usize,
+    /// Which rows are checked, one entry per row.
+    pub checked: Vec<bool>,
+}
+
+impl ListState {
+    /// Start from `default` (1-based row numbers), with the cursor on the first
+    /// checked row, or on the first row.
+    pub fn new(len: usize, default: &[usize]) -> Self {
+        let mut checked = vec![false; len];
+        for index in default {
+            if let Some(slot) = index.checked_sub(1).and_then(|i| checked.get_mut(i)) {
+                *slot = true;
+            }
+        }
+        let cursor = checked.iter().position(|on| *on).unwrap_or(0);
+        Self {
+            cursor: cursor.min(len.saturating_sub(1)),
+            checked,
+        }
+    }
+
+    /// Apply one key. A row in `disabled` is never changed by any key: the
+    /// picker cannot offer what this scope cannot use, so `Space`, `All` and
+    /// `None` all leave it as it was.
+    pub fn apply(&mut self, key: ListKey, disabled: &[usize]) -> ListOutcome {
+        let togglable = |index: usize| !disabled.contains(&(index + 1));
+        match key {
+            ListKey::Up => {
+                self.cursor = self.cursor.saturating_sub(1);
+                ListOutcome::Redraw
+            }
+            ListKey::Down => {
+                self.cursor = (self.cursor + 1).min(self.checked.len().saturating_sub(1));
+                ListOutcome::Redraw
+            }
+            ListKey::Space => {
+                if let Some(slot) = self.checked.get_mut(self.cursor)
+                    && togglable(self.cursor)
+                {
+                    *slot = !*slot;
+                    return ListOutcome::Redraw;
+                }
+                ListOutcome::Ignored
+            }
+            ListKey::All | ListKey::None => {
+                let on = key == ListKey::All;
+                for (index, slot) in self.checked.iter_mut().enumerate() {
+                    if togglable(index) {
+                        *slot = on;
+                    }
+                }
+                ListOutcome::Redraw
+            }
+            ListKey::Enter => ListOutcome::Confirm,
+            ListKey::Cancel => ListOutcome::Cancel,
+        }
+    }
+
+    /// The 1-based numbers of the checked rows, in row order.
+    pub fn picked(&self) -> Vec<usize> {
+        self.checked
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .map(|(index, _)| index + 1)
+            .collect()
+    }
+}
+
 /// One decoded keypress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -161,6 +298,38 @@ impl RawGuard {
         }
     }
 
+    /// The next key in a list picker, on the same byte and escape plumbing as
+    /// [`RawGuard::read_key`]: the vertical arrows, space and `a`/`n` a yes/no
+    /// question has no use for.
+    #[cfg_attr(test, mutants::skip)] // libc adapter; needs a real tty, the key map is tested pure
+    pub fn read_list_key(&mut self) -> ListKey {
+        loop {
+            let Some(byte) = self.read_byte() else {
+                return ListKey::Cancel;
+            };
+            if byte == 0x1b {
+                let (second, third) = self.escape_sequence();
+                if let Some(key) = decode_list_escape(second, third) {
+                    return key;
+                }
+            } else if let Some(key) = decode_list_byte(byte) {
+                return key;
+            }
+        }
+    }
+
+    /// The rest of an escape sequence: a second byte with a 100 ms timeout,
+    /// then a third with the same, so a lone Esc press cancels instead of
+    /// hanging the picker waiting for a sequence that never comes.
+    #[cfg_attr(test, mutants::skip)] // libc adapter; needs a real tty
+    fn escape_sequence(&mut self) -> (Option<u8>, Option<u8>) {
+        self.set_decaying();
+        let second = self.read_byte();
+        let third = self.read_byte();
+        self.set_blocking();
+        (second, third)
+    }
+
     #[cfg_attr(test, mutants::skip)] // libc adapter; needs a real tty, the byte mapping is tested pure
     fn read_byte(&mut self) -> Option<u8> {
         let mut byte = 0u8;
@@ -173,10 +342,7 @@ impl RawGuard {
     /// timeout, so a lone Esc cancels instead of hanging the picker.
     #[cfg_attr(test, mutants::skip)] // libc adapter; needs a real tty, the sequence mapping is tested pure
     fn escape(&mut self) -> Option<Key> {
-        self.set_decaying();
-        let second = self.read_byte();
-        let third = self.read_byte();
-        self.set_blocking();
+        let (second, third) = self.escape_sequence();
         decode_escape(second, third)
     }
 
@@ -246,6 +412,122 @@ mod tests {
         assert_eq!(decode_escape(Some(b'['), Some(b'H')), None);
         assert_eq!(decode_escape(Some(b'O'), Some(b'A')), None);
         assert_eq!(decode_escape(Some(b'['), None), None);
+    }
+
+    #[test]
+    fn list_keys_map_the_byte_the_arrow_and_the_vim_shorthand() {
+        assert_eq!(decode_list_byte(b' '), Some(ListKey::Space));
+        assert_eq!(decode_list_byte(b'a'), Some(ListKey::All));
+        assert_eq!(decode_list_byte(b'n'), Some(ListKey::None));
+        assert_eq!(decode_list_byte(b'j'), Some(ListKey::Down));
+        assert_eq!(decode_list_byte(b'k'), Some(ListKey::Up));
+        assert_eq!(decode_list_byte(b'\r'), Some(ListKey::Enter));
+        assert_eq!(decode_list_byte(b'q'), Some(ListKey::Cancel));
+        assert_eq!(decode_list_byte(0x03), Some(ListKey::Cancel));
+        assert_eq!(decode_list_byte(b'z'), None, "noise is ignored");
+        assert_eq!(
+            decode_list_escape(Some(b'['), Some(b'A')),
+            Some(ListKey::Up)
+        );
+        assert_eq!(
+            decode_list_escape(Some(b'['), Some(b'B')),
+            Some(ListKey::Down)
+        );
+        assert_eq!(
+            decode_list_escape(None, None),
+            Some(ListKey::Cancel),
+            "a lone Esc"
+        );
+        assert_eq!(
+            decode_list_escape(Some(b'['), Some(b'D')),
+            Some(ListKey::Up),
+            "left moves like up"
+        );
+        assert_eq!(
+            decode_list_escape(Some(b'['), Some(b'C')),
+            Some(ListKey::Down),
+            "right moves like down — the Apply/Cancel row's ←/→ pick"
+        );
+    }
+
+    #[test]
+    fn the_list_state_starts_on_the_first_default_row() {
+        let state = ListState::new(4, &[2, 4]);
+        assert_eq!(state.checked, vec![false, true, false, true]);
+        assert_eq!(state.cursor, 1, "the cursor opens on a checked row");
+        assert_eq!(state.picked(), vec![2, 4]);
+
+        let empty = ListState::new(3, &[]);
+        assert_eq!(empty.cursor, 0);
+        assert_eq!(empty.picked(), Vec::<usize>::new());
+        assert_eq!(
+            ListState::new(0, &[1]).cursor,
+            0,
+            "a list with no rows cannot point past its end"
+        );
+    }
+
+    #[test]
+    fn the_list_state_moves_toggles_and_stops_at_both_ends() {
+        let mut state = ListState::new(3, &[1]);
+        assert_eq!(state.apply(ListKey::Down, &[]), ListOutcome::Redraw);
+        assert_eq!(state.cursor, 1);
+        assert_eq!(state.apply(ListKey::Down, &[]), ListOutcome::Redraw);
+        assert_eq!(state.apply(ListKey::Down, &[]), ListOutcome::Redraw);
+        assert_eq!(state.cursor, 2, "the cursor stops on the last row");
+        assert_eq!(state.apply(ListKey::Up, &[]), ListOutcome::Redraw);
+        assert_eq!(state.apply(ListKey::Up, &[]), ListOutcome::Redraw);
+        assert_eq!(state.apply(ListKey::Up, &[]), ListOutcome::Redraw);
+        assert_eq!(state.cursor, 0, "and on the first");
+
+        assert_eq!(state.apply(ListKey::Space, &[]), ListOutcome::Redraw);
+        assert_eq!(state.checked, vec![false, false, false], "row 1 was on");
+        assert_eq!(state.picked(), Vec::<usize>::new());
+        assert_eq!(state.apply(ListKey::Space, &[]), ListOutcome::Redraw);
+
+        assert_eq!(state.apply(ListKey::Enter, &[]), ListOutcome::Confirm);
+        assert_eq!(state.apply(ListKey::Cancel, &[]), ListOutcome::Cancel);
+    }
+
+    #[test]
+    fn all_and_none_answer_every_togglable_row() {
+        let mut state = ListState::new(4, &[]);
+        assert_eq!(state.apply(ListKey::All, &[2]), ListOutcome::Redraw);
+        assert_eq!(
+            state.picked(),
+            vec![1, 3, 4],
+            "a row this scope cannot use is never checked by `all`"
+        );
+        assert_eq!(state.apply(ListKey::None, &[2]), ListOutcome::Redraw);
+        assert_eq!(state.picked(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn none_leaves_a_disabled_row_exactly_as_it_was() {
+        // A disabled row can only be checked by the default it came in with,
+        // and no key takes that away: the picker cannot offer what this scope
+        // cannot use, so it does not quietly undo it either.
+        let mut state = ListState::new(2, &[2]);
+        assert_eq!(state.apply(ListKey::None, &[2]), ListOutcome::Redraw);
+        assert_eq!(
+            state.picked(),
+            vec![2],
+            "`none` cleared a row the picker cannot toggle"
+        );
+        assert_eq!(state.apply(ListKey::All, &[2]), ListOutcome::Redraw);
+        assert_eq!(
+            state.picked(),
+            vec![1, 2],
+            "`all` checks the rows it can and leaves the disabled one as it was"
+        );
+    }
+
+    #[test]
+    fn a_disabled_row_cannot_be_toggled_and_says_so_by_not_repainting() {
+        let mut state = ListState::new(2, &[]);
+        state.cursor = 1;
+        assert_eq!(state.apply(ListKey::Space, &[2]), ListOutcome::Ignored);
+        assert_eq!(state.picked(), Vec::<usize>::new());
     }
 
     #[test]

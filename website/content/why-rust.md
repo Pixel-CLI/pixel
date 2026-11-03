@@ -25,7 +25,7 @@ A language that makes each edit slow to validate can limit development, includin
 
 The useful measure is elapsed time from an edit to a correct, validated change. It includes implementation, compilation, linking, tests, linting, repair and CI. A quick compiler cannot compensate for missing checks; a fast executable cannot make developer waiting disappear.
 
-Pixel already has a `dev-release` profile that disables thin LTO and increases codegen units compared with the shipping release profile. Contributors use focused checks during editing and the applicable full gates when a reviewable change is ready. These are existing workflow choices, not a newly demonstrated productivity gain from the audit. See [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/CONTRIBUTING.md).
+Pixel already has a `dev-release` profile that disables thin LTO and increases codegen units compared with the shipping release profile. Contributors use focused checks during editing and the applicable full gates when a reviewable change is ready. These are existing workflow choices, not a newly demonstrated productivity gain from the audit. See [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/.github/CONTRIBUTING.md).
 
 ## What the exploratory audit established
 

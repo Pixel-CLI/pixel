@@ -1,0 +1,39 @@
+{
+  "command": [
+    "rtk",
+    "bypass",
+    "python3",
+    "-I",
+    "/Users/livio/Documents/pixel-worktrees/brief-over-90/scripts/bench/tool-census/score_brief.py",
+    "--root",
+    "/tmp/pixel-brief-over-90/final3-candidate-root",
+    "--bin",
+    "/tmp/pixel-brief-coverage-evidence/target/dev-release/pixel",
+    "--label",
+    "final-candidate-df9f39fa",
+    "--probe-home",
+    "/tmp/pixel-brief-over-90/candidate-home",
+    "--questions",
+    "/Users/livio/Documents/pixel-worktrees/brief-over-90/eval/brief-bench/questions.jsonl",
+    "--out",
+    "/tmp/pixel-brief-over-90/runs",
+    "--route",
+    "hook"
+  ],
+  "log": "/tmp/pixel-brief-over-90/final-candidate-df9f39fa.log",
+  "queued_unix": 1792418961.4703171,
+  "started_unix": 1792418961.470429,
+  "ended_unix": 1792419065.532912,
+  "exit_code": 1,
+  "load_average_start": [
+    9.173828125,
+    14.3330078125,
+    26.119140625
+  ],
+  "load_average_end": [
+    55.77880859375,
+    25.42138671875,
+    28.84130859375
+  ],
+  "logical_cpus": 16
+}

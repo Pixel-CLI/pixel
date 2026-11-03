@@ -13,18 +13,20 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-/// `https://user:token@host/...` -> `https://<redacted>@host/...`
-static CRED_URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"https://[^/\s:@]+:[^/\s@]+@").unwrap());
+/// `https://user:token@host/...` and the token-only
+/// `https://token@host/...` -> `https://<redacted>@host/...`
+static CRED_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https://[^/\s@]+@").unwrap());
 
 /// `Authorization: Bearer <token>` (or any single token after the colon),
 /// case-insensitive.
 static AUTH_HEADER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(authorization\s*:\s*)(?:bearer\s+)?\S+").unwrap());
 
-/// `token=<value>` / `password=<value>`, case-insensitive.
-static TOKEN_KV: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(token|password)\s*=\s*[^\s&]+").unwrap());
+/// `token=<value>` / `GITHUB_TOKEN=<value>` / `DB_PASSWORD=<value>`: a name
+/// ending in token, password, secret or api_key; case-insensitive.
+static TOKEN_KV: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b([a-z0-9_]*(?:token|password|secret|api_key))\s*=\s*[^\s&]+").unwrap()
+});
 
 /// Scrub credential-shaped substrings out of `text`. Best-effort: this is a
 /// defense-in-depth scrub for logging/error-display, not a security
@@ -51,6 +53,19 @@ mod tests {
     }
 
     #[test]
+    fn redact_should_mask_a_token_only_userinfo() {
+        assert_eq!(
+            redact("clone https://ghp_tokenonly123@github.com/x/y.git"),
+            "clone https://<redacted>@github.com/x/y.git"
+        );
+        assert_eq!(
+            redact("https://github.com/x/y.git"),
+            "https://github.com/x/y.git",
+            "a URL without userinfo is left alone"
+        );
+    }
+
+    #[test]
     fn redacts_authorization_header() {
         let input = "sent header Authorization: Bearer sk-verysecrettoken123";
         let out = redact(input);
@@ -66,6 +81,16 @@ mod tests {
         assert!(!out.contains("abcDEF123"));
         assert!(!out.contains("hunter2xyz"));
         assert!(out.contains("other=1"));
+    }
+
+    #[test]
+    fn redact_should_mask_a_value_whose_name_ends_in_a_secret_word() {
+        assert_eq!(
+            redact(
+                "GITHUB_TOKEN=abc123 DB_PASSWORD=hunter2 my_Secret = s3 ANTHROPIC_API_KEY=sk-x a=b x = 1"
+            ),
+            "GITHUB_TOKEN=<redacted> DB_PASSWORD=<redacted> my_Secret=<redacted> ANTHROPIC_API_KEY=<redacted> a=b x = 1"
+        );
     }
 
     #[test]

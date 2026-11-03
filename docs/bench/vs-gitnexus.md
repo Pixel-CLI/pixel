@@ -4,7 +4,7 @@ Measured 2026-09-21 on an Apple M2 / 16 GiB / Darwin 25.6.0, pixel 0.4.0
 (`5c9b4ad`) against GitNexus 1.6.12 (`737634705`, rebuilt from source with
 `npm run build` before the run). Full environment, corpus commits and raw rows:
 [`vs-gitnexus/raw/`](vs-gitnexus/raw/). Reproduce with the scripts in
-[`scripts/bench-vs/`](../../scripts/bench-vs/).
+[`scripts/bench/bench-vs/`](../../scripts/bench/bench-vs/).
 
 Same house rule as [`measured-performance.md`](measured-performance.md): every
 number here is a measurement, losses are printed in the same voice as wins, and
@@ -17,7 +17,7 @@ Only the capabilities **both** tools implement are benchmarked. Comparing a tool
 against a capability its competitor does not have measures nothing.
 
 Not measured, and therefore not claimed anywhere: agent-level task time (the
-`claude -p` three-arm A/B that [`pixel-bench.sh`](../../scripts/pixel-bench.sh)
+`claude -p` three-arm A/B that [`pixel-bench.sh`](../../scripts/bench/pixel-bench.sh)
 would drive), semantic/concept search quality, and `rename` correctness. Cold
 index build is compared on **one** corpus only — see the caveat in that section.
 
@@ -53,7 +53,7 @@ git-history and repo-operations surface GitNexus does not implement.
 ## Blast radius (`impact` / `impact`) — 29 cases, 4 repos, 3 languages
 
 Ground truth is mechanical and re-derivable
-([`gen-truth.py`](../../scripts/bench-vs/gen-truth.py)): for a symbol with
+([`gen-truth.py`](../../scripts/bench/bench-vs/gen-truth.py)): for a symbol with
 exactly one definition, the truth set is the files containing a call site of it.
 Both tools are scored at **depth 1** with the same scorer — the layer whose
 expected answer is a fact about the source rather than about a graph.
@@ -130,7 +130,7 @@ user-facing comparison claims Ruby parity.
 
 The harness edits three known functions across three crates, so the changed-symbol
 set is constructed rather than inferred, then reverts them in a `finally` block
-([`bench-changes.py`](../../scripts/bench-vs/bench-changes.py)).
+([`bench-changes.py`](../../scripts/bench/bench-vs/bench-changes.py)).
 
 | | recall | p50 | bytes |
 |---|---|---|---|
@@ -146,7 +146,7 @@ format gap is a CLI-surface difference, not a capability one.
 
 Pairs whose call site was located in the source and recorded in the case file,
 so "a path exists" is a fact about the code
-([`gen-path-cases.py`](../../scripts/bench-vs/gen-path-cases.py)).
+([`gen-path-cases.py`](../../scripts/bench/bench-vs/gen-path-cases.py)).
 
 | Outcome | pixel | GitNexus |
 |---|---|---|

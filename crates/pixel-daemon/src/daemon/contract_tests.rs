@@ -244,19 +244,43 @@ fn default_corpus_should_watch_its_root_and_do_nothing_on_sweep_or_ready() {
     let mut corpus = EchoCorpus::new();
     assert_eq!(corpus.watch_paths(), vec![corpus.root.clone()]);
     corpus.sweep();
-    corpus.watch_ready();
+    corpus.watch_ready(&WatchReport {
+        dirs: 1,
+        recursive: true,
+        elapsed: Duration::ZERO,
+        git_dir: false,
+    });
     assert!(corpus.applied.lock().unwrap().is_empty());
 }
 
+/// The root counts as replaced once it is no longer the directory the
+/// daemon opened: removed, turned into a file, or swapped for another
+/// directory at the same path (#1107), which `is_dir` alone never saw.
 #[test]
-fn root_removed_should_be_true_only_once_the_root_is_no_directory() {
-    let root = tempfile_root("root-removed");
-    assert!(!root_removed(&root));
+fn root_replaced_should_follow_the_opened_directory_not_the_path() {
+    let root = tempfile_root("root-replaced");
+    let opened = root_identity(&root);
+    assert!(opened.is_some());
+    assert!(!root_replaced(&root, opened), "the same directory");
+    assert!(
+        root_replaced(&root, None),
+        "a root never opened is not served"
+    );
+
     let file = root.join("plain");
     std::fs::write(&file, "x").unwrap();
-    assert!(root_removed(&file), "a file is not a servable root");
+    assert_eq!(root_identity(&file), None, "a file is not a servable root");
+
+    let old = root.with_extension("old");
+    let _ = std::fs::remove_dir_all(&old);
+    std::fs::rename(&root, &old).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    assert!(root.is_dir(), "a directory is back at the path");
+    assert!(root_replaced(&root, opened), "replaced in place");
+
     std::fs::remove_dir_all(&root).unwrap();
-    assert!(root_removed(&root));
+    assert!(root_replaced(&root, opened), "removed");
+    let _ = std::fs::remove_dir_all(&old);
 }
 
 #[test]
@@ -289,9 +313,16 @@ fn flush_pending_should_apply_nothing_and_keep_the_deadline_when_nothing_is_pend
     let mut pending = BTreeMap::new();
     let deadline = Some(Instant::now());
     let mut flush_at = deadline;
-    flush_pending(&mut corpus, &mut pending, &mut flush_at);
+    let mut first_pending_at = deadline;
+    flush_pending(
+        &mut corpus,
+        &mut pending,
+        &mut flush_at,
+        &mut first_pending_at,
+    );
     assert!(corpus.applied.lock().unwrap().is_empty());
     assert_eq!(flush_at, deadline);
+    assert_eq!(first_pending_at, deadline);
 }
 
 fn tempfile_root(tag: &str) -> PathBuf {
@@ -321,6 +352,8 @@ fn search_hits(service: &mut Service, pattern: &str) -> Vec<String> {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         },
     );
     let value = serde_json::to_value(&resp).unwrap();
@@ -385,6 +418,37 @@ fn service_apply_changes_should_apply_a_batch_of_adds_and_removals() {
     service.apply_changes(&[(root.join("a.rs"), true), (root.join("b.rs"), false)]);
 
     assert_eq!(search_hits(&mut service, "vexlor"), vec!["b.rs"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `status` says whether the watch is live and what it covers, so a
+/// registration that grows back to every ignored directory, or slows
+/// down, is visible without a profiler.
+#[test]
+fn service_status_should_report_the_watch_once_it_is_live() {
+    let root = tempfile_root("service-watch-report");
+    let mut service = Service::open(&root).unwrap();
+    let status = |service: &mut Service| {
+        let resp = Corpus::handle(service, Request::Status {});
+        serde_json::to_value(&resp).unwrap()["result"]["watcher"].clone()
+    };
+    let before = status(&mut service);
+    assert_eq!(before["ready"], false, "{before}");
+    assert!(before["watched_dirs"].is_null(), "{before}");
+    assert!(before["registration_ms"].is_null(), "{before}");
+
+    service.watch_ready(&WatchReport {
+        dirs: 2216,
+        recursive: false,
+        elapsed: Duration::from_millis(131),
+        git_dir: true,
+    });
+    let after = status(&mut service);
+    assert_eq!(after["ready"], true, "{after}");
+    assert_eq!(after["watched_dirs"], 2216, "{after}");
+    assert_eq!(after["recursive"], false, "{after}");
+    assert_eq!(after["registration_ms"], 131, "{after}");
+    assert_eq!(after["git_dir"], true, "{after}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

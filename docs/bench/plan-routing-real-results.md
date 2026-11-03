@@ -14,7 +14,7 @@ model advantage. The preregistered coverage/adoption gate fails.
 
 ## What was implemented and actually exercised
 
-`scripts/bench-plan-mixed.py` is a standalone, non-generative prototype, not wired
+`scripts/bench/bench-plan-mixed.py` is a standalone, non-generative prototype, not wired
 into Pixel. It emits ordered independent jobs with original-text evidence spans,
 explicit parameters and warnings. A concept-location clause can coexist with a
 specialized scan and keeps its own input. Fenced/quoted examples are masked for
@@ -176,7 +176,7 @@ These clocks cannot establish a deployment speedup or compare with previous runs
 Executed checks: **16 mixed-job contract tests + 5 corpus/gold tests + 8 existing
 pilot tests**, Python compilation, actual three-job source-daemon mechanism check,
 45/45 Rust/Python baseline name-set parity, literal evidence validation for 45/45
-annotations, and independent direct exact/FP/FN recomputation. `scripts/gates.sh`
+annotations, and independent direct exact/FP/FN recomputation. `scripts/ci/gates.sh`
 passed **67 tests (36+12+9+10)** and explicitly skipped Cargo gates for docs/bench
 changes. No Rust edits, install/doctor, full workspace tests, mutants, push or PR.
 Three initial contract-test failures (unterminated fences, concept negation suffix,
@@ -196,9 +196,9 @@ are both retained; the original mechanism record was not rewritten.
 
 ## Artifacts and reproduction
 
-- `scripts/bench-plan-mixed.py`: standalone routing and opt-in explicit-job execution.
-- `scripts/bench-plan-real-corpus.py`: deterministic selection from API captures.
-- `scripts/bench-plan-real-evaluate.py`: frozen comparison and raw evidence.
+- `scripts/bench/bench-plan-mixed.py`: standalone routing and opt-in explicit-job execution.
+- `scripts/bench/bench-plan-real-corpus.py`: deterministic selection from API captures.
+- `scripts/bench/bench-plan-real-evaluate.py`: frozen comparison and raw evidence.
 - `scripts/fixtures/plan-routing-real-{requests.json,gold.jsonl}`: versionable corpus.
 - `.pixel/experiments/plan-routing-real-v1/`: API snapshots/exclusions, source pins,
   both annotation reports, contract audit, freeze manifests, exact command,
@@ -223,9 +223,9 @@ With the retained venv/model and an isolated current-source daemon, output paths
 must be fresh:
 
 ```sh
-python3 scripts/bench-plan-mixed.py 'Locate classify_prompt; rank highest fan-in files'
+python3 scripts/bench/bench-plan-mixed.py 'Locate classify_prompt; rank highest fan-in files'
 # Add --socket only to execute the independent read-only jobs.
-.pixel/experiments/plan-routing-pilot-v1/venv/bin/python scripts/bench-plan-real-evaluate.py \
+.pixel/experiments/plan-routing-pilot-v1/venv/bin/python scripts/bench/bench-plan-real-evaluate.py \
   --requests scripts/fixtures/plan-routing-real-requests.json \
   --gold scripts/fixtures/plan-routing-real-gold.jsonl \
   --candidate-freeze .pixel/experiments/plan-routing-real-v1/candidate-freeze.json \
@@ -233,7 +233,7 @@ python3 scripts/bench-plan-mixed.py 'Locate classify_prompt; rank highest fan-in
   --socket /socket/of/isolated/current-source/daemon --output /new/results
 python3 scripts/test-bench-plan-mixed.py
 python3 scripts/test-bench-plan-real.py
-scripts/gates.sh
+scripts/ci/gates.sh
 ```
 
 ## Decision

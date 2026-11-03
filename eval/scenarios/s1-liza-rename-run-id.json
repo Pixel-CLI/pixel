@@ -1,0 +1,14 @@
+{
+  "id": "s1-liza-rename-run-id",
+  "kind": "rename-impact",
+  "brief_expected": true,
+  "prompt": "Rename `generateRunId` to `createRunId` in server/index.ts and update every caller. Keep the generated identifier format unchanged.",
+  "must": [
+    {"pattern": "createRunId", "points": 3, "why": "renamed definition and caller"},
+    {"pattern": "run-", "points": 2, "why": "identifier format preserved"},
+    {"pattern": "server/index\\.ts", "points": 1, "why": "correct implementation file"}
+  ],
+  "never": [
+    {"pattern": "generateRunId\\s*\\(", "penalty": 2, "why": "old symbol must be removed"}
+  ]
+}

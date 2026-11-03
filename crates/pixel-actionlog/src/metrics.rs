@@ -66,7 +66,8 @@ impl ComparisonGap {
 
 static INVOCATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn invocation_id() -> String {
+/// Allocate a process/time/sequence identity for one invocation.
+pub fn invocation_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -394,7 +395,7 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
 /// The token row of a measured whole-file read: both sides, then the saving.
 ///
 /// Counts are UTF-8 bytes divided by four, rounded down, on both sides: the
-/// rule of `scripts/bench-read-savings.sh`, so the line and the published
+/// rule of `scripts/bench/bench-read-savings.sh`, so the line and the published
 /// table can be re-derived with `wc -c` and agree to the token.
 fn measured_read_section(file_bytes: u64, answer_bytes: u64) -> String {
     let full_tok = read_tokens(file_bytes);
@@ -407,7 +408,7 @@ fn measured_read_section(file_bytes: u64, answer_bytes: u64) -> String {
 }
 
 /// Tokens a measured read counts for `bytes` of UTF-8: divided by four,
-/// rounded down, the rule `scripts/bench-read-savings.sh` publishes.
+/// rounded down, the rule `scripts/bench/bench-read-savings.sh` publishes.
 pub fn read_tokens(bytes: u64) -> u64 {
     bytes / 4
 }
@@ -1054,10 +1055,10 @@ mod tests {
     fn metrics_should_render_only_identity_when_no_policy_applies() {
         let metrics = OperationMetrics::new(Duration::from_millis(3), 100, None)
             .with_comparison_gap(ComparisonGap::NoPolicy);
-        let mut event = ActionEvent::new("install", ".").with_metrics(metrics);
+        let mut event = ActionEvent::new("setup", ".").with_metrics(metrics);
         event.invocation_id = Some("test-abcdef".to_owned());
         let line = event.finalize_metrics_line().unwrap();
-        assert_eq!(line, "🟩 pixel install ❀ 3.0ms ❀ #abcdef");
+        assert_eq!(line, "🟩 pixel setup ❀ 3.0ms ❀ #abcdef");
         assert_eq!(
             event.metrics.as_ref().unwrap().reporting_bytes,
             line.len() as u64 + 2

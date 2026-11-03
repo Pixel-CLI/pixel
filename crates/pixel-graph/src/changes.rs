@@ -6,13 +6,14 @@
 //! processes, the call sites that may be affected, and depth-1 upstream
 //! callers feeding risk.
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
 use serde::Serialize;
 
-use crate::build::{Indexability, graph_file_cap, indexability};
+use crate::build::{Indexability, graph_file_cap, indexability, symbol_uids};
 use crate::concept::is_test_path;
 use crate::extract::{extract_file, lang_of};
 use crate::impact::{file_path_by_id, processes_for_symbol, symbol_by_id};
@@ -295,14 +296,19 @@ pub(crate) fn parse_diff(output: &str) -> Vec<FileDiff> {
             header = header_path(rest);
             header_has_text = false;
         } else if let Some(rest) = line.strip_prefix("--- ") {
-            old_path = Some(rest.trim().trim_start_matches("a/").to_string());
+            old_path = Some(
+                rest.trim()
+                    .strip_prefix("a/")
+                    .unwrap_or(rest.trim())
+                    .to_string(),
+            );
         } else if let Some(rest) = line.strip_prefix("+++ ") {
             header_has_text = true;
             let new = rest.trim();
             let (path, status) = if new == "/dev/null" {
                 (old_path.clone().unwrap_or_default(), FileStatus::Deleted)
             } else {
-                let p = new.trim_start_matches("b/").to_string();
+                let p = new.strip_prefix("b/").unwrap_or(new).to_string();
                 let status = if old_path.as_deref() == Some("/dev/null") {
                     FileStatus::Added
                 } else {
@@ -549,13 +555,17 @@ fn scan_uncovered(
             unexamined(&mut changes, motif);
             continue;
         };
+        // Numbered over the whole old file, as the build numbers a second
+        // same-named definition, so the uid looked up is the one it wrote.
+        let uids = symbol_uids(&fd.old_path, &extraction.symbols);
         for &(start, end) in &fd.old_ranges {
             // Same overlap rule the new side uses, so a range touching a
             // symbol's first or last line anchors on it either way.
-            let hits: Vec<&crate::extract::RawSymbol> = extraction
+            let hits: Vec<(&crate::extract::RawSymbol, &String)> = extraction
                 .symbols
                 .iter()
-                .filter(|s| overlaps(&[(s.start_line, s.end_line)], start, end))
+                .zip(&uids)
+                .filter(|(s, _)| overlaps(&[(s.start_line, s.end_line)], start, end))
                 .collect();
             if hits.is_empty() {
                 changes.push(UncoveredChange {
@@ -566,15 +576,14 @@ fn scan_uncovered(
                 });
                 continue;
             }
-            for sym in hits {
-                let uid = format!("{}#{}#{}", fd.old_path, sym.qualified, sym.kind.as_str());
+            for (sym, uid) in hits {
                 // A deleted file's symbols are unanchored whatever the graph
                 // still holds: a graph built before the deletion answers for
                 // a file that is gone.
-                let gone = fd.status == FileStatus::Deleted || store.symbol_by_uid(&uid)?.is_none();
+                let gone = fd.status == FileStatus::Deleted || store.symbol_by_uid(uid)?.is_none();
                 if gone && seen_uids.insert(uid.clone()) {
                     unanchored.push(UnanchoredSymbol {
-                        uid,
+                        uid: uid.clone(),
                         name: sym.name.clone(),
                         path: fd.old_path.clone(),
                         old_lines: [sym.start_line, sym.end_line],
@@ -688,6 +697,10 @@ pub fn detect(
     let runner = GitRunner::new(root);
     let diff_bytes = match runner.diff_unified0(base_ref) {
         Ok(bytes) => bytes,
+        // Only a tree that is not a git repository has "no changes" to
+        // report; any other git failure (a bad base, a timeout) is an error,
+        // never a LOW verdict.
+        Err(e) if runner.run(&["rev-parse", "--git-dir"]).is_ok() => return Err(e.into()),
         Err(_) => {
             return Ok(ChangesReport {
                 base: base_ref.unwrap_or("index").to_string(),
@@ -858,7 +871,7 @@ pub(crate) fn detect_diffs(
     let uncovered = scan_uncovered(store, root, &runner, base_ref, file_diffs)?;
     // A deleted symbol has no edges left; its former callers are the
     // unresolved sites that still write its name.
-    let mut file_symbols: HashMap<i64, Vec<SymbolRow>> = HashMap::new();
+    let mut file_symbols: HashMap<i64, Vec<SymbolRow>> = HashMap::default();
     for gone in &uncovered.unanchored {
         for site in store.unresolved_named(&gone.name)? {
             let symbols = match file_symbols.entry(site.file_id) {
@@ -929,7 +942,7 @@ fn suggest_tests(
             record(seed_path.clone(), 0, seed_name, &mut by_file);
         }
         // Source 2: BFS upstream over `calls` edges, depth ≤ 3.
-        let mut visited: HashSet<i64> = HashSet::new();
+        let mut visited: HashSet<i64> = HashSet::default();
         visited.insert(*seed_id);
         let mut queue: VecDeque<(i64, u8)> = VecDeque::new();
         queue.push_back((*seed_id, 0));
@@ -1403,7 +1416,7 @@ mod tests {
 
     #[test]
     fn classify_should_judge_a_modified_file_symbol_against_its_base() {
-        let base: HashMap<String, String> = HashMap::from([(
+        let base: HashMap<String, String> = HashMap::from_iter([(
             "keep#function".to_string(),
             "export function keep(n: number):  number {".to_string(),
         )]);
@@ -1477,5 +1490,52 @@ mod tests {
         assert!(validate_base_ref("HEAD~1").is_ok());
         assert!(validate_base_ref("main").is_ok());
         assert!(validate_base_ref("abcdef1234567890").is_ok());
+    }
+
+    /// Paths of the working-tree diff of `root`, read through the real runner.
+    fn worktree_diff_paths(root: &Path) -> Vec<String> {
+        let out = GitRunner::new(root).diff_unified0(None).unwrap();
+        parse_diff(&String::from_utf8_lossy(&out))
+            .into_iter()
+            .map(|f| f.path)
+            .collect()
+    }
+
+    /// A directory named like the prefix keeps its name; a non-ASCII name is
+    /// not quoted; `diff.noprefix` in the repo config does not strip the
+    /// first path component.
+    #[test]
+    fn worktree_diff_paths_survive_prefix_lookalikes_unicode_and_noprefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let files = ["b/b/x.rs", "a/a/y.rs", "é.rs", "src/z.rs"];
+        crate::testutil::init_repo(root, &files.map(|f| (f, "fn f() {}\n")));
+        for f in files {
+            std::fs::write(root.join(f), "fn g() {}\n").unwrap();
+        }
+        let want: Vec<String> = ["a/a/y.rs", "b/b/x.rs", "src/z.rs", "é.rs"]
+            .map(String::from)
+            .into();
+        let mut got = worktree_diff_paths(root);
+        got.sort();
+        assert_eq!(got, want);
+        crate::testutil::git(root, &["config", "diff.noprefix", "true"]);
+        let mut got = worktree_diff_paths(root);
+        got.sort();
+        assert_eq!(got, want);
+    }
+
+    /// A git failure inside a repository is an error, not "LOW, no changes";
+    /// a tree that is not a repository keeps the empty LOW report.
+    #[test]
+    fn detect_errors_on_a_bad_base_but_not_outside_a_repository() {
+        let store = GraphStore::open_in_memory().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        crate::testutil::init_repo(repo.path(), &[("a.rs", "fn f() {}\n")]);
+        let err = detect(&store, repo.path(), Some("no-such-ref"), false).unwrap_err();
+        assert!(err.to_string().contains("no-such-ref"), "{err}");
+        let plain = tempfile::tempdir().unwrap();
+        let report = detect(&store, plain.path(), None, false).unwrap();
+        assert_eq!((report.risk.as_str(), report.changed_files), ("LOW", 0));
     }
 }

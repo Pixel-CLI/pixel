@@ -12,8 +12,7 @@ fn run(home: &Path, cwd: &Path, args: &[&str]) -> Output {
         .env("HOME", home)
         .env_remove("PIXEL_METRICS")
         .env_remove("PIXEL_DAEMON_AUTO_START")
-        .env_remove("PIXEL_TASK_CONTEXT")
-        .env_remove("PIXEL_TASK_BOUNDARY")
+        .env_remove("OPENAI_API_KEY")
         .current_dir(cwd)
         .args(args)
         .output()
@@ -40,17 +39,16 @@ fn overview_should_show_effective_layers_without_creating_files_or_printing_secr
     assert!(!home.join(".pixel/config.yaml").exists());
     fs::create_dir_all(home.join(".pixel")).unwrap();
     fs::create_dir_all(repo.join(".pixel")).unwrap();
-    fs::write(home.join(".pixel/config.yaml"), "metrics: 'off'\ndaemon_auto_start: false\ntask_context: false\nclassify: {engine: remote, remote_preset: deepseek}\nremote_keys: {deepseek: sk-secret}\nunknown: hidden-secret\n").unwrap();
+    fs::write(home.join(".pixel/config.yaml"), "metrics: 'off'\ndaemon_auto_start: false\nclassify: {engine: remote, remote_preset: deepseek}\nremote_keys: {deepseek: sk-secret}\nunknown: hidden-secret\n").unwrap();
     fs::write(
         repo.join(".pixel/config.yaml"),
-        "metrics: 'on'\ntask_context: true\n",
+        "metrics: 'on'\ndaemon_auto_start: true\n",
     )
     .unwrap();
     let out = run(&home, &repo, &["config"]);
     let text = stdout(&out);
     assert!(text.contains("metrics: on (Repo)"), "{text}");
-    assert!(text.contains("daemon_auto_start: false"), "{text}");
-    assert!(text.contains("task_context: true"), "{text}");
+    assert!(text.contains("daemon_auto_start: true"), "{text}");
     assert!(text.contains("classify.engine: remote"));
     assert!(text.contains("classify.remote_preset: deepseek"));
     assert!(text.contains("remote_keys.deepseek: set"));
@@ -69,88 +67,6 @@ fn overview_should_show_effective_layers_without_creating_files_or_printing_secr
             .unwrap();
         assert!(stdout(&out).contains(expected));
     }
-}
-
-#[cfg(unix)]
-#[test]
-fn editor_should_receive_one_path_preserve_legacy_values_and_report_bad_edits() {
-    let home = Scratch::for_test("config", "editor home's");
-    let repo = Scratch::for_test("config", "editor repo's");
-    fs::create_dir_all(home.join(".pixel")).unwrap();
-    fs::create_dir_all(repo.join(".pixel")).unwrap();
-    fs::write(
-        home.join(".pixel/config.json"),
-        "{\"metrics\":\"off\",\"future\":42}",
-    )
-    .unwrap();
-    let script = home.join("editor script.sh");
-    fs::write(&script, "test \"$1\" = '--wait' || exit 19\ntest \"$#\" = 2 || exit 20\nprintf '\\n# edited\\n' >> \"$2\"\n").unwrap();
-    let editor = format!("sh {} --wait", shell_words::quote(script.to_str().unwrap()));
-    let invoke = |args: &[&str]| {
-        pixel_command()
-            .env("HOME", &*home)
-            .env("VISUAL", &editor)
-            .env("EDITOR", "does-not-exist")
-            .current_dir(&*repo)
-            .args(args)
-            .output()
-            .unwrap()
-    };
-    stdout(&invoke(&["config", "edit"]));
-    let path = home.join(".pixel/config.yaml");
-    let contents = fs::read_to_string(&path).unwrap();
-    assert!(contents.contains("# edited"));
-    let value: serde_json::Value = serde_saphyr::from_str(&contents).unwrap();
-    assert_eq!(value, serde_json::json!({"metrics":"off", "future":42}));
-    stdout(&invoke(&["config", "edit", "--repo"]));
-    assert!(
-        fs::read_to_string(repo.join(".pixel/config.yaml"))
-            .unwrap()
-            .contains("# edited")
-    );
-    assert_eq!(
-        fs::read_to_string(&path).unwrap(),
-        contents,
-        "repo edit leaves global untouched"
-    );
-    fs::write(&script, "printf 'metrics: [sk-secret' > \"$2\"\n").unwrap();
-    let out = invoke(&["config", "edit"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid configuration"));
-    assert!(!String::from_utf8_lossy(&out.stderr).contains("sk-secret"));
-    fs::write(&script, "exit 42\n").unwrap();
-    let out = invoke(&["config", "edit"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("editor exited"));
-}
-
-#[cfg(unix)]
-#[test]
-fn editor_should_fall_back_from_blank_visual_to_editor_then_vi() {
-    use std::os::unix::fs::PermissionsExt;
-    let home = Scratch::for_test("config", "fallback-home");
-    let script = home.join("vi");
-    fs::write(
-        &script,
-        "#!/bin/sh\nprintf '\\n# fallback editor\\n' >> \"$1\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-    let editor = shell_words::quote(script.to_str().unwrap()).into_owned();
-    for configured in [&editor, "  "] {
-        let out = pixel_command()
-            .env("HOME", &*home)
-            .env("VISUAL", "  ")
-            .env("EDITOR", configured)
-            .env("PATH", &*home)
-            .current_dir(&*home)
-            .args(["config", "edit"])
-            .output()
-            .unwrap();
-        stdout(&out);
-    }
-    let contents = fs::read_to_string(home.join(".pixel/config.yaml")).unwrap();
-    assert_eq!(contents.matches("# fallback editor").count(), 2);
 }
 
 #[test]
@@ -197,104 +113,8 @@ fn classify_off_should_block_every_engine_and_batch_before_reading_input() {
     }
 }
 
-#[test]
-fn policy_should_resolve_environment_then_repository_then_global_and_write_each_layer() {
-    let home = Scratch::for_test("config", "policy-home");
-    let repo = Scratch::for_test("config", "policy-repo");
-    crate::support::git(&repo, &["init", "-q"]);
-    let global = home.join(".pixel/config.yaml");
-    let repo_file = repo.join(".pixel/config.yaml");
-    let query = |cwd: &Path, args: &[&str]| {
-        pixel_command()
-            .env("HOME", &*home)
-            .env_remove("PIXEL_POLICY")
-            .env_remove("PIXEL_TARGETS_GUARD")
-            .current_dir(cwd)
-            .args(args)
-            .output()
-            .unwrap()
-    };
-    let policy = |args: &[&str]| stdout(&query(&repo, args));
-
-    assert_eq!(
-        policy(&["config", "policy"]),
-        "policy: advisory — default (no config sets it)\n"
-    );
-    assert!(policy(&["config"]).contains("policy: advisory (default)\n"));
-    let report = |cwd: &Path| -> serde_json::Value {
-        let out = stdout(&query(cwd, &["config", "policy", "--json"]));
-        assert!(out.ends_with('\n'), "{out}");
-        serde_json::from_str(&out).unwrap()
-    };
-    assert_eq!(
-        report(&repo),
-        serde_json::json!({"policy":"advisory", "source":"default"})
-    );
-
-    // The global layer decides where no repository overrides it.
-    fs::create_dir_all(home.join(".pixel")).unwrap();
-    fs::write(&global, "policy: enforce\n").unwrap();
-    assert_eq!(
-        policy(&["config", "policy"]),
-        format!("policy: enforce — global {}\n", global.display())
-    );
-
-    // `pixel config policy` writes the repository layer; only --global
-    // touches the machine-wide file.
-    assert_eq!(
-        policy(&["config", "policy", "off"]),
-        format!("policy: off — wrote {}\n", repo_file.display())
-    );
-    assert_eq!(
-        report(&repo),
-        serde_json::json!({
-            "policy":"off", "source":"repo", "file": repo_file.display().to_string()
-        })
-    );
-    assert_eq!(
-        policy(&["config", "policy", "advisory", "--global"]),
-        format!("policy: advisory — wrote {}\n", global.display())
-    );
-    let doc: serde_json::Value =
-        serde_saphyr::from_str(&fs::read_to_string(&repo_file).unwrap()).unwrap();
-    assert_eq!(doc, serde_json::json!({"policy":"off"}));
-
-    // The environment overrides every file layer for one process.
-    assert_eq!(
-        stdout(
-            &pixel_command()
-                .env("HOME", &*home)
-                .env("PIXEL_POLICY", "enforce")
-                .current_dir(&*repo)
-                .args(["config", "policy"])
-                .output()
-                .unwrap()
-        ),
-        "policy: enforce — PIXEL_POLICY (environment)\n"
-    );
-
-    // An unknown argument is refused instead of written.
-    let out = query(&repo, &["config", "policy", "loudly"]);
-    assert!(!out.status.success());
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("possible values: advisory, enforce, off"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    // A hand-written value the reader cannot use is a validation error, not a
-    // half-applied setting.
-    fs::write(&repo_file, "policy: loudly\n").unwrap();
-    let out = query(&repo, &["config"]);
-    assert!(!out.status.success());
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("policy must be advisory, enforce, or off"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-/// The 0.6.1 report: setup saved `metrics: "on"` globally while a legacy repo
-/// `config.json` carried `metrics: "off"`, so every launch in that repository
+/// The 0.6.1 report: setup saved `metrics: "on"` globally while a repo
+/// `config.yaml` carried `metrics: "off"`, so every launch in that repository
 /// hid the footer. The global write must name the layer that wins instead of
 /// letting the answer look ignored.
 #[test]
@@ -302,9 +122,9 @@ fn metrics_on_global_should_report_a_contradicting_repo_layer() {
     let home = Scratch::for_test("config", "metrics-home");
     let repo = Scratch::for_test("config", "metrics-repo");
     crate::support::git(&repo, &["init", "-q"]);
-    let legacy = repo.join(".pixel/config.json");
-    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-    fs::write(&legacy, "{\"metrics\":\"off\"}").unwrap();
+    let repo_file = repo.join(".pixel/config.yaml");
+    fs::create_dir_all(repo_file.parent().unwrap()).unwrap();
+    fs::write(&repo_file, "{\"metrics\":\"off\"}").unwrap();
 
     let text = stdout(&run(&home, &repo, &["config", "metrics", "on", "--global"]));
     assert!(
@@ -318,19 +138,19 @@ fn metrics_on_global_should_report_a_contradicting_repo_layer() {
         text.contains(&format!(
             "note: {} sets metrics: off and wins in this repository — \
              run `pixel config metrics on` here to apply this answer",
-            legacy.display()
+            repo_file.display()
         )),
         "{text}"
     );
     // The note only reports: the repo layer is untouched, and the report
     // command names it as the winner.
     assert_eq!(
-        fs::read_to_string(&legacy).unwrap(),
+        fs::read_to_string(&repo_file).unwrap(),
         "{\"metrics\":\"off\"}"
     );
     assert_eq!(
         stdout(&run(&home, &repo, &["config", "metrics"])),
-        format!("metrics: off — repo {}\n", legacy.display())
+        format!("metrics: off — repo {}\n", repo_file.display())
     );
 }
 
@@ -402,4 +222,276 @@ fn classify_engine_jev_should_store_the_remote_preset_not_a_plain_engine() {
         serde_saphyr::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(doc["classify"]["engine"], "local");
     assert_eq!(doc["classify"]["remote_preset"], "jev");
+}
+
+#[test]
+fn classify_accepts_the_openai_preset_and_names_its_key_when_missing() {
+    let home = Scratch::for_test("config", "classify-openai-home");
+    let repo = Scratch::for_test("config", "classify-openai-repo");
+    // The preset is a valid clap value.
+    stdout(&run(&home, &repo, &["config", "remote-preset", "openai"]));
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(home.join(".pixel/config.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(doc["classify"]["remote_preset"], "openai");
+
+    // Without a key anywhere the classify call must fail naming OPENAI_API_KEY
+    // and the `pixel config remote-key openai` remedy — before any network call.
+    stdout(&run(&home, &repo, &["config", "classify", "on"]));
+    let out = run(
+        &home,
+        &repo,
+        &[
+            "classify",
+            "t",
+            "--engine",
+            "remote",
+            "--remote-preset",
+            "openai",
+            "--label",
+            "a",
+            "--label",
+            "b",
+        ],
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "remote preset openai needs an API key: set OPENAI_API_KEY or run `pixel config remote-key openai -`",
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn config_remote_key_openai_round_trips_and_clears() {
+    let home = Scratch::for_test("config", "remote-key-openai-home");
+    stdout(&run(
+        &home,
+        &home,
+        &["config", "remote-key", "openai", "sk-openai-test"],
+    ));
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(home.join(".pixel/config.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(doc["remote_keys"]["openai"], "sk-openai-test");
+
+    let out = run(&home, &home, &["config", "remote-key", "openai"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("set"));
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("sk-openai-test"),
+        "the stored key value must never be echoed"
+    );
+
+    stdout(&run(
+        &home,
+        &home,
+        &["config", "remote-key", "openai", "--clear"],
+    ));
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(home.join(".pixel/config.yaml")).unwrap())
+            .unwrap();
+    assert!(doc["remote_keys"].get("openai").is_none());
+}
+
+#[test]
+fn brief_parts_should_show_its_effective_value_and_reject_what_is_not_a_part_count() {
+    let home = Scratch::for_test("config", "brief-parts-home");
+    let repo = Scratch::for_test("config", "brief-parts-repo");
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("brief_parts: 3\n"));
+    fs::create_dir_all(home.join(".pixel")).unwrap();
+    fs::create_dir_all(repo.join(".pixel")).unwrap();
+    fs::write(home.join(".pixel/config.yaml"), "brief_parts: 5\n").unwrap();
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("brief_parts: 5\n"));
+    fs::write(repo.join(".pixel/config.yaml"), "brief_parts: 1\n").unwrap();
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("brief_parts: 1\n"));
+    for bad in ["0", "9", "-1", "2.5", "many", "[2]"] {
+        fs::write(
+            repo.join(".pixel/config.yaml"),
+            format!("brief_parts: {bad}\n"),
+        )
+        .unwrap();
+        let out = run(&home, &repo, &["config"]);
+        assert!(!out.status.success(), "{bad}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("brief_parts must be a whole number from 1 to 8"),
+            "{bad}: {stderr}"
+        );
+    }
+}
+
+fn repo_with_git(tag: &str) -> Scratch {
+    let repo = Scratch::for_test("config", tag);
+    crate::support::git(&repo, &["init", "-q"]);
+    repo
+}
+
+fn yaml(path: &Path) -> serde_json::Value {
+    serde_saphyr::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn a_known_setting_should_be_written_to_the_repository_layer_and_read_back() {
+    let home = Scratch::for_test("config", "set-home");
+    let repo = repo_with_git("set-repo");
+    let repo_file = repo.join(".pixel/config.yaml");
+
+    let text = stdout(&run(&home, &repo, &["config", "brief_parts", "5"]));
+    assert!(
+        text.contains(&format!("brief_parts: 5 — wrote {}", repo_file.display())),
+        "{text}"
+    );
+    assert!(text.contains("run `pixel setup`"), "{text}");
+    assert_eq!(yaml(&repo_file)["brief_parts"], 5, "a number, not a string");
+    assert!(!home.join(".pixel/config.yaml").exists());
+    assert_eq!(
+        stdout(&run(&home, &repo, &["config", "brief_parts"])),
+        format!("brief_parts: 5 — {}\n", repo_file.display())
+    );
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("brief_parts: 5\n"));
+
+    stdout(&run(&home, &repo, &["config", "brief", "off"]));
+    assert_eq!(yaml(&repo_file)["brief"], false, "a boolean, not a string");
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("brief: false"));
+}
+
+#[test]
+fn a_global_set_should_leave_the_repository_alone_and_name_a_layer_that_wins() {
+    let home = Scratch::for_test("config", "global-set-home");
+    let repo = repo_with_git("global-set-repo");
+    let repo_file = repo.join(".pixel/config.yaml");
+    stdout(&run(&home, &repo, &["config", "brief_parts", "2"]));
+
+    let text = stdout(&run(
+        &home,
+        &repo,
+        &["config", "brief_parts", "6", "--global"],
+    ));
+    let global_file = home.join(".pixel/config.yaml");
+    assert!(
+        text.contains(&format!("brief_parts: 6 — wrote {}", global_file.display())),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "note: {} sets brief_parts: 2 here and wins",
+            repo_file.display()
+        )),
+        "{text}"
+    );
+    assert_eq!(yaml(&global_file)["brief_parts"], 6);
+    assert_eq!(
+        yaml(&repo_file)["brief_parts"],
+        2,
+        "the repository layer is untouched"
+    );
+}
+
+#[test]
+fn a_value_that_is_not_valid_for_its_setting_should_be_refused_and_write_nothing() {
+    let home = Scratch::for_test("config", "invalid-home");
+    let repo = repo_with_git("invalid-repo");
+    for (key, bad, expected) in [
+        (
+            "brief_parts",
+            "0",
+            "brief_parts must be a whole number from 1 to 8",
+        ),
+        (
+            "brief_parts",
+            "9",
+            "brief_parts must be a whole number from 1 to 8",
+        ),
+        (
+            "brief_parts",
+            "many",
+            "brief_parts must be a whole number from 1 to 8",
+        ),
+        ("brief", "maybe", "brief takes on or off"),
+        (
+            "daemon_auto_start",
+            "2",
+            "daemon_auto_start takes on or off",
+        ),
+    ] {
+        let out = run(&home, &repo, &["config", key, bad]);
+        assert_eq!(out.status.code(), Some(1), "{key} {bad}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(expected), "{key} {bad}: {stderr}");
+        assert!(out.stdout.is_empty(), "{key} {bad}");
+        assert!(!repo.join(".pixel/config.yaml").exists(), "{key} {bad}");
+        assert!(!home.join(".pixel/config.yaml").exists(), "{key} {bad}");
+    }
+}
+
+#[test]
+fn an_unknown_key_should_list_the_settings_and_never_echo_or_log_its_value() {
+    let home = Scratch::for_test("config", "unknown-home");
+    let repo = repo_with_git("unknown-repo");
+    let secret = "sk-live-0123456789abcdef0123456789abcdef";
+    for args in [
+        vec!["config", "remote_keys.openai", secret],
+        vec!["config", "--global", "remote_keys.openai", secret],
+    ] {
+        let out = run(&home, &repo, &args);
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("unknown setting")
+                && stderr.contains("brief_parts")
+                && stderr.contains("daemon_auto_start"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains(secret), "{stderr}");
+        assert!(!repo.join(".pixel/config.yaml").exists());
+        assert!(!home.join(".pixel/config.yaml").exists());
+    }
+    // The action log recorded the attempt, with the value masked.
+    let log = fs::read_to_string(repo.join(".pixel/actions.jsonl")).unwrap();
+    assert!(
+        log.contains("config remote_keys.openai <redacted>"),
+        "{log}"
+    );
+    assert!(!log.contains(secret), "{log}");
+}
+
+#[test]
+fn the_action_log_should_keep_the_value_of_a_setting_it_can_show() {
+    let home = Scratch::for_test("config", "logged-home");
+    let repo = repo_with_git("logged-repo");
+    stdout(&run(&home, &repo, &["config", "brief_parts", "4"]));
+    let log = fs::read_to_string(repo.join(".pixel/actions.jsonl")).unwrap();
+    assert!(log.contains("config brief_parts 4"), "{log}");
+}
+
+#[test]
+fn edit_hooks_should_be_off_by_default_and_follow_a_written_value() {
+    let home = Scratch::for_test("config", "edit-hooks-home");
+    let repo = repo_with_git("edit-hooks-repo");
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("edit_hooks: false (default)\n"));
+    let text = stdout(&run(&home, &repo, &["config", "edit_hooks"]));
+    assert!(text.starts_with("edit_hooks: off — default"), "{text}");
+
+    let global = home.join(".pixel/config.yaml");
+    let text = stdout(&run(
+        &home,
+        &repo,
+        &["config", "edit_hooks", "on", "--global"],
+    ));
+    assert!(
+        text.contains(&format!("edit_hooks: on — wrote {}", global.display())),
+        "{text}"
+    );
+    assert!(text.contains("run `pixel setup`"), "{text}");
+    assert_eq!(yaml(&global)["edit_hooks"], true);
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("edit_hooks: true"));
+
+    // A repository layer wins, and anything but on/off is refused unwritten.
+    stdout(&run(&home, &repo, &["config", "edit_hooks", "off"]));
+    assert!(stdout(&run(&home, &repo, &["config", "edit_hooks"])).starts_with("edit_hooks: off"));
+    let bad = run(&home, &repo, &["config", "edit_hooks", "maybe"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("edit_hooks takes on or off"));
 }

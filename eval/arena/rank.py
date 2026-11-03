@@ -394,9 +394,9 @@ def rank_results(results, scenarios_dir, arms, tasks, reps, baseline_arm="raw",
             "required": assert_context_parity,
             "raw_snapshot_policy": RAW_SNAPSHOT_CONTEXT_POLICY,
             "pixel_snapshot_policy": (
-                "shared pinned Pixel image; graph prepared without pixel install; one candidate skill staged"
+                "shared pinned Pixel image; graph prepared without pixel setup; one candidate skill staged"
                 if assert_skill_only else
-                "repo snapshot followed by pixel install before context capture"
+                "repo snapshot followed by pixel setup before context capture"
             ),
             "manifests": context_manifests,
             "checks": context_checks,

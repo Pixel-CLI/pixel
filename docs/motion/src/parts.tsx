@@ -352,9 +352,10 @@ export const Panel = ({x, y, w, h, title, color, mark}: {x: number; y: number; w
 	);
 };
 
-export const Badge = ({x, y, text, color}: {x: number; y: number; text: string; color: string}) => {
+export const Badge = ({x: cx, y, text, color, maxRight = Infinity}: {x: number; y: number; text: string; color: string; maxRight?: number}) => {
 	const tw = text.length * 9.6;
 	const w = tw + 56;
+	const x = Math.min(cx, maxRight - w / 2);
 	return (
 		<g>
 			<rect x={x - w / 2} y={y - 17} width={w} height={34} rx={4} fill={C.ground2} fillOpacity={0.92} stroke={color} strokeOpacity={0.5} strokeWidth={1.4}/>

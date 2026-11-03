@@ -10,7 +10,7 @@ WarpGrep is Morph's search subagent: a model trained with reinforcement learning
 
 ## What leaves the machine
 
-WarpGrep's SDK runs its tools locally, but their results, grep lines and reads of up to 800 lines, are the model's next input and are sent to Morph's API. Pixel's search sends nothing: the embedding model is downloaded once, from Hugging Face, on first use, and the index never leaves the machine.
+WarpGrep's SDK runs its tools locally, but their results, grep lines and reads of up to 800 lines, are the model's next input and are sent to Morph's API. Pixel's search sends nothing: the embedding model is downloaded once, from Hugging Face, on first use, and the index stays on your machine.
 
 ## Reading the numbers
 

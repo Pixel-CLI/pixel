@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-use super::cargo_profile_dir;
+use super::{cargo_profile_dir, install_staged};
 
 /// The install step must read the binary the build step wrote: a
 /// `--build` on another profile (the `dev-release` iteration loop) used
@@ -370,4 +370,106 @@ fn refusal_names_the_owning_managers_update_command() {
         "{reason}"
     );
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A file that starts like an ELF executable, `len` bytes long.
+fn elf(len: usize) -> Vec<u8> {
+    let mut bytes = vec![0x7f, b'E', b'L', b'F'];
+    bytes.resize(len.max(4), 0xab);
+    bytes
+}
+
+/// What lives in `dir` besides `keep`: a temp left behind shows up here.
+fn leftovers(dir: &std::path::Path, keep: &[&str]) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !keep.contains(&n.as_str()))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn install_staged_should_replace_the_binary_and_leave_no_temp() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("built");
+    std::fs::write(&src, elf(4096)).unwrap();
+    let bin = dir.path().join("bin");
+    let dest = bin.join("pixel");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(&dest, elf(64)).unwrap();
+
+    install_staged(&src, &dest, 41).unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), elf(4096));
+    assert_eq!(leftovers(&bin, &["pixel"]), Vec::<String>::new());
+}
+
+#[test]
+fn install_staged_should_keep_the_previous_binary_when_the_build_is_truncated() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let dest = bin.join("pixel");
+    std::fs::write(&dest, elf(64)).unwrap();
+    for (name, bytes) in [
+        ("empty", Vec::new()),
+        ("short", vec![0x7f, b'E']),
+        ("text", b"#!/bin/sh\necho not a build\n".to_vec()),
+    ] {
+        let src = dir.path().join(name);
+        std::fs::write(&src, &bytes).unwrap();
+        let err = install_staged(&src, &dest, 42).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "{} is not an executable ({} bytes, no ELF or Mach-O header): refusing to install it",
+                src.display(),
+                bytes.len()
+            ),
+            "{name}"
+        );
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            elf(64),
+            "{name}: previous binary kept"
+        );
+        assert_eq!(leftovers(&bin, &["pixel"]), Vec::<String>::new(), "{name}");
+    }
+}
+
+#[test]
+fn install_staged_should_refuse_a_symlinked_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("built");
+    std::fs::write(&src, elf(128)).unwrap();
+    let real = dir.path().join("real-pixel");
+    std::fs::write(&real, elf(64)).unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let dest = bin.join("pixel");
+    std::os::unix::fs::symlink(&real, &dest).unwrap();
+
+    let err = install_staged(&src, &dest, 43).unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "{} is a symbolic link to {}: pass --install-path with the binary it points to",
+            dest.display(),
+            real.display()
+        )
+    );
+    assert!(
+        std::fs::symlink_metadata(&dest)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read(&real).unwrap(),
+        elf(64),
+        "the target is untouched"
+    );
+    assert_eq!(leftovers(&bin, &["pixel"]), Vec::<String>::new());
 }

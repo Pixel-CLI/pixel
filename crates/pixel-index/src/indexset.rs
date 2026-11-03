@@ -13,8 +13,9 @@
 //!
 //! Outside a git repo the set degrades to a plain single-shard index.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use pixel_git::BatchObject;
@@ -31,6 +32,36 @@ use crate::posting::{GramQuery, resolve_query};
 use crate::shard::{Shard, ShardBuilder, ShardError};
 use crate::verify::{MatchLine, Verifier, VerifyError};
 use crate::{gitsync, index};
+
+/// Compiled verifiers, keyed by pattern.
+///
+/// `Verifier::new` builds the regex automaton and that build dominates a
+/// one-shot probe: `targets` re-probes the same keyword patterns on every
+/// call, and a repeated `search`/`find-code` reuses them too. The cache is
+/// bounded and never load-bearing — a miss compiles as before, and a full
+/// cache clears wholesale instead of evicting one entry.
+static VERIFIERS: OnceLock<Mutex<HashMap<String, Arc<Verifier>>>> = OnceLock::new();
+
+/// Max compiled verifiers kept; each is a regex automaton, so the count is
+/// the memory bound.
+const MAX_VERIFIERS: usize = 128;
+
+/// [`Verifier`] for `pattern`, compiled once and shared.
+fn verifier_for(pattern: &str) -> Result<Arc<Verifier>, VerifyError> {
+    let cache = VERIFIERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(verifier) = cache.get(pattern) {
+        return Ok(Arc::clone(verifier));
+    }
+    let verifier = Arc::new(Verifier::new(pattern)?);
+    if cache.len() >= MAX_VERIFIERS {
+        cache.clear();
+    }
+    cache.insert(pattern.to_string(), Arc::clone(&verifier));
+    Ok(verifier)
+}
 
 #[derive(Debug)]
 pub enum IndexSetError {
@@ -77,7 +108,11 @@ impl std::error::Error for IndexSetError {}
 
 #[derive(Debug, Clone)]
 pub struct FreshnessStatus {
+    /// The base shard's commit: the layer rebuilt least often, which a
+    /// delta and the overlay bring up to date.
     pub commit_oid: Option<String>,
+    /// The HEAD the set's content answers for: [`IndexSet::covered_head`].
+    pub covered_head: Option<String>,
     pub base_files: u32,
     pub delta_files: u32,
     pub overlay_files: usize,
@@ -102,6 +137,106 @@ pub struct IndexSet {
     /// HEAD when the set was opened: the commit base ∪ delta covers. The
     /// overlay follows the working tree from there, HEAD moves included.
     head: Option<String>,
+    /// The HEAD the content answers for: `head` at open, moved by
+    /// [`IndexSet::note_caught_up`] once the caller has refreshed every path
+    /// a HEAD move touched.
+    covered: Option<String>,
+    /// The walk policy's verdict between watcher batches, built by the
+    /// first batch's full walk and rebuilt only when a batch touches an
+    /// ignore-control file: a batch of one edit does not walk the tree.
+    /// Behind its own lock because [`IndexSet::stage_refresh`] updates it
+    /// while readers share the set; no query reads it.
+    admitted: Mutex<Option<Admitted>>,
+    /// Full policy walks the watcher batches ran, for the tests that pin
+    /// them to the first batch and the ignore-control edits.
+    #[cfg(test)]
+    full_walks: std::sync::atomic::AtomicUsize,
+}
+
+/// A watcher batch read from disk and judged, not yet visible to queries:
+/// what [`IndexSet::stage_refresh`] prepares and [`IndexSet::apply_refresh`]
+/// stores. One final change per path, in path order.
+pub struct StagedRefresh {
+    changes: BTreeMap<String, StagedChange>,
+}
+
+/// What a staged path becomes in the overlay.
+enum StagedChange {
+    /// Removed, or no longer admitted by the walk policy: tombstoned.
+    Excluded,
+    /// Admitted: tombstoned in base/delta, with the grams read from disk
+    /// (`None` for a file that turned out missing, binary or a link).
+    Indexed(Option<HashSet<u64>>),
+}
+
+impl StagedRefresh {
+    /// Each path of the batch (and, after an ignore-control edit, each path
+    /// whose admission changed) with its outcome, in path order.
+    pub fn outcomes(&self) -> Vec<(String, RefreshOutcome)> {
+        self.changes
+            .iter()
+            .map(|(path, change)| {
+                let outcome = match change {
+                    StagedChange::Excluded => RefreshOutcome::Excluded,
+                    StagedChange::Indexed(_) => RefreshOutcome::Indexed,
+                };
+                (path.clone(), outcome)
+            })
+            .collect()
+    }
+}
+
+/// Files the walk policy admits, and the directories that hold them, as of
+/// the last full walk plus the paths admitted one by one since.
+struct Admitted {
+    files: HashSet<String>,
+    /// `""` for the root, then every parent of an admitted file: a walk
+    /// started from one of them sees the same ignore rules as the full walk.
+    dirs: HashSet<String>,
+}
+
+impl Admitted {
+    fn new(files: HashSet<String>) -> Self {
+        let mut admitted = Self {
+            files: HashSet::new(),
+            dirs: HashSet::from([String::new()]),
+        };
+        for file in files {
+            admitted.insert(file);
+        }
+        admitted
+    }
+
+    fn insert(&mut self, file: String) {
+        let mut parent = Path::new(&file).parent();
+        while let Some(dir) = parent.filter(|dir| !dir.as_os_str().is_empty()) {
+            if !self.dirs.insert(dir.to_string_lossy().into_owned()) {
+                break;
+            }
+            parent = dir.parent();
+        }
+        self.files.insert(file);
+    }
+
+    /// Whether the walk policy admits `rel` as a regular file: known paths
+    /// answer at once (a file that became a link is not one), a new one by
+    /// a walk from its nearest admitted ancestor.
+    fn admits(&mut self, root: &Path, rel: &str) -> bool {
+        if self.files.contains(rel) {
+            return std::fs::symlink_metadata(root.join(rel)).is_ok_and(|meta| meta.is_file());
+        }
+        let start = Path::new(rel)
+            .ancestors()
+            .skip(1)
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .find(|dir| self.dirs.contains(dir))
+            .unwrap_or_default();
+        let admitted = index::policy_admits_from(root, &start, rel);
+        if admitted {
+            self.insert(rel.to_string());
+        }
+        admitted
+    }
 }
 
 /// Whole milliseconds in `elapsed`, saturating rather than wrapping on a
@@ -186,37 +321,71 @@ fn plain_sig_path(gpx_dir: &Path) -> PathBuf {
 /// Content signature for a non-Git directory. The same ignore, binary, size,
 /// and symlink policy as the index builder keeps freshness tied to the bytes
 /// that can actually appear in search results.
-fn plain_signature(root: &Path) -> String {
+///
+/// Runs under the plain-walk time budget of the build
+/// ([`index::build_budget_from_env`]): with no commit bounding the file set,
+/// an unrelated huge tree (an ancestor's `.pixel/` re-rooting a run in
+/// `/tmp`) would otherwise be read and hashed end to end on every open.
+fn plain_signature(root: &Path) -> Result<String, index::IndexError> {
+    plain_signature_within(root, index::build_budget_from_env())
+}
+
+/// A walk is out of time only once it is strictly past its budget: spending
+/// exactly the budget is still within it.
+fn past_budget(elapsed: Duration, budget: Duration) -> bool {
+    elapsed > budget
+}
+
+fn plain_signature_within(
+    root: &Path,
+    budget: Option<std::time::Duration>,
+) -> Result<String, index::IndexError> {
     use std::hash::Hasher;
+    let started = Instant::now();
+    let mut entries: Vec<(String, u64)> = Vec::new();
     // Must mirror `index::build`'s walk policy exactly — both go through
     // `policy_walk` — or freshness would disagree with what the shard
     // actually contains.
-    let mut entries: Vec<(String, u64)> = crate::index::policy_walk(root)
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let rel = path.strip_prefix(root).ok()?.to_string_lossy().into_owned();
-            if is_internal(&rel) {
-                return None;
-            }
-            let meta = std::fs::symlink_metadata(path).ok()?;
-            if !meta.file_type().is_file() || meta.len() > MAX_FILE_BYTES {
-                return None;
-            }
-            let content = std::fs::read(path).ok()?;
-            if content[..content.len().min(8192)].contains(&0) {
-                return None;
-            }
-            Some((rel, xxhash_rust::xxh3::xxh3_64(&content)))
-        })
-        .collect();
+    for entry in crate::index::policy_walk(root).filter_map(Result::ok) {
+        if let Some(budget) = budget
+            && past_budget(started.elapsed(), budget)
+        {
+            return Err(index::freshness_budget_error(
+                root,
+                started.elapsed(),
+                budget,
+                entries.len(),
+            ));
+        }
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().into_owned();
+        if is_internal(&rel) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            continue;
+        };
+        if !meta.file_type().is_file() || meta.len() > MAX_FILE_BYTES {
+            continue;
+        }
+        let Ok(content) = std::fs::read(path) else {
+            continue;
+        };
+        if content[..content.len().min(8192)].contains(&0) {
+            continue;
+        }
+        entries.push((rel, xxhash_rust::xxh3::xxh3_64(&content)));
+    }
     entries.sort();
     let mut h = xxhash_rust::xxh3::Xxh3::new();
     for (rel, content_hash) in &entries {
         h.write(rel.as_bytes());
         h.write(&content_hash.to_le_bytes());
     }
-    format!("{:016x}", h.finish())
+    Ok(format!("{:016x}", h.finish()))
 }
 
 /// Load the stored plain-walk signature, or `None` if absent/corrupt.
@@ -434,6 +603,9 @@ struct BuiltShard {
     unreadable: usize,
 }
 
+/// Files hashed per chunk while building a git-anchored shard.
+const BUILD_CHUNK_FILES: usize = 4096;
+
 /// Build a git-anchored shard from an explicit repo-relative file list,
 /// extracting every blob from the git object store at `commit_oid` (parallel).
 fn build_shard_from(
@@ -444,29 +616,32 @@ fn build_shard_from(
     dest: &Path,
     prune_default: bool,
 ) -> Result<BuiltShard, IndexSetError> {
-    let admitted: Vec<&String> = rel_paths
+    let mut admitted: Vec<&String> = rel_paths
         .iter()
         .filter(|rel| !is_internal(rel))
         .filter(|rel| !prune_default || !rel.split('/').any(crate::index::is_ignored_dir_name))
         .collect();
-    let outcomes: Vec<BlobExtraction> = admitted
-        .par_chunks(batch_len(admitted.len(), rayon::current_num_threads()))
-        .flat_map_iter(|chunk| extract_blobs(root, commit_oid, chunk, extractor))
-        .collect();
-    let mut unreadable = 0;
-    let mut extracted: Vec<(String, Vec<u64>)> = Vec::with_capacity(outcomes.len());
-    for outcome in outcomes {
-        match outcome {
-            BlobExtraction::Indexed(rel, hashes) => extracted.push((rel, hashes)),
-            BlobExtraction::Skipped => {}
-            BlobExtraction::Unreadable => unreadable += 1,
-        }
-    }
-    extracted.sort_by(|a, b| a.0.cmp(&b.0));
+    // File ids follow path order. Blobs are hashed and handed to the builder
+    // a bounded chunk at a time: hashing the whole tree before building held
+    // every file's gram hashes in memory at once.
+    admitted.sort();
     let mut builder = ShardBuilder::new(&extractor.id());
     builder.set_commit_oid(commit_oid);
-    for (rel, hashes) in extracted {
-        builder.add_file(&rel, hashes);
+    let mut unreadable = 0;
+    for chunk in admitted.chunks(BUILD_CHUNK_FILES) {
+        let outcomes: Vec<BlobExtraction> = chunk
+            .par_chunks(batch_len(chunk.len(), rayon::current_num_threads()))
+            .flat_map_iter(|batch| extract_blobs(root, commit_oid, batch, extractor))
+            .collect();
+        for outcome in outcomes {
+            match outcome {
+                BlobExtraction::Indexed(rel, hashes) => {
+                    builder.add_file(&rel, hashes);
+                }
+                BlobExtraction::Skipped => {}
+                BlobExtraction::Unreadable => unreadable += 1,
+            }
+        }
     }
     builder.write(dest)?;
     Ok(BuiltShard {
@@ -536,7 +711,7 @@ impl IndexSet {
         // directory signature has changed (or is missing on first open).
         if head.is_none()
             && base.as_ref().is_some_and(|s| s.commit_oid().is_none())
-            && load_plain_sig(&gpx_dir).as_deref() != Some(&plain_signature(root))
+            && load_plain_sig(&gpx_dir).as_deref() != Some(&plain_signature(root)?)
         {
             base = None;
         }
@@ -558,7 +733,7 @@ impl IndexSet {
                         delta_anchor_held(root, &s)
                     } else {
                         s.commit_oid().is_none()
-                            && load_plain_sig(&gpx_dir).as_deref() == Some(&plain_signature(root))
+                            && load_plain_sig(&gpx_dir).as_deref() == Some(&plain_signature(root)?)
                     };
                     if valid {
                         let base = (BaseSource::Reused, millis(started.elapsed()));
@@ -641,7 +816,7 @@ impl IndexSet {
                         source = BaseSource::BuiltFromWalk;
                         index::build(root, extractor.as_ref())?;
                         let shard = Shard::open(&base_path)?;
-                        save_plain_sig(&gpx_dir, &plain_signature(root));
+                        save_plain_sig(&gpx_dir, &plain_signature(root)?);
                         shard
                     }
                 }
@@ -670,6 +845,10 @@ impl IndexSet {
             delta_tombstones: HashSet::new(),
             overlay: Overlay::new(),
             head: head.clone(),
+            covered: head.clone(),
+            admitted: Mutex::new(None),
+            #[cfg(test)]
+            full_walks: std::sync::atomic::AtomicUsize::new(0),
             open_timings: OpenTimings {
                 base: base_source,
                 base_ms,
@@ -728,6 +907,21 @@ impl IndexSet {
     /// commit base ∪ delta answers for, whatever HEAD has moved to since.
     pub fn opened_head(&self) -> Option<&str> {
         self.head.as_deref()
+    }
+
+    /// The HEAD the set's content answers for, `None` outside a git
+    /// repository: the opened HEAD until a catch-up moves it. The base
+    /// shard's commit is not it — a delta and the overlay carry the content
+    /// past it, and judging freshness by it closes every request after the
+    /// first commit until the base is rebuilt (#1032).
+    pub fn covered_head(&self) -> Option<&str> {
+        self.covered.as_deref()
+    }
+
+    /// Record that the content now answers for `head`: the caller refreshed
+    /// every path between [`IndexSet::covered_head`] and it.
+    pub fn note_caught_up(&mut self, head: &str) {
+        self.covered = Some(head.to_string());
     }
 
     /// Every path the overlay answers for instead of base ∪ delta: the
@@ -820,41 +1014,87 @@ impl IndexSet {
             .unwrap_or(RefreshOutcome::Excluded)
     }
 
-    /// Refresh a watcher batch from one ignore-policy snapshot.
+    /// Refresh a watcher batch from one ignore-policy snapshot. Only the
+    /// first batch and a batch that touches an ignore-control file walk the
+    /// tree; any other batch decides admission path by path.
     pub fn refresh_files(&mut self, files: &[(&str, bool)]) -> Vec<(String, RefreshOutcome)> {
+        let staged = self.stage_refresh(files);
+        let outcomes = staged.outcomes();
+        self.apply_refresh(staged);
+        outcomes
+    }
+
+    /// The slow half of [`IndexSet::refresh_files`], on a shared borrow:
+    /// judge every path against the walk policy and read the admitted ones
+    /// from disk, leaving every query's answer as it was. Only the policy
+    /// cache moves. The batch must be applied before another one is staged:
+    /// the next batch is judged against the cache this one updated.
+    pub fn stage_refresh(&self, files: &[(&str, bool)]) -> StagedRefresh {
         let policy_changed = files.iter().any(|(path, _)| is_ignore_control_path(path));
-        let admitted = if policy_changed {
-            index::policy_indexable_paths(&self.root)
-        } else {
-            index::policy_file_paths(&self.root)
-        };
+        let mut changes = BTreeMap::new();
+        let mut cache = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
+        if !policy_changed {
+            let admitted = cache.get_or_insert_with(|| {
+                #[cfg(test)]
+                self.full_walks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Admitted::new(index::policy_file_paths(&self.root))
+            });
+            for &(path, removed) in files {
+                if removed {
+                    admitted.files.remove(path);
+                }
+                let change = if removed || !admitted.admits(&self.root, path) {
+                    StagedChange::Excluded
+                } else {
+                    self.staged_read(path)
+                };
+                changes.insert(path.to_string(), change);
+            }
+            return StagedRefresh { changes };
+        }
+
+        #[cfg(test)]
+        self.full_walks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let policy_files = index::policy_file_paths(&self.root);
+        let admitted = index::indexable_subset(&self.root, &policy_files);
+        *cache = Some(Admitted::new(policy_files));
         let before: HashSet<String> = self.paths().into_iter().collect();
-        let mut outcomes = BTreeMap::new();
-
         for &(path, removed) in files {
-            if removed || !admitted.contains(path) {
-                self.overlay.remove_file(path);
-                outcomes.insert(path.to_string(), RefreshOutcome::Excluded);
+            let change = if removed || !admitted.contains(path) {
+                StagedChange::Excluded
             } else {
-                self.overlay
-                    .refresh_file(&self.root, path, self.extractor.as_ref());
-                outcomes.insert(path.to_string(), RefreshOutcome::Indexed);
+                self.staged_read(path)
+            };
+            changes.insert(path.to_string(), change);
+        }
+        for path in before.difference(&admitted) {
+            changes.insert(path.clone(), StagedChange::Excluded);
+        }
+        for path in admitted.difference(&before) {
+            if !changes.contains_key(path) {
+                changes.insert(path.clone(), self.staged_read(path));
             }
         }
+        StagedRefresh { changes }
+    }
 
-        if policy_changed {
-            for path in before.difference(&admitted) {
-                self.overlay.remove_file(path);
-                outcomes.insert(path.clone(), RefreshOutcome::Excluded);
-            }
-            for path in admitted.difference(&before) {
-                self.overlay
-                    .refresh_file(&self.root, path, self.extractor.as_ref());
-                outcomes.insert(path.clone(), RefreshOutcome::Indexed);
+    /// An admitted path's grams, read from the working tree.
+    fn staged_read(&self, path: &str) -> StagedChange {
+        StagedChange::Indexed(Overlay::extract(&self.root, path, self.extractor.as_ref()))
+    }
+
+    /// The fast half of [`IndexSet::refresh_files`]: store a staged batch in
+    /// the overlay. No disk read, so a caller holding readers off for it
+    /// holds them for an in-memory update only.
+    pub fn apply_refresh(&mut self, staged: StagedRefresh) {
+        for (path, change) in staged.changes {
+            match change {
+                StagedChange::Excluded => self.overlay.remove_file(&path),
+                StagedChange::Indexed(grams) => self.overlay.insert_extracted(&path, grams),
             }
         }
-
-        outcomes.into_iter().collect()
     }
 
     /// Tombstone a deleted file everywhere.
@@ -917,6 +1157,7 @@ impl IndexSet {
         filter: Option<&crate::path_filter::PathFilter>,
     ) -> Result<(Vec<MatchLine>, SearchStats), IndexSetError> {
         let started = std::time::Instant::now();
+        let probe = std::env::var_os("PIXEL_TARGETS_PROFILE").is_some();
         let query = plan_pattern(pattern, self.extractor.as_ref())
             .map_err(|e| IndexSetError::Pattern(e.to_string()))?;
         let scanned_all = matches!(query, GramQuery::All);
@@ -962,27 +1203,44 @@ impl IndexSet {
         }
         let mut contained = Containment::new(&self.root);
         candidates.retain(|rel| contained.admits(rel));
-        let verifier = Verifier::new(pattern)?;
+        if probe {
+            eprintln!(
+                "IDX cand {} pattern={:?} {}us",
+                candidates.len(),
+                &pattern[..pattern.len().min(24)],
+                started.elapsed().as_micros()
+            );
+        }
+        let verifier = verifier_for(pattern)?;
 
-        // Limited verification searches sorted files until one match beyond
-        // the requested limit is observed. That bounds retained matches and
-        // makes `truncated` exact: remaining candidates alone are not proof
-        // that another match exists.
         let mut matches: Vec<MatchLine> = Vec::new();
         let mut truncated = false;
         if let Some(limit) = limit {
+            // Limited verification searches sorted files until one match
+            // beyond the requested limit is observed. That bounds retained
+            // matches and makes `truncated` exact: remaining candidates alone
+            // are not proof that another match exists. One searcher (and its
+            // line buffers) serves the whole set; `open_regular_bounded` is
+            // the regular-file check, so no extra stat precedes it.
+            let mut searcher = Verifier::searcher();
             let probe_target = limit.saturating_add(1);
             let mut skip = offset;
             for rel in &candidates {
-                let abs = self.root.join(rel);
-                if !is_regular_file(&abs) {
-                    continue;
-                }
                 let remaining = probe_target.saturating_sub(matches.len());
                 if remaining == 0 {
                     break;
                 }
-                verifier.search_file_page(&abs, rel, &mut matches, &mut skip, Some(remaining))?;
+                let abs = self.root.join(rel);
+                let Ok(()) = verifier.search_file_page_with(
+                    &mut searcher,
+                    &abs,
+                    rel,
+                    &mut matches,
+                    &mut skip,
+                    Some(remaining),
+                ) else {
+                    continue;
+                };
                 if matches.len() > limit {
                     truncated = true;
                     matches.truncate(limit);
@@ -1013,6 +1271,14 @@ impl IndexSet {
             elapsed_us: started.elapsed().as_micros(),
             truncated,
         };
+        if probe {
+            eprintln!(
+                "IDX done cand={} matches={} {}us",
+                stats.candidates,
+                stats.matches,
+                started.elapsed().as_micros()
+            );
+        }
         Ok((matches, stats))
     }
 
@@ -1046,6 +1312,7 @@ impl IndexSet {
     pub fn status(&self) -> FreshnessStatus {
         FreshnessStatus {
             commit_oid: self.base.commit_oid().map(str::to_string),
+            covered_head: self.covered.clone(),
             base_files: self.base.file_count(),
             delta_files: self.delta.as_ref().map_or(0, Shard::file_count),
             overlay_files: self.overlay.files.len(),
@@ -1091,6 +1358,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The freshness walk of an un-anchored tree stops at its budget with an
+    /// error naming the root, and a lifted or generous budget returns the
+    /// same signature.
+    #[test]
+    fn plain_signature_should_stop_at_its_time_budget() {
+        let dir = scratch("plain-sig-budget");
+        for n in 0..50 {
+            std::fs::write(dir.join(format!("f{n}.rs")), format!("fn f{n}() {{}}\n")).unwrap();
+        }
+        let message = plain_signature_within(&dir, Some(Duration::ZERO))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains(&format!("{} is not inside a git repository", dir.display()))
+                && message.contains("PIXEL_INDEX_BUDGET_MS"),
+            "{message}"
+        );
+        let lifted = plain_signature_within(&dir, None).unwrap();
+        let roomy = plain_signature_within(&dir, Some(Duration::from_secs(600))).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(lifted, roomy);
+    }
+
     /// A file over the size cap never reaches the shard, so it must not move
     /// the plain-tree freshness signature either.
     #[test]
@@ -1099,7 +1389,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
-        let before = plain_signature(&dir);
+        let before = plain_signature(&dir).unwrap();
         let big = dir.join("big.txt");
         std::fs::write(&big, vec![b'x'; 8192]).unwrap();
         std::fs::OpenOptions::new()
@@ -1108,12 +1398,82 @@ mod tests {
             .unwrap()
             .set_len(MAX_FILE_BYTES + 1)
             .unwrap();
-        let after = plain_signature(&dir);
+        let after = plain_signature(&dir).unwrap();
         std::fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
-        let with_small = plain_signature(&dir);
+        let with_small = plain_signature(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(before, after);
         assert_ne!(before, with_small);
+    }
+
+    /// A walk that has spent exactly its budget is still within it.
+    #[test]
+    fn past_budget_should_be_strict_at_the_budget() {
+        let budget = Duration::from_millis(50);
+        assert!(!past_budget(Duration::from_millis(49), budget));
+        assert!(!past_budget(budget, budget));
+        assert!(past_budget(Duration::from_millis(51), budget));
+    }
+
+    /// The size cap is inclusive here too: a file of exactly
+    /// `MAX_FILE_BYTES` is indexed, so it must move the freshness signature.
+    #[test]
+    fn plain_signature_should_count_a_file_exactly_at_the_size_cap() {
+        let dir = scratch("plain-sig-at-cap");
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        let before = plain_signature(&dir).unwrap();
+        let cap = usize::try_from(MAX_FILE_BYTES).unwrap();
+        std::fs::write(dir.join("at_cap.txt"), "a".repeat(cap)).unwrap();
+        let after = plain_signature(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_ne!(before, after);
+    }
+
+    /// A git repo whose base is anchored is reused on the fast path, with no
+    /// build lock: a lock held elsewhere must not stall the open.
+    #[test]
+    fn open_or_build_should_reuse_an_anchored_base_without_the_build_lock() {
+        let _cache = IsolatedCache::new("reuse-no-lock");
+        let dir = scratch("reuse-no-lock");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        drop(IndexSet::open_or_build(&dir, ex()).unwrap());
+        let held = BuildLock::acquire(&dir).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let base = IndexSet::open_or_build(&dir, ex()).map(|s| s.open_timings().base);
+                let _ = tx.send(base.is_ok_and(|b| b == BaseSource::Reused));
+            })
+        };
+        let reused = rx.recv_timeout(Duration::from_secs(10));
+        drop(held);
+        worker.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(reused, Ok(true));
+    }
+
+    /// The walk signature only judges a base that has no commit anchor: an
+    /// anchored base whose repository lost its `.git` is not invalidated by
+    /// the missing signature.
+    #[test]
+    fn open_or_build_should_keep_an_anchored_base_when_git_is_gone() {
+        let _cache = IsolatedCache::new("anchored-no-git");
+        let dir = scratch("anchored-no-git");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        drop(IndexSet::open_or_build(&dir, ex()).unwrap());
+        std::fs::remove_dir_all(dir.join(".git")).unwrap();
+        let again = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let base = again.open_timings().base;
+        drop(again);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(base, BaseSource::Reused);
     }
 
     /// A pixel-only `.gitignore` is skipped from the overlay, but only that
@@ -2127,6 +2487,25 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn verifier_cache_reuses_one_compiled_pattern_and_surfaces_a_bad_one() {
+        // `targets` re-probes the same keyword patterns on every call; the
+        // compiled matcher must be shared, and a distinct pattern must not
+        // alias it. The test names one pattern per assertion, so a full
+        // cache cannot make two spellings collide.
+        let first = verifier_for("cacheNeedleAlpha\\b").unwrap();
+        let again = verifier_for("cacheNeedleAlpha\\b").unwrap();
+        let other = verifier_for("cacheNeedleBeta\\b").unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "an identical pattern must reuse the compiled verifier"
+        );
+        assert!(!Arc::ptr_eq(&first, &other));
+        // A pattern that does not compile is reported, not silently cached.
+        assert!(verifier_for("(").is_err());
+        assert!(verifier_for("(").is_err());
+    }
+
     /// A test holding the guard builds and publishes its shard in its own
     /// cache, and leaves `XDG_CACHE_HOME` as it found it.
     #[test]
@@ -2498,5 +2877,145 @@ mod tests {
         let rebuilt = IndexSet::open_or_build(&dir, ex()).unwrap();
         assert_eq!(rebuilt.open_timings().base, BaseSource::BuiltFromWalk);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    impl IndexSet {
+        fn full_walks(&self) -> usize {
+            self.full_walks.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// A git fixture with ignore rules at every level the walk policy
+    /// reads: a root `.gitignore` naming a directory, a nested `.gitignore`,
+    /// and `.git/info/exclude`.
+    fn ruled_repo(tag: &str) -> PathBuf {
+        let dir = scratch(tag);
+        git(&dir, &["init", "-q"]);
+        std::fs::create_dir_all(dir.join("src/sub")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "logs/\n").unwrap();
+        std::fs::write(dir.join("src/sub/.gitignore"), "*.tmp\n").unwrap();
+        std::fs::write(dir.join(".git/info/exclude"), "*.secret\n").unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn alpha_known() {}\n").unwrap();
+        std::fs::write(dir.join("src/sub/b.rs"), "fn beta_known() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        dir
+    }
+
+    /// The editing rhythm: one walk for the first batch, then batches of
+    /// one edit judge the path alone, until an ignore-control file moves.
+    #[test]
+    fn a_one_file_batch_should_not_walk_the_tree_again() {
+        let _cache = IsolatedCache::new("a_one_file_batch_should_not_walk_the_tree_again");
+        let dir = ruled_repo("refresh-no-walk");
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+
+        std::fs::write(dir.join("src/a.rs"), "fn alpha_edited() {}\n").unwrap();
+        assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
+        assert_eq!(set.full_walks(), 1, "the first batch builds the verdict");
+        std::fs::write(dir.join("src/c.rs"), "fn gamma_added() {}\n").unwrap();
+        assert_eq!(set.refresh_file("src/c.rs"), RefreshOutcome::Indexed);
+        std::fs::write(dir.join("src/a.rs"), "fn alpha_again() {}\n").unwrap();
+        assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
+        assert_eq!(set.full_walks(), 1, "an edit batch walked the whole tree");
+        assert_eq!(set.search("gamma_added", None).unwrap().0.len(), 1);
+        assert_eq!(set.search("alpha_again", None).unwrap().0.len(), 1);
+
+        std::fs::write(dir.join(".gitignore"), "logs/\nsrc/c.rs\n").unwrap();
+        let outcomes = set.refresh_files(&[(".gitignore", false)]);
+        assert_eq!(
+            set.full_walks(),
+            2,
+            "an ignore-control edit rebuilds the verdict"
+        );
+        assert!(
+            outcomes.contains(&("src/c.rs".to_string(), RefreshOutcome::Excluded)),
+            "{outcomes:?}"
+        );
+        assert!(set.search("gamma_added", None).unwrap().0.is_empty());
+        std::fs::write(dir.join("src/c.rs"), "fn gamma_edited() {}\n").unwrap();
+        assert_eq!(set.refresh_file("src/c.rs"), RefreshOutcome::Excluded);
+        assert_eq!(set.full_walks(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A path the cache has never seen gets the full walk's verdict, whichever
+    /// rule decides it: a parent directory a root rule ignores, a nested
+    /// `.gitignore`, `.git/info/exclude`, a default-pruned directory, or
+    /// nothing at all several new directories deep.
+    #[test]
+    fn a_new_path_should_get_the_verdict_of_the_full_walk() {
+        let _cache = IsolatedCache::new("a_new_path_should_get_the_verdict_of_the_full_walk");
+        let dir = ruled_repo("refresh-new-path");
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
+        let cases = [
+            ("logs/deep/run.txt", RefreshOutcome::Excluded),
+            ("src/sub/inner/t.tmp", RefreshOutcome::Excluded),
+            ("src/k.secret", RefreshOutcome::Excluded),
+            ("src/node_modules/pkg/m.js", RefreshOutcome::Excluded),
+            ("src/new/deeper/n.rs", RefreshOutcome::Indexed),
+            ("src/sub/inner/kept.rs", RefreshOutcome::Indexed),
+        ];
+        for (path, _) in cases {
+            let file = dir.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "fn written_later() {}\n").unwrap();
+        }
+        let full = index::policy_file_paths(&dir);
+        for (path, expected) in cases {
+            assert_eq!(set.refresh_file(path), expected, "{path}");
+            assert_eq!(
+                expected == RefreshOutcome::Indexed,
+                full.contains(path),
+                "{path}: the full walk disagrees"
+            );
+        }
+        assert_eq!(set.full_walks(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A known file that turned into a link is no longer a regular file the
+    /// walk lists, and a removed one leaves the cache.
+    #[test]
+    fn a_known_path_should_be_rejudged_when_it_stops_being_a_regular_file() {
+        let _cache = IsolatedCache::new(
+            "a_known_path_should_be_rejudged_when_it_stops_being_a_regular_file",
+        );
+        let dir = ruled_repo("refresh-known-link");
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Indexed);
+        std::fs::remove_file(dir.join("src/a.rs")).unwrap();
+        std::os::unix::fs::symlink(dir.join("src/sub/b.rs"), dir.join("src/a.rs")).unwrap();
+        assert_eq!(set.refresh_file("src/a.rs"), RefreshOutcome::Excluded);
+        std::fs::remove_file(dir.join("src/sub/b.rs")).unwrap();
+        let removed = set.refresh_files(&[("src/sub/b.rs", true)]);
+        assert_eq!(
+            removed,
+            [("src/sub/b.rs".to_string(), RefreshOutcome::Excluded)]
+        );
+        assert!(
+            !set.admitted
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .files
+                .contains("src/sub/b.rs")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn admitted_should_hold_the_root_and_every_parent_of_a_file() {
+        let admitted = Admitted::new(HashSet::from([
+            "a/b/c.rs".to_string(),
+            "a/d.rs".to_string(),
+            "top.rs".to_string(),
+        ]));
+        let mut dirs: Vec<&str> = admitted.dirs.iter().map(String::as_str).collect();
+        dirs.sort_unstable();
+        assert_eq!(dirs, ["", "a", "a/b"]);
+        assert_eq!(admitted.files.len(), 3);
     }
 }

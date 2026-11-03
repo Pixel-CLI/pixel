@@ -23,7 +23,8 @@
 //! adds a semantic layer on top. NDCG is the gate (see
 //! crates/pixel-bench/benches/ndcg_relevance.rs).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::code_vectors::{ChunkKey, Namespace, Store};
@@ -51,7 +52,8 @@ pub struct AskHit {
     pub snippet: String,
 }
 
-const MAX_FILE_BYTES: usize = 512 * 1024;
+/// Largest file `ask` and the resident index read, in bytes (512 KiB).
+pub const MAX_FILE_BYTES: usize = 524_288;
 
 /// Most files a question without a `--max-files` budget embeds: a guard
 /// against a runaway universe, not a budget. A question searches every
@@ -233,7 +235,7 @@ pub struct AskResult {
 /// are a sample spread over the whole tree ([`sample_across_tree`]);
 /// `candidate_files` still counts every eligible file, and
 /// `file_limit_reached` and `degraded` say that the search was partial.
-fn collect_files(root: &Path, max_files: Option<usize>) -> (Vec<PathBuf>, AskCoverage) {
+pub(crate) fn collect_files(root: &Path, max_files: Option<usize>) -> (Vec<PathBuf>, AskCoverage) {
     collect_files_within(root, max_files, UNBUDGETED_FILE_CEILING)
 }
 
@@ -259,7 +261,7 @@ fn collect_files_within(
         coverage.degraded = true;
         return (Vec::new(), coverage);
     }
-    let mut nested = HashMap::new();
+    let mut nested = HashMap::default();
     let mut eligible = Vec::new();
     for entry in pixel_index::index::policy_walk(root) {
         let Ok(entry) = entry else {
@@ -408,26 +410,42 @@ fn is_code_file(name: &str) -> bool {
 
 /// Cosine similarity between two vectors (defensive normalize on top of the
 /// embedder's built-in L2 normalization).
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+///
+/// Three sums, eight independent lanes each. One accumulator makes every
+/// `f32` add wait on the one before it; on a 384-wide vector that latency,
+/// not the arithmetic, is the cost.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let mut dot = 0.0f32;
-    let mut na = 0.0f32;
-    let mut nb = 0.0f32;
-    for (x, y) in a.iter().zip(b) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
+    let mut lanes = [(0.0f32, 0.0f32, 0.0f32); 8];
+    let (a_blocks, a_rest) = a.as_chunks::<8>();
+    let (b_blocks, b_rest) = b.as_chunks::<8>();
+    for (x, y) in a_blocks.iter().zip(b_blocks) {
+        for ((lane, x), y) in lanes.iter_mut().zip(x).zip(y) {
+            lane.0 += x * y;
+            lane.1 += x * x;
+            lane.2 += y * y;
+        }
     }
+    for (x, y) in a_rest.iter().zip(b_rest) {
+        lanes[0].0 += x * y;
+        lanes[0].1 += x * x;
+        lanes[0].2 += y * y;
+    }
+    let (dot, na, nb) = lanes
+        .iter()
+        .fold((0.0f32, 0.0f32, 0.0f32), |(dot, na, nb), lane| {
+            (dot + lane.0, na + lane.1, nb + lane.2)
+        });
     let denom = (na * nb).sqrt();
     if denom > 0.0 { dot / denom } else { 0.0 }
 }
 
-struct CorpusEntry {
-    path: String,
-    text: String,
-    key: ChunkKey,
+pub(crate) struct CorpusEntry {
+    pub(crate) path: String,
+    pub(crate) text: String,
+    pub(crate) key: ChunkKey,
 }
 
 /// Answer a natural-language question over a code tree.
@@ -479,10 +497,7 @@ impl SemanticFallback {
         if self.hits.is_empty() {
             return Vec::new();
         }
-        let mut caps = vec![
-            "semantic leads are unverified: embedding similarity does not separate related from unrelated files"
-                .to_string(),
-        ];
+        let mut caps = vec![SEMANTIC_LEADS_UNVERIFIED.to_string()];
         if self.file_limit_reached {
             caps.push(format!(
                 "semantic fallback embedded only a deterministic sample of {} of the eligible files",
@@ -492,6 +507,10 @@ impl SemanticFallback {
         caps
     }
 }
+
+/// The cap every semantic answer names: embedding similarity ranks, it does
+/// not decide relevance.
+pub const SEMANTIC_LEADS_UNVERIFIED: &str = "semantic leads are unverified: embedding similarity does not separate related from unrelated files";
 
 /// Whether the semantic fallback may run. Default OFF: a lexical miss used
 /// to load the embedding model and embed up to
@@ -521,9 +540,8 @@ fn fallback_flag(value: Option<&str>) -> bool {
 ///
 /// Never downloads the model: a daemon request must not block on the
 /// network. With no model on disk (fetched once by `pixel search-meaning`)
-/// or any other embedding error, the fallback is empty. This is not the
-/// daemon's `--scope hybrid` model (`potion-code-64M-v2`); each keeps its own
-/// download marker ([`crate::potion_marker`]).
+/// or any other embedding error, the fallback is empty. Hybrid and meaning share this
+/// code model, independently of transcript preferences.
 ///
 /// Returned paths are repo-relative (stripped of `root`) so they join with
 /// index paths, annotations, and evidence maps that are all relative.
@@ -607,7 +625,7 @@ pub fn ask_with_metadata(
 
 /// The question over `root`, with the embedder `open` returns (opened only
 /// when a file is eligible) and the store `cache` names.
-fn ask_opening(
+pub(crate) fn ask_opening(
     root: &Path,
     query: &str,
     k: usize,
@@ -644,8 +662,85 @@ fn ask_opening(
     )
 }
 
-fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>, String> {
-    crate::embed::open_embedder_with_potion_repo(download, Some("minishlab/potion-code-16M-v2"))
+/// The Hugging Face repository [`open_code_embedder`] loads: one name for
+/// the opener and [`warm_probe`], which reads its download marker.
+pub const CODE_SEARCH_MODEL_REPO: &str = "minishlab/potion-code-16M-v2";
+
+/// Open the shared code model, independently of transcript model preferences.
+pub fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>, String> {
+    crate::embed::open_embedder_with_potion_repo(download, Some(CODE_SEARCH_MODEL_REPO))
+}
+
+/// Whether the code-search model finished downloading, so
+/// [`open_code_embedder_offline`] would not need the network.
+#[cfg_attr(test, mutants::skip)] // adapter reading $HOME; `potion_set_up` holds the rule and is tested
+pub fn code_model_on_disk() -> bool {
+    crate::potion_cached(&crate::models_dir(), CODE_SEARCH_MODEL_REPO)
+}
+
+/// The embedder `pixel search-meaning` ranks with, opened from the model
+/// cache and never downloaded: a long-lived caller must not block on the
+/// network, so it learns "not set up" from [`code_model_on_disk`] or the
+/// error and reports it.
+#[cfg_attr(test, mutants::skip)] // adapter over the on-disk model; no instance exists without the downloaded weights
+pub fn open_code_embedder_offline() -> Result<Box<dyn crate::embed::Embedder>, String> {
+    open_code_embedder(false)
+}
+
+/// Whether the semantic code-search path over a root is already warm: the
+/// embedding model downloaded and the chunk vectors persisted.
+///
+/// [`warm_probe`] fills this without touching the model or the vectors
+/// themselves, for a deadline-bounded caller deciding whether an embedding
+/// operation would pay a cold start. It reports presence, never freshness
+/// or completeness of the index.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WarmProbe {
+    /// The code-search model's download finished
+    /// ([`crate::potion_cached`] on [`CODE_SEARCH_MODEL_REPO`]): opening it
+    /// without a download would not hit the network.
+    pub model_on_disk: bool,
+    /// `<root>/.pixel/code-vectors/` holds a readable manifest naming at
+    /// least one vector row.
+    pub vectors_present: bool,
+    /// Vector rows the store's manifest names, `0` when there is no
+    /// readable one.
+    pub vectors_chunks: u64,
+}
+
+/// Probe whether the semantic code-search path over `root` is already warm.
+///
+/// Strictly read-only and cheap: it never loads a model, never embeds,
+/// never downloads and never writes. `model_on_disk` reads the same
+/// download markers [`open_code_embedder`] checks ([`crate::potion_cached`]
+/// on [`crate::models_dir`]), and `vectors_*` read only the store's
+/// manifest — a small JSON file, atomically replaced — so `vectors_chunks`
+/// counts the rows the manifest names rather than loading a single vector.
+/// A missing or unreadable manifest reports `vectors_present: false`, like
+/// a never-written store: [`Store::load`] would re-embed either way.
+///
+/// Intended for deadline-bounded callers deciding whether an embedding
+/// operation would pay a cold start.
+#[cfg_attr(test, mutants::skip)] // adapter reading $HOME; `warm_probe_in` holds the probe and is tested
+pub fn warm_probe(root: &Path) -> WarmProbe {
+    warm_probe_in(root, &crate::models_dir())
+}
+
+/// [`warm_probe`] with the model cache directory as a parameter, so a test
+/// does not read `$HOME`.
+fn warm_probe_in(root: &Path, models: &Path) -> WarmProbe {
+    let vectors_chunks = Store::at(
+        &root
+            .join(pixel_index::index::SHARD_DIR)
+            .join(crate::code_vectors::DIR),
+    )
+    .manifest_rows()
+    .unwrap_or(0);
+    WarmProbe {
+        model_on_disk: crate::potion_cached(models, CODE_SEARCH_MODEL_REPO),
+        vectors_present: vectors_chunks > 0,
+        vectors_chunks,
+    }
 }
 
 /// Rank `files` for `query`: chunk them, take each chunk's vector from
@@ -722,8 +817,8 @@ fn ask_collected(
     let vectors = chunk_vectors(&corpus, &namespace, embedder, store, &mut coverage)?;
 
     // Per-file best score across its chunks.
-    let mut best: HashMap<String, f32> = HashMap::new();
-    let mut snippet_of: HashMap<String, String> = HashMap::new();
+    let mut best: HashMap<String, f32> = HashMap::default();
+    let mut snippet_of: HashMap<String, String> = HashMap::default();
     for entry in &corpus {
         let vec = &vectors[&entry.key];
         validate_vector(vec, qvec.len())?;
@@ -749,7 +844,7 @@ fn ask_collected(
 /// `coverage.vector_cache_errors` and marks the answer degraded, and the next
 /// save rebuilds the store. Counts go to `coverage.chunks`,
 /// `embedded_chunks` and `cached_chunks`.
-fn chunk_vectors(
+pub(crate) fn chunk_vectors(
     corpus: &[CorpusEntry],
     namespace: &Namespace,
     embedder: &mut dyn crate::embed::Embedder,
@@ -769,7 +864,7 @@ fn chunk_vectors(
     coverage.vector_cache_errors.extend(errors);
     let mut fresh = Vec::new();
     let mut texts = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for entry in corpus {
         if !vectors.contains_key(&entry.key) && seen.insert(entry.key) {
             fresh.push(entry.key);
@@ -871,7 +966,7 @@ fn read_file(root: &Path, file: &Path, terms: &[String]) -> FileRead {
     FileRead::Searched { path, chunks }
 }
 
-fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
+pub(crate) fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
     let norm: f64 = vector.iter().map(|x| f64::from(*x).powi(2)).sum();
     if dims == 0 || vector.len() != dims || !norm.is_finite() || norm <= 0.0 {
         return Err(
@@ -885,7 +980,7 @@ fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
 /// Exclude identifier fragments created only by fixed byte-window boundaries
 /// (the windows of an unparsed file or an oversize piece; symbol chunks end
 /// on line boundaries).
-fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
+pub(crate) fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
     let is_ident = |character: char| character.is_alphanumeric() || character == '_';
     let chunk = &text[start..end];
     let chunk = if text[..start].chars().next_back().is_some_and(is_ident)
@@ -910,7 +1005,7 @@ fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
 
 /// Preserve complete identifiers and split snake_case, camelCase and acronyms.
 fn words(text: &str) -> HashSet<String> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for_each_word(text, |word| {
         out.insert(word);
     });
@@ -922,7 +1017,7 @@ fn words(text: &str) -> HashSet<String> {
 /// the only part is the identifier itself (`readHTTPResponse` gives
 /// `readhttpresponse`, `read`, `http`, `response`; `_setup` gives `_setup`,
 /// `setup`; `setup` gives `setup` once).
-fn for_each_word(text: &str, mut emit: impl FnMut(String)) {
+pub(crate) fn for_each_word(text: &str, mut emit: impl FnMut(String)) {
     for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
         if word.is_empty() {
             continue;
@@ -969,7 +1064,7 @@ fn term_counts(text: &str, terms: &[String]) -> (Vec<u32>, u32) {
 }
 
 /// [`query_terms`], sorted: the term order of every lexical document.
-fn sorted_query_terms(query: &str) -> Vec<String> {
+pub(crate) fn sorted_query_terms(query: &str) -> Vec<String> {
     let mut terms: Vec<String> = query_terms(query).into_iter().collect();
     terms.sort_unstable();
     terms
@@ -1064,11 +1159,11 @@ fn lexical_evidence(
 
 /// A file's lexical evidence for one question.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct Lexical {
+pub(crate) struct Lexical {
     /// BM25 score of its best chunk (0 when no query term occurs).
-    score: f64,
+    pub(crate) score: f64,
     /// Most distinct query terms found together in one chunk.
-    matches: usize,
+    pub(crate) matches: usize,
 }
 
 /// Kinds of file that answer a question about code less often than the code
@@ -1159,7 +1254,7 @@ impl FileKind {
 /// evidence is strong, but a source file with the same evidence goes first.
 const DEMOTED_WEIGHT: f64 = 0.8;
 
-fn rank_files(
+pub(crate) fn rank_files(
     query: &str,
     lexical: &HashMap<String, Lexical>,
     best: HashMap<String, f32>,
@@ -1181,13 +1276,13 @@ fn rank_files(
             let evidence = lexical.get(&path).copied().unwrap_or_default();
             let fixed = pixel_rank::bm25_fixed(evidence.score);
             // Competition ranks: equal scores receive exactly equal evidence weight.
-            let fused = 2.0 / (60.0 + (index + 1) as f64)
+            let fused = pixel_rank::reciprocal_rank(2.0, pixel_rank::RRF_K, index)
                 + if fixed == 0 {
                     0.0
                 } else {
-                    lexical_ranks
-                        .get(&fixed)
-                        .map_or(0.0, |&rank| 1.0 / (60.0 + rank as f64))
+                    lexical_ranks.get(&fixed).map_or(0.0, |&rank| {
+                        pixel_rank::reciprocal_rank(1.0, pixel_rank::RRF_K, rank - 1)
+                    })
                 };
             let demoted = FileKind::of(&path).filter(|kind| !kind.named_by(&terms));
             AskHit {
@@ -1228,7 +1323,7 @@ fn competition_ranks<T: Ord + std::hash::Hash + Copy>(
     for value in values {
         *counts.entry(value).or_insert(0usize) += 1;
     }
-    let mut ranks = HashMap::with_capacity(counts.len());
+    let mut ranks = HashMap::with_capacity_and_hasher(counts.len(), Default::default());
     let mut above = 0;
     for (value, count) in counts.into_iter().rev() {
         ranks.insert(value, 1 + above);
@@ -1237,7 +1332,7 @@ fn competition_ranks<T: Ord + std::hash::Hash + Copy>(
     ranks
 }
 
-fn make_snippet(text: &str) -> String {
+pub(crate) fn make_snippet(text: &str) -> String {
     let joined: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut cut = joined;
     if cut.len() > 160 {
@@ -1283,7 +1378,7 @@ mod tests {
             .iter()
             .map(|(path, _, score)| (path.to_string(), *score))
             .collect();
-        rank_files(query, &lexical, best, HashMap::new(), usize::MAX)
+        rank_files(query, &lexical, best, HashMap::default(), usize::MAX)
     }
 
     fn lexical(score: f64, matches: usize) -> Lexical {
@@ -1296,10 +1391,14 @@ mod tests {
     #[test]
     fn competition_ranks_share_ties_and_skip_past_them() {
         let ranks = competition_ranks([3, 1, 3, 0, 2, 1, 3].into_iter());
-        let expected: HashMap<usize, usize> = [(3, 1), (2, 4), (1, 5), (0, 7)].into();
+        let expected: HashMap<usize, usize> =
+            [(3, 1), (2, 4), (1, 5), (0, 7)].into_iter().collect();
         assert_eq!(ranks, expected);
         assert!(competition_ranks(std::iter::empty::<usize>()).is_empty());
-        assert_eq!(competition_ranks([4].into_iter()), [(4, 1)].into());
+        assert_eq!(
+            competition_ranks([4].into_iter()),
+            [(4, 1)].into_iter().collect()
+        );
     }
 
     /// The lexical half of the fused score uses those ranks: two files
@@ -1314,11 +1413,13 @@ mod tests {
             ("d", lexical(0.0, 0)),
         ]
         .map(|(path, value)| (path.to_string(), value))
-        .into();
+        .into_iter()
+        .collect();
         let best: HashMap<String, f32> = [("a", 0.9), ("b", 0.8), ("c", 0.7), ("d", 0.6)]
             .map(|(path, score)| (path.to_string(), score))
-            .into();
-        let hits = rank_files("x y", &coverage, best, HashMap::new(), usize::MAX);
+            .into_iter()
+            .collect();
+        let hits = rank_files("x y", &coverage, best, HashMap::default(), usize::MAX);
         let score = |path: &str| {
             hits.iter()
                 .find(|hit| hit.path == path)
@@ -1484,6 +1585,34 @@ mod tests {
             assert!(!fallback_flag(Some(off)), "{off}");
         }
         assert!(!fallback_flag(None));
+    }
+
+    /// Lane order sums the same products in a different order, so the result
+    /// must stay equal to the sequential one at every length, tails
+    /// included, and not just at multiples of the lane width.
+    #[test]
+    fn cosine_should_match_the_sequential_sum_at_every_length() {
+        let a: Vec<f32> = (0..40).map(|i| (i as f32 * 0.31).sin()).collect();
+        let b: Vec<f32> = (0..40).map(|i| (i as f32 * 0.17).cos()).collect();
+        for len in 1..=a.len() {
+            let want = {
+                let mut dot = 0.0f32;
+                let mut na = 0.0f32;
+                let mut nb = 0.0f32;
+                for (x, y) in a[..len].iter().zip(&b[..len]) {
+                    dot += x * y;
+                    na += x * x;
+                    nb += y * y;
+                }
+                let denom = (na * nb).sqrt();
+                if denom > 0.0 { dot / denom } else { 0.0 }
+            };
+            let got = cosine(&a[..len], &b[..len]);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "len {len}: lanes {got} against sequential {want}"
+            );
+        }
     }
 
     #[test]
@@ -2714,7 +2843,7 @@ mod tests {
         let revision = crate::embed::embedder_revision(model);
         let windows = Namespace::new(model, revision, 1);
         let key = windows.key(text);
-        let vectors = HashMap::from([(key, invoice_vector(text))]);
+        let vectors = HashMap::from_iter([(key, invoice_vector(text))]);
         Store::at(&store_dir(root))
             .save(&windows, 2, &[key], &vectors, 0, false)
             .unwrap();
@@ -3118,5 +3247,89 @@ mod tests {
         assert_ne!(paths, sorted, "the order is the scores', not the paths'");
         assert_eq!(ranking(&cold), ranking(&uncached));
         assert_eq!(ranking(&warm), ranking(&uncached));
+    }
+
+    /// A root with no `.pixel/code-vectors/` and a models dir without
+    /// markers is cold on both counts.
+    #[test]
+    fn warm_probe_should_report_a_never_used_root_cold() {
+        let root = tempfile::tempdir().unwrap();
+        let models = tempfile::tempdir().unwrap();
+        assert_eq!(
+            warm_probe_in(root.path(), models.path()),
+            WarmProbe {
+                model_on_disk: false,
+                vectors_present: false,
+                vectors_chunks: 0,
+            }
+        );
+    }
+
+    /// `model_on_disk` reads the markers `require_set_up` admits: the
+    /// code-search repository's own marker — never another repository's.
+    #[test]
+    fn warm_probe_should_read_the_same_markers_the_opener_admits() {
+        let root = tempfile::tempdir().unwrap();
+
+        let models = tempfile::tempdir().unwrap();
+        std::fs::write(
+            crate::potion_marker(models.path(), CODE_SEARCH_MODEL_REPO),
+            CODE_SEARCH_MODEL_REPO,
+        )
+        .unwrap();
+        let probe = warm_probe_in(root.path(), models.path());
+        assert!(probe.model_on_disk);
+        assert!(!probe.vectors_present && probe.vectors_chunks == 0);
+
+        let models = tempfile::tempdir().unwrap();
+        std::fs::write(
+            crate::potion_marker(models.path(), "minishlab/potion-code-64M-v2"),
+            "minishlab/potion-code-64M-v2",
+        )
+        .unwrap();
+        assert!(
+            !warm_probe_in(root.path(), models.path()).model_on_disk,
+            "another repository's marker admits nothing"
+        );
+    }
+
+    /// `vectors_*` count the rows a store written through `Store::save`
+    /// names in its manifest — the real write path — without a segment
+    /// being opened.
+    #[test]
+    fn warm_probe_should_count_persisted_vector_rows() {
+        let root = indexed_tree();
+        let models = tempfile::tempdir().unwrap();
+        let store = Store::at(&store_dir(root.path()));
+        let namespace = Namespace::new("m", crate::embed::embedder_revision("m"), CHUNKER_VERSION);
+        let live: HashMap<ChunkKey, Vec<f32>> = [1, 2, 3]
+            .map(|key| (key, vec![key as f32; 4]))
+            .into_iter()
+            .collect();
+        store
+            .save(&namespace, 4, &[1, 2, 3], &live, 0, false)
+            .unwrap();
+        let probe = warm_probe_in(root.path(), models.path());
+        assert!(!probe.model_on_disk);
+        assert!(probe.vectors_present);
+        assert_eq!(probe.vectors_chunks, 3);
+    }
+
+    /// A store directory whose manifest cannot be read reports cold, like
+    /// the `Store::load` that re-embeds on the same manifest.
+    #[test]
+    fn warm_probe_should_report_an_unreadable_store_cold() {
+        let root = indexed_tree();
+        let models = tempfile::tempdir().unwrap();
+        let store = Store::at(&store_dir(root.path()));
+        let namespace = Namespace::new("m", crate::embed::embedder_revision("m"), CHUNKER_VERSION);
+        let live: HashMap<ChunkKey, Vec<f32>> = [(1, vec![0.0f32; 4])].into_iter().collect();
+        store.save(&namespace, 4, &[1], &live, 0, false).unwrap();
+        assert!(warm_probe_in(root.path(), models.path()).vectors_present);
+        // The manifest file of the store layout, corrupted after the write.
+        std::fs::write(store_dir(root.path()).join("manifest.json"), "{not json").unwrap();
+        let probe = warm_probe_in(root.path(), models.path());
+        assert!(!probe.vectors_present);
+        assert_eq!(probe.vectors_chunks, 0);
     }
 }

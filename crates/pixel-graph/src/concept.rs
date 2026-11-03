@@ -155,7 +155,7 @@ pub(crate) fn is_test_path(path: &str) -> bool {
 /// boundaries, lowercased, deduped, keeping words of length ≥ 2. Used to build
 /// the `concept_words` table and to match T1/T2 word-intersection queries.
 pub fn concept_words(norm: &str) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     let mut out = Vec::new();
     for chunk in norm.split(|c: char| !c.is_alphanumeric()) {
         let w = chunk.to_lowercase();

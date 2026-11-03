@@ -1,0 +1,70 @@
+{
+  "id": "qk-architecture",
+  "suite": "brief-question-kinds",
+  "task_class": "explanation",
+  "mode": "answer",
+  "commit": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+  "max_turns": 30,
+  "prompt": "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+  "must": [
+    {
+      "pattern": "(?i)task_hook",
+      "points": 1,
+      "why": "identifies the host-hook module"
+    },
+    {
+      "pattern": "(?i)execution_brief.{0,80}chain|chain.{0,80}execution_brief",
+      "points": 2,
+      "why": "identifies the retrieval-chain module"
+    },
+    {
+      "pattern": "(?i)(?:fn\\s+)?process",
+      "points": 1,
+      "why": "names the host payload processing boundary"
+    },
+    {
+      "pattern": "(?i)start_brief",
+      "points": 1,
+      "why": "names the hook's brief-start boundary"
+    },
+    {
+      "pattern": "(?i)with_brief",
+      "points": 1,
+      "why": "names the context attachment boundary"
+    },
+    {
+      "pattern": "(?i)(?:fn\\s+)?render",
+      "points": 1,
+      "why": "names evidence rendering"
+    },
+    {
+      "pattern": "(?i)additionalContext",
+      "points": 1,
+      "why": "names the host envelope field"
+    },
+    {
+      "pattern": "(?i)envelope",
+      "points": 1,
+      "why": "names the host response wrapper"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "(?i)execution_brief.{0,100}(?:writes?|constructs?|returns?).{0,100}additionalContext",
+      "penalty": 2,
+      "why": "the retrieval chain renders text; task_hook builds the host envelope"
+    },
+    {
+      "pattern": "(?i)task_hook.{0,100}(?:performs?|owns?).{0,100}(?:search-content|find-symbol|impact).{0,100}(?:retrieval chain)",
+      "penalty": 1,
+      "why": "retrieval operations live in execution_brief::chain"
+    }
+  ],
+  "semantic_review": {
+    "criteria": [
+      "The module path is a code boundary, not a complete architecture or exhaustive call graph.",
+      "execution_brief::chain owns bounded retrieval and renders a Pending brief; task_hook owns translating that text into the host additionalContext envelope.",
+      "task_hook::process receives the host event and payload, calls start_brief, attaches the pending brief with with_brief, then calls envelope."
+    ]
+  }
+}

@@ -18,11 +18,11 @@
 //! reaches the caller.
 //!
 //! Config: a preset (`openrouter` | `ollama` | `local` | `deepseek` |
-//! `opencode-go` | `jev`) selects the base URL, the default model, and the
+//! `opencode-go` | `jev` | `clef-ollama` | `clef-cloudflare`) selects the base URL, the default model, and the
 //! env var that names the API key; the preset is overridable by
 //! `--remote-model` / `PIXEL_REMOTE_MODEL`, `PIXEL_REMOTE_BASE`, and
 //! `PIXEL_REMOTE_KEY_ENV`. The key resolves from the env var first, then
-//! from `remote_keys.<preset>` in `~/.pixel/config.json`
+//! from `remote_keys.<preset>` in `~/.pixel/config.yaml`
 //! (`pixel config remote-key`), then — when Infisical is configured — from
 //! the project's secrets (see `decide_infisical`). The key value itself is
 //! only ever written into the Authorization header — never into logs, error
@@ -31,6 +31,9 @@
 //! `jev` is the exception in transport: TypeSafe's hosted Jev speaks the
 //! `/v1/systemone` decision shape, not `/chat/completions`, so its preset
 //! config is resolved here (base, model, key) but served by [`decide_jev`].
+//! `clef-ollama` and `clef-cloudflare` are the same kind of exception for
+//! Cloudflare's Clef-flash decision model: resolved here, served by
+//! [`decide_clef`] (Ollama's `/v1/systemone`, or Workers AI's REST run path).
 
 use crate::classify::Spec;
 use serde_json::{Value, json};
@@ -51,7 +54,15 @@ pub enum Preset {
     Local,
     Deepseek,
     OpencodeGo,
+    Openai,
     Jev,
+    /// Cloudflare's Clef-flash decision model served by Ollama
+    /// (`/v1/systemone`): a local server needs no key, a remote Ollama host
+    /// takes `OLLAMA_API_KEY`. Served by [`decide_clef`].
+    ClefOllama,
+    /// Cloudflare's Clef-flash decision model on Workers AI behind a
+    /// Cloudflare API token plus account id. Served by [`decide_clef`].
+    ClefCloudflare,
 }
 
 impl Preset {
@@ -63,11 +74,16 @@ impl Preset {
             Preset::Local => "http://localhost:11434/v1",
             Preset::Deepseek => "https://api.deepseek.com",
             Preset::OpencodeGo => "https://opencode.ai/zen/go/v1",
+            Preset::Openai => "https://api.openai.com/v1",
             // TypeSafe's hosted Jev decision model. Unlike the chat presets
             // it speaks TypeSafe's `/v1/systemone` shape, served by
             // `decide_jev` — the base stays bare so the shared
             // `PIXEL_REMOTE_BASE` override keeps working for it too.
             Preset::Jev => "https://api.typesafe.ai",
+            // Clef-flash speaks the same `/v1/systemone` shape; the bare
+            // bases are appended to by `decide_clef`.
+            Preset::ClefOllama => crate::decide_clef::OLLAMA_DEFAULT_BASE,
+            Preset::ClefCloudflare => crate::decide_clef::CLOUDFLARE_DEFAULT_BASE,
         }
     }
 
@@ -80,8 +96,24 @@ impl Preset {
             Preset::Local => None,
             Preset::Deepseek => Some("DEEPSEEK_API_KEY"),
             Preset::OpencodeGo => Some("OPENCODE_API_KEY"),
+            Preset::Openai => Some("OPENAI_API_KEY"),
             Preset::Jev => Some("TYPESAFE_API_KEY"),
+            Preset::ClefOllama => Some("OLLAMA_API_KEY"),
+            Preset::ClefCloudflare => Some(crate::decide_clef::CLOUDFLARE_KEY_ENVS[0]),
         }
+    }
+
+    /// Whether the preset runs without a key: a local Ollama serving Clef
+    /// takes none, and only a remote Ollama host asks for `OLLAMA_API_KEY`.
+    /// The key is still read when one is stored or set.
+    pub fn key_optional(&self) -> bool {
+        matches!(self, Preset::ClefOllama)
+    }
+
+    /// Whether this preset is Cloudflare's Clef-flash, served by
+    /// [`decide_clef`] over Ollama or Workers AI.
+    pub fn is_clef(&self) -> bool {
+        matches!(self, Preset::ClefOllama | Preset::ClefCloudflare)
     }
 
     /// A sensible default model for the preset; overridable by
@@ -93,7 +125,9 @@ impl Preset {
             Preset::Local => "qwen3.5:4b",
             Preset::Deepseek => "deepseek-flash",
             Preset::OpencodeGo => "deepseek-v4.1-flash",
+            Preset::Openai => "gpt-6-luna",
             Preset::Jev => "jev-latest",
+            Preset::ClefOllama | Preset::ClefCloudflare => crate::decide_clef::DEFAULT_MODEL,
         }
     }
 
@@ -106,7 +140,10 @@ impl Preset {
             Preset::Local => "local",
             Preset::Deepseek => "deepseek",
             Preset::OpencodeGo => "opencode-go",
+            Preset::Openai => "openai",
             Preset::Jev => "jev",
+            Preset::ClefOllama => "clef-ollama",
+            Preset::ClefCloudflare => "clef-cloudflare",
         }
     }
 
@@ -125,7 +162,10 @@ impl Preset {
             Preset::Local,
             Preset::Deepseek,
             Preset::OpencodeGo,
+            Preset::Openai,
             Preset::Jev,
+            Preset::ClefOllama,
+            Preset::ClefCloudflare,
         ]
         .into_iter()
         .find(|preset| preset.display() == normalized)
@@ -214,6 +254,7 @@ pub(crate) fn resolve_config_from(
     if key.is_none()
         && base_override.is_none()
         && preset.key_env().is_some()
+        && !preset.key_optional()
         && let Some(var) = key_env_name(preset, set("PIXEL_REMOTE_KEY_ENV"))
     {
         let name = preset.display();
@@ -327,10 +368,21 @@ impl Remote {
     }
 
     /// The full decision: build the request, POST it, parse and renormalize.
+    /// The `openai` preset speaks OpenAI's Decisions shape instead of
+    /// `/chat/completions`; the transport picks the path from the preset.
     pub fn decide(&self, spec: &Spec) -> Result<BTreeMap<String, f64>, String> {
-        let body = build_request(&self.config.model, spec);
+        let decisions = self.config.preset == Preset::Openai;
+        let body = if decisions {
+            build_decisions_request(&self.config.model, spec)
+        } else {
+            build_request(&self.config.model, spec)
+        };
         let response = (self.chat)(&self.config, &body)?;
-        parse_probs(&response, &spec.labels)
+        if decisions {
+            parse_decisions_probs(&response, &spec.labels)
+        } else {
+            parse_probs(&response, &spec.labels)
+        }
     }
 }
 
@@ -410,7 +462,14 @@ fn http_chat_within(
     timeout: Duration,
     cap: usize,
 ) -> Result<Value, String> {
-    let url = format!("{}/chat/completions", config.base.trim_end_matches('/'));
+    // The openai preset answers through OpenAI's Decisions endpoint; every
+    // other preset is an OpenAI-compatible chat completion.
+    let path = if config.preset == Preset::Openai {
+        "decisions"
+    } else {
+        "chat/completions"
+    };
+    let url = format!("{}/{path}", config.base.trim_end_matches('/'));
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .user_agent("pixel-cli classify-remote")
@@ -506,6 +565,110 @@ fn parse_probs(response: &Value, labels: &[String]) -> Result<BTreeMap<String, f
     Ok(out)
 }
 
+/// Assemble the OpenAI Decisions body: `input` is the state verbatim, and
+/// the single question is a `choice` whose choices carry the labels as
+/// `value` and the criterion (or the label itself) as `description` —
+/// arbitrary runtime labels are preserved, exactly as the other engines
+/// preserve them.
+fn build_decisions_request(model: &str, spec: &Spec) -> Value {
+    let question = if spec.context.is_empty() {
+        "Classify the state below into exactly one of the given options."
+    } else {
+        spec.context.as_str()
+    };
+    let choices: Vec<Value> = spec
+        .labels
+        .iter()
+        .map(|label| {
+            let description = spec
+                .criteria
+                .get(label)
+                .map_or(label.as_str(), String::as_str);
+            json!({"value": label, "description": description})
+        })
+        .collect();
+    json!({
+        "model": model,
+        "input": spec.text,
+        "questions": [{
+            "type": "choice",
+            "instructions": question,
+            "choices": choices,
+        }],
+    })
+}
+
+/// Read `answers[0]` of a Decisions response: a `refusal` answer is an
+/// error (the model declined to decide — never silently a distribution),
+/// a `choice` answer carries `probabilities` as `{value, probability}`
+/// pairs that are renormalized to sum 1 over the caller's labels. Unknown
+/// values are an error, not a silent drop, as in [`parse_probs`].
+fn parse_decisions_probs(
+    response: &Value,
+    labels: &[String],
+) -> Result<BTreeMap<String, f64>, String> {
+    let answer = response
+        .get("answers")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .ok_or("remote decisions response missing answers[0]")?;
+    match answer.get("type").and_then(Value::as_str) {
+        Some("refusal") => {
+            let reason = answer
+                .get("refusal")
+                .and_then(Value::as_str)
+                .unwrap_or("(no reason given)");
+            return Err(format!("remote decisions refused the decision: {reason}"));
+        }
+        Some("choice") => {}
+        Some(answer_type) => {
+            return Err(format!(
+                "remote decisions answer has unsupported type {answer_type:?}"
+            ));
+        }
+        None => return Err("remote decisions answer missing string type".to_string()),
+    }
+    let probs = answer
+        .get("probabilities")
+        .and_then(Value::as_array)
+        .ok_or("remote decisions answer probabilities is not an array")?;
+    let mut out: BTreeMap<String, f64> = labels.iter().map(|l| (l.clone(), 0.0)).collect();
+    let mut seen = BTreeMap::new();
+    let mut sum = 0.0f64;
+    for entry in probs {
+        let label = entry
+            .get("value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("remote decisions probability {entry} has no string value"))?;
+        if !out.contains_key(label) {
+            return Err(format!(
+                "remote returned probability for unknown label {label:?} (expected only: {labels:?})"
+            ));
+        }
+        if seen.insert(label, ()).is_some() {
+            return Err(format!(
+                "remote returned duplicate probability for label {label:?}"
+            ));
+        }
+        let p = entry
+            .get("probability")
+            .and_then(Value::as_f64)
+            .filter(|p| p.is_finite() && *p >= 0.0)
+            .ok_or_else(|| {
+                format!("remote probabilities[{label:?}] is not a finite non-negative number")
+            })?;
+        out.insert(label.to_string(), p);
+        sum += p;
+    }
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err("remote probabilities must sum to a finite positive value".to_string());
+    }
+    for p in out.values_mut() {
+        *p /= sum;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,11 +734,32 @@ mod tests {
                 Some("OPENCODE_API_KEY"),
             ),
             (
+                Preset::Openai,
+                "https://api.openai.com/v1",
+                "gpt-6-luna",
+                "openai",
+                Some("OPENAI_API_KEY"),
+            ),
+            (
                 Preset::Jev,
                 "https://api.typesafe.ai",
                 "jev-latest",
                 "jev",
                 Some("TYPESAFE_API_KEY"),
+            ),
+            (
+                Preset::ClefOllama,
+                "http://127.0.0.1:11434",
+                "clef-flash",
+                "clef-ollama",
+                Some("OLLAMA_API_KEY"),
+            ),
+            (
+                Preset::ClefCloudflare,
+                "https://api.cloudflare.com/client/v4",
+                "clef-flash",
+                "clef-cloudflare",
+                Some("CLOUDFLARE_API_TOKEN"),
             ),
         ];
         for (preset, base, model, display, key_env) in table {
@@ -596,14 +780,29 @@ mod tests {
         assert!(!Preset::Openrouter.wants_session_header());
         assert!(!Preset::Local.wants_session_header());
         assert!(!Preset::Jev.wants_session_header());
+        assert!(!Preset::ClefOllama.wants_session_header());
+        assert!(!Preset::ClefCloudflare.wants_session_header());
+        // Only a local Ollama serves Clef without a key.
+        for preset in [Preset::Openrouter, Preset::Jev, Preset::ClefCloudflare] {
+            assert!(!preset.key_optional(), "{preset:?}");
+        }
+        assert!(Preset::ClefOllama.key_optional());
+        assert!(Preset::ClefOllama.is_clef() && Preset::ClefCloudflare.is_clef());
+        assert!(!Preset::Jev.is_clef() && !Preset::Ollama.is_clef());
     }
 
     #[test]
     fn parse_name_accepts_normalized_preset_names_and_rejects_unknown_ones() {
         assert_eq!(Preset::parse_name("OpenRouter"), Some(Preset::Openrouter));
+        assert_eq!(Preset::parse_name("OpenAI"), Some(Preset::Openai));
         assert_eq!(Preset::parse_name("opencode_go"), Some(Preset::OpencodeGo));
         assert_eq!(Preset::parse_name("  DEEPSEEK  "), Some(Preset::Deepseek));
         assert_eq!(Preset::parse_name("jev"), Some(Preset::Jev));
+        assert_eq!(Preset::parse_name("clef_ollama"), Some(Preset::ClefOllama));
+        assert_eq!(
+            Preset::parse_name("Clef-Cloudflare"),
+            Some(Preset::ClefCloudflare)
+        );
         assert_eq!(Preset::parse_name("not-a-provider"), None);
     }
 
@@ -617,6 +816,37 @@ mod tests {
         assert_eq!(keyed.key_value().as_deref(), Some("tsk-resolved"));
         let keyless = resolve_config_from(Preset::Jev, None, None, env_of(&[]));
         assert!(keyless.is_err(), "Jev always needs a key");
+    }
+
+    #[test]
+    fn clef_presets_resolve_keyless_on_ollama_and_keyed_on_cloudflare() {
+        let local = resolve_config_from(Preset::ClefOllama, None, None, env_of(&[])).unwrap();
+        assert_eq!(local.base, "http://127.0.0.1:11434");
+        assert_eq!(local.model, "clef-flash");
+        assert_eq!(local.key_value(), None);
+        let remote = resolve_config_from(
+            Preset::ClefOllama,
+            None,
+            Some("ollama-key".into()),
+            env_of(&[("PIXEL_REMOTE_BASE", "https://ollama.example")]),
+        )
+        .unwrap();
+        assert_eq!(remote.key_value().as_deref(), Some("ollama-key"));
+        // A key never crosses cleartext http to a non-loopback Ollama host.
+        let error = resolve_config_from(
+            Preset::ClefOllama,
+            None,
+            Some("ollama-key".into()),
+            env_of(&[("PIXEL_REMOTE_BASE", "http://ollama.example:11434")]),
+        )
+        .unwrap_err();
+        assert!(error.contains("cleartext http"), "{error}");
+        let error =
+            resolve_config_from(Preset::ClefCloudflare, None, None, env_of(&[])).unwrap_err();
+        assert_eq!(
+            error,
+            "remote preset clef-cloudflare needs an API key: set CLOUDFLARE_API_TOKEN or run `pixel config remote-key clef-cloudflare -`"
+        );
     }
 
     #[test]
@@ -1137,5 +1367,180 @@ mod tests {
             session_id: None,
         };
         assert!(!format!("{config:?}").contains("sekret"));
+    }
+
+    /// A Decisions response whose single answer carries `probs`.
+    fn decisions_with(probs: Value) -> Value {
+        json!({"answers": [{"type": "choice", "probabilities": probs}]})
+    }
+
+    #[test]
+    fn the_decisions_request_maps_labels_to_choice_values_with_their_criteria() {
+        let s = spec(
+            "deploy now",
+            "Under the policy, decide whether the change is permitted",
+            &["yes", "no"],
+            &[("yes", "Every condition holds")],
+        );
+        let body = build_decisions_request("gpt-6-luna", &s);
+        assert_eq!(body["model"], "gpt-6-luna");
+        assert_eq!(body["input"], "deploy now");
+        let question = &body["questions"][0];
+        assert_eq!(question["type"], "choice");
+        assert_eq!(
+            question["instructions"],
+            "Under the policy, decide whether the change is permitted"
+        );
+        assert_eq!(
+            question["choices"],
+            json!([
+                {"value": "yes", "description": "Every condition holds"},
+                // The omitted criterion falls back to the label name.
+                {"value": "no", "description": "no"}
+            ])
+        );
+    }
+
+    #[test]
+    fn decisions_probabilities_map_to_labels_and_renormalize_to_one() {
+        let s = spec("t", "", &["a", "b"], &[]);
+        // 0.8 / 0.1 does not sum to 1; renormalized → 8/9 and 1/9.
+        let probs = parse_decisions_probs(
+            &decisions_with(json!([
+                {"value": "a", "probability": 0.8},
+                {"value": "b", "probability": 0.1}
+            ])),
+            &s.labels,
+        )
+        .unwrap();
+        assert!((probs["a"] - 8.0 / 9.0).abs() < 1e-9);
+        assert!((probs["b"] - 1.0 / 9.0).abs() < 1e-9);
+        assert!((probs.values().sum::<f64>() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn decisions_probabilities_reject_duplicate_labels() {
+        let s = spec("t", "", &["a", "b"], &[]);
+        let error = parse_decisions_probs(
+            &decisions_with(json!([
+                {"value": "a", "probability": 0.8},
+                {"value": "a", "probability": 0.2},
+                {"value": "b", "probability": 0.1}
+            ])),
+            &s.labels,
+        )
+        .unwrap_err();
+        assert!(error.contains("duplicate probability"), "{error}");
+        assert!(error.contains("\"a\""), "{error}");
+    }
+
+    #[test]
+    fn decisions_predicate_answers_are_rejected() {
+        let s = spec("t", "", &["a", "b"], &[]);
+        let error = parse_decisions_probs(
+            &json!({"answers": [{"type": "predicate", "probabilities": []}]}),
+            &s.labels,
+        )
+        .unwrap_err();
+        assert!(error.contains("unsupported type"), "{error}");
+        assert!(error.contains("predicate"), "{error}");
+    }
+
+    #[test]
+    fn a_decisions_refusal_is_an_error_naming_the_reason() {
+        let s = spec("t", "", &["a", "b"], &[]);
+        let e = parse_decisions_probs(
+            &json!({"answers": [{"type": "refusal", "refusal": "cannot classify this"}]}),
+            &s.labels,
+        )
+        .unwrap_err();
+        assert!(e.contains("refused"), "{e}");
+        assert!(e.contains("cannot classify this"), "{e}");
+    }
+
+    #[test]
+    fn decisions_error_bodies_name_the_real_cause() {
+        let body = r#"{"error":{"message":"model blocked by guardrail"}}"#;
+        let (base, server) = http_once_with("403 Forbidden", Some(body.to_string()));
+        let error = http_chat_within(
+            &config_for(&base, Some("sekret")),
+            &json!({}),
+            Duration::from_secs(5),
+            RESPONSE_CAP_BYTES,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("http status 403"), "{error}");
+        assert!(error.contains("model blocked by guardrail"), "{error}");
+        assert!(!error.contains("sekret"), "{error}");
+    }
+
+    #[test]
+    fn the_openai_preset_posts_to_decisions_not_chat_completions() {
+        let (base, server) = http_once(Some(
+            decisions_with(json!([
+                {"value": "yes", "probability": 0.8},
+                {"value": "no", "probability": 0.2}
+            ]))
+            .to_string(),
+        ));
+        let config = Config {
+            preset: Preset::Openai,
+            base: base.to_string(),
+            model: "gpt-6-luna".to_string(),
+            key: Some("k".to_string()),
+            session_id: None,
+        };
+        http_chat_within(
+            &config,
+            &build_decisions_request("gpt-6-luna", &spec("t", "", &["yes", "no"], &[])),
+            Duration::from_secs(5),
+            RESPONSE_CAP_BYTES,
+        )
+        .unwrap();
+        let (head, _) = server.join().unwrap();
+        assert!(head.starts_with("POST /v1/decisions HTTP/1.1"), "{head}");
+    }
+
+    #[test]
+    fn decide_routes_the_openai_preset_through_the_decisions_wire_end_to_end() {
+        let s = spec("deploy now", "", &["yes", "no"], &[]);
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(None::<Value>));
+        let seen = std::sync::Arc::clone(&recorded);
+        let config = Config {
+            preset: Preset::Openai,
+            base: "https://api.openai.com/v1".to_string(),
+            model: "gpt-6-luna".to_string(),
+            key: Some("k".to_string()),
+            session_id: None,
+        };
+        let remote = Remote::with_chat(config, move |_, body| {
+            *seen.lock().unwrap() = Some(body.clone());
+            Ok(decisions_with(json!([
+                {"value": "yes", "probability": 0.8},
+                {"value": "no", "probability": 0.1}
+            ])))
+        });
+        let probs = remote.decide(&s).unwrap();
+        assert!((probs["yes"] - 8.0 / 9.0).abs() < 1e-9, "{probs:?}");
+        assert!((probs["no"] - 1.0 / 9.0).abs() < 1e-9);
+        // The Decisions shape was sent, not the chat shape.
+        let body = recorded.lock().unwrap().clone().unwrap();
+        assert_eq!(body["input"], "deploy now");
+        assert_eq!(body["questions"][0]["type"], "choice");
+        assert!(body.get("messages").is_none());
+        // A refusal through the same wired path fails the decision.
+        let refusal_config = Config {
+            preset: Preset::Openai,
+            base: "https://api.openai.com/v1".to_string(),
+            model: "gpt-6-luna".to_string(),
+            key: Some("k".to_string()),
+            session_id: None,
+        };
+        let remote = Remote::with_chat(refusal_config, move |_, _| {
+            Ok(json!({"answers": [{"type": "refusal", "refusal": "no"}]}))
+        });
+        let e = remote.decide(&s).unwrap_err();
+        assert!(e.contains("refused"), "{e}");
     }
 }

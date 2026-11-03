@@ -25,7 +25,7 @@ use crate::error::GitError;
 /// successfully — these are ordinary, non-flag rev expressions that git
 /// itself accepts, and `pixel-graph::changes` documents `main@{1}` as a
 /// supported example. `:` is deliberately NOT included: the `<oid>:<path>`
-/// spec form used by `pixel-git::plumbing::rev_parse_at`/`show_blob_string`
+/// spec form used by `pixel-git::plumbing::show_blob`
 /// validates only the `oid`/`commit` portion via `validate_ref` *before*
 /// appending `:{path}` to build the spec, so the colon and path never pass
 /// through this validator and don't need to be in the allowed charset.

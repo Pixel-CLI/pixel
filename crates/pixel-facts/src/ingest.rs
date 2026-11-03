@@ -18,6 +18,7 @@
 //! every tick so queries are never blocked: each tick processes a bounded
 //! batch then returns; a ref move just enqueues another tick.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use rusqlite::params;
@@ -41,7 +42,7 @@ const PHASE_A_BATCH: usize = 200;
 /// Fixed phase-B/C commit batch size (25 per PLAN.md bounded batching).
 const PHASE_B_BATCH: usize = 25;
 /// 8MB aggregate output cap for a phase-B/C batch (bounded batching).
-const BATCH_OUTPUT_CAP_BYTES: usize = 8 * 1024 * 1024;
+const BATCH_OUTPUT_CAP_BYTES: usize = 8_388_608;
 
 /// Options controlling one ingest tick.
 #[derive(Debug, Clone)]
@@ -60,10 +61,33 @@ impl Default for IngestOptions {
     }
 }
 
+/// Time spent in each ingest stage; full-build loops accumulate all ticks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IngestTimings {
+    pub metadata: Duration,
+    pub blobs: Duration,
+    pub diffs: Duration,
+    pub retention: Duration,
+}
+
+impl IngestTimings {
+    fn add(&mut self, tick: &Self) {
+        self.metadata += tick.metadata;
+        self.blobs += tick.blobs;
+        self.diffs += tick.diffs;
+        self.retention += tick.retention;
+    }
+}
+
 /// Outcome of one tick, reported so the daemon can surface progress.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickReport {
     pub phase: String,
+    pub timings: IngestTimings,
+    pub blob_commits_done: u64,
+    pub blob_commits_total: u64,
+    pub diff_commits_done: u64,
+    pub diff_commits_total: u64,
     pub commits_indexed: u64,
     pub total_commits: u64,
     pub diff_indexed_pct: f64,
@@ -111,38 +135,62 @@ pub fn ingest_tick(store: &mut FactsStore, options: &IngestOptions) -> Result<Ti
     let mut poisoned = 0u64;
     let mut skipped = 0u64;
 
-    // Phase A: ensure metadata is complete first (always completes before B/C).
+    let mut timings = IngestTimings::default();
+    let start = Instant::now();
     let a_done = phase_a(store, &deadline)?;
+    timings.metadata = start.elapsed();
     if !a_done {
-        let state = store.index_state();
-        return Ok(TickReport {
-            phase: state.phase,
-            commits_indexed: state.commits_indexed,
-            total_commits: state.total_commits,
-            diff_indexed_pct: state.diff_indexed_pct,
-            fresh: state.fresh,
-            poisoned_this_tick: 0,
-            skipped_this_tick: 0,
-        });
+        return tick_report(store, timings, poisoned, skipped);
     }
+    let start = Instant::now();
+    apply_window(store, &options.limits, now_unix())?;
+    timings.retention += start.elapsed();
+    let start = Instant::now();
     let (b_done, p) = phase_b(store, &deadline)?;
+    timings.blobs = start.elapsed();
     poisoned += p;
     if b_done {
-        // Phase B may have consumed most of the tick budget. Give phase C a
-        // fresh deadline so diff text ingestion always gets time to run,
-        // even on large repos where phase B eats the entire original budget.
-        let c_deadline = Instant::now() + Duration::from_millis(options.tick_budget_ms);
-        // The window first, so a commit too old to keep is never fetched.
-        apply_window(store, &options.limits, now_unix())?;
+        // Give diff ingestion its own yield budget after metadata/blob work.
+        let start = Instant::now();
+        let c_deadline = start + Duration::from_millis(options.tick_budget_ms);
         let (_c_done, p, s) = phase_c(store, &c_deadline)?;
+        timings.diffs = start.elapsed();
         poisoned += p;
         skipped += s;
+        let start = Instant::now();
         enforce_budget(store, options.limits.budget_bytes)?;
+        timings.retention += start.elapsed();
     }
+    tick_report(store, timings, poisoned, skipped)
+}
 
+fn tick_report(
+    store: &FactsStore,
+    timings: IngestTimings,
+    poisoned: u64,
+    skipped: u64,
+) -> Result<TickReport> {
     let state = store.index_state();
+    // Exclude merges and expired diffs from the active work denominator.
+    // Already indexed/skipped retained commits count as completed work.
+    let (blob_done, total, diff_done): (i64, i64, i64) = store.conn().query_row(
+        "SELECT COUNT(CASE WHEN id <= ?1 THEN 1 END), COUNT(*),
+                COUNT(CASE WHEN diff_state != ?2 THEN 1 END)
+         FROM commits WHERE diff_state != ?3 AND COALESCE(skip_note, '') != 'merge'",
+        params![
+            phase_b_cursor(store),
+            DIFF_STATE_PENDING,
+            DIFF_STATE_EVICTED
+        ],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
     Ok(TickReport {
         phase: state.phase,
+        timings,
+        blob_commits_done: blob_done as u64,
+        blob_commits_total: total as u64,
+        diff_commits_done: diff_done as u64,
+        diff_commits_total: total as u64,
         commits_indexed: state.commits_indexed,
         total_commits: state.total_commits,
         diff_indexed_pct: state.diff_indexed_pct,
@@ -176,12 +224,40 @@ pub fn ingest_until_fresh_within(
     options: &IngestOptions,
     wall_clock: Duration,
 ) -> Result<TickReport> {
+    ingest_until_fresh_reporting(store, options, wall_clock, |_| {})
+}
+
+/// Build history while reporting progress after each bounded tick.
+///
+/// Timings in each callback and the final report accumulate this invocation.
+/// Existing CLI and daemon callers without a callback remain silent.
+///
+/// # Errors
+/// Returns the same ingest, no-progress and deadline errors as a full build.
+pub fn ingest_until_fresh_with_progress(
+    store: &mut FactsStore,
+    options: &IngestOptions,
+    progress: impl FnMut(&TickReport),
+) -> Result<TickReport> {
+    ingest_until_fresh_reporting(store, options, MAX_INGEST_UNTIL_FRESH_WALL_CLOCK, progress)
+}
+
+fn ingest_until_fresh_reporting(
+    store: &mut FactsStore,
+    options: &IngestOptions,
+    wall_clock: Duration,
+    mut progress: impl FnMut(&TickReport),
+) -> Result<TickReport> {
+    let mut timings = IngestTimings::default();
     let mut n = 0u64;
     let start = Instant::now();
     let dbg = std::env::var("PIXEL_FACTS_DEBUG_TICKS").is_ok();
     let mut last_mark: Option<String> = None;
     loop {
-        let report = ingest_tick(store, options)?;
+        let mut report = ingest_tick(store, options)?;
+        timings.add(&report.timings);
+        report.timings = timings.clone();
+        progress(&report);
         n += 1;
         if dbg {
             eprintln!("tick {n}: {report:?}");
@@ -279,10 +355,9 @@ fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
     if !needs_phase_a(store)? {
         return Ok(true);
     }
-    refresh_refs(store)?;
     // Enumerate every commit reachable from any ref, plus stash and reflog.
-    let oids = enumerate_all_commits(store)?;
     let known = known_oids(store);
+    let oids = enumerate_all_commits(store, &known)?;
     let pending: Vec<String> = oids
         .iter()
         .filter(|o| !known.contains(*o))
@@ -304,8 +379,7 @@ fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
     }
     // Guaranteed-progress (do-while) loop: the deadline is a soft yield
     // target, not a license to do zero work. Checking it BEFORE the first
-    // batch (as a plain `while`) would let setup cost alone (refresh_refs +
-    // enumerate_all_commits + known_oids — five git subprocess spawns) eat
+    // batch (as a plain `while`) would let setup cost alone (enumerate_all_commits + known_oids — several git subprocess spawns) eat
     // the entire tick budget under load, so the batch body never runs, no
     // commit is ever inserted, and every subsequent tick repeats the exact
     // same expensive-but-fruitless enumeration forever. That is the same
@@ -368,13 +442,13 @@ fn needs_phase_a(store: &FactsStore) -> Result<bool> {
             |r| r.get(0),
         )
         .ok();
-    let current = store.current_refs_hash()?;
+    let current = store.refs_hash()?;
     Ok(stored.as_deref() != Some(current.as_str()))
 }
 
 fn complete_phase_a(store: &mut FactsStore) -> Result<()> {
     // Record the refs hash at completion so a later ref move is detectable.
-    let hash = store.current_refs_hash()?;
+    let hash = store.refs_hash()?;
     store.conn().execute(
         "UPDATE ingest_jobs SET status = 'done', ref_hash = ?1, updated_at = ?2 WHERE phase = 'A'",
         params![hash, now_iso()],
@@ -408,105 +482,68 @@ fn store_phase_a_cursor(store: &mut FactsStore, rest: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn refresh_refs(store: &mut FactsStore) -> Result<()> {
-    let runner = store.runner();
-    // heads / remotes / tags
-    let refs = runner.run(&["for-each-ref", "--format=%(refname)%00%(objectname)"])?;
-    let lines = split_nul_lines(&refs);
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        let Some((refname, oid)) = split_ref_record(&line) else {
-            continue;
-        };
-        let kind = if refname.starts_with("refs/heads/") {
-            "branch"
-        } else if refname.starts_with("refs/remotes/") {
-            "remote"
-        } else if refname.starts_with("refs/tags/") {
-            "tag"
-        } else {
-            "other"
-        };
-        store.conn().execute(
-            "INSERT INTO refs (ref, oid, kind, indexed_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (ref) DO UPDATE SET oid = excluded.oid, indexed_at = excluded.indexed_at",
-            params![refname, oid, kind, now_iso()],
-        )?;
-    }
-    // refs/stash + stash reflog (first-class reach).
-    let stash = runner.run(&[
-        "for-each-ref",
-        "--format=%(refname)%00%(objectname)",
-        "refs/stash",
-    ]);
-    if let Ok(out) = stash {
-        for line in split_nul_lines(&out) {
-            if line.is_empty() {
-                continue;
-            }
-            if let Some((refname, oid)) = split_ref_record(&line) {
-                store.conn().execute(
-                    "INSERT INTO refs (ref, oid, kind, indexed_at) VALUES (?1, ?2, 'stash', ?3)
-                     ON CONFLICT (ref) DO UPDATE SET oid = excluded.oid, indexed_at = excluded.indexed_at",
-                    params![refname, oid, now_iso()],
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Reach of a commit listed by `rev-list --branches --remotes --tags`:
 /// `REACH_BRANCH | REACH_REMOTE | REACH_TAG`, spelled as its value because
 /// the three bits are disjoint, so `|`, `^` and `+` agree (a test pins it).
 const REACH_LISTED_REFS: i64 = 0b111;
 
-/// `refname\0oid` from `for-each-ref`, or `None` when either half is empty.
-fn split_ref_record(line: &str) -> Option<(&str, &str)> {
-    let mut parts = line.splitn(2, '\0');
-    let (refname, oid) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-    if refname.is_empty() || oid.is_empty() {
-        None
-    } else {
-        Some((refname, oid))
+/// The store's runner with the cap of a repository-wide enumeration: one
+/// 41-byte line per commit puts `rev-list --branches` past the default 1 MiB
+/// at about 25 500 commits, and one line per ref does the same to
+/// `for-each-ref` on a repository with thousands of tags.
+pub(crate) fn enumeration_runner(store: &FactsStore) -> pixel_git::GitRunner {
+    store
+        .runner()
+        .with_max_output_bytes(Some(pixel_git::ENUMERATION_MAX_OUTPUT_BYTES))
+}
+
+/// The output of an enumeration, `None` when git refused the revision itself
+/// (no `refs/stash`, no reflog): there is nothing to list. Any other failure
+/// (a timeout, an output cap, git missing) is an error, never an empty list:
+/// an empty enumeration completes phase A with no commit at all.
+fn listed(result: std::result::Result<Vec<u8>, pixel_git::GitError>) -> Result<Option<Vec<u8>>> {
+    match result {
+        Ok(out) => Ok(Some(out)),
+        Err(pixel_git::GitError::NonZeroExit { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
 /// Enumerate every commit that should be indexed: all reachable from refs,
 /// plus stash, plus reflog-only commits. Returns oids in reverse (oldest-first)
-/// order and computes the reach bitmask per oid.
-fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
-    let _ = store.conn().execute("DELETE FROM reach_map", []);
-    let runner = store.runner();
+/// order and records the reach bitmask of each one not in `known` in
+/// `reach_map`, which only the insert of a new commit reads.
+fn enumerate_all_commits(
+    store: &mut FactsStore,
+    known: &std::collections::HashSet<String>,
+) -> Result<Vec<String>> {
+    let runner = enumeration_runner(store);
     let mut all: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut reach: Vec<(String, i64)> = Vec::new();
+    let mut take = |out: &[u8], bits: i64| {
+        for oid in split_nul_lines(out) {
+            if !oid.is_empty() && seen.insert(oid.clone()) {
+                if !known.contains(&oid) {
+                    reach.push((oid.clone(), bits));
+                }
+                all.push(oid);
+            }
+        }
+    };
 
     // Branches + remotes + tags via a single rev-list of all heads/remotes/tags.
-    let args = vec!["rev-list", "--reverse", "--branches", "--remotes", "--tags"];
-    if let Ok(out) = runner.run(&args) {
-        let reach = REACH_LISTED_REFS;
-        for oid in split_nul_lines(&out) {
-            if !oid.is_empty() && seen.insert(oid.clone()) {
-                all.push(oid.clone());
-                set_reach(store, &oid, reach)?;
-            }
-        }
+    if let Some(out) =
+        listed(runner.run(&["rev-list", "--reverse", "--branches", "--remotes", "--tags"]))?
+    {
+        take(&out, REACH_LISTED_REFS);
     }
-
     // Stash.
-    if let Ok(out) = runner.run(&["rev-list", "--reverse", "refs/stash"]) {
-        for oid in split_nul_lines(&out) {
-            if !oid.is_empty() && seen.insert(oid.clone()) {
-                all.push(oid.clone());
-                set_reach(store, &oid, REACH_STASH)?;
-            }
-        }
+    if let Some(out) = listed(runner.run(&["rev-list", "--reverse", "refs/stash"]))? {
+        take(&out, REACH_STASH);
     }
-
     // Reflog-only commits (reachable via reflogs but not any branch/remote/tag).
-    if let Ok(out) = runner.run(&[
+    if let Some(out) = listed(runner.run(&[
         "rev-list",
         "--reverse",
         "--reflog",
@@ -514,26 +551,28 @@ fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
         "--branches",
         "--remotes",
         "--tags",
-    ]) {
-        for oid in split_nul_lines(&out) {
-            if !oid.is_empty() && seen.insert(oid.clone()) {
-                all.push(oid.clone());
-                set_reach(store, &oid, REACH_REFLOG_ONLY)?;
-            }
-        }
+    ]))? {
+        take(&out, REACH_REFLOG_ONLY);
     }
-
+    write_reach_map(store, &reach)?;
     Ok(all)
 }
 
-fn set_reach(store: &FactsStore, oid: &str, bits: i64) -> Result<()> {
-    // If the commit row already exists, OR the bits; else defer (phase A insert
-    // will set them). We store the reach map in a temp table keyed by oid.
-    store.conn().execute(
-        "INSERT INTO reach_map (oid, bits) VALUES (?1, ?2)
-         ON CONFLICT (oid) DO UPDATE SET bits = bits | excluded.bits",
-        params![oid, bits],
-    )?;
+/// Replace `reach_map` with `entries` in one transaction: one commit per
+/// enumeration, not one per oid.
+fn write_reach_map(store: &mut FactsStore, entries: &[(String, i64)]) -> Result<()> {
+    let tx = store.conn_mut().transaction()?;
+    tx.execute("DELETE FROM reach_map", [])?;
+    {
+        let mut insert = tx.prepare(
+            "INSERT INTO reach_map (oid, bits) VALUES (?1, ?2)
+             ON CONFLICT (oid) DO UPDATE SET bits = bits | excluded.bits",
+        )?;
+        for (oid, bits) in entries {
+            insert.execute(params![oid, bits])?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -722,15 +761,15 @@ fn phase_b(store: &mut FactsStore, deadline: &Instant) -> Result<(bool, u64)> {
     let mut poisoned = 0u64;
     let mut cursor: i64 = phase_b_cursor(store);
     loop {
-        let next = next_phase_b_commit(store, cursor);
-        let cid = match next {
-            Some(c) => c,
+        let batch = next_phase_b_commits(store, cursor)?;
+        let cid = match batch.last() {
+            Some(c) => *c,
             None => {
                 complete_phase_b(store)?;
                 return Ok((true, poisoned));
             }
         };
-        let poisoned_batch = measure_commit_blobs(store, cid)?;
+        let poisoned_batch = measure_commits_blobs(store, &batch)?;
         poisoned += poisoned_batch;
         // checkpoint cursor (upsert: the B row may not exist on first tick)
         store.conn().execute(
@@ -759,17 +798,106 @@ fn phase_b_cursor(store: &FactsStore) -> i64 {
         .unwrap_or(0)
 }
 
-fn next_phase_b_commit(store: &FactsStore, after_cursor: i64) -> Option<i64> {
-    store
+fn next_phase_b_commits(store: &FactsStore, after_cursor: i64) -> Result<Vec<i64>> {
+    let mut stmt = store
         .conn()
-        .query_row(
-            "SELECT id FROM commits
-             WHERE id > ?1 AND diff_state = ?2
-             ORDER BY id LIMIT 1",
-            params![after_cursor, DIFF_STATE_PENDING],
-            |r| r.get(0),
-        )
-        .ok()
+        .prepare("SELECT id FROM commits WHERE id > ?1 AND diff_state = ?2 ORDER BY id LIMIT ?3")?;
+    let rows = stmt.query_map(
+        params![after_cursor, DIFF_STATE_PENDING, PHASE_B_BATCH as i64],
+        |r| r.get(0),
+    )?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Measure several commits with one size-only Git protocol, before checkpointing
+/// any of them. Fall back to the bounded tree reader if the protocol fails or
+/// cannot represent a filename (newline or trailing carriage return).
+fn measure_commits_blobs(store: &mut FactsStore, commits: &[i64]) -> Result<u64> {
+    let mut pairs = Vec::new();
+    for cid in commits {
+        let oid: String =
+            store
+                .conn()
+                .query_row("SELECT oid FROM commits WHERE id = ?1", [cid], |r| r.get(0))?;
+        for path in changed_paths_for_commit(store, *cid)? {
+            let previous =
+                parent_path_for(store, &oid, &path).map(|(parent, old)| format!("{parent}:{old}"));
+            pairs.push((format!("{oid}:{path}"), previous, path));
+        }
+    }
+    let specs: Vec<&str> = pairs
+        .iter()
+        .flat_map(|(new, old, _)| std::iter::once(new.as_str()).chain(old.as_deref()))
+        .collect();
+    let runner = pixel_git::GitRunner::with_options(
+        store.root(),
+        GitOptions {
+            timeout: Some(Duration::from_secs(30)),
+            max_output_bytes: Some(1_048_576),
+        },
+    );
+    let Some(sizes) = batch_blob_sizes(&runner, &specs) else {
+        return commits.iter().try_fold(0, |total, cid| {
+            Ok(total + measure_commit_blobs(store, *cid)?)
+        });
+    };
+    let mut sizes = sizes.into_iter();
+    let mut poisoned = 0;
+    for (_, old, path) in pairs {
+        let added = sizes.next().expect("one answer per requested blob");
+        let removed = if old.is_some() {
+            sizes.next().expect("one answer per parent blob")
+        } else {
+            0
+        };
+        if added > BLOB_CAP_BYTES as u64 || removed > BLOB_CAP_BYTES as u64 {
+            store.learn_poison(&path, &format!("blob over {BLOB_CAP_BYTES}B cap"))?;
+            poisoned += 1;
+        }
+    }
+    Ok(poisoned)
+}
+
+/// Only metadata is requested: even a multi-gigabyte object is never inflated.
+fn batch_blob_sizes(runner: &pixel_git::GitRunner, specs: &[&str]) -> Option<Vec<u64>> {
+    if specs.iter().any(|s| s.contains('\n') || s.ends_with('\r')) {
+        return None;
+    }
+    let mut sizes = Vec::with_capacity(specs.len());
+    for batch in specs.chunks(TREE_BATCH_PATHS) {
+        let mut input = batch.join("\n");
+        input.push('\n');
+        let output = runner
+            .run_with_stdin(
+                &["cat-file", "--batch-check=%(objecttype) %(objectsize)"],
+                input.as_bytes(),
+            )
+            .ok()?;
+        if !output.success() {
+            return None;
+        }
+        let body = output.stdout.strip_suffix(b"\n")?;
+        let lines: Vec<&[u8]> = body.split(|b| *b == b'\n').collect();
+        if lines.len() != batch.len() {
+            return None;
+        }
+        for (line, spec) in lines.into_iter().zip(batch) {
+            let line = std::str::from_utf8(line).ok()?;
+            let size = if let Some(size) = line.strip_prefix("blob ") {
+                size.parse().ok()?
+            } else if line == format!("{spec} missing")
+                || ["tree ", "commit ", "tag "]
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
+            {
+                0
+            } else {
+                return None;
+            };
+            sizes.push(size);
+        }
+    }
+    Some(sizes)
 }
 
 fn complete_phase_b(store: &mut FactsStore) -> Result<()> {
@@ -781,7 +909,7 @@ fn complete_phase_b(store: &mut FactsStore) -> Result<()> {
 }
 
 /// For one commit, gather its changed paths, measure blob sizes via
-/// `cat-file --batch-check`, and learn any over-cap paths as poison forever.
+/// bounded `ls-tree` batches, and learn any over-cap paths as poison forever.
 /// Returns the number of newly-poisoned paths.
 fn measure_commit_blobs(store: &mut FactsStore, cid: i64) -> Result<u64> {
     let paths = changed_paths_for_commit(store, cid)?;
@@ -812,9 +940,8 @@ fn changed_paths_for_commit(store: &FactsStore, cid: i64) -> Result<Vec<String>>
     Ok(v)
 }
 
-/// Measure (added_size, removed_size) for each changed path of a commit using
-/// `git cat-file --batch-check` on the blob OIDs at the commit's tree. Since
-/// the runner's stdin is null, we pass OIDs as positional args.
+/// Measure changed paths in bounded batches, including rename sources in the
+/// parent tree. Keep the result in input order; deleted/non-blob entries are 0.
 fn measure_blob_sizes(
     store: &FactsStore,
     oid: &str,
@@ -825,26 +952,95 @@ fn measure_blob_sizes(
         max_output_bytes: Some(1_048_576),
     };
     let cmd_runner = pixel_git::GitRunner::with_options(store.root(), opts);
-    let mut out = Vec::new();
-    for path in paths {
-        let size_new = blob_size(&cmd_runner, oid, path);
-        // The old name of a rename only exists in the parent tree.
-        let size_old = if let Some(old) = old_path_for(store, path) {
-            blob_size(&cmd_runner, &format!("{oid}^"), &old)
+    let current: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let new_sizes = blob_sizes(&cmd_runner, oid, &current);
+    let old_paths: Vec<Option<String>> = paths
+        .iter()
+        .map(|path| parent_path_for(store, oid, path).map(|(_, old)| old))
+        .collect();
+    let renamed: Vec<&str> = old_paths.iter().filter_map(Option::as_deref).collect();
+    let old_sizes = blob_sizes(&cmd_runner, &format!("{oid}^"), &renamed);
+    Ok(paths
+        .iter()
+        .zip(old_paths)
+        .map(|(path, old)| {
+            let added = new_sizes.get(path.as_str()).copied().unwrap_or(0);
+            let removed = old
+                .as_deref()
+                .and_then(|p| old_sizes.get(p))
+                .copied()
+                .unwrap_or(0);
+            (path.to_owned(), (added, removed))
+        })
+        .collect())
+}
+
+/// Bound argv below platform limits and output below the runner's 1 MiB cap.
+const TREE_BATCH_PATHS: usize = 128;
+const TREE_BATCH_PATH_BYTES: usize = 32_768;
+
+/// Number of paths fitting one argv batch; even an oversized first path advances.
+fn tree_batch_count(paths: &[&str]) -> usize {
+    let mut bytes = 0;
+    paths
+        .iter()
+        .take(TREE_BATCH_PATHS)
+        .take_while(|path| {
+            bytes += path.len() + 1;
+            bytes <= TREE_BATCH_PATH_BYTES
+        })
+        .count()
+        .max(1)
+}
+
+fn blob_sizes(runner: &pixel_git::GitRunner, rev: &str, paths: &[&str]) -> HashMap<String, u64> {
+    let mut sizes = HashMap::with_capacity(paths.len());
+    let mut remaining = paths;
+    while !remaining.is_empty() {
+        let count = tree_batch_count(remaining);
+        let (batch, rest) = remaining.split_at(count);
+        let mut args = vec![
+            "--literal-pathspecs",
+            "ls-tree",
+            "-l",
+            "-z",
+            "--end-of-options",
+            rev,
+            "--",
+        ];
+        args.extend_from_slice(batch);
+        if let Ok(output) = runner.run(&args) {
+            for record in output.split(|b| *b == 0) {
+                if let Some(tab) = record.iter().position(|b| *b == b'\t') {
+                    let path = String::from_utf8_lossy(&record[tab + 1..]).into_owned();
+                    let size = parse_ls_tree_size(&String::from_utf8_lossy(&record[..tab]));
+                    sizes.insert(path, size);
+                }
+            }
         } else {
-            0
-        };
-        out.push((path.clone(), (size_new, size_old)));
+            // A failed/capped batch must not hide a large blob that a single
+            // bounded lookup can still measure.
+            for path in batch {
+                sizes.insert((*path).to_owned(), blob_size(runner, rev, path));
+            }
+        }
+        remaining = rest;
     }
-    Ok(out)
+    sizes
 }
 
 /// Size of the blob at `path` in `rev`'s tree; 0 when the entry is missing
-/// or is not a blob (a directory, a submodule). One `ls-tree -l` per path:
-/// `cat-file --batch-check` only reads objects from stdin and rejected the
-/// argument, so every size read as 0 and no blob was ever learned as poison.
+/// or is not a blob (a directory, a submodule). Fallback for a failed batch.
 fn blob_size(runner: &pixel_git::GitRunner, rev: &str, path: &str) -> u64 {
-    match runner.run(&["ls-tree", "-l", "--end-of-options", rev, "--", path]) {
+    match runner.run(&[
+        "--literal-pathspecs",
+        "ls-tree",
+        "-l",
+        "--end-of-options",
+        rev,
+        "--",
+        path,
+    ]) {
         Ok(bytes) => parse_ls_tree_size(&String::from_utf8_lossy(&bytes)),
         Err(_) => 0,
     }
@@ -865,15 +1061,20 @@ fn parse_ls_tree_size(line: &str) -> u64 {
     size.parse().unwrap_or(0)
 }
 
-fn old_path_for(store: &FactsStore, path: &str) -> Option<String> {
-    store
+/// Both sides of a retained diff must be checked, including modifications
+/// and deletions whose large parent belongs to an expired commit. Merge diffs
+/// are skipped in phase A; ordinary commits have at most one parent.
+fn parent_path_for(store: &FactsStore, oid: &str, path: &str) -> Option<(String, String)> {
+    let (parents, old): (String, String) = store
         .conn()
         .query_row(
-            "SELECT old_path FROM file_changes WHERE path = ?1 AND old_path IS NOT NULL LIMIT 1",
-            [path],
-            |r| r.get::<_, String>(0),
+            "SELECT c.parents, COALESCE(f.old_path, f.path) FROM file_changes f
+         JOIN commits c ON c.id = f.commit_id WHERE c.oid = ?1 AND f.path = ?2",
+            params![oid, path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .ok()
+        .ok()?;
+    Some((parents.split_whitespace().next()?.to_owned(), old))
 }
 
 // ---------------------------------------------------------------------------
@@ -1310,6 +1511,21 @@ pub fn apply_window(store: &mut FactsStore, limits: &HistoryLimits, now_unix: i6
     let cutoff = limits
         .window_days
         .map_or(i64::MIN, |days| window_cutoff(now_unix, days));
+    let restored: Option<i64> = store.conn().query_row(
+        "SELECT MIN(id) FROM commits WHERE diff_state = ?1 AND skip_note = ?2
+         AND unixepoch(committed_at) >= ?3",
+        params![DIFF_STATE_EVICTED, SKIP_NOTE_OUTSIDE_WINDOW, cutoff],
+        |r| r.get(0),
+    )?;
+    if let Some(first) = restored {
+        // A widened window can restore IDs behind the saved B cursor. They
+        // must pass blob checks before phase C is allowed to read their diffs.
+        let cursor = phase_b_cursor(store).min(first - 1).to_string();
+        store.conn().execute(
+            "UPDATE ingest_jobs SET cursor = ?1, status = 'running' WHERE phase = 'B'",
+            [cursor],
+        )?;
+    }
     store.conn().execute(
         "UPDATE commits SET diff_state = ?1, skip_note = NULL
          WHERE diff_state = ?2 AND skip_note = ?3 AND unixepoch(committed_at) >= ?4",
@@ -1513,6 +1729,41 @@ pub(crate) mod tests {
     /// the loop needs several ticks: the wall-clock cap must let them run
     /// and only fire once it is really exceeded.
     #[test]
+    fn full_build_progress_accumulates_timings_and_reports_completed_work() {
+        let (dir, _, _) = two_commit_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        let options = IngestOptions {
+            tick_budget_ms: 0,
+            ..IngestOptions::default()
+        };
+        let mut reports = Vec::new();
+        let result =
+            ingest_until_fresh_reporting(&mut store, &options, TEST_WALL_CLOCK, |report| {
+                reports.push(report.clone()); // Keep owned snapshots after the callback returns.
+            })
+            .unwrap();
+        assert!(reports.len() >= 2, "zero-budget ingest must yield");
+        assert_eq!(reports.last(), Some(&result));
+        assert_eq!(
+            reports[0].timings.diffs,
+            Duration::ZERO,
+            "phase C has not run yet"
+        );
+        assert_eq!(reports[0].diff_commits_done, 0);
+        assert_eq!(result.blob_commits_done, 2);
+        assert_eq!(result.blob_commits_total, 2);
+        assert_eq!(result.diff_commits_done, 2);
+        assert_eq!(result.diff_commits_total, 2);
+        assert!(result.fresh);
+        for pair in reports.windows(2) {
+            assert!(pair[1].timings.metadata >= pair[0].timings.metadata);
+            assert!(pair[1].timings.blobs >= pair[0].timings.blobs);
+            assert!(pair[1].timings.diffs >= pair[0].timings.diffs);
+            assert!(pair[1].timings.retention >= pair[0].timings.retention);
+        }
+    }
+
+    #[test]
     fn ingest_until_fresh_within_keeps_ticking_until_fresh_under_a_tiny_tick_budget() {
         let (dir, _, _) = two_commit_repo();
         let mut store = FactsStore::open(dir.path()).unwrap();
@@ -1549,6 +1800,168 @@ pub(crate) mod tests {
         assert!(phase_a(&mut store, &far()).unwrap());
         assert!(phase_b(&mut store, &far()).unwrap().0);
         store
+    }
+
+    /// A repository of `n` commits on one branch, oldest first.
+    fn linear_repo(n: usize) -> (tempfile::TempDir, Vec<String>) {
+        let dir = init_repo();
+        let oids = (0..n)
+            .map(|i| {
+                let body = format!("fn step_{i}() {{}}\n");
+                commit(
+                    dir.path(),
+                    &[("lib.rs", body.as_bytes())],
+                    &format!("step {i}"),
+                )
+            })
+            .collect();
+        (dir, oids)
+    }
+
+    fn reach_rows(store: &FactsStore) -> Vec<(String, i64)> {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT oid, bits FROM reach_map ORDER BY oid")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    /// A ref move re-enumerates every commit, but only a commit not yet in
+    /// the store gets a `reach_map` row: the insert of a new commit is its
+    /// only reader, so a row for a known one is a write for nothing.
+    #[test]
+    fn enumeration_should_record_reach_only_for_commits_not_yet_indexed() {
+        let (dir, oids) = linear_repo(5);
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_within(&mut store);
+        let new = commit(dir.path(), &[("lib.rs", b"fn moved() {}\n")], "move");
+
+        let known = known_oids(&store);
+        let all = enumerate_all_commits(&mut store, &known).unwrap();
+        let mut expected = oids;
+        expected.push(new.clone());
+        assert_eq!(
+            all, expected,
+            "every commit is still enumerated, oldest first"
+        );
+        assert_eq!(reach_rows(&store), [(new, REACH_LISTED_REFS)]);
+    }
+
+    /// The reach rows of one enumeration land in one transaction: the WAL
+    /// grows by a few page frames, not by one commit frame per oid.
+    #[test]
+    fn enumeration_should_write_reach_map_in_one_transaction() {
+        let (dir, oids) = linear_repo(40);
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        let wal_frames = |store: &FactsStore, mode: &str| -> i64 {
+            store
+                .conn()
+                .query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| r.get(1))
+                .unwrap()
+        };
+        assert_eq!(wal_frames(&store, "TRUNCATE"), 0);
+
+        enumerate_all_commits(&mut store, &std::collections::HashSet::new()).unwrap();
+        assert_eq!(reach_rows(&store).len(), oids.len());
+        let frames = wal_frames(&store, "PASSIVE");
+        assert!(
+            frames < 10,
+            "{frames} WAL frames for {} rows: one commit per row",
+            oids.len()
+        );
+    }
+
+    /// A repository of `n` commits on `main`, written by one `git fast-import`
+    /// (tens of thousands of commits in about a second).
+    fn imported_repo(n: usize) -> tempfile::TempDir {
+        use std::io::Write as _;
+        let dir = init_repo();
+        let mut stream = String::new();
+        for i in 0..n {
+            let body = format!("fn step_{i}() {{}}\n");
+            let message = format!("step {i}\n");
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{}\ncommitter t <t@example.com> {} +0000\ndata {}\n{message}",
+                i + 1,
+                1_700_000_000 + i,
+                message.len()
+            ));
+            if i > 0 {
+                stream.push_str(&format!("from :{i}\n"));
+            }
+            stream.push_str(&format!(
+                "M 644 inline lib.rs\ndata {}\n{body}\n",
+                body.len()
+            ));
+        }
+        let mut child = std::process::Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stream.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "fast-import");
+        git(dir.path(), &["reset", "-q", "--hard", "main"]);
+        dir
+    }
+
+    /// One 41-byte line per commit put `rev-list --branches` past the
+    /// runner's default 1 MiB at about 25 500 commits; the error was taken
+    /// for an empty list, and phase A completed with no commit at all.
+    #[test]
+    fn enumeration_should_list_every_commit_past_the_default_output_cap() {
+        const COMMITS: usize = 26_000;
+        let dir = imported_repo(COMMITS);
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        let oids = enumerate_all_commits(&mut store, &std::collections::HashSet::new()).unwrap();
+        let listing = git(dir.path(), &["rev-list", "--branches"]);
+        assert!(
+            listing.len() > pixel_git::DEFAULT_MAX_OUTPUT_BYTES,
+            "the fixture must cross the default cap: {} bytes",
+            listing.len()
+        );
+        assert_eq!(oids.len(), COMMITS);
+        assert_eq!(
+            oids.first(),
+            Some(
+                &git(dir.path(), &["rev-list", "--max-parents=0", "main"])
+                    .trim()
+                    .to_string()
+            )
+        );
+    }
+
+    /// A revision git refuses (no `refs/stash`, no reflog) lists nothing; a
+    /// capped, timed-out or failed run is an error, never an empty list.
+    #[test]
+    fn listed_should_tolerate_a_refused_revision_and_report_any_other_failure() {
+        let args = vec!["rev-list".to_string()];
+        let refused = pixel_git::GitError::NonZeroExit {
+            args: args.clone(),
+            code: Some(128),
+            stderr: "fatal: bad revision 'refs/stash'".into(),
+        };
+        assert!(listed(Err(refused)).unwrap().is_none());
+        assert_eq!(
+            listed(Ok(b"abc\n".to_vec())).unwrap(),
+            Some(b"abc\n".to_vec())
+        );
+        let capped = pixel_git::GitError::OutputTooLarge {
+            args: args.clone(),
+            cap: 1_048_576,
+        };
+        assert!(listed(Err(capped)).is_err());
+        assert!(listed(Err(pixel_git::GitError::Timeout { args })).is_err());
     }
 
     #[test]
@@ -1682,29 +2095,11 @@ body"
     }
 
     #[test]
-    fn a_fresh_index_should_need_no_phase_a_and_record_its_refs() {
-        let (dir, _, second) = two_commit_repo();
+    fn a_fresh_index_should_need_no_phase_a_and_record_its_reach() {
+        let (dir, _, _) = two_commit_repo();
         let mut store = FactsStore::open(dir.path()).unwrap();
         ingest_within(&mut store);
         assert!(!needs_phase_a(&store).unwrap());
-        let refs: Vec<(String, String, String)> = {
-            let mut stmt = store
-                .conn()
-                .prepare("SELECT ref, oid, kind FROM refs")
-                .unwrap();
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .unwrap();
-            rows.map(|r| r.unwrap()).collect()
-        };
-        assert_eq!(
-            refs,
-            vec![(
-                "refs/heads/develop".to_string(),
-                second,
-                "branch".to_string()
-            )]
-        );
         let reach: Vec<i64> = {
             let mut stmt = store.conn().prepare("SELECT reach FROM commits").unwrap();
             let rows = stmt.query_map([], |r| r.get(0)).unwrap();
@@ -1718,14 +2113,184 @@ body"
     }
 
     #[test]
-    fn split_ref_record_should_refuse_an_empty_half() {
-        assert_eq!(
-            split_ref_record("refs/heads/a\0abc"),
-            Some(("refs/heads/a", "abc"))
+    fn size_only_batch_resolves_revisions_and_missing_paths_without_reading_content() {
+        let dir = init_repo();
+        let first = commit(dir.path(), &[("a", b"small")], "small");
+        let second = commit(
+            dir.path(),
+            &[("a", &vec![b'x'; BLOB_CAP_BYTES + 1]), ("dir/file", b"x")],
+            "large",
         );
-        assert_eq!(split_ref_record("refs/heads/a\0"), None);
-        assert_eq!(split_ref_record("refs/heads/a"), None);
-        assert_eq!(split_ref_record("\0abc"), None);
+        let specs = [
+            format!("{first}:a"),
+            format!("{second}:a"),
+            format!("{second}:missing"),
+            format!("{second}:dir"),
+            second,
+        ];
+        let refs: Vec<&str> = specs.iter().map(String::as_str).collect();
+        // The response fits in 512 bytes although the blob is over the cap.
+        let runner = pixel_git::GitRunner::with_options(
+            dir.path(),
+            GitOptions {
+                max_output_bytes: Some(512),
+                ..GitOptions::default()
+            },
+        );
+        assert_eq!(
+            batch_blob_sizes(&runner, &refs),
+            Some(vec![5, (BLOB_CAP_BYTES + 1) as u64, 0, 0, 0])
+        );
+        assert_eq!(batch_blob_sizes(&runner, &[]), Some(vec![]));
+        assert_eq!(batch_blob_sizes(&runner, &["HEAD:line\nname"]), None);
+        assert_eq!(batch_blob_sizes(&runner, &["HEAD:carriage\r"]), None);
+        let capped = pixel_git::GitRunner::with_options(
+            dir.path(),
+            GitOptions {
+                max_output_bytes: Some(1),
+                ..GitOptions::default()
+            },
+        );
+        assert_eq!(batch_blob_sizes(&capped, &refs), None);
+    }
+
+    #[test]
+    fn cross_commit_batch_keeps_poison_detection_for_unrepresentable_paths() {
+        let dir = init_repo();
+        let first = commit(
+            dir.path(),
+            &[("first", &vec![b'x'; BLOB_CAP_BYTES + 1])],
+            "large",
+        );
+        let second = commit(
+            dir.path(),
+            &[("line\nname", &vec![b'y'; BLOB_CAP_BYTES + 1])],
+            "unusual large",
+        );
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        assert!(phase_a(&mut store, &far()).unwrap());
+        let ids = [commit_id(&store, &first), commit_id(&store, &second)];
+        assert_eq!(measure_commits_blobs(&mut store, &ids).unwrap(), 2);
+        assert_eq!(store.poison_paths().unwrap(), vec!["first", "line\nname"]);
+    }
+
+    #[test]
+    fn phase_b_checkpoints_a_bounded_commit_batch_before_yielding() {
+        let dir = init_repo();
+        for i in 0..PHASE_B_BATCH + 1 {
+            commit(dir.path(), &[("a", i.to_string().as_bytes())], "change");
+        }
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        assert!(phase_a(&mut store, &far()).unwrap());
+        let batch = next_phase_b_commits(&store, 0).unwrap();
+        assert_eq!(batch.len(), PHASE_B_BATCH);
+        assert_eq!(phase_b(&mut store, &Instant::now()).unwrap(), (false, 0));
+        assert_eq!(phase_b_cursor(&store), *batch.last().unwrap());
+        assert_eq!(
+            next_phase_b_commits(&store, phase_b_cursor(&store))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(phase_b(&mut store, &far()).unwrap(), (true, 0));
+    }
+
+    #[test]
+    fn expired_history_skips_blob_checks_but_a_wider_window_rewinds_them() {
+        let dir = init_repo();
+        let old = commit_at(
+            dir.path(),
+            &[("big", &vec![b'x'; BLOB_CAP_BYTES + 1])],
+            "old large",
+            days_ago(400),
+        );
+        commit_at(dir.path(), &[("recent", b"small")], "recent", days_ago(1));
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_with(
+            &mut store,
+            HistoryLimits {
+                window_days: Some(365),
+                ..no_limits()
+            },
+        );
+        assert!(
+            store.poison_paths().unwrap().is_empty(),
+            "expired changes must not be measured"
+        );
+        assert_eq!(
+            state_of(&store, &old),
+            (
+                DIFF_STATE_EVICTED,
+                Some(SKIP_NOTE_OUTSIDE_WINDOW.to_owned())
+            )
+        );
+        let cursor = phase_b_cursor(&store);
+        assert!(cursor >= commit_id(&store, &old));
+        drop(store);
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_with(&mut store, no_limits());
+        assert_eq!(store.poison_paths().unwrap(), vec!["big"]);
+        assert_eq!(hunks_for(&store, &old), 0);
+        assert_eq!(state_of(&store, &old).0, DIFF_STATE_SKIPPED);
+    }
+
+    #[test]
+    fn retained_changes_check_large_parents_even_when_the_parent_commit_expired() {
+        for (path, operation) in [
+            ("large", "modify"),
+            ("large", "delete"),
+            ("line\nname", "modify"),
+            ("line\nname", "delete"),
+            ("large", "rename"),
+        ] {
+            let dir = init_repo();
+            let old = commit_at(
+                dir.path(),
+                &[(path, &vec![b'x'; BLOB_CAP_BYTES + 1])],
+                "old large",
+                days_ago(400),
+            );
+            let target = if operation == "rename" {
+                "renamed"
+            } else {
+                path
+            };
+            if operation == "delete" {
+                git(dir.path(), &["rm", "--", path]);
+            }
+            if operation == "rename" {
+                git(dir.path(), &["mv", "--", path, target]);
+            }
+            let recent = if operation == "delete" {
+                commit_at(dir.path(), &[], "delete", days_ago(1))
+            } else {
+                commit_at(
+                    dir.path(),
+                    &[(target, &vec![b'x'; BLOB_CAP_BYTES])],
+                    "trim below poison threshold",
+                    days_ago(1),
+                )
+            };
+            let mut store = FactsStore::open(dir.path()).unwrap();
+            ingest_with(
+                &mut store,
+                HistoryLimits {
+                    window_days: Some(365),
+                    ..no_limits()
+                },
+            );
+            assert_eq!(
+                store.poison_paths().unwrap(),
+                vec![target],
+                "{operation} {path:?}"
+            );
+            assert_eq!(
+                hunks_for(&store, &recent),
+                0,
+                "large removals must never reach the diff index"
+            );
+            assert_eq!(state_of(&store, &old).0, DIFF_STATE_EVICTED);
+        }
     }
 
     #[test]
@@ -1893,6 +2458,78 @@ b
     }
 
     #[test]
+    fn batched_blob_sizes_preserve_exact_paths_across_batches_and_revisions() {
+        let dir = init_repo();
+        let root = dir.path();
+        let mut names: Vec<String> = (0..TREE_BATCH_PATHS + 1)
+            .map(|i| format!("dir/file-{i}"))
+            .collect();
+        names.extend(
+            [
+                "space name",
+                "tab\tname",
+                "line\nname",
+                "literal*",
+                "literal-other",
+                "-dash",
+            ]
+            .map(str::to_owned),
+        );
+        let contents: Vec<Vec<u8>> = names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| vec![b'x'; i + 1])
+            .collect();
+        let files: Vec<(&str, &[u8])> = names
+            .iter()
+            .zip(&contents)
+            .map(|(p, bytes)| (p.as_str(), bytes.as_slice()))
+            .collect();
+        let first = commit(root, &files, "distinct sizes including unusual paths");
+        git(root, &["rm", "--", "space name"]);
+        let second = commit(root, &[("literal*", b"updated")], "delete and change");
+        let mut paths: Vec<&str> = names.iter().map(String::as_str).collect();
+        paths.extend(["missing", "dir"]);
+        let runner = pixel_git::GitRunner::with_options(root, GitOptions::default());
+        let before = blob_sizes(&runner, &first, &paths);
+        let after = blob_sizes(&runner, &second, &paths);
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(before.get(name).copied(), Some((i + 1) as u64), "{name:?}");
+            let expected = match name.as_str() {
+                "space name" => None,
+                "literal*" => Some(7),
+                _ => Some((i + 1) as u64),
+            };
+            assert_eq!(after.get(name).copied(), expected, "{name:?}");
+        }
+        assert_eq!(before.get("dir").copied().unwrap_or(0), 0);
+        assert_eq!(before.get("missing"), None);
+        assert!(blob_sizes(&runner, &first, &[]).is_empty());
+        assert_eq!(
+            blob_sizes(&runner, "missing-rev", &["literal*"]).get("literal*"),
+            Some(&0)
+        );
+    }
+
+    #[test]
+    fn capped_tree_batch_falls_back_without_losing_blob_sizes() {
+        let dir = init_repo();
+        let root = dir.path();
+        let oid = commit(root, &[("a", b"short"), ("b", b"longer")], "two blobs");
+        // Each record fits separately, but their combined output exceeds 90B.
+        let runner = pixel_git::GitRunner::with_options(
+            root,
+            GitOptions {
+                max_output_bytes: Some(90),
+                ..GitOptions::default()
+            },
+        );
+        let sizes = blob_sizes(&runner, &oid, &["a", "b"]);
+        assert_eq!(sizes.get("a"), Some(&5));
+        assert_eq!(sizes.get("b"), Some(&6));
+    }
+
+    #[test]
     fn measure_commit_blobs_poisons_only_paths_strictly_over_the_cap() {
         let dir = init_repo();
         let root = dir.path();
@@ -1940,7 +2577,9 @@ b
         let mut store = FactsStore::open(root).unwrap();
         assert!(phase_a(&mut store, &far()).unwrap());
         assert_eq!(
-            old_path_for(&store, "moved.bin").as_deref(),
+            parent_path_for(&store, &renamed, "moved.bin")
+                .map(|(_, old)| old)
+                .as_deref(),
             Some("big.bin"),
             "git must report the rename"
         );
@@ -1970,7 +2609,9 @@ b
         let mut store = FactsStore::open(root).unwrap();
         assert!(phase_a(&mut store, &far()).unwrap());
         assert_eq!(
-            old_path_for(&store, "edge2.bin").as_deref(),
+            parent_path_for(&store, &renamed, "edge2.bin")
+                .map(|(_, old)| old)
+                .as_deref(),
             Some("edge.bin")
         );
         let cid = commit_id(&store, &renamed);
@@ -2554,5 +3195,66 @@ b
         assert_eq!(store.index_state().diff_coverage_since, None);
         let by_message = search(&store, "rescue", SearchFacet::Message, 10).unwrap();
         assert_eq!(by_message.candidates.len(), 1);
+    }
+
+    #[test]
+    fn audited_ingest_timings_should_accumulate_every_phase_instead_of_replacing_it() {
+        let mut total = IngestTimings {
+            metadata: Duration::from_millis(1),
+            blobs: Duration::from_millis(2),
+            diffs: Duration::from_millis(3),
+            retention: Duration::from_millis(4),
+        };
+        total.add(&IngestTimings {
+            metadata: Duration::from_millis(10),
+            blobs: Duration::from_millis(20),
+            diffs: Duration::from_millis(30),
+            retention: Duration::from_millis(40),
+        });
+        assert_eq!(
+            total,
+            IngestTimings {
+                metadata: Duration::from_millis(11),
+                blobs: Duration::from_millis(22),
+                diffs: Duration::from_millis(33),
+                retention: Duration::from_millis(44)
+            }
+        );
+    }
+
+    #[test]
+    fn audited_tree_batches_should_include_exact_byte_and_path_caps_and_always_advance() {
+        let exact = "x".repeat(32_767);
+        let over = "x".repeat(32_768);
+        assert_eq!(tree_batch_count(&[&exact, "next"]), 1);
+        assert_eq!(tree_batch_count(&["a", &exact]), 1);
+        assert_eq!(tree_batch_count(&[&over, "next"]), 1);
+        assert_eq!(tree_batch_count(&vec!["a"; 129]), 128);
+        let first = "x".repeat(16_383);
+        assert_eq!(tree_batch_count(&[&first, &first, "next"]), 2);
+    }
+
+    #[test]
+    fn audited_blob_caps_should_allow_exact_cap_on_both_sides_and_poison_only_overflow() {
+        let dir = init_repo();
+        let exact = vec![b'x'; BLOB_CAP_BYTES];
+        let overflow = vec![b'y'; BLOB_CAP_BYTES + 1];
+        let first = commit(
+            dir.path(),
+            &[("exact", &exact), ("overflow", &overflow)],
+            "sized blobs",
+        );
+        let second = commit(
+            dir.path(),
+            &[("exact", b"small"), ("overflow", b"small")],
+            "small blobs",
+        );
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        assert!(phase_a(&mut store, &far()).unwrap());
+        for oid in [&first, &second] {
+            let cid = commit_id(&store, oid);
+            assert_eq!(measure_commits_blobs(&mut store, &[cid]).unwrap(), 1);
+        }
+        assert_eq!(store.poison_paths().unwrap(), vec!["overflow"]);
     }
 }

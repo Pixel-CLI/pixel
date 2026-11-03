@@ -26,7 +26,7 @@ mod metrics;
 mod serve;
 pub use metrics::{
     ComparisonGap, OperationMetrics, WorkflowEvidence, WorkflowTimeEstimate, format_metrics_line,
-    read_tokens, saved_percent, summarize_metrics,
+    invocation_id, read_tokens, saved_percent, summarize_metrics,
 };
 pub use serve::{InProcessReason, ServeRoute, ServeStep};
 
@@ -57,6 +57,9 @@ pub enum Outcome {
 /// One recorded pixel invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionEvent {
+    /// Producing binary and host context; absent in historical or external records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
     /// Correlates one invocation, never a global latest-operation pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
@@ -90,6 +93,22 @@ pub struct ActionEvent {
     pub serve: Vec<ServeStep>,
 }
 
+/// Shared provenance for local usage journals; missing context means unknown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Provenance {
+    pub schema_version: u32,
+    pub pixel_version: String,
+    pub build_commit: String,
+    pub build_dirty: Option<bool>,
+    pub source: String,
+    pub invocation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Same pseudonym as brief feedback, never the host's raw session ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
 /// Links an invocation to the durable task ledger without changing legacy records.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskCorrelation {
@@ -105,6 +124,7 @@ pub struct TaskCorrelation {
 impl ActionEvent {
     pub fn new(command: impl Into<String>, args: impl Into<String>) -> Self {
         ActionEvent {
+            provenance: None,
             invocation_id: Some(metrics::invocation_id()),
             task: None,
             metrics: None,
@@ -283,6 +303,9 @@ impl Drop for ActionLog {
 }
 
 fn writer_loop(path: PathBuf, rx: mpsc::Receiver<ActionEvent>, done_tx: Sender<()>) {
+    // A CLI run logs about one event, so the periodic check below never fires
+    // for it: rotate once before the first append (a stat, under the cap).
+    let _ = rotate_if_needed(&path);
     let mut file = open_log_file(&path);
     let mut since_rotate_check: u32 = 0;
     while let Ok(event) = rx.recv() {
@@ -719,22 +742,21 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), body);
     }
 
-    /// The writer checks rotation every `ROTATE_CHECK_EVERY` events, not on
-    /// the first one: a single event appended to an oversized log leaves
-    /// every older line in place.
+    /// A writer rotates an oversized log once when it starts, so a
+    /// one-event CLI run still bounds the file: the kept tail plus the new line.
     #[test]
-    fn writer_should_not_rotate_before_the_check_interval() {
+    fn writer_should_rotate_an_oversized_log_at_start() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("actions.jsonl");
         let line = format!("{}\n", "y".repeat(1024));
-        let lines = MAX_KEPT_LINES + 1500;
-        fs::write(&path, line.repeat(lines)).unwrap();
+        fs::write(&path, line.repeat(MAX_KEPT_LINES + 1500)).unwrap();
         assert!(fs::metadata(&path).unwrap().len() > MAX_LOG_BYTES);
         let mut log = ActionLog::spawn_at(path.clone());
         log.log(ActionEvent::new("search", "one"));
         log.finish_flush();
         let text = fs::read_to_string(&path).unwrap();
-        assert_eq!(text.lines().count(), lines + 1);
+        assert_eq!(text.lines().count(), MAX_KEPT_LINES + 1);
+        assert!(text.lines().last().unwrap().contains("\"args\":\"one\""));
     }
 }
 

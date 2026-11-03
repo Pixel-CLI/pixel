@@ -1,0 +1,22 @@
+{
+  "id": "g4-rename-impact",
+  "suite": "generic",
+  "task_class": "rename",
+  "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+  "mode": "answer",
+  "max_turns": 30,
+  "prompt": "The shared helper handleError in packages/ui/handleError.ts is being renamed to reportError. List every file that would need to change because it imports or calls handleError — do not modify anything, just produce the complete list of affected files with the importing symbol or component for each.",
+  "must": [
+    {"pattern": "(?im)^(?=.*packages/login/)(?=.*SignOnComponent).*$", "points": 2, "why": "login path and caller"},
+    {"pattern": "(?im)^(?=.*apps/feedback/)(?=.*SuggestForm).*$", "points": 2, "why": "feedback path and caller"},
+    {"pattern": "(?im)^(?=.*apps/feedback/)(?=.*AnswerForm).*$", "points": 2, "why": "feedback path and caller"},
+    {"pattern": "(?im)^(?=.*apps/feedback/)(?=.*playground).*$", "points": 1, "why": "feedback playground path and caller"},
+    {"pattern": "(?im)^(?=.*apps/project/)(?=.*Business).*$", "points": 1, "why": "project path and caller"},
+    {"pattern": "(?im)^(?=.*apps/site/)(?=.*Chatbot).*$", "points": 1, "why": "site path and caller"},
+    {"pattern": "(?im)^(?=.*apps/(?:site|project)/)(?=.*Contact).*$", "points": 1, "why": "site or project path and caller"},
+    {"pattern": "(?im)^(?=.*packages/ui/)(?=.*handleError).*$", "points": 2, "why": "definition path and symbol"}
+  ],
+  "never": [
+    {"pattern": "modified|edited|updated the file", "why": "answer-only task"}
+  ]
+}

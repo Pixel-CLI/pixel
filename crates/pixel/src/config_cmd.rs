@@ -9,16 +9,7 @@
 //! an unset layer defaults to on. `--metrics=off` and `PIXEL_METRICS=0`
 //! still veto a single invocation above every file layer.
 //!
-//! The `policy` key is the retired guard's switch. No hook reads it any more:
-//! the guard and its rewrite or deny of native retrieval are gone, and
-//! `pixel install` registers only the task-event hook. The key stays readable
-//! and writable so an existing configuration file keeps validating, and
-//! `pixel config` still reports it. `PIXEL_POLICY` overrides it for one
-//! environment and the legacy `PIXEL_TARGETS_GUARD=0` kill switch still reads
-//! as `off`, both for that report only.
-//!
 //! YAML files live under `.pixel/` in the repository and home directory.
-//! Legacy JSON remains readable until install/edit creates the YAML equivalent.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -26,11 +17,20 @@ use std::path::{Path, PathBuf};
 use crate::prompt_key::{KeyReader, RawGuard};
 use serde_json::{Value, json};
 
+/// Settings key of the daemon auto-start opt-out (`daemon_auto_start: false`).
+pub(crate) const DAEMON_AUTO_START_FEATURE: &str = "daemon_auto_start";
+/// Its environment opt-out: `0`, `false` or `off`.
+pub(crate) const DAEMON_AUTO_START_ENV: &str = "PIXEL_DAEMON_AUTO_START";
+
+use pixel_setup::config::{BRIEF_PARTS_KEY, BRIEF_PARTS_MAX, EDIT_HOOKS_KEY};
+
+/// Environment switch of the edit hooks: `1`, `true` or `on` turns them on.
+/// Unlike the opt-out features they are off unless something says otherwise.
+pub(crate) const EDIT_HOOKS_ENV: &str = "PIXEL_EDIT_HOOKS";
+
 /// The environment overrides and YAML switches exposed in the overview.
 const FEATURES: &[(&str, &str)] = &[
-    ("daemon_auto_start", "PIXEL_DAEMON_AUTO_START"),
-    ("task_context", "PIXEL_TASK_CONTEXT"),
-    ("task_boundary", "PIXEL_TASK_BOUNDARY"),
+    (DAEMON_AUTO_START_FEATURE, DAEMON_AUTO_START_ENV),
     (
         crate::execution_brief::chain::BRIEF_FEATURE,
         crate::execution_brief::chain::BRIEF_ENV,
@@ -66,140 +66,23 @@ fn feature_resolution(root: Option<&Path>, key: &str, env: &str) -> (bool, Strin
     (value.unwrap_or(true), source)
 }
 
-/// The retired guard's setting, kept so existing configuration still parses.
-/// Nothing acts on it. The three values are the YAML setting, the `--json`
-/// value, and the `pixel config policy` argument.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
-pub enum PolicyMode {
-    /// The default.
-    Advisory,
-    /// Accepted for configurations written by older releases; no hook reads it.
-    Enforce,
-    /// The legacy off switch; no hook reads it.
-    Off,
+/// The edit hooks switch and where it comes from: the environment, the first
+/// layer that sets a boolean, else off.
+fn edit_hooks_resolution(root: Option<&Path>) -> (bool, String) {
+    if let Ok(value) = std::env::var(EDIT_HOOKS_ENV) {
+        return (
+            matches!(value.as_str(), "1" | "true" | "on"),
+            EDIT_HOOKS_ENV.into(),
+        );
+    }
+    let (value, source) = resolved(root, EDIT_HOOKS_KEY);
+    (value.unwrap_or(false), source)
 }
 
-impl PolicyMode {
-    /// The exact setting spelling, as stored in YAML and printed in JSON.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Advisory => "advisory",
-            Self::Enforce => "enforce",
-            Self::Off => "off",
-        }
-    }
-
-    /// Parse one configuration value; an unknown spelling is not a policy.
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "advisory" => Some(Self::Advisory),
-            "enforce" => Some(Self::Enforce),
-            "off" => Some(Self::Off),
-            _ => None,
-        }
-    }
-}
-
-/// The layer that decided the effective policy.
-enum PolicySource {
-    /// The environment variable that overrode every file layer.
-    Environment(&'static str),
-    Repo,
-    Global,
-    Default,
-}
-
-/// Effective retrieval policy and the layer that set it.
-struct PolicyResolution {
-    mode: PolicyMode,
-    source: PolicySource,
-    /// The file that declared the setting, for the two file layers.
-    file: Option<PathBuf>,
-}
-
-impl PolicyResolution {
-    fn environment(mode: PolicyMode, variable: &'static str) -> Self {
-        Self {
-            mode,
-            source: PolicySource::Environment(variable),
-            file: None,
-        }
-    }
-
-    /// Layer name for `--json`: a fixed word the Pi extension can branch on.
-    fn source_name(&self) -> &'static str {
-        match self.source {
-            PolicySource::Environment(_) => "env",
-            PolicySource::Repo => "repo",
-            PolicySource::Global => "global",
-            PolicySource::Default => "default",
-        }
-    }
-
-    /// `pixel config policy` reports the layer in words.
-    fn layer(&self) -> String {
-        match (&self.source, &self.file) {
-            (PolicySource::Environment(variable), _) => format!("{variable} (environment)"),
-            (_, Some(file)) => format!("{} {}", self.source_name(), file.display()),
-            _ => "default (no config sets it)".into(),
-        }
-    }
-
-    /// The overview line names the variable or file the value came from.
-    fn overview_label(&self) -> String {
-        match (&self.source, &self.file) {
-            (PolicySource::Environment(variable), _) => (*variable).into(),
-            (_, Some(file)) => file.display().to_string(),
-            _ => "default".into(),
-        }
-    }
-}
-
-/// The policy one layer declares, or `None` when the layer does not
-/// pronounce itself (missing file, missing key, or unknown value). An
-/// unknown value is ignored rather than fatal: a hook must never break a
-/// session over a typo, and `pixel config` reports it when the file is
-/// validated.
-fn read_policy(path: &Path) -> Option<PolicyMode> {
-    PolicyMode::parse(read_config_doc(path)?.get("policy")?.as_str()?)
-}
-
-/// Effective retrieval policy for `root`: the `PIXEL_POLICY` environment
-/// override, the repository layer, the global layer, then the advisory
-/// default. `PIXEL_TARGETS_GUARD=0` (also `false`/`off`) remains the
-/// legacy kill switch over everything.
-fn policy_resolution(root: Option<&Path>) -> PolicyResolution {
-    const LEGACY_SWITCH: &str = "PIXEL_TARGETS_GUARD";
-    if crate::env_flag_off(LEGACY_SWITCH) {
-        return PolicyResolution::environment(PolicyMode::Off, LEGACY_SWITCH);
-    }
-    if let Ok(value) = std::env::var("PIXEL_POLICY") {
-        // An unrecognised value selects the advisory default, as it always has.
-        let mode = PolicyMode::parse(value.trim().to_ascii_lowercase().as_str())
-            .unwrap_or(PolicyMode::Advisory);
-        return PolicyResolution::environment(mode, "PIXEL_POLICY");
-    }
-    let repo = root.map(repo_config_path);
-    if let Some(mode) = repo.as_deref().and_then(read_policy) {
-        return PolicyResolution {
-            mode,
-            source: PolicySource::Repo,
-            file: repo,
-        };
-    }
-    let global = global_config_path();
-    if let Some(mode) = global.as_deref().and_then(read_policy) {
-        return PolicyResolution {
-            mode,
-            source: PolicySource::Global,
-            file: global,
-        };
-    }
-    PolicyResolution {
-        mode: PolicyMode::Advisory,
-        source: PolicySource::Default,
-        file: None,
-    }
+/// Whether the edit hooks run: off unless `edit_hooks` or `PIXEL_EDIT_HOOKS`
+/// turns them on.
+pub fn edit_hooks_on(root: Option<&Path>) -> bool {
+    edit_hooks_resolution(root).0
 }
 
 pub fn ensure_template(root: Option<&Path>) -> Result<PathBuf, String> {
@@ -214,58 +97,27 @@ pub fn ensure_template(root: Option<&Path>) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn edit(path: &Path, repo: bool) -> Result<(), String> {
-    let root = if repo {
-        Some(crate::discover_root(path)?)
-    } else {
-        None
-    };
-    let path = ensure_template(root.as_deref())?;
-    let editor = std::env::var("VISUAL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("EDITOR")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or_else(|| "vi".into());
-    let args = shell_words::split(&editor).map_err(|_| "invalid quoting in VISUAL/EDITOR")?;
-    let (program, args) = args.split_first().ok_or("empty editor command")?;
-    let status = std::process::Command::new(program)
-        .args(args)
-        .arg(&path)
-        .status()
-        .map_err(|e| format!("launch editor: {e}"))?;
-    if !status.success() {
-        return Err(format!("editor exited with {status}"));
-    }
-    validate(&path)?;
-    println!("configuration: {}", path.display());
-    Ok(())
-}
-
 fn validate(path: &Path) -> Result<(), String> {
     let doc = crate::config_file::load(path)?;
-    for (key, _) in FEATURES {
+    for key in FEATURES.iter().map(|(key, _)| *key).chain([EDIT_HOOKS_KEY]) {
         if doc.get(key).is_some_and(|v| !v.is_boolean()) {
             return Err(format!("{}: {key} must be true or false", path.display()));
         }
+    }
+    if doc.get(BRIEF_PARTS_KEY).is_some_and(|v| {
+        !v.as_u64()
+            .is_some_and(|parts| (1..=u64::from(BRIEF_PARTS_MAX)).contains(&parts))
+    }) {
+        return Err(format!(
+            "{}: {BRIEF_PARTS_KEY} must be a whole number from 1 to {BRIEF_PARTS_MAX}",
+            path.display()
+        ));
     }
     if doc
         .get("metrics")
         .is_some_and(|v| !matches!(v.as_str(), Some("on" | "off")))
     {
         return Err(format!("{}: metrics must be on or off", path.display()));
-    }
-    if doc
-        .get("policy")
-        .is_some_and(|v| !v.as_str().and_then(PolicyMode::parse).is_some())
-    {
-        return Err(format!(
-            "{}: policy must be advisory, enforce, or off",
-            path.display()
-        ));
     }
     classify_enabled_in(&doc)?;
     if let Some(classify) = doc.get("classify") {
@@ -309,6 +161,15 @@ fn validate(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// How many `UserPromptSubmit` hooks `pixel setup` registers for the prompt
+/// brief: `brief_parts` from the repository layer, then the global one, else 3.
+pub(crate) fn brief_parts(root: Option<&Path>) -> u8 {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    pixel_setup::config::brief_parts(&home, root)
+}
+
 /// Print only known public settings; arbitrary configuration can contain secrets.
 pub fn overview(path: &Path) -> Result<(), String> {
     let root = crate::discover_root(path).ok();
@@ -333,12 +194,9 @@ pub fn overview(path: &Path) -> Result<(), String> {
         let (enabled, source) = feature_resolution(root.as_deref(), key, env);
         println!("{key}: {enabled} ({source})");
     }
-    let policy = policy_resolution(root.as_deref());
-    println!(
-        "policy: {} ({})",
-        policy.mode.as_str(),
-        policy.overview_label()
-    );
+    let (edit_hooks, source) = edit_hooks_resolution(root.as_deref());
+    println!("{EDIT_HOOKS_KEY}: {edit_hooks} ({source})");
+    println!("{BRIEF_PARTS_KEY}: {}", brief_parts(root.as_deref()));
     println!("classify.enabled: {} (global)", classify_enabled()?);
     println!(
         "classify.engine: {}",
@@ -369,7 +227,7 @@ pub fn overview(path: &Path) -> Result<(), String> {
         }
     }
     println!("Setup: pixel config setup (interactive global settings)");
-    println!("Edit: pixel config edit (global), pixel config edit --repo (repository)");
+    println!("Edit: ~/.pixel/config.yaml (global), <repository>/.pixel/config.yaml (repository)");
     Ok(())
 }
 
@@ -385,12 +243,35 @@ fn read_metrics(path: &Path) -> Option<bool> {
 }
 
 fn repo_config_path(root: &Path) -> PathBuf {
-    crate::config_file::preferred_path(&root.join(".pixel"))
+    crate::config_file::path_in(&root.join(".pixel"))
+}
+
+/// The repository's `config.yaml`, for a write: refused when `.pixel` is a
+/// symbolic link or not a directory, or when `config.yaml` itself is a link.
+/// A link would carry the temp file and the rename to wherever it points,
+/// outside the repository, and the rename would replace a linked
+/// `config.yaml` with a plain file. `~/.pixel` is the user's own and may be
+/// a link (a dotfiles checkout), so the global layer is not checked.
+fn confined_repo_config(root: &Path) -> Result<PathBuf, String> {
+    let dir = pixel_git::sidecar::dir(root);
+    let path = repo_config_path(root);
+    for entry in [&dir, &path] {
+        if std::fs::symlink_metadata(entry).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(format!(
+                "{} is a symbolic link; pixel does not write configuration through a link under .pixel/",
+                entry.display()
+            ));
+        }
+    }
+    if std::fs::symlink_metadata(&dir).is_ok_and(|meta| !meta.is_dir()) {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    Ok(path)
 }
 
 fn global_config_path() -> Option<PathBuf> {
     std::env::var_os("HOME")
-        .map(|home| crate::config_file::preferred_path(&PathBuf::from(home).join(".pixel")))
+        .map(|home| crate::config_file::path_in(&PathBuf::from(home).join(".pixel")))
 }
 
 /// Effective live-metrics setting for `root`: repo layer first, then the
@@ -444,7 +325,7 @@ fn write_doc(path: &Path, mutate: impl FnOnce(&mut Value)) -> Result<(), String>
         "{}.{}.tmp",
         path.file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("config.json"),
+            .unwrap_or("config.yaml"),
         std::process::id(),
     ));
     if let Err(e) = write_private(&tmp, rendered.as_bytes()) {
@@ -527,13 +408,64 @@ fn set_classify_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
     })
 }
 
+/// Store one key in the global configuration, creating the intermediate
+/// mappings it needs. Used by `pixel setup`, which resolves a feature to a key
+/// path and never reads the document back.
+///
+/// A path that is not a mapping is an error rather than an overwrite: the
+/// configuration is the user's, and a key nested under a scalar is a bug in the
+/// caller, not an invitation to replace what is there.
+pub fn set_global_key(key: &[&str], value: Value) -> Result<(), String> {
+    let Some((leaf, parents)) = key.split_last() else {
+        return Err("set_global_key needs a key".into());
+    };
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    let mut current = crate::config_file::load(&path)?;
+    // Only the *intermediate* components have to be mappings. The leaf is the
+    // key being set, so whatever it holds now is the value this call replaces:
+    // checking it too would refuse to overwrite `brief: true` with `brief:
+    // true`, and a second `pixel setup` run would fail after it had already
+    // written the instruction files.
+    for part in parents {
+        let next = current.get(*part).cloned().unwrap_or(Value::Null);
+        if !next.is_null() && !next.is_object() {
+            return Err(format!(
+                "{}: {part} holds a value, not a mapping, so {}, then {leaf}, cannot be nested under it",
+                path.display(),
+                key.join(".")
+            ));
+        }
+        current = next;
+    }
+    write_doc(&path, |doc| set_key_path(doc, key, value.clone()))
+}
+
+/// Put `value` at `key` in `doc`, creating the mappings along the way. The
+/// caller has checked that every step is a mapping or absent.
+fn set_key_path(doc: &mut Value, key: &[&str], value: Value) {
+    let mut cursor = doc;
+    for (depth, part) in key.iter().enumerate() {
+        if depth + 1 == key.len() {
+            cursor[*part] = value;
+            return;
+        }
+        if !cursor[*part].is_object() {
+            cursor[*part] = json!({});
+        }
+        cursor = cursor
+            .get_mut(*part)
+            .expect("just created or verified as a mapping");
+    }
+}
+
 /// Terminal adapter shared by explicit setup and interactive global installation.
 #[cfg_attr(test, mutants::skip)] // Terminal and provider adapters; draft/save policy tested with injected I/O.
 pub fn setup() -> Result<(), String> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Err(
-            "setup needs a terminal; use pixel config edit or pixel config classify off".into(),
+            "setup needs a terminal; edit ~/.pixel/config.yaml or run pixel config classify off"
+                .into(),
         );
     }
     let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
@@ -597,7 +529,7 @@ fn setup_with_install(
 
 /// Setup and `config metrics on --global` write the global layer only, and a
 /// repo-level `metrics` still wins in its repository; without this note a
-/// stale legacy repo `config.json` defeats the answer the user just gave and
+/// stale repo `config.yaml` defeats the answer the user just gave and
 /// the footer stays hidden. Best effort: no repository, no saved answer, or a
 /// repo layer that agrees means no note.
 fn note_repo_override(
@@ -711,38 +643,22 @@ fn setup_with_keys(
         return Ok(false);
     };
     doc["metrics"] = json!(if metrics { "on" } else { "off" });
-    for (key, label) in [
-        (
-            "daemon_auto_start",
-            "Start the background repository daemon on demand?",
-        ),
-        (
-            "task_context",
-            "Suggest relevant code when an agent receives a prompt (retired: no hook reads this)?",
-        ),
-        (
-            "task_boundary",
-            "Detect task changes in agent prompts (retired: no hook reads this)?",
-        ),
-    ] {
-        let current = doc.get(key).and_then(Value::as_bool).unwrap_or(true);
-        let Some(value) = ask_bool(input, output, label, current, keys, color)? else {
-            return Ok(false);
-        };
-        doc[key] = json!(value);
-    }
-    let Some(enforce) = ask_bool(
+    let daemon_auto_start = doc
+        .get("daemon_auto_start")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let Some(daemon_auto_start) = ask_bool(
         input,
         output,
-        "Enforce Pixel retrieval policy (retired: no hook reads this)?",
-        doc.get("policy").and_then(Value::as_str) == Some(PolicyMode::Enforce.as_str()),
+        "Start the background repository daemon on demand?",
+        daemon_auto_start,
         keys,
         color,
     )?
     else {
         return Ok(false);
     };
-    doc["policy"] = json!(if enforce { "enforce" } else { "advisory" });
+    doc["daemon_auto_start"] = json!(daemon_auto_start);
     writeln!(output).map_err(|e| e.to_string())?;
     writeln!(output, "{}", classify_blurb(color)).map_err(|e| e.to_string())?;
     let Some(enabled) = ask_bool(
@@ -765,15 +681,6 @@ fn setup_with_keys(
             "daemon auto-start",
             yes_no(doc["daemon_auto_start"].as_bool().unwrap_or(true)),
         ),
-        (
-            "task context",
-            yes_no(doc["task_context"].as_bool().unwrap_or(true)),
-        ),
-        (
-            "task boundary",
-            yes_no(doc["task_boundary"].as_bool().unwrap_or(true)),
-        ),
-        ("policy", doc["policy"].as_str().unwrap_or("?").to_string()),
         (
             "classify",
             if enabled {
@@ -805,13 +712,7 @@ fn setup_with_keys(
         return Ok(false);
     }
     write_doc(path, |current| {
-        for key in [
-            "metrics",
-            "daemon_auto_start",
-            "task_context",
-            "task_boundary",
-            "policy",
-        ] {
+        for key in ["metrics", "daemon_auto_start"] {
             current[key] = doc[key].clone();
         }
         if !current.get("classify").is_some_and(Value::is_object) {
@@ -1203,6 +1104,144 @@ pub fn run_remote_key(
     }
 }
 
+/// A flat key of `config.yaml` that `pixel config <key> <value>` writes. Keys
+/// holding a credential (`remote_keys.*`) are not here on purpose: they have
+/// `remote-key`, whose value can come from stdin and is masked in the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Setting {
+    /// `true` or `false` in the file, `on` or `off` on the command line; the
+    /// environment variable overrides the file.
+    Switch(&'static str),
+    /// A switch that is off unless the file or the environment (`1`, `true`
+    /// or `on`) turns it on.
+    OptIn(&'static str),
+    /// A whole number of hooks, `1..=BRIEF_PARTS_MAX`.
+    BriefParts,
+}
+
+fn setting_of(key: &str) -> Option<Setting> {
+    if key == BRIEF_PARTS_KEY {
+        return Some(Setting::BriefParts);
+    }
+    if key == EDIT_HOOKS_KEY {
+        return Some(Setting::OptIn(EDIT_HOOKS_ENV));
+    }
+    FEATURES
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, env)| Setting::Switch(env))
+}
+
+/// The keys `pixel config <key> <value>` writes.
+fn setting_keys() -> impl Iterator<Item = &'static str> {
+    FEATURES
+        .iter()
+        .map(|(name, _)| *name)
+        .chain([EDIT_HOOKS_KEY, BRIEF_PARTS_KEY])
+}
+
+/// Whether `key` is a setting `pixel config <key> <value>` writes, so its
+/// value may appear in the action log.
+pub(crate) fn is_setting(key: &str) -> bool {
+    setting_of(key).is_some()
+}
+
+/// The value as the file stores it. The message names the key and the rule,
+/// never the value: a mistyped credential must not travel in an error.
+fn parse_setting(key: &str, setting: Setting, raw: &str) -> Result<Value, String> {
+    match setting {
+        Setting::Switch(_) | Setting::OptIn(_) => match raw {
+            "on" | "true" => Ok(json!(true)),
+            "off" | "false" => Ok(json!(false)),
+            _ => Err(format!("{key} takes on or off")),
+        },
+        Setting::BriefParts => raw
+            .parse::<u8>()
+            .ok()
+            .filter(|parts| (1..=BRIEF_PARTS_MAX).contains(parts))
+            .map(|parts| json!(parts))
+            .ok_or_else(|| format!("{key} must be a whole number from 1 to {BRIEF_PARTS_MAX}")),
+    }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// What `value` reads as to a person.
+fn shown(value: &Value) -> String {
+    value
+        .as_bool()
+        .map_or_else(|| value.to_string(), |on| on_off(on).to_owned())
+}
+
+/// The value in force for `key` and where it comes from: the environment
+/// variable, the first layer that sets it, or the default.
+fn effective(root: Option<&Path>, key: &str, setting: Setting) -> (String, String) {
+    match setting {
+        Setting::Switch(env) => {
+            let (on, source) = feature_resolution(root, key, env);
+            (on_off(on).to_owned(), source)
+        }
+        Setting::OptIn(_) => {
+            let (on, source) = edit_hooks_resolution(root);
+            (on_off(on).to_owned(), source)
+        }
+        Setting::BriefParts => {
+            let source = layers(root)
+                .find(|path| read_config_doc(path).is_some_and(|doc| doc.get(key).is_some()))
+                .map_or_else(|| "default".to_owned(), |path| path.display().to_string());
+            (brief_parts(root).to_string(), source)
+        }
+    }
+}
+
+/// `pixel config <key> [<value>] [--global]`: without a value, the value in
+/// force and its source; with one, validate it and write it to the
+/// repository's `config.yaml`, or the global one.
+pub fn run_setting(
+    key: &str,
+    value: Option<&str>,
+    global: bool,
+    path: &Path,
+) -> Result<(), String> {
+    let setting = setting_of(key).ok_or_else(|| {
+        format!(
+            "unknown setting {key:?}; the settings are {} (a credential has `pixel config remote-key`)",
+            setting_keys().collect::<Vec<_>>().join(", ")
+        )
+    })?;
+    let root = crate::discover_root(path).ok();
+    let Some(raw) = value else {
+        let (current, source) = effective(root.as_deref(), key, setting);
+        println!("{key}: {current} — {source}");
+        return Ok(());
+    };
+    let stored = parse_setting(key, setting, raw)?;
+    let target = if global {
+        global_config_path().ok_or("no HOME for the global config")?
+    } else {
+        confined_repo_config(
+            root.as_deref()
+                .ok_or("no repository root here — pass --global or run inside a repo")?,
+        )?
+    };
+    write_doc(&target, |doc| doc[key] = stored.clone())?;
+    let written = shown(&stored);
+    println!("{key}: {written} — wrote {}", target.display());
+    let (current, source) = effective(root.as_deref(), key, setting);
+    if current != written {
+        println!("note: {source} sets {key}: {current} here and wins");
+    }
+    if setting == Setting::BriefParts {
+        println!("note: run `pixel setup` so the registered hooks carry the new count");
+    }
+    if setting == Setting::OptIn(EDIT_HOOKS_ENV) {
+        println!("note: run `pixel setup` so the edit hooks are registered or removed");
+    }
+    Ok(())
+}
+
 /// `pixel config metrics [on|off] [--global]`: without a value, report the
 /// effective setting and the layer that set it; with a value, persist it to
 /// the chosen layer.
@@ -1256,9 +1295,9 @@ fn run_metrics_with(
                 .map_err(|e| e.to_string())?;
                 note_repo_override(output, true, Some(on), root.as_deref())
             } else {
-                let target = repo_config_path(
+                let target = confined_repo_config(
                     &root.ok_or("no repository root here — pass --global or run inside a repo")?,
-                );
+                )?;
                 write_metrics(&target, on)?;
                 writeln!(
                     output,
@@ -1272,67 +1311,80 @@ fn run_metrics_with(
     }
 }
 
-/// Printed when `enforce` is set, so a success message is never read as
-/// enforcement: the guard that acted on it was retired.
-const ENFORCE_SCOPE_NOTE: &str = "note: no hook reads the policy any more; `pixel run-hook guard` is retired, so enforce changes no agent's native retrieval";
-
-/// `pixel config policy [advisory|enforce|off] [--global] [--json]`: without
-/// a value, report the effective policy and the layer that set it; with one,
-/// persist it to the chosen layer. `--json` is the Pi extension's
-/// machine-readable form, so it never has to parse the prose.
-pub fn run_policy(
-    path: &Path,
-    global: bool,
-    value: Option<PolicyMode>,
-    json: bool,
-) -> Result<(), String> {
-    let root = crate::discover_root(path).ok();
-    match value {
-        None => {
-            let resolution = policy_resolution(root.as_deref());
-            if json {
-                let mut report = json!({
-                    "policy": resolution.mode.as_str(),
-                    "source": resolution.source_name(),
-                });
-                if let Some(file) = resolution.file.as_deref() {
-                    report["file"] = json!(file.display().to_string());
-                }
-                println!(
-                    "{}",
-                    serde_json::to_string(&report).map_err(|e| e.to_string())?
-                );
-            } else {
-                println!(
-                    "policy: {} — {}",
-                    resolution.mode.as_str(),
-                    resolution.layer()
-                );
-            }
-            Ok(())
-        }
-        Some(mode) => {
-            let target = if global {
-                global_config_path().ok_or("no HOME for the global config")?
-            } else {
-                repo_config_path(
-                    &root.ok_or("no repository root here — pass --global or run inside a repo")?,
-                )
-            };
-            write_doc(&target, |doc| {
-                doc["policy"] = Value::String(mode.as_str().to_string());
-            })?;
-            println!("policy: {} — wrote {}", mode.as_str(), target.display());
-            if mode == PolicyMode::Enforce {
-                println!("{ENFORCE_SCOPE_NOTE}");
-            }
-            Ok(())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_settings_pixel_writes_are_settings() {
+        assert_eq!(
+            setting_keys().collect::<Vec<_>>(),
+            ["daemon_auto_start", "brief", "edit_hooks", "brief_parts"]
+        );
+        assert_eq!(
+            setting_of("daemon_auto_start"),
+            Some(Setting::Switch("PIXEL_DAEMON_AUTO_START"))
+        );
+        assert_eq!(setting_of("brief"), Some(Setting::Switch("PIXEL_BRIEF")));
+        assert_eq!(
+            setting_of("edit_hooks"),
+            Some(Setting::OptIn("PIXEL_EDIT_HOOKS"))
+        );
+        assert_eq!(setting_of("brief_parts"), Some(Setting::BriefParts));
+        for not_a_setting in ["remote_keys.openai", "classify", "metrics", "", "BRIEF"] {
+            assert_eq!(setting_of(not_a_setting), None, "{not_a_setting}");
+            assert!(!is_setting(not_a_setting));
+        }
+    }
+
+    #[test]
+    fn a_switch_takes_on_off_true_or_false_and_stores_a_boolean() {
+        let switch = Setting::Switch("X");
+        for (raw, stored) in [
+            ("on", true),
+            ("true", true),
+            ("off", false),
+            ("false", false),
+        ] {
+            assert_eq!(
+                parse_setting("brief", switch, raw),
+                Ok(json!(stored)),
+                "{raw}"
+            );
+        }
+        for bad in ["", "yes", "1", "ON", "sk-secret-value"] {
+            let error = parse_setting("brief", switch, bad).unwrap_err();
+            assert_eq!(error, "brief takes on or off");
+            assert!(
+                !error.contains(bad) || bad.is_empty(),
+                "the value is never echoed"
+            );
+        }
+    }
+
+    #[test]
+    fn brief_parts_takes_one_to_the_maximum_and_stores_a_number() {
+        let parts = Setting::BriefParts;
+        for count in 1..=BRIEF_PARTS_MAX {
+            assert_eq!(
+                parse_setting("brief_parts", parts, &count.to_string()),
+                Ok(json!(count))
+            );
+        }
+        for bad in ["0", "9", "256", "-1", "2.5", "many", ""] {
+            assert_eq!(
+                parse_setting("brief_parts", parts, bad),
+                Err("brief_parts must be a whole number from 1 to 8".to_owned()),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_value_reads_back_the_way_it_was_typed() {
+        assert_eq!(shown(&json!(true)), "on");
+        assert_eq!(shown(&json!(false)), "off");
+        assert_eq!(shown(&json!(5)), "5");
+    }
+
     #[test]
     fn the_header_hint_matches_the_input_mode() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
@@ -1392,7 +1444,7 @@ mod tests {
             let mut calls = 0;
             let result = setup_with_install(
                 &path,
-                &mut std::io::Cursor::new("n\n\n\n\n\ny\ny\n"),
+                &mut std::io::Cursor::new("n\n\ny\ny\n"),
                 &mut Vec::new(),
                 false,
                 &KeyReader::inert(),
@@ -1423,8 +1475,7 @@ mod tests {
             assert_eq!(
                 crate::config_file::load(&path).unwrap(),
                 json!({
-                    "metrics":"off", "daemon_auto_start":true, "task_context":true,
-                    "task_boundary":true, "policy":"advisory",
+                    "metrics":"off", "daemon_auto_start":true,
                     "classify":{"enabled":expected_enabled, "engine":"remote"},
                     "future":42, "remote_keys":{"openrouter":"retained-secret"}
                 })
@@ -1440,7 +1491,7 @@ mod tests {
         let mut classify_runs = 0;
         let error = setup_with_install(
             &path,
-            &mut std::io::Cursor::new("n\n\n\n\n\ny\ny\n"),
+            &mut std::io::Cursor::new("n\n\ny\ny\n"),
             &mut Vec::new(),
             false,
             &KeyReader::inert(),
@@ -1462,7 +1513,7 @@ mod tests {
     fn setup_should_not_install_after_cancellation_or_disabling_classify() {
         for (answers, enabled, metrics, saved_expected) in [
             ("q\ny\n", true, "on", false),
-            ("n\n\n\n\n\nn\ny\n", false, "off", true),
+            ("n\n\nn\ny\n", false, "off", true),
         ] {
             let home = HomeGuard::set();
             let path = home.0.join("config.yaml");
@@ -1492,7 +1543,7 @@ mod tests {
         let path = home.0.join("config.yaml");
         let error = setup_with_install(
             &path,
-            &mut std::io::Cursor::new("\n\n\n\n\ny\ny\n"),
+            &mut std::io::Cursor::new("\n\ny\ny\n"),
             &mut Vec::new(),
             false,
             &KeyReader::inert(),
@@ -1508,13 +1559,13 @@ mod tests {
     }
 
     /// The 0.6.1 bug report: setup saved `metrics: "on"` globally while a
-    /// legacy repo `config.json` still carried `metrics: "off"`, so every
+    /// repo `config.yaml` still carried `metrics: "off"`, so every
     /// launch in that repository hid the footer and the answer looked ignored.
     #[test]
     fn repo_override_note_should_name_the_winning_repo_layer() {
         let home = HomeGuard::set();
         let repo = home.0.join("repo");
-        let legacy = repo.join(".pixel").join("config.json");
+        let legacy = repo.join(".pixel").join("config.yaml");
         write(&legacy, &json!({"metrics":"off"}).to_string());
         let mut out = Vec::new();
         note_repo_override(&mut out, true, Some(true), Some(&repo)).unwrap();
@@ -1542,7 +1593,7 @@ mod tests {
         // No repo-level metrics setting.
         write(
             &repo.join(".pixel").join("config.yaml"),
-            "policy: enforce\n",
+            "daemon_auto_start: false\n",
         );
         note_repo_override(&mut out, true, Some(true), Some(&repo)).unwrap();
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
@@ -1576,7 +1627,7 @@ mod tests {
         point_home(&home.0);
         let repo = home.0.join("repo");
         write(
-            &repo.join(".pixel").join("config.json"),
+            &repo.join(".pixel").join("config.yaml"),
             &json!({"metrics":"off"}).to_string(),
         );
 
@@ -1591,7 +1642,7 @@ mod tests {
 
         // The repo layer itself was left untouched: the note only reports.
         assert_eq!(
-            crate::config_file::load(&repo.join(".pixel").join("config.json")).unwrap(),
+            crate::config_file::load(&repo.join(".pixel").join("config.yaml")).unwrap(),
             json!({"metrics":"off"})
         );
         restore_home(saved_home);
@@ -1605,7 +1656,7 @@ mod tests {
         point_home(&home.0);
         let repo = home.0.join("repo");
         write(
-            &repo.join(".pixel").join("config.json"),
+            &repo.join(".pixel").join("config.yaml"),
             &json!({"metrics":"off"}).to_string(),
         );
 
@@ -1614,13 +1665,105 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("metrics: on — wrote"), "{text}");
         assert!(!text.contains("wins in this repository"), "{text}");
-        // The repo write targets the legacy json when no yaml exists, and no
-        // note is printed: the layer just written agrees by construction.
+        // No note is printed: the layer just written agrees by construction.
         assert_eq!(
-            crate::config_file::load(&repo.join(".pixel").join("config.json")).unwrap(),
+            crate::config_file::load(&repo.join(".pixel").join("config.yaml")).unwrap(),
             json!({"metrics":"on"})
         );
         restore_home(saved_home);
+    }
+
+    /// A git repository under `home` named `name`, for `discover_root`.
+    fn git_repo(home: &Path, name: &str) -> PathBuf {
+        let repo = home.join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        repo.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn config_metrics_on_repo_should_refuse_when_dot_pixel_links_out_of_the_repository() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        let repo = git_repo(&home.0, "repo-linked-dir");
+        let outside = home.0.join("outside-dir");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join(".pixel")).unwrap();
+
+        let mut out = Vec::new();
+        let err = run_metrics_with(&mut out, &repo, false, Some(true)).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "{} is a symbolic link; pixel does not write configuration through a link under .pixel/",
+                repo.join(".pixel").display()
+            )
+        );
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing written or renamed in the link target"
+        );
+        assert!(out.is_empty(), "no `wrote` line");
+        restore_home(saved_home);
+    }
+
+    #[test]
+    fn config_metrics_on_repo_should_refuse_to_replace_a_linked_config_yaml() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        let repo = git_repo(&home.0, "repo-linked-file");
+        let target = home.0.join("shared.yaml");
+        std::fs::write(&target, "metrics: off\n").unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        let link = repo.join(".pixel").join("config.yaml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut out = Vec::new();
+        let err = run_metrics_with(&mut out, &repo, false, Some(true)).unwrap_err();
+        assert!(err.starts_with(&link.display().to_string()), "{err}");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link is not replaced by a plain file"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "metrics: off\n");
+        let leftovers: Vec<_> = std::fs::read_dir(repo.join(".pixel"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("config.yaml")]);
+        restore_home(saved_home);
+    }
+
+    #[test]
+    fn confined_repo_config_should_refuse_a_file_where_dot_pixel_belongs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".pixel"), "x").unwrap();
+        let err = confined_repo_config(dir.path()).unwrap_err();
+        assert_eq!(
+            err,
+            format!("{} is not a directory", dir.path().join(".pixel").display())
+        );
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(
+            confined_repo_config(plain.path()).unwrap(),
+            plain.path().join(".pixel").join("config.yaml"),
+            "an absent .pixel is created by the write"
+        );
     }
 
     #[test]
@@ -1657,7 +1800,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("n\nn\nn\nn\nn\nn\ny\n"),
+                &mut std::io::Cursor::new("n\nn\nn\ny\n"),
                 &mut output,
                 false,
             )
@@ -1667,8 +1810,7 @@ mod tests {
         assert_eq!(
             crate::config_file::load(&path).unwrap(),
             json!({
-                "metrics":"off", "daemon_auto_start":false, "task_context":false,
-                "task_boundary":false, "policy":"advisory",
+                "metrics":"off", "daemon_auto_start":false,
                 "classify":{"engine":"remote", "enabled":false},
                 "remote_keys":{"openrouter":"new-secret"}, "future":42
             })
@@ -1682,7 +1824,7 @@ mod tests {
         let path = home.0.join("config.yaml");
         let original = "# personal comment\nremote_keys: {openrouter: hidden-secret}\nclassify: {engine: remote}\nunknown: 42\n";
         write(&path, original);
-        for answers in ["q\n", "", "n\nn\nn\nn\nn\nn\nn\n", "n\nn\nn\nn\nn\nn\n"] {
+        for answers in ["q\n", "", "n\nn\nn\nn\n", "n\nn\nn\n"] {
             assert!(
                 !setup_with(
                     &path,
@@ -1698,7 +1840,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("n\nn\nn\nn\nn\nn\ny\n"),
+                &mut std::io::Cursor::new("n\nn\nn\ny\n"),
                 &mut output,
                 false,
             )
@@ -1708,8 +1850,7 @@ mod tests {
             crate::config_file::load(&path).unwrap(),
             json!({
                 "remote_keys": {"openrouter":"hidden-secret"}, "unknown":42,
-                "metrics":"off", "daemon_auto_start":false, "task_context":false,
-                "task_boundary":false, "policy":"advisory",
+                "metrics":"off", "daemon_auto_start":false,
                 "classify":{"engine":"remote", "enabled":false}
             })
         );
@@ -1738,7 +1879,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
+                &mut std::io::Cursor::new("\n\n\ny\n"),
                 &mut Vec::new(),
                 false,
             )
@@ -1748,16 +1889,11 @@ mod tests {
             crate::config_file::load(&path).unwrap()["classify"]["enabled"],
             false
         );
-        // Enter keeps the saved policy too, rather than defaulting the prompt.
-        assert_eq!(
-            crate::config_file::load(&path).unwrap()["policy"],
-            "advisory"
-        );
         let mut output = Vec::new();
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("y\ny\ny\ny\ny\ny\ny\n"),
+                &mut std::io::Cursor::new("y\ny\ny\ny\n"),
                 &mut output,
                 false,
             )
@@ -1771,10 +1907,7 @@ mod tests {
         );
         let doc = crate::config_file::load(&path).unwrap();
         assert_eq!(doc["metrics"], "on");
-        for key in ["daemon_auto_start", "task_context", "task_boundary"] {
-            assert_eq!(doc[key], true);
-        }
-        assert_eq!(doc["policy"], "enforce");
+        assert_eq!(doc["daemon_auto_start"], true);
         assert_eq!(doc["classify"]["enabled"], true);
     }
 
@@ -1790,7 +1923,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\n\n\n"),
+                &mut std::io::Cursor::new("\n\n\n\n"),
                 &mut Vec::new(),
                 false
             )
@@ -1799,9 +1932,6 @@ mod tests {
         let saved = crate::config_file::load(&path).unwrap();
         assert_eq!(saved["metrics"], "on");
         assert_eq!(saved["daemon_auto_start"], true);
-        assert_eq!(saved["task_context"], true);
-        assert_eq!(saved["task_boundary"], true);
-        assert_eq!(saved["policy"], "advisory");
     }
 
     #[test]
@@ -1812,7 +1942,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
+                &mut std::io::Cursor::new("\n\n\ny\n"),
                 &mut Vec::new(),
                 false,
             )
@@ -1824,8 +1954,7 @@ mod tests {
         assert_eq!(
             crate::config_file::load(&path).unwrap(),
             json!({
-                "metrics":"on", "daemon_auto_start":true, "task_context":true,
-                "task_boundary":true, "policy":"advisory", "classify":{"enabled":true}
+                "metrics":"on", "daemon_auto_start":true, "classify":{"enabled":true}
             })
         );
         // A saved opt-out is respected: Enter keeps classify off rather
@@ -1834,7 +1963,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
+                &mut std::io::Cursor::new("\n\n\ny\n"),
                 &mut Vec::new(),
                 false,
             )
@@ -1849,7 +1978,7 @@ mod tests {
         assert_eq!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
+                &mut std::io::Cursor::new("\n\n\ny\n"),
                 &mut Vec::new(),
                 false,
             )
@@ -1862,12 +1991,12 @@ mod tests {
     fn the_classify_explanation_names_jev_and_the_default_shows_yes() {
         let home = HomeGuard::set();
         let path = home.0.join("config.yaml");
-        // Five noes answer the five questions before classify; q then
+        // Two noes answer the two questions before classify; q then
         // cancels at the classify question itself, after it was printed.
         let mut output = Vec::new();
         setup_with(
             &path,
-            &mut std::io::Cursor::new("n\nn\nn\nn\nn\nq\n"),
+            &mut std::io::Cursor::new("n\nn\nq\n"),
             &mut output,
             true,
         )
@@ -1892,7 +2021,7 @@ mod tests {
         let mut output = Vec::new();
         setup_with(
             &path,
-            &mut std::io::Cursor::new("n\nn\nn\nn\nn\nq\n"),
+            &mut std::io::Cursor::new("n\nn\nq\n"),
             &mut output,
             false,
         )
@@ -1973,39 +2102,6 @@ mod tests {
     }
 
     #[test]
-    fn yaml_should_drive_all_existing_readers_after_migration() {
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let home = HomeGuard::set();
-        let saved = home_env();
-        point_home(&home.0);
-        let legacy = home.0.join(".pixel/config.json");
-        write(
-            &legacy,
-            r#"{"metrics":"off","classify":{"engine":"remote","remote_preset":"deepseek","ollaya":{"base":"http://localhost:11435","argv":["ollaya","serve"]}},"remote_keys":{"deepseek":"key"}}"#,
-        );
-        let yaml = ensure_template(None).unwrap();
-        write(&legacy, "{}");
-        assert!(!metrics_enabled(None));
-        assert_eq!(classify_engine().as_deref(), Some("remote"));
-        assert_eq!(
-            classify_remote_preset(),
-            Some(crate::decide_remote::Preset::Deepseek)
-        );
-        assert_eq!(
-            ollaya_launch(),
-            Some(json!({"base":"http://localhost:11435","argv":["ollaya","serve"]}))
-        );
-        assert_eq!(
-            remote_key(crate::decide_remote::Preset::Deepseek).as_deref(),
-            Some("key")
-        );
-        set_classify_engine("local").unwrap();
-        assert_eq!(classify_engine().as_deref(), Some("local"));
-        assert_eq!(crate::config_file::load(&yaml).unwrap()["metrics"], "off");
-        restore_home(saved);
-    }
-
-    #[test]
     fn daemon_start_should_be_disabled_by_repo_yaml_without_an_environment_switch() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();
@@ -2059,30 +2155,6 @@ mod tests {
     }
 
     #[test]
-    fn migration_should_preserve_legacy_values_and_leave_existing_yaml_alone() {
-        let home = HomeGuard::set();
-        let yaml = home.0.join("config.yaml");
-        let legacy = home.0.join("config.json");
-        let original = r#"{"metrics":"off","remote_keys":{"ollama":"secret"},"future":[1,2]}"#;
-        write(&legacy, original);
-        assert_eq!(crate::config_file::preferred_path(&home.0), legacy);
-        crate::config_file::ensure(&yaml).unwrap();
-        assert_eq!(
-            crate::config_file::load(&yaml).unwrap(),
-            serde_json::from_str::<Value>(original).unwrap()
-        );
-        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), original);
-        assert_eq!(crate::config_file::preferred_path(&home.0), yaml);
-        let contents = std::fs::read_to_string(&yaml).unwrap();
-        assert!(contents.contains("# metrics:"));
-        write(&legacy, "{}");
-        crate::config_file::ensure(&yaml).unwrap();
-        assert_eq!(std::fs::read_to_string(&yaml).unwrap(), contents);
-        #[cfg(unix)]
-        assert_eq!(mode(&yaml), 0o600);
-    }
-
-    #[test]
     fn invalid_config_should_fail_without_overwriting_or_echoing_secrets() {
         let home = HomeGuard::set();
         for (extension, contents) in [
@@ -2097,6 +2169,53 @@ mod tests {
             assert!(!err.contains("secret-invalid"));
             assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
         }
+    }
+
+    #[test]
+    fn edit_hooks_should_be_off_until_the_environment_or_a_layer_turns_them_on() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let repo = home.0.join("repo");
+        let global = home.0.join(".pixel/config.yaml");
+        let local = repo.join(".pixel/config.yaml");
+        let previous = std::env::var_os(EDIT_HOOKS_ENV);
+        // SAFETY: ENV_LOCK is held; restored below.
+        unsafe { std::env::remove_var(EDIT_HOOKS_ENV) };
+        write(&global, "{}");
+        write(&local, "{}");
+        assert_eq!(
+            edit_hooks_resolution(Some(&repo)),
+            (false, "default".into())
+        );
+        run_setting("edit_hooks", Some("on"), true, &repo).unwrap();
+        assert_eq!(
+            edit_hooks_resolution(Some(&repo)),
+            (true, global.display().to_string())
+        );
+        write(&local, "edit_hooks: false\n");
+        assert!(!edit_hooks_on(Some(&repo)), "the nearest layer wins");
+        for (value, on) in [
+            ("1", true),
+            ("on", true),
+            ("0", false),
+            ("off", false),
+            ("yes", false),
+        ] {
+            // SAFETY: ENV_LOCK is held; restored below.
+            unsafe { std::env::set_var(EDIT_HOOKS_ENV, value) };
+            assert_eq!(edit_hooks_on(Some(&repo)), on, "{value}");
+        }
+        assert!(run_setting("edit_hooks", Some("maybe"), true, &repo).is_err());
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var(EDIT_HOOKS_ENV, value),
+                None => std::env::remove_var(EDIT_HOOKS_ENV),
+            }
+        }
+        restore_home(saved);
     }
 
     #[test]
@@ -2191,7 +2310,7 @@ mod tests {
         validate(&path).unwrap();
         for invalid in [
             "metrics: false",
-            "task_context: 'off'",
+            "daemon_auto_start: 'off'",
             "classify: []",
             "classify: {engine: invalid}",
             "classify: {remote_preset: invalid}",
@@ -2204,7 +2323,7 @@ mod tests {
         }
         write(
             &path,
-            "metrics: 'on'\nclassify: {engine: local, remote_preset: deepseek}\ntask_context: true\n\
+            "metrics: 'on'\nclassify: {engine: local, remote_preset: deepseek}\ndaemon_auto_start: true\n\
              web_search: {searxng_url: https://sx.test}\nremote_keys: {perplexity: pplx}",
         );
         validate(&path).unwrap();
@@ -2361,11 +2480,11 @@ mod tests {
 
         assert!(metrics_enabled(Some(&repo)), "unset defaults on");
 
-        write(&repo.join(".pixel/config.json"), "{\"metrics\": \"off\"}");
+        write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert!(!metrics_enabled(Some(&repo)), "repo off wins");
 
-        write(&repo.join(".pixel/config.json"), "{\"metrics\": \"on\"}");
-        write(&home.0.join(".pixel/config.json"), "{\"metrics\": \"off\"}");
+        write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"on\"}");
+        write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert!(metrics_enabled(Some(&repo)), "repo on overrides global off");
         assert!(
             !metrics_enabled(Some(&repo.join("no-config-here"))),
@@ -2383,20 +2502,20 @@ mod tests {
         point_home(&home.0);
 
         let repo = home.0.join("repo");
-        write(&repo.join(".pixel/config.json"), "not json");
-        write(&home.0.join(".pixel/config.json"), "{\"metrics\": \"off\"}");
+        write(&repo.join(".pixel/config.yaml"), "not json");
+        write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert!(
             !metrics_enabled(Some(&repo)),
             "malformed repo falls through to global"
         );
 
-        write(&repo.join(".pixel/config.json"), "{\"metrics\": \"loud\"}");
+        write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"loud\"}");
         assert!(
             !metrics_enabled(Some(&repo)),
             "unknown value is not a setting"
         );
         write(
-            &home.0.join(".pixel/config.json"),
+            &home.0.join(".pixel/config.yaml"),
             "{\"metrics\": \"off\", \"future\": 1}",
         );
         assert!(!metrics_enabled(Some(&repo)));
@@ -2414,11 +2533,11 @@ mod tests {
     #[test]
     fn every_config_write_leaves_the_stored_keys_owner_only() {
         let home = HomeGuard::set();
-        let cfg = home.0.join(".pixel/config.json");
+        let cfg = home.0.join(".pixel/config.yaml");
         write(&cfg, "{\"remote_keys\": {\"openrouter\": \"sk-secret\"}}");
         // A world-readable leftover tmp from a crashed write must not lend
         // its mode to the next one.
-        let tmp = cfg.with_file_name(format!("config.json.{}.tmp", std::process::id()));
+        let tmp = cfg.with_file_name(format!("config.yaml.{}.tmp", std::process::id()));
         write(&tmp, "{}");
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2462,11 +2581,11 @@ mod tests {
 
         let repo = home.0.join("repo");
         std::fs::create_dir_all(repo.join(".pixel")).unwrap();
-        let cfg = repo.join(".pixel/config.json");
+        let cfg = repo.join(".pixel/config.yaml");
         write(&cfg, "{\"future\": {\"nested\": true}}");
 
         write_metrics(&cfg, false).unwrap();
-        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let doc: Value = crate::config_file::load(&cfg).unwrap();
         assert_eq!(doc["metrics"], "off");
         assert_eq!(doc["future"]["nested"], true);
         assert!(!metrics_enabled(Some(&repo)));
@@ -2501,7 +2620,7 @@ mod tests {
             "no repo handle still resolves through the default"
         );
 
-        write(&home.0.join(".pixel/config.json"), "{\"metrics\": \"off\"}");
+        write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert_eq!(
             metrics_resolution(Some(&repo)),
             (false, Source::Global),
@@ -2512,7 +2631,7 @@ mod tests {
             "without a repo the global layer is the answer"
         );
 
-        write(&repo.join(".pixel/config.json"), "{\"metrics\": \"on\"}");
+        write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"on\"}");
         assert_eq!(
             metrics_resolution(Some(&repo)),
             (true, Source::Repo),
@@ -2520,105 +2639,6 @@ mod tests {
         );
 
         restore_home(saved);
-    }
-
-    #[test]
-    fn policy_values_round_trip_and_reject_every_other_spelling() {
-        for mode in [PolicyMode::Advisory, PolicyMode::Enforce, PolicyMode::Off] {
-            assert_eq!(PolicyMode::parse(mode.as_str()), Some(mode));
-        }
-        for value in ["", "advisory ", "ADVISORY", "Enforce", "loud", "offf"] {
-            assert_eq!(PolicyMode::parse(value), None, "{value:?}");
-        }
-    }
-
-    #[test]
-    fn policy_resolution_reads_env_then_repo_then_global_and_labels_each_layer() {
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let home = HomeGuard::set();
-        let repo_dir = HomeGuard::set();
-        let saved_home = home_env();
-        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
-            ["PIXEL_POLICY", "PIXEL_TARGETS_GUARD"]
-                .into_iter()
-                .map(|name| (name, std::env::var_os(name)))
-                .collect();
-        for (name, _) in &saved {
-            // SAFETY: under crate::ENV_LOCK in tests only.
-            unsafe { std::env::remove_var(name) };
-        }
-        point_home(&home.0);
-        let repo = repo_dir.0.clone();
-        let global_path = home.0.join(".pixel/config.yaml");
-        let repo_path = repo.join(".pixel/config.yaml");
-
-        let default = policy_resolution(Some(&repo));
-        assert_eq!(default.mode, PolicyMode::Advisory);
-        assert_eq!(default.source_name(), "default");
-        assert_eq!(default.layer(), "default (no config sets it)");
-        assert_eq!(default.overview_label(), "default");
-
-        // A value the layer cannot read is not a policy: it falls through
-        // to the next layer.
-        write(&global_path, "policy: loudly\n");
-        write(&repo_path, "policy: null\n");
-        assert_eq!(policy_resolution(Some(&repo)).mode, PolicyMode::Advisory);
-
-        // Quoted like every YAML string: a bare `off` is a YAML boolean.
-        write(&global_path, "policy: \"off\"\n");
-        let global = policy_resolution(Some(&repo));
-        assert_eq!(global.mode, PolicyMode::Off);
-        assert_eq!(global.source_name(), "global");
-        assert_eq!(global.layer(), format!("global {}", global_path.display()));
-        assert_eq!(global.overview_label(), global_path.display().to_string());
-        assert_eq!(
-            policy_resolution(None).mode,
-            PolicyMode::Off,
-            "no repo handle reads global"
-        );
-
-        write(&repo_path, "policy: enforce\n");
-        let repo_layer = policy_resolution(Some(&repo));
-        assert_eq!(repo_layer.mode, PolicyMode::Enforce);
-        assert_eq!(repo_layer.source_name(), "repo");
-        assert_eq!(repo_layer.layer(), format!("repo {}", repo_path.display()));
-
-        for (value, expected) in [
-            ("Enforce ", PolicyMode::Enforce),
-            ("ADVISORY", PolicyMode::Advisory),
-            ("nonsense", PolicyMode::Advisory),
-        ] {
-            // SAFETY: under crate::ENV_LOCK in tests only.
-            unsafe { std::env::set_var("PIXEL_POLICY", value) };
-            let environment = policy_resolution(Some(&repo));
-            assert_eq!(environment.mode, expected, "{value:?}");
-            assert_eq!(environment.source_name(), "env");
-            assert_eq!(environment.file, None);
-            assert_eq!(environment.layer(), "PIXEL_POLICY (environment)");
-            assert_eq!(environment.overview_label(), "PIXEL_POLICY");
-        }
-
-        // The legacy kill switch outranks an explicit enforce.
-        // SAFETY: under crate::ENV_LOCK in tests only.
-        unsafe {
-            std::env::set_var("PIXEL_POLICY", "enforce");
-            std::env::set_var("PIXEL_TARGETS_GUARD", "0");
-        }
-        let legacy = policy_resolution(Some(&repo));
-        assert_eq!(legacy.mode, PolicyMode::Off);
-        assert_eq!(legacy.layer(), "PIXEL_TARGETS_GUARD (environment)");
-        assert_eq!(legacy.overview_label(), "PIXEL_TARGETS_GUARD");
-
-        for (name, value) in saved {
-            // SAFETY: under crate::ENV_LOCK in tests only.
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
-        }
-        restore_home(saved_home);
     }
 
     #[test]
@@ -2714,7 +2734,7 @@ mod tests {
         let home = HomeGuard::set();
         let saved = home_env();
         point_home(&home.0);
-        let path = home.0.join(".pixel/config.json");
+        let path = home.0.join(".pixel/config.yaml");
         write(&path, r#"{"metrics":"off","classify":"stale"}"#);
         let launch = json!({"base": "http://127.0.0.1:11435", "argv": ["ollaya", "serve"]});
         set_ollaya_launch(&launch).unwrap();
@@ -2731,7 +2751,7 @@ mod tests {
         let saved = home_env();
         point_home(&home.0);
 
-        let path = home.0.join(".pixel/config.json");
+        let path = home.0.join(".pixel/config.yaml");
         write(&path, r#"{"metrics":"off","classify":"stale"}"#);
         set_classify_engine("local").unwrap();
         assert_eq!(classify_engine().as_deref(), Some("local"));
@@ -2771,7 +2791,7 @@ mod tests {
             Some(crate::decide_remote::Preset::OpencodeGo)
         );
 
-        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let stored: Value = crate::config_file::load(&path).unwrap();
         assert_eq!(stored["metrics"], "off");
         assert_eq!(stored["classify"]["engine"], "local");
         assert_eq!(stored["classify"]["ollaya"]["model"], "winnow:e4b");
@@ -2812,6 +2832,78 @@ mod tests {
         assert_eq!(classify_remote_base(), None);
 
         restore_home(saved);
+    }
+    #[test]
+    fn set_global_key_should_create_the_mappings_it_nests_under_and_keep_the_rest() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        write(
+            &home.0.join(".pixel").join("config.yaml"),
+            "metrics: \"off\"\n",
+        );
+
+        set_global_key(&["classify", "enabled"], json!(true)).unwrap();
+        set_global_key(&["brief"], json!(true)).unwrap();
+
+        let doc = crate::config_file::load(&home.0.join(".pixel").join("config.yaml")).unwrap();
+        assert_eq!(doc["classify"]["enabled"], json!(true));
+        assert_eq!(doc["brief"], json!(true));
+        assert_eq!(doc["metrics"], json!("off"), "the rest of the file stays");
+        restore_home(saved_home);
+    }
+
+    #[test]
+    fn set_global_key_should_overwrite_a_leaf_that_already_holds_a_value() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        // The state a second `pixel setup` run meets: `pixel config setup` (or
+        // the first run) already stored every key the wizard is about to set.
+        write(
+            &home.0.join(".pixel").join("config.yaml"),
+            "brief: true\nmetrics: \"on\"\nclassify:\n  enabled: true\n",
+        );
+
+        set_global_key(&["brief"], json!(true)).unwrap();
+        set_global_key(&["metrics"], json!("on")).unwrap();
+        set_global_key(&["classify", "enabled"], json!(true)).unwrap();
+
+        let doc = crate::config_file::load(&home.0.join(".pixel").join("config.yaml")).unwrap();
+        assert_eq!(
+            doc["brief"],
+            json!(true),
+            "a re-run sets the same leaf again"
+        );
+        assert_eq!(doc["metrics"], json!("on"));
+        assert_eq!(doc["classify"]["enabled"], json!(true));
+        restore_home(saved_home);
+    }
+
+    #[test]
+    fn set_global_key_should_refuse_to_nest_under_a_scalar_rather_than_replace_it() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        write(
+            &home.0.join(".pixel").join("config.yaml"),
+            "classify: \"not-a-mapping\"\n",
+        );
+
+        let err = set_global_key(&["classify", "enabled"], json!(true)).unwrap_err();
+
+        assert!(err.contains("classify"), "{err}");
+        assert!(err.contains("not a mapping"), "{err}");
+        let doc = crate::config_file::load(&home.0.join(".pixel").join("config.yaml")).unwrap();
+        assert_eq!(
+            doc["classify"],
+            json!("not-a-mapping"),
+            "the user's value is not overwritten by a failed write"
+        );
+        restore_home(saved_home);
     }
 }
 

@@ -1,0 +1,12 @@
+{
+  "id": "s0-pi-simple-overview",
+  "kind": "repository-overview",
+  "brief_expected": false,
+  "prompt": "Explain this repository's purpose, identify its main dependency file and test layout, and name the focused commands a contributor should run first.",
+  "must": [
+    {"pattern": "requirements\\.txt", "points": 2, "why": "dependency file"},
+    {"pattern": "tests/test_ed_rns\\.py", "points": 2, "why": "ED/RNS test module"},
+    {"pattern": "tests/test_subprocess\\.py", "points": 2, "why": "subprocess test module"}
+  ],
+  "never": []
+}

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/homebrew-core-formula.py: the formula a homebrew-core
+"""Contract of scripts/release/homebrew-core-formula.py: the formula a homebrew-core
 pull request carries, which must build pixel from source.
 
 Each rule below is one homebrew-core would reject the formula over:
@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCRIPT = HERE / "homebrew-core-formula.py"
+SCRIPT = HERE / "release" / "homebrew-core-formula.py"
 TEMPLATE = HERE / "fixtures/homebrew/pixel-core.rb.template"
 TAG_URL = "https://github.com/Pixel-CLI/pixel/archive/refs/tags/v9.8.7.tar.gz"
 

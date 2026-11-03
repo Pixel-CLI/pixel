@@ -22,7 +22,7 @@
 //!    and drowned the real errors in `pixel action-log --errors-only`.
 //! 4. The binary never reads the developer's home. `HOME` points at an empty
 //!    directory unless the test sets its own: every command compares the
-//!    prompts `pixel install` deployed there with its own and warns on
+//!    prompts `pixel setup` deployed there with its own and warns on
 //!    stderr, so a machine that ran another release's install failed every
 //!    test that reads stderr exactly, while CI, with no install, passed.
 
@@ -43,8 +43,31 @@ pub fn pixel_command() -> Command {
     command
 }
 
+/// The top-level commands `pixel --help` lists: the commands the core
+/// builds in. A rename or a moved name that points at anything else is
+/// answered by the plugin dispatch, not by clap.
+pub fn built_in_commands() -> std::collections::BTreeSet<String> {
+    let out = pixel_command().arg("--help").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    let block = text
+        .split("Commands:")
+        .nth(1)
+        .and_then(|rest| rest.split("Options:").next())
+        .expect("clap help has Commands: then Options:");
+    let names: std::collections::BTreeSet<String> = block
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect();
+    assert!(names.len() > 20, "help parsing broke: {names:?}");
+    names
+}
+
 /// An empty home, one per test process and created once, like
-/// [`neutral_cwd`]: nothing `pixel install` deployed on this machine is in it.
+/// [`neutral_cwd`]: nothing `pixel setup` deployed on this machine is in it.
 pub fn neutral_home() -> &'static Path {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
@@ -119,59 +142,6 @@ fn report_leak(root: &Path, leaked: Vec<String>) {
         root.display(),
         leaked.join("\n")
     );
-}
-
-/// A fake recall-daemon socket at `recall_dir`'s socket path: it answers the
-/// client's `Ping` (the probe and the op open separate connections) and then
-/// the first `Recall` with `answer`, so a test can drive the daemon-first
-/// path without a corpus or a model. The caller joins the handle and removes
-/// the socket the thread leaves behind.
-pub fn fake_recall_daemon(
-    recall_dir: &Path,
-    answer: pixel_daemon::Response,
-) -> std::thread::JoinHandle<()> {
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixListener;
-    let listener = UnixListener::bind(pixel_daemon::daemon::socket_path(recall_dir)).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    std::thread::spawn(move || {
-        // Poll with a deadline: a client that never reaches the `Recall` must
-        // fail its own assertion, not hang here.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut served = false;
-        while !served && std::time::Instant::now() < deadline {
-            let Ok((mut stream, _)) = listener.accept() else {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                continue;
-            };
-            // A non-blocking listener hands back a non-blocking socket on
-            // BSD: reset it, or the read races the client's write.
-            let _ = stream.set_nonblocking(false);
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            while !served {
-                let mut line = String::new();
-                let Ok(n) = reader.read_line(&mut line) else {
-                    break;
-                };
-                if n == 0 {
-                    break;
-                }
-                let reply = match serde_json::from_str::<pixel_daemon::Request>(&line).unwrap() {
-                    pixel_daemon::Request::Ping => pixel_daemon::Response::success(
-                        "ping",
-                        serde_json::json!({"pong": true, "protocol_version": pixel_daemon::api::PROTOCOL_VERSION}),
-                    ),
-                    pixel_daemon::Request::Recall { .. } => {
-                        served = true;
-                        answer.clone()
-                    }
-                    other => panic!("unexpected request: {other:?}"),
-                };
-                writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
-            }
-        }
-    })
 }
 
 /// A throwaway directory under the system temp dir. Dereferences to `Path`;
@@ -376,4 +346,22 @@ fn action_log_of_an_unresolvable_path_lands_in_the_neutral_cwd_not_the_checkout(
         "the probe leaked into {}",
         checkout.display()
     );
+}
+
+/// Executing a binary this test just copied can fail with ETXTBSY while a
+/// sibling test's forked child still holds the write descriptor, or while
+/// writeback finishes on overlay filesystems; a short bounded retry clears
+/// it (the same race antigravity's registration probe retries under).
+pub fn exec_while_text_busy(
+    mut probe: impl FnMut() -> std::io::Result<std::process::Output>,
+) -> std::io::Result<std::process::Output> {
+    for _ in 0..50 {
+        match probe() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            outcome => return outcome,
+        }
+    }
+    probe()
 }

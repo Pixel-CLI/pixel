@@ -1,6 +1,6 @@
 ---
 name: improve-codebase-architecture
-description: Find deepening opportunities in pixel's crates (shallow modules to merge behind a smaller interface, leaking seams, logic only testable past its interface), scouted with pixel's own churn, size, caller and area data, presented as a local HTML report of before/after cards with their real cost (diff size, mutants, ARCHITECTURE.md sections, PR stack), then grilled through the candidate the user picks until it becomes a task on project 3. Adapted from Matt Pocock's improve-codebase-architecture skill. Manual only: "/improve-codebase-architecture [area]", "revue d'archi", "où approfondir les modules".
+description: 'Find deepening opportunities in pixel''s crates (shallow modules to merge behind a smaller interface, leaking seams, logic only testable past its interface), scouted with pixel''s own churn, size, caller and area data, presented as a local HTML report of before/after cards with their real cost (diff size, mutants, ARCHITECTURE.md sections, PR stack), then grilled through the candidate the user picks until it becomes a task on project 3. Adapted from Matt Pocock''s improve-codebase-architecture skill. Manual only: "/improve-codebase-architecture [area]", "revue d''archi", "où approfondir les modules".'
 disable-model-invocation: true
 ---
 

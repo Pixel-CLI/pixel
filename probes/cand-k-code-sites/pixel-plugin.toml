@@ -1,0 +1,13 @@
+name = "cand-k-code-sites"
+version = "0.1.0"
+api = 1
+description = "Shows the code that reads a named ALL_CAPS variable (with what it calls and who calls it) and the code sites of the behaviour a 'which flags control X, where applied' question names"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "pixel"
+when_prompt = "(?i:\\bwhere\\b.*\\b(appl\\w+|used|handled|enforced|checked|read)\\b)|\\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\\b"
+when_gate_closed = true
+budget_ms = 2500
+mode = "lead"

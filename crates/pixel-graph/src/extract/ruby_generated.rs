@@ -239,8 +239,13 @@ fn literal_name(w: &Walker, node: Node) -> Option<String> {
 }
 
 /// A method name as the `alias` keyword spells it: an identifier, a constant,
-/// an operator, a setter or a symbol; `None` for a global variable.
+/// an operator, a setter or a symbol; `None` for a missing name or global variable.
 fn method_name(w: &Walker, node: Node) -> Option<String> {
+    // Error recovery inserts zero-width names in an unfinished alias.
+    // Such a declaration cannot generate a method or a forwarding reference.
+    if node.is_missing() {
+        return None;
+    }
     match node.kind() {
         "simple_symbol" | "string" | "delimited_symbol" => literal_name(w, node),
         "global_variable" => None,
@@ -291,12 +296,12 @@ pub(super) fn drop_overridden(w: &mut Walker) {
     if w.generated.is_empty() {
         return;
     }
-    let generated: std::collections::HashSet<usize> = w.generated.iter().copied().collect();
+    let generated: rustc_hash::FxHashSet<usize> = w.generated.iter().copied().collect();
     // One pass over the symbols (walk order is source order): per
     // qualified name and kind, whether a generated method is among them, and
     // the last definition.
-    let mut owners: std::collections::HashMap<(&str, &str), (bool, usize)> =
-        std::collections::HashMap::new();
+    let mut owners: rustc_hash::FxHashMap<(&str, &str), (bool, usize)> =
+        rustc_hash::FxHashMap::default();
     for (i, symbol) in w.symbols.iter().enumerate() {
         let entry = owners
             .entry((symbol.qualified.as_str(), symbol.kind.as_str()))

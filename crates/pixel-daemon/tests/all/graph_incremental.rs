@@ -18,19 +18,7 @@ use std::process::Command;
 
 use pixel_daemon::{Request, Service};
 
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {args:?}: {out:?}");
-}
+use crate::support::git;
 
 /// Five source files, one committed baseline. `worker.ts` calls `helper`
 /// from `util.ts`; the other three are independent filler so a threshold
@@ -75,6 +63,7 @@ fn build_graph(dir: &Path) -> serde_json::Value {
     let mut svc = Service::open(dir).unwrap();
     let resp = svc.handle(Request::Symbol {
         name: "work".into(),
+        stale_ok: false,
     });
     assert!(resp.ok, "{:?}", resp.error);
     let data = resp.into_data();
@@ -98,7 +87,10 @@ fn changes(dir: &Path) -> serde_json::Value {
 
 fn symbol(dir: &Path, name: &str) -> serde_json::Value {
     let mut svc = Service::open(dir).unwrap();
-    let resp = svc.handle(Request::Symbol { name: name.into() });
+    let resp = svc.handle(Request::Symbol {
+        name: name.into(),
+        stale_ok: false,
+    });
     assert!(resp.ok, "{:?}", resp.error);
     resp.into_data()
 }
@@ -144,6 +136,8 @@ fn one_edited_file_updates_the_graph_incrementally() {
         uid_or_name: "src/worker.ts#work#function".into(),
         direction: "downstream".into(),
         depth: Some(1),
+
+        stale_ok: false,
     });
     assert!(resp.ok, "{:?}", resp.error);
     let impact = resp.into_data();
@@ -221,7 +215,7 @@ fn copied_pixel_dir_is_updated_not_rebuilt() {
         dir.file_name().unwrap().to_string_lossy()
     ));
     std::fs::remove_dir_all(&copy).ok();
-    let out = Command::new("git")
+    let out = crate::support::git_command()
         .args(["clone", "-q"])
         .arg(&dir)
         .arg(&copy)

@@ -1,0 +1,55 @@
+{
+  "id": "qk-configuration",
+  "suite": "brief-question-kinds",
+  "task_class": "explanation",
+  "mode": "answer",
+  "commit": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+  "max_turns": 30,
+  "prompt": "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+  "must": [
+    {
+      "pattern": "(?i)UserPromptSubmit",
+      "points": 2,
+      "why": "names the Codex host event"
+    },
+    {
+      "pattern": "(?i)prompt-submit",
+      "points": 1,
+      "why": "names the corresponding task-event verb"
+    },
+    {
+      "pattern": "(?i)run-hook\\s+task-event",
+      "points": 2,
+      "why": "names the active hook command"
+    },
+    {
+      "pattern": "(?i)--provider\\s+codex",
+      "points": 1,
+      "why": "names the provider flag"
+    },
+    {
+      "pattern": "(?i)--event\\s+prompt-submit",
+      "points": 2,
+      "why": "names the event flag and its value"
+    },
+    {
+      "pattern": "(?i)(?:codex_config|codex config)",
+      "points": 1,
+      "why": "locates the registration implementation"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "(?im)^(?!.*(?:legacy|retired|removed|old|former|marker|test fixture)).*(?:installs?|registers?|live command).{0,100}pixel run-hook prompt-submit --provider codex",
+      "penalty": 2,
+      "why": "the old direct prompt-submit verb is not the active installed command"
+    }
+  ],
+  "semantic_review": {
+    "criteria": [
+      "Do not present the retained legacy prompt-submit marker or old test fixture as the current installed command.",
+      "The Codex host event UserPromptSubmit maps to prompt-submit.",
+      "The current installed command is the configured Pixel executable followed by run-hook task-event --provider codex --event prompt-submit."
+    ]
+  }
+}

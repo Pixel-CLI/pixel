@@ -28,5 +28,10 @@ img2webp -loop 0 -lossless -m 6 -d 67 "$t"/*.png \
   re-render from Remotion.
 - Composition id → file name map lives in `docs/motion/scripts/render.sh`
   (`name_of`); e.g. `PixelScope` → `pixel-scope-comparison.webp`.
+- A recording replay (not a Remotion composition) may crop each pane to
+  fewer terminal columns and show the pair across the README's full column
+  width, so the text renders larger: see
+  `docs/motion/prompt-submit/README.md`, whose two ~80-column panes become
+  two ~40-column 800×1000 crops displayed at `width="1000"`.
 - Cheaper fallback if size must shrink: `-lossy -q 95 -m 6` at 1600×1000
   (~3.5 MB, visually near-lossless).

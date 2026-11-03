@@ -4,7 +4,8 @@
 //! Impact analysis — BFS over `calls` edges, depth-bucketed blast radius with
 //! an epistemic envelope so "0 callers" is distinguishable from "resolver gave up".
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use rustc_hash::FxHashSet as HashSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::str::FromStr;
 
 use rusqlite::params;
@@ -203,7 +204,7 @@ pub fn impact(
         .ok_or_else(|| StoreError::Sql(rusqlite::Error::QueryReturnedNoRows))?;
     let max_depth = max_depth.clamp(1, 3);
 
-    let mut visited: HashSet<i64> = HashSet::new();
+    let mut visited: HashSet<i64> = HashSet::default();
     visited.insert(target.id);
     // (symbol_id, depth, tier of the edge that reached it)
     let mut queue: VecDeque<(i64, u32, Tier)> = VecDeque::new();
@@ -214,7 +215,7 @@ pub fn impact(
     // A bucket refused an item at `limit_per_depth`. The count stays exact;
     // only the listed subset is cut, and the cut is named below.
     let mut bucket_truncated = [false; 3];
-    let mut files: HashSet<i64> = HashSet::new();
+    let mut files: HashSet<i64> = HashSet::default();
     let mut proc_set: BTreeSet<String> = BTreeSet::new();
 
     while let Some((id, depth, _)) = queue.pop_front() {
@@ -274,7 +275,7 @@ pub fn impact(
         let ref_edges = store.edges_to(target.id, Some(EdgeKind::References))?;
         // Dedupe by src_id — the same referrer at N call sites shouldn't
         // produce N identical items; the total counts each referrer once.
-        let mut seen_src: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut seen_src: rustc_hash::FxHashSet<i64> = rustc_hash::FxHashSet::default();
         for e in ref_edges {
             if !seen_src.insert(e.src_id) {
                 continue;

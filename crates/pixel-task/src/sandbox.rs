@@ -588,11 +588,14 @@ mod tests {
 
     #[test]
     fn identity_input_shape_matches_the_receipts_main_recorded() {
-        // Expected value computed by main's runner (b3551ad) on these inputs:
+        // Expected value computed by main's runner on these inputs:
         // `digest(&(check, binary, binary_sha256, digest(env), target, toolchain))`.
         // A change here turns every recorded receipt `Unavailable` on upgrade.
+        // The digest moved from `92b5b1fe…` when the `kind` field joined
+        // `Check` (issue #813): the identity subject is the whole check.
         let check = crate::model::Check {
             id: "build".into(),
+            kind: crate::model::CheckKind::Argv,
             argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
             cwd: "crates".into(),
             timeout_ms: 1000,
@@ -612,7 +615,7 @@ mod tests {
                 &observed_toolchain,
             )
             .unwrap(),
-            "92b5b1fec7592dc6db6d028d4072f01e88bd945ab9093d746f095b2a3583fc91"
+            "b394c453ab48b28ef68f2fc30534797c0343d5fab575c9a3174f87079743a1fd"
         );
     }
 

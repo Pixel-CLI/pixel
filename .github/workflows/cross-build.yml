@@ -7,9 +7,10 @@ name: Cross-build
 # cross (--locked, model2vec only) and aarch64-apple-darwin natively. The Test job's `cargo check` of that feature
 # set runs on glibc and cannot see a dependency that fails to link against
 # musl or a Cargo.lock that --locked rejects, so this is the only job that
-# proves a change still ships. It runs on every push to main and on the
+# proves the Linux release feature set links. It runs on every push to main and on the
 # pull requests that can change the outcome; a docs, prompt or script PR
-# skips it. The release workflow's build job builds the same lane again
+# skips it. Native macOS runs on main and maintenance release PRs only.
+# The release workflow's build job builds the same lane again
 # from the tag. No branch rule requires this check today; if one is added,
 # the excluded paths need a twin workflow that reports success.
 #
@@ -26,8 +27,8 @@ on:
       - ".cargo/**"
       - ".github/workflows/cross-build.yml"
       - "Cargo.*"
-      - "Cross.toml"
-      - "scripts/release-build-env.sh"
+      - "scripts/release/release-build-env.sh"
+      - "scripts/release/split-symbols.sh"
       - "crates/**"
       - "deny.toml"
       - "rust-toolchain*"
@@ -56,7 +57,7 @@ jobs:
     name: Cross-build ${{ matrix.target }} (${{ matrix.profile }})
     needs: scope
     if: needs.scope.outputs.release-prepare != 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.target == 'aarch64-apple-darwin' && 'macos-15' || 'ubuntu-26.04' }}
     # A pull request into main builds `dev-release` (release without thin LTO
     # and with 16 codegen units): the lane still has to link against musl
     # with the release feature set and a --locked Cargo.lock, which is what
@@ -69,7 +70,7 @@ jobs:
     # release before its tag. A maintenance pull request into `release/x.y`
     # keeps `release`: no push run covers that branch.
     #
-    # The push to main runs both profiles, each as its own job with its own
+    # Linux on main runs both profiles, each as its own job with its own
     # cache key, so each saves the entry its readers restore: `release-<t>`
     # for the tag's build in release-build.yml, `dev-release-<t>` for the pull
     # requests. One key cannot hold both: an entry is immutable, and a push
@@ -81,17 +82,12 @@ jobs:
       fail-fast: true
       matrix:
         profile: ${{ fromJSON(github.event_name == 'push' && '["release", "dev-release"]' || (github.event_name == 'pull_request' && github.base_ref == 'main') && '["dev-release"]' || '["release"]') }}
-        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, aarch64-apple-darwin]
-        # The three release targets, on the runners release-build.yml builds them
-        # on. aarch64-apple-darwin is here so a push to main proves the macOS
-        # lane before a tag does, and saves the cache the tag's build restores.
-        include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-26.04
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-26.04
+        # Ordinary and stacked PRs use Linux. Main and maintenance releases
+        # retain the native macOS proof before tagging; no macOS PR cache to warm.
+        target: ${{ fromJSON((github.event_name == 'push' || startsWith(github.base_ref, 'release/')) && '["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "aarch64-apple-darwin"]' || '["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]') }}
+        exclude:
           - target: aarch64-apple-darwin
-            os: macos-latest
+            profile: dev-release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -144,6 +140,8 @@ jobs:
           # it is passed explicitly (same channel as before).
           toolchain: stable
           targets: ${{ matrix.target }}
+          # llvm-strip, which split-symbols.sh runs on the Linux binaries.
+          components: llvm-tools
 
       # The same reproducible-build environment as release-build.yml, before
       # the cache step: rust-cache hashes RUSTFLAGS into its key, so the
@@ -151,7 +149,7 @@ jobs:
       # both set the same value.
       - name: Reproducible build environment
         if: steps.dup.outputs.duplicate != 'true'
-        run: scripts/release-build-env.sh --github-env
+        run: scripts/release/release-build-env.sh --github-env
 
       # One entry per target, shared with release-build.yml's build job: a shared
       # key replaces the job id in the cache key, so the tag's build (job
@@ -159,7 +157,7 @@ jobs:
       # run can read the default branch's caches, never another tag's.
       - name: Cache Rust build
         if: steps.dup.outputs.duplicate != 'true'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # PRs read the cache but never write it: only merges into main
           # refresh the shared entries, so one PR cannot thrash
@@ -168,14 +166,18 @@ jobs:
           cache-on-failure: true
           # `release-<target>` for the release profile, the name release-build.yml
           # restores; `dev-release-<target>` for the pull requests' profile.
-          shared-key: ${{ matrix.profile }}-${{ matrix.target }}
+          # `-pabort`: the release profiles set `panic = "abort"`, which changes
+          # the ort-sys build-script hash. A cache keyed without it restores an
+          # OUT_DIR whose onnxruntime static library is not the one this build
+          # looks for, and ort-sys then cannot find `libonnxruntime`.
+          shared-key: ${{ matrix.profile }}-${{ matrix.target }}-pabort
 
       # Prebuilt binary instead of `cargo install cross` (~40 s per run).
       # cross compiles inside its own Docker image, which carries the musl
       # toolchain, so no host musl-tools/perl/make are needed.
       - name: Install cross
         if: runner.os == 'Linux' && steps.dup.outputs.duplicate != 'true'
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           # The version release-build.yml pins.
           tool: cross@0.2.5
@@ -193,6 +195,22 @@ jobs:
       - name: Build (macOS native)
         if: runner.os == 'macOS' && steps.dup.outputs.duplicate != 'true'
         run: cargo build --profile ${{ matrix.profile }} --locked --target ${{ matrix.target }} -p pixel-cli
+
+      # release-build.yml's packaging split, on every lane: the release tag is
+      # the only run of the Package step, so a strip tool that is missing, a
+      # binary that comes out of the build already stripped, or (macOS) a
+      # signature the strip breaks fails here first. The binary runs where
+      # the runner can execute it.
+      - name: Split symbols and strip (release-build.yml's Package step)
+        if: steps.dup.outputs.duplicate != 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          scripts/release/split-symbols.sh "target/$TARGET/$PROFILE/pixel" "$RUNNER_TEMP/pixel.symbols.tar.xz"
+          case "$TARGET" in
+            x86_64-unknown-linux-musl|aarch64-apple-darwin) "target/$TARGET/$PROFILE/pixel" --version ;;
+          esac
 
       # A green build records the verdict under
       # crossbuild-verdict-<profile>-<target>-<tree>-<day>: a later run of

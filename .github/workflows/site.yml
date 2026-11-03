@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+name: Site
+
+# Checks a pull request that touches the website or the README animations
+# before Pages (pages.yml) publishes it from main: ci.yml leaves website/**
+# and docs/** out of its path filter, so nothing else builds them. Two jobs:
+# the Hugo build with the pin from website/mise.toml, and a TypeScript
+# typecheck of docs/motion (Remotion, Bun) with tsgo. website/ holds no
+# TypeScript of its own.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "docs/motion/**"
+      - "docs/examples/**"
+      - "crates/pixel/Cargo.toml"
+      - ".github/workflows/site.yml"
+  pull_request:
+    paths:
+      - "website/**"
+      - "docs/motion/**"
+      - "docs/examples/**"
+      - "crates/pixel/Cargo.toml"
+      - ".github/workflows/site.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  hugo:
+    name: Hugo build (website)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # enableGitInfo dates each page by the last commit that touched it.
+          fetch-depth: 0
+      # Installs the Hugo pin from website/mise.toml, the one pages.yml uses.
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+        with:
+          working_directory: website
+      - name: Build with Hugo
+        working-directory: website
+        run: hugo --gc --minify --destination "$RUNNER_TEMP/site"
+
+  motion-typecheck:
+    name: Typecheck (docs/motion, tsgo)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: docs/motion
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install from the lockfile
+        run: bun install --frozen-lockfile
+      # TypeScript 7 (tsgo), as everywhere in this stack; tsc is not used.
+      - name: Typecheck
+        run: bunx @typescript/native-preview --noEmit -p .

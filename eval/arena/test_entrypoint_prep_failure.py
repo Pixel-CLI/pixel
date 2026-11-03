@@ -57,7 +57,7 @@ class PrepFailureStopsCodexTest(unittest.TestCase):
             self.assertEqual(calls.read_text().split()[2], str(repo))
             self.assertFalse(codex_called.exists())
 
-    def test_failed_pixel_install_stops_before_codex(self):
+    def test_failed_pixel_setup_stops_before_codex(self):
         self.assert_prep_failure_stops_codex(fail_command="install", expected_rc=41)
 
     def test_failed_pixel_index_stops_before_codex(self):

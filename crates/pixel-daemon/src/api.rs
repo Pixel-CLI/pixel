@@ -7,28 +7,36 @@
 //! centralized in the `bridge` module at the bottom so integration drift is
 //! a one-line fix per call site.
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::{BTreeMap, BTreeSet};
-use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::cycles;
+use crate::daemon::WatchReport;
+use crate::meaning::Meaning;
+use crate::plane::Plane;
+use crate::relevance;
 use pixel_context::estimate_tokens;
 use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
 use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, credential_path, open_regular_bounded};
-use pixel_index::indexset::{IndexSet, IndexSetError, OpenTimings, RefreshOutcome, millis};
+use pixel_index::indexset::{
+    IndexSet, IndexSetError, OpenTimings, RefreshOutcome, StagedRefresh, millis,
+};
 use pixel_proto::{
     Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, TargetsFactsInputs,
     TargetsFactsResult, TargetsFactsUnavailableReason, Warning,
 };
-use pixel_recall::embed::{EmbedKind, Embedder, open_default_embedder};
+use pixel_recall::code_search::{CODE_SEARCH_MODEL_REPO, code_model_on_disk, open_code_embedder};
+use pixel_recall::embed::{EmbedKind, Embedder};
 
 pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// Increment whenever the daemon request/response contract changes in a way
@@ -43,20 +51,60 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// (`cap_hits`), which the CLI reads instead of matching the cap sentences.
 /// 13: `search` takes `globs` and `types` and filters candidate files
 /// itself; an older daemon would ignore them and answer unfiltered.
-pub const PROTOCOL_VERSION: u64 = 13;
+/// 14: `targets` takes `regions` and attaches the symbol-level regions
+/// manifest; an older daemon would ignore the flag and answer without it.
+/// 15: `history`, `excavate`/`dig-history` and `lifecycle` take
+/// `read_only`, and `status` reports `embedding`; an older daemon would
+/// drop the flag and run the facts-ingest path a prompt hook must never
+/// start.
+/// 16: the `meaning` request, which an older daemon rejects as an unknown
+/// variant.
+/// 17: a request line may carry `deadline_unix_ms`
+/// (`pixel_proto::REQUEST_DEADLINE_FIELD`), the instant its answer stops
+/// being wanted; the daemon runs nothing for a queued request past it. An
+/// older daemon ignores the member and runs the request to the end, so the
+/// CLI sends it only to a daemon that answered a ping on this version.
+pub const PROTOCOL_VERSION: u64 = 17;
 
 /// Rows a `search` returns when the request names no `limit`.
 pub const SEARCH_DEFAULT_ROWS: usize = 100;
 /// The most rows one `search` page returns, whatever `limit` asks for.
 pub const SEARCH_MAX_ROWS: usize = 10_000;
 
-/// The potion model the daemon warms. Its download leaves its own marker
-/// ([`pixel_recall::potion_marker`]), which another model's cannot overwrite.
-const POTION_V2_REPO: &str = "minishlab/potion-code-64M-v2";
-
 // `targets` (S3 probes, graph expansion and evidence): the caps keep the op
 // ms-scale; every cap that fires is named in the epistemics envelope.
 const CONTENT_PROBE_LIMIT: usize = 1000;
+/// Lines longer than this are minified or generated and carry no evidence.
+const EVIDENCE_MAX_LINE_BYTES: usize = 1_000;
+/// Characters of a matching line shown as evidence, centred on the keyword.
+const EVIDENCE_WINDOW_CHARS: usize = 160;
+
+/// The part of a matching line around its first occurrence of `keyword`, at most
+/// [`EVIDENCE_WINDOW_CHARS`] characters, with `…` where the line was cut.
+fn keyword_window(line: &str, keyword: &str) -> String {
+    let trimmed = line.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= EVIDENCE_WINDOW_CHARS {
+        return trimmed.to_string();
+    }
+    let lower = trimmed.to_lowercase();
+    let at = lower
+        .find(&keyword.to_lowercase())
+        .map_or(0, |byte| lower[..byte].chars().count());
+    let start = at
+        .saturating_sub(EVIDENCE_WINDOW_CHARS / 2)
+        .min(chars.len() - EVIDENCE_WINDOW_CHARS);
+    let end = start + EVIDENCE_WINDOW_CHARS;
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    out
+}
 const MAX_SEED_FILES: usize = 8;
 const MAX_SEED_SYMBOLS: usize = 24;
 /// P0 is the only tier the doctrine mandates checking before the first
@@ -64,7 +112,10 @@ const MAX_SEED_SYMBOLS: usize = 24;
 const EVIDENCE_MAX_LINES_PER_TARGET: usize = 2;
 /// Most keywords a `targets` content probe runs, expansions included.
 const MAX_PROBE_KEYWORDS: usize = 6;
-const TARGETS_FACTS_ALGORITHM_VERSION: u32 = 1;
+/// Identifies the `targets_facts` algorithm in `inputs.algorithm_version`,
+/// so a reader knows which `facts` keys to expect. 1: the target list. 2:
+/// adds `facts.relevance` (per-keyword document frequency and co-files).
+const TARGETS_FACTS_ALGORITHM_VERSION: u32 = 2;
 
 /// `context` and `uses`: edges returned per direction before elision.
 const EDGE_LIMIT: usize = 20;
@@ -191,6 +242,27 @@ fn code_named_in_prefix(msg: &str) -> Option<ErrorCode> {
     serde_json::from_str(&format!("\"{}\"", head.trim())).ok()
 }
 
+/// Lock acquisition that survives a poisoned lock. A request that panicked
+/// while holding the index or publication lock poisons it, and an `expect`
+/// on every later acquisition turned that one failed answer into a daemon
+/// that panics on every request. Both guarded values stay consistent across
+/// a panic: the index is replaced by a single assignment, and a publication
+/// is marked unhealthy before any work that can fail, so a recovered lock
+/// at worst answers "unhealthy; retry after refresh".
+pub(crate) trait RecoverLock<T> {
+    fn read_or_recover(&self) -> RwLockReadGuard<'_, T>;
+    fn write_or_recover(&self) -> RwLockWriteGuard<'_, T>;
+}
+
+impl<T> RecoverLock<T> for RwLock<T> {
+    fn read_or_recover(&self) -> RwLockReadGuard<'_, T> {
+        self.read().unwrap_or_else(PoisonError::into_inner)
+    }
+    fn write_or_recover(&self) -> RwLockWriteGuard<'_, T> {
+        self.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Build a failure envelope from a plain error string (the shape `dispatch`
 /// returns). Used by `handle` and the daemon transport for pre-parse errors.
 pub fn failure_response(op: &str, msg: impl Into<String>) -> Response {
@@ -215,7 +287,17 @@ pub fn facts_visibility(root: &Path) -> Value {
         Ok(None) => return json!({"present": false}),
         Err(e) => return json!({"present": false, "error": e.to_string()}),
     };
-    let state = facts.index_state();
+    let refs = facts.refs_hash().ok();
+    let total = pixel_git::GitRunner::new(root)
+        .rev_list_count_all()
+        .unwrap_or(0);
+    visibility_of(&facts, refs.as_deref(), total)
+}
+
+/// [`facts_visibility`] of an open store, its freshness judged against
+/// `refs` and `rev_list_total` the repository's `rev-list --all` count.
+fn visibility_of(facts: &FactsStore, refs: Option<&str>, rev_list_total: u64) -> Value {
+    let state = facts.index_state_at(refs);
     let count = |sql: &str| -> i64 { facts.conn().query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
     let phase_a_done: bool = facts
         .conn()
@@ -229,10 +311,7 @@ pub fn facts_visibility(root: &Path) -> Value {
     // visible as commits_indexed < total_commits. The facts universe also
     // covers stash/reflog-only commits that `--all` doesn't count, so take
     // the max — indexed exceeding rev-list is healthy, not suspicious.
-    let total_commits = pixel_git::GitRunner::new(root)
-        .rev_list_count_all()
-        .unwrap_or(0)
-        .max(state.total_commits);
+    let total_commits = rev_list_total.max(state.total_commits);
     json!({
         "present": true,
         "schema_version": state.schema_version,
@@ -252,6 +331,52 @@ pub fn facts_visibility(root: &Path) -> Value {
     })
 }
 
+/// The semantic code-search warmth fields of `status`: whether the
+/// code-search model and this repo's persisted chunk vectors are already on
+/// disk, and whether this daemon holds a loaded embedder. Reads download
+/// markers and the vector store's manifest only — never loads a model,
+/// embeds, downloads or writes, so `status` stays cheap.
+fn embedding_status(
+    root: &Path,
+    resident_model: Option<&str>,
+    error: Option<&str>,
+    downloading: bool,
+    semantic_searches: u64,
+) -> Value {
+    let probe = pixel_recall::code_search::warm_probe(root);
+    json!({
+        "model_on_disk": probe.model_on_disk,
+        "vectors_present": probe.vectors_present,
+        "vectors_chunks": probe.vectors_chunks,
+        "embedder_resident": resident_model.is_some(),
+        "resident_model": resident_model,
+        "model": CODE_SEARCH_MODEL_REPO,
+        "error": error,
+        "downloading": downloading,
+        "semantic_searches": semantic_searches,
+    })
+}
+
+/// An open history store and the identity of the db file it was opened on.
+struct OpenFacts {
+    store: FactsStore,
+    file: (u64, u64),
+}
+
+/// Device and inode of the history db, `None` when it does not exist.
+fn history_db_identity(root: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(pixel_facts::store::history_db_path(root))
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// Paths a HEAD move may change for [`Service::catch_up_head`] to refresh
+/// them on the serving path; a wider move (a branch switch across a large
+/// refactor) is left to the watcher and the next open, and the index stays
+/// `index_stale` meanwhile.
+const HEAD_CATCH_UP_MAX_PATHS: usize = 2_000;
+
 pub struct Service {
     root: PathBuf,
     index: Arc<RwLock<IndexSet>>,
@@ -266,47 +391,202 @@ pub struct Service {
     /// `notify` backend errors reported by the transport loop: a watcher
     /// that stopped seeing changes leaves the same stale answers.
     watcher_failures: FailureLog,
+    /// The registered watch, once the transport loop reports it live: until
+    /// then edits are caught up from `git status`, not observed.
+    watch: Option<WatchReport>,
     /// Lazily opened on first `scope: "hybrid"` search; kept warm for the
     /// daemon's lifetime. `None` = not yet loaded (not tried, download in
     /// progress, or load failed transiently).
     embedder: Option<Box<dyn Embedder>>,
     /// Permanent: the model IS cached but the load itself errors (corrupt
     /// download, incompatible build). Never set for "not cached yet" —
-    /// that's transient and retried on every call until the background
-    /// download writes the marker.
+    /// that's transient and retried on every call until
+    /// an opted-in download writes the marker.
     embedder_unavailable: bool,
-    /// A background download has been spawned — prevents duplicate threads.
-    embedder_download_started: bool,
+    /// [`EMBEDDER_HINT`] was printed or the opted-in download spawned: each
+    /// happens once per daemon.
+    embedder_hinted: bool,
+    /// The one opted-in download, polled without blocking by searches and status.
+    embedder_download: Option<std::thread::JoinHandle<Result<(), String>>>,
+    /// Latest load/download failure, exposed even when the daemon has no stderr.
+    embedder_error: Option<String>,
+    /// Searches whose semantic ranking completed, not just model loads.
+    semantic_searches: u64,
+    /// The history store, kept open between facts and status requests:
+    /// opening it runs the `.pixel` trust check (a `git ls-files` spawn),
+    /// the DDL and the pragmas. Reopened, and so re-checked, whenever the
+    /// db file is another one than the store holds (a rebuild by another
+    /// process, a replaced or relinked `.pixel/`).
+    facts: Option<OpenFacts>,
+    /// `git rev-list --count --all` for `status`, under the refs hash it
+    /// was counted at: it can only change when a ref moves.
+    commit_total: Option<(String, u64)>,
+    /// History-store opens and `rev-list` counts run, for the tests that
+    /// pin them to the first request and to a moved db or ref.
+    #[cfg(test)]
+    facts_opens: usize,
+    #[cfg(test)]
+    rev_list_runs: usize,
     /// The facts/history warm loop is demand-driven: spawned on the first
     /// facts-consuming request, not at daemon start — users who never touch
     /// history commands never pay for the index.
     facts_warmer_started: AtomicBool,
-    /// Short-TTL cache of the `repo_snapshot` triple (HEAD, branch, dirty
-    /// list). Every snapshot-carrying op used to pay 3 git subprocesses;
-    /// a burst of scope-task+impact+find-code now costs one round-trip.
-    /// Invalidated by watcher batches and every writing op.
-    snapshot_cache: Option<(Instant, SnapshotInfo)>,
+    /// Fan-in queries run, for the tests that pin which ops count fan-in.
+    #[cfg(test)]
+    fan_in_queries: usize,
+    /// Caches of what `repo_snapshot` reports, one git subprocess each: a
+    /// burst of scope-task+impact+find-code costs one round-trip. A writing
+    /// op or a HEAD move seen under `.git` drops all three; a watcher batch
+    /// drops only the dirty list, since a working-tree edit moves neither
+    /// HEAD nor the branch. HEAD is also the one the graph check reads.
+    git_state: GitStateCache,
     /// Short-TTL cache of the `git log --since=90.days` activity map behind
     /// `engine_signals`. The decay weights shift negligibly over the TTL;
     /// only successful scans are cached so a transient git failure still
     /// reports `activity_unavailable` on the next call.
-    activity_cache: Option<(Instant, std::collections::HashMap<String, f64>)>,
+    activity_cache: Option<(Instant, rustc_hash::FxHashMap<String, f64>)>,
     /// Per-file stat→hash memo for `tree_delta`: after a watcher batch
     /// drops the graph handle, the re-walk hashes only files whose
     /// (mtime, len) changed instead of the whole tree.
     hash_cache: pixel_graph::build::TreeHashCache,
+    /// The resident chunk vectors behind `meaning`, built on a background
+    /// thread. Shared with every read replica, which ranks from it and never
+    /// builds it.
+    meaning: Arc<Meaning>,
+    /// The snapshot the writer last computed, with the generation it was
+    /// computed at; replicas attach it instead of running git (#1151).
+    published_snapshot: Arc<RwLock<Option<PublishedSnapshot>>>,
+    /// On a replica, the published snapshot the read in progress attaches.
+    reader_snapshot: Option<SnapshotInfo>,
+    /// Runs inside a watcher batch's graph transaction, right before the
+    /// swap: the tests hold the batch open there.
+    #[cfg(test)]
+    before_swap: Option<Box<dyn FnMut() + Send>>,
 }
 
-/// How long a cached [`SnapshotInfo`] may be served. One concurrent burst
-/// of retrieval ops (scope-task + impact + find-code back to back) shares
-/// one git round-trip; dirty-state staleness inside the window is the
-/// accepted trade, and writing ops + watcher batches invalidate anyway.
+/// How long a cached HEAD, branch or dirty list may be served. One
+/// concurrent burst of retrieval ops (scope-task + impact + find-code back
+/// to back) shares one git round-trip; staleness inside the window (a
+/// commit made outside pixel) is the accepted trade, and writing ops and
+/// watcher batches invalidate anyway.
 const SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(1000);
+
+/// How long HEAD and the branch may be served once the watch covers
+/// `.git`: a commit, a checkout or a reset drops them through
+/// `Corpus::git_moved`, so the TTL only bounds an event the backend lost.
+const WATCHED_REF_TTL: Duration = Duration::from_secs(60);
+
+/// The git state a snapshot reports, each value cached on its own.
+struct GitStateCache {
+    /// For the dirty list: a tracked file under an ignored directory
+    /// (`vendor/`, `build/`) changes without a watcher event.
+    ttl: Duration,
+    /// For HEAD and the branch: `SNAPSHOT_CACHE_TTL` until the watch
+    /// covers `.git`, then `WATCHED_REF_TTL`.
+    ref_ttl: Duration,
+    head: Option<(Instant, Option<String>)>,
+    branch: Option<(Instant, Option<String>)>,
+    dirty: Option<(Instant, Vec<String>)>,
+    /// Git lookups actually run, for the tests that count them.
+    #[cfg(test)]
+    lookups: usize,
+}
+
+impl GitStateCache {
+    fn new() -> Self {
+        Self {
+            ttl: SNAPSHOT_CACHE_TTL,
+            ref_ttl: SNAPSHOT_CACHE_TTL,
+            head: None,
+            branch: None,
+            dirty: None,
+            #[cfg(test)]
+            lookups: 0,
+        }
+    }
+
+    /// Forget everything: a writing op may have moved any of it.
+    fn clear(&mut self) {
+        self.head = None;
+        self.branch = None;
+        self.dirty = None;
+    }
+
+    fn head(&mut self, root: &Path) -> Option<String> {
+        let ttl = self.ref_ttl;
+        self.lookup(
+            |cache| &mut cache.head,
+            ttl,
+            || pixel_index::gitsync::rev_parse_head(root),
+        )
+    }
+
+    /// HEAD read now, whatever the cache holds, and kept for the rest of
+    /// the request: the answer to a freshness gate, which a commit made
+    /// outside pixel a moment ago must not pass.
+    fn fresh_head(&mut self, root: &Path) -> Option<String> {
+        self.head = None;
+        self.head(root)
+    }
+
+    fn branch(&mut self, root: &Path) -> Option<String> {
+        let ttl = self.ref_ttl;
+        self.lookup(
+            |cache| &mut cache.branch,
+            ttl,
+            || pixel_index::gitsync::current_branch(root),
+        )
+    }
+
+    fn dirty(&mut self, root: &Path) -> Vec<String> {
+        let ttl = self.ttl;
+        self.lookup(
+            |cache| &mut cache.dirty,
+            ttl,
+            || {
+                pixel_index::gitsync::status_porcelain(root)
+                    .into_iter()
+                    .map(|(_xy, path)| path)
+                    .collect()
+            },
+        )
+    }
+
+    /// The value in `slot` while younger than `ttl`, else a fresh `run`.
+    fn lookup<T: Clone>(
+        &mut self,
+        slot: impl Fn(&mut Self) -> &mut Option<(Instant, T)>,
+        ttl: Duration,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        if let Some((at, value)) = slot(self)
+            && at.elapsed() < ttl
+        {
+            return value.clone();
+        }
+        #[cfg(test)]
+        {
+            self.lookups += 1;
+        }
+        let value = run();
+        *slot(self) = Some((Instant::now(), value.clone()));
+        value
+    }
+}
 
 /// How long the `git log` activity map may be served. Churn decays on a
 /// 14-day half-life, so a minute of reuse never moves a ranking; the TTL
 /// only bounds how fast a just-landed commit starts counting.
 const ACTIVITY_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// A compact `SnapshotInfo` the writer computed while the published
+/// generation was `generation`: what a replica answering from that
+/// generation attaches.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PublishedSnapshot {
+    pub generation: u64,
+    pub snapshot: SnapshotInfo,
+}
 
 /// Version of a coherently published index/graph pair, not a filesystem snapshot.
 #[derive(Clone, Copy, Debug)]
@@ -341,6 +621,36 @@ impl Publication {
     }
 }
 
+/// The moment a watcher batch becomes what readers see. Until
+/// [`Swap::open`], replicas answer from the published generation; `open`
+/// takes the publication's write lock, marks it unhealthy (a panic before
+/// the publish leaves it refusing reads, not answering from a half-applied
+/// batch) and applies the staged index. The lock is held until the swap is
+/// dropped, after the caller committed the graph and published.
+struct Swap<'a> {
+    publication: &'a RwLock<Publication>,
+    index: &'a RwLock<IndexSet>,
+    staged: Option<StagedRefresh>,
+    state: Option<RwLockWriteGuard<'a, Publication>>,
+}
+
+impl Swap<'_> {
+    /// The publication, write-locked, with the staged index applied: taken
+    /// on the first call, returned as is on the next ones.
+    fn open(&mut self) -> &mut Publication {
+        let publication = self.publication;
+        let state = self.state.get_or_insert_with(|| {
+            let mut state = publication.write_or_recover();
+            state.healthy = false;
+            state
+        });
+        if let Some(staged) = self.staged.take() {
+            self.index.write_or_recover().apply_refresh(staged);
+        }
+        state
+    }
+}
+
 /// Counts watcher-side failures and decides which ones are logged: the
 /// first, then every doubling (1, 2, 4, 8 …). A permanently broken graph.db
 /// or watch stays visible in `status` without one stderr line per filesystem
@@ -372,6 +682,12 @@ fn note_failure(log: &mut FailureLog, what: &str) {
     }
 }
 
+impl crate::daemon::ReadReplica for Service {
+    fn read(&mut self, req: &Request, behind: &dyn Fn() -> Option<Duration>) -> Option<Response> {
+        self.read_answer(req, behind)
+    }
+}
+
 impl Service {
     /// Open (building layers if needed) the text index; graph db is lazy.
     pub fn open(root: &Path) -> Result<Self, ServeError> {
@@ -379,6 +695,7 @@ impl Service {
             .canonicalize()
             .map_err(|e| ServeError::Msg(format!("bad root {}: {e}", root.display())))?;
         let index = IndexSet::open_or_build(&root, Box::new(TrigramExtractor))?;
+        let meaning = Meaning::new(&root);
         Ok(Service {
             root,
             index: Arc::new(RwLock::new(index)),
@@ -392,18 +709,45 @@ impl Service {
             graph: None,
             graph_failures: FailureLog::default(),
             watcher_failures: FailureLog::default(),
+            watch: None,
             embedder: None,
             embedder_unavailable: false,
-            embedder_download_started: false,
+            embedder_hinted: false,
+            embedder_download: None,
+            embedder_error: None,
+            semantic_searches: 0,
+            facts: None,
+            commit_total: None,
+            #[cfg(test)]
+            facts_opens: 0,
+            #[cfg(test)]
+            rev_list_runs: 0,
             facts_warmer_started: AtomicBool::new(false),
-            snapshot_cache: None,
+            #[cfg(test)]
+            fan_in_queries: 0,
+            git_state: GitStateCache::new(),
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
+            meaning,
+            published_snapshot: Arc::new(RwLock::new(None)),
+            reader_snapshot: None,
+            #[cfg(test)]
+            before_swap: None,
         })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// What `ping` answers: constant for the life of the service, so the
+    /// daemon loop can answer it without the writer.
+    pub(crate) fn pong_value(&self) -> Value {
+        json!({
+            "pong": true,
+            "root": self.root.display().to_string(),
+            "protocol_version": PROTOCOL_VERSION,
+        })
     }
 
     /// A persistent reader shares the warm text index, but never a SQLite connection.
@@ -417,13 +761,30 @@ impl Service {
             graph: None,
             graph_failures: FailureLog::default(),
             watcher_failures: FailureLog::default(),
+            watch: None,
             embedder: None,
             embedder_unavailable: true,
-            embedder_download_started: false,
+            embedder_hinted: false,
+            embedder_download: None,
+            embedder_error: None,
+            semantic_searches: 0,
+            facts: None,
+            commit_total: None,
+            #[cfg(test)]
+            facts_opens: 0,
+            #[cfg(test)]
+            rev_list_runs: 0,
             facts_warmer_started: AtomicBool::new(true),
-            snapshot_cache: None,
+            #[cfg(test)]
+            fan_in_queries: 0,
+            git_state: GitStateCache::new(),
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
+            meaning: Arc::clone(&self.meaning),
+            published_snapshot: Arc::clone(&self.published_snapshot),
+            reader_snapshot: None,
+            #[cfg(test)]
+            before_swap: None,
         }
     }
 
@@ -435,7 +796,7 @@ impl Service {
         limit: usize,
     ) -> (Publication, Result<Value, String>) {
         let publication = Arc::clone(&self.publication);
-        let state = publication.read().expect("publication lock poisoned");
+        let state = publication.read_or_recover();
         if !state.healthy {
             return (
                 *state,
@@ -454,17 +815,80 @@ impl Service {
         {
             return (*state, Err(error.to_string()));
         }
-        let result = match kind {
-            "execution_brief" => self.op_targets(query, Some(limit), Some("P1"), false),
-            "search" => self.op_search(query, Some(limit), None, None, None, None),
-            "resolve" => self.op_resolve(query, Some(limit)),
-            "impact" => self.op_impact(query, "upstream", Some(2)),
-            _ => Err(format!("unsupported evidence query kind: {kind}")),
+        let result = match crate::plane::evidence_request(kind, query, limit) {
+            Some(req) if crate::plane::plane(&req) != Plane::Read => {
+                Err(format!("unsupported evidence query kind: {kind}"))
+            }
+            // Ranks from the resident vectors the writable service builds;
+            // a replica never builds, embeds a chunk or reads a file. The
+            // generation is the one held above, not a second lock.
+            Some(Request::Meaning {
+                query,
+                limit,
+                stale_ok: _,
+            }) => self.meaning.answer(state.generation, &query, limit),
+            Some(req) => self.dispatch(req),
+            None => Err(format!("unsupported evidence query kind: {kind}")),
         };
         if let Some(graph) = &self.graph {
             let _ = graph.conn().execute_batch("ROLLBACK");
         }
         (*state, result)
+    }
+
+    /// Answer a read-plane request on a replica, from the generation the
+    /// writer last published, or `None` when the writer must: not an op a
+    /// replica may answer (`plane::replica_may_answer`), not a replica, an unhealthy or graph-lagging
+    /// publication, no graph on disk to read (the writer builds it), no
+    /// snapshot published for this generation, or a generation that moved
+    /// while the answer was computed. The graph is read inside one
+    /// transaction, so the answer sees one database state, and the answer
+    /// carries the snapshot published with that generation: a replica runs
+    /// no git. A `stale_ok` answer given while a watcher batch is unfinished
+    /// (`behind`, sampled once the answer is computed) states it
+    /// ([`stamp_stale`]).
+    pub(crate) fn read_answer(
+        &mut self,
+        req: &Request,
+        behind: &dyn Fn() -> Option<Duration>,
+    ) -> Option<Response> {
+        if !self.read_only || !crate::plane::replica_may_answer(req) {
+            return None;
+        }
+        let before = *self.publication.read_or_recover();
+        if !before.healthy || before.graph_lagging {
+            return None;
+        }
+        if self.reader_generation != before.generation {
+            self.graph = None;
+            self.reader_generation = before.generation;
+        }
+        if self.graph.is_none() {
+            self.graph = GraphStore::open_read_only(&self.graph_db_path()).ok();
+        }
+        let published = self.published_snapshot.read_or_recover().clone()?;
+        if published.generation != before.generation {
+            return None;
+        }
+        self.graph.as_ref()?.conn().execute_batch("BEGIN").ok()?;
+        self.reader_snapshot = Some(published.snapshot);
+        let response = self.handle(req.clone());
+        self.reader_snapshot = None;
+        if let Some(graph) = &self.graph {
+            let _ = graph.conn().execute_batch("ROLLBACK");
+        }
+        // Sample batch state before validating the generation. If a batch
+        // publishes between the two checks, the generation comparison sends
+        // this response back to the writer instead of returning it unstamped.
+        let stale_lag = req.stale_ok().then(behind).flatten();
+        let after = *self.publication.read_or_recover();
+        if !after.healthy || after.generation != before.generation {
+            return None;
+        }
+        Some(match stale_lag {
+            Some(lag) => stamp_stale(response, before.generation, lag),
+            _ => response,
+        })
     }
 
     /// Semantic leads for a lexical miss. The read plane never embeds: a
@@ -485,7 +909,36 @@ impl Service {
     }
 
     pub(crate) fn admitted_paths(&self) -> Vec<String> {
-        self.index.read().expect("index lock poisoned").paths()
+        self.index.read_or_recover().paths()
+    }
+
+    /// The files a task can rank: the admitted paths without generated, minified or
+    /// vendored bundles. A bundle names its own words in its filename and matches every
+    /// keyword it contains, so it is never the answer to a question about the code.
+    /// Only files past the graph's size floor are read.
+    pub(crate) fn ranked_paths(&self) -> Vec<String> {
+        self.admitted_paths()
+            .into_iter()
+            .filter(|rel| {
+                let full = self.root.join(rel);
+                match std::fs::metadata(&full) {
+                    Ok(meta) if meta.len() >= pixel_graph::extract::GENERATED_MIN_BYTES as u64 => {
+                        std::fs::read(&full).map_or(true, |bytes| {
+                            // A vendored bundle can average short lines and still carry a
+                            // multi-hundred-kilobyte minified line; no written source does.
+                            let longest = bytes
+                                .split(|b| *b == b'\n')
+                                .map(<[u8]>::len)
+                                .max()
+                                .unwrap_or(0);
+                            !pixel_graph::extract::is_generated_blob(&bytes)
+                                && longest < pixel_graph::extract::GENERATED_MIN_BYTES
+                        })
+                    }
+                    _ => true,
+                }
+            })
+            .collect()
     }
 
     pub fn graph_db_path(&self) -> PathBuf {
@@ -505,39 +958,88 @@ impl Service {
     }
 
     /// Watcher hook: refresh a batch of files in index + graph.
+    ///
+    /// Readers keep the published generation while the batch is read and
+    /// extracted: the index is staged under its read lock and the graph rows
+    /// are written in an uncommitted transaction, which SQLite readers do not
+    /// see. Only the swap takes the publication's write lock: applying the
+    /// staged index, the graph `COMMIT` and the generation bump, so a replica
+    /// never waits for the extraction and never answers from the new index
+    /// or rows under the old generation.
     pub fn refresh_files(&mut self, files: &[(&str, bool)]) {
         if files.is_empty() {
             return;
         }
-        // A watcher batch means the working tree changed: the cached
-        // snapshot's dirty list is stale as of right now.
-        self.snapshot_cache = None;
-        let publication = Arc::clone(&self.publication);
-        let mut state = publication.write().expect("publication lock poisoned");
-        state.healthy = false;
-        let graph_changes = self
-            .index
-            .write()
-            .expect("index lock poisoned")
-            .refresh_files(files);
-        let graph_files: Vec<(&str, bool)> = graph_changes
-            .iter()
-            .map(|(path, outcome)| (path.as_str(), *outcome == RefreshOutcome::Excluded))
+        // A watcher batch means the working tree changed: the cached dirty
+        // list is stale as of right now. HEAD and the branch are not.
+        self.git_state.dirty = None;
+        // Stage the envelope alongside the index, outside the publication
+        // lock. Every batch publishes it so a subsequent batch can serve
+        // replicas without an intervening writer request to warm a snapshot.
+        let snapshot = self.repo_snapshot().compact();
+        let staged = self.index.read_or_recover().stage_refresh(files);
+        let graph_files: Vec<(String, bool)> = staged
+            .outcomes()
+            .into_iter()
+            .map(|(path, outcome)| (path, outcome == RefreshOutcome::Excluded))
             .collect();
+        let graph_files: Vec<(&str, bool)> = graph_files
+            .iter()
+            .map(|(path, removed)| (path.as_str(), *removed))
+            .collect();
+        let publication = Arc::clone(&self.publication);
+        let index = Arc::clone(&self.index);
+        let mut swap = Swap {
+            publication: &publication,
+            index: &index,
+            staged: Some(staged),
+            state: None,
+        };
+        #[cfg(test)]
+        let mut before_swap = self.before_swap.take();
         let db = self.graph_db_path();
-        if db.exists() {
-            if let Err(error) = bridge::update_files(&self.root, &db, &graph_files) {
+        let lock = if db.exists() {
+            GraphLock::try_acquire(&db)
+        } else {
+            None
+        };
+        if db.exists() && lock.is_none() {
+            // Another process holds the graph (a rebuild that will swap the
+            // file): leave it to the next graph op, which sees the drift.
+            self.graph = None;
+        } else if db.exists() {
+            let updated = bridge::update_files_gated(
+                &self.root,
+                &db,
+                &graph_files,
+                &mut self.hash_cache,
+                &mut || {
+                    #[cfg(test)]
+                    if let Some(hold) = before_swap.as_mut() {
+                        hold();
+                    }
+                    swap.open();
+                },
+            );
+            self.graph = None;
+            if let Err(error) = updated {
                 self.note_graph_update_failure(
                     &format!("batch of {} file(s) from {}", files.len(), files[0].0),
                     &error,
                 );
-                self.graph = None;
+                let state = swap.open();
                 state.publish_after_failure();
+                self.meaning.nudge(state.generation);
                 return;
             }
-            self.graph = None;
         }
+        let state = swap.open();
         state.publish();
+        *self.published_snapshot.write_or_recover() = Some(PublishedSnapshot {
+            generation: state.generation,
+            snapshot,
+        });
+        self.meaning.nudge(state.generation);
     }
 
     /// Count a watcher-driven graph update that failed. The cached handle is
@@ -554,15 +1056,83 @@ impl Service {
     /// answers for: what a watch registered late must re-read besides
     /// `git status`.
     pub(crate) fn index_catch_up(&self) -> (Option<String>, BTreeSet<String>) {
-        let index = self.index.read().expect("index lock poisoned");
+        let index = self.index.read_or_recover();
         (
             index.opened_head().map(str::to_owned),
             index.overlay_paths(),
         )
     }
 
+    /// The HEAD the text index covers, for the watch tests of `daemon`.
+    #[cfg(test)]
+    pub(crate) fn index_covered_head(&self) -> Option<String> {
+        self.index
+            .read_or_recover()
+            .covered_head()
+            .map(str::to_owned)
+    }
+
+    /// Bring the text index's content to HEAD after a ref move: refresh every
+    /// path that changed between the HEAD the index covers and HEAD now, then
+    /// record HEAD as covered. Whether the index covers HEAD afterwards. A
+    /// failed diff, or a move wider than [`HEAD_CATCH_UP_MAX_PATHS`], leaves
+    /// the covered HEAD where it was: the freshness gate goes on saying
+    /// `index_stale` rather than vouch for content nothing refreshed.
+    pub(crate) fn catch_up_head(&mut self) -> bool {
+        self.catch_up_head_within(HEAD_CATCH_UP_MAX_PATHS)
+    }
+
+    /// [`Service::catch_up_head`] with the widest move it refreshes.
+    fn catch_up_head_within(&mut self, max_paths: usize) -> bool {
+        let root = self.root.clone();
+        let Some(head) = pixel_index::gitsync::rev_parse_head(&root) else {
+            return false;
+        };
+        let covered = self
+            .index
+            .read_or_recover()
+            .covered_head()
+            .map(str::to_owned);
+        if covered.as_deref() == Some(head.as_str()) {
+            return true;
+        }
+        let from = covered.unwrap_or_else(|| crate::daemon::EMPTY_TREE.to_string());
+        let Ok(changed) = pixel_index::gitsync::diff_name_status_or_err(&root, &from, &head) else {
+            return false;
+        };
+        if changed.len() > max_paths {
+            return false;
+        }
+        let files: Vec<(&str, bool)> = changed
+            .iter()
+            .map(|(_status, path)| (path.as_str(), !root.join(path).exists()))
+            .collect();
+        self.refresh_files(&files);
+        self.index.write_or_recover().note_caught_up(&head);
+        true
+    }
+
+    /// Record the watch the transport loop registered, for `status`. Once
+    /// it covers `.git`, HEAD and the branch are cached until they move.
+    pub(crate) fn note_watch_ready(&mut self, report: WatchReport) {
+        self.watch = Some(report);
+        if report.git_dir {
+            self.git_state.ref_ttl = WATCHED_REF_TTL;
+        }
+    }
+
+    /// HEAD or a branch moved: the cached git state describes another commit,
+    /// and so does the snapshot published for the replicas.
+    pub(crate) fn note_git_moved(&mut self) {
+        self.git_state.clear();
+        self.unpublish_snapshot();
+    }
+
     /// Count a `notify` backend error reported by the transport loop.
     pub(crate) fn note_watcher_error(&mut self, error: &str) {
+        // A lost event may have been a HEAD move: stop trusting the watch
+        // for it.
+        self.git_state.ref_ttl = SNAPSHOT_CACHE_TTL;
         note_failure(
             &mut self.watcher_failures,
             &format!("watcher error: {error}"),
@@ -592,7 +1162,7 @@ impl Service {
             );
         }
         let publication = Arc::clone(&self.publication);
-        let mut state = publication.write().expect("publication lock poisoned");
+        let mut state = publication.write_or_recover();
         state.healthy = false;
         let result = self.ensure_graph_inner();
         if result.is_ok() {
@@ -605,7 +1175,7 @@ impl Service {
 
     fn ensure_graph_inner(&mut self) -> Result<Option<Value>, String> {
         let db = self.graph_db_path();
-        let gitless = pixel_index::gitsync::rev_parse_head(&self.root).is_none();
+        let gitless = self.git_state.head(&self.root).is_none();
         let mut built = None;
         if !db.exists() {
             built = Some(self.full_rebuild_info("missing")?);
@@ -662,7 +1232,12 @@ impl Service {
         let db = self.graph_db_path();
         self.graph.take();
         let started = Instant::now();
-        if let Err(error) = bridge::apply_tree_delta(&self.root, &db, delta) {
+        // Released before a fallback rebuild, which takes it again.
+        let applied = {
+            let _lock = GraphLock::acquire(&db)?;
+            bridge::apply_tree_delta(&self.root, &db, delta)
+        };
+        if let Err(error) = applied {
             let mut info = self.full_rebuild_info("incremental_failed")?;
             info["incremental_error"] = json!(error);
             return Ok(info);
@@ -690,6 +1265,10 @@ impl Service {
     fn rebuild_graph(&mut self) -> Result<(Value, u64), String> {
         let db = self.graph_db_path();
         let tmp = db.with_file_name(format!(".graph-rebuild-{}.db", std::process::id()));
+        // Held through the swap: no other writer, in this process or
+        // another, builds into the same temporary file or renames over the
+        // database while this one does.
+        let _lock = GraphLock::acquire(&db)?;
         self.graph.take();
         remove_sqlite_files(&tmp)?;
         let started = Instant::now();
@@ -701,6 +1280,14 @@ impl Service {
                 .conn()
                 .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
                 .map_err(|error| error.to_string())?;
+        }
+        // Fold the live database's WAL into it and empty it before the
+        // sidecars go: a reader still on the old file loses no committed
+        // page, and the new file never meets a WAL that is not its own.
+        if db.exists()
+            && let Ok(live) = GraphStore::open(&db)
+        {
+            let _ = live.conn().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
         }
         remove_sqlite_sidecars(&db)?;
         std::fs::rename(&tmp, &db).map_err(|error| {
@@ -743,7 +1330,7 @@ impl Service {
         }
     }
 
-    /// Lazy-load the code embedding model. Three-tier graceful degradation:
+    /// Lazy-load the code embedding model; download it only on opt-in:
     ///
     /// 1. **Cached** (marker file exists for v2): load now with
     ///    `download=false` — fast (~100ms for a static model). On load
@@ -751,76 +1338,84 @@ impl Service {
     ///    `embedder_unavailable` permanently — re-downloading won't fix a
     ///    corrupt file; the user must clear the model cache.
     ///
-    /// 2. **Not cached, no download started**: spawn a detached background
-    ///    thread that downloads + caches the model (writes the marker on
-    ///    success). Degrade THIS call to `code` ranking (semantic channel
-    ///    returns `None`). The next call finds the marker and loads from
-    ///    cache. Never blocks the search latency budget on a network
-    ///    download.
+    /// 2. **Not cached, [`EMBED_DOWNLOAD_ENV`] unset**: print
+    ///    [`EMBEDDER_HINT`] once and degrade this call to `code` ranking (the
+    ///    semantic channel returns `None`). No network request is made.
     ///
-    /// 3. **Not cached, download already in progress**: degrade silently.
-    ///    The background thread will write the marker when done; the next
-    ///    call picks it up.
+    /// 3. **Not cached, opted in**: spawn one detached thread that downloads
+    ///    and caches the model (the opener prints the repository, revision
+    ///    and destination as it starts, and writes the marker on success);
+    ///    degrade this call. The next call finds the marker and loads it.
     ///
-    /// `embedder_unavailable` is NEVER set for "not cached" — only for a
-    /// confirmed load failure on a cached model. This means `pixel search-meaning`
-    /// (which uses `download=true`) can cache the model at any time, and
-    /// the next `--scope hybrid` search will pick it up without a restart.
-    // Loads or downloads the potion model: unit tests never have it, so no
-    // test can observe the difference (`pixel search-meaning` covers it end to end).
-    #[cfg_attr(test, mutants::skip)]
+    /// `embedder_unavailable` is NEVER set for "not cached": a model cached
+    /// later is picked up by the next `--scope hybrid` search without a
+    /// restart.
+    #[cfg_attr(test, mutants::skip)] // adapter reading the process environment and real model cache
     fn ensure_embedder(&mut self) {
-        if self.embedder.is_some() || self.embedder_unavailable {
+        self.ensure_embedder_with(
+            code_model_on_disk(),
+            embed_download_opted_in(std::env::var(EMBED_DOWNLOAD_ENV).ok().as_deref()),
+            open_code_embedder,
+        );
+    }
+
+    fn ensure_embedder_with(
+        &mut self,
+        cached: bool,
+        opted_in: bool,
+        open: impl FnOnce(bool) -> Result<Box<dyn Embedder>, String> + Send + 'static,
+    ) {
+        self.poll_embedder_download();
+        if self.embedder.is_some() || self.embedder_unavailable || self.embedder_download.is_some()
+        {
             return;
         }
-
-        // Cached means this model's own marker, or the legacy shared one
-        // while it still names this model.
-        let is_cached = pixel_recall::potion_cached(&pixel_recall::models_dir(), POTION_V2_REPO);
-
-        if is_cached {
-            // Cached — load now (fast, no network).
-            // SAFETY: set_var is process-global. This runs on the request thread
-            // before the embedder is opened, and nothing else reads
-            // PIXEL_RECALL_MODEL_REPO concurrently.
-            unsafe {
-                std::env::set_var("PIXEL_RECALL_MODEL_REPO", POTION_V2_REPO);
-            }
-            match open_default_embedder(false) {
-                Ok(e) => self.embedder = Some(e),
-                Err(_) => self.embedder_unavailable = true,
-            }
-            return;
-        }
-
-        // Not cached — trigger a one-shot background download, degrade this
-        // call. The thread is detached; it writes the marker on success.
-        //
-        // In daemon mode (long-running), the thread completes and the next
-        // search picks up the cached model. In `--no-daemon` mode (one-shot
-        // CLI), the process exits before the thread finishes — the user
-        // sees the hint below and runs `pixel search-meaning` once to cache the model.
-        if !self.embedder_download_started {
-            self.embedder_download_started = true;
-            eprintln!(
-                "pixel: semantic channel unavailable — model not cached yet. \
-                 Run `pixel search-meaning \"test\" .` once to download it (~1s), then retry \
-                 `--scope hybrid`. Degrading to `code` ranking for this call."
-            );
-            std::thread::spawn(move || {
-                // SAFETY: same variable and value as the cached path above; the only
-                // reader is the embedder opened on this thread right after.
-                unsafe {
-                    std::env::set_var("PIXEL_RECALL_MODEL_REPO", POTION_V2_REPO);
+        match embedder_step(cached, self.embedder_hinted, opted_in) {
+            EmbedderStep::Load => match open(false) {
+                Ok(embedder) => {
+                    self.embedder = Some(embedder);
+                    self.embedder_error = None;
                 }
-                // download=true: fetches + caches the model, writes marker.
-                // Result is intentionally ignored — best-effort background
-                // download; the next search call will recheck the marker.
-                let _ = open_default_embedder(true);
-            });
+                Err(error) => {
+                    self.embedder_unavailable = true;
+                    self.embedder_error = Some(error);
+                }
+            },
+            EmbedderStep::Hint => {
+                self.embedder_hinted = true;
+                eprintln!("{EMBEDDER_HINT}");
+            }
+            EmbedderStep::Download => {
+                self.embedder_hinted = true;
+                match std::thread::Builder::new()
+                    .name("pixel-code-model".into())
+                    .spawn(move || open(true).map(drop))
+                {
+                    Ok(download) => self.embedder_download = Some(download),
+                    Err(error) => {
+                        self.embedder_error = Some(format!("start code-model download: {error}"))
+                    }
+                }
+            }
+            EmbedderStep::Degrade => {}
         }
-        // Degrade: semantic_rank_for_search returns None → caller skips
-        // the semantic channel, fusion is identical to `scope: "code"`.
+    }
+
+    fn poll_embedder_download(&mut self) {
+        if self
+            .embedder_download
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            let download = self
+                .embedder_download
+                .take()
+                .expect("finished download is present");
+            self.embedder_error = download
+                .join()
+                .unwrap_or_else(|_| Err("code-model download thread panicked".into()))
+                .err();
+        }
     }
 
     /// Compute a semantic file ranking over the matched pool: embed the
@@ -839,7 +1434,7 @@ impl Service {
         self.ensure_embedder();
         let embedder = self.embedder.as_deref_mut()?;
         // Group matched lines by file.
-        let mut by_file: HashMap<String, String> = HashMap::new();
+        let mut by_file: HashMap<String, String> = HashMap::default();
         for m in matches {
             by_file.entry(m.path.clone()).or_default().push_str(&m.line);
             by_file.entry(m.path.clone()).or_default().push('\n');
@@ -871,6 +1466,7 @@ impl Service {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.1.cmp(&b.1))
         });
+        self.semantic_searches += 1;
         Some(scored.into_iter().map(|(_, f)| f).collect())
     }
 
@@ -909,18 +1505,31 @@ impl Service {
         let full_dirty_list = matches!(op_name, "inspect" | "review");
         // Ops that write repo state (commit/push/branch/sync/rename/…) make
         // any cached HEAD/branch/dirty triple stale the moment they return.
-        let mutates_repo = matches!(
-            op_name,
-            "publish" | "push" | "ship" | "branch_op" | "update" | "sync" | "rename" | "reindex"
-        );
-        match self.dispatch(req) {
+        let plane = crate::plane::plane(&req);
+        let mutates_repo = plane.mutates_repo();
+        // A repository write can run for minutes (a `sync` is several git
+        // calls of up to 120 s) while replicas answer reads: give them a
+        // snapshot of the generation they read before it starts. Other ops
+        // publish the snapshot they attach, at no extra git cost.
+        if !self.read_only && plane == Plane::RepoWrite {
+            self.ensure_snapshot_published();
+        }
+        let result = self.dispatch(req);
+        if mutates_repo {
+            // HEAD, a branch or the tree may have moved, failure or not.
+            self.unpublish_snapshot();
+        }
+        match result {
             Ok(v) => {
                 if mutates_repo {
-                    self.snapshot_cache = None;
+                    self.git_state.clear();
                 }
                 let mut env = Envelope::success(op_name, v);
                 if attach_snapshot {
                     let snapshot = self.repo_snapshot();
+                    if !mutates_repo {
+                        self.publish_snapshot(&snapshot);
+                    }
                     env = env.with_snapshot(if full_dirty_list {
                         snapshot
                     } else {
@@ -953,35 +1562,51 @@ impl Service {
     /// staged / untracked) repo-relative paths. `token` is left `None`
     /// here — pixel-ops computes the validated snapshot token separately.
     fn repo_snapshot(&mut self) -> SnapshotInfo {
-        if let Some((at, snapshot)) = &self.snapshot_cache
-            && at.elapsed() < SNAPSHOT_CACHE_TTL
-        {
-            return snapshot.clone();
+        // A replica never runs git: it attaches what the writer published
+        // for the generation it reads ([`Service::read_answer`]).
+        if self.read_only {
+            return self.reader_snapshot.clone().unwrap_or_default();
         }
-        let head = pixel_index::gitsync::rev_parse_head(&self.root);
-        let branch = pixel_index::gitsync::current_branch(&self.root);
-        let dirty: Vec<String> = pixel_index::gitsync::status_porcelain(&self.root)
-            .into_iter()
-            .map(|(_xy, path)| path)
-            .collect();
-        let snapshot = SnapshotInfo {
+        SnapshotInfo {
             token: None,
-            head,
-            branch,
-            dirty,
+            head: self.git_state.head(&self.root),
+            branch: self.git_state.branch(&self.root),
+            dirty: self.git_state.dirty(&self.root),
             dirty_count: None,
-        };
-        self.snapshot_cache = Some((Instant::now(), snapshot.clone()));
-        snapshot
+        }
+    }
+
+    /// Publish `snapshot`, compact, for the current generation (writer only).
+    fn publish_snapshot(&self, snapshot: &SnapshotInfo) {
+        let generation = self.publication_generation();
+        *self.published_snapshot.write_or_recover() = Some(PublishedSnapshot {
+            generation,
+            snapshot: snapshot.clone().compact(),
+        });
+    }
+
+    /// Publish a snapshot unless one already describes the current
+    /// generation; the cached git state keeps this to one lookup.
+    fn ensure_snapshot_published(&mut self) {
+        let generation = self.publication_generation();
+        let current = self
+            .published_snapshot
+            .read_or_recover()
+            .as_ref()
+            .is_some_and(|published| published.generation == generation);
+        if !current {
+            let snapshot = self.repo_snapshot();
+            self.publish_snapshot(&snapshot);
+        }
+    }
+
+    fn unpublish_snapshot(&self) {
+        *self.published_snapshot.write_or_recover() = None;
     }
 
     fn dispatch(&mut self, req: Request) -> Result<Value, String> {
         match req {
-            Request::Ping => Ok(json!({
-                "pong": true,
-                "root": self.root.display().to_string(),
-                "protocol_version": PROTOCOL_VERSION,
-            })),
+            Request::Ping => Ok(self.pong_value()),
             Request::Shutdown => Ok(json!({"shutting_down": true})),
             Request::Recall { .. } => Err(
                 "recall ops are served by the recall daemon (`pixel recall daemon start`), not a repository daemon"
@@ -996,6 +1621,7 @@ impl Service {
                 scope,
                 globs,
                 types,
+                stale_ok: _,
             } => pixel_index::path_filter::PathFilter::new(&globs, &types).and_then(|filter| {
                 self.op_search(
                     &pattern,
@@ -1006,23 +1632,32 @@ impl Service {
                     filter.as_ref(),
                 )
             }),
-            Request::Targets { task, limit, max_tier, precision } => self.op_targets(&task, limit, max_tier.as_deref(), precision),
-            Request::TargetsFacts { task, limit } => self.op_targets_facts(&task, limit),
-            Request::Regions { task, limit } => self.op_regions(&task, limit),
-            Request::Symbol { name } => self.op_symbol(&name),
-            Request::Skeleton { file } => self.op_skeleton(&file),
-            Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
+            Request::Targets { task, limit, max_tier, precision, regions } => self.op_targets(&task, limit, max_tier.as_deref(), precision, regions),
+            // `stale_ok` chose who answers (`Queued::route`); the op is the
+            // same on the writer and on a replica.
+            Request::TargetsFacts {
+                task,
+                limit,
+                relevance_only,
+                stale_ok: _,
+            } => self.op_targets_facts(&task, limit, relevance_only),
+            Request::Meaning { query, limit, stale_ok: _ } => self.op_meaning(&query, limit),
+            Request::Symbol { name, stale_ok: _ } => self.op_symbol(&name),
+            Request::Skeleton { file, .. } => self.op_skeleton(&file),
+            Request::Context { uid, budget_tokens, .. } => self.op_context(&uid, budget_tokens),
             Request::Impact {
                 uid_or_name,
                 direction,
                 depth,
+                ..
             } => self.op_impact(&uid_or_name, &direction, depth),
             Request::Uses {
                 uid_or_name,
                 role,
                 offset,
+                ..
             } => self.op_uses(&uid_or_name, &role, offset),
-            Request::Trace { from, to } => self.op_trace(&from, &to),
+            Request::Trace { from, to, .. } => self.op_trace(&from, &to),
             Request::Processes { offset } => self.op_processes(offset),
             Request::Clusters { offset } => self.op_clusters(offset),
             Request::Changes {
@@ -1034,13 +1669,15 @@ impl Service {
             Request::Graph { if_stale } => self.op_graph(if_stale),
             Request::Status {} => self.op_status(),
             Request::Reindex {} => self.op_reindex(),
-            Request::Resolve { phrase, limit } => self.op_resolve(&phrase, limit),
-            Request::History { query, facet, limit } => {
-                self.op_history(&query, facet.as_deref(), limit)
+            Request::Resolve { phrase, limit, stale_ok: _ } => self.op_resolve(&phrase, limit),
+            Request::History { query, facet, limit, read_only } => {
+                self.op_history(&query, facet.as_deref(), limit, read_only)
             }
-            Request::Lifecycle { path, token } => self.op_lifecycle(path.as_deref(), token.as_deref()),
-            Request::Excavate { phrase, path, from, to, limit } => {
-                self.op_excavate(phrase.as_deref(), path.as_deref(), from.as_deref(), to.as_deref(), limit)
+            Request::Lifecycle { path, token, read_only } => {
+                self.op_lifecycle(path.as_deref(), token.as_deref(), read_only)
+            }
+            Request::Excavate { phrase, path, from, to, limit, read_only } => {
+                self.op_excavate(phrase.as_deref(), path.as_deref(), from.as_deref(), to.as_deref(), limit, read_only)
             }
             Request::Reconcile { strategy, push, into, request_id } => {
                 self.op_reconcile(strategy.as_deref(), push.as_deref(), into.as_deref(), request_id.as_deref())
@@ -1158,6 +1795,7 @@ impl Service {
                 time_budget_ms,
                 scope,
                 at_snapshot,
+                ..
             } => self.op_evaluate(EvaluateRequest {
                 from,
                 to,
@@ -1167,6 +1805,19 @@ impl Service {
                 time_budget_ms,
                 scope,
                 at_snapshot,
+            }),
+            Request::Cycles {
+                tiers,
+                max_nodes,
+                max_edges,
+                time_budget_ms,
+                max_components,
+            } => self.op_cycles(CyclesRequest {
+                tiers,
+                max_nodes,
+                max_edges,
+                time_budget_ms,
+                max_components,
             }),
         }
     }
@@ -1248,8 +1899,7 @@ impl Service {
             const RANK_CANDIDATE_CAP: usize = SEARCH_MAX_ROWS;
             let (pool, pool_stats) = self
                 .index
-                .read()
-                .expect("index lock poisoned")
+                .read_or_recover()
                 .search_page_filtered(pattern, 0, Some(RANK_CANDIDATE_CAP), paths, filter)
                 .map_err(|e| e.to_string())?;
             if pool_stats.truncated {
@@ -1281,8 +1931,7 @@ impl Service {
             (ranked_pool[start..].to_vec(), stats)
         } else {
             self.index
-                .read()
-                .expect("index lock poisoned")
+                .read_or_recover()
                 .search_page_filtered(pattern, offset, Some(row_limit), paths, filter)
                 .map_err(|e| e.to_string())?
         };
@@ -1421,15 +2070,22 @@ impl Service {
         limit: Option<usize>,
         max_tier: Option<&str>,
         precision: bool,
+        regions: bool,
     ) -> Result<Value, String> {
-        self.op_targets_mode(task, limit, max_tier, precision, false)
+        self.op_targets_mode(task, limit, max_tier, precision, false, regions)
     }
 
     /// Serve deterministic targets facts only from a fresh published snapshot.
-    fn op_targets_facts(&mut self, task: &str, limit: Option<usize>) -> Result<Value, String> {
+    /// With `relevance_only` the facts are the relevance block and its caps.
+    fn op_targets_facts(
+        &mut self,
+        task: &str,
+        limit: Option<usize>,
+        relevance_only: bool,
+    ) -> Result<Value, String> {
         let limit = limit.unwrap_or(pixel_rank::DEFAULT_LIMIT);
         let publication = Arc::clone(&self.publication);
-        let state = publication.read().expect("publication lock poisoned");
+        let state = publication.read_or_recover();
         let unavailable = |reason| {
             serde_json::to_value(TargetsFactsResult::Unavailable { reason })
                 .map_err(|error| error.to_string())
@@ -1445,7 +2101,16 @@ impl Service {
             Ok(index) => index.status(),
             Err(_) => return unavailable(TargetsFactsUnavailableReason::IndexUnavailable),
         };
-        if index_status.commit_oid != pixel_index::gitsync::rev_parse_head(&self.root) {
+        // The HEAD the content covers, not the base shard's commit: a delta
+        // and the overlay carry the content past the base, which is rebuilt
+        // rarely (#1032). A replica runs no git: it compares with the HEAD
+        // the writer published with the generation it reads.
+        let head = if self.read_only {
+            self.reader_snapshot.as_ref().and_then(|s| s.head.clone())
+        } else {
+            self.git_state.fresh_head(&self.root)
+        };
+        if index_status.covered_head != head {
             return unavailable(TargetsFactsUnavailableReason::IndexStale);
         }
 
@@ -1453,24 +2118,32 @@ impl Service {
         if !graph_path.is_file() {
             return unavailable(TargetsFactsUnavailableReason::GraphMissing);
         }
-        let graph = match GraphStore::open_read_only(&graph_path) {
-            Ok(graph) => graph,
-            Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
+        let graph_signature = if self.read_only {
+            // A replica answers a `stale_ok` request from the graph the
+            // writer published, which `read_answer` holds in one read
+            // transaction. It walks no tree: the edits of the batch under
+            // way already moved it, and the envelope states that lag.
+            match self.graph.as_ref().map(published_signature) {
+                Some(Some(signature)) => signature,
+                _ => return unavailable(TargetsFactsUnavailableReason::GraphStale),
+            }
+        } else {
+            let graph = match GraphStore::open_read_only(&graph_path) {
+                Ok(graph) => graph,
+                Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
+            };
+            // One stat-cached walk answers the stored signature, the extractor
+            // version and the tree's signature at once: files unchanged since
+            // the last walk are stat-only instead of re-read and re-hashed, so
+            // the freshness check stops dominating the request's window.
+            match bridge::tree_delta_cached(&self.root, &graph_path, &mut self.hash_cache) {
+                Ok(Some(delta)) if delta.fresh => {
+                    self.graph = Some(graph);
+                    delta.signature
+                }
+                _ => return unavailable(TargetsFactsUnavailableReason::GraphStale),
+            }
         };
-        let stored_signature = match graph.meta_get(pixel_graph::build::FRESHNESS_KEY) {
-            Ok(signature) => signature,
-            Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
-        };
-        let extractor_version = match graph.meta_get(pixel_graph::build::EXTRACTOR_VERSION_KEY) {
-            Ok(version) => version,
-            Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
-        };
-        let graph_signature = pixel_graph::build::freshness_signature(&self.root);
-        if stored_signature.as_deref() != Some(graph_signature.as_str())
-            || extractor_version.as_deref() != Some(pixel_graph::build::EXTRACTOR_VERSION)
-        {
-            return unavailable(TargetsFactsUnavailableReason::GraphStale);
-        }
 
         let inputs = TargetsFactsInputs {
             task: task.to_owned(),
@@ -1486,8 +2159,15 @@ impl Service {
             activity_reranking: false,
             semantic_fallback: false,
         };
-        self.graph = Some(graph);
-        let facts = self.op_targets_mode(task, Some(limit), None, false, true)?;
+        let facts = if relevance_only {
+            // The same gate and inputs as the full answer; the ranking of
+            // targets, the part of the work a gate on relevance does not read,
+            // is skipped.
+            let index = self.index.read_or_recover();
+            relevance::facts_of_relevance_only(&index, self.graph.as_ref(), task)?
+        } else {
+            self.op_targets_mode(task, Some(limit), None, false, true, false)?
+        };
         serde_json::to_value(TargetsFactsResult::Available { inputs, facts })
             .map_err(|error| error.to_string())
     }
@@ -1499,11 +2179,17 @@ impl Service {
         max_tier: Option<&str>,
         precision: bool,
         fact_mode: bool,
+        regions_mode: bool,
     ) -> Result<Value, String> {
         use pixel_graph::targets as graph_targets;
         use pixel_rank as engine;
 
         let started = Instant::now();
+        // `PIXEL_TARGETS_PROFILE=1` prints one line per stage to stderr; the
+        // m1 bench header names it. Warm-stage numbers here are how a
+        // regression gets attributed before it is fixed.
+        let profile = std::env::var_os("PIXEL_TARGETS_PROFILE").is_some();
+        let mut last = Instant::now();
         let query = engine::tokenize_task(task)?;
 
         let (graph_available, build_info) = if fact_mode {
@@ -1513,60 +2199,27 @@ impl Service {
             (ensured.is_ok(), ensured.ok().flatten())
         };
 
-        let all_paths = self.admitted_paths();
+        let all_paths = self.ranked_paths();
         // S6: explicit file paths named in the task, matched against the
         // live tree before any lexical probe runs.
         let path_hits = engine::path_rank(&all_paths, &query.path_tokens);
+        if profile {
+            eprintln!("TGT setup {}us", last.elapsed().as_micros());
+            last = Instant::now();
+        }
 
-        // S3: per-keyword content match counts (capped probes keep this ms-scale).
-        let mut content_hits: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
-        // Epistemics: every probe cap that fires is NAMED here and forces
-        // lower_bound on the report envelope — a truncated probe must never
-        // feed an "exhaustive" claim.
-        let mut probe_caps: Vec<String> = Vec::new();
-        // Phase 3 item 1 (targets evidence): keep the first ~2 match lines per
-        // (file, keyword) so the caller can verify a target's content match
-        // without re-searching. Near-zero cost — the lines are already fetched.
-        let mut evidence: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-
+        // S3: per-keyword content match counts (capped probes keep this
+        // ms-scale). Every probe cap that fires is NAMED in the report
+        // envelope and forces lower_bound: a truncated probe must never feed
+        // an "exhaustive" claim.
         let probe_keywords = probe_keywords(
             &query.keywords,
             engine::expand_keywords(&query.keywords, query.language),
         );
-
-        for kw in &probe_keywords {
-            // Word-bounded so "auth" cannot count every "author" as signal.
-            // Keywords are [a-z0-9_]+ by construction (tokenize_task), but
-            // escape defensively anyway.
-            let pattern = format!(r"(?i)\b{}\b", regex_escape_keyword(kw));
-            if let Ok((matches, probe_stats)) = self
-                .index
-                .read()
-                .expect("index lock poisoned")
-                .search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
-            {
-                if probe_stats.truncated {
-                    probe_caps.push(format!(
-                        "content probe truncated at {CONTENT_PROBE_LIMIT} matches for keyword \
-                         '{kw}'; files beyond the cap carry no content signal"
-                    ));
-                }
-                let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-                for m in matches {
-                    *counts.entry(m.path.clone()).or_default() += 1;
-                    let lines = evidence.entry(m.path.clone()).or_default();
-                    if lines.len() < EVIDENCE_MAX_LINES_PER_TARGET {
-                        lines.push(json!({
-                            "line": m.line_number,
-                            "text": m.line,
-                            "keyword": kw,
-                        }));
-                    }
-                }
-                if !counts.is_empty() {
-                    content_hits.insert(kw.clone(), counts.into_iter().collect());
-                }
-            }
+        let probes = probe_content(&self.index.read_or_recover(), &probe_keywords);
+        if profile {
+            eprintln!("TGT probes {}us", last.elapsed().as_micros());
+            last = Instant::now();
         }
 
         let mut symbol_hits = Vec::new();
@@ -1585,7 +2238,7 @@ impl Service {
                 &probe_keywords,
                 query.language,
                 &symbol_hits,
-                &content_hits,
+                &probes.hits,
             )
             .into_iter()
             .take(MAX_SEED_FILES)
@@ -1602,7 +2255,7 @@ impl Service {
                 }
             }
 
-            let mut seen: HashSet<String> = HashSet::new();
+            let mut seen: HashSet<String> = HashSet::default();
             for (path, reason) in graph_targets::neighbor_files(store, &seed_symbol_ids)
                 .map_err(|e| e.to_string())?
                 .into_iter()
@@ -1629,6 +2282,59 @@ impl Service {
                 Some(graph_targets::envelope_for_names(store, &names).map_err(|e| e.to_string())?);
         }
 
+        // Fact packets also say how widely the task's words occur here; the
+        // probes above are reused, only what they did not run is probed.
+        if profile {
+            eprintln!("TGT graph {}us", last.elapsed().as_micros());
+            last = Instant::now();
+        }
+        let relevance = if fact_mode {
+            let graph = if graph_available {
+                self.graph.as_ref()
+            } else {
+                None
+            };
+            let index = self.index.read_or_recover();
+            Some(relevance::relevance_for(
+                &index,
+                graph,
+                &query,
+                &all_paths,
+                Some(&probes),
+            )?)
+        } else {
+            None
+        };
+        let probe_caps = probes.caps(&probe_keywords);
+        let ContentProbes {
+            hits: content_hits,
+            lines: evidence,
+            ..
+        } = probes;
+
+        // The same universe for every channel: a file the candidate set left out (a
+        // generated bundle) must not come back through the symbol or content probes.
+        let (symbol_hits, content_hits) = {
+            let ranked: HashSet<&str> = all_paths.iter().map(String::as_str).collect();
+            let symbol_hits: Vec<_> = symbol_hits
+                .into_iter()
+                .filter(|hit| ranked.contains(hit.path.as_str()))
+                .collect();
+            let content_hits = content_hits
+                .into_iter()
+                .map(|(kw, files)| {
+                    (
+                        kw,
+                        files
+                            .into_iter()
+                            .filter(|(p, _)| ranked.contains(p.as_str()))
+                            .collect(),
+                    )
+                })
+                .collect();
+            (symbol_hits, content_hits)
+        };
+
         let opts = engine::TargetsOptions {
             limit: limit.unwrap_or(engine::DEFAULT_LIMIT),
             max_tier: max_tier.map(String::from),
@@ -1650,14 +2356,20 @@ impl Service {
             },
             &opts,
         );
+        if profile {
+            eprintln!("TGT compute {}us", last.elapsed().as_micros());
+            last = Instant::now();
+        }
         // Phase 1c: rerank within tiers via the Engine-3 reranker (first
         // production call site). v1 = activity-only signals (the session and
         // error-sink channels are not wired here). The per-path test penalty
         // demotes test files only when the task does NOT mention tests/specs
         // (a test file is a worse target for a non-test task).
+        let mut fan_in_gap = None;
         if !fact_mode {
             let target_paths: Vec<String> = report.targets.iter().map(|t| t.path.clone()).collect();
             let signals = self.engine_signals(&target_paths);
+            fan_in_gap.clone_from(&signals.fan_in_unavailable);
             // Per-path test penalty: demote a test file only when the task does
             // NOT mention tests/specs (a test file is a *worse* target for a
             // non-test task, but a *better* one for a test task).
@@ -1678,6 +2390,19 @@ impl Service {
             }
         }
         let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+        if let Some(gap) = fan_in_gap {
+            // Named as a cap so the envelope's epistemics and warnings carry
+            // it: the ranking ran without fan-in.
+            let cap = format!("fan-in signal unavailable: {gap}");
+            match out.get_mut("caps").and_then(Value::as_array_mut) {
+                Some(caps) => caps.push(json!(cap)),
+                None => out["caps"] = json!([cap]),
+            }
+        }
+        if profile {
+            eprintln!("TGT signals+serialize {}us", last.elapsed().as_micros());
+            last = Instant::now();
+        }
         // Phase 3 item 1: attach per-file content evidence to each target so
         // the caller can trust a content match without re-searching (S2).
         //
@@ -1729,13 +2454,7 @@ impl Service {
             if !fact_mode {
                 stats["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
             }
-            stats["commit_oid"] = json!(
-                self.index
-                    .read()
-                    .expect("index lock poisoned")
-                    .status()
-                    .commit_oid
-            );
+            stats["commit_oid"] = json!(self.index.read_or_recover().status().commit_oid);
         }
         // The regular targets command owns an enforcement manifest and keeps
         // its legacy closed-list explanation. Fact packets never enforce a
@@ -1743,103 +2462,179 @@ impl Service {
         if fact_mode && let Some(object) = out.as_object_mut() {
             object.remove("closed_world");
         }
+        if let Some(relevance) = &relevance {
+            relevance::attach(&mut out, relevance)?;
+        }
+        // Issue #814: the symbol-level regions manifest. The daemon gathers
+        // the P0 symbols and the call/import edges between them; the analysis
+        // is pure (pixel_rank::regions). The manifest is evidence for a
+        // harness, never an action recommendation.
+        if regions_mode && !fact_mode {
+            match self.regions_manifest(&report) {
+                Ok(regions) => {
+                    out["regions"] = regions;
+                }
+                Err(e) => {
+                    out["regions"] = json!({ "error": e });
+                }
+            }
+        }
         merge_build_info(&mut out, build_info);
+        if profile {
+            eprintln!("TGT tail {}us", last.elapsed().as_micros());
+        }
         Ok(out)
     }
 
-    /// Symbol-level regions manifest for safe parallel edits.
-    ///
-    /// Runs the targets computation to get P0 symbols, then gathers the
-    /// graph context (full symbol rows, edges between them, imports) and
-    /// calls the pure regions analysis in `pixel-graph`.
-    fn op_regions(&mut self, task: &str, limit: Option<usize>) -> Result<Value, String> {
-        use pixel_graph::regions::{compute_regions, RegionsInput};
+    /// Issue #814: gather the P0 symbols and the call/import edges between
+    /// them from the graph store, then run the pure regions analysis. With
+    /// no graph the analysis takes its conservative floor (every pair of
+    /// regions conflicts).
+    fn regions_manifest(&self, report: &pixel_rank::TargetsReport) -> Result<Value, String> {
+        use pixel_graph::store::EdgeKind;
+        use pixel_rank::regions::{CallEdge, ImportEdge, RegionInput, RegionsInputs};
 
-        // First, run the targets computation to get P0 targets.
-        let targets_out = self.op_targets_mode(task, limit, Some("P0"), false, false)?;
-
-        // Ensure the graph is built for gathering symbol/edge/import data.
-        let _ = self.ensure_graph()?;
-        let store = self.graph.as_ref().unwrap();
-
-        // Extract P0 symbols from the targets report.
-        let p0_symbols: Vec<String> = targets_out
-            .get("targets")
+        let unresolved_same_name = report
+            .envelope
+            .get("unresolved_same_name")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let caps: Vec<String> = report
+            .envelope
+            .get("caps")
             .and_then(Value::as_array)
-            .map(|targets| {
-                targets
-                    .iter()
-                    .filter(|t| t.get("tier").and_then(Value::as_str) == Some("P0"))
-                    .flat_map(|t| {
-                        t.get("symbols")
-                            .and_then(Value::as_array)
-                            .map(|syms| {
-                                syms.iter()
-                                    .filter_map(|s| s.get("uid").and_then(Value::as_str).map(String::from))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default()
-                    })
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| c.as_str().map(str::to_string))
                     .collect()
             })
             .unwrap_or_default();
 
-        // Look up full SymbolRow data for each P0 symbol.
-        let mut symbols = Vec::new();
-        for uid in &p0_symbols {
-            if let Some(sym) = store.symbol_by_uid(uid).map_err(|e| e.to_string())? {
-                symbols.push(sym);
-            }
-        }
-
-        // If no P0 symbols found, return an empty manifest.
-        if symbols.is_empty() {
-            let empty = compute_regions(&RegionsInput::default());
-            return serde_json::to_value(&empty).map_err(|e| e.to_string());
-        }
-
-        // Gather edges between P0 symbols.
-        let symbol_ids: HashSet<i64> = symbols.iter().map(|s| s.id).collect();
-        let mut edges = Vec::new();
-        for sym in &symbols {
-            for e in store.edges_from(sym.id, None).map_err(|e| e.to_string())? {
-                if symbol_ids.contains(&e.dst_id) {
-                    edges.push(e);
-                }
-            }
-            for e in store.edges_to(sym.id, None).map_err(|e| e.to_string())? {
-                if symbol_ids.contains(&e.src_id) {
-                    edges.push(e);
-                }
-            }
-        }
-
-        // Gather imports for P0 files.
-        let file_ids: HashSet<i64> = symbols.iter().map(|s| s.file_id).collect();
-        let mut imports = Vec::new();
-        for &fid in &file_ids {
-            for imp in store.imports_from(fid).map_err(|e| e.to_string())? {
-                imports.push(imp);
-            }
-        }
-
-        // Gather file metadata.
-        let mut files = Vec::new();
-        for &fid in &file_ids {
-            if let Some(f) = store.file_by_id(fid).map_err(|e| e.to_string())? {
-                files.push(f);
-            }
-        }
-
-        // Call the pure analysis.
-        let input = RegionsInput {
-            symbols,
-            edges,
-            imports,
-            files,
+        let Some(store) = self.graph.as_ref() else {
+            let inputs = RegionsInputs {
+                graph_available: false,
+                unresolved_same_name,
+                caps,
+                ..Default::default()
+            };
+            let rep = pixel_rank::regions::compute_regions(inputs);
+            return serde_json::to_value(rep).map_err(|e| e.to_string());
         };
-        let manifest = compute_regions(&input);
-        serde_json::to_value(&manifest).map_err(|e| e.to_string())
+
+        // P0 symbols with full line ranges (the report carries start_line
+        // only; the region territory needs both ends).
+        let mut syms: Vec<SymbolRow> = Vec::new();
+        for target in report.targets.iter().filter(|t| t.tier == "P0") {
+            for sym in &target.symbols {
+                let Some(uid) = sym.get("uid").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Ok(Some(row)) = store.symbol_by_uid(uid) {
+                    syms.push(row);
+                }
+            }
+        }
+        let regions: Vec<RegionInput> = syms
+            .iter()
+            .map(|r| RegionInput {
+                uid: r.uid.clone(),
+                name: r.name.clone(),
+                kind: r.kind.as_str().to_string(),
+                file: store
+                    .file_by_id(r.file_id)
+                    .ok()
+                    .flatten()
+                    .map(|f| f.path)
+                    .unwrap_or_default(),
+                start_line: r.start_line,
+                end_line: r.end_line,
+            })
+            .collect();
+
+        // Call edges between region symbols: outgoing edges only, so each
+        // edge is collected exactly once.
+        let id_to_uid: HashMap<i64, &str> = syms.iter().map(|s| (s.id, s.uid.as_str())).collect();
+        let mut call_edges: Vec<CallEdge> = Vec::new();
+        for s in &syms {
+            let outgoing = store
+                .edges_from(s.id, Some(EdgeKind::Calls))
+                .map_err(|e| e.to_string())?;
+            for edge in outgoing {
+                if let Some(callee) = id_to_uid.get(&edge.dst_id) {
+                    call_edges.push(CallEdge {
+                        caller: s.uid.clone(),
+                        callee: callee.to_string(),
+                    });
+                }
+            }
+        }
+
+        // Import edges: region-to-region (both directions) and
+        // region-to-external (imports_from only, so shared-file detection
+        // finds files imported by multiple region files even when the
+        // imported file is not itself P0).
+        let mut file_rows: Vec<(i64, String)> = Vec::new();
+        for target in report.targets.iter().filter(|t| t.tier == "P0") {
+            if let Ok(Some(f)) = store.file_by_path(&target.path) {
+                file_rows.push((f.id, target.path.clone()));
+            }
+        }
+        let file_id_set: HashSet<i64> = file_rows.iter().map(|(id, _)| *id).collect();
+        let file_id_to_path: HashMap<i64, &str> =
+            file_rows.iter().map(|(id, p)| (*id, p.as_str())).collect();
+        let mut import_edges: Vec<ImportEdge> = Vec::new();
+        // Track non-P0 files imported by multiple region files for the
+        // epistemics cap. Keys are owned Strings since the file row is
+        // dropped at the end of each loop iteration.
+        let mut non_p0_importers: BTreeMap<String, usize> = BTreeMap::new();
+        for (file_id, path) in &file_rows {
+            for imp in store.imports_from(*file_id).map_err(|e| e.to_string())? {
+                if let Some(resolved) = imp.resolved_file_id {
+                    if file_id_set.contains(&resolved) {
+                        // Region-to-region: both files are P0.
+                        import_edges.push(ImportEdge {
+                            importer: path.clone(),
+                            imported: file_id_to_path[&resolved].to_string(),
+                        });
+                    } else {
+                        // Region-to-external: the imported file is not P0,
+                        // but a second region file importing it makes it
+                        // shared. Resolve its path for the witness.
+                        if let Ok(Some(f)) = store.file_by_id(resolved) {
+                            import_edges.push(ImportEdge {
+                                importer: path.clone(),
+                                imported: f.path.clone(),
+                            });
+                            *non_p0_importers.entry(f.path.clone()).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            for imp in store.imports_to_file(*file_id).map_err(|e| e.to_string())? {
+                if file_id_set.contains(&imp.file_id) {
+                    import_edges.push(ImportEdge {
+                        importer: file_id_to_path[&imp.file_id].to_string(),
+                        imported: path.clone(),
+                    });
+                }
+            }
+        }
+        let external_shared_file_count = non_p0_importers
+            .values()
+            .filter(|&&count| count >= 2)
+            .count() as u64;
+
+        let inputs = RegionsInputs {
+            regions,
+            call_edges,
+            import_edges,
+            graph_available: true,
+            unresolved_same_name,
+            caps,
+            external_shared_file_count,
+        };
+        let rep = pixel_rank::regions::compute_regions(inputs);
+        serde_json::to_value(rep).map_err(|e| e.to_string())
     }
 
     fn op_symbol(&mut self, name: &str) -> Result<Value, String> {
@@ -1847,9 +2642,12 @@ impl Service {
         let store = self.graph.as_ref().unwrap();
         let files = file_map(store)?;
         let syms = store
-            .symbols_by_name(name, None, 50)
+            .symbols_named(name, None, 50)
             .map_err(|e| e.to_string())?;
-        let envelope = store.envelope_for_name(name).map_err(|e| e.to_string())?;
+        // A qualified name (`ActionLog::finish`) matched on its leaf: the
+        // unresolved call sites that bound the answer are counted under it.
+        let called = syms.first().map_or(name, |s| s.name.as_str());
+        let envelope = store.envelope_for_name(called).map_err(|e| e.to_string())?;
         let mut out = json!({
             "symbols": syms.iter().map(|s| symbol_json(s, &files)).collect::<Vec<_>>(),
             "envelope": envelope,
@@ -1930,7 +2728,7 @@ impl Service {
         // Verify only files whose source will be returned, once per request.
         // Reuse these exact bytes for excerpts; never pair fresh file contents
         // with stale graph spans or stored Crux. No repository freshness sweep.
-        let mut sources = HashMap::new();
+        let mut sources = HashMap::default();
         let stale_response = |mut response: Value| -> Result<Value, String> {
             response["truncated"] = json!(true);
             response["caps"] = json!([
@@ -1984,7 +2782,7 @@ impl Service {
         );
         source_remaining = source_remaining.saturating_sub(target.snippet.len());
         items.push(target);
-        let mut seen_context = std::collections::HashSet::from([sym.id]);
+        let mut seen_context = rustc_hash::FxHashSet::from_iter([sym.id]);
         let neighbors = incoming
             .iter()
             .map(|edge| edge.src_id)
@@ -2207,12 +3005,7 @@ impl Service {
             // Only calls: an unresolved callback argument is a reference the
             // symbol passes on, not a callee it invokes.
             let unresolved: u64 = store
-                .conn()
-                .query_row(
-                    "SELECT COUNT(*) FROM unresolved_calls WHERE enclosing_symbol_id = ?1 AND kind = 'calls'",
-                    [sym.id],
-                    |row| row.get::<_, i64>(0).map(|count| count as u64),
-                )
+                .unresolved_outgoing(sym.id)
                 .map_err(|e| e.to_string())?;
             envelope["unresolved_outgoing"] = json!(unresolved);
             if unresolved > 0 {
@@ -2316,7 +3109,12 @@ impl Service {
         req: EvaluateRequest,
         probe: &mut dyn FnMut(),
     ) -> Result<Value, String> {
-        let args = req.parse()?;
+        let mut args = req.parse()?;
+        // A replica's transaction names the published graph, not today's
+        // working tree. Never run the tree check on this read-only route.
+        if self.read_only {
+            args.at_snapshot = true;
+        }
         let epistemics =
             |caps: Vec<String>| derive_epistemics("evaluate", &json!({ "caps": caps })).0;
 
@@ -2428,6 +3226,49 @@ impl Service {
             .map_err(|e| e.to_string())
     }
 
+    /// Enumerate recursion cycles in the call graph, bounded by the four
+    /// budgets. The answer carries explicit coverage so an incomplete graph
+    /// is never read as proof of safety.
+    fn op_cycles(&mut self, req: CyclesRequest) -> Result<Value, String> {
+        let args = req.parse()?;
+
+        // Nothing to attribute an answer to: report it, never build one.
+        if let Err(reason) = self.evaluate_gate()? {
+            let reason_str = match reason {
+                wire::Reason::GraphUnavailable => "graph_unavailable",
+                wire::Reason::GraphStale => "graph_stale",
+                _ => "graph_unavailable",
+            };
+            let result = json!({
+                "op": "cycles",
+                "components": [],
+                "coverage": {
+                    "enumeration_exhausted": false,
+                    "stopped_by": null,
+                    "reason": reason_str,
+                },
+            });
+            return serde_json::to_value(result).map_err(|e| e.to_string());
+        }
+
+        let db = self.graph_db_path();
+        if self.graph.is_none() {
+            self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
+        }
+        let store = self.graph.as_ref().expect("opened above");
+
+        let enumeration = cycles::run(store, &args)?;
+
+        let caps = cycles_caps(&enumeration);
+        let result = json!({
+            "op": "cycles",
+            "components": enumeration.components,
+            "coverage": enumeration.coverage,
+            "caps": caps,
+        });
+        serde_json::to_value(result).map_err(|e| e.to_string())
+    }
+
     /// Bring the graph to a generation an answer can name, or say why not.
     ///
     /// Drift under the incremental threshold is applied, as every graph op
@@ -2435,6 +3276,15 @@ impl Service {
     /// is `graph_stale`: a full rebuild can take minutes and is never a side
     /// effect of a question.
     fn evaluate_gate(&mut self) -> Result<Result<(), wire::Reason>, String> {
+        if self.read_only {
+            return Ok(
+                if self.graph.as_ref().and_then(published_signature).is_some() {
+                    Ok(())
+                } else {
+                    Err(wire::Reason::GraphStale)
+                },
+            );
+        }
         let db = self.graph_db_path();
         if !db.exists() {
             return Ok(Err(wire::Reason::GraphUnavailable));
@@ -2482,7 +3332,7 @@ impl Service {
             return self.op_graph_if_stale();
         }
         let publication = Arc::clone(&self.publication);
-        let mut state = publication.write().expect("publication lock poisoned");
+        let mut state = publication.write_or_recover();
         state.healthy = false;
         let rebuilt = self.rebuild_graph();
         if rebuilt.is_ok() {
@@ -2655,8 +3505,38 @@ impl Service {
         Ok(out)
     }
 
+    /// `meaning`: ranked leads for a natural-language question, from the
+    /// resident chunk vectors. It starts the background build when they are
+    /// cold or stale and answers without waiting for it, so a caller on a
+    /// deadline gets `unavailable` and a reason instead of a slow answer.
+    fn op_meaning(&mut self, query: &str, limit: Option<usize>) -> Result<Value, String> {
+        let generation = self.publication_generation();
+        if !self.read_only {
+            self.meaning.ensure(generation);
+        }
+        self.meaning.answer(generation, query, limit)
+    }
+
+    /// Start the background build of the `meaning` vectors if they are cold
+    /// or stale. The evidence bridge calls it for a bundle that asks for
+    /// them: its read replicas rank from the vectors and never build.
+    pub(crate) fn warm_meaning(&self) {
+        self.meaning.ensure(self.publication_generation());
+    }
+
+    fn publication_generation(&self) -> u64 {
+        self.publication.read_or_recover().generation
+    }
+
+    /// Replace the `meaning` index, so a test never loads the real model.
+    #[cfg(test)]
+    pub(crate) fn set_meaning(&mut self, meaning: Arc<Meaning>) {
+        self.meaning = meaning;
+    }
+
     fn op_status(&mut self) -> Result<Value, String> {
-        let s = self.index.read().expect("index lock poisoned").status();
+        self.poll_embedder_download();
+        let s = self.index.read_or_recover().status();
         let db = self.graph_db_path();
         let graph = if db.exists() {
             match GraphStore::open(&db) {
@@ -2685,7 +3565,7 @@ impl Service {
                 "overlay_files": s.overlay_files,
                 "tombstones": s.tombstones,
                 "open": open_timings_json(
-                    self.index.read().expect("index lock poisoned").open_timings(),
+                    self.index.read_or_recover().open_timings(),
                 ),
             },
             "graph": graph,
@@ -2694,8 +3574,14 @@ impl Service {
                 // means answers may have been served from a stale index.
                 "graph_update_failures": self.graph_failures.count(),
                 "notify_errors": self.watcher_failures.count(),
+                "ready": self.watch.is_some(),
+                "recursive": self.watch.map(|w| w.recursive),
+                "watched_dirs": self.watch.map(|w| w.dirs),
+                "registration_ms": self.watch.map(|w| w.elapsed.as_millis()),
+                "git_dir": self.watch.map(|w| w.git_dir),
             },
-            "facts": facts_visibility(&self.root),
+            "facts": self.facts_status(),
+            "embedding": embedding_status(&self.root, self.embedder.as_ref().map(|model| model.model_id()), self.embedder_error.as_deref(), self.embedder_download.is_some(), self.semantic_searches),
         }))
     }
 
@@ -2703,7 +3589,7 @@ impl Service {
     /// no concurrent build races because the daemon serializes requests).
     fn op_reindex(&mut self) -> Result<Value, String> {
         let publication = Arc::clone(&self.publication);
-        let mut state = publication.write().expect("publication lock poisoned");
+        let mut state = publication.write_or_recover();
         state.healthy = false;
         // Remove the existing shard so open_or_build is forced to rebuild.
         let gpx = self.root.join(pixel_index::index::SHARD_DIR);
@@ -2726,8 +3612,8 @@ impl Service {
                 return Err(error.to_string());
             }
         };
-        *self.index.write().expect("index lock poisoned") = new_index;
-        let s = self.index.read().expect("index lock poisoned").status();
+        *self.index.write_or_recover() = new_index;
+        let s = self.index.read_or_recover().status();
         state.publish();
         Ok(json!({
             "root": self.root.display().to_string(),
@@ -2773,7 +3659,7 @@ impl Service {
                 .ok_or_else(|| format!("no symbol with uid {uid:?}"))?
         } else {
             let mut syms = store
-                .symbols_by_name(name, None, 50)
+                .symbols_named(name, None, 50)
                 .map_err(|e| e.to_string())?;
             if let Some(file) = file {
                 let rel = normalize_file_arg(&self.root, file);
@@ -2825,12 +3711,13 @@ impl Service {
             "unclaimed_text": plan.unclaimed_text,
         });
         if !dry_run {
-            let written = pixel_graph::rename::apply(&self.root, &plan, &sym.name, new_name)?;
-            out["applied"] = json!(written);
-            // The store is now stale: the renamed files' rows no longer
-            // match disk. Drop the handle so the next op re-syncs via the
-            // tree delta instead of serving pre-rename spans.
+            let applied = pixel_graph::rename::apply(&self.root, &plan, &sym.name, new_name);
+            // The store may be stale whatever `apply` returned (a failed
+            // write can leave earlier files rewritten): drop the handle so
+            // the next op re-syncs via the tree delta instead of serving
+            // pre-rename spans.
             self.graph = None;
+            out["applied"] = json!(applied?);
         }
         merge_build_info(&mut out, built);
         Ok(out)
@@ -2847,7 +3734,7 @@ impl Service {
         // Computed BEFORE borrowing `self.graph`: `engine_signals` needs
         // `&mut self` for its snapshot/activity caches.
         let all_paths = self.admitted_paths();
-        let signals = self.engine_signals(&all_paths);
+        let signals = self.signals_for(&all_paths, FanIn::Skip);
         let store = match self.graph.as_ref() {
             Some(s) => s,
             None => {
@@ -3017,11 +3904,15 @@ impl Service {
     /// Budget: `PIXEL_FACTS_QUERY_BUDGET_MS` (default 3000ms) — a query is
     /// never blocked longer than that; the attached `index_state` tells the
     /// caller whether coverage is complete.
-    fn facts_open_and_catch_up(&self) -> Result<FactsStore, String> {
-        let mut facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
-        if !facts.index_state().fresh {
-            pixel_facts::ingest::lazy_ingest(&mut facts)
-                .map_err(|e| format!("facts lazy ingest failed: {e}"))?;
+    fn facts_open_and_catch_up(&mut self) -> Result<&mut FactsStore, String> {
+        {
+            let facts = self
+                .cached_facts(true)?
+                .ok_or("history db vanished on open")?;
+            if !facts.index_state().fresh {
+                pixel_facts::ingest::lazy_ingest(facts)
+                    .map_err(|e| format!("facts lazy ingest failed: {e}"))?;
+            }
         }
         // First facts use: start the keep-fresh warm loop. `lazy_ingest` above
         // serves this request within its budget; the warmer finishes the job
@@ -3029,7 +3920,94 @@ impl Service {
         if self.facts_warmer_needed() {
             crate::daemon::spawn_facts_ingest(&self.root);
         }
-        Ok(facts)
+        // A rebuild during the ingest replaced the file: this reopens it.
+        self.cached_facts(true)?
+            .ok_or_else(|| "history db vanished on open".to_string())
+    }
+
+    /// The kept history store, opened (`create`: built when absent) unless
+    /// the one held is still on the db file that exists now. `Ok(None)`
+    /// only without `create`, when there is no db.
+    fn cached_facts(&mut self, create: bool) -> Result<Option<&mut FactsStore>, String> {
+        let current = history_db_identity(&self.root);
+        let reusable =
+            matches!((&self.facts, current), (Some(open), Some(file)) if open.file == file);
+        if !reusable {
+            self.facts = None;
+            #[cfg(test)]
+            {
+                self.facts_opens += 1;
+            }
+            let store = if create {
+                FactsStore::open(&self.root).map_err(|e| e.to_string())?
+            } else {
+                match FactsStore::open_existing(&self.root).map_err(|e| e.to_string())? {
+                    Some(store) => store,
+                    None => return Ok(None),
+                }
+            };
+            let file = history_db_identity(&self.root)
+                .ok_or_else(|| "history db vanished on open".to_string())?;
+            self.facts = Some(OpenFacts { store, file });
+        }
+        Ok(self.facts.as_mut().map(|open| &mut open.store))
+    }
+
+    /// `git rev-list --count --all` for the `facts` block of `status`.
+    fn count_commits(&mut self) -> Option<u64> {
+        #[cfg(test)]
+        {
+            self.rev_list_runs += 1;
+        }
+        pixel_git::GitRunner::new(&self.root).rev_list_count_all()
+    }
+
+    /// The `facts` block of `status`, from the kept store: no trust-check
+    /// spawn once it is open, the refs read once, and `rev-list` run only
+    /// when they moved.
+    fn facts_status(&mut self) -> Value {
+        let refs = match self.cached_facts(false) {
+            Ok(Some(store)) => store.refs_hash().ok(),
+            Ok(None) => return json!({"present": false}),
+            Err(e) => return json!({"present": false, "error": e}),
+        };
+        let total = match (&self.commit_total, refs.as_deref()) {
+            (Some((at, total)), Some(refs)) if at == refs => *total,
+            _ => match self.count_commits() {
+                Some(total) => {
+                    self.commit_total = refs.clone().map(|refs| (refs, total));
+                    total
+                }
+                None => 0,
+            },
+        };
+        let open = self
+            .facts
+            .as_ref()
+            .expect("cached_facts just returned the open store");
+        visibility_of(&open.store, refs.as_deref(), total)
+    }
+
+    /// The facts db exactly as it stands, for a `read_only` history
+    /// request: `open_existing` never creates the file and this path never
+    /// ingests, rebuilds or spawns the warmer — `Ok(None)` (no db) is an
+    /// error because the read-only contract forbids the open-and-catch-up
+    /// that would serve it. The answer's `index_state` says how stale the
+    /// index it came from was.
+    fn facts_open_read_only(&mut self) -> Result<&mut FactsStore, String> {
+        self.cached_facts(false)?
+            .ok_or_else(|| "facts index absent or not built".to_string())
+    }
+
+    /// The facts store an op sees: `read_only` takes the index as it
+    /// stands, otherwise the open-and-catch-up path that built today's
+    /// behaviour.
+    fn facts_for(&mut self, read_only: bool) -> Result<&mut FactsStore, String> {
+        if read_only {
+            self.facts_open_read_only()
+        } else {
+            self.facts_open_and_catch_up()
+        }
     }
 
     /// True exactly once per Service: the first facts-consuming request.
@@ -3044,10 +4022,11 @@ impl Service {
         query: &str,
         facet: Option<&str>,
         limit: Option<usize>,
+        read_only: bool,
     ) -> Result<Value, String> {
-        let facts = self.facts_open_and_catch_up()?;
+        let facts = self.facts_for(read_only)?;
         let result = pixel_facts::search::search(
-            &facts,
+            facts,
             query,
             facet.unwrap_or("all").into(),
             limit.unwrap_or(200),
@@ -3060,8 +4039,13 @@ impl Service {
     }
 
     /// Engine 2: lifecycle of a path or token.
-    fn op_lifecycle(&mut self, path: Option<&str>, token: Option<&str>) -> Result<Value, String> {
-        let facts = self.facts_open_and_catch_up()?;
+    fn op_lifecycle(
+        &mut self,
+        path: Option<&str>,
+        token: Option<&str>,
+        read_only: bool,
+    ) -> Result<Value, String> {
+        let facts = self.facts_for(read_only)?;
         let result = match (path, token) {
             (Some(p), _) => facts.path_lifecycle(p).map_err(|e| e.to_string())?,
             (None, Some(t)) => facts.token_lifecycle(t).map_err(|e| e.to_string())?,
@@ -3087,8 +4071,9 @@ impl Service {
         from: Option<&str>,
         to: Option<&str>,
         limit: Option<usize>,
+        read_only: bool,
     ) -> Result<Value, String> {
-        let facts = self.facts_open_and_catch_up()?;
+        let facts = self.facts_for(read_only)?;
         // Default cut from 200 to 15: only the top SNIPPET_TOP_N=5 candidates
         // ever carry a code snippet, so the other ~195 were pure metadata
         // rows a caller almost never needs — measured 2026-08-30, a 31-hit
@@ -3351,6 +4336,17 @@ impl Service {
     /// is named in `SignalBundle::activity_unavailable` (the reranker then
     /// applies only the per-path test penalty).
     fn engine_signals(&mut self, candidates: &[String]) -> pixel_rank::signals::SignalBundle {
+        self.signals_for(candidates, FanIn::Count)
+    }
+
+    /// [`Service::engine_signals`], with the graph's fan-in counted or not:
+    /// `resolve` hands only activity and session to the concept resolver, so
+    /// counting fan-in over its whole admitted universe was work for nothing.
+    fn signals_for(
+        &mut self,
+        candidates: &[String],
+        fan_in: FanIn,
+    ) -> pixel_rank::signals::SignalBundle {
         use pixel_rank::signals::{SignalOptions, compute_signals};
         if self.read_only {
             return pixel_rank::signals::SignalBundle {
@@ -3361,10 +4357,16 @@ impl Service {
             };
         }
         let runner = pixel_git::GitRunner::new(&self.root);
+        let profile = std::env::var_os("PIXEL_TARGETS_PROFILE").is_some();
+        let mut siglast = Instant::now();
         // The dirty set is the same `status_porcelain` walk `repo_snapshot`
         // already pays for on this request path — reuse its cache instead
         // of spawning a second git subprocess per op.
         let dirty: Vec<String> = self.repo_snapshot().dirty;
+        if profile {
+            eprintln!("TGTSIG snapshot {}us", siglast.elapsed().as_micros());
+            siglast = Instant::now();
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
@@ -3373,96 +4375,164 @@ impl Service {
         // reuse window changes nothing observable while saving a
         // subprocess per find-code/scope-task. Only a successful scan is
         // cached — a failed one keeps reporting `activity_unavailable`
-        // instead of latching.
-        let activity = match &self.activity_cache {
-            Some((at, map)) if at.elapsed() < ACTIVITY_CACHE_TTL => Some(map.clone()),
-            _ => {
-                let scanned = pixel_rank::signals::activity_from_git_log(
-                    &runner,
-                    now_ms,
-                    SignalOptions::default().activity_half_life_days,
-                )
-                .ok();
-                if let Some(map) = &scanned {
+        // instead of latching. The scan runs at most once per call either
+        // way: a failure is handed on as an empty map so `compute_signals`
+        // does not spawn the same `git log` a second time.
+        let (activity, activity_error) = match &self.activity_cache {
+            Some((at, map)) if at.elapsed() < ACTIVITY_CACHE_TTL => (map.clone(), None),
+            _ => match pixel_rank::signals::activity_from_git_log(
+                &runner,
+                now_ms,
+                SignalOptions::default().activity_half_life_days,
+            ) {
+                Ok(map) => {
                     self.activity_cache = Some((Instant::now(), map.clone()));
+                    (map, None)
                 }
-                scanned
-            }
+                Err(e) => {
+                    if profile {
+                        eprintln!("TGTSIG activity_err {e}");
+                    }
+                    (rustc_hash::FxHashMap::default(), Some(e.to_string()))
+                }
+            },
         };
         // Fan-in (in-degree): count incoming `calls` edges per candidate
         // file via the graph.db escape hatch (`GraphStore::conn`). The graph
         // is lazily built by `ensure_graph` earlier in the request; if it is
         // unavailable, fan-in degrades to empty (the reranker then applies
         // only activity + session + test penalty).
-        let fan_in_raw: std::collections::HashMap<String, u64> = self
-            .graph
-            .as_ref()
-            .map(|store| fan_in_counts(store.conn(), candidates))
-            .unwrap_or_default();
+        if profile {
+            eprintln!("TGTSIG activity {}us", siglast.elapsed().as_micros());
+            siglast = Instant::now();
+        }
+        let counted = match (fan_in, self.graph.as_ref()) {
+            (FanIn::Count, Some(store)) => {
+                #[cfg(test)]
+                {
+                    self.fan_in_queries += 1;
+                }
+                fan_in_counts(store.conn(), candidates)
+            }
+            _ => Ok(rustc_hash::FxHashMap::default()),
+        };
+        let (fan_in_raw, fan_in_error) = match counted {
+            Ok(counts) => (counts, None),
+            Err(error) => (rustc_hash::FxHashMap::default(), Some(error)),
+        };
+        if profile {
+            eprintln!("TGTSIG fan_in {}us", siglast.elapsed().as_micros());
+            siglast = Instant::now();
+        }
         let opts = SignalOptions {
             now_ms,
             ..Default::default()
         };
-        compute_signals(
+        let out = compute_signals(
             &runner,
             None,
             &[],
-            activity.as_ref(),
+            Some(&activity),
             &dirty,
             &fan_in_raw,
             candidates,
             &opts,
         )
-        .unwrap_or_default()
+        .unwrap_or_default();
+        let mut out = out;
+        out.activity_unavailable = activity_error;
+        out.fan_in_unavailable = fan_in_error;
+        self.profile_end("compute_signals", siglast);
+        out
+    }
+
+    /// TEMP (#1081) note: `PIXEL_TARGETS_PROFILE=1` prints `TGTSIG` stage
+    /// lines to stderr.
+    fn profile_end(&self, label: &str, since: Instant) {
+        if std::env::var_os("PIXEL_TARGETS_PROFILE").is_some() {
+            eprintln!("TGTSIG {label} {}us", since.elapsed().as_micros());
+        }
     }
 }
+
+/// A failed fan-in query, named without its SQL: the statement carries one
+/// placeholder per candidate, thousands of them, and this lands in a cap.
+fn fan_in_error(error: rusqlite::Error) -> String {
+    match error {
+        rusqlite::Error::SqlInputError { msg, .. } => format!("fan-in query: {msg}"),
+        other => format!("fan-in query: {other}"),
+    }
+}
+
+/// Whether [`Service::signals_for`] counts the graph's fan-in.
+#[derive(Clone, Copy)]
+enum FanIn {
+    Count,
+    Skip,
+}
+
+/// Most candidates `fan_in_counts` binds into one IN-list. Above it, one
+/// aggregate over every file, filtered in memory, costs no more (40 000-file
+/// graph, 20 000 candidates: 44 ms as an IN-list, 31 ms as the aggregate),
+/// and an IN-list past SQLite's `SQLITE_MAX_VARIABLE_NUMBER` (32 766 in the
+/// bundled build) cannot even be prepared.
+const FAN_IN_IN_LIST_MAX: usize = 8_192;
+
+/// The fan-in aggregate: incoming `calls` edges per file path.
+const FAN_IN_SQL: &str = "SELECT f.path, COUNT(*) AS fan_in \
+     FROM edges e \
+     JOIN symbols s ON e.dst_id = s.id \
+     JOIN files f ON s.file_id = f.id \
+     WHERE e.kind = 'calls'";
 
 /// Count incoming `calls` edges per candidate file from the graph.db.
 /// `conn` is the `GraphStore::conn()` escape hatch. Returns a path → count
 /// map; paths with no incoming calls edges are absent (treated as 0 by the
-/// scorer). Any SQL failure degrades to an empty map (the reranker then
-/// ignores fan-in).
+/// scorer). Up to `FAN_IN_IN_LIST_MAX` candidates are bound in the query;
+/// more are kept from one aggregate over every file.
+///
+/// # Errors
+///
+/// The query failed: the caller names the gap instead of reading an empty
+/// map as "nothing calls these files".
 fn fan_in_counts(
     conn: &rusqlite::Connection,
     candidates: &[String],
-) -> std::collections::HashMap<String, u64> {
-    use std::collections::HashMap;
-    let mut out: HashMap<String, u64> = HashMap::new();
-    if candidates.is_empty() {
-        return out;
-    }
-    // Build a positional IN-list of placeholders matching the candidate
-    // count; rusqlite's `params!` macro handles the binding.
-    let placeholders: Vec<&str> = (0..candidates.len()).map(|_| "?").collect();
-    let sql = format!(
-        "SELECT f.path, COUNT(*) AS fan_in \
-         FROM edges e \
-         JOIN symbols s ON e.dst_id = s.id \
-         JOIN files f ON s.file_id = f.id \
-         WHERE e.kind = 'calls' AND f.path IN ({}) \
-         GROUP BY f.path",
-        placeholders.join(", ")
-    );
-    let params: Vec<&dyn rusqlite::ToSql> = candidates
-        .iter()
-        .map(|c| c as &dyn rusqlite::ToSql)
-        .collect();
-    let Ok(mut rows) = conn.prepare(&sql) else {
-        return out;
+) -> Result<rustc_hash::FxHashMap<String, u64>, String> {
+    let read = |r: &rusqlite::Row<'_>| {
+        // COUNT(*) is an integer; rusqlite has no `FromSql` for `u64`, so
+        // read it as `i64` and cast (counts are non-negative).
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
     };
-    let queried = rows
-        .query_map(params.as_slice(), |r| {
-            // COUNT(*) is an integer; rusqlite has no `FromSql` for `u64`,
-            // so read it as `i64` and cast (counts are non-negative).
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
-        })
-        .ok();
-    if let Some(iter) = queried {
-        for row in iter.flatten() {
-            out.insert(row.0, row.1);
+    let mut out = rustc_hash::FxHashMap::default();
+    if candidates.is_empty() {
+        return Ok(out);
+    }
+    if candidates.len() <= FAN_IN_IN_LIST_MAX {
+        let placeholders = vec!["?"; candidates.len()].join(", ");
+        let sql = format!("{FAN_IN_SQL} AND f.path IN ({placeholders}) GROUP BY f.path");
+        let mut statement = conn.prepare(&sql).map_err(fan_in_error)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(candidates), read)
+            .map_err(fan_in_error)?;
+        for row in rows {
+            let (path, count) = row.map_err(fan_in_error)?;
+            out.insert(path, count);
+        }
+        return Ok(out);
+    }
+    let wanted: rustc_hash::FxHashSet<&str> = candidates.iter().map(String::as_str).collect();
+    let mut statement = conn
+        .prepare(&format!("{FAN_IN_SQL} GROUP BY f.path"))
+        .map_err(fan_in_error)?;
+    let rows = statement.query_map([], read).map_err(fan_in_error)?;
+    for row in rows {
+        let (path, count) = row.map_err(fan_in_error)?;
+        if wanted.contains(path.as_str()) {
+            out.insert(path, count);
         }
     }
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -3490,6 +4560,200 @@ fn probe_keywords(keywords: &[String], expansions: Vec<String>) -> Vec<String> {
         }
     }
     probe
+}
+
+/// One line that matched a content probe, kept so a reader can check the match
+/// without searching again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ProbeLine {
+    pub line: u64,
+    pub text: String,
+    pub keyword: String,
+}
+
+/// What the bounded content probes of a keyword list found. `targets` ranks
+/// and justifies files with it; `relevance` counts documents with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ContentProbes {
+    /// Every keyword probed, with or without a match.
+    pub probed: BTreeSet<String>,
+    /// keyword → matches per file, path ascending. Only keywords with a match.
+    pub hits: BTreeMap<String, Vec<(String, u32)>>,
+    /// Keywords whose probe stopped at [`CONTENT_PROBE_LIMIT`]: their `hits`
+    /// are the files of a path-ordered prefix, not all of them.
+    pub truncated: BTreeSet<String>,
+    /// path → the first lines that matched, at most
+    /// [`EVIDENCE_MAX_LINES_PER_TARGET`], across keywords in probe order.
+    pub lines: BTreeMap<String, Vec<ProbeLine>>,
+}
+
+impl ContentProbes {
+    /// The cap sentences of the probes that truncated, in `order`.
+    pub(crate) fn caps(&self, order: &[String]) -> Vec<String> {
+        order
+            .iter()
+            .filter(|keyword| self.truncated.contains(*keyword))
+            .map(|keyword| probe_cap(keyword))
+            .collect()
+    }
+
+    /// Only what the probes of `keywords` found. A second consumer reuses
+    /// these without inheriting the first one's choice of extra probes.
+    pub(crate) fn restricted_to(&self, keywords: &[String]) -> Self {
+        let wanted = |keyword: &String| keywords.contains(keyword);
+        let mut lines: BTreeMap<String, Vec<ProbeLine>> = BTreeMap::new();
+        for (path, kept) in &self.lines {
+            let kept: Vec<ProbeLine> = kept
+                .iter()
+                .filter(|line| wanted(&line.keyword))
+                .cloned()
+                .collect();
+            if !kept.is_empty() {
+                lines.insert(path.clone(), kept);
+            }
+        }
+        Self {
+            probed: self.probed.iter().filter(|k| wanted(k)).cloned().collect(),
+            hits: self
+                .hits
+                .iter()
+                .filter(|(keyword, _)| wanted(keyword))
+                .map(|(keyword, files)| (keyword.clone(), files.clone()))
+                .collect(),
+            truncated: self
+                .truncated
+                .iter()
+                .filter(|k| wanted(k))
+                .cloned()
+                .collect(),
+            lines,
+        }
+    }
+
+    /// Fold the probes of other keywords in; each path keeps at most
+    /// [`EVIDENCE_MAX_LINES_PER_TARGET`] lines, the earlier ones first.
+    pub(crate) fn absorb(&mut self, other: ContentProbes) {
+        self.probed.extend(other.probed);
+        self.hits.extend(other.hits);
+        self.truncated.extend(other.truncated);
+        for (path, lines) in other.lines {
+            let kept = self.lines.entry(path).or_default();
+            let room = EVIDENCE_MAX_LINES_PER_TARGET.saturating_sub(kept.len());
+            kept.extend(lines.into_iter().take(room));
+        }
+    }
+}
+
+/// The cap sentence for a probe that stopped at [`CONTENT_PROBE_LIMIT`].
+pub(crate) fn probe_cap(keyword: &str) -> String {
+    format!(
+        "content probe truncated at {CONTENT_PROBE_LIMIT} matches for keyword \
+         '{keyword}'; files beyond the cap carry no content signal"
+    )
+}
+
+/// Run a bounded, word-bounded content probe per keyword over `index`.
+///
+/// Word-bounded so "auth" cannot count every "author" as signal. A probe the
+/// index cannot run is skipped: it is not recorded in `probed`.
+pub(crate) fn probe_content(index: &IndexSet, keywords: &[String]) -> ContentProbes {
+    let mut probes = ContentProbes::default();
+    for keyword in keywords {
+        probes.probed.insert(keyword.clone());
+    }
+    if keywords.is_empty() {
+        return probes;
+    }
+    // One alternation for every keyword. The old loop gave each keyword its
+    // own index scan and regex compile: a six-word task paid six scans of the
+    // same candidate set, and the four parallel probes of one brief paid that
+    // again. One scan returns the union and each line is attributed to the
+    // keyword it carries below. The retention cap grows with the keyword
+    // count so each keyword can still keep `CONTENT_PROBE_LIMIT` matches.
+    let alternation = keywords
+        .iter()
+        .map(|k| regex_escape_keyword(k))
+        .collect::<Vec<_>>()
+        .join("|");
+    let pattern = format!(r"(?i)\b({alternation})\b");
+    let cap = CONTENT_PROBE_LIMIT.saturating_mul(keywords.len());
+    let Ok((matches, stats)) = index.search_page_in(&pattern, 0, Some(cap), None) else {
+        return probes;
+    };
+    let mut counts: BTreeMap<&str, BTreeMap<String, u32>> = BTreeMap::new();
+    let mut retained: BTreeMap<&str, usize> = BTreeMap::new();
+    // Keyword-major, so each keyword's evidence fills its first two lines per
+    // path before the next keyword's does (the order the per-keyword scans
+    // produced) even though one page now carries every keyword's matches.
+    for keyword in keywords {
+        let mut per_file: BTreeMap<String, u32> = BTreeMap::new();
+        for m in &matches {
+            let kept = retained.get(keyword.as_str()).copied().unwrap_or(0);
+            if kept >= CONTENT_PROBE_LIMIT {
+                break;
+            }
+            // A minified or generated line is not a readable match: it can run to
+            // megabytes (a bundled script carries whole wordlists on one line) and
+            // would be the evidence for every keyword it contains.
+            if m.line.len() > EVIDENCE_MAX_LINE_BYTES || !line_has_keyword(&m.line, keyword) {
+                continue;
+            }
+            *per_file.entry(m.path.clone()).or_default() += 1;
+            *retained.entry(keyword.as_str()).or_default() += 1;
+            // Phase 3 item 1 (targets evidence): keep the first ~2 match
+            // lines per file so the caller can verify a content match without
+            // re-searching. Near-zero cost: the lines are already fetched.
+            let lines = probes.lines.entry(m.path.clone()).or_default();
+            if lines.len() < EVIDENCE_MAX_LINES_PER_TARGET {
+                lines.push(ProbeLine {
+                    line: m.line_number,
+                    text: keyword_window(&m.line, keyword),
+                    keyword: keyword.clone(),
+                });
+            }
+        }
+        if per_file.is_empty() {
+            continue;
+        }
+        // A retained cap, or a page that stopped before the candidates ran
+        // out, means this keyword may have matches the caller cannot see:
+        // name it so the op reports a lower bound instead of completeness.
+        // A page-wide stop flags every keyword that matched, which is
+        // conservative where only one of them filled the page.
+        if stats.truncated
+            || retained.get(keyword.as_str()).copied().unwrap_or(0) >= CONTENT_PROBE_LIMIT
+        {
+            probes.truncated.insert(keyword.clone());
+        }
+        counts.insert(keyword, per_file);
+    }
+    for (keyword, per_file) in counts {
+        probes
+            .hits
+            .insert(keyword.to_string(), per_file.into_iter().collect());
+    }
+    probes
+}
+
+/// Whether `line` contains `keyword` as a whole word, ASCII
+/// case-insensitively — the attribution the combined probe cannot get from
+/// the shared `MatchLine`. `[a-z0-9_]` keywords make ASCII folding exact for
+/// the characters that can differ.
+fn line_has_keyword(line: &str, keyword: &str) -> bool {
+    let needle = keyword.as_bytes();
+    let hay = line.as_bytes();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    (0..=hay.len() - needle.len()).any(|start| {
+        hay[start..start + needle.len()].eq_ignore_ascii_case(needle)
+            && line[..start].chars().next_back().is_none_or(|c| !word(c))
+            && line[start + needle.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !word(c))
+    })
 }
 
 /// Whether a task names tests or specs as a word: the per-path test
@@ -3590,6 +4854,7 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "resolve",
     "targets",
     "targets_facts",
+    "meaning",
     "impact",
     "uses",
     "trace",
@@ -3600,7 +4865,43 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "processes",
     "clusters",
     "plan",
+    "cycles",
 ];
+
+/// The freshness signature stored in `graph`, `None` when it has none or
+/// another extractor or graph source built it (the writer would rebuild):
+/// what a replica vouches for without walking the tree.
+fn published_signature(graph: &GraphStore) -> Option<String> {
+    if !pixel_graph::build::extractor_is_current(graph).ok()? {
+        return None;
+    }
+    graph
+        .meta_get(pixel_graph::build::FRESHNESS_KEY)
+        .ok()
+        .flatten()
+}
+
+/// Say that `response` comes from `generation` while watcher batches queued
+/// `lag` ago are unpublished: `epistemics.staleness_ms` and a
+/// `STALE_GENERATION` warning naming the generation. A failure is left as it
+/// is: it states nothing about the corpus.
+fn stamp_stale(mut response: Response, generation: u64, lag: Duration) -> Response {
+    if !response.ok {
+        return response;
+    }
+    let ms = u64::try_from(lag.as_millis()).unwrap_or(u64::MAX);
+    response
+        .epistemics
+        .get_or_insert_with(Epistemics::default)
+        .staleness_ms = Some(ms);
+    response.warnings.push(Warning {
+        code: "STALE_GENERATION".to_string(),
+        message: format!(
+            "answered from generation {generation}, which predates watcher batches queued {ms} ms ago and not yet published"
+        ),
+    });
+    response
+}
 
 fn is_retrieval_op(op_name: &str) -> bool {
     RETRIEVAL_OPS.contains(&op_name)
@@ -3653,8 +4954,9 @@ fn regex_escape_keyword(kw: &str) -> String {
 fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     let mut caps: Vec<String> = Vec::new();
 
-    // Op-declared named caps (top-level and inside the targets envelope).
-    for path in ["/caps", "/envelope/caps"] {
+    // Op-declared named caps (top-level, inside the targets envelope, and
+    // inside the envelope of a `targets_facts` packet).
+    for path in ["/caps", "/envelope/caps", "/facts/envelope/caps"] {
         if let Some(arr) = v.pointer(path).and_then(Value::as_array) {
             caps.extend(arr.iter().filter_map(Value::as_str).map(String::from));
         }
@@ -3706,6 +5008,7 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         "search" => "text index",
         "targets" | "resolve" => "text index + code graph",
         "changes" | "review_gate" => "code graph + working-tree diff",
+        "meaning" => "resident code-chunk embeddings + chunk BM25",
         _ => "code graph",
     };
     let mut basis = String::from(source);
@@ -3727,13 +5030,7 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     // extraction limits always apply, `closed_world` is never true: a
     // "0 callers" answer means "no callers found", not "this symbol has no
     // callers". This is Pixel's "I say when I don't know" value prop.
-    let extraction_limits = vec![
-        "callbacks passed as arguments (e.g. schema.plugin(fn), emitter.on('event', fn))"
-            .to_string(),
-        "dynamic dispatch (e.g. obj[methodName]())".to_string(),
-        "macro-generated calls".to_string(),
-        "eval / new Function".to_string(),
-    ];
+    let extraction_limits = extraction_limits_for(op_name);
     if caps.is_empty() {
         basis.push_str(
             "; static analysis cannot guarantee completeness: tree-sitter may miss callbacks, \
@@ -3775,6 +5072,27 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         })
         .collect();
     (epistemics, warnings)
+}
+
+/// The blind spots an op's answer carries into `epistemics.extraction_limits`.
+/// Graph answers share the static-analysis ones; `meaning` ranks embeddings
+/// and names its own.
+fn extraction_limits_for(op_name: &str) -> Vec<String> {
+    if op_name == "meaning" {
+        return vec![
+            "embedding similarity ranks chunks; it does not separate related from unrelated code"
+                .to_string(),
+            "only eligible source and document files are embedded (extension, size and ignore rules)"
+                .to_string(),
+        ];
+    }
+    vec![
+        "callbacks passed as arguments (e.g. schema.plugin(fn), emitter.on('event', fn))"
+            .to_string(),
+        "dynamic dispatch (e.g. obj[methodName]())".to_string(),
+        "macro-generated calls".to_string(),
+        "eval / new Function".to_string(),
+    ]
 }
 
 /// Drop matches whose path is credential-shaped before any byte or row
@@ -3870,13 +5188,14 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
         let pr_signals = pixel_rank::signals::SignalBundle {
             activity: signals.activity.clone(),
             session: signals.session.clone(),
-            fan_in: std::collections::HashMap::new(),
+            fan_in: rustc_hash::FxHashMap::default(),
             session_reasons: signals.session_reasons.clone(),
             error_reasons: signals.error_reasons.clone(),
             // `op_resolve` mirrors the activity maps out of the bundle
             // `engine_signals` returned; pixel-graph's own bundle has no field
             // for the git-log scan's availability, so it is not carried here.
             activity_unavailable: None,
+            fan_in_unavailable: None,
         };
         // Per-candidate test penalty: demote a test/spec file only when the
         // phrase itself is NOT about tests (per-path, via `is_test_path`).
@@ -3976,6 +5295,83 @@ impl EvaluateRequest {
     }
 }
 
+/// The `cycles` op's arguments as they arrive on the wire, before the
+/// strings are parsed into the types the enumeration runs on.
+pub(crate) struct CyclesRequest {
+    pub tiers: Option<String>,
+    pub max_nodes: Option<u32>,
+    pub max_edges: Option<u32>,
+    pub time_budget_ms: Option<u64>,
+    pub max_components: Option<u32>,
+}
+
+/// Default node cap for cycle enumeration.
+pub(crate) const DEFAULT_CYCLES_MAX_NODES: u32 = 10_000;
+/// Default edge cap for cycle enumeration.
+pub(crate) const DEFAULT_CYCLES_MAX_EDGES: u32 = 100_000;
+/// Default wall-clock budget for cycle enumeration.
+pub(crate) const DEFAULT_CYCLES_TIME_BUDGET_MS: u64 = 500;
+/// Default component cap for cycle enumeration.
+pub(crate) const DEFAULT_CYCLES_MAX_COMPONENTS: u32 = 1_000;
+
+impl CyclesRequest {
+    /// Parse the wire strings. An unknown `tiers` is a usage error, never a
+    /// silent fallback to a different relation.
+    fn parse(self) -> Result<cycles::Args, String> {
+        let tiers = match self.tiers.as_deref() {
+            None => cycles::TierSelection::Exact,
+            Some(value) => pixel_graph::cycles::TierSelection::parse(value).ok_or_else(|| {
+                format!("cycles: unknown --tiers {value:?} (exact | exact,probable)")
+            })?,
+        };
+        Ok(cycles::Args {
+            tiers,
+            max_nodes: self.max_nodes.unwrap_or(DEFAULT_CYCLES_MAX_NODES),
+            max_edges: self.max_edges.unwrap_or(DEFAULT_CYCLES_MAX_EDGES),
+            time_budget_ms: self.time_budget_ms.unwrap_or(DEFAULT_CYCLES_TIME_BUDGET_MS),
+            max_components: self.max_components.unwrap_or(DEFAULT_CYCLES_MAX_COMPONENTS),
+        })
+    }
+}
+
+/// The caps a cycle enumeration hit, in the words `derive_epistemics` turns
+/// into `lower_bound`. An enumeration that stopped early is a bounded answer
+/// and the envelope must say so.
+fn cycles_caps(enumeration: &pixel_graph::cycles::Enumeration) -> Vec<String> {
+    let mut caps = Vec::new();
+    if !enumeration.coverage.enumeration_exhausted
+        && let Some(param) = enumeration.coverage.stopped_by
+    {
+        match param {
+            pixel_graph::cycles::BudgetParameter::MaxNodes => {
+                caps.push(format!(
+                    "node cap {} stopped the enumeration; cycles beyond it were not found",
+                    enumeration.coverage.max_nodes
+                ));
+            }
+            pixel_graph::cycles::BudgetParameter::MaxEdges => {
+                caps.push(format!(
+                    "edge cap {} stopped the enumeration; cycles beyond it were not found",
+                    enumeration.coverage.max_edges
+                ));
+            }
+            pixel_graph::cycles::BudgetParameter::TimeBudgetMs => {
+                caps.push(format!(
+                    "time budget {}ms expired with nodes still queued",
+                    enumeration.coverage.time_budget_ms
+                ));
+            }
+            pixel_graph::cycles::BudgetParameter::MaxComponents => {
+                caps.push(format!(
+                    "component cap {} stopped the enumeration; further cycles were not reported",
+                    enumeration.coverage.max_components
+                ));
+            }
+        }
+    }
+    caps
+}
+
 /// The caps an evaluation hit, in the words `derive_epistemics` turns into
 /// `lower_bound`. A traversal that stopped early is a bounded answer and
 /// the envelope must say so twice: once in `coverage`, once here.
@@ -4004,9 +5400,11 @@ enum Resolved {
 /// `uid_or_name` protocol: '#' means uid; otherwise a name, with the
 /// disambiguation protocol (`{candidates: [...], hint}`) on ambiguity.
 ///
-/// When nothing matches, the error names the recovery
-/// (`pixel find-symbol`) instead of only restating the input, so an agent
-/// that guessed the identifier wrong learns the lookup that answers.
+/// A qualified name (`ActionLog::finish`, `Builder.finish`) resolves
+/// through [`GraphStore::symbols_named`], like `find-symbol`. When nothing
+/// matches, the error names the recovery (`pixel find-symbol`) instead of
+/// only restating the input, so an agent that guessed the identifier wrong
+/// learns the lookup that answers.
 fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, String> {
     if uid_or_name.contains('#') {
         return store
@@ -4020,15 +5418,21 @@ fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, Str
             });
     }
     let syms = store
-        .symbols_by_name(uid_or_name, None, 50)
+        .symbols_named(uid_or_name, None, 50)
         .map_err(|e| e.to_string())?;
     match syms.len() {
-        0 => Err(format!(
-            "no symbol named {uid_or_name:?}; run `pixel find-symbol {uid_or_name}` to list matching symbols"
-        )),
+        0 => Err(not_found_hint(uid_or_name)),
         1 => Ok(Resolved::One(syms.into_iter().next().unwrap())),
         _ => Ok(Resolved::Many(syms)),
     }
+}
+
+/// The not-found error for `name`, whose `find-symbol` hint can answer: a
+/// qualified name that matched nothing would miss again under
+/// `find-symbol`, so the hint searches its leaf, which lists every owner.
+fn not_found_hint(name: &str) -> String {
+    let search = pixel_graph::store::qualified_leaf(name).unwrap_or(name);
+    format!("no symbol named {name:?}; run `pixel find-symbol {search}` to list matching symbols")
 }
 
 /// `impact` on a graph the caller already opened and checked, answered as
@@ -4176,7 +5580,7 @@ fn compact_edges(
     limit: usize,
 ) -> Result<Value, String> {
     let mut grouped: BTreeMap<&'static str, Vec<Value>> = BTreeMap::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for e in edges {
         if seen.len() >= limit {
             break;
@@ -4407,6 +5811,48 @@ fn merge_build_info(out: &mut Value, built: Option<Value>) {
     }
 }
 
+/// The file beside the graph database whose `flock` serializes every
+/// write to the graph across processes.
+const GRAPH_LOCK_FILE: &str = "graph.lock";
+
+/// An exclusive hold on [`GRAPH_LOCK_FILE`] for one graph write: a full
+/// rebuild and its swap, an incremental update, a watcher batch. The text
+/// index has had `pixel_index::BuildLock` for this; the graph had none, so
+/// a `--no-daemon` run beside a live daemon could unlink the daemon's
+/// `-wal`/`-shm` and rename a database over the file it was writing
+/// (#1104). Released on drop, or by the kernel when the process dies.
+struct GraphLock(std::fs::File);
+
+impl GraphLock {
+    fn open(db: &Path) -> Result<std::fs::File, String> {
+        let path = db.with_file_name(GRAPH_LOCK_FILE);
+        pixel_git::nofollow::open_lock(&path)
+            .map_err(|error| format!("open graph lock {}: {error}", path.display()))
+    }
+
+    /// Wait for the lock: what a graph op does, since it owes a fresh graph.
+    fn acquire(db: &Path) -> Result<Self, String> {
+        let file = Self::open(db)?;
+        fs2::FileExt::lock_exclusive(&file).map_err(|error| format!("lock graph: {error}"))?;
+        Ok(Self(file))
+    }
+
+    /// Take the lock only if it is free: what a watcher batch does, since
+    /// the loop must not wait out another process's rebuild. `None` when it
+    /// is held; the next graph op walks the tree and repairs the drift.
+    fn try_acquire(db: &Path) -> Option<Self> {
+        let file = Self::open(db).ok()?;
+        fs2::FileExt::try_lock_exclusive(&file).ok()?;
+        Some(Self(file))
+    }
+}
+
+impl Drop for GraphLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
 fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
@@ -4517,9 +5963,18 @@ mod bridge {
         pixel_graph::build::apply_tree_delta(root, db, delta).map_err(es)
     }
 
-    /// The same for a debounced batch of watcher events.
-    pub fn update_files(root: &Path, db: &Path, files: &[(&str, bool)]) -> Result<(), String> {
-        pixel_graph::build::update_files(root, db, files)
+    /// The same for a debounced batch of watcher events, reusing the
+    /// caller's stat memo: a batch re-reads only the files whose stat moved
+    /// since the last walk. `before_commit` runs right before the rows
+    /// become visible to other connections.
+    pub fn update_files_gated(
+        root: &Path,
+        db: &Path,
+        files: &[(&str, bool)],
+        cache: &mut pixel_graph::build::TreeHashCache,
+        before_commit: &mut dyn FnMut(),
+    ) -> Result<(), String> {
+        pixel_graph::build::update_files_gated(root, db, files, cache, before_commit)
             .map(|_| ())
             .map_err(es)
     }
@@ -4958,7 +6413,7 @@ fn rank_search_matches(
     density_rank.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     let bm25_terms: Vec<String> = {
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::default();
         tokenize_words(pattern)
             .into_iter()
             .filter(|w| seen.insert(w.clone()))
@@ -5063,6 +6518,47 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     if denom > 0.0 { dot / denom } else { 0.0 }
 }
 
+/// The environment variable that lets a `--scope hybrid` search download
+/// the code embedding model in the background: `1` or `true`, read by the
+/// process that serves the search (the daemon keeps the environment it was
+/// started with). Unset, a search never makes a network request.
+const EMBED_DOWNLOAD_ENV: &str = "PIXEL_EMBED_DOWNLOAD";
+
+/// What a `--scope hybrid` search tells the user, once, when the code
+/// embedding model is not cached and no download was opted into.
+const EMBEDDER_HINT: &str = "pixel: semantic channel unavailable — the code embedding model minishlab/potion-code-16M-v2 is not cached, and a search downloads it only on opt-in. \
+Start pixel (and its daemon: `pixel daemon stop` first) with PIXEL_EMBED_DOWNLOAD=1 to fetch it from Hugging Face in the background. \
+Degrading to `code` ranking.";
+
+/// Whether [`EMBED_DOWNLOAD_ENV`]'s value opts into the background download.
+fn embed_download_opted_in(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true"))
+}
+
+/// What [`Service::ensure_embedder`] does about the code embedding model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbedderStep {
+    /// The model is cached: load it from disk.
+    Load,
+    /// Not cached, not opted in, not said yet: print [`EMBEDDER_HINT`].
+    Hint,
+    /// Not cached and opted in, not started yet: download in the background.
+    Download,
+    /// Not cached, already hinted or downloading: rank without it.
+    Degrade,
+}
+
+/// The step for a model that is `cached` or not, once the hint or the
+/// download already happened (`hinted`), with the download `opted_in` or not.
+fn embedder_step(cached: bool, hinted: bool, opted_in: bool) -> EmbedderStep {
+    match (cached, hinted, opted_in) {
+        (true, _, _) => EmbedderStep::Load,
+        (false, true, _) => EmbedderStep::Degrade,
+        (false, false, false) => EmbedderStep::Hint,
+        (false, false, true) => EmbedderStep::Download,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5070,6 +6566,166 @@ mod tests {
     use pixel_graph::concept_resolve::{RankedCandidate, Reranker, SignalBundle};
     use pixel_index::verify::MatchLine;
     use std::path::PathBuf;
+
+    struct CodeTestEmbedder;
+
+    impl Embedder for CodeTestEmbedder {
+        fn model_id(&self) -> &str {
+            CODE_SEARCH_MODEL_REPO
+        }
+        fn dims(&self) -> usize {
+            1
+        }
+        fn embed_batch(
+            &mut self,
+            texts: &[&str],
+            _kind: EmbedKind,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts.iter().map(|_| vec![1.0]).collect())
+        }
+    }
+
+    fn finish_code_download(service: &mut Service) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while service
+            .embedder_download
+            .as_ref()
+            .is_some_and(|job| !job.is_finished())
+        {
+            assert!(Instant::now() < deadline, "fixture download did not finish");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn hybrid_should_load_a_model_cached_after_its_hint_without_restarting() {
+        let root = login_repo("hybrid-late-cache");
+        let mut service = Service::open(&root).unwrap();
+        service.ensure_embedder_with(false, false, |_| {
+            panic!("a search must not download without opt-in")
+        });
+        assert!(service.embedder_hinted);
+        assert!(!service.embedder_unavailable);
+        service.ensure_embedder_with(true, false, |download| {
+            assert!(!download, "a cached model must load offline");
+            Ok(Box::new(CodeTestEmbedder))
+        });
+        let status = service.op_status().unwrap();
+        assert_eq!(status["embedding"]["model"], CODE_SEARCH_MODEL_REPO);
+        assert_eq!(status["embedding"]["embedder_resident"], true);
+        assert_eq!(status["embedding"]["semantic_searches"], 0);
+        let matches = vec![MatchLine {
+            path: "login.rs".into(),
+            line_number: 1,
+            line: "login".into(),
+        }];
+        assert_eq!(
+            service.semantic_rank_for_search(&matches, "login"),
+            Some(vec!["login.rs".into()])
+        );
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["semantic_searches"],
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hybrid_should_report_failed_download_in_status_once_and_allow_external_recovery() {
+        let root = login_repo("hybrid-download-error");
+        let mut service = Service::open(&root).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        service.ensure_embedder_with(false, true, move |download| {
+            assert!(download);
+            wait.recv_timeout(Duration::from_secs(2)).unwrap();
+            Err("fixture hub rejected download".into())
+        });
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["downloading"],
+            true
+        );
+        service.ensure_embedder_with(false, true, |_| panic!("must not start a second download"));
+        release.send(()).unwrap();
+        finish_code_download(&mut service);
+        let status = service.op_status().unwrap();
+        assert_eq!(
+            status["embedding"]["error"],
+            "fixture hub rejected download"
+        );
+        assert_eq!(status["embedding"]["downloading"], false);
+        assert_eq!(status["embedding"]["embedder_resident"], false);
+        service.ensure_embedder_with(false, true, |_| {
+            panic!("a failed download must not be retried on every request")
+        });
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["error"],
+            "fixture hub rejected download"
+        );
+        service.ensure_embedder_with(true, false, |_| Ok(Box::new(CodeTestEmbedder)));
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["error"],
+            Value::Null
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hybrid_should_load_after_background_download_and_report_a_corrupt_cache() {
+        let root = login_repo("hybrid-download-ready");
+        let mut service = Service::open(&root).unwrap();
+        service.ensure_embedder_with(false, true, |download| {
+            assert!(download);
+            Ok(Box::new(CodeTestEmbedder))
+        });
+        finish_code_download(&mut service);
+        service.ensure_embedder_with(true, false, |download| {
+            assert!(!download);
+            Ok(Box::new(CodeTestEmbedder))
+        });
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["resident_model"],
+            CODE_SEARCH_MODEL_REPO
+        );
+        let mut service = Service::open(&root).unwrap();
+        service.ensure_embedder_with(true, false, |_| Err("fixture corrupt weights".into()));
+        let status = service.op_status().unwrap();
+        assert_eq!(status["embedding"]["error"], "fixture corrupt weights");
+        assert_eq!(status["embedding"]["downloading"], false);
+        service.ensure_embedder_with(true, false, |_| {
+            panic!("corrupt caches must not be reopened every request")
+        });
+        assert_eq!(
+            service.op_status().unwrap()["embedding"]["embedder_resident"],
+            false
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedder_step_should_download_only_when_opted_in() {
+        for opted_in in [false, true] {
+            assert_eq!(embedder_step(true, false, opted_in), EmbedderStep::Load);
+            assert_eq!(embedder_step(true, true, opted_in), EmbedderStep::Load);
+            assert_eq!(embedder_step(false, true, opted_in), EmbedderStep::Degrade);
+        }
+        assert_eq!(embedder_step(false, false, false), EmbedderStep::Hint);
+        assert_eq!(embedder_step(false, false, true), EmbedderStep::Download);
+        assert!(
+            EMBEDDER_HINT.contains("downloads it only on opt-in")
+                && EMBEDDER_HINT.contains("PIXEL_EMBED_DOWNLOAD=1")
+                && EMBEDDER_HINT.contains(CODE_SEARCH_MODEL_REPO),
+            "{EMBEDDER_HINT}"
+        );
+    }
+
+    #[test]
+    fn embed_download_should_be_opted_in_only_by_one_or_true() {
+        assert!(embed_download_opted_in(Some("1")));
+        assert!(embed_download_opted_in(Some("true")));
+        for value in [None, Some(""), Some("0"), Some("false"), Some("yes")] {
+            assert!(!embed_download_opted_in(value), "{value:?}");
+        }
+    }
 
     #[test]
     fn read_plane_shares_index_and_observes_published_refresh() {
@@ -5117,6 +6773,714 @@ mod tests {
             (state.generation, state.healthy, state.graph_lagging),
             (10, true, false)
         );
+    }
+
+    fn search_request(pattern: &str) -> Request {
+        Request::Search {
+            pattern: pattern.into(),
+            json: false,
+            limit: None,
+            offset: None,
+            paths: None,
+            scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
+
+            stale_ok: false,
+        }
+    }
+
+    /// A replica answers a read-plane op from the published generation and
+    /// gives back everything else to the writer: a write-plane op, a read on
+    /// the writer itself, a repository whose graph is not built yet, and a
+    /// graph that lags the index (#1150).
+    #[test]
+    fn read_answer_should_serve_only_read_ops_from_a_published_graph() {
+        let root = login_repo("read-answer");
+        let mut writer = Service::open(&root).unwrap();
+        let mut cold = writer.read_replica();
+        assert!(
+            cold.read_answer(&search_request("login"), &|| None)
+                .is_none(),
+            "no graph on disk: the writer builds it"
+        );
+        writer.ensure_graph().unwrap();
+        // The writer's own answer publishes the snapshot replicas attach.
+        assert!(writer.handle(search_request("login")).ok);
+        let mut reader = writer.read_replica();
+
+        let found = reader
+            .read_answer(&search_request("login"), &|| None)
+            .expect("a read-plane op");
+        assert!(found.ok, "{found:?}");
+        assert!(found.data().to_string().contains("login.rs"), "{found:?}");
+        assert!(reader.read_answer(&Request::Status {}, &|| None).is_none());
+        assert!(
+            writer
+                .read_answer(&search_request("login"), &|| None)
+                .is_none(),
+            "only a replica answers on the read plane"
+        );
+
+        std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
+        writer.refresh_file("login.rs");
+        assert!(writer.handle(search_request("login_v2")).ok);
+        let fresh = reader
+            .read_answer(&search_request("login_v2"), &|| None)
+            .expect("next generation");
+        assert!(fresh.data().to_string().contains("login_v2"), "{fresh:?}");
+
+        writer.publication.write_or_recover().graph_lagging = true;
+        assert!(
+            reader
+                .read_answer(&search_request("login_v2"), &|| None)
+                .is_none(),
+            "a lagging graph sends the read to the writer, which repairs it"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A replica's answer carries the snapshot the writer published with
+    /// the generation it read, and the replica runs no git for it; with no
+    /// snapshot for that generation (a HEAD move or repository write), the
+    /// read goes back to the writer (#1151). Watcher batches publish their own.
+    #[test]
+    fn a_replica_should_attach_the_published_snapshot_and_run_no_git() {
+        let root = login_repo("published-snapshot");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        let mut reader = writer.read_replica();
+        assert!(
+            reader
+                .read_answer(&search_request("login"), &|| None)
+                .is_none(),
+            "nothing published yet"
+        );
+
+        let written = writer.handle(search_request("login"));
+        let published = writer.published_snapshot.read_or_recover().clone().unwrap();
+        assert_eq!(published.generation, writer.publication_generation());
+        assert_eq!(Some(&published.snapshot), written.snapshot.as_ref());
+        assert!(published.snapshot.head.is_some(), "{published:?}");
+
+        let read = reader
+            .read_answer(&search_request("login"), &|| None)
+            .unwrap();
+        assert_eq!(read.snapshot, Some(published.snapshot.clone()));
+        assert_eq!(reader.git_state.lookups, 0, "a replica spawned git");
+
+        // A watcher batch publishes its snapshot with the new generation;
+        // no writer request is needed before a replica can answer.
+        std::fs::write(root.join("login.rs"), "pub fn login_v3() {}\n").unwrap();
+        writer.refresh_file("login.rs");
+        assert_eq!(
+            reader
+                .read_answer(&search_request("login_v3"), &|| None)
+                .expect("the batch published its snapshot")
+                .snapshot
+                .and_then(|s| s.dirty_count),
+            Some(1)
+        );
+        let next = reader
+            .read_answer(&search_request("login_v3"), &|| None)
+            .unwrap();
+        assert_eq!(next.snapshot.and_then(|s| s.dirty_count), Some(1));
+
+        // A HEAD move unpublishes it.
+        writer.note_git_moved();
+        assert!(writer.published_snapshot.read_or_recover().is_none());
+        assert!(
+            reader
+                .read_answer(&search_request("login_v3"), &|| None)
+                .is_none()
+        );
+        assert_eq!(reader.git_state.lookups, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A repository write publishes the snapshot of the generation readers
+    /// see before it runs, and withdraws it afterwards, success or not.
+    #[test]
+    fn a_repo_write_should_publish_before_and_withdraw_after() {
+        let root = login_repo("repo-write-snapshot");
+        let mut writer = Service::open(&root).unwrap();
+        let generation = writer.publication_generation();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let shared = Arc::clone(&writer.published_snapshot);
+        let watcher = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if let Some(published) = shared.read_or_recover().clone() {
+                    let _ = seen_tx.send(published);
+                    return;
+                }
+                std::thread::yield_now();
+            }
+        });
+        // A remote that does not exist: the sync fails, after the snapshot
+        // the replicas would read while it ran was published.
+        let synced = writer.handle(Request::Sync {
+            remote: "nowhere".into(),
+            refspec: None,
+        });
+        watcher.join().unwrap();
+        let seen = seen_rx
+            .try_recv()
+            .expect("a snapshot was published before the sync");
+        assert_eq!(seen.generation, generation);
+        assert!(!synced.ok, "{synced:?}");
+        assert!(
+            writer.published_snapshot.read_or_recover().is_none(),
+            "withdrawn after the write"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A watcher batch held open inside its graph transaction, right before
+    /// it swaps, leaves the published generation readable: a replica answers
+    /// within a second, from the index and the rows of before the edit, under
+    /// the generation it read. Once the batch swaps, the next read sees the
+    /// edit (#1225). Before, the batch held the publication's write lock from
+    /// its first line, and the replica waited for the whole update.
+    #[test]
+    fn a_replica_should_answer_from_the_last_generation_while_a_batch_is_held() {
+        let root = login_repo("held-batch");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        assert!(writer.handle(search_request("login")).ok);
+        let generation = writer.publication_generation();
+        let mut reader = writer.read_replica();
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        writer.before_swap = Some(Box::new(move || {
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        }));
+        std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
+        let batch = std::thread::spawn(move || {
+            writer.refresh_file("login.rs");
+            writer
+        });
+        held.recv_timeout(Duration::from_secs(10))
+            .expect("the batch reaches its swap");
+
+        let started = Instant::now();
+        let old = reader
+            .read_answer(&search_request("login"), &|| None)
+            .expect("the replica answers during the batch");
+        let renamed = reader
+            .read_answer(&search_request("login_v2"), &|| None)
+            .expect("the replica answers during the batch");
+        let resolve = Request::Resolve {
+            phrase: "login_v2".into(),
+            limit: Some(5),
+
+            stale_ok: false,
+        };
+        let symbol = reader
+            .read_answer(&resolve, &|| None)
+            .expect("the replica answers during the batch");
+        let elapsed = started.elapsed();
+        release.send(()).unwrap();
+        let mut writer = batch.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the replica waited {elapsed:?} for the batch"
+        );
+        assert!(
+            old.ok && renamed.ok && symbol.ok,
+            "{old:?} {renamed:?} {symbol:?}"
+        );
+        assert!(
+            old.data().to_string().contains("login.rs"),
+            "the published index still holds login: {old:?}"
+        );
+        assert!(
+            !renamed.data().to_string().contains("login.rs"),
+            "the staged index leaked before the swap: {renamed:?}"
+        );
+        assert_ne!(
+            symbol.data()["confidence"],
+            json!("resolved"),
+            "uncommitted rows leaked before the swap: {symbol:?}"
+        );
+        assert_eq!(writer.publication_generation(), generation + 1);
+        assert!(writer.handle(search_request("login_v2")).ok);
+        let fresh = reader
+            .read_answer(&search_request("login_v2"), &|| None)
+            .expect("the next generation");
+        assert!(fresh.data().to_string().contains("login.rs"), "{fresh:?}");
+        let resolved = reader
+            .read_answer(&resolve, &|| None)
+            .expect("the next generation");
+        assert_eq!(
+            resolved.data()["confidence"],
+            json!("resolved"),
+            "the committed rows: {resolved:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A second edit must not need an intervening writer request to make
+    /// the previous generation available to a deadline-bound brief.
+    #[test]
+    fn stale_brief_should_answer_during_a_second_batch_without_a_writer_read() {
+        let root = login_repo("consecutive-stale-brief");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        assert!(writer.handle(search_request("login")).ok);
+        let mut reader = writer.read_replica();
+        std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
+        writer.refresh_file("login.rs");
+        let generation = writer.publication_generation();
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        writer.before_swap = Some(Box::new(move || {
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        }));
+        std::fs::write(root.join("login.rs"), "pub fn login_v3() {}\n").unwrap();
+        let batch = std::thread::spawn(move || {
+            writer.refresh_file("login.rs");
+            writer
+        });
+        held.recv_timeout(Duration::from_secs(10)).unwrap();
+        let started = Instant::now();
+        let response = reader.read_answer(&relevance_request(true), &|| {
+            Some(Duration::from_millis(1000))
+        });
+        let elapsed = started.elapsed();
+        release.send(()).unwrap();
+        let _writer = batch.join().unwrap();
+        let response =
+            response.expect("the second batch must leave the previous snapshot readable");
+        assert!(elapsed < Duration::from_secs(1), "brief waited {elapsed:?}");
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.data()["inputs"]["graph_generation"], generation);
+        assert_eq!(response.snapshot.and_then(|s| s.dirty_count), Some(1));
+        assert_eq!(response.epistemics.and_then(|e| e.staleness_ms), Some(1000));
+        assert_eq!(reader.git_state.lookups, 0, "replicas never spawn git");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A writer over `login_repo(tag)` that answered once (so a snapshot is
+    /// published), then holds a watcher batch renaming `login` to
+    /// `login_v2` right before its swap, with a replica of it.
+    struct HeldBatch {
+        root: PathBuf,
+        reader: Service,
+        generation: u64,
+        /// The graph signature the writer's own gate vouched for before.
+        signature: Value,
+        release: std::sync::mpsc::Sender<()>,
+        batch: std::thread::JoinHandle<Service>,
+    }
+
+    impl HeldBatch {
+        fn start(tag: &str) -> Self {
+            let root = login_repo(tag);
+            let mut writer = Service::open(&root).unwrap();
+            writer.ensure_graph().unwrap();
+            assert!(writer.handle(search_request("login")).ok);
+            let generation = writer.publication_generation();
+            let signature =
+                writer.handle(relevance_request(false)).data()["inputs"]["graph_signature"].clone();
+            assert!(signature.is_string(), "the writer's gate: {signature:?}");
+            let reader = writer.read_replica();
+            let (held_tx, held) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel::<()>();
+            writer.before_swap = Some(Box::new(move || {
+                held_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            }));
+            std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
+            let batch = std::thread::spawn(move || {
+                writer.refresh_file("login.rs");
+                writer
+            });
+            held.recv_timeout(Duration::from_secs(10))
+                .expect("the batch reaches its swap");
+            HeldBatch {
+                root,
+                reader,
+                generation,
+                signature,
+                release,
+                batch,
+            }
+        }
+
+        /// Let the batch publish; the writer, now one generation on.
+        fn finish(self) -> (PathBuf, Service, Service) {
+            self.release.send(()).unwrap();
+            let mut writer = self.batch.join().unwrap();
+            assert_eq!(writer.publication_generation(), self.generation + 1);
+            assert!(
+                writer.handle(search_request("login_v2")).ok,
+                "publish a snapshot"
+            );
+            (self.root, writer, self.reader)
+        }
+    }
+
+    /// Every brief graph read must keep the published rows available during
+    /// a batch, without pretending that those rows describe the edited tree.
+    fn stale_brief_read(op: &str) {
+        let mut held = HeldBatch::start(&format!("stale-brief-{op}"));
+        let mut value = json!({"op": op, "stale_ok": true,
+            "pattern": "login", "phrase": "login", "query": "login", "file": "login.rs", "uid": "login", "uid_or_name": "login",
+            "direction": "upstream", "role": "callers", "depth": 1,
+            "from": "go", "to": "login"});
+        let request: Request = serde_json::from_value(value.clone()).unwrap();
+        let response = held.reader.read_answer(&request, &|| Some(HELD_LAG));
+        let generation = held.generation;
+        let signature = held.signature.clone();
+        let (root, mut writer, mut reader) = held.finish();
+        let response = response.expect("stale_ok graph read must reach the replica");
+        assert!(response.ok, "{op}: {response:?}");
+        assert_eq!(
+            stated_lag(&response),
+            (
+                Some(1500),
+                vec![format!(
+                    "answered from generation {generation}, which predates watcher batches queued 1500 ms ago and not yet published"
+                )]
+            )
+        );
+        let data = response.data();
+        match op {
+            "search" => assert!(
+                data["matches"].as_array().unwrap().iter().any(|r| r["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("pub fn login_v2()")),
+                "{data}"
+            ),
+            "resolve" => assert!(data.to_string().contains("login.rs"), "{data}"),
+            "meaning" => assert_eq!(
+                data["status"], "unavailable",
+                "cold replica must not build embeddings"
+            ),
+            "skeleton" => assert_eq!(data["symbols"][0]["name"], "login"),
+            "context" => {
+                assert_eq!(data["text"], "", "changed source must not be quoted");
+                assert_eq!(data["truncated"], true);
+                assert_eq!(
+                    data["caps"],
+                    json!([
+                        "context truncated: source differs from graph snapshot or is unavailable; stale excerpts and Crux omitted"
+                    ])
+                );
+            }
+            "uses" => assert_eq!(data["edges"][0]["symbol"]["name"], "go"),
+            "impact" => assert_eq!(data["d1_will_break"][0]["name"], "go"),
+            "trace" => assert_eq!(data["found"], true),
+            "evaluate" => {
+                assert_eq!(data["status"], "established", "{data}");
+                assert_eq!(data["snapshot"]["signature"], signature);
+            }
+            _ => panic!("unknown test op {op}"),
+        }
+        value["uid"] = json!("login_v2");
+        value["uid_or_name"] = json!("login_v2");
+        value["to"] = json!("login_v2");
+        let request = serde_json::from_value(value.clone()).unwrap();
+        let fresh = reader
+            .read_answer(&request, &|| None)
+            .expect("fresh replica");
+        assert!(fresh.ok, "{fresh:?}");
+        assert_eq!(stated_lag(&fresh), (None, Vec::new()));
+        if op == "skeleton" {
+            assert_eq!(fresh.data()["symbols"][0]["name"], "login_v2");
+        }
+        value["stale_ok"] = json!(false);
+        let ordinary: Request = serde_json::from_value(value).unwrap();
+        assert!(!ordinary.stale_ok());
+        let current = writer.handle(ordinary);
+        assert!(current.ok, "{current:?}");
+        assert_eq!(stated_lag(&current), (None, Vec::new()));
+        assert_eq!(reader.git_state.lookups, 0, "replica must not spawn git");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_brief_skeleton_should_answer_the_published_generation() {
+        stale_brief_read("skeleton");
+    }
+
+    #[test]
+    fn stale_brief_context_should_answer_the_published_generation() {
+        stale_brief_read("context");
+    }
+
+    #[test]
+    fn stale_brief_uses_should_answer_the_published_generation() {
+        stale_brief_read("uses");
+    }
+
+    #[test]
+    fn stale_brief_impact_should_answer_the_published_generation() {
+        stale_brief_read("impact");
+    }
+
+    #[test]
+    fn stale_brief_trace_should_answer_the_published_generation() {
+        stale_brief_read("trace");
+    }
+
+    #[test]
+    fn stale_brief_evaluate_should_answer_the_published_generation() {
+        stale_brief_read("evaluate");
+    }
+
+    #[test]
+    fn stale_brief_search_should_answer_the_published_generation() {
+        stale_brief_read("search");
+    }
+
+    #[test]
+    fn stale_brief_resolve_should_answer_the_published_generation() {
+        stale_brief_read("resolve");
+    }
+
+    #[test]
+    fn stale_brief_meaning_should_answer_the_published_generation() {
+        stale_brief_read("meaning");
+    }
+
+    fn relevance_request(stale_ok: bool) -> Request {
+        Request::TargetsFacts {
+            task: "fix the login check".into(),
+            limit: Some(8),
+            relevance_only: true,
+            stale_ok,
+        }
+    }
+
+    /// What a held batch makes `Busy::behind` say.
+    const HELD_LAG: Duration = Duration::from_millis(1_500);
+
+    /// The lag a `stale_ok` answer states, and its `STALE_GENERATION`
+    /// warnings: none at all on an answer that is not stale.
+    fn stated_lag(response: &Response) -> (Option<u64>, Vec<String>) {
+        (
+            response.epistemics.as_ref().and_then(|e| e.staleness_ms),
+            response
+                .warnings
+                .iter()
+                .filter(|w| w.code == "STALE_GENERATION")
+                .map(|w| w.message.clone())
+                .collect(),
+        )
+    }
+
+    fn symbol_names(response: &Response) -> Vec<String> {
+        response.data()["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// While a batch is held, a `symbol` that sets `stale_ok` is answered by
+    /// the replica at once, from the generation before the batch, and says
+    /// so; without the flag the replica refuses and the writer answers after
+    /// the batch (read-after-write). Once the batch is published, the same
+    /// request reads the new rows and states no lag.
+    #[test]
+    fn a_stale_ok_symbol_should_be_answered_from_the_last_generation_and_say_so() {
+        let mut held = HeldBatch::start("stale-ok-symbol");
+        let symbol = |name: &str, stale_ok| Request::Symbol {
+            name: name.into(),
+            stale_ok,
+        };
+        let lag = || Some(HELD_LAG);
+
+        assert!(
+            held.reader
+                .read_answer(&symbol("login", false), &lag)
+                .is_none(),
+            "without stale_ok the writer answers, after the batch"
+        );
+        let started = Instant::now();
+        let old = held
+            .reader
+            .read_answer(&symbol("login", true), &lag)
+            .expect("the replica answers during the batch");
+        let renamed = held
+            .reader
+            .read_answer(&symbol("login_v2", true), &lag)
+            .expect("the replica answers during the batch");
+        let elapsed = started.elapsed();
+        let generation = held.generation;
+        let (root, _writer, mut reader) = held.finish();
+
+        assert!(elapsed < Duration::from_secs(1), "waited {elapsed:?}");
+        assert!(old.ok && renamed.ok, "{old:?} {renamed:?}");
+        assert_eq!(symbol_names(&old), ["login"], "the published rows");
+        assert_eq!(
+            symbol_names(&renamed),
+            Vec::<String>::new(),
+            "no uncommitted row"
+        );
+        let stated = (
+            Some(1_500),
+            vec![format!(
+                "answered from generation {generation}, which predates watcher batches queued 1500 ms ago and not yet published"
+            )],
+        );
+        assert_eq!(stated_lag(&old), stated);
+        assert_eq!(stated_lag(&renamed), stated);
+
+        let fresh = reader
+            .read_answer(&symbol("login_v2", true), &|| None)
+            .expect("the next generation");
+        assert_eq!(symbol_names(&fresh), ["login_v2"]);
+        assert_eq!(
+            stated_lag(&fresh),
+            (None, Vec::new()),
+            "nothing pending: not stale"
+        );
+        assert_eq!(reader.git_state.lookups, 0, "a replica spawned git");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The relevance probe the brief sends on every prompt: during a held
+    /// batch a `stale_ok` `targets_facts` is available on the replica, its
+    /// inputs name the generation before the batch, and the envelope states
+    /// the lag. The replica runs no git and walks no tree, which the batch
+    /// has already moved (the writer's gate would say `graph_stale`).
+    #[test]
+    fn a_stale_ok_targets_facts_should_be_answered_from_the_last_generation_and_say_so() {
+        let mut held = HeldBatch::start("stale-ok-facts");
+        let facts = relevance_request;
+        let lag = || Some(HELD_LAG);
+
+        assert!(
+            held.reader.read_answer(&facts(false), &lag).is_none(),
+            "without stale_ok the writer answers, after the batch"
+        );
+        let started = Instant::now();
+        let stale = held
+            .reader
+            .read_answer(&facts(true), &lag)
+            .expect("the replica answers during the batch");
+        let elapsed = started.elapsed();
+        let generation = held.generation;
+        let signature = held.signature.clone();
+        let (root, _writer, mut reader) = held.finish();
+
+        assert!(elapsed < Duration::from_secs(1), "waited {elapsed:?}");
+        assert_eq!(stale.data()["status"], "available", "{stale:?}");
+        assert_eq!(
+            stale.data()["inputs"]["graph_generation"],
+            json!(generation)
+        );
+        assert_eq!(
+            stale.data()["inputs"]["graph_signature"],
+            signature,
+            "the signature the writer vouched for before the batch"
+        );
+        assert!(
+            stale.data()["facts"].get("relevance").is_some(),
+            "the relevance block: {stale:?}"
+        );
+        assert_eq!(stated_lag(&stale).0, Some(1_500));
+        assert_eq!(stated_lag(&stale).1.len(), 1, "{stale:?}");
+
+        let fresh = reader
+            .read_answer(&facts(true), &|| None)
+            .expect("the next generation");
+        assert_eq!(fresh.data()["status"], "available", "{fresh:?}");
+        assert_eq!(
+            fresh.data()["inputs"]["graph_generation"],
+            json!(generation + 1)
+        );
+        assert_ne!(
+            fresh.data()["inputs"]["graph_signature"],
+            stale.data()["inputs"]["graph_signature"],
+            "the stale answer vouched for the old graph, not the edited tree"
+        );
+        assert_eq!(stated_lag(&fresh), (None, Vec::new()));
+        assert_eq!(reader.git_state.lookups, 0, "a replica spawned git");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A replica vouches only for a graph the current extractor wrote: one
+    /// another extractor built is the writer's to rebuild, so the replica
+    /// says `graph_stale` rather than serve its rows.
+    #[test]
+    fn a_replica_should_not_vouch_for_a_graph_another_extractor_built() {
+        let root = login_repo("stale-ok-extractor");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        assert!(writer.handle(search_request("login")).ok);
+        let mut reader = writer.read_replica();
+        let current = reader
+            .read_answer(&relevance_request(true), &|| None)
+            .expect("a published generation");
+        assert_eq!(current.data()["status"], "available", "{current:?}");
+
+        GraphStore::open(&writer.graph_db_path())
+            .unwrap()
+            .meta_set(pixel_graph::build::EXTRACTOR_VERSION_KEY, "0")
+            .unwrap();
+        let older = reader
+            .read_answer(&relevance_request(true), &|| None)
+            .expect("a published generation");
+        assert_eq!(older.data()["status"], "unavailable", "{older:?}");
+        assert_eq!(older.data()["reason"], "graph_stale", "{older:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A failure says nothing about the corpus, so it carries no lag; a
+    /// success gets the lag in `staleness_ms` and one warning naming the
+    /// generation it was read from.
+    #[test]
+    fn stamp_stale_should_state_the_lag_on_a_success_only() {
+        let failed = failure_response("symbol", "no graph");
+        assert_eq!(
+            stamp_stale(failed.clone(), 7, HELD_LAG),
+            failed,
+            "a failure is left as it is"
+        );
+        let stamped = stamp_stale(Response::success("symbol", json!({})), 7, HELD_LAG);
+        assert_eq!(
+            stated_lag(&stamped),
+            (
+                Some(1_500),
+                vec!["answered from generation 7, which predates watcher batches queued 1500 ms ago and not yet published".to_owned()]
+            )
+        );
+    }
+
+    /// If a queued batch publishes after the generation check but before its
+    /// lag is sampled, the old-generation response must not escape unstamped.
+    #[test]
+    fn a_replica_should_requeue_when_publication_advances_before_lag_sampling() {
+        let root = login_repo("stale-ok-publish-before-lag");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        assert!(writer.handle(search_request("login")).ok);
+        let publication = Arc::clone(&writer.publication);
+        let queued_lag = Arc::new(std::sync::Mutex::new(Some(HELD_LAG)));
+        assert_eq!(*queued_lag.lock().unwrap(), Some(HELD_LAG));
+        let lag_after_publish = Arc::clone(&queued_lag);
+        let mut reader = writer.read_replica();
+
+        let response = reader.read_answer(&relevance_request(true), &|| {
+            publication.write_or_recover().generation += 1;
+            assert_eq!(lag_after_publish.lock().unwrap().take(), Some(HELD_LAG));
+            None
+        });
+
+        assert!(
+            response.is_none(),
+            "the replica must not return a response after its generation changed"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn login_repo(tag: &str) -> PathBuf {
@@ -5229,6 +7593,12 @@ mod tests {
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@t")
+            // The machine's global config can sign (`commit.gpgsign`), which
+            // makes every fixture commit depend on an SSH agent: a locked
+            // one failed the whole suite. The test-hygiene pin makes the
+            // fixture's commits deterministic.
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
@@ -5446,6 +7816,8 @@ mod tests {
         let mut svc = Service::open(&root).unwrap();
         let resp = svc.handle(Request::Skeleton {
             file: "mod.rs".into(),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "{resp:?}");
         assert_eq!(resp.validate(), Ok(()));
@@ -5494,7 +7866,7 @@ mod tests {
             );
         }
         // Spot-check: the struct and fn are both signatures, not bodies.
-        let names: std::collections::HashSet<&str> =
+        let names: rustc_hash::FxHashSet<&str> =
             syms.iter().filter_map(|s| s["name"].as_str()).collect();
         assert!(
             names.contains("bootstrap"),
@@ -5641,6 +8013,8 @@ mod tests {
             uid_or_name: "entry".into(),
             role: "callees".into(),
             offset: None,
+
+            stale_ok: false,
         });
         assert!(outgoing.ok);
         assert_eq!(outgoing.data()["total_edges"], 1);
@@ -5661,6 +8035,8 @@ mod tests {
             uid_or_name: "relay".into(),
             role: "callees".into(),
             offset: None,
+
+            stale_ok: false,
         });
         assert!(relay.ok);
         assert_eq!(relay.data()["total_edges"], 1, "{:?}", relay.data());
@@ -5676,6 +8052,8 @@ mod tests {
                 uid_or_name: symbol.into(),
                 role: role.into(),
                 offset: None,
+
+                stale_ok: false,
             });
             assert!(response.ok);
             assert_eq!(response.data()["total_edges"], count);
@@ -5710,6 +8088,8 @@ mod tests {
             uid_or_name: "no_such_symbol_anywhere".into(),
             role: "callers".into(),
             offset: None,
+
+            stale_ok: false,
         });
         assert!(!miss.ok, "{miss:?}");
         let error = miss.error.as_ref().expect("a miss is an error");
@@ -5726,6 +8106,8 @@ mod tests {
             uid_or_name: "a.ts#ghost#function".into(),
             direction: "upstream".into(),
             depth: Some(2),
+
+            stale_ok: false,
         });
         assert!(!miss.ok, "{miss:?}");
         let error = miss.error.as_ref().unwrap();
@@ -5740,10 +8122,147 @@ mod tests {
             uid_or_name: "alpha".into(),
             direction: "upstream".into(),
             depth: Some(2),
+
+            stale_ok: false,
         });
         assert!(hit.ok, "{hit:?}");
         assert_eq!(hit.data()["target"], "a.ts#alpha#function", "{hit:?}");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A method written the way the graph prints it in a uid
+    /// (`ActionLog::finish`, `Builder.finish`) resolves on every route the
+    /// name reaches: `impact`, `uses`, `symbol` (`find-symbol`) and the
+    /// in-process `impact_on_graph`. Before, only the bare leaf or the uid
+    /// answered, and the miss hint sent the agent to a `find-symbol` that
+    /// failed the same way.
+    #[test]
+    fn qualified_method_names_resolve_on_every_route_and_misses_hint_the_leaf() {
+        let root = tmpdir("qualified-names");
+        std::fs::write(
+            root.join("log.rs"),
+            [
+                "pub struct ActionLog;",
+                "impl ActionLog { pub fn finish(&self) {} }",
+                "pub struct Hasher;",
+                "impl Hasher { pub fn finish(&self) {} }",
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("snap_a.rs"),
+            "pub struct Snapshot;\nimpl Snapshot { pub fn finish(self) {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("snap_b.rs"),
+            "pub struct Snapshot;\nimpl Snapshot { pub fn finish(self) {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("build.py"),
+            "class Builder:\n    def finish(self):\n        return 1\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "qualified fixture"]);
+        let action_log = "log.rs#ActionLog::finish#method";
+
+        let mut svc = Service::open(&root).unwrap();
+        for name in ["ActionLog::finish", "ActionLog.finish"] {
+            let impact = svc.handle(Request::Impact {
+                uid_or_name: name.into(),
+                direction: "upstream".into(),
+                depth: Some(2),
+
+                stale_ok: false,
+            });
+            assert!(impact.ok, "{name}: {impact:?}");
+            assert_eq!(impact.data()["target"], action_log, "{name}");
+        }
+        let uses = svc.handle(Request::Uses {
+            uid_or_name: "ActionLog::finish".into(),
+            role: "callers".into(),
+            offset: None,
+
+            stale_ok: false,
+        });
+        assert!(uses.ok, "{uses:?}");
+        assert_eq!(uses.data()["symbol"]["uid"], action_log, "{uses:?}");
+
+        let uids = |response: &Response| -> Vec<String> {
+            let key = if response.data()["candidates"].is_array() {
+                "candidates"
+            } else {
+                "symbols"
+            };
+            let mut uids: Vec<String> = response.data()[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["uid"].as_str().unwrap().to_string())
+                .collect();
+            uids.sort();
+            uids
+        };
+        let found = svc.handle(Request::Symbol {
+            name: "ActionLog::finish".into(),
+            stale_ok: false,
+        });
+        assert!(found.ok, "{found:?}");
+        assert_eq!(uids(&found), vec![action_log.to_string()]);
+        // The dotted spelling a Python uid carries, and the Rust one for it.
+        for name in ["Builder.finish", "Builder::finish"] {
+            let found = svc.handle(Request::Symbol {
+                name: name.into(),
+                stale_ok: false,
+            });
+            assert_eq!(
+                uids(&found),
+                vec!["build.py#Builder.finish#method".to_string()],
+                "{name}"
+            );
+        }
+
+        // Two `Snapshot::finish`: the disambiguation answer, both listed.
+        let ambiguous = svc.handle(Request::Impact {
+            uid_or_name: "Snapshot::finish".into(),
+            direction: "upstream".into(),
+            depth: Some(2),
+
+            stale_ok: false,
+        });
+        assert!(ambiguous.ok, "{ambiguous:?}");
+        assert_eq!(
+            uids(&ambiguous),
+            vec![
+                "snap_a.rs#Snapshot::finish#method".to_string(),
+                "snap_b.rs#Snapshot::finish#method".to_string(),
+            ]
+        );
+
+        // A qualified miss points at the leaf, which `find-symbol` can list.
+        let miss = svc.handle(Request::Impact {
+            uid_or_name: "Nothing::finish".into(),
+            direction: "upstream".into(),
+            depth: Some(2),
+
+            stale_ok: false,
+        });
+        let error = miss.error.as_ref().expect("a qualified miss is an error");
+        assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
+        assert_eq!(
+            error.message,
+            "no symbol named \"Nothing::finish\"; run `pixel find-symbol finish` to list matching symbols"
+        );
+
+        let store = GraphStore::open_read_only(&svc.graph_db_path()).unwrap();
+        let in_process = impact_on_graph(&store, "ActionLog::finish", "upstream", Some(2)).unwrap();
+        assert_eq!(in_process["target"], action_log);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5766,11 +8285,15 @@ mod tests {
             uid_or_name: "target".into(),
             role: "callers".into(),
             offset: Some(0),
+
+            stale_ok: false,
         });
         let second = svc.handle(Request::Uses {
             uid_or_name: "target".into(),
             role: "callers".into(),
             offset: Some(20),
+
+            stale_ok: false,
         });
         assert!(first.ok && second.ok);
         let edge_uids = |response: &Response| {
@@ -5779,7 +8302,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter_map(|edge| edge["symbol"]["uid"].as_str().map(str::to_string))
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<rustc_hash::FxHashSet<_>>()
         };
         let first_uids = edge_uids(&first);
         let second_uids = edge_uids(&second);
@@ -5829,7 +8352,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter_map(|symbol| symbol["uid"].as_str().map(str::to_string))
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<rustc_hash::FxHashSet<_>>()
         };
         let first_uids = symbol_uids(&first);
         let second_uids = symbol_uids(&second);
@@ -5865,6 +8388,7 @@ mod tests {
         // Find the uid for `alpha`.
         let sym = svc.handle(Request::Symbol {
             name: "alpha".into(),
+            stale_ok: false,
         });
         assert!(sym.ok, "symbol lookup: {sym:?}");
         let uid = sym
@@ -5881,6 +8405,8 @@ mod tests {
         let resp = svc.handle(Request::Context {
             uid: uid.clone(),
             budget_tokens: Some(50),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "context: {resp:?}");
         let serialized = serde_json::to_string(resp.data()).unwrap();
@@ -5940,6 +8466,8 @@ mod tests {
         let zero = svc.handle(Request::Context {
             uid: "sharedName".into(),
             budget_tokens: Some(0),
+
+            stale_ok: false,
         });
         assert!(!zero.ok, "zero budget must not return candidates: {zero:?}");
         // A budget above the minimum response but below the candidate
@@ -5947,6 +8475,8 @@ mod tests {
         let small = svc.handle(Request::Context {
             uid: "sharedName".into(),
             budget_tokens: Some(100),
+
+            stale_ok: false,
         });
         assert!(
             !small.ok,
@@ -5960,6 +8490,8 @@ mod tests {
         let ok = svc.handle(Request::Context {
             uid: "sharedName".into(),
             budget_tokens: Some(100_000),
+
+            stale_ok: false,
         });
         assert!(ok.ok, "generous budget: {ok:?}");
         assert!(
@@ -5973,6 +8505,8 @@ mod tests {
         let default = svc.handle(Request::Context {
             uid: "sharedName".into(),
             budget_tokens: None,
+
+            stale_ok: false,
         });
         assert!(
             default.ok,
@@ -6015,6 +8549,7 @@ mod tests {
         let mut svc = Service::open(&root).unwrap();
         let sym = svc.handle(Request::Symbol {
             name: "alpha".into(),
+            stale_ok: false,
         });
         let uid = sym
             .data()
@@ -6030,6 +8565,8 @@ mod tests {
         let resp = svc.handle(Request::Context {
             uid: uid.clone(),
             budget_tokens: Some(500),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "context: {resp:?}");
         let serialized = serde_json::to_string(resp.data()).unwrap();
@@ -6073,6 +8610,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "search: {resp:?}");
         let matches = resp
@@ -6102,6 +8641,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok);
         let matches = resp
@@ -6127,6 +8668,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok);
         let second_page = resp
@@ -6183,6 +8726,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(unranked.ok, "unranked: {:?}", unranked.error);
         assert_eq!(
@@ -6194,7 +8739,7 @@ mod tests {
             .get("matches")
             .and_then(Value::as_array)
             .unwrap();
-        let unranked_set: std::collections::HashSet<(String, u64)> = unranked_matches
+        let unranked_set: rustc_hash::FxHashSet<(String, u64)> = unranked_matches
             .iter()
             .map(|m| {
                 (
@@ -6215,6 +8760,8 @@ mod tests {
             scope: Some("code".into()),
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(ranked.ok, "ranked: {:?}", ranked.error);
         assert_eq!(
@@ -6226,7 +8773,7 @@ mod tests {
             .get("matches")
             .and_then(Value::as_array)
             .unwrap();
-        let ranked_set: std::collections::HashSet<(String, u64)> = ranked_matches
+        let ranked_set: rustc_hash::FxHashSet<(String, u64)> = ranked_matches
             .iter()
             .map(|m| {
                 (
@@ -6571,6 +9118,8 @@ mod tests {
             scope: Some("code".into()),
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "ranked search: {:?}", resp.error);
         let matches = resp
@@ -6628,6 +9177,8 @@ mod tests {
                 scope: Some("code".into()),
                 globs: Vec::new(),
                 types: Vec::new(),
+
+                stale_ok: false,
             });
             assert!(resp.ok, "page at offset {o}: {:?}", resp.error);
             let matches = resp
@@ -6650,7 +9201,7 @@ mod tests {
             );
         }
 
-        let unique: std::collections::HashSet<&String> = seen.iter().collect();
+        let unique: rustc_hash::FxHashSet<&String> = seen.iter().collect();
         assert_eq!(
             seen.len(),
             unique.len(),
@@ -6708,6 +9259,8 @@ mod tests {
                 scope: Some("code".into()),
                 globs: Vec::new(),
                 types: Vec::new(),
+
+                stale_ok: false,
             });
             assert!(resp.ok, "search: {:?}", resp.error);
             resp.data()
@@ -6735,6 +9288,7 @@ mod tests {
             limit: Some(5),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(targets.ok, "targets: {:?}", targets.error);
 
@@ -6771,6 +9325,8 @@ mod tests {
             scope: Some("banana".into()),
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(!resp.ok, "unknown scope must fail, not silently succeed");
         assert_eq!(
@@ -6787,6 +9343,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(
             unranked.ok,
@@ -6803,6 +9361,8 @@ mod tests {
             scope: Some("CODE".into()),
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(
             upper.ok,
@@ -6838,6 +9398,7 @@ mod tests {
             limit: Some(5),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let targets = resp
@@ -6885,6 +9446,7 @@ mod tests {
             limit: Some(5),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let targets = resp
@@ -6929,6 +9491,7 @@ mod tests {
                 limit: Some(5),
                 max_tier: None,
                 precision: false,
+                regions: false,
             });
             assert!(resp.ok, "targets({task}): {:?}", resp.error);
             resp.data()
@@ -6973,11 +9536,24 @@ mod tests {
         let response = service.handle(Request::TargetsFacts {
             task: "change login".into(),
             limit: Some(8),
+            relevance_only: false,
+            stale_ok: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
         assert_eq!(response.data()["status"], "unavailable");
         assert_eq!(response.data()["reason"], "graph_missing");
+        let relevance_only = service.handle(Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+            relevance_only: true,
+            stale_ok: false,
+        });
+        assert_eq!(
+            relevance_only.data(),
+            response.data(),
+            "the relevance-only path refuses on the same gate, with the same reason"
+        );
         assert!(
             !graph_path.exists(),
             "a fact request must not create a missing graph"
@@ -6999,6 +9575,7 @@ mod tests {
             limit: Some(8),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(built.ok, "fixture graph build: {built:?}");
         let graph_path = service.graph_db_path();
@@ -7008,16 +9585,294 @@ mod tests {
         let response = service.handle(Request::TargetsFacts {
             task: "change login".into(),
             limit: Some(8),
+            relevance_only: false,
+            stale_ok: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
         assert_eq!(response.data()["status"], "unavailable");
         assert_eq!(response.data()["reason"], "graph_stale");
+        let relevance_only = service.handle(Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+            relevance_only: true,
+            stale_ok: false,
+        });
+        assert_eq!(
+            relevance_only.data(),
+            response.data(),
+            "the relevance-only path refuses on the same gate, with the same reason"
+        );
         assert_eq!(
             std::fs::read(&graph_path).unwrap(),
             graph_before,
             "a fact request must not refresh a stale graph"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// HEAD of the fixture repository at `root`.
+    fn head_of(root: &Path) -> String {
+        pixel_index::gitsync::rev_parse_head(root).expect("a committed fixture")
+    }
+
+    /// A `targets_facts` request for `task`, full or relevance-only.
+    fn facts(service: &mut Service, task: &str, relevance_only: bool) -> Value {
+        service
+            .handle(Request::TargetsFacts {
+                task: task.into(),
+                limit: Some(8),
+                relevance_only,
+                stale_ok: false,
+            })
+            .data()
+            .clone()
+    }
+
+    /// The case behind 214 of 474 unbriefed prompts (#1032): the daemon
+    /// brought its content to the new HEAD, but the gate compared HEAD with
+    /// the base shard's commit, which only a rebuild moves, and closed every
+    /// prompt as `index_stale`.
+    #[test]
+    fn targets_facts_should_open_once_the_index_caught_up_with_a_commit() {
+        let root = tmpdir("targets-facts-caught-up");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let base = head_of(&root);
+        let mut service = Service::open(&root).unwrap();
+        let built = service.handle(Request::Targets {
+            task: "change login".into(),
+            limit: Some(8),
+            max_tier: None,
+            precision: false,
+            regions: false,
+        });
+        assert!(built.ok, "fixture graph build: {built:?}");
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        let moved = head_of(&root);
+        // Before the catch-up the gate is right to refuse.
+        assert_eq!(
+            facts(&mut service, "change session", false)["reason"],
+            "index_stale"
+        );
+
+        crate::daemon::Corpus::git_moved(&mut service);
+
+        let status = service.index.read_or_recover().status();
+        assert_eq!(
+            status.commit_oid.as_deref(),
+            Some(base.as_str()),
+            "the base did not move"
+        );
+        assert_eq!(status.covered_head.as_deref(), Some(moved.as_str()));
+        let full = facts(&mut service, "change session", false);
+        assert_eq!(full["status"], "available", "{full}");
+        let relevance_only = facts(&mut service, "change session", true);
+        assert_eq!(relevance_only["status"], "available", "{relevance_only}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A daemon opened after the commit covers HEAD through its delta, while
+    /// the base shard stays at the commit it was built at.
+    #[test]
+    fn targets_facts_should_open_on_a_delta_over_an_older_base() {
+        let root = tmpdir("targets-facts-delta");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let base = head_of(&root);
+        drop(Service::open(&root).unwrap());
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        let moved = head_of(&root);
+
+        let mut service = Service::open(&root).unwrap();
+        let built = service.handle(Request::Targets {
+            task: "change session".into(),
+            limit: Some(8),
+            max_tier: None,
+            precision: false,
+            regions: false,
+        });
+        assert!(built.ok, "fixture graph build: {built:?}");
+        let status = service.index.read_or_recover().status();
+        assert_eq!(status.commit_oid.as_deref(), Some(base.as_str()));
+        assert_eq!(status.covered_head.as_deref(), Some(moved.as_str()));
+        let answer = facts(&mut service, "change session", false);
+        assert_eq!(answer["status"], "available", "{answer}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A move wider than the bound is not refreshed on the serving path, and
+    /// the index does not claim a HEAD it did not read.
+    #[test]
+    fn catch_up_head_should_leave_a_move_wider_than_its_bound_uncovered() {
+        let (root, mut service) = cached_git_service("catch-up-bound");
+        let opened = head_of(&root);
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join("b.rs"), "pub fn b() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "two files"]);
+        assert!(!service.catch_up_head_within(1));
+        assert_eq!(
+            service.index.read_or_recover().covered_head(),
+            Some(opened.as_str())
+        );
+        // Two paths fit a bound of two, exactly.
+        assert!(service.catch_up_head_within(2));
+        assert_eq!(
+            service.index.read_or_recover().covered_head(),
+            Some(head_of(&root).as_str())
+        );
+        // Nothing moved since: covered, with nothing to refresh.
+        assert!(service.catch_up_head_within(0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A committed `login.rs` in a git fixture, served by a service whose
+    /// git-state cache outlives the test (no TTL expiry mid-assertion).
+    fn cached_git_service(tag: &str) -> (PathBuf, Service) {
+        let root = tmpdir(tag);
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut service = Service::open(&root).unwrap();
+        service.git_state.ttl = Duration::from_secs(600);
+        service.git_state.ref_ttl = Duration::from_secs(600);
+        (root, service)
+    }
+
+    /// The agent rhythm is edit, then ask: the watcher batch in between
+    /// leaves HEAD and the branch cached, and only `git status` runs again,
+    /// so the snapshot still lists the edited file.
+    #[test]
+    fn an_edit_should_refresh_only_the_dirty_list_of_the_snapshot() {
+        let (root, mut service) = cached_git_service("snapshot-after-edit");
+        let before = service.repo_snapshot();
+        assert_eq!(service.git_state.lookups, 3, "head, branch, dirty");
+        assert!(before.dirty.is_empty(), "{before:?}");
+
+        std::fs::write(root.join("login.rs"), "pub fn login_edited() {}\n").unwrap();
+        service.refresh_files(&[("login.rs", false)]);
+        let after = service.repo_snapshot();
+        assert_eq!(
+            service.git_state.lookups, 4,
+            "only the dirty list is looked up again"
+        );
+        assert_eq!(after.dirty, ["login.rs"]);
+        assert_eq!(after.head, before.head);
+        assert_eq!(after.branch, before.branch);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A writing op may move HEAD, the branch and the tree: all three are
+    /// looked up again. Within the TTL nothing is.
+    #[test]
+    fn git_state_cache_should_serve_within_its_ttl_until_cleared() {
+        let (root, mut service) = cached_git_service("snapshot-clear");
+        let first = service.repo_snapshot();
+        let again = service.repo_snapshot();
+        assert_eq!(service.git_state.lookups, 3);
+        assert_eq!(first, again);
+        service.git_state.clear();
+        let _ = service.repo_snapshot();
+        assert_eq!(service.git_state.lookups, 6);
+        service.git_state.ttl = Duration::ZERO;
+        service.git_state.ref_ttl = Duration::ZERO;
+        let _ = service.repo_snapshot();
+        assert_eq!(
+            service.git_state.lookups, 9,
+            "an expired value is looked up again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A commit the watcher saw under `.git` drops HEAD and the branch, so
+    /// the next snapshot names the new commit at once, whatever the TTL.
+    #[test]
+    fn a_head_move_should_drop_the_cached_head() {
+        let (root, mut service) = cached_git_service("snapshot-head-moved");
+        let primed = service.repo_snapshot();
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        assert_eq!(
+            service.repo_snapshot().head,
+            primed.head,
+            "cached until told"
+        );
+        crate::daemon::Corpus::git_moved(&mut service);
+        let moved = service.repo_snapshot();
+        assert_ne!(moved.head, primed.head);
+        assert_eq!(service.git_state.lookups, 6, "head, branch and dirty again");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// HEAD outlives the one-second TTL only while the watch covers `.git`,
+    /// and stops as soon as the watcher may have lost an event.
+    #[test]
+    fn head_should_be_cached_longer_only_while_the_watch_covers_git() {
+        let (root, mut service) = cached_git_service("snapshot-ref-ttl");
+        let report = |git_dir| crate::daemon::WatchReport {
+            dirs: 1,
+            recursive: true,
+            elapsed: Duration::ZERO,
+            git_dir,
+        };
+        service.git_state.ref_ttl = SNAPSHOT_CACHE_TTL;
+        service.note_watch_ready(report(false));
+        assert_eq!(service.git_state.ref_ttl, SNAPSHOT_CACHE_TTL);
+        service.note_watch_ready(report(true));
+        assert_eq!(service.git_state.ref_ttl, WATCHED_REF_TTL);
+        assert_eq!(
+            service.git_state.ttl,
+            Duration::from_secs(600),
+            "the dirty list keeps its own"
+        );
+        service.note_watcher_error("queue overflow");
+        assert_eq!(service.git_state.ref_ttl, SNAPSHOT_CACHE_TTL);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The targets-facts gate reads HEAD fresh, so a commit made outside
+    /// pixel stales the index at once, and the snapshot of that same answer
+    /// carries the HEAD the gate judged, not the one cached before the
+    /// commit: one read per request, shared.
+    #[test]
+    fn targets_facts_should_share_its_fresh_head_with_the_snapshot() {
+        let (root, mut service) = cached_git_service("targets-facts-one-head");
+        let primed = service.repo_snapshot();
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        let moved = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let moved = String::from_utf8(moved.stdout).unwrap().trim().to_string();
+        assert_ne!(primed.head.as_deref(), Some(moved.as_str()));
+
+        let response = service.handle(Request::TargetsFacts {
+            task: "change session".into(),
+            limit: Some(8),
+            relevance_only: false,
+            stale_ok: false,
+        });
+        assert_eq!(response.data()["reason"], "index_stale", "{response:?}");
+        assert_eq!(
+            response.snapshot.as_ref().and_then(|s| s.head.as_deref()),
+            Some(moved.as_str()),
+            "the snapshot must describe the HEAD the gate judged"
+        );
+        assert_eq!(service.git_state.lookups, 4, "primed 3, then one HEAD read");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7035,6 +9890,7 @@ mod tests {
             limit: Some(8),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(built.ok, "fixture graph build: {built:?}");
         let graph_path = service.graph_db_path();
@@ -7046,11 +9902,24 @@ mod tests {
         let response = service.handle(Request::TargetsFacts {
             task: "change session".into(),
             limit: Some(8),
+            relevance_only: false,
+            stale_ok: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
         assert_eq!(response.data()["status"], "unavailable");
         assert_eq!(response.data()["reason"], "index_stale");
+        let relevance_only = service.handle(Request::TargetsFacts {
+            task: "change session".into(),
+            limit: Some(8),
+            relevance_only: true,
+            stale_ok: false,
+        });
+        assert_eq!(
+            relevance_only.data(),
+            response.data(),
+            "the relevance-only path refuses on the same gate, with the same reason"
+        );
         assert_eq!(
             std::fs::read(&graph_path).unwrap(),
             graph_before,
@@ -7077,6 +9946,7 @@ mod tests {
             limit: Some(8),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(built.ok, "fixture graph build: {built:?}");
         let graph_path = service.graph_db_path();
@@ -7084,6 +9954,8 @@ mod tests {
         let request = || Request::TargetsFacts {
             task: "change login".into(),
             limit: Some(8),
+            relevance_only: false,
+            stale_ok: false,
         };
         let first = service.handle(request());
         let second = service.handle(request());
@@ -7096,6 +9968,15 @@ mod tests {
         assert_eq!(inputs["task"], "change login");
         assert_eq!(inputs["limit"], 8);
         assert_eq!(inputs["algorithm_version"], TARGETS_FACTS_ALGORITHM_VERSION);
+        assert_eq!(
+            inputs["algorithm_version"], 2,
+            "version 2 is the first with `facts.relevance`"
+        );
+        assert_eq!(
+            first.data()["facts"]["relevance"]["files_considered"],
+            1,
+            "the block is part of the deterministic facts"
+        );
         assert!(!inputs["activity_reranking"].as_bool().unwrap());
         assert!(!inputs["semantic_fallback"].as_bool().unwrap());
         assert_eq!(
@@ -7109,6 +9990,33 @@ mod tests {
         assert!(
             first.data()["facts"].get("closed_world").is_none(),
             "fact packets must not carry the targets-manifest read/edit boundary"
+        );
+        let only = || Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+            relevance_only: true,
+            stale_ok: false,
+        };
+        let (fast, fast_again) = (service.handle(only()), service.handle(only()));
+        assert_eq!(fast.data(), fast_again.data(), "the fast path repeats too");
+        assert_eq!(fast.data()["status"], "available");
+        assert_eq!(
+            fast.data()["inputs"],
+            *inputs,
+            "same gate, same declared inputs"
+        );
+        assert_eq!(
+            fast.data()["facts"]["relevance"],
+            first.data()["facts"]["relevance"],
+            "the block is the one the full answer carries"
+        );
+        assert!(
+            fast.data()["facts"].get("targets").is_none(),
+            "the fast path ranks no targets"
+        );
+        assert_eq!(
+            fast.epistemics.as_ref().map(|e| e.lower_bound),
+            first.epistemics.as_ref().map(|e| e.lower_bound),
         );
         assert_eq!(
             std::fs::read(&graph_path).unwrap(),
@@ -7143,6 +10051,8 @@ mod tests {
             scope: Some("code".into()),
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "ranked search: {:?}", resp.error);
         let matches = resp
@@ -7186,9 +10096,12 @@ mod tests {
         .unwrap();
 
         let mut svc = Service::open(&root).unwrap();
+        // Never the real model: this walk only needs the envelope.
+        svc.set_meaning(crate::meaning::testing::meaning(&root));
         let uid = {
             let sym = svc.handle(Request::Symbol {
                 name: "alpha".into(),
+                stale_ok: false,
             });
             sym.data()["symbols"][0]["uid"]
                 .as_str()
@@ -7208,6 +10121,8 @@ mod tests {
                     scope: None,
                     globs: Vec::new(),
                     types: Vec::new(),
+
+                    stale_ok: false,
                 },
             ),
             (
@@ -7215,6 +10130,8 @@ mod tests {
                 Request::Resolve {
                     phrase: "alpha".into(),
                     limit: Some(5),
+
+                    stale_ok: false,
                 },
             ),
             (
@@ -7224,6 +10141,7 @@ mod tests {
                     limit: Some(5),
                     max_tier: None,
                     precision: false,
+                    regions: false,
                 },
             ),
             (
@@ -7231,6 +10149,17 @@ mod tests {
                 Request::TargetsFacts {
                     task: "alpha beta".into(),
                     limit: Some(5),
+                    relevance_only: false,
+                    stale_ok: false,
+                },
+            ),
+            (
+                "meaning",
+                Request::Meaning {
+                    query: "alpha beta".into(),
+                    limit: Some(5),
+
+                    stale_ok: false,
                 },
             ),
             (
@@ -7239,6 +10168,8 @@ mod tests {
                     uid_or_name: "alpha".into(),
                     direction: "upstream".into(),
                     depth: Some(2),
+
+                    stale_ok: false,
                 },
             ),
             (
@@ -7247,6 +10178,8 @@ mod tests {
                     uid_or_name: "alpha".into(),
                     role: "callers".into(),
                     offset: None,
+
+                    stale_ok: false,
                 },
             ),
             (
@@ -7254,6 +10187,8 @@ mod tests {
                 Request::Trace {
                     from: "beta".into(),
                     to: "alpha".into(),
+
+                    stale_ok: false,
                 },
             ),
             (
@@ -7270,12 +10205,15 @@ mod tests {
                 Request::Context {
                     uid,
                     budget_tokens: Some(2000),
+
+                    stale_ok: false,
                 },
             ),
             (
                 "symbol",
                 Request::Symbol {
                     name: "alpha".into(),
+                    stale_ok: false,
                 },
             ),
             ("processes", Request::Processes { offset: None }),
@@ -7289,12 +10227,21 @@ mod tests {
                     limit: None,
                 },
             ),
+            (
+                "cycles",
+                Request::Cycles {
+                    tiers: Some("exact".into()),
+                    max_nodes: None,
+                    max_edges: None,
+                    time_budget_ms: None,
+                    max_components: None,
+                },
+            ),
         ];
 
         // The walk itself must cover the registry exactly — a new retrieval
         // op added to RETRIEVAL_OPS without a row here fails loudly.
-        let walked: std::collections::HashSet<&str> =
-            requests.iter().map(|(name, _)| *name).collect();
+        let walked: rustc_hash::FxHashSet<&str> = requests.iter().map(|(name, _)| *name).collect();
         for op in super::RETRIEVAL_OPS {
             assert!(
                 walked.contains(op),
@@ -7328,6 +10275,7 @@ mod tests {
                 "search" => "text index",
                 "targets" | "resolve" => "text index + code graph",
                 "changes" => "code graph + working-tree diff",
+                "meaning" => "resident code-chunk embeddings",
                 _ => "code graph",
             };
             assert!(
@@ -7672,6 +10620,7 @@ mod tests {
             limit: Some(20),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let envelope = &resp.data()["envelope"];
@@ -7733,6 +10682,7 @@ mod tests {
             limit: Some(10),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let targets = resp.data()["targets"].as_array().unwrap();
@@ -7777,6 +10727,8 @@ mod tests {
         let resp = svc.handle(Request::Resolve {
             phrase: "uniqueTargetFn".into(),
             limit: Some(5),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "resolve: {:?}", resp.error);
         let data = resp.data();
@@ -7807,7 +10759,7 @@ mod tests {
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "init"]);
 
-        let svc = Service::open(&root).unwrap();
+        let mut svc = Service::open(&root).unwrap();
         std::fs::remove_dir_all(root.join(".git")).unwrap();
 
         let error = match svc.facts_open_and_catch_up() {
@@ -7816,6 +10768,98 @@ mod tests {
         };
         assert!(error.contains("facts lazy ingest failed"), "{error}");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn history_query(read_only: bool) -> Request {
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: Some(5),
+            read_only,
+        }
+    }
+
+    /// Every facts request after the first reads the store already open:
+    /// no `.pixel` trust check, no DDL. A db another process replaced (a
+    /// rebuild, a reset) is reopened, so its trust check runs again.
+    #[test]
+    fn facts_requests_should_reuse_the_open_store_until_the_db_file_changes() {
+        let root = tmpdir("facts-store-kept");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut svc = Service::open(&root).unwrap();
+        svc.facts_warmer_started.store(true, Ordering::SeqCst);
+
+        assert!(svc.handle(history_query(false)).ok);
+        assert!(svc.handle(history_query(true)).ok);
+        assert!(svc.handle(Request::Status {}).ok);
+        assert!(svc.handle(history_query(false)).ok);
+        assert_eq!(svc.facts_opens, 1, "one open serves every later request");
+
+        let db = pixel_facts::store::history_db_path(&root);
+        let moved = db.with_extension("moved");
+        std::fs::copy(&db, &moved).unwrap();
+        std::fs::remove_file(&db).unwrap();
+        std::fs::rename(&moved, &db).unwrap();
+        assert!(svc.handle(history_query(true)).ok);
+        assert_eq!(svc.facts_opens, 2, "a replaced db file is opened again");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The kept store does not keep the trust verdict past its file: a
+    /// `.pixel/` the repository now tracks is refused as soon as the db the
+    /// store was opened on is replaced, as a checkout of it would.
+    #[test]
+    fn a_replaced_db_should_be_refused_when_the_repository_tracks_pixel() {
+        let root = tmpdir("facts-store-tracked");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut svc = Service::open(&root).unwrap();
+        svc.facts_warmer_started.store(true, Ordering::SeqCst);
+        assert!(svc.handle(history_query(false)).ok);
+
+        let db = pixel_facts::store::history_db_path(&root);
+        let copy = db.with_extension("copy");
+        std::fs::copy(&db, &copy).unwrap();
+        std::fs::remove_file(&db).unwrap();
+        std::fs::rename(&copy, &db).unwrap();
+        git(&root, &["add", "-f", ".pixel/history.db"]);
+        let refused = svc.handle(history_query(true));
+        assert!(!refused.ok, "{refused:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `status` counts the repository's commits once per refs state: the
+    /// prompt hook asks for it on every prompt, and `rev-list --all` only
+    /// changes when a ref moves.
+    #[test]
+    fn status_should_count_commits_again_only_after_a_ref_moves() {
+        let root = tmpdir("facts-status-total");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut svc = Service::open(&root).unwrap();
+        svc.facts_warmer_started.store(true, Ordering::SeqCst);
+        assert!(svc.handle(history_query(false)).ok);
+        let total = |svc: &mut Service| {
+            svc.handle(Request::Status {}).data()["facts"]["total_commits"].clone()
+        };
+
+        assert_eq!(total(&mut svc), 1);
+        assert_eq!(total(&mut svc), 1);
+        assert_eq!(svc.rev_list_runs, 1, "the refs did not move");
+
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+        assert_eq!(total(&mut svc), 2);
+        assert_eq!(svc.rev_list_runs, 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7847,6 +10891,8 @@ mod tests {
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .env("GIT_AUTHOR_DATE", &old_date)
             .env("GIT_COMMITTER_DATE", &old_date)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
@@ -7872,7 +10918,7 @@ mod tests {
         // No warm loop outliving the test: the index is already fresh.
         svc.facts_warmer_started.store(true, Ordering::SeqCst);
 
-        let missing = svc.op_lifecycle(None, Some("legacy_token")).unwrap();
+        let missing = svc.op_lifecycle(None, Some("legacy_token"), false).unwrap();
         assert_eq!(missing["first_seen"], Value::Null, "{missing}");
         assert_eq!(
             missing["coverage"],
@@ -7887,13 +10933,13 @@ mod tests {
         );
         assert_eq!(missing["index_state"]["diffs_evicted"], 1, "{missing}");
 
-        let found = svc.op_lifecycle(None, Some("fresh_token")).unwrap();
+        let found = svc.op_lifecycle(None, Some("fresh_token"), false).unwrap();
         assert_eq!(found["total_touches"], 1, "{found}");
         assert_eq!(found["coverage"]["lower_bound"], true, "{found}");
         assert_eq!(found["coverage"]["first_seen_exact"], false, "{found}");
 
         let by_path = svc
-            .op_lifecycle(Some("old.rs"), Some("legacy_token"))
+            .op_lifecycle(Some("old.rs"), Some("legacy_token"), false)
             .unwrap();
         assert_eq!(by_path["what"], "old.rs", "{by_path}");
         assert!(by_path.get("coverage").is_none(), "{by_path}");
@@ -8083,6 +11129,24 @@ mod tests {
         let caller = bundle.activity.get("caller.rs").copied().unwrap_or(0.0);
         assert!(login > 0.0, "{:?}", bundle.activity);
         assert!(login >= caller, "{:?}", bundle.activity);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repository with no commits has no `git log`: the failure is handed
+    /// on as an empty map and still named, so the caller reports
+    /// `activity_unavailable` instead of "this repository has no history".
+    /// Before the hand-on, `compute_signals` re-ran the same failing scan.
+    #[test]
+    fn engine_signals_names_the_activity_failure_instead_of_rescanning() {
+        let root = tmpdir("engine-signals-commitless");
+        git(&root, &["init", "-q"]);
+        std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        let mut svc = Service::open(&root).unwrap();
+        let bundle = svc.engine_signals(&["a.rs".to_string()]);
+        assert!(
+            bundle.activity_unavailable.is_some(),
+            "a commitless repo must name the failed scan: {bundle:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -8410,7 +11474,7 @@ mod tests {
     #[test]
     fn engine_reranker_preserves_candidates_and_applies_live_weights() {
         let signals = SignalBundle {
-            activity: HashMap::from([("hot.rs".to_string(), 1.0)]),
+            activity: HashMap::from_iter([("hot.rs".to_string(), 1.0)]),
             ..SignalBundle::default()
         };
         let candidates = vec![
@@ -8662,6 +11726,7 @@ mod tests {
         // new name, not the pre-rename snapshot.
         let sym = svc.handle(Request::Symbol {
             name: "authenticate".to_string(),
+            stale_ok: false,
         });
         assert!(sym.ok, "{sym:?}");
         assert!(
@@ -8802,6 +11867,8 @@ mod tests {
                 scope: None,
                 globs: globs.iter().map(ToString::to_string).collect(),
                 types: types.iter().map(ToString::to_string).collect(),
+
+                stale_ok: false,
             })
         };
         let paths = |resp: &Response| -> Vec<String> {
@@ -8853,6 +11920,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "search: {resp:?}");
         let data = resp.data();
@@ -8885,6 +11954,8 @@ mod tests {
             scope: None,
             globs: Vec::new(),
             types: Vec::new(),
+
+            stale_ok: false,
         });
         assert_eq!(
             resp.data()["cap_hits"],
@@ -8937,6 +12008,8 @@ mod tests {
         let resp = svc.handle(Request::Context {
             uid: uid.to_owned(),
             budget_tokens: Some(budget),
+
+            stale_ok: false,
         });
         assert!(resp.ok, "context: {resp:?}");
         resp.data().clone()
@@ -9245,7 +12318,7 @@ mod context_crux_coordinate_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
         let crux = vec![(2, "if flag {".to_owned()), (3, "return 1;".to_owned())];
-        let files = HashMap::from([(1, "sample.rs".to_owned())]);
+        let files = HashMap::from_iter([(1, "sample.rs".to_owned())]);
         for padding in [10, 20] {
             let source = format!("{}{body}", "// padding\n".repeat(padding));
             std::fs::write(dir.join("sample.rs"), &source).unwrap();
@@ -9268,7 +12341,7 @@ mod context_crux_coordinate_tests {
 
     #[test]
     fn context_crux_rejects_zero_out_of_span_and_overflow_coordinates() {
-        let files = HashMap::new();
+        let files = HashMap::default();
         let crux = vec![
             (0, "invalid".to_owned()),
             (2, "valid".to_owned()),
@@ -9313,6 +12386,8 @@ mod context_crux_coordinate_tests {
         let request = || Request::Context {
             uid: "sample.rs#check#function".to_owned(),
             budget_tokens: Some(2000),
+
+            stale_ok: false,
         };
         let mut service = Service::open(&root).unwrap();
         let before = service.handle(request());
@@ -9365,3 +12440,29 @@ mod context_crux_coordinate_tests {
 
 #[cfg(test)]
 mod contract_tests;
+
+#[cfg(test)]
+mod keyword_window_tests {
+    use super::{EVIDENCE_WINDOW_CHARS, keyword_window};
+
+    #[test]
+    fn a_long_line_is_shown_as_a_window_around_the_keyword() {
+        let line = format!("{}needle{}", "a".repeat(500), "b".repeat(500));
+        let shown = keyword_window(&line, "needle");
+        assert!(shown.contains("needle"), "{shown}");
+        assert!(
+            shown.chars().count() <= EVIDENCE_WINDOW_CHARS + 2,
+            "{}",
+            shown.len()
+        );
+        assert!(shown.starts_with('…') && shown.ends_with('…'));
+    }
+
+    #[test]
+    fn a_short_line_is_shown_whole_and_trimmed() {
+        assert_eq!(
+            keyword_window("   const needle = 1;  ", "needle"),
+            "const needle = 1;"
+        );
+    }
+}

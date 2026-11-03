@@ -3,7 +3,7 @@
 
 [package]
 name = "pixel-task"
-version = "0.7.1"
+version = "0.10.0"
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -25,4 +25,3 @@ libc = "0.2"
 tempfile = "3"
 
 [dev-dependencies]
-proptest = { workspace = true }

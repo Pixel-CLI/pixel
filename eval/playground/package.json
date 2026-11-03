@@ -1,0 +1,14 @@
+{
+  "name": "pixel-brief-playground",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/server.ts",
+    "start": "bun src/server.ts",
+    "test": "bun test",
+    "setup": "bash scripts/setup-fixture.sh"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

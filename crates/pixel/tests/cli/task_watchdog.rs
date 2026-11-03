@@ -304,7 +304,7 @@ fn telemetry_export_retry_should_recover_the_event_and_count_one_request() {
     );
 
     let output = command(&root)
-        .args(["task", "events", &task.task_id, "--json"])
+        .args(["task-state", "events", &task.task_id, "--json"])
         .output()
         .unwrap();
     assert!(

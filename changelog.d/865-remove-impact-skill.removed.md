@@ -1,1 +1,0 @@
-**plugin:** the `pixel-impact` skill is removed from the Claude, Codex and Qoder plugins, which now ship no skill (their manifests drop `skills`, `package.json` drops `skills/` and `claude-skills/`); the per-prompt `[PIXEL:BRIEF]` runs `find-symbol` then `impact <uid>` itself. The Pi `/pixel-impact` command and `pixel impact` stay. Task #865.

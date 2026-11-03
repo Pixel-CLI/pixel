@@ -473,23 +473,34 @@ impl RecallService {
     }
 }
 
+impl RecallService {
+    /// What `ping` answers, constant for the life of the service.
+    fn pong_envelope(&self) -> Response {
+        Envelope::success(
+            "ping",
+            json!({
+                "pong": true,
+                "root": self.root.display().to_string(),
+                "corpus": "recall",
+                "protocol_version": PROTOCOL_VERSION,
+            }),
+        )
+    }
+}
+
 impl Corpus for RecallService {
     fn root(&self) -> &Path {
         &self.root
     }
 
+    fn pong(&self) -> Option<Response> {
+        Some(self.pong_envelope())
+    }
+
     fn handle(&mut self, req: Request) -> Response {
         let op_name = req.op_name();
         match req {
-            Request::Ping => Envelope::success(
-                op_name,
-                json!({
-                    "pong": true,
-                    "root": self.root.display().to_string(),
-                    "corpus": "recall",
-                    "protocol_version": PROTOCOL_VERSION,
-                }),
-            ),
+            Request::Ping => self.pong_envelope(),
             Request::Shutdown => Envelope::success(op_name, json!({"shutting_down": true})),
             Request::Recall { action, params } => match self.op(&action, params) {
                 Ok(data) => Envelope::success(op_name, data),
@@ -553,6 +564,21 @@ mod tests {
         assert!(!drains_inline(MAX_INLINE_BACKLOG + 1, false));
         assert!(drains_inline(MAX_INLINE_BACKLOG + 1, true));
         assert!(drains_inline(248_000, true));
+    }
+
+    /// The daemon loop answers `ping` with `pong`: it must be the envelope
+    /// `handle` gives, corpus tag included, so a probe tells the recall
+    /// daemon from a repository one as before.
+    #[test]
+    fn pong_should_equal_the_handled_ping() {
+        let mut fixture = Fixture::new("pong");
+        let pong = Corpus::pong(&fixture.service).expect("recall answers ping from the loop");
+        let handled = Corpus::handle(&mut fixture.service, Request::Ping);
+        assert_eq!(
+            serde_json::to_value(&pong).unwrap(),
+            serde_json::to_value(&handled).unwrap()
+        );
+        assert_eq!(pong.result.unwrap()["corpus"], "recall");
     }
 
     /// A recall service over a scratch corpus and one Claude store holding a

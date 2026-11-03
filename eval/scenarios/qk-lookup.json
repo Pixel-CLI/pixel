@@ -1,0 +1,50 @@
+{
+  "id": "qk-lookup",
+  "suite": "brief-question-kinds",
+  "task_class": "exact-identifier",
+  "mode": "answer",
+  "commit": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+  "max_turns": 30,
+  "prompt": "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+  "must": [
+    {
+      "pattern": "(?i)BRIEF_BYTES",
+      "points": 1,
+      "why": "names the rendered-byte limit"
+    },
+    {
+      "pattern": "(?i)(?:BRIEF_BYTES.{0,80}2048|2048.{0,80}BRIEF_BYTES|2,?048\\s*bytes|2\\s*KiB)",
+      "points": 2,
+      "why": "gives the 2,048-byte rendered cap"
+    },
+    {
+      "pattern": "(?i)MAX_OPS",
+      "points": 1,
+      "why": "names the operation cap"
+    },
+    {
+      "pattern": "(?i)(?:MAX_OPS.{0,80}4|four\\s+(?:ops|operations)|at most\\s+4\\s+(?:ops|operations))",
+      "points": 2,
+      "why": "gives the four-operation cap"
+    },
+    {
+      "pattern": "(?i)(?:BRIEF_WINDOW.{0,80}750|750\\s*(?:ms|milliseconds))",
+      "points": 2,
+      "why": "gives the 750 millisecond window"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "(?i)(?<!\\bnot\\s)(?<!\\bnever\\s)(?<!\\bdoesn't\\s)(?<!\\bdoes\\snot\\s)(?<!\\bwithout\\s)(?<!\\bno\\s)(?<!\\bcannot\\s)(?<!\\bcan't\\s)(?:starts?|builds?)\\s+(?:a\\s+)?(?:daemon|index|graph)\\s+(?:for|during|on)\\s+(?:each|every|the)\\s+prompt",
+      "penalty": 2,
+      "why": "the prompt brief does not initialize indexes or daemons"
+    }
+  ],
+  "semantic_review": {
+    "criteria": [
+      "The byte cap, operation cap, and deadline are distinct limits.",
+      "The rendered brief cap is 2,048 bytes (2 KiB).",
+      "The shared deadline is 750 ms and at most four operations may start."
+    ]
+  }
+}

@@ -140,11 +140,27 @@ pub(crate) fn open_embedder_with_potion_repo(
     download: bool,
     potion_repo: Option<&str>,
 ) -> Result<Box<dyn Embedder>, String> {
-    let choice = match std::env::var("PIXEL_RECALL_MODEL") {
-        Ok(v) if !v.is_empty() => v,
-        _ => stored_model_id().unwrap_or_else(|| POTION_MODEL_ID.to_string()),
-    };
+    let choice = model_choice(
+        potion_repo,
+        std::env::var("PIXEL_RECALL_MODEL").ok(),
+        stored_model_id(),
+    );
     open_selected_embedder(&choice, download, potion_repo)
+}
+
+/// An explicit code repository wins over both transcript preferences.
+fn model_choice(
+    code_repo: Option<&str>,
+    requested: Option<String>,
+    stored: Option<String>,
+) -> String {
+    if code_repo.is_some() {
+        return POTION_MODEL_ID.to_string();
+    }
+    requested
+        .filter(|value| !value.is_empty())
+        .or(stored)
+        .unwrap_or_else(|| POTION_MODEL_ID.to_string())
 }
 
 fn open_selected_embedder(
@@ -164,7 +180,12 @@ fn open_selected_embedder(
     #[cfg(feature = "model2vec")]
     {
         match potion_repo {
-            Some(repo) => potion::PotionEmbedder::open_repo(&crate::models_dir(), download, repo),
+            Some(repo) => potion::PotionEmbedder::open_code_repo(
+                &crate::models_dir(),
+                &hf_hub::Cache::default(),
+                download,
+                repo,
+            ),
             None => potion::PotionEmbedder::open(&crate::models_dir(), download),
         }
         .map(|e| Box::new(e) as Box<dyn Embedder>)
@@ -342,20 +363,14 @@ pub mod potion {
         }
     }
 
-    /// Refuse a load that may not download when `repo` was never set up.
-    /// Set up means its download finished, or a legacy marker exists at all:
-    /// that marker proved some model was set up and named only the last one,
-    /// so it keeps admitting every model as it did before per-repository
-    /// markers.
+    /// Refuse a load that may not download when `repo` was never set up
+    /// ([`crate::potion_cached`]: its download finished).
     pub(crate) fn require_set_up(
         cache_dir: &Path,
         repo: &str,
         download: bool,
     ) -> Result<(), String> {
-        if download
-            || crate::potion_cached(cache_dir, repo)
-            || cache_dir.join(crate::LEGACY_POTION_MARKER).is_file()
-        {
+        if download || crate::potion_cached(cache_dir, repo) {
             Ok(())
         } else {
             Err("embedding model not present — run `pixel recall setup` first".to_string())
@@ -390,9 +405,51 @@ pub mod potion {
         Ok(dims)
     }
 
+    /// The Hugging Face revision `from_pretrained` fetches: model2vec-rs
+    /// takes no revision argument, so the hub's default branch.
+    pub(crate) const HUB_REVISION: &str = "main";
+
+    /// The line printed once when a load is about to fetch `repo`: the
+    /// network destination, the model and the revision, before any byte moves.
+    pub(crate) fn download_notice(cache_dir: &Path, repo: &str) -> String {
+        format!(
+            "pixel: downloading embedding model {repo} (revision {HUB_REVISION}, unpinned) from https://huggingface.co into {}",
+            cache_dir.display()
+        )
+    }
+
     impl PotionEmbedder {
         pub fn open(cache_dir: &Path, download: bool) -> Result<Self, String> {
             Self::open_repo(cache_dir, download, &resolved_repo())
+        }
+
+        /// Open the code model from local bytes unless a download was explicitly requested.
+        pub(crate) fn open_code_repo(
+            cache_dir: &Path,
+            hub: &hf_hub::Cache,
+            download: bool,
+            repo: &str,
+        ) -> Result<Self, String> {
+            if download {
+                return Self::open_repo(cache_dir, true, repo);
+            }
+            require_set_up(cache_dir, repo, false)?;
+            let cached = hub.model(repo.to_string());
+            let read = |name: &str| {
+                let path = cached.get(name).ok_or_else(|| {
+                    format!("code model {repo} is missing cached {name}; run `pixel search-meaning` to repair it")
+                })?;
+                std::fs::read(path).map_err(|error| format!("code model {repo}: {name}: {error}"))
+            };
+            // from_bytes cannot fall back to the network, even if a marker outlives its weights.
+            let model = model2vec_rs::model::StaticModel::from_bytes(
+                read("tokenizer.json")?,
+                read("model.safetensors")?,
+                read("config.json")?,
+                None,
+            )
+            .map_err(|error| format!("potion model load: {error}"))?;
+            Self::from_model(cache_dir, false, repo, model)
         }
 
         /// Select a repository without mutating transcript recall's process-wide model choice.
@@ -402,15 +459,21 @@ pub mod potion {
             repo: &str,
         ) -> Result<Self, String> {
             require_set_up(cache_dir, repo, download)?;
-            let _ = std::fs::create_dir_all(cache_dir);
-            // Route the HF hub cache under pixel's model dir.
-            // SAFETY: set_var is process-global; both CLI and daemon call this
-            // before any thread that reads the environment exists.
-            unsafe {
-                std::env::set_var("HF_HOME", cache_dir.join("hf"));
+            if download && !crate::potion_cached(cache_dir, repo) {
+                eprintln!("{}", download_notice(cache_dir, repo));
             }
+            let _ = std::fs::create_dir_all(cache_dir);
             let model = model2vec_rs::model::StaticModel::from_pretrained(repo, None, None, None)
                 .map_err(|e| format!("potion model load: {e}"))?;
+            Self::from_model(cache_dir, download, repo, model)
+        }
+
+        fn from_model(
+            cache_dir: &Path,
+            download: bool,
+            repo: &str,
+            model: model2vec_rs::model::StaticModel,
+        ) -> Result<Self, String> {
             let dims = finish_load(
                 cache_dir,
                 repo,
@@ -520,10 +583,105 @@ pub mod fast {
 
 #[cfg(all(test, feature = "model2vec"))]
 mod potion_gate_tests {
-    use super::potion::{finish_load, require_set_up};
+    use super::potion::{download_notice, finish_load, require_set_up};
 
     const CODE_16M: &str = "minishlab/potion-code-16M-v2";
     const CODE_64M: &str = "minishlab/potion-code-64M-v2";
+
+    #[test]
+    fn code_model_should_ignore_transcript_preferences_without_changing_transcript_selection() {
+        for requested in [
+            None,
+            Some(super::E5_MODEL_ID.to_string()),
+            Some(String::new()),
+        ] {
+            for stored in [None, Some(super::E5_MODEL_ID.to_string())] {
+                assert_eq!(
+                    super::model_choice(Some(CODE_16M), requested.clone(), stored.clone()),
+                    super::POTION_MODEL_ID
+                );
+            }
+        }
+        assert_eq!(
+            super::model_choice(None, None, Some(super::E5_MODEL_ID.to_string())),
+            super::E5_MODEL_ID
+        );
+        assert_eq!(
+            super::model_choice(None, Some("custom".into()), Some(super::E5_MODEL_ID.into())),
+            "custom"
+        );
+        assert_eq!(
+            super::model_choice(None, Some(String::new()), None),
+            super::POTION_MODEL_ID
+        );
+    }
+
+    #[test]
+    fn offline_code_model_should_refuse_another_marker_and_missing_weights() {
+        let models = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let hub = hf_hub::Cache::new(cache.path().to_path_buf());
+        std::fs::write(crate::potion_marker(models.path(), CODE_64M), CODE_64M).unwrap();
+        let open =
+            || super::potion::PotionEmbedder::open_code_repo(models.path(), &hub, false, CODE_16M);
+        assert!(open().err().unwrap().contains("not present"));
+        std::fs::write(crate::potion_marker(models.path(), CODE_16M), CODE_16M).unwrap();
+        assert!(
+            open()
+                .err()
+                .unwrap()
+                .contains("missing cached tokenizer.json")
+        );
+        assert_eq!(
+            std::fs::read_dir(cache.path()).unwrap().count(),
+            0,
+            "offline misses must not write a hub cache"
+        );
+    }
+
+    #[test]
+    fn offline_code_model_should_load_cached_bytes_and_keep_its_identity() {
+        use super::Embedder;
+        let models = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let repo = cache.path().join("models--minishlab--potion-code-16M-v2");
+        let snapshot = repo.join("snapshots/fixture");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::create_dir_all(repo.join("refs")).unwrap();
+        std::fs::write(repo.join("refs/main"), "fixture").unwrap();
+        std::fs::write(crate::potion_marker(models.path(), CODE_16M), CODE_16M).unwrap();
+        std::fs::write(snapshot.join("config.json"), "{}").unwrap();
+        std::fs::write(snapshot.join("tokenizer.json"), r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":{"type":"Whitespace"},"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"[UNK]":0,"code":1,"probe":2},"unk_token":"[UNK]"}}"#).unwrap();
+        let mut header = r#"{"embeddings":{"dtype":"F32","shape":[3,2],"data_offsets":[0,24]}}"#
+            .as_bytes()
+            .to_vec();
+        header.resize(header.len().next_multiple_of(8), b' ');
+        let mut weights = (header.len() as u64).to_le_bytes().to_vec();
+        weights.extend(header);
+        for value in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0] {
+            weights.extend(value.to_le_bytes());
+        }
+        std::fs::write(snapshot.join("model.safetensors"), weights).unwrap();
+        let hub = hf_hub::Cache::new(cache.path().to_path_buf());
+        let mut model =
+            super::potion::PotionEmbedder::open_code_repo(models.path(), &hub, false, CODE_16M)
+                .unwrap();
+        assert_eq!(model.model_id(), CODE_16M);
+        assert_eq!(model.dims(), 2);
+        assert_eq!(
+            model
+                .embed_batch(&["code"], super::EmbedKind::Query)
+                .unwrap(),
+            vec![vec![1.0, 0.0]]
+        );
+        std::fs::remove_file(snapshot.join("model.safetensors")).unwrap();
+        assert!(
+            super::potion::PotionEmbedder::open_code_repo(models.path(), &hub, false, CODE_16M)
+                .err()
+                .unwrap()
+                .contains("missing cached model.safetensors")
+        );
+    }
 
     #[test]
     fn require_set_up_should_refuse_only_a_model_never_set_up_without_download() {
@@ -547,9 +705,8 @@ mod potion_gate_tests {
         assert_eq!(
             std::fs::read_to_string(crate::potion_marker(dir.path(), CODE_64M)).unwrap(),
             CODE_64M,
-            "the repository's own marker, not the shared legacy one"
+            "the repository's own marker"
         );
-        assert!(!dir.path().join(crate::LEGACY_POTION_MARKER).exists());
         assert!(!crate::potion_cached(dir.path(), CODE_16M));
 
         assert_eq!(finish_load(dir.path(), CODE_16M, false, 256), Ok(256));
@@ -559,13 +716,12 @@ mod potion_gate_tests {
         assert!(!crate::potion_cached(dir.path(), CODE_16M));
     }
 
-    /// Before per-repository markers, one `potion.ok` admitted every model;
-    /// an upgrade must not refuse a model that loaded the day before.
     #[test]
-    fn a_legacy_marker_should_still_admit_any_model() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(crate::LEGACY_POTION_MARKER), CODE_16M).unwrap();
-        assert_eq!(require_set_up(dir.path(), CODE_64M, false), Ok(()));
+    fn download_notice_should_name_the_model_revision_and_destination() {
+        assert_eq!(
+            download_notice(std::path::Path::new("/h/models"), CODE_64M),
+            "pixel: downloading embedding model minishlab/potion-code-64M-v2 (revision main, unpinned) from https://huggingface.co into /h/models"
+        );
     }
 }
 

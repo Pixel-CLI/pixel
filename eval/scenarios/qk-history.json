@@ -1,0 +1,61 @@
+{
+  "id": "qk-history",
+  "suite": "brief-question-kinds",
+  "task_class": "explanation",
+  "mode": "answer",
+  "commit": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+  "max_turns": 30,
+  "prompt": "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+  "must": [
+    {
+      "pattern": "(?i)14feba456b479be165ab40ec14dde3958a865368",
+      "points": 1,
+      "why": "identifies the requested historical commit"
+    },
+    {
+      "pattern": "(?i)(?:four\\s+(?:ops|operations)|at most\\s+four\\s+(?:ops|operations)|4\\s+(?:ops|operations))",
+      "points": 2,
+      "why": "records the operation limit"
+    },
+    {
+      "pattern": "(?i)750\\s*(?:ms|milliseconds)",
+      "points": 2,
+      "why": "records the deadline"
+    },
+    {
+      "pattern": "(?i)(?:2\\s*KiB|2048\\s*bytes|2,048\\s*bytes)",
+      "points": 2,
+      "why": "records the output cap"
+    },
+    {
+      "pattern": "(?i)read.only",
+      "points": 1,
+      "why": "records read-only retrieval"
+    },
+    {
+      "pattern": "(?i)(?:never|does not|doesn't).{0,50}(?:start|build).{0,50}(?:daemon|index)",
+      "points": 1,
+      "why": "records that the brief neither starts daemons nor builds indexes"
+    },
+    {
+      "pattern": "(?is)(?=.*Claude Code)(?=.*Codex)(?=.*Pi)(?=.*stale graph)(?=.*text evidence)",
+      "points": 2,
+      "why": "records host coverage and stale-graph fallback"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "(?i)(?:commit|recorded rationale).{0,100}(?:proves?|establishes?).{0,100}(?:model accuracy|answer quality|live latency)",
+      "penalty": 2,
+      "why": "a design commit does not establish experimental outcomes"
+    }
+  ],
+  "semantic_review": {
+    "criteria": [
+      "It says the brief reads warm daemon/index/graph state read-only and never starts a daemon or builds an index.",
+      "The commit message is historical design evidence, not a measurement of model accuracy, live latency, or delivered context.",
+      "The prompt-submit path serves Claude Code and Codex; Pi is skipped. A stale or missing graph can leave text evidence with the reason under unresolved.",
+      "The requested commit records four operations, one shared 750 ms deadline, and a 2 KiB rendered cap."
+    ]
+  }
+}

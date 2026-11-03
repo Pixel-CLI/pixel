@@ -16,6 +16,7 @@ use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Tree};
 
 use crate::store::SymbolKind;
 
+pub mod js_assignments;
 pub(crate) mod ruby_associations;
 pub(crate) mod ruby_callbacks;
 pub(crate) mod ruby_generated;
@@ -135,6 +136,8 @@ pub struct FileExtraction {
     pub jsx_elements: Vec<RawJsxElement>,
     /// Ruby only: the superclass and modules each class or module declares.
     pub mixins: Vec<RawMixin>,
+    /// JavaScript syntax evidence, never a resolver candidate.
+    pub js_assignments: js_assignments::Facts,
 }
 
 /// Whether a walker at `depth` has passed the recursion cap: a node at
@@ -170,6 +173,7 @@ pub fn lang_of(path: &str) -> Option<&'static str> {
         "swift" => Some("swift"),
         "ex" | "exs" => Some("elixir"),
         "lua" => Some("lua"),
+        "kt" | "kts" => Some("kotlin"),
         _ => None,
     }
 }
@@ -299,9 +303,23 @@ fn parse_within(parser: &mut Parser, content: &[u8], budget: Duration) -> Option
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_PARSE_BUDGET: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn parse_budget() -> Duration {
+    #[cfg(test)]
+    if let Some(budget) = TEST_PARSE_BUDGET.with(std::cell::Cell::get) {
+        return budget;
+    }
+    PARSE_BUDGET
+}
+
 /// [`parse_within`] at [`PARSE_BUDGET`]: the parse every extractor uses.
 pub(crate) fn parse_bounded(parser: &mut Parser, content: &[u8]) -> Option<Tree> {
-    parse_within(parser, content, PARSE_BUDGET)
+    parse_within(parser, content, parse_budget())
 }
 
 /// Parse one file into a tree-sitter tree for the language its extension
@@ -369,7 +387,7 @@ pub fn extract_file(path_rel: &str, content: &[u8]) -> Option<FileExtraction> {
 /// reference per declaration line and handler (`resources` declares several
 /// routes to one action, `update` twice).
 fn push_route_references(extraction: &mut FileExtraction, content: &[u8]) {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     for route in ruby_routes::routes(content) {
         let (Some(action), Some(controller)) = (route.action.clone(), route.controller_constant())
         else {
@@ -402,6 +420,7 @@ fn language_for(lang: &str) -> Option<Language> {
         "swift" => tree_sitter_swift::LANGUAGE.into(),
         "elixir" => tree_sitter_elixir::LANGUAGE.into(),
         "lua" => tree_sitter_lua::LANGUAGE.into(),
+        "kotlin" => tree_sitter_kotlin_ng::LANGUAGE.into(),
         _ => return None,
     })
 }
@@ -420,7 +439,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         jsx_elements: Vec::new(),
         stack: Vec::new(),
         in_trait_impl: false,
-        use_scopes: std::collections::HashMap::new(),
+        use_scopes: rustc_hash::FxHashMap::default(),
         generated: Vec::new(),
         mixins: Vec::new(),
     };
@@ -447,6 +466,11 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         imports: w.imports,
         jsx_elements: w.jsx_elements,
         mixins: w.mixins,
+        js_assignments: if lang == "js" {
+            js_assignments::collect(root, content)
+        } else {
+            js_assignments::Facts::default()
+        },
     };
     assign_enclosing(&mut fx);
     Some(fx)
@@ -496,7 +520,7 @@ struct Walker<'a> {
     in_trait_impl: bool,
     /// Rust `use` scopes already computed, by scope node id: every `use` of a
     /// file's top level shares one walk of the file.
-    use_scopes: std::collections::HashMap<usize, Vec<(u32, u32)>>,
+    use_scopes: rustc_hash::FxHashMap<usize, Vec<(u32, u32)>>,
     /// Indices in `symbols` of the Ruby methods a declaration generated
     /// (`attr_reader`, `delegate`, ...), for `ruby_generated::drop_overridden`.
     generated: Vec<usize>,
@@ -716,6 +740,46 @@ fn walk_call_arguments(w: &mut Walker, call: Node, arg_of: Option<String>) {
     }
 }
 
+/// Identifier operands of a fallback chain used as a callee: `(x ?? handler)(...)`,
+/// `(a || handler)(...)`, `(a && handler)(...)`. Each identifier operand is a
+/// function value the call may invoke, so it is a reference to that symbol.
+/// Member operands (`dependencies.start`) are data and are not followed.
+fn walk_callee_fallbacks(w: &mut Walker, callee: Node, call: Node) {
+    // (node, reached through a fallback operator). A plain callee identifier is the
+    // call itself, already recorded as a call, so it is only a reference inside a chain.
+    let mut stack = vec![(callee, false)];
+    while let Some((n, in_chain)) = stack.pop() {
+        match n.kind() {
+            "parenthesized_expression" => {
+                stack.extend(
+                    each_child(n)
+                        .into_iter()
+                        .filter(Node::is_named)
+                        .map(|c| (c, in_chain)),
+                );
+            }
+            "binary_expression" => {
+                let op = n.child_by_field_name("operator").map(|o| w.text(o));
+                if matches!(op.as_deref(), Some("??" | "||" | "&&")) {
+                    stack.extend(
+                        each_child(n)
+                            .into_iter()
+                            .filter(Node::is_named)
+                            .map(|c| (c, true)),
+                    );
+                }
+            }
+            "identifier" if in_chain => {
+                let name = w.text(n);
+                if !NON_REFERENCE_WORDS.contains(&name.as_str()) {
+                    w.push_reference(name, call, None);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The property of a member access whose receiver is `this`/`self`/`Self`,
 /// or `None` for a member of any other value.
 fn self_member_name(w: &Walker, member: Node) -> Option<String> {
@@ -772,6 +836,26 @@ fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
                 w.push_symbol(name, q, SymbolKind::Method, node);
             }
         }
+        // `class C { handle = async (e) => {...} }` (TS: `public_field_definition`,
+        // JS: `field_definition`): a method of the class whose body is the
+        // arrow, so the calls made inside it belong to it.
+        "public_field_definition" | "field_definition" => {
+            let is_fn = node.child_by_field_name("value").is_some_and(|v| {
+                matches!(
+                    v.kind(),
+                    "arrow_function" | "function_expression" | "function"
+                )
+            });
+            if is_fn
+                && let Some(name) = ["name", "property"]
+                    .iter()
+                    .find_map(|f| field_text(w, node, f))
+                    .filter(|name| !name.contains(['{', '[', '(']))
+            {
+                let q = w.qualify(&name, ".");
+                w.push_symbol(name, q, SymbolKind::Method, node);
+            }
+        }
         "variable_declarator" => {
             let is_fn = node.child_by_field_name("value").is_some_and(|v| {
                 matches!(
@@ -809,6 +893,11 @@ fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
             // After extracting the callee, check arguments for identifier
             // references (callbacks / plugins / handlers passed as args).
             walk_call_arguments(w, node, callee_name);
+            // `(override ?? handler)(...)`: every identifier operand of a fallback
+            // chain used as the callee is a function that may run here.
+            if let Some(f) = node.child_by_field_name("function") {
+                walk_callee_fallbacks(w, f, node);
+            }
         }
         "new_expression" => {
             if let Some(c) = node.child_by_field_name("constructor")
@@ -2463,11 +2552,17 @@ fn csharp_simple_name(w: &Walker, node: Node) -> String {
 // --- Generic heuristic walker -------------------------------------------------
 //
 // Languages without a hand-written walker (php, c, swift, elixir, lua,
-// and any future grammar wired into `language_for`) fall back to a node-kind
+// kotlin, and any future grammar wired into `language_for`) fall back to a node-kind
 // heuristic pass. We match node kinds ending in `_declaration`/`_definition`
 // for symbols、 call/invocation node kinds for call sites, and import/use/require
 // node kinds for import specs. It is deliberately coarse:s a less precise graph
 // beats an absent one. Field names and node kinds degrade gracefully to `None`.
+//
+// Kotlin through it: classes, `object`s and functions (members qualified by
+// their class, a companion object's by the enclosing class), imports by their
+// qualified name, calls with their receiver. An `interface` or `enum class` is
+// recorded as a class, `val`/`var` properties are not symbols, and an
+// extension function is named without its receiver type.
 
 fn walk_generic(w: &mut Walker, node: Node, depth: usize) {
     if too_deep(depth) {
@@ -2546,10 +2641,12 @@ fn generic_symbol_kind(kind: &str) -> Option<(SymbolKind, bool)> {
     {
         return Some((SymbolKind::Module, true));
     }
+    // Kotlin's `object Foo` (`object_declaration`) is a singleton class.
     if kind.contains("class")
         || kind.contains("struct")
         || kind.contains("record")
         || kind.contains("actor")
+        || kind.contains("object")
     {
         return Some((SymbolKind::Class, true));
     }
@@ -2662,6 +2759,16 @@ fn generic_call(w: &mut Walker, node: Node) {
                 .find_map(|f| e.child_by_field_name(f));
                 callee = pos_name.map(|n| w.text(n));
                 receiver = pos_recv.map(|r| w.text(r));
+                // Kotlin's `navigation_expression` names no field: the
+                // receiver is its first named child, the member its last.
+                if callee.is_none()
+                    && e.named_child_count() == 2
+                    && let (Some(recv), Some(member)) = (e.named_child(0), e.named_child(1))
+                    && member.kind() == "identifier"
+                {
+                    callee = Some(w.text(member));
+                    receiver = Some(w.text(recv));
+                }
             }
             _ => {}
         }
@@ -2740,7 +2847,12 @@ fn generic_import(w: &mut Walker, node: Node) {
                     return;
                 }
             }
-            "identifier" | "dotted_name" | "qualified_name" | "namespace_name" => {
+            // Kotlin's `import a.b.C` holds a `qualified_identifier`.
+            "identifier"
+            | "dotted_name"
+            | "qualified_name"
+            | "namespace_name"
+            | "qualified_identifier" => {
                 let spec = w.text(child);
                 if !spec.is_empty() {
                     w.push_import(spec, Vec::new());
@@ -2926,10 +3038,81 @@ mod tests {
             jsx_elements: vec![],
             references: vec![],
             mixins: vec![],
+            js_assignments: Default::default(),
         };
         assign_enclosing(&mut fx);
         let owners: Vec<Option<usize>> = fx.calls.iter().map(|c| c.enclosing_index).collect();
         assert_eq!(owners, vec![Some(1), Some(0), Some(2), None]);
+    }
+
+    #[test]
+    fn ruby_fuzz_references_should_stay_inside_their_enclosing_symbols() {
+        // Saved graph_extract crash from Actions run 38576137492 (#942).
+        let source = b"require_relative \"base\"\nmtruct Point\"base\"\nmodule Billing\n  class Invoice < ApplicanetionRecord\n   alias has_many :\x9a\xdfself.build(attrs) = newng\n la css Invoice < ApplicationReco]d\n   alias has_m;any :\x9a\xdfself.build(attrs) = new(attrs).tap(&>save!)\n  end\nend\n";
+        let extraction = extract_file("src/fuzz.rb", source).unwrap();
+        let references: Vec<_> = extraction
+            .references
+            .iter()
+            .map(|reference| {
+                (
+                    reference.name.as_str(),
+                    reference.site_line,
+                    reference
+                        .enclosing_index
+                        .map(|index| extraction.symbols[index].qualified.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            references,
+            [
+                ("��self", 5, Some("Billing::Invoice#has_many")),
+                ("attrs", 7, Some("Billing")),
+            ]
+        );
+        for reference in &extraction.references {
+            if let Some(index) = reference.enclosing_index {
+                let symbol = &extraction.symbols[index];
+                assert!(
+                    (symbol.start_line..=symbol.end_line).contains(&reference.site_line),
+                    "reference {reference:?} outside {symbol:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ruby_incomplete_alias_should_not_reassign_an_earlier_reference() {
+        let source = [
+            "class Model",
+            "  alias first :target",
+            "  alias second; nil",
+            "end",
+            "",
+        ]
+        .join("\n");
+        let extraction = extract_file("model.rb", source.as_bytes()).unwrap();
+        let methods: Vec<_> = extraction
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == SymbolKind::Method)
+            .map(|symbol| symbol.qualified.as_str())
+            .collect();
+        assert_eq!(methods, ["Model#first"]);
+        let references: Vec<_> = extraction
+            .references
+            .iter()
+            .map(|reference| {
+                (
+                    reference.name.as_str(),
+                    reference.site_line,
+                    reference
+                        .enclosing_index
+                        .map(|index| extraction.symbols[index].qualified.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(references, [("target", 2, Some("Model#first"))]);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::path::Path;
 
 use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
-use grep_searcher::{BinaryDetection, SearcherBuilder};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder};
 
 use crate::index::{MAX_FILE_BYTES, open_regular_bounded};
 
@@ -75,15 +75,42 @@ impl Verifier {
         skip: &mut usize,
         max_matches: Option<usize>,
     ) -> Result<(), VerifyError> {
+        let mut searcher = Self::searcher();
+        self.search_file_page_with(
+            &mut searcher,
+            abs_path,
+            display_path,
+            out,
+            skip,
+            max_matches,
+        )
+    }
+
+    /// A searcher configured as [`Self::search_file_page`] builds one:
+    /// verify a candidate set with a single searcher rather than allocating
+    /// one (and its line buffers) per file.
+    pub fn searcher() -> Searcher {
+        SearcherBuilder::new()
+            .binary_detection(BinaryDetection::quit(b'\x00'))
+            .line_number(true)
+            .build()
+    }
+
+    /// [`Self::search_file_page`] on a caller-owned `searcher`.
+    pub fn search_file_page_with(
+        &self,
+        searcher: &mut Searcher,
+        abs_path: &Path,
+        display_path: &str,
+        out: &mut Vec<MatchLine>,
+        skip: &mut usize,
+        max_matches: Option<usize>,
+    ) -> Result<(), VerifyError> {
         if max_matches == Some(0) {
             return Ok(());
         }
         let start_len = out.len();
         let file = open_regular_bounded(abs_path, MAX_FILE_BYTES).map_err(VerifyError::Io)?;
-        let mut searcher = SearcherBuilder::new()
-            .binary_detection(BinaryDetection::quit(b'\x00'))
-            .line_number(true)
-            .build();
         searcher
             .search_reader(
                 &self.matcher,
@@ -150,6 +177,25 @@ mod tests {
         let lines: Vec<u64> = out.iter().map(|m| m.line_number).collect();
         assert_eq!(lines, vec![9, 2, 3]);
         assert_eq!(skip, 0);
+    }
+
+    #[test]
+    fn one_searcher_serves_a_whole_candidate_set() {
+        let dir = std::env::temp_dir().join(format!("gpx-verify-reuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let v = Verifier::new("hit").unwrap();
+        let mut searcher = Verifier::searcher();
+        let mut out = Vec::new();
+        let mut skip = 0;
+        for name in ["a.txt", "b.txt"] {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("hit {name}\n")).unwrap();
+            v.search_file_page_with(&mut searcher, &path, name, &mut out, &mut skip, None)
+                .unwrap();
+        }
+        let paths: Vec<&str> = out.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt", "b.txt"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

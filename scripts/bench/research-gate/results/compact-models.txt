@@ -1,0 +1,118 @@
+# gate_compact.py --experiment (English dev rows)
+109 dev prompts, 61 on-topic, 48 off-topic
+
+single-feature AUC:
+  length                 0.815
+  n_kw                   0.772
+  n_struct_files         0.770
+  struct_per_mille       0.770
+  n_noncommon            0.753
+  chunk_nc_top1_raw      0.729
+  struct_lines_norm      0.724
+  chunk_best_cooc        0.719
+  best_struct            0.711
+  n_struct_kw            0.706
+  chunk_cooc2_log        0.700
+  q_weight               0.693
+  n_matching_files       0.693
+  matching_per_mille     0.693
+  cofiles_ge2            0.684
+  cofile_depth           0.676
+  struct_symbols_norm    0.660
+  question               0.656
+  chunk_all_margin       0.638
+  ops_share              0.365
+  max_idf_struct         0.604
+  struct_ratio           0.601
+  best_any_ratio         0.447
+  chunk_cooc_frac        0.547
+  chunk_nc_top1_norm     0.540
+  common_share           0.465
+  cofile_depth_frac      0.478
+  max_idf                0.519
+  cov_df                 0.484
+
+English rows: 78 (43 on-topic, 35 off-topic); French rows set aside: 31
+
+single-feature AUC on English rows:
+  chunk_nc_top1_raw      0.801
+  n_struct_files         0.765
+  struct_per_mille       0.765
+  best_struct            0.754
+  chunk_best_cooc        0.737
+  length                 0.736
+  chunk_cooc2_log        0.730
+  n_struct_kw            0.730
+  question               0.727
+  struct_lines_norm      0.722
+  n_kw                   0.718
+  cofiles_ge2            0.710
+  n_matching_files       0.701
+  matching_per_mille     0.701
+  cofile_depth           0.699
+  n_noncommon            0.694
+  struct_ratio           0.661
+  struct_symbols_norm    0.658
+  ops_share              0.353
+  q_weight               0.629
+  chunk_all_margin       0.615
+  max_idf_struct         0.594
+  chunk_nc_top1_norm     0.591
+  chunk_cooc_frac        0.565
+  max_idf                0.440
+  best_any_ratio         0.466
+  cofile_depth_frac      0.518
+  cov_df                 0.511
+  common_share           0.500
+
+fixed sets, L2 logistic regression, C=0.3 (and 0.1):
+a1 with length C=0.1 (10 f)        CV AUC 0.893±0.012 TPR@5 0.470±0.126 TPR@10 0.656±0.032 | LOSO AUC 0.920 TPR@5 0.628 TPR@10 0.744
+a1 with length C=0.3 (10 f)        CV AUC 0.901±0.010 TPR@5 0.495±0.081 TPR@10 0.678±0.040 | LOSO AUC 0.921 TPR@5 0.605 TPR@10 0.744
+a2 no length C=0.1 (10 f)          CV AUC 0.893±0.010 TPR@5 0.535±0.057 TPR@10 0.650±0.054 | LOSO AUC 0.922 TPR@5 0.605 TPR@10 0.767
+a2 no length C=0.3 (10 f)          CV AUC 0.897±0.011 TPR@5 0.491±0.077 TPR@10 0.665±0.058 | LOSO AUC 0.923 TPR@5 0.558 TPR@10 0.721
+a3 no length, no file size C=0.1 (10 f) CV AUC 0.894±0.009 TPR@5 0.522±0.055 TPR@10 0.629±0.050 | LOSO AUC 0.861 TPR@5 0.047 TPR@10 0.581
+a3 no length, no file size C=0.3 (10 f) CV AUC 0.898±0.011 TPR@5 0.487±0.079 TPR@10 0.619±0.044 | LOSO AUC 0.852 TPR@5 0.023 TPR@10 0.512
+a4 six features C=0.1 (6 f)        CV AUC 0.908±0.008 TPR@5 0.562±0.067 TPR@10 0.662±0.040 | LOSO AUC 0.926 TPR@5 0.651 TPR@10 0.698
+a4 six features C=0.3 (6 f)        CV AUC 0.909±0.009 TPR@5 0.533±0.074 TPR@10 0.684±0.043 | LOSO AUC 0.926 TPR@5 0.558 TPR@10 0.721
+b1 a2 - 3 + chunk top3 C=0.1 (10 f) CV AUC 0.894±0.010 TPR@5 0.485±0.069 TPR@10 0.613±0.048 | LOSO AUC 0.921 TPR@5 0.558 TPR@10 0.744
+b1 a2 - 3 + chunk top3 C=0.3 (10 f) CV AUC 0.902±0.012 TPR@5 0.544±0.068 TPR@10 0.619±0.056 | LOSO AUC 0.932 TPR@5 0.674 TPR@10 0.698
+b2 a3 - 2 + chunk 2 C=0.1 (10 f)   CV AUC 0.885±0.011 TPR@5 0.431±0.062 TPR@10 0.592±0.066 | LOSO AUC 0.914 TPR@5 0.488 TPR@10 0.698
+b2 a3 - 2 + chunk 2 C=0.3 (10 f)   CV AUC 0.894±0.014 TPR@5 0.474±0.100 TPR@10 0.615±0.066 | LOSO AUC 0.925 TPR@5 0.674 TPR@10 0.721
+b3 a4 + chunk 3 C=0.1 (9 f)        CV AUC 0.898±0.010 TPR@5 0.513±0.066 TPR@10 0.613±0.045 | LOSO AUC 0.922 TPR@5 0.581 TPR@10 0.721
+b3 a4 + chunk 3 C=0.3 (9 f)        CV AUC 0.903±0.011 TPR@5 0.548±0.062 TPR@10 0.626±0.049 | LOSO AUC 0.932 TPR@5 0.674 TPR@10 0.674
+
+feature selection inside every training fold (top-k by univariate AUC, |r| < 0.85):
+pool a (no length) k=6             CV AUC 0.836±0.034 TPR@5 0.244±0.114 TPR@10 0.462±0.142 | LOSO AUC 0.912 TPR@5 0.581 TPR@10 0.698
+pool a (no length) k=8             CV AUC 0.862±0.018 TPR@5 0.317±0.090 TPR@10 0.583±0.095 | LOSO AUC 0.914 TPR@5 0.651 TPR@10 0.814
+pool a (no length) k=10            CV AUC 0.890±0.019 TPR@5 0.464±0.153 TPR@10 0.667±0.073 | LOSO AUC 0.917 TPR@5 0.558 TPR@10 0.814
+pool a (with length) k=6           CV AUC 0.832±0.033 TPR@5 0.255±0.113 TPR@10 0.440±0.120 | LOSO AUC 0.915 TPR@5 0.581 TPR@10 0.698
+pool a (with length) k=8           CV AUC 0.865±0.019 TPR@5 0.329±0.102 TPR@10 0.552±0.095 | LOSO AUC 0.919 TPR@5 0.651 TPR@10 0.814
+pool a (with length) k=10          CV AUC 0.889±0.018 TPR@5 0.437±0.140 TPR@10 0.657±0.063 | LOSO AUC 0.920 TPR@5 0.558 TPR@10 0.814
+pool b (no length) k=6             CV AUC 0.800±0.029 TPR@5 0.155±0.108 TPR@10 0.347±0.106 | LOSO AUC 0.860 TPR@5 0.116 TPR@10 0.558
+pool b (no length) k=8             CV AUC 0.830±0.030 TPR@5 0.193±0.114 TPR@10 0.434±0.114 | LOSO AUC 0.916 TPR@5 0.581 TPR@10 0.744
+pool b (no length) k=10            CV AUC 0.853±0.016 TPR@5 0.274±0.121 TPR@10 0.499±0.055 | LOSO AUC 0.914 TPR@5 0.581 TPR@10 0.698
+
+# gate_forward.py
+greedy forward selection by repeated 5-fold CV AUC (5 repeats), C=0.3
+k=1 +n_struct_files       CV AUC 0.756 TPR@5 0.101 TPR@10 0.206 | LOSO AUC 0.761 TPR@5 0.093 TPR@10 0.140
+k=2 +question             CV AUC 0.878 TPR@5 0.399 TPR@10 0.615 | LOSO AUC 0.894 TPR@5 0.488 TPR@10 0.651
+k=3 +ops_share            CV AUC 0.918 TPR@5 0.585 TPR@10 0.717 | LOSO AUC 0.932 TPR@5 0.558 TPR@10 0.698
+k=4 +struct_ratio         CV AUC 0.922 TPR@5 0.588 TPR@10 0.707 | LOSO AUC 0.934 TPR@5 0.651 TPR@10 0.698
+k=5 +max_idf              CV AUC 0.920 TPR@5 0.562 TPR@10 0.713 | LOSO AUC 0.928 TPR@5 0.651 TPR@10 0.651
+k=6 +struct_per_mille     CV AUC 0.920 TPR@5 0.564 TPR@10 0.707 | LOSO AUC 0.928 TPR@5 0.628 TPR@10 0.651
+k=7 +best_any_ratio       CV AUC 0.918 TPR@5 0.573 TPR@10 0.694 | LOSO AUC 0.922 TPR@5 0.465 TPR@10 0.674
+k=8 +n_matching_files     CV AUC 0.916 TPR@5 0.562 TPR@10 0.690 | LOSO AUC 0.923 TPR@5 0.488 TPR@10 0.651
+order: ['n_struct_files', 'question', 'ops_share', 'struct_ratio', 'max_idf', 'struct_per_mille', 'best_any_ratio', 'n_matching_files']
+
+# gate_pick_compact.py
+English rows: 78 - repeated 5-fold x20 and leave-one-source-out, L2 C=0.3
+model                       CV AUC  TPR@5  TPR@10 | LOSO AUC  TPR@5  TPR@10 | mean(CV,LOSO) TPR@10
+a3 count                     0.918  0.585   0.717 |    0.932  0.558   0.698 | 0.708
+a3 per-mille                 0.917  0.588   0.710 |    0.932  0.558   0.698 | 0.704
+a4 count                     0.922  0.588   0.707 |    0.934  0.651   0.698 | 0.702
+a4 per-mille                 0.922  0.588   0.706 |    0.934  0.651   0.698 | 0.702
+a5 per-mille + n_kw          0.915  0.542   0.700 |    0.930  0.512   0.721 | 0.710
+a6 per-mille + depth         0.916  0.567   0.698 |    0.931  0.605   0.651 | 0.674
+b3 a3 + chunk 2              0.896  0.437   0.629 |    0.919  0.581   0.674 | 0.652
+b4 a3 + chunk 3              0.898  0.495   0.669 |    0.923  0.628   0.698 | 0.683
+b5 a4 + chunk 3              0.904  0.592   0.665 |    0.931  0.651   0.721 | 0.693

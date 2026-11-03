@@ -18,6 +18,7 @@
 //! Each command runs against the in-process service (`PIXEL_DAEMON_AUTO_START=0`)
 //! so the test does not depend on, or leave behind, a background daemon.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -139,7 +140,6 @@ fn json_commands_emit_only_json_on_stdout() {
             ],
             &["targets", "epistemics"],
         ),
-        (&["repo-state", ".", "--json"], &["head", "branch"]),
     ];
     for (argv, keys) in single_doc {
         let out = pixel(&dir, argv);
@@ -485,9 +485,7 @@ fn prepare_repo_reports_where_the_time_went() {
 /// dirty list, blew the 256 KB cap, and the whole answer degraded to a
 /// `{partial: "..."}` wrapper — `jq .index` stopped working on a command
 /// whose job is only to say "index and graph are ready". The freshness
-/// answers must stay small (a count, never the list), and the commands that
-/// legitimately return the list must be cut structurally: valid JSON, every
-/// scalar field intact, the list shortened and the cut named.
+/// answers must stay small (a count, never the list).
 #[test]
 fn big_untracked_tree_keeps_json_answers_structured() {
     let dir = fixture("bigdirty");
@@ -570,44 +568,6 @@ fn big_untracked_tree_keeps_json_answers_structured() {
         assert!(doc["snapshot"]["head"].is_string(), "{args:?}: {doc}");
     }
 
-    // `inspect` owns the list: under a small cap it is shortened, not
-    // replaced by a textual wrapper.
-    let out = pixel_command()
-        .args(["repo-state", ".", "--json"])
-        .current_dir(&dir)
-        .env("PIXEL_OUTPUT_CAP_BYTES", "4096")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{out:?}");
-    assert!(out.stdout.len() <= 4097, "{}", out.stdout.len());
-    let doc = &parse_stdout_lines(&out, "inspect capped")[0];
-    assert_eq!(doc["truncated"], true);
-    assert_eq!(doc["cap_bytes"], 4096);
-    assert!(
-        doc.get("partial").is_none(),
-        "structural cut, not wrapper: {doc}"
-    );
-    assert_eq!(doc["branch"].as_str().map(str::is_empty), Some(false));
-    let cut = &doc["truncated_arrays"][0];
-    assert_eq!(cut["path"], "dirty");
-    assert_eq!(cut["total"], 3000);
-    assert_eq!(
-        cut["kept"].as_u64(),
-        doc["dirty"].as_array().map(|a| a.len() as u64)
-    );
-    assert!(cut["kept"].as_u64().unwrap() > 0);
-
-    // `0` lifts the cap: the full list comes back and nothing is flagged.
-    let out = pixel_command()
-        .args(["repo-state", ".", "--json"])
-        .current_dir(&dir)
-        .env("PIXEL_OUTPUT_CAP_BYTES", "0")
-        .output()
-        .unwrap();
-    let doc = &parse_stdout_lines(&out, "inspect uncapped")[0];
-    assert!(doc.get("truncated").is_none(), "{doc}");
-    assert_eq!(doc["dirty"].as_array().map(Vec::len), Some(3000));
-
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -671,107 +631,37 @@ fn review_gate_json_contract_is_an_enveloped_finding_list() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// `repo-state` is the Phase-1 freshness answer: the tracked-clean file list
-/// is the bulk of it on a clean tree and no consumer reads it. The default
-/// answer keeps the exact counts, `--files` keeps restricting them, and
-/// `--include-clean` keeps the full (capped) form reachable.
+/// History diagnostics belong on stderr and must survive redirected logs.
 #[test]
-fn repo_state_should_hide_the_clean_list_unless_include_clean_is_passed() {
-    let dir = fixture("repo-state-compact");
-    // 2 tracked-clean files (caller.rs, .gitignore), 1 dirty (login.rs).
-    std::fs::write(
-        dir.join("src/login.rs"),
-        "pub fn login_user(name: &str) -> bool {\n    name.is_empty()\n}\n",
-    )
-    .unwrap();
-
-    let out = pixel(&dir, &["repo-state", ".", "--json"]);
-    assert!(out.status.success(), "{out:?}");
-    let doc = &parse_stdout_lines(&out, "repo-state compact")[0];
-    assert!(doc.get("clean").is_none(), "compact answer: {doc}");
-    assert!(doc.get("clean_list_cap").is_none(), "compact answer: {doc}");
+fn history_build_reports_phase_timings_without_polluting_stdout() {
+    let dir = fixture("history-timings");
+    let output = pixel(&dir, &["build-index", "--history", "."]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        doc.get("clean_list_truncated").is_none(),
-        "compact answer: {doc}"
+        stderr.contains("facts: starting history ingestion"),
+        "{stderr}"
     );
-    assert_eq!(doc["clean_count"], 2, "{doc}");
-    assert_eq!(doc["dirty_count"], 1, "{doc}");
-    assert!(
-        doc["dirty"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["path"] == "src/login.rs"),
-        "the dirty list stays: {doc}"
-    );
-
-    // `--include-clean` restores the list, the cap and the truncation flag.
-    let out = pixel(&dir, &["repo-state", ".", "--json", "--include-clean"]);
-    assert!(out.status.success(), "{out:?}");
-    let doc = &parse_stdout_lines(&out, "repo-state --include-clean")[0];
-    let clean = doc["clean"].as_array().unwrap();
-    assert_eq!(clean.len(), 2, "{doc}");
-    assert!(clean.iter().any(|p| p == "src/caller.rs"), "{doc}");
-    assert_eq!(doc["clean_count"], 2);
-    assert_eq!(doc["clean_list_cap"], 200);
-    assert_eq!(doc["clean_list_truncated"], false);
-
-    // `--files` restricts both lists and both counts; the compact form keeps
-    // the filtered `clean_count` without the list.
-    let out = pixel(
-        &dir,
-        &[
-            "repo-state",
-            ".",
-            "--json",
-            "--files",
-            "src/login.rs",
-            "--files",
-            "src/caller.rs",
-        ],
-    );
-    assert!(out.status.success(), "{out:?}");
-    let doc = &parse_stdout_lines(&out, "repo-state --files")[0];
-    assert!(doc.get("clean").is_none(), "{doc}");
-    assert_eq!(doc["clean_count"], 1, "{doc}");
-    assert_eq!(doc["dirty_count"], 1, "{doc}");
-
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-/// `CLEAN_LIST_CAP` bounds the opt-in list: 200 of 201 paths, the exact
-/// `clean_count`, and the truncation flag naming the cut.
-#[test]
-fn repo_state_should_cap_the_include_clean_list_at_200_paths() {
-    let dir = Scratch::for_test("pixel-json-contract", "repo-state-clean-cap");
-    std::fs::create_dir_all(dir.join("src")).unwrap();
-    for i in 0..201 {
-        std::fs::write(
-            dir.join(format!("src/f{i}.rs")),
-            format!("pub fn f{i}() -> u32 {{ {i} }}\n"),
-        )
-        .unwrap();
+    let summary = stderr
+        .lines()
+        .find(|line| line.starts_with("facts: phase="))
+        .expect("final facts summary");
+    for key in [
+        "metadata_ms=",
+        "blobs_ms=",
+        "diffs_ms=",
+        "retention_ms=",
+        "total_ms=",
+    ] {
+        let value = summary
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(key))
+            .expect(key);
+        let duration: f64 = value.parse().unwrap();
+        assert!(duration.is_finite() && duration >= 0.0, "{key}{value}");
     }
-    git(&dir, &["init", "-q"]);
-    git(&dir, &["add", "."]);
-    git(&dir, &["commit", "-qm", "201 files"]);
-
-    let out = pixel(&dir, &["repo-state", ".", "--json", "--include-clean"]);
-    assert!(out.status.success(), "{out:?}");
-    let doc = &parse_stdout_lines(&out, "repo-state clean cap")[0];
-    assert_eq!(doc["clean_count"], 201, "{doc}");
-    assert_eq!(doc["clean_list_cap"], 200);
-    assert_eq!(doc["clean_list_truncated"], true);
-    assert_eq!(doc["clean"].as_array().map(Vec::len), Some(200));
-
-    // The default answer stays compact on the same tree.
-    let out = pixel(&dir, &["repo-state", ".", "--json"]);
-    assert!(out.status.success(), "{out:?}");
-    let doc = &parse_stdout_lines(&out, "repo-state clean cap compact")[0];
-    assert!(doc.get("clean").is_none(), "{doc}");
-    assert_eq!(doc["clean_count"], 201, "{doc}");
-
-    std::fs::remove_dir_all(&dir).ok();
+    assert!(summary.contains("fresh=true"), "{summary}");
 }
 
 /// The statusline shows `indexed/total` commits only when the history index
@@ -794,42 +684,6 @@ fn statusline_reports_the_commit_fraction_only_when_there_are_commits() {
     assert!(out.status.success(), "{out:?}");
     let line = String::from_utf8_lossy(&out.stdout);
     assert!(!line.contains("0/0"), "{line}");
-}
-
-/// `dig-history --show` is the follow-up every `dig-history` answer names:
-/// it prints the file at the commit, and without `--file` it refuses under
-/// the command's current name, so the agent can correct the call it typed.
-#[test]
-fn dig_history_show_prints_the_file_and_requires_file() {
-    let dir = fixture("dig-history-show");
-    let shown = pixel(
-        &dir,
-        &[
-            "dig-history",
-            "--show",
-            "HEAD",
-            "--file",
-            "src/login.rs",
-            "--json",
-            ".",
-        ],
-    );
-    assert!(shown.status.success(), "{shown:?}");
-    let doc: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(
-        doc["content"],
-        "pub fn login_user(name: &str) -> bool {\n    !name.is_empty()\n}\n"
-    );
-    assert_eq!(doc["parent_fallback"], false);
-
-    let missing = pixel(&dir, &["dig-history", "--show", "HEAD", "."]);
-    assert!(!missing.status.success(), "{missing:?}");
-    assert!(missing.stdout.is_empty(), "{missing:?}");
-    let stderr = String::from_utf8_lossy(&missing.stderr);
-    assert!(
-        stderr.contains("dig-history --show requires --file"),
-        "{stderr}"
-    );
 }
 
 /// `pixel plan` renders the daemon's findings: JSON carries each finding
@@ -909,10 +763,47 @@ fn plan_lists_verification_gates_and_honors_no_gates() {
     )
     .unwrap();
 
+    // Replaying a flow is the pixel-flow plugin's: the gate names the replay
+    // command only where `pixel flow` runs, here a `pixel-flow` on PATH.
+    let bin = dir.join("flow-plugin-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let plugin = bin.join("pixel-flow");
+    std::fs::write(&plugin, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let with_plugin = format!("{}:/usr/bin:/bin", bin.display());
+
+    // Without the plugin the same flow is reported, not offered as a command.
+    let bare = pixel_command()
+        .args(["plan", "--query", "dead-code", "--json", "."])
+        .current_dir(&*dir)
+        .env("PIXEL_FLOW_DIR", &flows)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(bare.status.success(), "{bare:?}");
+    let bare_doc: serde_json::Value = serde_json::from_slice(&bare.stdout).unwrap();
+    let bare_labels: Vec<&str> = bare_doc["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|g| g["label"].as_str())
+        .collect();
+    assert!(
+        bare_labels.iter().any(|l| l.contains(
+            "1 saved login flow(s) cannot be replayed until the pixel-flow plugin is installed (pixel install github:Pixel-CLI/pixel-flow)"
+        )),
+        "{bare_doc}"
+    );
+    assert!(
+        !bare_labels.iter().any(|l| l.contains("pixel flow run")),
+        "{bare_doc}"
+    );
+
     let out = pixel_command()
         .args(["plan", "--query", "dead-code", "--json", "."])
         .current_dir(&*dir)
         .env("PIXEL_FLOW_DIR", &flows)
+        .env("PATH", &with_plugin)
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
@@ -936,6 +827,7 @@ fn plan_lists_verification_gates_and_honors_no_gates() {
         .args(["plan", "--query", "dead-code", "."])
         .current_dir(&*dir)
         .env("PIXEL_FLOW_DIR", &flows)
+        .env("PATH", &with_plugin)
         .output()
         .unwrap();
     assert!(md.status.success(), "{md:?}");

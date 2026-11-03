@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use tree_sitter::Parser;
 
 use super::{
-    FileExtraction, ImportBinding, MAX_DEPTH, PARSE_BUDGET, RawSymbol, extract_file,
-    generic_symbol_kind, lang_of, language_for, over_budget, parse_file, parse_within, too_deep,
+    FileExtraction, ImportBinding, MAX_DEPTH, PARSE_BUDGET, RawSymbol, TEST_PARSE_BUDGET,
+    extract_file, generic_symbol_kind, lang_of, language_for, over_budget, parse_file,
+    parse_within, too_deep,
 };
 use crate::store::SymbolKind;
 
@@ -110,6 +111,8 @@ fn lang_of_should_map_every_wired_extension_to_its_walker_language() {
         ("a.ex", "elixir"),
         ("a.exs", "elixir"),
         ("a.lua", "lua"),
+        ("a.kt", "kotlin"),
+        ("build.gradle.kts", "kotlin"),
     ];
     for (path, lang) in cases {
         assert_eq!(lang_of(path), Some(lang), "{path}");
@@ -147,6 +150,7 @@ fn parse_file_should_parse_every_wired_language() {
         ("a.ex", "x = 1\n"),
         ("a.lua", "local x = 1\n"),
         ("A.cs", "class A {}\n"),
+        ("A.kt", "class A\n"),
     ] {
         let tree = parse_file(path, src.as_bytes()).unwrap_or_else(|| panic!("{path}"));
         assert!(!tree.root_node().has_error(), "{path} parses cleanly");
@@ -1079,15 +1083,11 @@ fn elixir_remote_call_should_be_recorded_by_its_dotted_target() {
 
 // --- parse budget (#800) ----------------------------------------------------------
 
-/// 262 bytes of `.tsx` (the `Fuzz` job's `timeout-287dc264…` reproducer) on
-/// which TSX error recovery ran for minutes without a budget.
-fn parse_hang_reproducer() -> Vec<u8> {
-    [
-        &b"import fu\x00\x00\x00\xfbon Button({ onClick(}# Pconst Page = (=> save()} /><span>te=t</span></di<Button onClick={() => save()} /><span>te=0</s`an></dn onClick={() => save()} /><span>t"[..],
-        &[0xa9; 72][..],
-        &b"e=t</span></div>;\n"[..],
-    ]
-    .concat()
+fn large_tsx() -> Vec<u8> {
+    (0..4000)
+        .map(|i| format!("const a{i} = <span>hi {i}</span>;\n"))
+        .collect::<String>()
+        .into_bytes()
 }
 
 /// Run `work` on its own thread and give it `cap`: a regression that hangs
@@ -1130,13 +1130,10 @@ fn parse_within_should_return_the_tree_of_a_file_inside_its_budget() {
 #[test]
 fn parse_within_should_give_up_once_past_its_budget() {
     let started = Instant::now();
-    let tree = within(Duration::from_secs(15), || {
-        parse_within(
-            &mut tsx_parser(),
-            &parse_hang_reproducer(),
-            Duration::from_millis(100),
-        )
-        .is_some()
+    let content = large_tsx();
+    assert!(parse_within(&mut tsx_parser(), &content, PARSE_BUDGET).is_some());
+    let tree = within(Duration::from_secs(15), move || {
+        parse_within(&mut tsx_parser(), &content, Duration::ZERO).is_some()
     });
     assert!(!tree, "a cancelled parse yields no tree");
     assert!(
@@ -1146,12 +1143,13 @@ fn parse_within_should_give_up_once_past_its_budget() {
     );
 }
 
-/// The production paths, concept and symbol extraction alike, return on the
-/// reproducer: the file just contributes no rows.
 #[test]
 fn extraction_should_return_on_a_file_that_stalls_the_parser() {
-    let (concepts, extraction) = within(Duration::from_secs(19), || {
-        let content = parse_hang_reproducer();
+    let content = large_tsx();
+    assert!(!crate::concept::extract_concepts("src/fuzz.tsx", &content).is_empty());
+    assert!(extract_file("src/fuzz.tsx", &content).is_some());
+    let (concepts, extraction) = within(Duration::from_secs(19), move || {
+        TEST_PARSE_BUDGET.with(|budget| budget.set(Some(Duration::ZERO)));
         (
             crate::concept::extract_concepts("src/fuzz.tsx", &content),
             extract_file("src/fuzz.tsx", &content).is_some(),
@@ -1255,4 +1253,187 @@ fn csharp_generic_calls_alias_usings_and_callback_arguments() {
     );
     assert!(refs.contains(&("OnClick".to_string(), None)), "{refs:?}");
     assert!(!refs.iter().any(|(n, _)| n == "null"), "{refs:?}");
+}
+
+const TS_CLASS_ARROWS: &str = "\
+export class App {
+  private handleDrop = async (event: DragEvent) => {
+    const file = event.dataTransfer?.files[0];
+    insertImage(file);
+    this.refresh();
+  };
+  public refresh = () => this.render();
+  onResize = function () { measure(); };
+  static count = 3;
+  label: string = \"drop\";
+  render() { paint(); }
+}
+";
+
+#[test]
+fn ts_class_property_arrow_functions_should_be_methods_of_their_class() {
+    let fx = extract("src/app.ts", TS_CLASS_ARROWS);
+    let syms = symbols(&fx);
+    for expected in [
+        "App.handleDrop",
+        "App.refresh",
+        "App.onResize",
+        "App.render",
+    ] {
+        assert!(
+            syms.contains(&(expected.to_string(), SymbolKind::Method)),
+            "missing {expected} in {syms:?}"
+        );
+    }
+    // A property that holds data names no function.
+    assert!(
+        !syms
+            .iter()
+            .any(|(q, _)| q == "App.count" || q == "App.label"),
+        "{syms:?}"
+    );
+    let drop = symbol(&fx, "App.handleDrop");
+    assert_eq!((drop.start_line, drop.end_line), (2, 6));
+}
+
+#[test]
+fn ts_calls_made_inside_a_class_property_arrow_should_belong_to_it() {
+    let fx = extract("src/app.ts", TS_CLASS_ARROWS);
+    let owner = |callee: &str| {
+        let call = fx
+            .calls
+            .iter()
+            .find(|call| call.callee_name == callee)
+            .unwrap_or_else(|| panic!("no call to {callee} in {:?}", calls(&fx)));
+        fx.symbols[call
+            .enclosing_index
+            .expect("a call inside a method has an owner")]
+        .qualified
+        .clone()
+    };
+    assert_eq!(owner("insertImage"), "App.handleDrop");
+    assert_eq!(owner("refresh"), "App.handleDrop");
+    assert_eq!(owner("render"), "App.refresh");
+    assert_eq!(owner("measure"), "App.onResize");
+    assert_eq!(owner("paint"), "App.render");
+}
+
+#[test]
+fn js_class_fields_with_a_function_value_should_be_methods_too() {
+    let fx = extract(
+        "src/app.js",
+        "class Board {\n  onDrop = async (e) => { load(e); };\n  size = 4;\n  #secret = () => hide();\n}\n",
+    );
+    let syms = symbols(&fx);
+    assert!(
+        syms.contains(&("Board.onDrop".to_string(), SymbolKind::Method)),
+        "{syms:?}"
+    );
+    assert!(!syms.iter().any(|(q, _)| q == "Board.size"), "{syms:?}");
+    let call = fx
+        .calls
+        .iter()
+        .find(|call| call.callee_name == "load")
+        .unwrap();
+    assert_eq!(
+        fx.symbols[call.enclosing_index.unwrap()].qualified,
+        "Board.onDrop"
+    );
+    // A private name is kept as written, so a call to it can still resolve.
+    assert!(
+        syms.iter()
+            .any(|(q, _)| q.starts_with("Board.") && q.ends_with("secret")),
+        "{syms:?}"
+    );
+}
+
+const KOTLIN_SRC: &str = r#"package com.acme.shop
+
+import com.acme.net.HttpClient
+import kotlinx.coroutines.launch
+
+interface Repository { fun load(id: Int): Order }
+
+class OrderService(private val client: HttpClient) {
+    fun total(order: Order): Int {
+        val price = client.fetch(order.id)
+        return applyTax(price)
+    }
+
+    private fun applyTax(price: Int): Int = price * 2
+
+    companion object {
+        fun create(): OrderService = OrderService(HttpClient())
+    }
+}
+
+object Registry {
+    fun register(service: OrderService) { println(service) }
+}
+
+fun main() { Registry.register(OrderService.create()) }
+"#;
+
+#[test]
+fn kotlin_should_record_classes_objects_functions_and_their_nesting() {
+    let fx = extract("src/main/kotlin/OrderService.kt", KOTLIN_SRC);
+    let syms = symbols(&fx);
+    for (qualified, kind) in [
+        ("Repository", SymbolKind::Class),
+        ("Repository.load", SymbolKind::Function),
+        ("OrderService", SymbolKind::Class),
+        ("OrderService.total", SymbolKind::Function),
+        ("OrderService.applyTax", SymbolKind::Function),
+        ("Registry", SymbolKind::Class),
+        ("Registry.register", SymbolKind::Function),
+        ("main", SymbolKind::Function),
+    ] {
+        assert!(
+            syms.contains(&(qualified.to_string(), kind)),
+            "{qualified} {kind:?} missing from {syms:?}"
+        );
+    }
+}
+
+#[test]
+fn kotlin_imports_should_record_the_qualified_name() {
+    let fx = extract("OrderService.kt", KOTLIN_SRC);
+    assert_eq!(
+        import_paths(&fx),
+        vec![
+            "com.acme.net.HttpClient".to_string(),
+            "kotlinx.coroutines.launch".to_string()
+        ]
+    );
+}
+
+#[test]
+fn kotlin_calls_should_name_the_member_and_its_receiver() {
+    let fx = extract("OrderService.kt", KOTLIN_SRC);
+    assert_eq!(call_receiver(&fx, "fetch"), Some("client".to_string()));
+    assert_eq!(call_receiver(&fx, "applyTax"), None);
+    assert_eq!(call_receiver(&fx, "register"), Some("Registry".to_string()));
+    assert_eq!(
+        call_receiver(&fx, "create"),
+        Some("OrderService".to_string())
+    );
+    assert!(has_call(&fx, "println"), "{:?}", calls(&fx));
+    assert_eq!(
+        owner_of_call(&fx, "fetch"),
+        Some("OrderService.total".to_string())
+    );
+}
+
+#[test]
+fn kotlin_script_files_should_extract_like_kotlin_sources() {
+    let fx = extract(
+        "build.gradle.kts",
+        "plugins { id(\"java\") }\nfun helper() = 1\n",
+    );
+    assert!(
+        symbols(&fx).contains(&("helper".to_string(), SymbolKind::Function)),
+        "{:?}",
+        symbols(&fx)
+    );
+    assert!(has_call(&fx, "id"), "{:?}", calls(&fx));
 }

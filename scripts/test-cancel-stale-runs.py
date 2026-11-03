@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/cancel-stale-runs.sh, the sweep cancel-stale.yml runs
-when a pull request closes and every ten minutes.
+"""Contract of scripts/ci/cancel-stale-runs.sh, the sweep cancel-stale.yml runs
+when a pull request closes and hourly at minute 17.
 
 It exists to stop validation runs whose verdict no longer matters. What it
 must leave alone matters as much: the board sync (a pull_request_target run
@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "cancel-stale-runs.sh"
+SCRIPT = ROOT / "scripts" / "ci" / "cancel-stale-runs.sh"
 
 STUB_GH = r"""#!/usr/bin/env bash
 # Answers `gh api` the way cancel-stale-runs.sh reads it (its --jq output).
@@ -116,6 +116,17 @@ class CancelStaleRuns(unittest.TestCase):
         out = self.sweep("--branch", "feat")
         self.assertEqual(self.cancelled(), set())
         self.assertIn("would cancel 20", out.stdout)
+
+    def test_workflow_runs_on_close_and_hourly_with_a_bounded_sweep(self):
+        workflow = (ROOT / ".github" / "workflows" / "cancel-stale.yml").read_text()
+        self.assertIn("types: [closed]", workflow)
+        self.assertIn("- cron: '17 * * * *'", workflow)
+        self.assertIn("timeout-minutes: 5", workflow)
+        self.assertIn("ref: main", workflow)
+        self.assertIn(
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            workflow,
+        )
 
 
 if __name__ == "__main__":

@@ -34,6 +34,9 @@ pub enum InProcessReason {
     AutoStartDisabled,
     /// A newer daemon serves a newer CLI and is left alone.
     NewerDaemon,
+    /// The root holds no `.git`: a daemon is never started for it, because
+    /// nothing bounds the file set its watcher and index would cover.
+    NotARepository,
     /// Spawning a daemon failed.
     StartFailed,
     /// A daemon was spawned but did not answer within the start window.

@@ -136,6 +136,7 @@ fn a_retrieval_answer_should_carry_epistemics_and_a_compact_snapshot() {
         &mut service,
         Request::Symbol {
             name: "login".into(),
+            stale_ok: false,
         },
     );
     assert_eq!(env["ok"], true, "{env}");
@@ -166,6 +167,7 @@ fn symbol_should_list_every_definition_of_a_shared_name_with_its_file() {
         &mut service,
         Request::Symbol {
             name: "helper".into(),
+            stale_ok: false,
         },
     );
     let mut paths: Vec<&str> = out["symbols"]
@@ -190,6 +192,8 @@ fn skeleton_should_accept_an_absolute_path_inside_the_root_and_name_a_missing_fi
         &mut service,
         Request::Skeleton {
             file: root.join("login.rs").display().to_string(),
+
+            stale_ok: false,
         },
     );
     assert_eq!(out["file"], "login.rs");
@@ -205,6 +209,8 @@ fn skeleton_should_accept_an_absolute_path_inside_the_root_and_name_a_missing_fi
         &mut service,
         Request::Skeleton {
             file: "/nope.rs".into(),
+
+            stale_ok: false,
         },
     );
     assert_eq!(code, "INVALID_INPUT");
@@ -223,6 +229,8 @@ fn context_should_return_candidates_for_an_ambiguous_name_and_not_found_for_an_u
         Request::Context {
             uid: "helper".into(),
             budget_tokens: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(names(&out), ["helper@caller.rs", "helper@login.rs"]);
@@ -233,6 +241,8 @@ fn context_should_return_candidates_for_an_ambiguous_name_and_not_found_for_an_u
         Request::Context {
             uid: "helper".into(),
             budget_tokens: Some(1),
+
+            stale_ok: false,
         },
     );
     assert_eq!(code, "INVALID_INPUT");
@@ -246,6 +256,8 @@ fn context_should_return_candidates_for_an_ambiguous_name_and_not_found_for_an_u
         Request::Context {
             uid: "nosuchsymbol".into(),
             budget_tokens: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(code, "NOT_FOUND");
@@ -265,6 +277,8 @@ fn impact_and_trace_should_stop_at_an_ambiguous_name_with_its_candidates() {
             uid_or_name: "helper".into(),
             direction: "upstream".into(),
             depth: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(names(&impact), ["helper@caller.rs", "helper@login.rs"]);
@@ -273,6 +287,8 @@ fn impact_and_trace_should_stop_at_an_ambiguous_name_with_its_candidates() {
         Request::Trace {
             from: "go".into(),
             to: "helper".into(),
+
+            stale_ok: false,
         },
     );
     assert_eq!(
@@ -285,6 +301,8 @@ fn impact_and_trace_should_stop_at_an_ambiguous_name_with_its_candidates() {
         Request::Trace {
             from: "helper".into(),
             to: "login".into(),
+
+            stale_ok: false,
         },
     );
     assert_eq!(names(&trace_from), ["helper@caller.rs", "helper@login.rs"]);
@@ -300,6 +318,8 @@ fn impact_should_name_a_uid_that_matches_nothing() {
             uid_or_name: "rust:nowhere.rs#ghost".into(),
             direction: "upstream".into(),
             depth: Some(1),
+
+            stale_ok: false,
         },
     );
     assert_eq!(code, "NOT_FOUND");
@@ -319,6 +339,8 @@ fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty()
             uid_or_name: "login".into(),
             role: "callers".into(),
             offset: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(callers["role"], "callers");
@@ -338,6 +360,8 @@ fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty()
             uid_or_name: "login".into(),
             role: "callers".into(),
             offset: Some(10),
+
+            stale_ok: false,
         },
     );
     assert_eq!(
@@ -353,6 +377,8 @@ fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty()
             uid_or_name: "go".into(),
             role: "callees".into(),
             offset: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(callees["role"], "callees");
@@ -369,6 +395,8 @@ fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty()
             uid_or_name: "helper".into(),
             role: "callers".into(),
             offset: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(names(&ambiguous), ["helper@caller.rs", "helper@login.rs"]);
@@ -389,6 +417,8 @@ fn uses_callees_should_mark_a_lower_bound_when_the_symbol_has_unresolved_calls()
             uid_or_name: "outer".into(),
             role: "callees".into(),
             offset: None,
+
+            stale_ok: false,
         },
     );
     assert_eq!(out["envelope"]["unresolved_outgoing"], 1, "{out}");
@@ -573,6 +603,7 @@ fn rename_should_rewrite_the_definition_and_its_call_sites_and_answer_from_the_n
         &mut service,
         Request::Symbol {
             name: "sign_in".into(),
+            stale_ok: false,
         },
     );
     assert_eq!(
@@ -758,6 +789,7 @@ fn lifecycle_should_require_a_path_or_a_token() {
         Request::Lifecycle {
             path: None,
             token: None,
+            read_only: false,
         },
     );
     assert_eq!(code, "INVALID_INPUT");
@@ -773,6 +805,7 @@ fn lifecycle_should_report_coverage_for_a_token_found_nowhere() {
         Request::Lifecycle {
             path: None,
             token: Some("never_written_token".into()),
+            read_only: false,
         },
     );
     assert!(
@@ -786,11 +819,151 @@ fn lifecycle_should_report_coverage_for_a_token_found_nowhere() {
         Request::Lifecycle {
             path: Some("login.rs".into()),
             token: None,
+            read_only: false,
         },
     );
     assert!(
         by_path.get("coverage").is_none(),
         "a path answer carries no token coverage: {by_path}"
+    );
+}
+
+/// A `read_only` history op sees the facts db exactly as it stands — never
+/// created, never ingested, never warmed — so a db that was never built is
+/// a clean refusal while the same op without the flag still builds it.
+#[test]
+fn read_only_history_ops_should_refuse_a_facts_db_that_was_never_built() {
+    let root = fixture("read-only-absent");
+    let mut service = Service::open(&root).unwrap();
+    for req in [
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: None,
+            read_only: true,
+        },
+        Request::Lifecycle {
+            path: Some("login.rs".into()),
+            token: None,
+            read_only: true,
+        },
+        Request::Excavate {
+            phrase: Some("login".into()),
+            path: None,
+            from: None,
+            to: None,
+            limit: None,
+            read_only: true,
+        },
+    ] {
+        let (code, message) = err(&mut service, req);
+        assert_eq!(code, "INVALID_INPUT");
+        assert_eq!(message, "facts index absent or not built");
+    }
+    assert!(
+        !pixel_facts::store::history_db_path(&root).exists(),
+        "a read-only op never creates history.db"
+    );
+    assert!(
+        !service.facts_warmer_started.load(Ordering::SeqCst),
+        "a read-only op never spawns the facts warmer"
+    );
+
+    // Without the flag, today's behaviour is unchanged: the same op opens
+    // the db and ingests instead of refusing.
+    service.facts_warmer_started.store(true, Ordering::SeqCst); // no warm loop outliving the test
+    let out = ok(
+        &mut service,
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: None,
+            read_only: false,
+        },
+    );
+    assert!(out["index_state"].is_object(), "{out}");
+    assert!(pixel_facts::store::history_db_path(&root).exists());
+}
+
+/// A `read_only` history op on a built-but-stale index answers the stale
+/// rows instead of catching up: the same query without the flag ingests the
+/// newer commit in-band.
+#[test]
+fn read_only_history_should_answer_the_stale_index_without_ingesting() {
+    let root = fixture("read-only-stale");
+    let mut facts = FactsStore::open(&root).unwrap();
+    let report = pixel_facts::ingest::ingest_until_fresh_within(
+        &mut facts,
+        &pixel_facts::ingest::IngestOptions::default(),
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(report.fresh, "{report:?}");
+    drop(facts);
+
+    // A commit after the ingest makes the stored index stale. Only the
+    // source file is added: `add .` would stage the `.pixel/` the ingest
+    // created, and a tracked sidecar is refused on the next open.
+    std::fs::write(root.join("late.rs"), "pub fn late() {}\n").unwrap();
+    git(&root, &["add", "late.rs"]);
+    git(&root, &["commit", "-qm", "late"]);
+
+    let mut service = Service::open(&root).unwrap();
+    let before = FactsStore::open_existing(&root)
+        .unwrap()
+        .unwrap()
+        .index_state();
+    assert_eq!(before.commits_indexed, 1, "{before:?}");
+    assert!(!before.fresh, "{before:?}");
+
+    let out = ok(
+        &mut service,
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: None,
+            read_only: true,
+        },
+    );
+    assert_eq!(out["index_state"]["commits_indexed"], 1, "{out}");
+    assert_eq!(out["index_state"]["fresh"], false, "{out}");
+    let lifecycle = ok(
+        &mut service,
+        Request::Lifecycle {
+            path: Some("login.rs".into()),
+            token: None,
+            read_only: true,
+        },
+    );
+    assert_eq!(
+        lifecycle["index_state"]["commits_indexed"], 1,
+        "{lifecycle}"
+    );
+    assert!(
+        !service.facts_warmer_started.load(Ordering::SeqCst),
+        "the read-only path never spawns the warmer"
+    );
+    // The db on disk is untouched by the reads: still the one commit.
+    let after = FactsStore::open_existing(&root)
+        .unwrap()
+        .unwrap()
+        .index_state();
+    assert_eq!(after.commits_indexed, 1, "{after:?}");
+
+    // Without the flag the same op catches up (lazy ingest in-band).
+    service.facts_warmer_started.store(true, Ordering::SeqCst); // no warm loop outliving the test
+    let caught_up = ok(
+        &mut service,
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: None,
+            read_only: false,
+        },
+    );
+    assert_eq!(
+        caught_up["index_state"]["commits_indexed"], 2,
+        "{caught_up}"
     );
 }
 
@@ -836,6 +1009,8 @@ fn evaluate_should_refuse_an_unknown_traversal_or_tier_instead_of_answering_anot
         time_budget_ms: None,
         scope: None,
         at_snapshot: false,
+
+        stale_ok: false,
     };
     let (_, message) = err(&mut service, request(Some("sideways"), None));
     assert_eq!(
@@ -923,6 +1098,233 @@ fn status_should_report_a_graph_file_it_cannot_open() {
             .as_str()
             .is_some_and(|e| !e.is_empty()),
         "{out}"
+    );
+}
+
+/// `status.embedding` is the semantic code-search warmth probe: the
+/// code-search model's download marker, this repo's persisted vector rows,
+/// and whether the daemon holds a loaded embedder. `model_on_disk` reads
+/// the machine-wide model cache (`$HOME`), so only its type is pinned.
+#[test]
+fn status_should_report_the_embedding_warmth_probe() {
+    let root = fixture("status-embedding");
+    let mut service = Service::open(&root).unwrap();
+    let out = ok(&mut service, Request::Status {});
+    let embedding = &out["embedding"];
+    assert_eq!(embedding["embedder_resident"], false, "{out}");
+    assert_eq!(embedding["vectors_present"], false, "{out}");
+    assert_eq!(embedding["vectors_chunks"], 0, "{out}");
+    assert!(embedding["model_on_disk"].is_boolean(), "{out}");
+}
+
+/// A question for the fixture's `login.rs`, which only it answers.
+const MEANING_QUERY: &str = "check whether the user is empty";
+
+fn meaning_request(limit: Option<usize>) -> Request {
+    Request::Meaning {
+        query: MEANING_QUERY.into(),
+        limit,
+
+        stale_ok: false,
+    }
+}
+
+/// Wait (bounded) until `check` holds of the `meaning` answer.
+fn meaning_until(service: &mut Service, check: impl Fn(&Value) -> bool) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let answer = call(service, meaning_request(Some(3)));
+        if check(&answer) {
+            return answer;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "meaning never reached the expected state: {answer}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// `meaning` never waits for the vectors it ranks from: cold it starts the
+/// build and says `warming` in an ordinary retrieval envelope (a lower bound
+/// naming what it could not do), and once built it ranks, with the same
+/// envelope naming that its leads are unverified.
+#[test]
+fn meaning_should_answer_warming_then_ranked_leads_in_a_lower_bound_envelope() {
+    let root = fixture("meaning-envelope");
+    let mut service = Service::open(&root).unwrap();
+    let (meaning, release) = crate::meaning::testing::gated(&root);
+    service.set_meaning(meaning);
+
+    let warming = call(&mut service, meaning_request(Some(3)));
+    assert_eq!(warming["ok"], true, "{warming}");
+    assert_eq!(warming["op"], "meaning");
+    let cap = "semantic index unavailable (warming): no semantic leads";
+    assert_eq!(
+        warming["result"],
+        json!({"status": "unavailable", "reason": "warming", "caps": [cap]})
+    );
+    assert_eq!(warming["epistemics"]["lower_bound"], true);
+    assert_eq!(warming["epistemics"]["closed_world"], false);
+    assert!(
+        warming["epistemics"]["basis"]
+            .as_str()
+            .unwrap()
+            .starts_with("resident code-chunk embeddings + chunk BM25; caps: "),
+        "{warming}"
+    );
+    assert_eq!(
+        warming["warnings"],
+        json!([{"code": "RESULT_CAPPED", "message": cap}])
+    );
+    assert!(warming["snapshot"]["head"].is_string(), "{warming}");
+
+    drop(release);
+    let ready = meaning_until(&mut service, |answer| answer["result"]["status"] == "ready");
+    let hits = ready["result"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 2, "both files of the fixture: {ready}");
+    assert_eq!(hits[0]["path"], "login.rs");
+    assert_eq!(hits[0]["symbol"], "login");
+    assert_eq!(hits[0]["start_line"], 1);
+    assert_eq!(hits[0]["end_line"], 2);
+    assert!(
+        hits[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .starts_with("pub fn login(")
+    );
+    let mut keys: Vec<&str> = hits[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "end_line",
+            "path",
+            "score",
+            "snippet",
+            "start_line",
+            "symbol"
+        ]
+    );
+    assert!(hits[0]["score"].as_f64().unwrap() > hits[1]["score"].as_f64().unwrap());
+    assert_eq!(ready["result"]["pool"]["files"], 2);
+    assert_eq!(ready["epistemics"]["lower_bound"], true);
+    assert_eq!(
+        ready["epistemics"]["extraction_limits"][0],
+        "embedding similarity ranks chunks; it does not separate related from unrelated code"
+    );
+    assert_eq!(
+        ready["warnings"],
+        json!([{
+            "code": "RESULT_CAPPED",
+            "message": pixel_recall::code_search::SEMANTIC_LEADS_UNVERIFIED
+        }])
+    );
+    assert!(ready["snapshot"]["head"].is_string(), "{ready}");
+}
+
+#[test]
+fn meaning_should_refuse_a_blank_question_as_invalid_input() {
+    let root = fixture("meaning-blank");
+    let mut service = Service::open(&root).unwrap();
+    service.set_meaning(crate::meaning::testing::meaning(&root));
+    let (code, message) = err(
+        &mut service,
+        Request::Meaning {
+            query: "  ".into(),
+            limit: None,
+
+            stale_ok: false,
+        },
+    );
+    assert_eq!(code, "INVALID_INPUT");
+    assert!(message.contains("query is empty"), "{message}");
+}
+
+/// A watcher batch publishes a new generation; once the vectors were asked
+/// for they rebuild at once, so the next question finds the edit without
+/// starting the build itself.
+#[test]
+fn a_watcher_batch_should_rebuild_the_vectors_that_were_asked_for() {
+    let root = fixture("meaning-nudge");
+    let mut service = Service::open(&root).unwrap();
+    let meaning = crate::meaning::testing::meaning(&root);
+    service.set_meaning(Arc::clone(&meaning));
+    let generation = |service: &Service| service.publication.read().unwrap().generation;
+    crate::meaning::testing::build(&meaning, generation(&service));
+
+    std::fs::write(root.join("login.rs"), "pub fn logout_session() {}\n").unwrap();
+    service.refresh_files(&[("login.rs", false)]);
+    let published = generation(&service);
+
+    // A pure read: it cannot start the build the nudge should have.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let answer = loop {
+        let answer = meaning
+            .answer(published, "logout session", Some(1))
+            .unwrap();
+        if answer["status"] == "ready" {
+            break answer;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never rebuilt: {answer}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(answer["hits"][0]["symbol"], "logout_session");
+    assert_eq!(answer["pool"]["generation"], published);
+}
+
+/// The evidence plane ranks from the vectors the writable service shares
+/// with its replicas and never builds them: cold, a replica says so and
+/// starts nothing; built, it ranks within the bundle's limit.
+#[test]
+fn read_evidence_should_rank_meaning_from_shared_vectors_and_never_build_them() {
+    let root = fixture("meaning-evidence");
+    let mut service = Service::open(&root).unwrap();
+    let (meaning, opened) = crate::meaning::testing::counting(&root);
+    service.set_meaning(Arc::clone(&meaning));
+
+    let (publication, cold) = service
+        .read_replica()
+        .read_evidence("meaning", MEANING_QUERY, 5);
+    let cold = cold.unwrap();
+    assert_eq!(cold["status"], "unavailable");
+    assert_eq!(cold["reason"], "cold");
+    assert_eq!(
+        opened.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a replica builds nothing"
+    );
+
+    // Nor does a request handed to a replica directly.
+    let mut replica = service.read_replica();
+    let handled = call(&mut replica, meaning_request(Some(1)));
+    assert_eq!(handled["result"]["reason"], "cold", "{handled}");
+    assert_eq!(opened.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    crate::meaning::testing::build(&meaning, publication.generation);
+    let (_, ready) = service
+        .read_replica()
+        .read_evidence("meaning", MEANING_QUERY, 1);
+    let ready = ready.unwrap();
+    assert_eq!(ready["status"], "ready");
+    assert_eq!(ready["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(ready["hits"][0]["path"], "login.rs");
+    assert_eq!(ready["pool"]["generation"], publication.generation);
+
+    let (_, unknown) = service
+        .read_replica()
+        .read_evidence("telepathy", MEANING_QUERY, 1);
+    assert_eq!(
+        unknown.unwrap_err(),
+        "unsupported evidence query kind: telepathy"
     );
 }
 
@@ -1148,11 +1550,181 @@ fn fan_in_counts_should_count_incoming_calls_per_candidate_file() {
     let mut service = Service::open(&root).unwrap();
     service.ensure_graph().unwrap();
     let store = service.graph.as_ref().unwrap();
-    assert!(fan_in_counts(store.conn(), &[]).is_empty());
+    assert!(fan_in_counts(store.conn(), &[]).unwrap().is_empty());
     let counts = fan_in_counts(
         store.conn(),
         &["login.rs".to_string(), "caller.rs".to_string()],
-    );
+    )
+    .unwrap();
     assert_eq!(counts.get("login.rs"), Some(&1), "`go` calls `login`");
     assert_eq!(counts.get("caller.rs"), None, "no call reaches caller.rs");
+}
+
+/// The graph tables `fan_in_counts` reads, with `files` files of which the
+/// ones in `called` receive `calls` edges (one per entry).
+fn fan_in_graph(files: i64, called: &[i64]) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);
+         CREATE TABLE symbols (id INTEGER PRIMARY KEY, file_id INTEGER);
+         CREATE TABLE edges (id INTEGER PRIMARY KEY, kind TEXT, dst_id INTEGER);",
+    )
+    .unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    for id in 0..files {
+        tx.execute(
+            "INSERT INTO files (id, path) VALUES (?1, ?2)",
+            rusqlite::params![id, format!("src/f{id}.rs")],
+        )
+        .unwrap();
+    }
+    for (symbol, file) in (0_i64..).zip(called) {
+        tx.execute(
+            "INSERT INTO symbols (id, file_id) VALUES (?1, ?2)",
+            rusqlite::params![symbol, file],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO edges (kind, dst_id) VALUES ('calls', ?1)",
+            rusqlite::params![symbol],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    conn
+}
+
+/// Past SQLite's parameter cap (32 766 in the bundled build) one IN-list
+/// for every candidate cannot be prepared, and fan-in came back empty with
+/// no word said. A file called from beyond the cap still gets its count.
+#[test]
+fn fan_in_counts_should_count_candidates_past_the_sqlite_parameter_cap() {
+    let conn = fan_in_graph(40_000, &[3, 39_999, 39_999]);
+    let candidates: Vec<String> = (0..40_000).map(|id| format!("src/f{id}.rs")).collect();
+    let counts = fan_in_counts(&conn, &candidates).unwrap();
+    assert_eq!(counts.len(), 2, "{counts:?}");
+    assert_eq!(counts.get("src/f3.rs"), Some(&1));
+    assert_eq!(counts.get("src/f39999.rs"), Some(&2));
+
+    let first_half: Vec<String> = (0..20_000).map(|id| format!("src/f{id}.rs")).collect();
+    let counts = fan_in_counts(&conn, &first_half).unwrap();
+    assert_eq!(
+        counts,
+        rustc_hash::FxHashMap::from_iter([("src/f3.rs".to_string(), 1)]),
+        "a called file outside the candidates is left out"
+    );
+}
+
+#[test]
+fn fan_in_counts_should_name_a_query_that_failed() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let error = fan_in_counts(&conn, &["a.rs".to_string()]).unwrap_err();
+    assert!(error.starts_with("fan-in query: "), "{error}");
+    assert!(
+        !error.contains("SELECT"),
+        "the statement stays out: {error}"
+    );
+}
+
+/// `resolve` hands only activity and session to the concept resolver, so it
+/// counts no fan-in over its whole admitted universe; `targets` reranks with
+/// fan-in and still counts it.
+#[test]
+fn resolve_should_count_no_fan_in_and_targets_should() {
+    let root = fixture("fan-in-ops");
+    let mut service = Service::open(&root).unwrap();
+    service.ensure_graph().unwrap();
+    let resolved = service.handle(Request::Resolve {
+        phrase: "login".into(),
+        limit: Some(4),
+
+        stale_ok: false,
+    });
+    assert!(resolved.ok, "{resolved:?}");
+    assert_eq!(service.fan_in_queries, 0);
+    let targets = service.handle(Request::Targets {
+        task: "change login".into(),
+        limit: Some(4),
+        max_tier: None,
+        precision: false,
+        regions: false,
+    });
+    assert!(targets.ok, "{targets:?}");
+    assert_eq!(service.fan_in_queries, 1);
+}
+
+/// A request that panicked while holding the index or publication lock
+/// poisons it, and every later acquisition used to panic at its `expect`
+/// (#1102). With both locks poisoned, status reads them, a forced graph
+/// build writes both, and status reads them again.
+#[test]
+fn requests_should_still_answer_after_a_panic_poisoned_both_locks() {
+    let root = fixture("poisoned-locks");
+    let mut service = Service::open(&root).unwrap();
+    let publication = Arc::clone(&service.publication);
+    let index = Arc::clone(&service.index);
+    let _ = std::thread::spawn(move || {
+        let _publication = publication.write().unwrap();
+        let _index = index.write().unwrap();
+        panic!("poison both locks");
+    })
+    .join();
+    assert!(service.publication.is_poisoned() && service.index.is_poisoned());
+
+    let before = ok(&mut service, Request::Status {});
+    ok(&mut service, Request::Graph { if_stale: false });
+    let after = ok(&mut service, Request::Status {});
+    for status in [&before, &after] {
+        assert_eq!(status["index"]["base_files"], 2, "{status}");
+    }
+    assert_eq!(after["graph"]["present"], true, "{after}");
+    assert_eq!(after["graph"]["files"], 2, "{after}");
+}
+
+/// Two writers rebuilding one root's graph at once (a daemon and a
+/// `--no-daemon` run, here two services) used to share the temporary file
+/// and rename over each other's database (#1104). With the graph lock they
+/// take turns: every rebuild succeeds and one clean database remains.
+#[test]
+fn two_builders_on_one_root_should_take_turns_and_leave_one_clean_graph() {
+    let root = fixture("two-builders");
+    let builders: Vec<_> = (0..2)
+        .map(|_| {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let mut service = Service::open(&root).unwrap();
+                for _ in 0..3 {
+                    ok(&mut service, Request::Graph { if_stale: false });
+                }
+            })
+        })
+        .collect();
+    for builder in builders {
+        builder.join().expect("every rebuild succeeds");
+    }
+    let state = root.join(pixel_index::index::SHARD_DIR);
+    let store = GraphStore::open(&state.join(GRAPH_DB_FILE)).unwrap();
+    let integrity: String = store
+        .conn()
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    assert_eq!(store.counts().unwrap().0, 2, "both fixture files");
+    let leftovers: Vec<String> = std::fs::read_dir(&state)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".graph-rebuild-"))
+        .collect();
+    assert_eq!(leftovers, Vec::<String>::new());
+}
+
+/// A watcher batch never waits on the graph lock; a graph op does.
+#[test]
+fn graph_lock_try_acquire_should_be_refused_while_another_holds_it() {
+    let root = tmpdir("graph-lock");
+    let db = root.join(GRAPH_DB_FILE);
+    let held = GraphLock::acquire(&db).unwrap();
+    assert!(GraphLock::try_acquire(&db).is_none(), "held elsewhere");
+    drop(held);
+    assert!(GraphLock::try_acquire(&db).is_some(), "free again");
 }

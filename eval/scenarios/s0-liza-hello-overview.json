@@ -1,0 +1,12 @@
+{
+  "id": "s0-liza-hello-overview",
+  "kind": "repository-overview",
+  "brief_expected": false,
+  "prompt": "Explain this repository's purpose, identify its main application entry point, and describe where its tests and provider logic live.",
+  "must": [
+    {"pattern": "package\\.json", "points": 2, "why": "project manifest"},
+    {"pattern": "server/index\\.ts", "points": 2, "why": "application entry point"},
+    {"pattern": "server/providers", "points": 2, "why": "provider logic"}
+  ],
+  "never": []
+}

@@ -8,7 +8,8 @@
 //! useful lexical/structural evidence before completion, and never permits a
 //! slow client to consume more than its small in-flight allotment.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use rustc_hash::FxHashMap as HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -129,23 +130,24 @@ impl Master {
         if now == self.seen {
             return Ok(());
         }
-        let committed = match (&self.seen.head, &now.head) {
-            (Some(before), Some(after)) if before != after => {
-                pixel_index::gitsync::diff_name_status(root, before, after)
-            }
-            _ => Vec::new(),
-        };
-        let stale = stale_paths(&self.seen, &now, &committed);
+        // The commit range is the service's to diff, from the HEAD its index
+        // covers, so the freshness gate learns the index caught up.
+        let stale = stale_paths(&self.seen, &now, &[]);
+        let mut service = self
+            .service
+            .lock()
+            .map_err(|_| "evidence service lock poisoned".to_string())?;
         if !stale.is_empty() {
             let files: Vec<(&str, bool)> = stale
                 .iter()
                 .map(|path| (path.as_str(), !root.join(path).exists()))
                 .collect();
-            self.service
-                .lock()
-                .map_err(|_| "evidence service lock poisoned".to_string())?
-                .refresh_files(&files);
+            service.refresh_files(&files);
         }
+        if self.seen.head != now.head {
+            service.catch_up_head();
+        }
+        drop(service);
         self.seen = now;
         Ok(())
     }
@@ -312,6 +314,7 @@ fn bundle_frames<W: Write>(
                 "bundle requires 1..={MAX_QUERIES_PER_BUNDLE} queries"
             ));
         }
+        let wants_meaning = queries.iter().any(|query| query.kind == "meaning");
         if let Some(status) = interrupted_status(cancelled, started, request.deadline_ms) {
             return Ok(status);
         }
@@ -327,10 +330,17 @@ fn bundle_frames<W: Write>(
             }
             Arc::clone(&slot.as_ref().expect("master opened above").service)
         };
-        let mut reader = service
-            .lock()
-            .map_err(|_| "evidence service lock poisoned".to_string())?
-            .read_replica();
+        let mut reader = {
+            let service = service
+                .lock()
+                .map_err(|_| "evidence service lock poisoned".to_string())?;
+            // Replicas rank from the resident vectors and never build them:
+            // the writable service starts the build for a bundle that asks.
+            if wants_meaning {
+                service.warm_meaning();
+            }
+            service.read_replica()
+        };
         for query in queries {
             if let Some(status) = interrupted_status(cancelled, started, request.deadline_ms) {
                 return Ok(status);
@@ -405,7 +415,7 @@ fn serve_bounded<R: BufRead, W: Write + Send + 'static>(
     let master: Arc<Mutex<Option<Master>>> = Arc::new(Mutex::new(None));
     let root: PathBuf = root.to_path_buf();
     let writer = Arc::new(Mutex::new(writer));
-    let active: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
+    let active: ActiveRequests = Arc::new(Mutex::new(HashMap::default()));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
@@ -608,7 +618,7 @@ mod tests {
 
     #[test]
     fn active_request_ids_cannot_replace_a_cancellation_handle() {
-        let active = Arc::new(Mutex::new(HashMap::new()));
+        let active = Arc::new(Mutex::new(HashMap::default()));
         let first = Arc::new(AtomicBool::new(false));
         assert!(register_active(&active, "bundle-1", Arc::clone(&first)).unwrap());
         assert!(!register_active(&active, "bundle-1", Arc::new(AtomicBool::new(false))).unwrap());
@@ -857,7 +867,7 @@ mod tests {
     #[test]
     fn the_queue_slot_is_free_before_the_client_can_see_complete() {
         let in_flight = Arc::new(AtomicUsize::new(1));
-        let active: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
+        let active: ActiveRequests = Arc::new(Mutex::new(HashMap::default()));
         let cancelled = Arc::new(AtomicBool::new(false));
         assert!(register_active(&active, "bundle-1", Arc::clone(&cancelled)).unwrap());
         let seen = Arc::new(Mutex::new(None));
@@ -891,7 +901,7 @@ mod tests {
     #[test]
     fn a_panicking_worker_gives_its_queue_slot_back() {
         let in_flight = Arc::new(AtomicUsize::new(1));
-        let active: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
+        let active: ActiveRequests = Arc::new(Mutex::new(HashMap::default()));
         assert!(register_active(&active, "bundle-1", Arc::new(AtomicBool::new(false))).unwrap());
         let slot = QueueSlot {
             in_flight: Arc::clone(&in_flight),
@@ -1020,6 +1030,84 @@ mod tests {
             partial(&second, "after").to_string().contains("late.rs"),
             "the edit made between two bundles is searchable: {second:?}"
         );
+    }
+
+    /// A commit made between two bundles leaves a clean tree: only the
+    /// commit range names its file, and the catch-up that reads it also
+    /// tells the freshness gate the index covers the new HEAD (#1032).
+    #[test]
+    fn a_catch_up_after_a_commit_should_read_it_and_cover_the_new_head() {
+        let root =
+            std::env::temp_dir().join(format!("pixel-evidence-commit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        std::fs::write(root.join("a.rs"), "fn early() {}\n").unwrap();
+        git(&root, &["add", "a.rs"]);
+        git(&root, &["commit", "-qm", "init"]);
+        let mut master = Master::open(&root).unwrap();
+        std::fs::write(root.join("b.rs"), "fn committed_marker() {}\n").unwrap();
+        git(&root, &["add", "b.rs"]);
+        git(&root, &["commit", "-qm", "b"]);
+        let head = pixel_index::gitsync::rev_parse_head(&root);
+
+        master.catch_up(&root).unwrap();
+
+        let mut service = master.service.lock().unwrap();
+        assert_eq!(service.index_covered_head(), head);
+        let found = service.handle(crate::api::Request::Search {
+            pattern: "committed_marker".into(),
+            json: false,
+            limit: None,
+            offset: None,
+            paths: None,
+            scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
+
+            stale_ok: false,
+        });
+        assert!(
+            found.data().to_string().contains("b.rs"),
+            "the committed file is searchable: {found:?}"
+        );
+        drop(service);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A bundle that asks for `meaning` makes the bridge's writable service
+    /// start the build its read replicas rank from: the answer is a typed
+    /// `meaning` result and never `cold` (nothing asked for a build), whatever
+    /// this machine's model is.
+    #[test]
+    fn a_meaning_query_should_start_the_build_its_replicas_rank_from() {
+        let root =
+            std::env::temp_dir().join(format!("pixel-evidence-meaning-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        std::fs::write(root.join("a.rs"), "fn early() {}\n").unwrap();
+        git(&root, &["add", "a.rs"]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let ask = json!({"op": "bundle", "version": 1, "requestId": "m",
+            "queries": [{"id": "q", "kind": "meaning", "query": "early"}]})
+        .to_string();
+        let (result, frames) = serve_lines(&root, &[ask]);
+        let _ = std::fs::remove_dir_all(&root);
+        result.unwrap();
+
+        assert_eq!(terminal(&frames, "m")["status"], "complete");
+        let partial = frames
+            .iter()
+            .find(|frame| frame["type"] == "partial")
+            .unwrap_or_else(|| panic!("no partial frame: {frames:?}"));
+        let status = partial["result"]["status"].as_str();
+        assert!(
+            matches!(status, Some("ready" | "unavailable")),
+            "a meaning result: {partial}"
+        );
+        assert_ne!(partial["result"]["reason"], "cold", "{partial}");
     }
 
     #[test]

@@ -1,0 +1,7 @@
+# pixel-chain arm — same image as pixel, plus the bounded evidence planner.
+# The planner runs the adaptive chain before the task and the agent receives
+# the compact brief prepended to its prompt (see entrypoint.sh).
+FROM pixel-arena:pixel
+ENV ARM_TOOL=pixel-chain
+COPY brief.py /usr/local/bin/arena-brief.py
+RUN chmod +x /usr/local/bin/arena-brief.py

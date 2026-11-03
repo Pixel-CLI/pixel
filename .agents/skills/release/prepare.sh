@@ -11,14 +11,18 @@
 # Steps, each one refused before any write when its precondition fails:
 # 1. the version is x.y.z (optional -suffix), has no `vx.y.z` tag and no
 #    `## [x.y.z]` heading yet;
-# 2. `changelog.d/` holds at least one fragment, every fragment is a
+# 2. `.github/changelog.d/` holds at least one fragment, every fragment is a
 #    `<slug>.<section>.md` with a section from SECTIONS and a first line that
 #    carries the entry, opens on its scope and fits HARD_LIMIT; an entry that
 #    names no pull request takes its link from the commit that merged it
 #    (Security may instead link this repository's GHSA), an optional
 #    `_highlights.md` carries no `## ` heading and fits HIGHLIGHTS_LIMIT, and
 #    `## [Unreleased]` carries no `- ` entry;
-# 3. every workspace member's `[package] version` is set to x.y.z (the
+# 3. `scripts/ci/check-claims.py --version x.y.z` passes: no public number in
+#    docs/bench/claims.toml is left more than one minor behind x.y.z without a
+#    `tracking` issue. The prepare pull request may not edit the registry and
+#    skips the CI job that checks it, so this is the last place to catch it;
+#    then every workspace member's `[package] version` is set to x.y.z (the
 #    members move in lockstep, as 0.2.4 did);
 # 4. the fragments are folded into a new `## [x.y.z] - DATE` under a kept,
 #    empty `## [Unreleased]`, grouped by section and led by `_highlights.md`
@@ -31,7 +35,7 @@
 #    a failed or capped lookup refuses the cut;
 # 7. `pixel check-release` runs from the tree exactly as the Release
 #    workflow's verify job runs it;
-# 8. `scripts/release-prepare-only.py HEAD` checks that the uncommitted diff
+# 8. `scripts/release/release-prepare-only.py HEAD` checks that the uncommitted diff
 #    holds only what this script writes: the rule the CI `scope` job applies
 #    before it skips the prepare pull request's jobs, so a refusal shows here
 #    instead of as a full CI run. The first failing step's exit code is the
@@ -42,7 +46,7 @@ set -eu
 
 usage() { sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; }
 
-# Entries live under changelog.d/, one file per entry: two pull requests then
+# Entries live under .github/changelog.d/, one file per entry: two pull requests then
 # never edit the same lines of CHANGELOG.md, and an entry written on a branch
 # cut before a release cannot land in that release's section by accident.
 # `<slug>.<section>.md`, the section naming the Keep a Changelog heading the
@@ -80,7 +84,7 @@ HARD_LIMIT=900
 # v2026.8.2's own lead plus highlights (1275 bytes) with room to spare: enough
 # for a paragraph and three bullets, not enough for the prose this whole
 # exercise moved out of the entries.
-HIGHLIGHTS="changelog.d/_highlights.md"
+HIGHLIGHTS=".github/changelog.d/_highlights.md"
 HIGHLIGHTS_LIMIT=2000
 
 # Where an entry's `([#<n>](...))` link points.
@@ -174,7 +178,7 @@ WARNINGS=""
 # such entries --check let through.
 LINKS=""
 UNLINKED_COUNT=0
-for fragment in changelog.d/*.md; do
+for fragment in .github/changelog.d/*.md; do
     [ -e "$fragment" ] || continue
     # `_highlights.md` is the release's narrative, not an entry: no section, no
     # scope, no bullet. Any other underscore name is a typo of it, refused
@@ -183,7 +187,7 @@ for fragment in changelog.d/*.md; do
     case "${fragment##*/}" in
         _*)
             if [ "${fragment##*/}" != "_highlights.md" ]; then
-                echo "prepare.sh: $fragment: the only underscore-named file changelog.d/ takes is _highlights.md; an entry is <slug>.<section>.md" >&2
+                echo "prepare.sh: $fragment: the only underscore-named file .github/changelog.d/ takes is _highlights.md; an entry is <slug>.<section>.md" >&2
                 exit 1
             fi
             continue ;;
@@ -299,11 +303,11 @@ STRAY="$(awk '
     END { print n + 0 }
 ' CHANGELOG.md)"
 if [ "$STRAY" -ne 0 ]; then
-    echo "prepare.sh: $STRAY bullet(s) still under ## [Unreleased] in CHANGELOG.md; entries live in changelog.d/, one file per entry" >&2
+    echo "prepare.sh: $STRAY bullet(s) still under ## [Unreleased] in CHANGELOG.md; entries live in .github/changelog.d/, one file per entry" >&2
     exit 1
 fi
 
-# An empty changelog.d/ is well formed: it is the state every release leaves
+# An empty .github/changelog.d/ is well formed: it is the state every release leaves
 # behind, and the release pull request that leaves it there runs --check on
 # every push like any other pull request. Only the cut below needs a fragment,
 # so its refusal moved under this return; above it, --check failed the release
@@ -315,16 +319,33 @@ if [ "$CHECK" -eq 1 ]; then
         echo "prepare.sh: $UNLINKED_COUNT entr$( [ "$UNLINKED_COUNT" -eq 1 ] && printf 'y takes its' || printf 'ies take their' ) pull request link from the commit that merges it at the cut"
     fi
     if [ "$FRAGMENT_COUNT" -eq 0 ]; then
-        echo "prepare.sh: changelog.d/ holds no entry$HIGHLIGHTS_NOTE, which is well formed between a release and the next entry; ## [Unreleased] empty"
+        echo "prepare.sh: .github/changelog.d/ holds no entry$HIGHLIGHTS_NOTE, which is well formed between a release and the next entry; ## [Unreleased] empty"
     else
-        echo "prepare.sh: $FRAGMENT_COUNT fragment(s) under changelog.d/$HIGHLIGHTS_NOTE, all well formed, ## [Unreleased] empty"
+        echo "prepare.sh: $FRAGMENT_COUNT fragment(s) under .github/changelog.d/$HIGHLIGHTS_NOTE, all well formed, ## [Unreleased] empty"
     fi
     exit 0
 fi
 
 if [ "$FRAGMENT_COUNT" -eq 0 ]; then
-    echo "prepare.sh: changelog.d/ holds no fragment; write one entry per user-visible change as changelog.d/<slug>.<section>.md" >&2
+    echo "prepare.sh: .github/changelog.d/ holds no fragment; write one entry per user-visible change as .github/changelog.d/<slug>.<section>.md" >&2
     exit 1
+fi
+
+# A bump that leaves a public number more than one minor behind turns main
+# red on the prepare PR's merge commit: the claims check runs in Test +
+# Format, which the prepare PR skips, and release-prepare-only.py forbids the
+# registry edit that would fix it there (0.10.0: #1357, then #1359). So the
+# claims are judged against the version about to be written, before any
+# write, and the fix goes through its own pull request first. Absent from a
+# disposable fixture that copies only this script.
+if [ -f scripts/ci/check-claims.py ]; then
+    if ! CLAIMS="$(python3 scripts/ci/check-claims.py --root . --version "$VERSION" 2>&1)"; then
+        printf '%s\n' "$CLAIMS" >&2
+        IDS="$(printf '%s\n' "$CLAIMS" | sed -n 's/^error: \([^: ]*\): .*/\1/p' | sort -u | paste -sd ' ' -)"
+        echo "prepare.sh: public claims in docs/bench/claims.toml fail under $VERSION: ${IDS:-see above}; re-measure each (scripts/bench/refresh-claim.sh <id>) or add a \`tracking\` issue to its entry, through a pull request into the target branch, then re-run; no release files written" >&2
+        exit 1
+    fi
+    printf '%s\n' "$CLAIMS" | grep '^warning: ' || true
 fi
 
 # Resolve the canonical repository before searching: a transferred remote's
@@ -389,16 +410,6 @@ for m in $MEMBERS; do
     perl -0pi -e 's/^version = "[^"]*"/version = "'"$VERSION"'"/m' "$m/Cargo.toml"
 done
 
-# Plugin manifests carry the version too: Claude Code and Codex deliver a
-# plugin update only when it changes. Same list as
-# pixel_release::PLUGIN_MANIFESTS (a test fails if they drift).
-for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json .devin-plugin/plugin.json \
-    .qoder-plugin/plugin.json gemini-extension.json package.json; do
-    perl -0pi -e 's/^  "version": "[^"]*"/  "version": "'"$VERSION"'"/m' "$manifest"
-done
-perl -0pi -e 's/^version: .*$/version: '"$VERSION"'/m' plugin.yaml
-sh scripts/gen-plugin-assets.sh >/dev/null
-
 SECTION_FILE="$(mktemp)"
 trap 'rm -f "$SECTION_FILE"' EXIT
 {
@@ -414,7 +425,7 @@ trap 'rm -f "$SECTION_FILE"' EXIT
     fi
     for section in $SECTIONS; do
         first=1
-        for fragment in changelog.d/*.md; do
+        for fragment in .github/changelog.d/*.md; do
             [ -e "$fragment" ] || continue
             case "${fragment##*/}" in _*) continue ;; esac
             [ "$(fragment_section "$fragment")" = "$section" ] || continue
@@ -463,7 +474,7 @@ mv "$SECTION_FILE.new" CHANGELOG.md
 
 # Deleted right after the cut, the point of no return: the entries are in
 # CHANGELOG.md now, and a re-run would refuse the ## [x.y.z] heading anyway.
-rm -f changelog.d/*.md
+rm -f .github/changelog.d/*.md
 
 cargo update --workspace --quiet
 
@@ -486,7 +497,7 @@ fi
 cargo run -q -p pixel-cli -- check-release "v$VERSION" --repo .
 
 # Absent from a disposable fixture that copies only this script.
-if [ -f scripts/release-prepare-only.py ]; then
-    python3 scripts/release-prepare-only.py HEAD
+if [ -f scripts/release/release-prepare-only.py ]; then
+    python3 scripts/release/release-prepare-only.py HEAD
     echo "release-prepare-only: the diff is what prepare.sh writes"
 fi

@@ -13,6 +13,20 @@ turn belongs in a separate conversation.
 Argument: a window (`24h` by default, `48h`, `7d`, an ISO date). Written
 `$W` below.
 
+## Prerequisite — the plugins this skill reads through
+
+`recall`, `action-log`, `list-errors`, `commit-history`, `search-history`,
+`repo-state`, `review-changes` and `diff` are command plugins, not core
+commands. `pixel plugin list` shows what runs; install what is missing, one
+repository each: `pixel install github:Pixel-CLI/pixel-recall` (`recall`),
+`pixel-telemetry` (`action-log`, `list-errors`, `token-savings`),
+`pixel-git` (the git commands). A plugin that declares network access also
+needs `pixel plugin enable <name>`. A missing plugin prints
+`"recall" moved to a plugin: pixel install …` and exits 2: install it, do
+not skip the step. The action log itself is plain JSONL
+(`<root>/.pixel/actions.jsonl`, one record per line, plugin runs included),
+readable without `action-log`.
+
 ## Step 0 — Fresh corpus, known baseline
 
 ```bash
@@ -21,13 +35,13 @@ pixel recall index --stats          # incremental, a few seconds
 pixel recall status                 # last ingest must be minutes old, per agent
 pixel --version                     # the binary the suggestions are judged against
 pixel commit-history                # what main gained inside the window
-pixel --metrics off doctor . --only install.agent-prompt --only install.pi-prompt
+pixel --metrics off doctor . --only install.claude-hooks --only install.pi-impact
 ```
 
 The last line says which prompt the agents in the transcripts were
 reading (`--only` is newer than 0.4.0: on an older binary, run `pixel
 doctor .` and read those two checks). A stale one — red, or the `note:
-agent-prompt.md deployed by \`pixel install\` differs…` line every command
+agent-prompt.md deployed by \`pixel setup\` differs…` line every command
 prints since #243 — means the misuses in the window may follow an older
 release's command map: judge them against that prompt, not the current one.
 
@@ -64,7 +78,11 @@ find ~/code /tmp/pxwt -maxdepth 4 -path '*/.pixel/actions.jsonl' -mtime -1 2>/de
 ```
 
 then per root `pixel action-log --errors-only --json --limit 500 <root>`,
-keeping entries whose `ts_ms` falls in the window. A read op that takes
+keeping entries whose `ts_ms` falls in the window. Count each
+`invocation_id` once and place it by its `cwd`, not by the log it was read
+from: a worktree bootstrap that copies the main checkout's `.pixel/` copies
+`actions.jsonl` with it (verified 2026-10-16, a downstream repository's Codex
+worktrees: one `find-symbol` in four logs). A read op that takes
 seconds is a friction even when it succeeds; group the slow ones by how
 they were served:
 
@@ -104,8 +122,8 @@ Drop the noise before counting (verified 2026-09):
   counts; report the leak itself once as a finding while it lasts.
 - **The stale-prompt note and a side build.** A `pixel-dev` never prints it.
   The managed `pixel` printing it on every call while `~/.claude/settings.json`
-  runs `pixel-dev run-hook …` means a global `pixel-dev install` took the home
-  install: report it once, with `pixel install` as the hand-back, not as drift.
+  runs `pixel-dev run-hook …` means a global `pixel-dev setup` took the home
+  install: report it once, with `pixel setup` as the hand-back, not as drift.
 - **Refusals that are the contract.** `fast-forward` refusing a non-ff,
   `commit` refusing a dirty or empty stage, a `--request-id` replay: an
   error is a friction only if the agent had to work around it (Step 2 says
@@ -123,8 +141,7 @@ Drop the noise before counting (verified 2026-09):
 | empty or truncated answer | `pixel recall search '\b(unresolved|capped)\b' --role tool --since $W` |
 | human complaint | `pixel recall search 'pixel' --role user --human-only --since $W` (`--human-only` alone keeps assistant and tool turns, it only drops injected user text), read for "marche pas", "lent", "pourquoi", "bug", "encore", "wrong" |
 | harness or install drift | `pixel recall search '(doctor|install\.|daemon (lock|not running)|stale)' --role tool --since $W` |
-| prompts older than the binary | `pixel recall search 'deployed by .pixel install. differs? from' --role tool --since $W` (#243): how many sessions ran on a stale prompt, and whether the agent or the user acted on it |
-| old command names | `pixel recall search "note: '[a-z-]+' is now '" --role tool --since $W`: an agent still calling pre-rename names, i.e. a prompt, skill or script that was never updated; outside the pixel repo only, where the string also sits in `rename_note`'s tests |
+| prompts older than the binary | `pixel recall search 'deployed by .pixel setup. differs? from' --role tool --since $W` (#243): how many sessions ran on a stale prompt, and whether the agent or the user acted on it |
 
 Sessions that ran in the pixel repo itself are mostly about pixel's code:
 there, "capped" or "error" usually sits in a diff or a test, not in a
@@ -147,19 +164,37 @@ python3 .agents/skills/pixel-retro/lead_time.py $W            # reads gh pr view
 python3 .agents/skills/pixel-retro/lead_time.py $W --no-gh    # offline: edit → PR open only
 ```
 
-It reads the Claude Code transcripts of this repository and its
-`.claude/worktrees/` (another path with `--projects <dir>`), and prints per
-PR the time from its first edit to `gh pr create`, from there to the last
-check completion on the final head, the pushes in that session, and the
+It reads every Claude Code session (subagents included) and Codex rollout
+(`sessions/` and `archived_sessions/`) written to in the window, whatever
+directory it ran in (narrow with `--projects <dir>` / `--codex <dir>`), and
+keeps the PRs whose `gh pr create` URL names this repository's `origin`
+slug: a sibling checkout opens PRs here, and a sibling repository's `#33` is
+not this one's. It prints per PR the time from its first edit to `gh pr create`, from there to all-check completion and separately to successful validation
+on the final head (SUCCESS, NEUTRAL or SKIPPED check runs; SUCCESS commit
+statuses), the pushes in that session, and the
 session's time split into tool, model, idle (waiting on a background task)
 and human; then the median lead time and the commands with the most
 blocking time. Read the numbers with their limits:
 
+- **Completed is not validated.** Failed, cancelled, timed-out, unknown or
+  pending results never enter the green median, even after merge. A pending
+  review status on a merged PR leaves validation unknown. The report shows
+  validated/local/GitHub PR counts; a failed or capped GitHub listing reports
+  unknown coverage. JSON retains the observed head SHA, completion duration
+  and missing local PR numbers. This is the observed rollup, not a branch
+  protection audit.
 - **Idle is a ceiling, not a saving.** It is recoverable only where the
   session had an independent unit to advance; the data does not say whether
   it did.
 - **One session per PR.** Follow-up pushes from another session count in
   open → green but not in the split.
+- **Codex edits are inferred.** A Codex unit starts at its first
+  `apply_patch` or at the first shell command that writes a file (`sed -i`,
+  a script calling `write_text`, a redirection into a source file); an edit
+  done another way starts it later.
+- **A PR opened elsewhere is missing.** Cloud sessions, another machine or a
+  person opening it by hand leave no local transcript: compare the count
+  with `gh pr list --search 'created:>=<window start>'`.
 - **Compare windows, not sessions.** A rule change (#418 on 2026-09-30, say)
   shows as a shift of the median and of the top blocking commands between a
   window before it and one after, quoted with both commands.
@@ -249,7 +284,7 @@ Session memory and a single log line both lie. For every candidate:
 | Agent misuse of a flag or command | the prompt pixel installs: `crates/pixel-install/assets/pixel-agent-prompt.md` (and `pixel-subagent-prompt.md`), or the clap help text |
 | Agent bypassed pixel because the answer was worse | the command's output (truth markers, caps, ranking) — not the prompt; a stronger "MUST" does not fix a weak answer |
 | Slow read op | profile first, suggest only with a measured number |
-| Install, doctor or daemon drift | first check whether a rerun of the install would clear it, without running it on the user's machine (Step 2 forbids replaying host-wide commands, and `--repo` writes into their repository): run it against a copy, `HOME=<scratch> CODEX_HOME=<scratch>/.codex XDG_CONFIG_HOME=<scratch>/.config pixel install --shell <shell>` then `pixel doctor` with the same three variables (all on the command line: `CODEX_HOME` and `XDG_CONFIG_HOME` otherwise point the install back at the real files), or for a `repo.*` check `pixel install --repo <fixture>` on a `git init` fixture seeded with the drifted file; failing that, read the install code path. If a rerun clears it, the install is fine and the friction is that nobody reran it: an upgrade path that skips it, a note nobody read. Propose a change to `pixel-install` only when the install itself leaves the check red, or a `pixel doctor` check when nothing reported the drift at all |
+| Install, doctor or daemon drift | first check whether a rerun of the install would clear it, without running it on the user's machine (Step 2 forbids replaying host-wide commands, and `--repo` writes into their repository): run it against a copy, `HOME=<scratch> CODEX_HOME=<scratch>/.codex XDG_CONFIG_HOME=<scratch>/.config pixel setup` then `pixel doctor` with the same three variables (all on the command line: `CODEX_HOME` and `XDG_CONFIG_HOME` otherwise point the install back at the real files), or for a `repo.*` check `pixel setup --repo <fixture>` on a `git init` fixture seeded with the drifted file; failing that, read the install code path. If a rerun clears it, the install is fine and the friction is that nobody reran it: an upgrade path that skips it, a note nobody read. Propose a change to `pixel-install` only when the install itself leaves the check red, or a `pixel doctor` check when nothing reported the drift at all |
 | Repo rule or skill gap | `.agents/rules/*.md` or `.agents/skills/*/SKILL.md` |
 | Not pixel's (user repo, git, another tool) | one line in the report, then drop it |
 

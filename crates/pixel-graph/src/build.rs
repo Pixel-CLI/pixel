@@ -7,7 +7,7 @@
 //! phase (files+symbols, then imports, then tiered call resolution).
 //! `update_file`: transactional per-file replacement + re-resolution.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -18,14 +18,17 @@ use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::extract::{
-    FileExtraction, RawMixin, extract_file, is_binstub_candidate, lang_of, lang_of_file,
+    FileExtraction, RawMixin, RawSymbol, extract_file, is_binstub_candidate, lang_of, lang_of_file,
 };
 use crate::imports::{resolve_import_in, ruby as ruby_projects};
+use crate::mvp_adapter::ruby_switch::{self, RubySource};
+use crate::mvp_adapter::{self, RustSource};
 use crate::resolve::{
-    Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference,
-    reconsider_resolved_calls, resolve_affected, resolve_calls, resolve_references,
+    Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference, ResolveIndex,
+    reconsider_resolved_calls, resolve_affected_in, resolve_calls_in, resolve_references_in,
+    shelve_unnamed_calls,
 };
-use crate::store::{EdgeKind, ExecCached, GraphStore, StoreError, extract_crux};
+use crate::store::{ExecCached, GraphStore, StoreError, extract_crux};
 
 /// Extract concepts for a file and insert them, linking each to the smallest
 /// enclosing symbol (by line range) when one exists. `symbol_ids` are the ids
@@ -164,11 +167,61 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 24: Rails routes files yield `route` concepts with their handler and a
 ///    `references` edge to the controller action (`:route` arg_of); Active
 ///    Record associations reference their model class (`:association`).
-pub const EXTRACTOR_VERSION: &str = "24";
+/// 25: TS/JS class properties whose value is an arrow or function expression
+///    (`handle = async (e) => {...}`, `private foo = () => ...`) are methods
+///    of their class, and the calls made inside them belong to them.
+/// 26: an incomplete Ruby `alias` generates no method or forwarding reference,
+///    so it cannot reassign a preceding alias's reference to another symbol.
+/// 27: with the Rust source on, an unresolved Rust call whose name no symbol
+///    carries is no longer stored, as an unresolved reference already was not.
+/// 28: this resolver records an unresolved call whose name no symbol carries
+///    once per file and name (`unresolved_names`), not per site in
+///    `unresolved_calls` (outside Ruby files and import bindings).
+/// 29: Kotlin (`.kt`, `.kts`) is extracted by the generic walker; for every
+///    generic language an `object` declaration is a class, an import's
+///    `qualified_identifier` is its path, and a call through a field-less
+///    `navigation_expression` names its member and receiver.
+/// 30: separate JavaScript assignment/declaration syntax facts, without new symbols or edges.
+/// 31: a second definition with the same qualified name and kind in one file
+///    keeps its own row under `<uid>~2` ([`symbol_uids`]) instead of
+///    replacing the first, so no edge or unresolved call is left on a missing
+///    symbol id (#1217).
+pub const EXTRACTOR_VERSION: &str = "31";
 
-/// True iff the graph's rows were written by the current extractor.
-fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
-    Ok(store.meta_get(EXTRACTOR_VERSION_KEY)?.as_deref() == Some(EXTRACTOR_VERSION))
+/// True iff the graph's rows were written by the current extractor, from
+/// the Rust and Ruby sources the switches ask for now
+/// (`mvp_adapter::RustSource`, `ruby_switch::RubySource`).
+pub fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
+    Ok(
+        store.meta_get(EXTRACTOR_VERSION_KEY)?.as_deref() == Some(EXTRACTOR_VERSION)
+            && mvp_adapter::source_is_current(
+                store.meta_get(mvp_adapter::GRAPH_SOURCE_KEY)?.as_deref(),
+                RustSource::from_env(),
+            )
+            && ruby_switch::source_is_current(
+                store.meta_get(ruby_switch::RUBY_SOURCE_KEY)?.as_deref(),
+                RubySource::from_env(),
+            ),
+    )
+}
+
+/// The ids of the graph's Rust files.
+fn rust_file_ids(store: &GraphStore) -> Result<HashSet<i64>, StoreError> {
+    Ok(store
+        .files()?
+        .into_iter()
+        .filter(|f| f.lang == "rust")
+        .map(|f| f.id)
+        .collect())
+}
+
+/// `stored` without the calls and references of Rust files: when the
+/// graph's Rust edges are pixel-mvp's, this graph's resolver decides none.
+fn without_rust_sites(store: &GraphStore, stored: &mut StoredBatch) -> Result<(), StoreError> {
+    let rust = rust_file_ids(store)?;
+    stored.calls.retain(|fc| !rust.contains(&fc.file_id));
+    stored.references.retain(|fr| !rust.contains(&fr.file_id));
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -473,15 +526,53 @@ fn input_signature(inputs: &[(String, Vec<u8>)]) -> String {
 /// Full graph build: parse everything in parallel, then write files,
 /// symbols, imports, and resolved call edges.
 pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
-    build_graph_with(root, db_path, freshness_signature)
+    build_graph_from(root, db_path, RustSource::from_env())
 }
 
-/// [`build_graph`] with the signature of the tree as it stands after the
-/// writes supplied by `signature_now`: production re-walks the tree, a test
-/// makes it move to reach the rollback.
+/// [`build_graph`] with the Rust edges taken from `rust`. With
+/// [`RustSource::Mvp`], pixel-mvp's index is refreshed in the repository's
+/// state directory (`.pixel/.pixel-mvp/`) and its answer replaces this
+/// graph's resolver for Rust (`mvp_adapter::switch_rust`); where it cannot
+/// index (no `Cargo.toml` at `root`, no git work tree there), the graph
+/// keeps this resolver's Rust edges and records why
+/// (`mvp_adapter::MVP_UNAVAILABLE`).
+pub fn build_graph_from(
+    root: &Path,
+    db_path: &Path,
+    rust: RustSource,
+) -> Result<GraphStats, BoxErr> {
+    build_graph_with(
+        root,
+        db_path,
+        rust,
+        RubySource::from_env(),
+        freshness_signature,
+    )
+}
+
+/// [`build_graph_from`] with the Ruby edges taken from `ruby` too. With
+/// [`RubySource::Hybrid`], pixel-mvp's index is refreshed in the
+/// repository's state directory and merged into this resolver's Ruby rows
+/// site by site (`ruby_switch`); where it cannot index (no git work tree
+/// at `root`), the graph keeps this resolver's Ruby rows and records why
+/// (`ruby_switch::RUBY_MVP_UNAVAILABLE`).
+pub fn build_graph_sources(
+    root: &Path,
+    db_path: &Path,
+    rust: RustSource,
+    ruby: RubySource,
+) -> Result<GraphStats, BoxErr> {
+    build_graph_with(root, db_path, rust, ruby, freshness_signature)
+}
+
+/// [`build_graph_from`] with the signature of the tree as it stands after
+/// the writes supplied by `signature_now`: production re-walks the tree, a
+/// test makes it move to reach the rollback.
 fn build_graph_with(
     root: &Path,
     db_path: &Path,
+    rust: RustSource,
+    ruby: RubySource,
     signature_now: impl FnOnce(&Path) -> String,
 ) -> Result<GraphStats, BoxErr> {
     let t0 = Instant::now();
@@ -525,13 +616,16 @@ fn build_graph_with(
     let all_paths: Vec<String> = extracted.iter().map(|e| e.rel.clone()).collect();
 
     let mut store = GraphStore::open(db_path)?;
+    // A db made before graph dbs tracked their free pages is converted once,
+    // here, where every row is about to be rewritten anyway.
+    store.ensure_incremental_vacuum()?;
     // One transaction for the whole build: without it every row below is its
     // own autocommit, and on a 60 000-symbol repository the store and
     // resolution passes spent 43 s of a 49 s build committing (#309).
     store.begin_write()?;
 
     // Drop files that vanished since the last build.
-    let known: std::collections::HashSet<&str> = all_paths.iter().map(String::as_str).collect();
+    let known: rustc_hash::FxHashSet<&str> = all_paths.iter().map(String::as_str).collect();
     let stale: Vec<String> = store
         .files()?
         .into_iter()
@@ -546,16 +640,59 @@ fn build_graph_with(
         store.record_walked_file(rel, blob_oid)?;
     }
 
+    // A merge recorded by an earlier build describes rows this build
+    // replaces: it goes, whatever the Ruby switch says now.
+    ruby_switch::forget(&store)?;
+    // pixel-mvp's index, read after the walk above: a file it reads newer
+    // than the walk did moves the signature checked below. Rust needs a
+    // crate root (`crate_root`); the Ruby merge does not.
+    let wants_rust = rust == RustSource::Mvp && mvp_adapter::crate_root(root);
+    let index = if wants_rust || ruby == RubySource::Hybrid {
+        mvp_adapter::refresh(root, &pixel_git::sidecar::dir(root)).ok()
+    } else {
+        None
+    };
+    let mvp = index.as_ref().filter(|_| wants_rust);
+    let source = match (rust, mvp) {
+        (RustSource::V1, _) => None,
+        (RustSource::Mvp, Some(_)) => Some(mvp_adapter::mvp_source()),
+        (RustSource::Mvp, None) => Some(mvp_adapter::MVP_UNAVAILABLE.to_string()),
+    };
+    // Before resolution: the resolver reads it (`rust_is_walled`).
+    mvp_adapter::record_source(&store, source.as_deref())?;
+    let ruby_index = index.as_ref().filter(|_| ruby == RubySource::Hybrid);
+    ruby_switch::record_source(
+        &store,
+        match (ruby, ruby_index) {
+            (RubySource::V1, _) => None,
+            (RubySource::Hybrid, Some(_)) => Some(ruby_switch::hybrid_source()),
+            (RubySource::Hybrid, None) => Some(ruby_switch::RUBY_MVP_UNAVAILABLE.to_string()),
+        }
+        .as_deref(),
+    )?;
+
     let projects = ruby_projects::Projects::load(root, &all_paths);
-    let stored = store_batch(&mut store, extracted, &all_paths, &projects)?;
+    let mut stored = store_batch(&mut store, extracted, &all_paths, &projects)?;
+    if mvp.is_some() {
+        without_rust_sites(&store, &mut stored)?;
+    }
     phases.store_ms = millis(stored.stored_at.duration_since(clock));
     phases.concepts_ms = millis(stored.concepts);
     phases.imports_ms = millis(stored.imports);
     let clock = Instant::now();
-    resolve_calls(&store, &stored.calls)?;
+    // Resolving writes edges and unresolved rows, never a symbol or an
+    // import: one index serves both passes.
+    let idx = ResolveIndex::build(&store)?;
+    resolve_calls_in(&store, &idx, &stored.calls)?;
     phases.resolve_calls_ms = millis(clock.elapsed());
     let clock = Instant::now();
-    resolve_references(&store, &stored.references)?;
+    resolve_references_in(&store, &idx, &stored.references)?;
+    if let Some(mvp) = mvp {
+        mvp_adapter::merge_into(&store, mvp)?;
+    }
+    if let Some(index) = ruby_index {
+        ruby_switch::merge_into(&store, index)?;
+    }
     phases.resolve_references_ms = millis(clock.elapsed());
     let clock = Instant::now();
 
@@ -579,6 +716,8 @@ fn build_graph_with(
     store.meta_set(BUILD_STARTED_KEY, &started.to_string())?;
     store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
     store.commit_write()?;
+    // The pages of every row the build deleted or replaced.
+    store.reclaim()?;
 
     let (files, symbols, edges, unresolved) = store.counts()?;
     Ok(GraphStats {
@@ -589,6 +728,30 @@ fn build_graph_with(
         elapsed_ms: t0.elapsed().as_millis(),
         phases,
     })
+}
+
+/// The uid of each of `symbols`, extracted in this order from `rel`:
+/// `rel#qualified#kind`, then `~n` from the second definition of the same
+/// qualified name and kind on, the suffix pixel-mvp writes
+/// (`mvp_index::extract::uid`). Two same-named spec helpers in sibling
+/// `describe` blocks shared one uid, and the second insert replaced the
+/// first row (#1217). The count follows source order, never the line: an
+/// edit above both definitions leaves their uids unchanged.
+pub fn symbol_uids(rel: &str, symbols: &[RawSymbol]) -> Vec<String> {
+    let mut seen: HashMap<(&str, &str), u32> = HashMap::default();
+    symbols
+        .iter()
+        .map(|s| {
+            let kind = s.kind.as_str();
+            let repetition = seen.entry((s.qualified.as_str(), kind)).or_default();
+            *repetition += 1;
+            if *repetition == 1 {
+                format!("{rel}#{}#{kind}", s.qualified)
+            } else {
+                format!("{rel}#{}#{kind}~{repetition}", s.qualified)
+            }
+        })
+        .collect()
 }
 
 /// What [`store_batch`] leaves to its caller: the calls and references of
@@ -627,14 +790,16 @@ fn store_batch(
     let mut stored_ids: Vec<(i64, Vec<i64>)> = Vec::with_capacity(files.len());
     for e in &mut files {
         let file_id = store.replace_file(&e.rel, &e.blob_oid, e.fx.lang)?;
+        if e.fx.lang == "js" {
+            store.set_js_assignment_facts(file_id, &e.fx.js_assignments)?;
+        }
         let mut ids = Vec::with_capacity(e.fx.symbols.len());
         let mut lines = Vec::with_capacity(e.fx.symbols.len());
         // Decoded and split once per file, not once per symbol: the crux
         // below slices every symbol's body out of the same lines.
         let body_str = String::from_utf8_lossy(&e.content);
         let all_lines: Vec<&str> = body_str.lines().collect();
-        for s in &e.fx.symbols {
-            let uid = format!("{}#{}#{}", e.rel, s.qualified, s.kind.as_str());
+        for (s, uid) in e.fx.symbols.iter().zip(symbol_uids(&e.rel, &e.fx.symbols)) {
             let id = store.insert_symbol(
                 file_id,
                 &uid,
@@ -1083,6 +1248,7 @@ pub fn apply_tree_delta(root: &Path, db_path: &Path, delta: &TreeDelta) -> Resul
             Ok(Some(delta.signature.clone()))
         },
         &mut || {},
+        &mut || {},
     )?;
     if let Some(rel) = drifted {
         return Err(std::io::Error::new(
@@ -1141,28 +1307,66 @@ pub fn update_files(
     db_path: &Path,
     files: &[(&str, bool)],
 ) -> Result<Publication, BoxErr> {
-    update_files_probed(root, db_path, files, &mut || {})
+    let mut cache = TreeHashCache::default();
+    update_files_cached(root, db_path, files, &mut cache)
 }
 
-/// [`update_files`] with a seam for tests: `probe` runs after the rows are
-/// written and before the tree walk that decides the signature, inside the
-/// open transaction. Production passes a no-op.
+/// [`update_files`] reusing the caller's stat memo: the tree walk the
+/// signature needs is stat-only for every file whose `(mtime, len)` the last
+/// walk already hashed, so a one-file watcher batch no longer reads and
+/// hashes the whole tree inside the write transaction.
+///
+/// The memo is a hint, never a source of truth: a stat-changed or vanished
+/// file is re-read, and a file that changed content without moving its
+/// `(mtime, len)` is as invisible here as git's own index makes it.
+pub fn update_files_cached(
+    root: &Path,
+    db_path: &Path,
+    files: &[(&str, bool)],
+    cache: &mut TreeHashCache,
+) -> Result<Publication, BoxErr> {
+    update_files_gated(root, db_path, files, cache, &mut || {})
+}
+
+/// [`update_files_cached`] that runs `before_commit` once the rows and the
+/// signature are written, right before the `COMMIT` that shows them to every
+/// other connection. A caller that publishes its own view of the update (the
+/// daemon's text index and generation) takes its readers' lock there, so its
+/// readers keep the previous state for the whole extraction and never see
+/// the new rows under the old generation. Not run when the update fails
+/// before that point: nothing was committed.
+pub fn update_files_gated(
+    root: &Path,
+    db_path: &Path,
+    files: &[(&str, bool)],
+    cache: &mut TreeHashCache,
+    before_commit: &mut dyn FnMut(),
+) -> Result<Publication, BoxErr> {
+    update_files_probed(root, db_path, files, cache, &mut || {}, before_commit)
+}
+
+/// [`update_files_gated`] with a seam for tests: `probe` runs after the rows
+/// are written and before the tree walk that decides the signature, inside
+/// the open transaction. Production passes a no-op.
 fn update_files_probed(
     root: &Path,
     db_path: &Path,
     files: &[(&str, bool)],
+    cache: &mut TreeHashCache,
     probe: &mut dyn FnMut(),
+    before_commit: &mut dyn FnMut(),
 ) -> Result<Publication, BoxErr> {
     update_files_in_one_transaction(
         root,
         db_path,
         files,
         |store, batch| {
-            let walk = tree_hashes(root);
+            let walk = tree_hashes_cached(root, cache);
             let known = known_hashes(store)?;
             Ok(rows_match_tree(&known, &walk, batch).then(|| signature_of(&walk)))
         },
         probe,
+        before_commit,
     )
 }
 
@@ -1210,7 +1414,8 @@ fn rows_match_tree(
 /// the raw batch to `write_rows` would apply both, and the signing check
 /// would still count the path as re-extracted after its row was removed.
 fn final_actions<'a>(files: &[(&'a str, bool)]) -> Vec<(&'a str, bool)> {
-    let mut position: HashMap<&str, usize> = HashMap::with_capacity(files.len());
+    let mut position: HashMap<&str, usize> =
+        HashMap::with_capacity_and_hasher(files.len(), Default::default());
     let mut out: Vec<(&'a str, bool)> = Vec::with_capacity(files.len());
     for &(rel, removed) in files {
         match position.get(rel) {
@@ -1228,7 +1433,8 @@ fn final_actions<'a>(files: &[(&'a str, bool)]) -> Vec<(&'a str, bool)> {
 /// open the store, `BEGIN IMMEDIATE`, write the rows for the batch (one final
 /// action per path, see [`final_actions`]), run `probe` (a test seam), ask
 /// `sign` which signature (if any) describes the rows now, write it under
-/// [`FRESHNESS_KEY`], or [`FRESHNESS_WITHHELD`] when there is none, `COMMIT`.
+/// [`FRESHNESS_KEY`], or [`FRESHNESS_WITHHELD`] when there is none, run
+/// `before_commit` (see [`update_files_gated`]), `COMMIT`.
 /// An error anywhere returns before the commit and the dropped connection
 /// rolls everything back, so another connection never observes new rows
 /// under the old signature, and rows that did commit are never left under
@@ -1239,6 +1445,7 @@ fn update_files_in_one_transaction(
     files: &[(&str, bool)],
     sign: impl FnOnce(&GraphStore, &[(&str, bool)]) -> Result<Option<String>, BoxErr>,
     probe: &mut dyn FnMut(),
+    before_commit: &mut dyn FnMut(),
 ) -> Result<Publication, BoxErr> {
     if files.is_empty() {
         return Ok(Publication::Withheld);
@@ -1253,6 +1460,7 @@ fn update_files_in_one_transaction(
         FRESHNESS_KEY,
         signature.as_deref().unwrap_or(FRESHNESS_WITHHELD),
     )?;
+    before_commit();
     store.commit_write()?;
     Ok(if signature.is_some() {
         Publication::Signed
@@ -1288,120 +1496,153 @@ fn stored_definitions(
 /// of everything a changed definition may have made ambiguous. Writes no
 /// signature: the caller decides which one (if any) describes the tree it
 /// just synchronised to.
+///
+/// When the graph's Rust edges are pixel-mvp's (`mvp_adapter::rust_is_walled`),
+/// this resolver decides no Rust site, and the Rust rows are written again
+/// last with pixel-mvp's answer, refreshed in `.pixel/.pixel-mvp/`, so
+/// whatever the passes before did to them (a demoted edge, a retried row) is
+/// not what stays: the rows of the files the batch, the refresh or those
+/// passes may have moved, every file's when that cannot be bounded
+/// (`mvp_adapter::merge_again`).
+///
+/// When the graph's Ruby rows are the hybrid merge (`ruby_switch::is_hybrid`),
+/// they are restored to this resolver's own first, and merged again last
+/// with the same refresh of pixel-mvp's index: the files whose merge may
+/// have moved are planned again, every other gets back the rows it had
+/// (`ruby_switch::merge_again`).
+///
+/// That refresh reads the tree and writes pixel-mvp's own index, never this
+/// graph, so it runs on its own thread from the start of the update, while
+/// the passes write this graph's rows, and only the merges at the end wait
+/// for it: on antiwork/gumroad `b996417e`, run after the passes, it held one
+/// inserted Ruby method 4.3 s past their 3.2 s (#1204). An update that fails
+/// before its merges still waits for the refresh it started; the generation
+/// that refresh published is then not the one the graph was merged against,
+/// and the next update merges every file again.
 fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Result<(), BoxErr> {
-    // What the batch changed, before and after, for the re-resolution below.
-    let mut affected = Affected::default();
-    let mut before: Vec<Definition> = Vec::new();
-    let mut after: Vec<Definition> = Vec::new();
-    let mut mixins_before: Vec<(String, usize, RawMixin)> = Vec::new();
-    let mut mixins_after: Vec<(String, usize, RawMixin)> = Vec::new();
-    let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
+    write_rows_with(root, store, files, &refresh_mvp, &mut || {})
+}
 
-    let mut extracted: Vec<Extracted> = Vec::with_capacity(files.len());
-    for &(rel, removed) in files {
-        let abs = root.join(rel);
+/// What one refresh of pixel-mvp's index gives [`write_rows`]: the index,
+/// and what the refresh changed in it.
+type Refreshed = Result<(mvp_store::Store, mvp_adapter::Changes), BoxErr>;
 
-        // Demote incoming call+reference edges (from OTHER files) into
-        // unresolved rows so they can re-link after the rebuild instead of
-        // being silently dropped. The receiver and kind are preserved so
-        // re-resolution produces the correct edge type (Calls vs References).
-        if let Some(old) = store.file_by_path(rel)? {
-            let old_syms = store.symbols_in_file(old.id)?;
-            before.extend(stored_definitions(store, old.id, rel)?);
-            mixins_before.extend(
-                store
-                    .ruby_mixins_in_file(old.id)?
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, mixin)| (rel.to_string(), i, mixin)),
-            );
-            affected.files.insert(old.id);
-            for import in store.imports_to_file(old.id)? {
-                affected.files.insert(import.file_id);
-            }
-            let mut demoted: Vec<(i64, String, i64, u32, Option<String>, String)> = Vec::new();
-            for sym in &old_syms {
-                for kind in [EdgeKind::Calls, EdgeKind::References] {
-                    for edge in store.edges_to(sym.id, Some(kind))? {
-                        let src_file: Option<i64> = store
-                            .conn()
-                            .query_row(
-                                "SELECT file_id FROM symbols WHERE id = ?1",
-                                rusqlite::params![edge.src_id],
-                                |r| r.get(0),
-                            )
-                            .ok();
-                        if let Some(src_file) = src_file
-                            && src_file != old.id
-                        {
-                            // Replay the name the site wrote: under an
-                            // alias (`leased()` → `push`) the target's name
-                            // is not in scope at the caller.
-                            demoted.push((
-                                src_file,
-                                edge.callee.clone().unwrap_or_else(|| sym.name.clone()),
-                                edge.src_id,
-                                edge.site_line,
-                                edge.receiver.clone(),
-                                kind.as_str().to_string(),
-                            ));
-                        }
-                    }
-                }
-            }
-            for (src_file, name, src_id, site_line, receiver, kind) in demoted {
-                affected.replayed.insert(name.clone());
-                store.insert_unresolved_call(
-                    src_file,
-                    &name,
-                    Some(src_id),
-                    site_line,
-                    receiver.as_deref(),
-                    &kind,
-                )?;
-            }
-        }
-
-        if removed {
-            store.remove_file(rel)?;
-            continue;
-        }
-
-        let Some(content) = read_source_file(&abs) else {
-            store.remove_file(rel)?;
-            continue;
-        };
-
-        let Some(fx) = extract_file(rel, &content) else {
-            store.remove_file(rel)?;
-            // The walks hash it as they hash the build's inputs (binaries
-            // excluded), so its hash is what the freshness checks compare.
-            if is_graph_candidate(rel) && !is_binary(&content) {
-                store.record_walked_file(rel, &content_oid(&content))?;
-            }
-            continue;
-        };
-
-        mixins_after.extend(
-            fx.mixins
-                .iter()
-                .enumerate()
-                .map(|(i, mixin)| (rel.to_string(), i, mixin.clone())),
-        );
-        after.extend(fx.symbols.iter().map(|s| Definition {
-            path: rel.to_string(),
-            name: s.name.clone(),
-            qualified: s.qualified.clone(),
-            kind: s.kind.as_str().to_string(),
-            trait_impl: s.trait_impl,
-        }));
-        extracted.push(Extracted {
-            rel: rel.to_string(),
-            blob_oid: content_oid(&content),
-            content,
-            fx,
-        });
+/// Refreshes pixel-mvp's index of `root` in its sidecar state, as a crate
+/// root when the graph's Rust rows are pixel-mvp's (`walled`).
+fn refresh_mvp(root: &Path, walled: bool) -> Refreshed {
+    let state = pixel_git::sidecar::dir(root);
+    if walled {
+        mvp_adapter::refresh_crate_changes(root, &state)
+    } else {
+        mvp_adapter::refresh_changes(root, &state)
     }
+}
+
+/// [`write_rows`] with two seams for tests: `refresh` stands for
+/// [`refresh_mvp`], and `joining` runs on the update's thread right before
+/// it waits for that refresh. Production passes [`refresh_mvp`] and a no-op.
+fn write_rows_with(
+    root: &Path,
+    store: &mut GraphStore,
+    files: &[(&str, bool)],
+    refresh: &(dyn Fn(&Path, bool) -> Refreshed + Sync),
+    joining: &mut dyn FnMut(),
+) -> Result<(), BoxErr> {
+    let walled = mvp_adapter::rust_is_walled(store)?;
+    let hybrid = ruby_switch::is_hybrid(store)?;
+    std::thread::scope(|scope| {
+        let mut pending = (walled || hybrid).then(|| scope.spawn(move || refresh(root, walled)));
+        let mut refreshed = || {
+            joining();
+            joined(pending.take())
+        };
+        write_rows_in(root, store, files, walled, hybrid, &mut refreshed)
+    })
+}
+
+/// The refresh `handle` ran, or the panic it ended in, raised again here.
+fn joined(handle: Option<std::thread::ScopedJoinHandle<'_, Refreshed>>) -> Refreshed {
+    let handle = handle.ok_or("pixel-mvp's index was not refreshed for this update")?;
+    handle
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// The passes of [`write_rows`]; `refreshed` waits for the refresh of
+/// pixel-mvp's index, which the merges read when the graph's Rust rows are
+/// pixel-mvp's (`walled`) or its Ruby rows the merge (`hybrid`).
+fn write_rows_in(
+    root: &Path,
+    store: &mut GraphStore,
+    files: &[(&str, bool)],
+    walled: bool,
+    hybrid: bool,
+    refreshed: &mut dyn FnMut() -> Refreshed,
+) -> Result<(), BoxErr> {
+    // The names the batch's files defined before it: whether one stopped or
+    // started being defined anywhere decides how much of pixel-mvp's Rust
+    // rows is written again (`mvp_adapter::merge_again`).
+    let mut names_before = if walled {
+        mvp_adapter::names_in(store, files.iter().map(|&(rel, _)| rel))?
+    } else {
+        HashMap::default()
+    };
+    // A merged graph goes back to this resolver's own Ruby rows first, so
+    // every pass below decides as it would without the merge; the merge is
+    // planned again at the end, on what they wrote.
+    let (undo, prints) = if hybrid {
+        let undo = ruby_switch::restore(store)?;
+        // What this resolver's rows hold before the passes below: the
+        // merge is planned again for the files whose rows they move, not
+        // for every file (`ruby_switch::merge_again`).
+        (undo, ruby_switch::prints(store)?)
+    } else {
+        (ruby_switch::Undo::default(), ruby_switch::Prints::default())
+    };
+    // What the batch changed, before and after, for the re-resolution below.
+    let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
+    let mut st = Staging::default();
+    for &(rel, removed) in files {
+        stage_file(root, store, rel, removed, &mut st)?;
+    }
+    // A name the batch defines that some file called while no symbol carried
+    // it: that file recorded the name once (`unresolved_names`), not its
+    // sites, so it is read again here, as if it were part of the batch, and
+    // its calls are decided as a full build decides them.
+    let staged: HashSet<&str> = files.iter().map(|&(rel, _)| rel).collect();
+    let mut callers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for name in st
+        .after
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect::<HashSet<_>>()
+    {
+        callers.extend(
+            store
+                .files_calling_unnamed(name)?
+                .into_iter()
+                .filter(|path| !staged.contains(path.as_str())),
+        );
+    }
+    if walled {
+        for (name, n) in mvp_adapter::names_in(store, callers.iter().map(String::as_str))? {
+            *names_before.entry(name).or_default() += n;
+        }
+    }
+    for rel in &callers {
+        stage_file(root, store, rel, false, &mut st)?;
+    }
+    let mut files: Vec<(&str, bool)> = files.to_vec();
+    files.extend(callers.iter().map(|rel| (rel.as_str(), false)));
+    let files = files.as_slice();
+    let Staging {
+        mut affected,
+        before,
+        after,
+        mixins_before,
+        mixins_after,
+        extracted,
+    } = st;
 
     // The file list as it stands once the batch is stored, in the order the
     // store lists it: kept files, then the batch's new ones as they are
@@ -1416,7 +1657,10 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     );
     let added_any = extracted.iter().any(|e| !known_before.contains(&e.rel));
     let projects = ruby_projects::Projects::load(root, &all_paths);
-    let stored = store_batch(store, extracted, &all_paths, &projects)?;
+    let mut stored = store_batch(store, extracted, &all_paths, &projects)?;
+    if walled {
+        without_rust_sites(store, &mut stored)?;
+    }
     affected.record_changed_definitions(&before, &after);
     affected.record_changed_mixins(store, &mixins_before, &mixins_after)?;
     // A file new to the graph gets its id here; its importers are any file
@@ -1451,6 +1695,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
                 .and_then(|p| path_to_id.get(&p).copied())
             {
                 affected.files.insert(importer_id);
+                affected.rows_moved.insert(importer_id);
                 store.conn().exec_cached(
                     "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
                     rusqlite::params![import_id, target],
@@ -1469,17 +1714,47 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         re_resolve_ruby_imports(store, &all_paths, &projects, &mut affected)?;
     }
 
+    // Every symbol and import of the batch is stored by now, and the passes
+    // below write edges and unresolved rows only: one index serves all three
+    // (it loads every symbol and resolved import of the graph).
+    let idx = ResolveIndex::build(store)?;
     if !stored.calls.is_empty() {
-        resolve_calls(store, &stored.calls)?;
+        resolve_calls_in(store, &idx, &stored.calls)?;
     }
     if !stored.references.is_empty() {
-        resolve_references(store, &stored.references)?;
+        resolve_references_in(store, &idx, &stored.references)?;
     }
 
     // Any changed definition can invalidate a previously unique target.
     reconsider_resolved_calls(store, &mut affected)?;
     // Retry what the batch can have changed against the new candidate set.
-    resolve_affected(store, &affected)?;
+    resolve_affected_in(store, &idx, &affected)?;
+    // A call whose name the batch left defined nowhere is recorded once per
+    // file, as the full build records it.
+    shelve_unnamed_calls(store, &idx, &affected.names)?;
+    let moved = if hybrid {
+        ruby_switch::moved(store, &prints)?
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    if walled || hybrid {
+        // One refresh of pixel-mvp's index serves both.
+        let (index, changes) = refreshed()?;
+        let batch: Vec<&str> = files.iter().map(|&(rel, _)| rel).collect();
+        if walled {
+            let paths: HashMap<i64, String> =
+                store.files()?.into_iter().map(|f| (f.id, f.path)).collect();
+            let moved: std::collections::BTreeSet<String> = affected
+                .rows_moved
+                .iter()
+                .filter_map(|id| paths.get(id).cloned())
+                .collect();
+            mvp_adapter::merge_again(store, &index, &changes, &batch, &moved, &names_before)?;
+        }
+        if hybrid {
+            ruby_switch::merge_again(store, &index, &changes, &undo, &moved, &batch)?;
+        }
+    }
 
     // Persisted analyses (`processes`, `clusters`) are keyed by symbol id,
     // and `replace_file` hands re-extracted symbols NEW ids: the cached
@@ -1490,6 +1765,133 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         "DELETE FROM process_steps; DELETE FROM processes;
          DELETE FROM cluster_members; DELETE FROM clusters;",
     )?;
+    Ok(())
+}
+
+/// What staging the files of one update gathers ([`stage_file`]): the
+/// definitions and Ruby ancestor declarations before and after, what the
+/// demotions moved, and the extracted sources to store.
+#[derive(Default)]
+struct Staging {
+    affected: Affected,
+    before: Vec<Definition>,
+    after: Vec<Definition>,
+    mixins_before: Vec<(String, usize, RawMixin)>,
+    mixins_after: Vec<(String, usize, RawMixin)>,
+    extracted: Vec<Extracted>,
+}
+
+/// Stages one file of an update (`removed`, or read from `root`): demotes
+/// the edges other files had into it, records what it defined before,
+/// removes it when it is gone, unreadable or no source, and otherwise
+/// extracts it into `st`.
+fn stage_file(
+    root: &Path,
+    store: &mut GraphStore,
+    rel: &str,
+    removed: bool,
+    st: &mut Staging,
+) -> Result<(), BoxErr> {
+    let abs = root.join(rel);
+
+    // Demote incoming call+reference edges (from OTHER files) into
+    // unresolved rows so they can re-link after the rebuild instead of
+    // being silently dropped. The receiver and kind are preserved so
+    // re-resolution produces the correct edge type (Calls vs References).
+    if let Some(old) = store.file_by_path(rel)? {
+        st.before.extend(stored_definitions(store, old.id, rel)?);
+        st.mixins_before.extend(
+            store
+                .ruby_mixins_in_file(old.id)?
+                .into_iter()
+                .enumerate()
+                .map(|(i, mixin)| (rel.to_string(), i, mixin)),
+        );
+        st.affected.files.insert(old.id);
+        for import in store.imports_to_file(old.id)? {
+            st.affected.files.insert(import.file_id);
+        }
+        // One query for the file: each incoming edge with its site's
+        // file, which the edge row does not carry.
+        let demoted: Vec<(i64, String, i64, u32, Option<String>, String)> = {
+            let mut stmt = store.conn().prepare_cached(
+                "SELECT src.file_id, COALESCE(e.callee, dst.name), e.src_id, e.site_line,
+                        e.receiver, e.kind
+                   FROM symbols dst
+                   JOIN edges e ON e.dst_id = dst.id
+                   JOIN symbols src ON src.id = e.src_id
+                  WHERE dst.file_id = ?1 AND e.kind IN ('calls', 'references')
+                    AND src.file_id != ?1
+                  ORDER BY dst.id, e.kind, e.id",
+            )?;
+            // Replay the name the site wrote: under an alias
+            // (`leased()` → `push`) the target's name is not in scope
+            // at the caller.
+            let rows = stmt.query_map(rusqlite::params![old.id], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (src_file, name, src_id, site_line, receiver, kind) in demoted {
+            st.affected.replayed.insert(name.clone());
+            st.affected.rows_moved.insert(src_file);
+            store.insert_unresolved_call(
+                src_file,
+                &name,
+                Some(src_id),
+                site_line,
+                receiver.as_deref(),
+                &kind,
+            )?;
+        }
+    }
+
+    if removed {
+        store.remove_file(rel)?;
+        return Ok(());
+    }
+
+    let Some(content) = read_source_file(&abs) else {
+        store.remove_file(rel)?;
+        return Ok(());
+    };
+
+    let Some(fx) = extract_file(rel, &content) else {
+        store.remove_file(rel)?;
+        // The walks hash it as they hash the build's inputs (binaries
+        // excluded), so its hash is what the freshness checks compare.
+        if is_graph_candidate(rel) && !is_binary(&content) {
+            store.record_walked_file(rel, &content_oid(&content))?;
+        }
+        return Ok(());
+    };
+
+    st.mixins_after.extend(
+        fx.mixins
+            .iter()
+            .enumerate()
+            .map(|(i, mixin)| (rel.to_string(), i, mixin.clone())),
+    );
+    st.after.extend(fx.symbols.iter().map(|s| Definition {
+        path: rel.to_string(),
+        name: s.name.clone(),
+        qualified: s.qualified.clone(),
+        kind: s.kind.as_str().to_string(),
+        trait_impl: s.trait_impl,
+    }));
+    st.extracted.push(Extracted {
+        rel: rel.to_string(),
+        blob_oid: content_oid(&content),
+        content,
+        fx,
+    });
     Ok(())
 }
 
@@ -1520,6 +1922,7 @@ fn re_resolve_ruby_imports(
             .and_then(|p| path_to_id.get(&p).copied());
         if after != before {
             affected.files.insert(importer_id);
+            affected.rows_moved.insert(importer_id);
             store.conn().exec_cached(
                 "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
                 rusqlite::params![import_id, after],
@@ -1537,8 +1940,8 @@ pub fn update_file(root: &Path, db_path: &Path, rel: &str) -> Result<Publication
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolve::{Decision, ResolveIndex};
-    use crate::store::Tier;
+    use crate::resolve::Decision;
+    use crate::store::{EdgeKind, Tier};
 
     /// `graph_file_cap` is what an evaluation quotes when it says the build
     /// stopped at the cap, so the number it reports has to be the cap the
@@ -1588,7 +1991,10 @@ mod tests {
         assert_eq!(before.1, ["kept"]);
 
         std::fs::write(root.join("b.rs"), "fn added() -> u32 { 2 }\n").unwrap();
-        let err = build_graph_with(&root, &db, |_| "moved".into()).unwrap_err();
+        let err = build_graph_with(&root, &db, RustSource::V1, RubySource::V1, |_| {
+            "moved".into()
+        })
+        .unwrap_err();
         assert!(err.to_string().contains("source changed"), "{err}");
         assert_eq!(
             snapshot(),
@@ -1783,6 +2189,133 @@ mod tests {
         let (f, s, e, _u) = store.counts().unwrap();
         assert_eq!((f, s, e), (stats.files, stats.symbols, stats.edges));
         drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The statements [`record_statement`] saw, on the one connection a test
+    /// traces.
+    static STATEMENTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    fn record_statement(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            STATEMENTS.lock().unwrap().push(sql.to_string());
+        }
+    }
+
+    #[test]
+    fn an_update_reads_the_symbol_table_once_and_its_incoming_edges_in_one_query() {
+        // `a.ts` defines 20 functions, each called from `b.ts`. Saving it
+        // used to build the resolve index three times (calls, references,
+        // retry), each loading every symbol, and to look up each incoming
+        // edge's site file with its own query (#1115).
+        let root = tmpdir("statements");
+        let defs: String = (0..20)
+            .map(|i| format!("export function f{i}() {{ return {i} }}\n"))
+            .collect();
+        let names: Vec<String> = (0..20).map(|i| format!("f{i}")).collect();
+        std::fs::write(root.join("a.ts"), &defs).unwrap();
+        std::fs::write(
+            root.join("b.ts"),
+            format!(
+                "import {{ {} }} from \"./a\";\nexport function main() {{ return {} }}\n",
+                names.join(", "),
+                names
+                    .iter()
+                    .map(|n| format!("{n}()"))
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            ),
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        std::fs::write(root.join("a.ts"), format!("{defs}// saved\n")).unwrap();
+
+        let mut store = GraphStore::open(&db).unwrap();
+        store.conn().trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(record_statement),
+        );
+        store.begin_write().unwrap();
+        write_rows(&root, &mut store, &[("a.ts", false)]).unwrap();
+        store.commit_write().unwrap();
+        let statements = std::mem::take(&mut *STATEMENTS.lock().unwrap());
+        let count = |needle: &str| statements.iter().filter(|s| s.contains(needle)).count();
+        assert_eq!(
+            count("SELECT name, file_id, id, kind, start_line, trait_impl, qualified FROM symbols"),
+            1
+        );
+        assert_eq!(count("SELECT file_id FROM symbols WHERE id = ?1"), 0);
+        assert_eq!(count("SELECT src_id, dst_id, kind, tier"), 0);
+        // The 20 calls came back: the edges are the ones the build wrote.
+        let callers: usize = store
+            .symbols_by_name("main", None, 10)
+            .unwrap()
+            .iter()
+            .map(|main| {
+                store
+                    .edges_from(main.id, Some(EdgeKind::Calls))
+                    .unwrap()
+                    .len()
+            })
+            .sum();
+        assert_eq!(callers, 20);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn pragma(db: &Path, name: &str) -> i64 {
+        GraphStore::open(db)
+            .unwrap()
+            .conn()
+            .query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_rebuild_after_most_files_went_hands_their_pages_back() {
+        // Every graph update deletes and rewrites rows; their pages stayed on
+        // the free list forever, so `graph.v2.db` only grew (#1089).
+        let root = tmpdir("vacuum");
+        for i in 0..40 {
+            let body: String = (0..30)
+                .map(|j| {
+                    format!(
+                        "export function f{i}_{j}() {{ return f{i}_{}() }}\n",
+                        (j + 1) % 30
+                    )
+                })
+                .collect();
+            std::fs::write(root.join(format!("m{i}.ts")), body).unwrap();
+        }
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        assert_eq!(pragma(&db, "auto_vacuum"), 2, "INCREMENTAL");
+        let before = pragma(&db, "page_count");
+        for i in 5..40 {
+            std::fs::remove_file(root.join(format!("m{i}.ts"))).unwrap();
+        }
+        build_graph(&root, &db).unwrap();
+        assert_eq!(pragma(&db, "freelist_count"), 0, "freed pages handed back");
+        let after = pragma(&db, "page_count");
+        assert!(after < before, "{after} pages after, {before} before");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_graph_db_made_before_auto_vacuum_is_converted_by_its_next_full_build() {
+        let root = tmpdir("vacuum-legacy");
+        std::fs::write(root.join("a.ts"), "export function f() { return 1 }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("CREATE TABLE legacy (x INTEGER); DROP TABLE legacy;")
+                .unwrap();
+        }
+        assert_eq!(pragma(&db, "auto_vacuum"), 0, "a table already existed");
+        build_graph(&root, &db).unwrap();
+        assert_eq!(pragma(&db, "auto_vacuum"), 2, "INCREMENTAL");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2115,27 +2648,75 @@ mod tests {
         let new_signature = freshness_signature(&root);
         assert_ne!(old_signature, new_signature);
         let mut probed = false;
-        let published = update_files_probed(&root, &db, &[("a.ts", false)], &mut || {
-            probed = true;
-            // In flight: rows are written on the writer's connection and not
-            // committed, so the reader still sees the previous generation.
-            assert_eq!(
-                stored_hash(&reader, "a.ts"),
-                hash_of(v1),
-                "rows became visible before the commit"
-            );
-            assert_eq!(
-                stored_signature(&reader),
-                old_signature,
-                "signature became visible before the commit"
-            );
-        })
+        let published = update_files_probed(
+            &root,
+            &db,
+            &[("a.ts", false)],
+            &mut TreeHashCache::default(),
+            &mut || {
+                probed = true;
+                // In flight: rows are written on the writer's connection and not
+                // committed, so the reader still sees the previous generation.
+                assert_eq!(
+                    stored_hash(&reader, "a.ts"),
+                    hash_of(v1),
+                    "rows became visible before the commit"
+                );
+                assert_eq!(
+                    stored_signature(&reader),
+                    old_signature,
+                    "signature became visible before the commit"
+                );
+            },
+            &mut || {},
+        )
         .unwrap();
         assert!(probed, "the seam must run inside the transaction");
         assert_eq!(published, Publication::Signed);
         assert_eq!(stored_hash(&reader, "a.ts"), hash_of(v2));
         assert_eq!(stored_signature(&reader), new_signature);
         assert!(is_fresh(&root, &db));
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The gate a publishing caller takes its readers' lock in runs once, in
+    /// the open transaction after the rows are written, and before any other
+    /// connection can see them: a reader of the daemon that is let through
+    /// until then answers from the previous rows, and one that waits behind
+    /// the gate sees the new rows as soon as it returns.
+    #[test]
+    fn update_files_gated_should_run_its_gate_once_right_before_the_commit() {
+        let root = tmpdir("gated-publish");
+        let v1 = b"export function alpha() { return 1 }\n";
+        let v2 = b"export function alpha() { return 2 }\n";
+        std::fs::write(root.join("a.ts"), v1).unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let reader = GraphStore::open(&db).unwrap();
+        std::fs::write(root.join("a.ts"), v2).unwrap();
+        let rows_written = std::cell::Cell::new(false);
+        let mut gated = 0;
+        let published = update_files_probed(
+            &root,
+            &db,
+            &[("a.ts", false)],
+            &mut TreeHashCache::default(),
+            &mut || rows_written.set(true),
+            &mut || {
+                gated += 1;
+                assert!(rows_written.get(), "the gate ran before the rows");
+                assert_eq!(
+                    stored_hash(&reader, "a.ts"),
+                    hash_of(v1),
+                    "the rows were committed before the gate"
+                );
+            },
+        )
+        .unwrap();
+        assert_eq!(gated, 1);
+        assert_eq!(published, Publication::Signed);
+        assert_eq!(stored_hash(&reader, "a.ts"), hash_of(v2));
         drop(reader);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2158,10 +2739,17 @@ mod tests {
         let old_signature = stored_signature(&GraphStore::open(&db).unwrap());
 
         std::fs::write(root.join("a.ts"), v2).unwrap();
-        let published = update_files_probed(&root, &db, &[("a.ts", false)], &mut || {
-            // The "concurrent" edit: the file moves on after extraction.
-            std::fs::write(root.join("a.ts"), v3).unwrap();
-        })
+        let published = update_files_probed(
+            &root,
+            &db,
+            &[("a.ts", false)],
+            &mut TreeHashCache::default(),
+            &mut || {
+                // The "concurrent" edit: the file moves on after extraction.
+                std::fs::write(root.join("a.ts"), v3).unwrap();
+            },
+            &mut || {},
+        )
         .unwrap();
         assert_eq!(published, Publication::Withheld);
         let store = GraphStore::open(&db).unwrap();
@@ -2219,6 +2807,32 @@ mod tests {
         let second = update_files(&root, &db, &[("b.ts", false)]).unwrap();
         assert_eq!(second, Publication::Signed);
         assert!(is_fresh(&root, &db));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A one-file watcher batch re-reads only that file: the walk the
+    /// signature needs takes every other file's hash from the memo the
+    /// previous walk left, and the counters are the proof.
+    #[test]
+    fn cached_update_rehashes_only_the_batched_file() {
+        let root = tmpdir("watcher-cached");
+        for (name, body) in [
+            ("a.ts", "export function alpha() { return 1 }\n"),
+            ("b.ts", "export function beta() { return 1 }\n"),
+            ("c.ts", "export function gamma() { return 1 }\n"),
+        ] {
+            std::fs::write(root.join(name), body).unwrap();
+        }
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let mut cache = TreeHashCache::default();
+        tree_delta_cached(&root, &db, &mut cache).unwrap();
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
+        let published = update_files_cached(&root, &db, &[("a.ts", false)], &mut cache).unwrap();
+        assert_eq!(published, Publication::Signed);
+        assert_eq!(cache.rehashed, 1, "only the edited file is read and hashed");
+        assert_eq!(cache.stat_hits, 2, "the untouched files come from the memo");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2313,7 +2927,7 @@ mod tests {
             "a row for a file the tree no longer has"
         );
         assert!(
-            rows_match_tree(&HashMap::new(), &[], &[]),
+            rows_match_tree(&HashMap::default(), &[], &[]),
             "an empty store matches an empty tree"
         );
     }
@@ -2408,10 +3022,17 @@ mod tests {
         let signature_a = stored_signature(&GraphStore::open(&db).unwrap());
 
         std::fs::write(root.join("a.ts"), b).unwrap();
-        let published = update_files_probed(&root, &db, &[("a.ts", false)], &mut || {
-            // Back to A before the walk that would sign.
-            std::fs::write(root.join("a.ts"), a).unwrap();
-        })
+        let published = update_files_probed(
+            &root,
+            &db,
+            &[("a.ts", false)],
+            &mut TreeHashCache::default(),
+            &mut || {
+                // Back to A before the walk that would sign.
+                std::fs::write(root.join("a.ts"), a).unwrap();
+            },
+            &mut || {},
+        )
         .unwrap();
         assert_eq!(published, Publication::Withheld);
         let store = GraphStore::open(&db).unwrap();
@@ -3883,7 +4504,8 @@ mod tests {
             (
                 "symbols",
                 "SELECT s.uid, f.path, s.name, s.qualified, s.kind, s.start_line, s.end_line, \
-                 s.sig, s.trait_impl, s.module_decl FROM symbols s JOIN files f ON f.id = s.file_id",
+                 s.sig, s.trait_impl, s.module_decl, s.unnamed_calls FROM symbols s \
+                 JOIN files f ON f.id = s.file_id",
             ),
             (
                 "symbol_crux",
@@ -3909,6 +4531,10 @@ mod tests {
                 "unresolved_calls",
                 "SELECT f.path, u.name, s.uid, u.site_line, u.receiver, u.kind FROM unresolved_calls u \
                  LEFT JOIN files f ON f.id = u.file_id LEFT JOIN symbols s ON s.id = u.enclosing_symbol_id",
+            ),
+            (
+                "unresolved_names",
+                "SELECT f.path, u.name FROM unresolved_names u LEFT JOIN files f ON f.id = u.file_id",
             ),
             (
                 "concepts",
@@ -3950,6 +4576,86 @@ mod tests {
                 (table, rows)
             })
             .collect()
+    }
+
+    #[test]
+    fn a_call_to_a_name_no_symbol_carries_is_recorded_once_and_read_again_when_defined() {
+        // `a.py` calls `later` from `main` and at its top level, and nothing
+        // defines it: one `unresolved_names` row stands for both sites,
+        // instead of one `unresolved_calls` row each (#1163). A save of
+        // `b.py` that defines `later` reads `a.py` again, which links `main`
+        // and gives the top-level site its row; a save that removes it puts
+        // the name back. After each save the graph is a full build's.
+        let dir = tmpdir("unnamed");
+        let a = "def main():\n    return later() + later()\n\n\nlater()\n";
+        let mut tree = std::collections::BTreeMap::from([
+            ("a.py", a),
+            ("b.py", "def other():\n    return 1\n"),
+        ]);
+        let files: Vec<(&str, &str)> = tree.iter().map(|(k, v)| (*k, *v)).collect();
+        write_tree(&dir, &files);
+        let db = dir.join(".pixel").join("graph.db");
+        build_graph(&dir, &db).unwrap();
+        let rows = |db: &Path, table: &str| -> Vec<String> {
+            graph_rows(db)
+                .into_iter()
+                .find(|(t, _)| *t == table)
+                .unwrap()
+                .1
+        };
+        assert_eq!(rows(&db, "unresolved_calls"), Vec::<String>::new());
+        assert_eq!(
+            rows(&db, "unresolved_names"),
+            vec!["Text(\"a.py\") | Text(\"later\")"]
+        );
+        // `uses main callees` still counts the two sites it may miss.
+        let outgoing = |db: &Path| {
+            let store = GraphStore::open(db).unwrap();
+            let main = store.symbols_by_name("main", None, 10).unwrap()[0].id;
+            store.unresolved_outgoing(main).unwrap()
+        };
+        assert_eq!(outgoing(&db), 2);
+        let steps: [(&str, &str); 3] = [
+            // A call to another unknown name grows no `unresolved_calls`.
+            ("ghost added", "def other():\n    return ghost()\n"),
+            (
+                "later defined",
+                "def other():\n    return ghost()\n\n\ndef later():\n    return 2\n",
+            ),
+            ("later removed", "def other():\n    return ghost()\n"),
+        ];
+        for (label, body) in steps {
+            write_tree(&dir, &[("b.py", body)]);
+            tree.insert("b.py", body);
+            update_file(&dir, &db, "b.py").unwrap();
+            let full = tmpdir("unnamed-full");
+            let files: Vec<(&str, &str)> = tree.iter().map(|(k, v)| (*k, *v)).collect();
+            write_tree(&full, &files);
+            let full_db = full.join(".pixel").join("graph.db");
+            build_graph(&full, &full_db).unwrap();
+            assert_same_graph(label, &graph_rows(&db), &graph_rows(&full_db));
+            let _ = std::fs::remove_dir_all(full);
+            let calls = rows(&db, "unresolved_calls");
+            let edges = rows(&db, "edges");
+            match label {
+                "later defined" => {
+                    assert_eq!(
+                        calls,
+                        vec![
+                            "Text(\"a.py\") | Text(\"later\") | Null | Integer(5) | Null | Text(\"calls\")"
+                        ]
+                    );
+                    assert_eq!(edges.len(), 2, "{edges:?}");
+                    assert_eq!(outgoing(&db), 0);
+                }
+                _ => {
+                    assert_eq!(calls, Vec::<String>::new(), "{label}");
+                    assert_eq!(edges, Vec::<String>::new(), "{label}");
+                    assert_eq!(outgoing(&db), 2, "{label}");
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn assert_same_graph(label: &str, got: &[(&str, Vec<String>)], want: &[(&str, Vec<String>)]) {
@@ -4246,5 +4952,77 @@ mod tests {
         update_files(&dir, &db, &batch).unwrap();
         check("revert", &RETRY_TREE.iter().copied().collect());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_hybrid_update_should_refresh_pixel_mvp_while_its_passes_run_not_after_them() {
+        use mvp_model::Graph;
+
+        // The refresh reads the tree and pixel-mvp's own index only, so it
+        // need not wait for this resolver's passes: run after them, it held
+        // one inserted method on antiwork/gumroad 4.3 s past their 3.2 s
+        // (#1204). By the time the passes are done, it has started.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        crate::testutil::init_repo(
+            &root,
+            &[
+                (
+                    "app/models/card.rb",
+                    "class Card\n  def total\n    compute\n  end\n\n  def compute\n    1\n  end\nend\n",
+                ),
+                (
+                    "app/models/deck.rb",
+                    "class Deck\n  def size\n    Card.new.total\n  end\nend\n",
+                ),
+            ],
+        );
+        let db = root.join(".pixel").join("graph.db");
+        build_graph_sources(&root, &db, RustSource::Mvp, RubySource::Hybrid).unwrap();
+        std::fs::write(
+            root.join("app/models/card.rb"),
+            "class Card\n  def total\n    compute\n  end\n\n  def fresh\n    total\n  end\n\n  def compute\n    1\n  end\nend\n",
+        )
+        .unwrap();
+
+        let mut store = GraphStore::open(&db).unwrap();
+        assert!(
+            ruby_switch::is_hybrid(&store).unwrap(),
+            "the graph is the merge"
+        );
+        let (started, start) = std::sync::mpsc::channel();
+        let refresh = move |root: &Path, walled: bool| {
+            started.send(()).unwrap();
+            refresh_mvp(root, walled)
+        };
+        let mut during_the_passes = None;
+        store.begin_write().unwrap();
+        write_rows_with(
+            &root,
+            &mut store,
+            &[("app/models/card.rb", false)],
+            &refresh,
+            &mut || {
+                during_the_passes = Some(start.recv_timeout(Duration::from_secs(5)).is_ok());
+            },
+        )
+        .unwrap();
+        store.commit_write().unwrap();
+        assert_eq!(during_the_passes, Some(true), "the refresh had started");
+        // ...and the update still merged against the refresh it waited for.
+        let mvp = mvp_store::Store::open(&pixel_git::sidecar::dir(&root)).unwrap();
+        assert_eq!(
+            store.meta_get(ruby_switch::RUBY_GENERATION_KEY).unwrap(),
+            Some(mvp.provenance().unwrap().generation),
+        );
+        let fresh: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM symbols WHERE name = 'fresh'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh, 1);
     }
 }

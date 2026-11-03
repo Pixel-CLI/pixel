@@ -10,16 +10,16 @@ name: Cancel stale runs
 # answer is moot. `concurrency` in the heavy workflows already covers the
 # same-branch repush; this covers the merge/close that fires no new job to
 # supersede the old ones. Manual purge from a checkout:
-#   bash scripts/cancel-stale-runs.sh --all --older-than 60 --apply
+#   bash scripts/ci/cancel-stale-runs.sh --all --older-than 60 --apply
 on:
   pull_request:
     types: [closed]
   # The close event is a point-in-time snapshot: a post-close push to a
-  # deleted branch (or a superseded queue entry) fires no new event. A
-  # periodic sweep catches those, so the runner queue never grows on runs
-  # whose PR is already closed.
+  # deleted branch (or a superseded queue entry) fires no new event. An
+  # hourly sweep catches those, so the runner queue never grows on runs
+  # whose PR is already closed. Minute 17 avoids the busiest hour boundary.
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '17 * * * *'
 
 # Read-only at the top: the write scope belongs to the one job that cancels
 # runs, so a job added later does not inherit it (OpenSSF Scorecard
@@ -30,6 +30,7 @@ permissions:
 jobs:
   cancel:
     runs-on: ubuntu-26.04
+    timeout-minutes: 5
     permissions:
       # actions/checkout of main.
       contents: read
@@ -41,12 +42,12 @@ jobs:
           ref: main
       - name: Cancel this PR's queued and in-progress runs
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        run: bash scripts/cancel-stale-runs.sh --branch "$PR_HEAD" --apply
+        run: bash scripts/ci/cancel-stale-runs.sh --branch "$PR_HEAD" --apply
         env:
           GH_TOKEN: ${{ github.token }}
           PR_HEAD: ${{ github.event.pull_request.head.ref }}
       - name: Cancel runs whose PR is already closed
         if: github.event_name == 'schedule'
-        run: bash scripts/cancel-stale-runs.sh --closed --apply
+        run: bash scripts/ci/cancel-stale-runs.sh --closed --apply
         env:
           GH_TOKEN: ${{ github.token }}

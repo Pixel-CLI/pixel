@@ -13,29 +13,27 @@ on:
     # under docs/, the licence files, a Markdown file outside the list below
     # -- cannot change a test result, so it skips the two-and-a-half-minute
     # run; the Hugo site under website/ has its own workflow, pages.yml
-    # (which stays in: scripts/verify-action-pins.py reads every workflow).
+    # (which stays in: scripts/ci/verify-action-pins.py reads every workflow).
     # Later patterns win: the negations drop the docs first, then the
-    # re-includes put back what the suite actually reads:
+    # re-includes put back what the suite actually reads or must validate:
     #   - crates/**: the bundled agent prompts, checked by the install tests;
     #   - the files crates/pixel/tests/cli/docs_drift.rs reads: it asserts
-    #     that every `pixel <command>` quoted there exists, that the README
-    #     and CHANGELOG rename tables match RENAMED_COMMANDS row for row, and
-    #     that the rule ids of the rust-guidelines skill head real guideline
-    #     sections;
-    #   - changelog.d/**: the fragments scripts/test-prepare.py validates
+    #     that every `pixel <command>` quoted there exists and that the rule
+    #     ids of the rust-guidelines skill head real guideline sections;
+    #   - .github/changelog.d/**: the fragments scripts/test-prepare.py validates
     #     against the release script's contract, in the repository itself and
     #     not only in its fixtures;
-    #   - the generated plugin surfaces, which install_tests.rs compares
-    #     against the prompts (scripts/gen-plugin-assets.sh --check),
-    #     .agents/skills/pixel/ among them;
     #   - .agents/skills/release/: prepare.sh, which scripts/test-prepare.py
-    #     and pixel-release's tests run or read;
-    #   - .agents/skills/pixel-retro/: lead_time.py and its contract test.
+    #     runs;
+    #   - .agents/skills/pixel-retro/: lead_time.py and its contract test;
+    #   - .agents/skills/ultima-arena/: ultima_arena.py and its contract test;
+    #   - .agents/skills/arena/: arena.sh and its offline protocol test.
     # Every other skill is excluded: no test reads it.
+    # docs/bench/** also runs CI so benchmark reports receive the required
+    # green-verdict status check even though they do not change Rust code.
     # Add a path here when a test starts reading one. Pushes to main stay
-    # unfiltered so every merge there keeps a complete run. No branch
-    # rule requires this check today; if one is added, the excluded paths
-    # need a twin workflow that reports success.
+    # unfiltered so every merge there keeps a complete run. Paths excluded
+    # here must not be required checks unless another workflow reports them.
     paths:
       - "**"
       - "!**.md"
@@ -50,13 +48,18 @@ on:
       # docs_drift.rs:
       - "README.md"
       - "ARCHITECTURE.md"
-      - "CONTRIBUTING.md"
+      - ".github/CONTRIBUTING.md"
       - "AGENTS.md"
       - "CHANGELOG.md"
-      - "changelog.d/**"
+      - ".github/changelog.d/**"
       - "docs/manual-setup.md"
+      - "docs/bench/**"
       - "website/content/docs.md"
       - "website/content/benchmarks.md"
+      # scripts/ci/check-claims.py: the registry and the docs it binds.
+      - "docs/bench/claims.toml"
+      - "docs/bench/vs-gitnexus.md"
+      - "website/data/read_savings.toml"
       # docs_drift.rs reads llms.txt (agent pages and answers links):
       - "website/static/llms.txt"
       - ".agents/rules/**"
@@ -65,16 +68,10 @@ on:
       - ".agents/skills/release/**"
       # test_lead_time.py, test_adherence.py:
       - ".agents/skills/pixel-retro/**"
+      - ".agents/skills/ultima-arena/**"
+      # offline-protocol-test.py:
+      - ".agents/skills/arena/**"
       - "scripts/README.md"
-      # gen-plugin-assets.sh --check:
-      - "PIXEL.md"
-      - "PIXEL-SUBAGENT.md"
-      - ".agents/skills/pixel/**"
-      - ".openclaw/**"
-      - ".clinerules/**"
-      - ".kiro/**"
-      - ".qoder/**"
-      - ".windsurf/**"
 
 # A release-prepare pull request into main (`release-x.y.z` branch whose
 # diff the `scope` job verifies) skips every job, as it skips Cross-build:
@@ -115,11 +112,12 @@ jobs:
   # to what the compile-only lanes (Clippy, MSRV, Ranking) actually compile,
   # so a docs-drift or prompt edit runs Test + Format without paying for
   # the three lanes whose result cannot change (#597); `scripts` covers the
-  # Python and Bun contract tests' inputs; `deps` covers the graph
-  # cargo-deny resolves. A push to main reports all four so every merge
-  # keeps the complete run the concurrency comment promises. Both lists err
-  # toward inclusion: a false negative skips a needed check, a false
-  # positive only costs a minute.
+  # Python and Bun contract tests' inputs; `installer` covers the Linux
+  # install smoke's script, contract, release assets and workflows; `deps`
+  # covers the graph cargo-deny resolves. A push to main reports every flag,
+  # so every merge keeps the complete run the concurrency comment promises.
+  # These matchers err toward inclusion: a false negative skips a needed
+  # check; a false positive only costs a minute.
   changes:
     outputs:
       # On a duplicate (below) every flag is forced false: an identical tree
@@ -130,6 +128,7 @@ jobs:
       cargo: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.cargo || 'false' }}
       rust-source: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.rust-source || 'false' }}
       scripts: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.scripts || 'false' }}
+      installer: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.installer || 'false' }}
       deps: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.deps || 'false' }}
       # The skip guard's finding for this tree, and the key it is stored
       # under (the `verdict` job saves it; #590).
@@ -138,11 +137,11 @@ jobs:
       day: ${{ steps.key.outputs.day }}
     runs-on: ubuntu-26.04
     steps:
-      # Full history so the merge base with the target branch is available.
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      # Pull requests need the target merge base; push runs only need HEAD.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
       # The skip-guard key: the tree of the commit this run checks out (the
       # merge commit on a pull request, the pushed commit on main). Two runs
@@ -197,7 +196,7 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
-            printf 'cargo=true\nrust-source=true\nscripts=true\ndeps=true\n' >> "$GITHUB_OUTPUT"
+            printf 'cargo=true\nrust-source=true\nscripts=true\ninstaller=true\ndeps=true\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
@@ -216,12 +215,12 @@ jobs:
           ^\.config/
           ^deny\.toml$
           ^rust-toolchain
-          ^(README|ARCHITECTURE|CONTRIBUTING|AGENTS|CHANGELOG|PIXEL|PIXEL-SUBAGENT)\.md$
+          ^(README|ARCHITECTURE|AGENTS|CHANGELOG)\.md$
+          ^\.github/CONTRIBUTING\.md$
           ^docs/manual-setup\.md$
           ^website/
-          ^\.agents/(rules|skills/(rust-guidelines|release|pixel))/
-          ^\.(openclaw|clinerules|kiro|qoder|windsurf)/
-          ^scripts/gen-plugin-assets\.sh$
+          ^\.agents/(rules|skills/(rust-guidelines|release))/
+          ^probes/
           ^\.github/workflows/ci\.yml$
           EOF
 
@@ -233,8 +232,11 @@ jobs:
           # change a clippy, cargo check or bench result, so those three
           # lanes skip it (#597). deny.toml is the deny job's input (via
           # `deps`); .config/ shapes the nextest run the Test lane owns.
+          # The model-pin script sets the bytes the Ranking lane embeds with.
           cat > rust-source.re <<'EOF'
           ^crates/.*\.rs$
+          ^scripts/ci/fetch-embedding-model\.sh$
+          ^probes/
           ^crates/.*/Cargo\.(toml|lock)$
           ^Cargo\.(toml|lock)$
           ^\.cargo/
@@ -244,19 +246,21 @@ jobs:
 
           # The contract tests' own inputs: their scripts, the fixtures and
           # shells they exercise, the workflows verify-action-pins parses,
-          # the fragments test-prepare validates, prepare.sh under the
-          # release skill, and the pi extension test-pi-impact.mjs imports.
+          # the fragments test-prepare validates, and prepare.sh under the
+          # release skill.
           cat > scripts.re <<'EOF'
           ^scripts/
+          ^probes/
           ^\.githooks/
-          ^changelog\.d/
+          ^.github/changelog\.d/
           ^\.github/workflows/
           ^\.agents/skills/release/
           ^\.agents/skills/pixel-retro/
+          ^\.agents/skills/ultima-arena/
+          ^\.agents/skills/arena/
           ^eval/
           ^\.cargo/mutants\.toml$
           (^|/)Cargo\.toml$
-          ^Cross\.toml$
           ^crates/pixel-install/assets/pi-pixel\.ts$
           EOF
 
@@ -270,11 +274,20 @@ jobs:
           ^scripts/check-advisory-ignores\.py$
           EOF
 
+          # This smoke runs the branch installer against the latest published
+          # archive; only the script, its contract and this wiring affect it.
+          cat > installer.re <<'EOF'
+          ^scripts/release/install\.sh$
+          ^scripts/test-install\.py$
+          ^\.github/workflows/ci\.yml$
+          EOF
+
           flag() { grep -Eqf "$1" changed.txt && echo true || echo false; }
           {
             echo "cargo=$(flag cargo.re)"
             echo "rust-source=$(flag rust-source.re)"
             echo "scripts=$(flag scripts.re)"
+            echo "installer=$(flag installer.re)"
             echo "deps=$(flag deps.re)"
           } >> "$GITHUB_OUTPUT"
           cat changed.txt
@@ -287,7 +300,7 @@ jobs:
   linux-install:
     name: install.sh (${{ matrix.target }})
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.scripts == 'true' && needs.changes.outputs.duplicate != 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.installer == 'true' && needs.changes.outputs.duplicate != 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -306,7 +319,7 @@ jobs:
         env:
           PIXEL_INSTALL_DIR: ${{ runner.temp }}/pixel
           PIXEL_NO_UPDATE_CHECK: "1"
-        run: sh scripts/install.sh
+        run: sh scripts/release/install.sh
 
       - name: Later steps see this target
         env:
@@ -351,12 +364,12 @@ jobs:
       # or the signing identity. Contract in scripts/test-verify-action-pins.py below.
       - name: Action pins (every uses on a full commit SHA)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/verify-action-pins.py
+        run: python3 scripts/ci/verify-action-pins.py
 
       # Every tracked source file carries its SPDX copyright and license
       # lines (OpenSSF gold); a tenth of a second, so it runs on every diff.
       - name: SPDX headers (copyright and license in every source file)
-        run: python3 scripts/check-spdx.py
+        run: python3 scripts/ci/check-spdx.py
 
       - name: Install Rust toolchain
         if: ${{ needs.changes.outputs.cargo == 'true' }}
@@ -369,7 +382,7 @@ jobs:
 
       - name: Cache Rust build
         if: ${{ needs.changes.outputs.cargo == 'true' }}
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # One key for every job that builds the debug profile on Linux
           # (this one and mutants.yml), instead of the default per-job key.
@@ -403,7 +416,7 @@ jobs:
       # Prebuilt binary; the profile lives in .config/nextest.toml.
       - name: Install cargo-nextest
         if: ${{ needs.changes.outputs.cargo == 'true' }}
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-nextest
 
@@ -413,7 +426,7 @@ jobs:
       # run on a flaky result, and kills a test that hangs past 3 minutes.
       - name: Test
         if: ${{ needs.changes.outputs.cargo == 'true' }}
-        run: cargo nextest run --workspace --locked --profile ci --features pixel-cli/readify
+        run: cargo nextest run --workspace --locked --profile ci
 
       # nextest does not run doctests.
       - name: Doctests
@@ -490,6 +503,8 @@ jobs:
       - name: Mutation gate config contract (no module silently excluded)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-mutants-config.py
+      - name: French lexicon is reproducible without the MVP checkout
+        run: python3 -I crates/mvp-lexicon/test_generate.py
 
       # The agent A/B harness end to end against fixture CLIs: no model call.
       - name: Agent A/B harness contract (fixture claude/codex/pixel, disposable repo)
@@ -503,6 +518,18 @@ jobs:
       - name: Retro adherence contract (synthetic transcripts, no network)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 .agents/skills/pixel-retro/test_adherence.py
+
+      - name: Ultima arena contract (fake herdr and pixel, no model, no Herdr)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 .agents/skills/ultima-arena/ultima_arena.py --self-test
+
+      - name: Verdict gate contract (failed, cancelled and applicable-skipped lanes fail)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-verdict-gate.py
+
+      - name: Arena offline protocol (fixture rollout and fake herdr, no model, no Herdr)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 .agents/skills/arena/offline-protocol-test.py
 
       - name: Action pin check contract (tags, short SHAs, unparsed forms refused)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
@@ -526,6 +553,65 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-cancel-stale-runs.py
 
+      - name: CI diff selection contract (disposable Git histories)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-ci-selection.py
+
+      # Every public number names the pixel version it was measured with
+      # (docs/bench/claims.toml); one more than a minor behind fails unless an
+      # issue tracks its re-measure. Unconditional: a version bump, a README
+      # or a website edit can each make a claim stale or unbound.
+      - name: Public claims bound to a version
+        run: python3 scripts/ci/check-claims.py
+
+      - name: Public-claims check contract (stale, tracked, unbound, malformed)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-check-claims.py
+
+      - name: Embedding-model pin contract (file:// hub, sha256 refusal)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-fetch-embedding-model.py
+
+      - name: Release symbols split contract (archive as built, shipped copy stripped)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-split-symbols.py
+
+      # The brief-gate bench parses `pixel brief` output and scores it against
+      # eval/brief-gate/prompts.jsonl; the excerpt and span benches score the
+      # answer blocks of confident briefs; the excavation counter reads agent
+      # transcripts; the live A/B driver reads a headless claude stream-json.
+      # Parsers, metrics and the set's schema and privacy lint.
+      - name: Brief-gate bench and excavation counter (self-tests, prompt set)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: |
+          python3 scripts/bench/bench-brief-gate.py --self-test
+          python3 scripts/bench/bench-brief-gate.py --check-set
+          python3 scripts/bench/bench-graph-edges.py --self-test
+          python3 scripts/bench/bench-brief-excerpt.py --self-test
+          python3 scripts/bench/bench-brief-spans.py --self-test
+          python3 scripts/bench/excavation-count.py --self-test
+          python3 scripts/bench/ab-brief-live.py --self-test
+          python3 scripts/bench/brief-check.py --self-test
+          python3 scripts/bench/probe-test.py --self-test
+          python3 scripts/bench/probe-test.py --check-all
+          # The probes search with ripgrep, which the runner image lacks; their own tests need it.
+          command -v rg >/dev/null || sudo apt-get install -y ripgrep
+          for t in probes/*/tests/test_*.py; do python3 "$t"; done
+          python3 scripts/bench/probe-translate.py --self-test
+          python3 scripts/bench/probe-loop.py --self-test
+          python3 scripts/bench/probe-chain.py --self-test
+          python3 scripts/bench/extract-probes.py --self-test
+          python3 scripts/bench/brief-bench.py --self-test
+          python3 scripts/bench/brief-bench.py check
+          python3 scripts/bench/brief-zero-calls.py --self-test
+          python3 scripts/bench/brief-recall.py --self-test
+          python3 scripts/bench/tool-census/question_source.py
+          python3 scripts/bench/tool-census/score_brief.py --self-test
+          python3 scripts/bench/tool-census/run.py --self-test
+          python3 scripts/bench/tool-census/oracle.py --self-test
+          python3 scripts/bench/tool-census/test_classify.py
+          python3 scripts/bench/tool-census/test_extract.py
+
       # The workflow's own step, run with a stub script: only a pull request
       # number reaches the shoot script.
       - name: Harness-grid dispatch input contract
@@ -533,12 +619,16 @@ jobs:
         run: python3 scripts/test-harness-grid-input.py
 
       # What reproducible-build.yml's proof depends on: the commit's time,
-      # both path remaps, Cross.toml forwarding SOURCE_DATE_EPOCH, the
+      # both path remaps, workspace.metadata.cross forwarding SOURCE_DATE_EPOCH, the
       # environment set before the cache and the build in the three
       # workflows, one pinned cross, the release command.
       - name: Reproducible release build contract (disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-build-env.py
+
+      - name: macOS CI cadence contract
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-macos-ci-cadence.py
 
       # clean.sh removes whole directories. The cases that matter are the ones
       # asserting what it leaves alone: a file git tracks, a tree behind a
@@ -547,14 +637,6 @@ jobs:
       - name: Clean contract (disposable repo with a second worktree)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-clean.py
-
-      - name: Install Bun
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
-      - name: Pi impact command contract
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: bun scripts/test-pi-impact.mjs
 
   # Clippy and the reduced feature lanes, beside the Test job instead of
   # after it: they read no test result and took 35 s of its critical path
@@ -568,7 +650,7 @@ jobs:
     if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.rust-source == 'true' && needs.changes.outputs.duplicate != 'true'
     runs-on: ubuntu-26.04
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
@@ -580,7 +662,7 @@ jobs:
           components: clippy
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: linux-lint
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -599,7 +681,7 @@ jobs:
           fi
 
       - name: Warnings-denied Clippy
-        run: cargo clippy --workspace --all-targets --features pixel-cli/readify -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Supported CLI feature lanes
         run: |
@@ -622,14 +704,15 @@ jobs:
       # The toolchain here must equal `rust-version` in the root Cargo.toml:
       # cargo only enforces that field on dependency resolution, never on
       # the workspace's own code, so without this job the number drifts
-      # (it read 1.85 while the tree needed 1.91). Bump both together.
+      # (it read 1.85 while the tree needed 1.91, and 1.91 while the tree
+      # needed 1.99). Bump both together.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.91
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.99
         with:
-          toolchain: "1.91"
+          toolchain: "1.99"
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: linux-msrv
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -650,7 +733,7 @@ jobs:
       - name: Toolchain matches Cargo.toml
         run: |
           declared=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
-          test "$declared" = "1.91" || { echo "Cargo.toml says rust-version $declared, this job installs 1.91"; exit 1; }
+          test "$declared" = "1.99" || { echo "Cargo.toml says rust-version $declared, this job installs 1.99"; exit 1; }
 
       # A check, not clippy: lint names are added by newer toolchains and
       # the lint gate runs on stable in the Lint job.
@@ -684,7 +767,7 @@ jobs:
           toolchain: stable
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: linux-bench
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -702,17 +785,56 @@ jobs:
             sudo apt-get install -y perl make
           fi
 
+      # The semantic lane embeds with potion-code-16M-v2. Its bytes are pinned
+      # to one Hugging Face revision by the script (sha256 per file) and kept
+      # in an actions/cache entry keyed by that revision, so a run neither
+      # depends on the hub nor follows an upstream re-upload. The script
+      # keeps the restored files and fetches only on a miss. The paths are
+      # hf-hub's default cache (model2vec-rs ignores HF_HOME) and pixel's
+      # download marker.
+      - name: Cache key of the pinned embedding model
+        id: model
+        run: echo "key=$(bash scripts/ci/fetch-embedding-model.sh --cache-key)" >> "$GITHUB_OUTPUT"
+      - name: Restore the pinned embedding model
+        id: model-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2
+            ~/.local/share/pixel/models/potion-minishlab--potion-code-16M-v2.ok
+          key: ${{ steps.model.outputs.key }}
+      - name: Pin the embedding model in pixel's model cache
+        run: bash scripts/ci/fetch-embedding-model.sh "$HOME"
+      - name: Save the pinned embedding model
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2
+            ~/.local/share/pixel/models/potion-minishlab--potion-code-16M-v2.ok
+          key: ${{ steps.model.outputs.key }}
+
       # `[[bench]]` targets are `harness = false`: criterion owns `main`, so
       # nextest never runs them and the ranking assertions inside would gate
       # nothing. `-- --test` runs the bench bodies once, without criterion's
-      # statistical sampling. Only the NDCG bench is gated here: m1_latency's
-      # `search_service_time` assertion is red today (median 78.6ms in the
-      # bench profile, 65.1ms in debug, against the M1 <1ms budget, while
-      # `ping_service_time` passes), so the step would fail on every pull
-      # request -- search latency is a perf fix of its own, not a CI-hygiene
-      # one.
+      # statistical sampling. Both bench lanes run here: NDCG asserts
+      # relevance floors, and m1_latency asserts each op's median against the
+      # <1ms service-time budget and prints it, so a failure states the
+      # number. The m1 fixture pins its own git identity and config, so the
+      # measurement does not depend on the runner's.
+      # The hub client honours proxy variables (hf-hub sets ureq's
+      # try_proxy_from_env); a closed port as the proxy makes the lane run
+      # from the pinned cache alone, and a lookup that would reach the network
+      # fails the job instead of fetching whatever `main` holds today.
+      - name: Build the ranking bench (fetches crates, so before the proxy)
+        run: cargo bench -p pixel-bench --bench ndcg_relevance --locked --no-run
       - name: Ranking gates (NDCG@10, bench test mode)
+        env:
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
         run: cargo bench -p pixel-bench --bench ndcg_relevance --locked -- --test
+      - name: M1 service-time gates (bench test mode)
+        run: cargo bench -p pixel-bench --bench m1_latency --locked -- --test
 
   deny:
     name: Dependency policy (cargo-deny)
@@ -720,7 +842,7 @@ jobs:
     if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.deps == 'true' && needs.changes.outputs.duplicate != 'true'
     runs-on: ubuntu-26.04
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
@@ -734,7 +856,7 @@ jobs:
       # Prebuilt binary, same pinned installer as nextest above and cross in
       # cross-build.yml.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-deny
 
@@ -749,28 +871,42 @@ jobs:
       # Scorecard's Vulnerabilities check reads osv-scanner.toml, not
       # deny.toml: the two must accept the same advisories.
       - name: Advisory ignores agree (deny.toml, osv-scanner.toml)
-        run: python3 scripts/check-advisory-ignores.py
+        run: python3 scripts/ci/check-advisory-ignores.py
 
   # The green verdict the changes job's skip guard reads (#590): every lane
   # above ran green on this exact tree, so the tree is recorded in the cache
   # under ci-verdict-<tree>-<day> and an identical repush skips instead of
-  # re-running. Needs every lane so a failure or a cancellation records
-  # nothing; always() with !failure() && !cancelled() lets the lanes a
-  # diff legitimately skips stay skipped while the ones that ran were green.
-  # Pushes to main record too: their caches are readable by every pull
-  # request, and a pull request whose merge tree equals a merged tree is the
-  # same content the push run judged.
+  # re-running. The job always runs, even when a lane failed or was
+  # cancelled, so that it can fail: a skipped job counts as passing for a
+  # required check, and `Record the green verdict` is the name branch
+  # protection keys on. scripts/ci/verdict-gate.py fails on any `failure` or
+  # `cancelled` lane and accepts `skipped` only for a lane the change filter
+  # marks as not applying to the diff (contract:
+  # scripts/test-verdict-gate.py). Only a release-prepare run and a
+  # duplicate tree skip the job itself, as they skip every lane. Pushes to
+  # main record too: their caches are readable by every pull request, and a
+  # pull request whose merge tree equals a merged tree is the same content
+  # the push run judged.
   verdict:
     name: Record the green verdict
     needs: [scope, changes, linux-install, test, lint, msrv, ranking, deny]
     if: >-
       always() &&
       needs.scope.outputs.release-prepare != 'true' &&
-      needs.changes.outputs.duplicate != 'true' &&
-      needs.test.result == 'success' &&
-      !failure() && !cancelled()
+      needs.changes.outputs.duplicate != 'true'
     runs-on: ubuntu-26.04
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci/verdict-gate.py
+          sparse-checkout-cone-mode: false
+
+      - name: Fail on a failed or cancelled lane, or a skipped one that applies
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/verdict-gate.py
+
       - name: Write the marker
         run: |
           mkdir -p "$RUNNER_TEMP/verdict"

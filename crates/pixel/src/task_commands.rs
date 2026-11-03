@@ -105,15 +105,6 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Reset the existing Claude session packet (does not erase completion evidence).
-    Reset {
-        #[arg(long)]
-        session: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
 }
 
 pub(crate) fn run(command: TaskCmd) -> Result<(), String> {
@@ -153,7 +144,7 @@ pub(crate) fn run(command: TaskCmd) -> Result<(), String> {
                 &format!("origin-{}", task.task_id),
                 "contract_origin",
                 json!({
-                    "repository_config":crate::config_file::preferred_path(&root.join(".pixel")),
+                    "repository_config":crate::config_file::path_in(&root.join(".pixel")),
                     "basis":"repository executable requirements plus task acceptance contract"
                 }),
             )?;
@@ -210,9 +201,17 @@ pub(crate) fn run(command: TaskCmd) -> Result<(), String> {
             output(&task, args.json)
         }
         TaskCmd::Verify { task: args, checks } => {
-            let (_, store, task) = open(&args)?;
+            let (root, store, task) = open(&args)?;
+            let selected: Vec<_> = task
+                .contract
+                .checks
+                .iter()
+                .filter(|check| checks.is_empty() || checks.contains(&check.id))
+                .cloned()
+                .collect();
+            let context = crate::task_verify::gather(&root, &selected).map_err(error)?;
             let task = store
-                .verify(&task.task_id, &checks, &request_for(&args))
+                .verify_with_context(&task.task_id, &checks, &request_for(&args), Some(&context))
                 .map_err(error)?;
             let failed = task
                 .receipts
@@ -276,14 +275,6 @@ pub(crate) fn run(command: TaskCmd) -> Result<(), String> {
             json,
         } => crate::print_data(
             &crate::task_runtime::show(&path, &session)?.unwrap_or(Value::Null),
-            json,
-        ),
-        TaskCmd::Reset {
-            session,
-            path,
-            json,
-        } => crate::print_data(
-            &json!({"session_id":session,"reset":crate::task_runtime::reset(&path, &session)?}),
             json,
         ),
     }

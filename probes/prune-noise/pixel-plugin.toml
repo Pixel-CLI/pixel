@@ -1,0 +1,12 @@
+name = "prune-noise"
+version = "0.1.0"
+api = 1
+description = "Shrinks the brief: drops doc sections, test lists, config rows and completion files the question does not need, merges overlapping ranges, caps blocks and the total"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "pixel"
+budget_ms = 800
+mode = "lead"
+stage = "post"

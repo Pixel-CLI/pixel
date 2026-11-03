@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for reporting. A vulnerability goes through a private advisory instead,
-        never a public issue: see [SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md).
+        never a public issue: see [SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/.github/SECURITY.md).
   - type: textarea
     id: what-happened
     attributes:
@@ -20,7 +20,7 @@ body:
       label: Steps to reproduce
       description: The smallest sequence that shows the problem, on a public repository if possible.
       placeholder: |
-        1. pixel install
+        1. pixel setup
         2. ...
     validations:
       required: true

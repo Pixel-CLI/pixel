@@ -4,7 +4,7 @@
 //! Hybrid natural-language retrieval: lexical word-match channel + semantic
 //! KNN channel, fused with RRF, grouped by session.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::embed::{EmbedKind, Embedder};
 use crate::hybrid::fuse;
@@ -60,7 +60,7 @@ const SEM_SNIPPET_LEN: usize = 160;
 /// No cap is applied here: which words survive is decided by rarity in
 /// `ask`, not by where they happened to fall in the sentence.
 fn query_words(query: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut out = Vec::new();
     for token in query.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.')) {
         let t = token.trim_matches(|c: char| c == '.' || c == '-');
@@ -205,7 +205,7 @@ pub fn ask(
     // Score a turn by the summed rarity of the query words it contains, not by
     // how many it contains: matching "absolute" and "paths" says far more than
     // matching "use" and "the".
-    let mut word_hits: HashMap<i64, (f64, Option<i64>)> = HashMap::new();
+    let mut word_hits: HashMap<i64, (f64, Option<i64>)> = HashMap::default();
     for (word, weight) in &words {
         let result = search(
             store,
@@ -242,7 +242,7 @@ pub fn ask(
 
     // --- semantic channel.
     let mut semantic: Vec<i64> = Vec::new();
-    let mut chunk_start_by_turn: HashMap<i64, i64> = HashMap::new();
+    let mut chunk_start_by_turn: HashMap<i64, i64> = HashMap::default();
     let mut notice = None;
     match embedder {
         None => {
@@ -290,7 +290,7 @@ pub fn ask(
                     .into_iter()
                     .map(|(chunk, turn, start)| (chunk, (turn, start)))
                     .collect();
-                let mut seen_turns = HashSet::new();
+                let mut seen_turns = HashSet::default();
                 for (chunk_id, _score) in &chunk_hits {
                     if let Some((turn_id, start)) = start_of.get(chunk_id)
                         && seen_turns.insert(*turn_id)
@@ -321,7 +321,7 @@ pub fn ask(
     };
 
     let mut groups: Vec<AskSessionGroup> = Vec::new();
-    let mut per_session: HashMap<i64, usize> = HashMap::new();
+    let mut per_session: HashMap<i64, usize> = HashMap::default();
     for (turn_id, score) in fused {
         if groups.len() >= k && per_session.len() >= k {
             break;

@@ -8,7 +8,7 @@
 //! returns nothing. Lexical carries a small weight bonus: exact
 //! identifiers should beat paraphrase.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 const RRF_K: f32 = 60.0;
 const LEXICAL_WEIGHT: f32 = 2.0;
@@ -16,7 +16,7 @@ const SEMANTIC_WEIGHT: f32 = 1.0;
 
 /// Fuse two ranked turn-id lists into one, best first.
 pub fn fuse(lexical: &[i64], semantic: &[i64]) -> Vec<(i64, f32)> {
-    let mut scores: HashMap<i64, f32> = HashMap::new();
+    let mut scores: HashMap<i64, f32> = HashMap::default();
     for (rank, id) in lexical.iter().enumerate() {
         *scores.entry(*id).or_default() += LEXICAL_WEIGHT / (RRF_K + rank as f32 + 1.0);
     }

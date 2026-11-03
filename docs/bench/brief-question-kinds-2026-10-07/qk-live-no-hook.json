@@ -1,0 +1,489 @@
+{
+  "classification": "no-hook control; excluded from brief-delivery and effectiveness claims",
+  "identity": {
+    "run_id": "20261007215331-29845",
+    "candidate_commit": "1f28487990e71f39f59d5eeef5953c2d15673254",
+    "model": "gpt-5.6-terra",
+    "codex_version": "codex-cli 0.160.0",
+    "effort": "medium",
+    "pixel_version": "0.7.1",
+    "pixel_binary_commit": "unknown (reported by pixel --version)",
+    "pixel_source": "local source at candidate_commit",
+    "images": {
+      "raw": "sha256:16e4f6d87b0705fe34c15f0f6869acb89c15ab8273f21590ba36f357650550e3",
+      "pixel": "sha256:acb729d951f9ea9772a896534011ebaff6336578846a2d3a4bb513aa888fd130"
+    },
+    "arms": [
+      "raw",
+      "pixel"
+    ],
+    "repetitions_per_arm": 1,
+    "tasks": [
+      "qk-lookup",
+      "qk-impact",
+      "qk-flow",
+      "qk-diagnosis",
+      "qk-configuration",
+      "qk-tests",
+      "qk-history",
+      "qk-architecture"
+    ],
+    "scenario_sha256": {
+      "qk-lookup": "56d3f4aafe69ebbd1131f19bdba82f0b026d890ec56b1d962f7a22277396f859",
+      "qk-impact": "d1cbde0d1d0c7f7c342905582e20b0973ab11f711d1ba9f761fcfabc1d332577",
+      "qk-flow": "12879641f6e6edf8dfd75cfa2d91f023ea93bd6cfcbcfaa5e77dc23e208cd8fb",
+      "qk-diagnosis": "b43a9f094938a6f5e92088872def4dbff5bf79990fe57ba5d29674fa26369828",
+      "qk-configuration": "be0e155c1cc08b9c38fd837db5940fa83d94e5d7ce79a67f7fb913478c7273e1",
+      "qk-tests": "325af2f03fd72a7d3192211dbb3367bb44ab1b157f66acef6eb59b9de08bddab",
+      "qk-history": "418a73308ec7d7ee7751a428078d75d1a32bd1f925da9d07af1e3d1beeeac3f2",
+      "qk-architecture": "10f404ef170a4f19fe259d5b505394eef96e81da7a00c36ff3a97b09a1a09e3e"
+    },
+    "source_branch_when_run": "codex/brief-question-kinds-experiment",
+    "commit_branch": "fix/brief-evidence-871-rest"
+  },
+  "command": "rtk env HERDR_ENV=1 REPO_SNAPSHOT=\"$REPO\" PIXEL_SRC=local PIXEL_SRC_DIR=\"$REPO\" CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium ARENA_SCENARIOS_DIR=\"$REPO/eval/scenarios\" ARENA_RESULTS_DIR=\"$REPO/eval/arena-results/qk-live-20261007-02\" ARMS=\"raw pixel\" TASKS=\"qk-lookup qk-impact qk-flow qk-diagnosis qk-configuration qk-tests qk-history qk-architecture\" bash \"$REPO/eval/arena.sh\" --reps 1",
+  "result_directory": "eval/arena-results/qk-live-20261007-02 (gitignored; local transcripts retained there)",
+  "harness_sha256": {
+    "arena_runner": "8c3c3b5be73cb1332aa7e22ec0208067c036f79408b06b1684077b65585b3e67",
+    "entrypoint": "29f31a1c952b2aab04f4f0d407b1091dc27cd7162ebbb20ada35d0655b4ec746",
+    "context_manifest": "72ea649da6315c0f8bfd76b244ec7d417767b51fcd5400ca2f4c5b7415071404",
+    "hook_audit": "3093ed3147b99de2897a1204a569afdb03da83ee7c773b560a990341abf101ce",
+    "skill_candidate": "5284af231cdad85d95e1e3a08106e9a80ee1963f7dfb18dfad3d9132b6bbc86d"
+  },
+  "hook_preflight": {
+    "arm": "pixel",
+    "rep": "1",
+    "provider": "codex",
+    "event": "prompt-submit",
+    "response_valid": false,
+    "hook_event_name": null,
+    "brief_present": false,
+    "execution_route_present": false,
+    "context_bytes": 0,
+    "context_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "context_manifest_summary": {
+    "raw": {
+      "pixel_reference_lines": 0,
+      "hook_config_files": [],
+      "agents_sha256": "0aeb8f4b63b0167f23170b99866071ce07091bb19441850e4ac72ab472de4ab2"
+    },
+    "pixel": {
+      "pixel_reference_lines": 32,
+      "hook_config_files": [
+        "$CODEX_HOME/hooks.json"
+      ],
+      "agents_sha256": "c357e009e552f0465f7448247b23d861c92ef7848f5a9320e7ee6aa0da758b4e"
+    }
+  },
+  "pair_count": 8,
+  "complete_pairs": 8,
+  "failed_pairs": 0,
+  "summary": {
+    "raw": {
+      "macro_score_pct": 76.9,
+      "mean_task_median_tokens": 179154,
+      "mean_task_median_seconds": 30.5,
+      "pixel_calls": 0,
+      "failed": 0
+    },
+    "pixel": {
+      "macro_score_pct": 76.4,
+      "mean_task_median_tokens": 199546,
+      "mean_task_median_seconds": 31.4,
+      "pixel_calls": 0,
+      "failed": 0
+    }
+  },
+  "rows": [
+    {
+      "arm": "raw",
+      "task": "qk-lookup",
+      "rep": "1",
+      "status": "complete",
+      "score": 4,
+      "max_score": 8,
+      "score_pct": 50.0,
+      "input_tokens": 65757,
+      "generation_tokens": 375,
+      "cache_read_tokens": 48384,
+      "tokens": 66132,
+      "tool_calls": 2,
+      "pixel_calls": 0,
+      "native_search_calls": 2,
+      "native_command_count": 3,
+      "native_command_counts": {
+        "rg": 2,
+        "sed": 1
+      },
+      "seconds": 25,
+      "reason": null
+    },
+    {
+      "arm": "pixel",
+      "task": "qk-lookup",
+      "rep": "1",
+      "status": "complete",
+      "score": 4,
+      "max_score": 8,
+      "score_pct": 50.0,
+      "input_tokens": 119449,
+      "generation_tokens": 640,
+      "cache_read_tokens": 90112,
+      "tokens": 120089,
+      "tool_calls": 3,
+      "pixel_calls": 0,
+      "native_search_calls": 2,
+      "native_command_count": 5,
+      "native_command_counts": {
+        "rg": 2,
+        "sed": 3
+      },
+      "seconds": 27,
+      "reason": null
+    },
+    {
+      "arm": "raw",
+      "task": "qk-impact",
+      "rep": "1",
+      "status": "complete",
+      "score": 6,
+      "max_score": 9,
+      "score_pct": 66.66666666666667,
+      "input_tokens": 72847,
+      "generation_tokens": 438,
+      "cache_read_tokens": 53504,
+      "tokens": 73285,
+      "tool_calls": 2,
+      "pixel_calls": 0,
+      "native_search_calls": 1,
+      "native_command_count": 3,
+      "native_command_counts": {
+        "rg": 1,
+        "sed": 1,
+        "2148,2192p'": 1
+      },
+      "seconds": 21,
+      "reason": null
+    },
+    {
+      "arm": "pixel",
+      "task": "qk-impact",
+      "rep": "1",
+      "status": "complete",
+      "score": 4,
+      "max_score": 9,
+      "score_pct": 44.44444444444444,
+      "input_tokens": 78878,
+      "generation_tokens": 517,
+      "cache_read_tokens": 57600,
+      "tokens": 79395,
+      "tool_calls": 2,
+      "pixel_calls": 0,
+      "native_search_calls": 1,
+      "native_command_count": 4,
+      "native_command_counts": {
+        "sed": 3,
+        "rg": 1
+      },
+      "seconds": 16,
+      "reason": null
+    },
+    {
+      "arm": "raw",
+      "task": "qk-flow",
+      "rep": "1",
+      "status": "complete",
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100.0,
+      "input_tokens": 353259,
+      "generation_tokens": 1985,
+      "cache_read_tokens": 304896,
+      "tokens": 355244,
+      "tool_calls": 8,
+      "pixel_calls": 0,
+      "native_search_calls": 7,
+      "native_command_count": 34,
+      "native_command_counts": {
+        "pwd": 1,
+        "rg": 10,
+        "sed": 23
+      },
+      "seconds": 66,
+      "reason": null
+    },
+    {
+      "arm": "pixel",
+      "task": "qk-flow",
+      "rep": "1",
+      "status": "complete",
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100.0,
+      "input_tokens": 361202,
+      "generation_tokens": 1839,
+      "cache_read_tokens": 300032,
+      "tokens": 363041,
+      "tool_calls": 7,
+      "pixel_calls": 0,
+      "native_search_calls": 4,
+      "native_command_count": 26,
+      "native_command_counts": {
+        "pwd": 1,
+        "rg": 4,
+        "sed": 21
+      },
+      "seconds": 51,
+      "reason": null
+    },
+    {
+      "arm": "raw",
+      "task": "qk-diagnosis",
+      "rep": "1",
+      "status": "complete",
+      "score": 6,
+      "max_score": 8,
+      "score_pct": 75.0,
+      "input_tokens": 324198,
+      "generation_tokens": 1509,
+      "cache_read_tokens": 257280,
+      "tokens": 325707,
+      "tool_calls": 6,
+      "pixel_calls": 0,
+      "native_search_calls": 6,
+      "native_command_count": 17,
+      "native_command_counts": {
+        "pwd": 1,
+        "rg": 7,
+        "sed": 9
+      },
+      "seconds": 43,
+      "reason": null
+    },
+    {
+      "arm": "pixel",
+      "task": "qk-diagnosis",
+      "rep": "1",
+      "status": "complete",
+      "score": 6,
+      "max_score": 8,
+      "score_pct": 75.0,
+      "input_tokens": 261930,
+      "generation_tokens": 1093,
+      "cache_read_tokens": 203264,
+      "tokens": 263023,
+      "tool_calls": 5,
+      "pixel_calls": 0,
+      "native_search_calls": 3,
+      "native_command_count": 15,
+      "native_command_counts": {
+        "rg": 4,
+        "sed": 4,
+        "nl": 4,
+        "227,305p'": 1,
+        "570,680p'": 1,
+        "255,282p'": 1
+      },
+      "seconds": 40,
+      "reason": null
+    },
+    {
+      "arm": "raw",
+      "task": "qk-configuration",
+      "rep": "1",
+      "status": "complete",
+      "score": 8,
+      "max_score": 9,
+      "score_pct": 88.88888888888889,
+      "input_tokens": 273821,
+      "generation_tokens": 862,
+      "cache_read_tokens": 225536,
+      "tokens": 274683,
+      "tool_calls": 6,
+      "pixel_calls": 0,
+      "native_search_calls": 5,
+      "native_command_count": 9,
+      "native_command_counts": {
+        "rg": 5,
+        "sed": 4
+      },
+      "seconds": 35,
+      "reason": null
+    },
+    {
+      "arm": "pixel",
+      "task": "qk-configuration",
+      "rep": "1",
+      "status": "complete",
+      "score": 8,
+      "max_score": 9,
+      "score_pct": 88.88888888888889,
+      "input_tokens": 191642,
+      "generation_tokens": 770,
+      "cache_read_tokens": 144128,
+      "tokens": 192412,
+      "tool_calls": 4,
+      "pixel_calls": 0,
+      "native_search_calls": 4,
+      "native_command_count": 9,
+      "native_command_counts": {
+        "rg": 4,
+        "sed": 5
+      },
+      "seconds": 23,
+      "reason": null
+    },
+    {
+      "arm": "raw",
+      "task": "qk-tests",
+      "rep": "1",
+      "status": "complete",
+      "score": 8,
+      "max_score": 10,
+      "score_pct": 80.0,
+      "input_tokens": 144978,
+      "generation_tokens": 948,
+      "cache_read_tokens": 114432,
+      "tokens": 145926,
+      "tool_calls": 4,
+      "pixel_calls": 0,
+      "native_search_calls": 3,
+      "native_command_count": 6,
+      "native_command_counts": {
+        "rg": 3,
+        "sed": 3
+      },
+      "seconds": 14,
+      "reason": null
+    },
+    {
+      "arm": "pixel",
+      "task": "qk-tests",
+      "rep": "1",
+      "status": "complete",
+      "score": 8,
+      "max_score": 10,
+      "score_pct": 80.0,
+      "input_tokens": 202169,
+      "generation_tokens": 1049,
+      "cache_read_tokens": 166400,
+      "tokens": 203218,
+      "tool_calls": 5,
+      "pixel_calls": 0,
+      "native_search_calls": 4,
+      "native_command_count": 10,
+      "native_command_counts": {
+        "rg": 4,
+        "sed": 2,
+        "2100,2192p": 1,
+        "2224,2285p'": 1,
+        "1400,1465p'": 1,
+        "git": 1
+      },
+      "seconds": 34,
+      "reason": null
+    },
+    {
+      "arm": "raw",
+      "task": "qk-history",
+      "rep": "1",
+      "status": "complete",
+      "score": 6,
+      "max_score": 11,
+      "score_pct": 54.54545454545455,
+      "input_tokens": 77802,
+      "generation_tokens": 791,
+      "cache_read_tokens": 55552,
+      "tokens": 78593,
+      "tool_calls": 2,
+      "pixel_calls": 0,
+      "native_search_calls": 0,
+      "native_command_count": 5,
+      "native_command_counts": {
+        "git": 5
+      },
+      "seconds": 26,
+      "reason": null
+    },
+    {
+      "arm": "pixel",
+      "task": "qk-history",
+      "rep": "1",
+      "status": "complete",
+      "score": 8,
+      "max_score": 11,
+      "score_pct": 72.72727272727273,
+      "input_tokens": 130873,
+      "generation_tokens": 947,
+      "cache_read_tokens": 99328,
+      "tokens": 131820,
+      "tool_calls": 3,
+      "pixel_calls": 0,
+      "native_search_calls": 0,
+      "native_command_count": 8,
+      "native_command_counts": {
+        "git": 8
+      },
+      "seconds": 24,
+      "reason": null
+    },
+    {
+      "arm": "raw",
+      "task": "qk-architecture",
+      "rep": "1",
+      "status": "complete",
+      "score": 9,
+      "max_score": 9,
+      "score_pct": 100.0,
+      "input_tokens": 112671,
+      "generation_tokens": 990,
+      "cache_read_tokens": 88064,
+      "tokens": 113661,
+      "tool_calls": 3,
+      "pixel_calls": 0,
+      "native_search_calls": 2,
+      "native_command_count": 11,
+      "native_command_counts": {
+        "pwd": 1,
+        "rg": 2,
+        "sed": 8
+      },
+      "seconds": 14,
+      "reason": null
+    },
+    {
+      "arm": "pixel",
+      "task": "qk-architecture",
+      "rep": "1",
+      "status": "complete",
+      "score": 9,
+      "max_score": 9,
+      "score_pct": 100.0,
+      "input_tokens": 241895,
+      "generation_tokens": 1471,
+      "cache_read_tokens": 187904,
+      "tokens": 243366,
+      "tool_calls": 5,
+      "pixel_calls": 0,
+      "native_search_calls": 3,
+      "native_command_count": 22,
+      "native_command_counts": {
+        "pwd": 1,
+        "rg": 4,
+        "sed": 14,
+        "nl": 3
+      },
+      "seconds": 36,
+      "reason": null
+    }
+  ],
+  "semantic_review": "Direct inspection of all 16 final answers found them broadly consistent with the expected facts. Regex scores are coverage signals, not semantic accuracy; no independent second scorer or held-out sample was used.",
+  "limitations": [
+    "Pixel UserPromptSubmit preflight returned response_valid=false with 0 context bytes. The runner warned that live Pixel brief evidence was disabled.",
+    "Pixel made 0 Pixel CLI calls in all 8 tasks; this run does not measure brief delivery or brief effectiveness.",
+    "The context manifests differ: raw had 0 Pixel reference lines and no Codex hook config; Pixel had 32 Pixel reference lines and a Codex hook config.",
+    "Raw stderr records Codex skill frontmatter load errors for six repository skills.",
+    "One repetition per task is a diagnostic screen, not a general comparison."
+  ]
+}

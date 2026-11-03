@@ -3,9 +3,10 @@
 
 //! The classify-engine install step and configuration.
 //!
-//! `pixel install` proposes the classify engine — local (the Ollaya decision
-//! daemon on this Mac), remote (a hosted LLM behind a key), or Jev
-//! (TypeSafe's hosted decision model behind `TYPESAFE_API_KEY`) — with each
+//! `pixel setup` proposes the classify engine — local (the Ollaya decision
+//! daemon on this Mac), remote (a hosted LLM behind a key), Jev
+//! (TypeSafe's hosted decision model behind `TYPESAFE_API_KEY`), or Clef-flash
+//! (Cloudflare's decision model, through Ollama or a Cloudflare API token) — with each
 //! option's measured accuracy in parentheses. Choosing local runs the
 //! auto-setup: the `ollaya` binary installed into a pixel-managed prefix,
 //! the recommended model pulled, and a recorded server launch that
@@ -17,8 +18,8 @@
 //!
 //! Everything interactive is gated on a TTY: a scripted install (CI, pipes)
 //! prints the choice it would have asked as a suggestion and moves on —
-//! `pixel config classify-engine <local|remote|jev|auto>` records the answer
-//! later. The stored preference is advisory: an explicit `--engine` flag on
+//! `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare|auto>`
+//! records the answer later. The stored preference is advisory: an explicit `--engine` flag on
 //! `pixel classify` always wins.
 
 use serde_json::{Value, json};
@@ -33,21 +34,29 @@ use std::path::{Path, PathBuf};
 pub const LOCAL_LABEL: &str = "Local — Ollaya winnow:e4b on this Mac (offline, $0 per call; 0.722 typed-decisions accuracy vs Jev's 0.738)";
 pub const REMOTE_LABEL: &str = "Remote — hosted LLM behind your key (DeepSeek-v4.1-flash: 100% on the 14-item public coding exam; ~$0.0001/call, needs network)";
 pub const JEV_LABEL: &str = "Jev — TypeSafe's hosted decision model behind your TYPESAFE_API_KEY (0.738 typed-decisions accuracy, needs network)";
+pub const OPENAI_LABEL: &str = "OpenAI — the Decisions API with gpt-6-luna behind your OPENAI_API_KEY (native typed answers: probability, choice, score; ~$0.10 per 1M input tokens, needs network)";
+pub const CLEF_LABEL: &str = "Clef-flash — Cloudflare's 9B decision model via Ollama (local, no key) or Workers AI (your Cloudflare token); 39 ms median latency, BFCL 98.8 vs Jev's 95.8 (Cloudflare-published)";
 /// What one menu row launches: the local auto-setup, the remote-provider
-/// key flow (any chat preset), or the Jev flow (a TypeSafe or OpenCode Go
-/// key, then the model the source carries).
+/// key flow (any chat preset), the OpenAI Decisions flow (its own wire
+/// and model), the Jev flow (a TypeSafe or OpenCode Go key, then the
+/// model the source carries), or the Clef-flash flow (an Ollama server or
+/// a Cloudflare account id and token).
 #[derive(Clone, Copy, PartialEq)]
 enum SetupKind {
     Local,
     Remote,
+    Openai,
     Jev,
+    Clef,
 }
 
 /// The install menu, in display order.
 const MENU: &[(&str, SetupKind)] = &[
     (LOCAL_LABEL, SetupKind::Local),
     (REMOTE_LABEL, SetupKind::Remote),
+    (OPENAI_LABEL, SetupKind::Openai),
     (JEV_LABEL, SetupKind::Jev),
+    (CLEF_LABEL, SetupKind::Clef),
 ];
 
 /// Everything Ollaya owns lives under one pixel-managed prefix (binary,
@@ -57,13 +66,13 @@ const OLLAYA_ROOT: &str = ".local/share/pixel/ollaya";
 /// The bundled `pixel-classify` skill — how to shape bounded classify calls
 /// and wire them into a harness's routing, guards, and grading — deployed
 /// into each configured harness's skills dir as `pixel-classify/SKILL.md`.
-const CLASSIFY_SKILL: &str = include_str!("../../pixel-install/assets/pixel-classify-skill.md");
+const CLASSIFY_SKILL: &str = include_str!("../../pixel-setup/assets/pixel-classify-skill.md");
 /// The bundled pi extension: `ask_pixel_file_bool/choice/score`,
 /// `ask_pixel_files`, `pick_pixel_file` — file-level classify calls whose
 /// file text never enters the agent's context. It ships as Pixel's classify
-/// Pi package ([`pixel_install::ClassifyPiPackage`]), declared in Pi's
+/// Pi package ([`pixel_setup::ClassifyPiPackage`]), declared in Pi's
 /// settings like the impact package, never copied into Pi's `extensions/`.
-const PI_CLASSIFY_EXTENSION: &str = include_str!("../../pixel-install/assets/pi-classify-files.ts");
+const PI_CLASSIFY_EXTENSION: &str = include_str!("../../pixel-setup/assets/pi-classify-files.ts");
 /// The skills-dir name every harness copy of [`CLASSIFY_SKILL`] deploys to.
 const CLASSIFY_SKILL_NAME: &str = "pixel-classify";
 
@@ -211,24 +220,53 @@ pub fn install_step(
         stdin,
         stdout,
         stored_engine(),
+        crate::config_cmd::classify_remote_preset(),
         setup_local,
         propose_remote_key,
+        propose_openai_key,
         propose_jev_key,
+        propose_clef_key,
         propose_classify_helpers,
         &mut crate::select::TermiosRaw::default(),
         std::io::stdin().is_terminal(),
     )
 }
 
+/// The menu row the stored engine lands on, for pre-highlighting: `local` is
+/// the local row; `remote` resolves through its stored preset (OpenAI, Jev
+/// and the two Clef routes have their own rows, every other remote preset is
+/// the generic one); `auto`, an unknown value, and nothing stored highlight
+/// nothing.
+fn current_row(
+    stored: Option<&str>,
+    preset: Option<crate::decide_remote::Preset>,
+) -> Option<usize> {
+    use crate::decide_remote::Preset;
+    match stored {
+        Some("local") => MENU.iter().position(|(_, kind)| *kind == SetupKind::Local),
+        Some("remote") => Some(match preset {
+            Some(Preset::Openai) => SetupKind::Openai,
+            Some(Preset::Jev) => SetupKind::Jev,
+            Some(p) if p.is_clef() => SetupKind::Clef,
+            _ => SetupKind::Remote,
+        })
+        .and_then(|kind| MENU.iter().position(|(_, k)| *k == kind)),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // the seams are the point: tests inject each collaborator
-fn install_step_with<FLocal, FRemote, FJev, FHelpers>(
+fn install_step_with<FLocal, FRemote, FOpenai, FJev, FClef, FHelpers>(
     tty: bool,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
     stored: Option<String>,
+    stored_preset: Option<crate::decide_remote::Preset>,
     setup_local: FLocal,
     propose_remote_key: FRemote,
+    propose_openai_key: FOpenai,
     propose_jev_key: FJev,
+    propose_clef_key: FClef,
     propose_helpers: FHelpers,
     raw: &mut dyn crate::select::RawMode,
     stdin_is_terminal: bool,
@@ -236,53 +274,101 @@ fn install_step_with<FLocal, FRemote, FJev, FHelpers>(
 where
     FLocal: FnOnce(&mut dyn std::io::Write) -> Result<(), String>,
     FRemote: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
+    FOpenai: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
     FJev: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
+    FClef: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
     FHelpers: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
 {
-    if let Some(engine) = stored {
-        writeln!(stdout, "classify engine: already configured as {engine:?} (change with `pixel config classify-engine <local|remote|jev|auto>`)")
-            .map_err(|e| e.to_string())?;
-        // An engine chosen on an earlier install still gets the helpers
-        // offer — the proposal itself is a no-op once every file it
-        // manages is current.
-        return propose_helpers(stdin, stdout);
-    }
+    // The menu is always offered (#863): a stored engine is pre-highlighted
+    // and marked `(current)`, and Enter on it keeps the setting instead of
+    // silently skipping the question.
+    let current = current_row(stored.as_deref(), stored_preset);
     let print_menu = |stdout: &mut dyn std::io::Write| -> Result<(), String> {
         for (index, (label, _)) in MENU.iter().enumerate() {
-            writeln!(stdout, "  [{}] {label}", index + 1).map_err(|e| e.to_string())?;
+            let marker = if Some(index) == current {
+                " · current"
+            } else {
+                ""
+            };
+            writeln!(stdout, "  [{}] {label}{marker}", index + 1).map_err(|e| e.to_string())?;
         }
         Ok(())
     };
     writeln!(stdout, "Classify engine:").map_err(|e| e.to_string())?;
     if !tty {
         print_menu(stdout)?;
-        writeln!(stdout, "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote|jev>` or re-run `pixel install` in a terminal")
-            .map_err(|e| e.to_string())?;
-        return Ok(());
+        let line = if let Some(engine) = stored.as_deref() {
+            format!(
+                "classify engine: configured as {engine:?} (change with `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare|auto>`)"
+            )
+        } else {
+            "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare>` or re-run `pixel setup` in a terminal".to_string()
+        };
+        return writeln!(stdout, "{line}").map_err(|e| e.to_string());
     }
     // TTY: the arrow picker paints the option rows itself; EOF falls back
     // to the numbered prompt so a piped answer still lands.
-    let labels: Vec<&str> = MENU.iter().map(|(label, _)| *label).collect();
-    let picked = crate::select::pick(&labels, stdin, stdout, raw, stdin_is_terminal)?;
+    let labels: Vec<String> = MENU
+        .iter()
+        .enumerate()
+        .map(|(index, (label, _))| {
+            if Some(index) == current {
+                format!("{label} · current")
+            } else {
+                (*label).to_string()
+            }
+        })
+        .collect();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let picked = crate::select::pick_at(
+        &refs,
+        current.unwrap_or(0),
+        stdin,
+        stdout,
+        raw,
+        stdin_is_terminal,
+    )?;
     let choice = match picked {
         Some(index) => Some(index),
         None => {
             print_menu(stdout)?;
-            write!(stdout, "Choice> ").map_err(|e| e.to_string())?;
+            match current {
+                Some(index) => {
+                    write!(stdout, "Choice [{}]> ", index + 1).map_err(|e| e.to_string())?
+                }
+                None => write!(stdout, "Choice> ").map_err(|e| e.to_string())?,
+            }
             stdout.flush().map_err(|e| e.to_string())?;
             let mut line = String::new();
             stdin
                 .read_line(&mut line)
                 .map_err(|e| format!("read choice: {e}"))?;
-            parse_choice(&line)
+            if line.trim().is_empty() {
+                current
+            } else {
+                parse_choice(&line)
+            }
         }
     };
+    if choice.is_some() && choice == current {
+        let engine = stored.as_deref().unwrap_or("auto");
+        writeln!(
+            stdout,
+            "classify engine: kept {engine:?} (change with `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare|auto>`)"
+        )
+        .map_err(|e| e.to_string())?;
+        // An unchanged engine still gets the helpers offer — the proposal
+        // itself is a no-op once every file it manages is current.
+        return propose_helpers(stdin, stdout);
+    }
     match choice.and_then(|index| MENU.get(index).map(|(_, kind)| *kind)) {
         Some(SetupKind::Local) => setup_local(stdout),
         Some(SetupKind::Remote) => propose_remote_key(stdin, stdout),
+        Some(SetupKind::Openai) => propose_openai_key(stdin, stdout),
         Some(SetupKind::Jev) => propose_jev_key(stdin, stdout),
+        Some(SetupKind::Clef) => propose_clef_key(stdin, stdout),
         None => {
-            writeln!(stdout, "classify engine: skipped — run `pixel config classify-engine <local|remote|jev>` to choose later")
+            writeln!(stdout, "classify engine: skipped — run `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare>` to choose later")
                 .map_err(|e| e.to_string())?;
             return Ok(());
         }
@@ -293,25 +379,25 @@ where
 
 /// What a "yes" to the helpers proposal writes: the `pixel-classify` skill
 /// into every configured harness's skills dir — the skill is
-/// harness-agnostic, not pi-only; [`pixel_install::config::SKILL_ROOTS`] is
+/// harness-agnostic, not pi-only; [`pixel_setup::config::SKILL_ROOTS`] is
 /// the single list of roots — and, when pi is set up, Pixel's classify Pi
 /// package with its `packages` entry. `.claude` is a target unconditionally
-/// (`pixel install` writes its hooks there before this step runs); the rest
+/// (`pixel setup` writes its hooks there before this step runs); the rest
 /// join only when configured.
 struct ClassifyHelpers {
     skills: Vec<PathBuf>,
-    pi: Option<pixel_install::ClassifyPiPackage>,
+    pi: Option<pixel_setup::ClassifyPiPackage>,
 }
 
 impl ClassifyHelpers {
-    fn at(home: &Path, pi: Option<pixel_install::ClassifyPiPackage>) -> Self {
+    fn at(home: &Path, pi: Option<pixel_setup::ClassifyPiPackage>) -> Self {
         let skill_file = |root: &Path| {
             root.join("skills")
                 .join(CLASSIFY_SKILL_NAME)
                 .join("SKILL.md")
         };
         let mut skills = vec![skill_file(&home.join(".claude"))];
-        for root in pixel_install::config::SKILL_ROOTS {
+        for root in pixel_setup::config::SKILL_ROOTS {
             let dir = home.join(root);
             if dir.is_dir() {
                 skills.push(skill_file(&dir));
@@ -327,7 +413,7 @@ impl ClassifyHelpers {
             && self
                 .pi
                 .as_ref()
-                .is_none_or(pixel_install::ClassifyPiPackage::is_current)
+                .is_none_or(pixel_setup::ClassifyPiPackage::is_current)
     }
 
     /// Every path the proposal names, in the order it writes them.
@@ -361,7 +447,7 @@ fn propose_classify_helpers(
         writeln!(stdout, "classify helpers: skipped — no HOME").map_err(|e| e.to_string())?;
         return Ok(());
     };
-    let pi = pixel_install::ClassifyPiPackage::for_home(&home, PI_CLASSIFY_EXTENSION);
+    let pi = pixel_setup::ClassifyPiPackage::for_home(&home, PI_CLASSIFY_EXTENSION);
     if let Err(error) = propose_classify_helpers_at(&ClassifyHelpers::at(&home, pi), stdin, stdout)
     {
         writeln!(stdout, "classify helpers: skipped — {error}").map_err(|e| e.to_string())?;
@@ -402,7 +488,7 @@ fn propose_classify_helpers_at(
         }
         // A failed backup stops the overwrite: an edited helper is never
         // replaced without its copy.
-        pixel_install::config::backup_if_changing(path, CLASSIFY_SKILL.as_bytes())
+        pixel_setup::config::backup_if_changing(path, CLASSIFY_SKILL.as_bytes())
             .map_err(|e| format!("back up {}: {e}", path.display()))?;
         fs::write(path, CLASSIFY_SKILL).map_err(|e| format!("write {}: {e}", path.display()))?;
     }
@@ -444,7 +530,7 @@ fn propose_remote_key_with(
 ) -> Result<(), String> {
     writeln!(
         stdout,
-        "Remote providers: openrouter / ollama / deepseek / opencode-go"
+        "Remote providers: openrouter / ollama / deepseek / opencode-go / openai"
     )
     .map_err(|e| e.to_string())?;
     write!(stdout, "Provider [openrouter]> ").map_err(|e| e.to_string())?;
@@ -460,15 +546,17 @@ fn propose_remote_key_with(
     };
     let Some(preset) = crate::decide_remote::Preset::parse_name(provider) else {
         return Err(format!(
-            "unknown provider {provider:?} (openrouter, ollama, deepseek, opencode-go, local)"
+            "unknown provider {provider:?} (openrouter, ollama, deepseek, opencode-go, openai, local)"
         ));
     };
-    if matches!(
-        preset,
-        crate::decide_remote::Preset::Jev | crate::decide_remote::Preset::Local
-    ) {
+    if preset.is_clef()
+        || matches!(
+            preset,
+            crate::decide_remote::Preset::Jev | crate::decide_remote::Preset::Local
+        )
+    {
         return Err(format!(
-            "{provider} is not a remote chat provider — pick Jev or Local at the top menu"
+            "{provider} is not a remote chat provider — pick Jev, Clef-flash or Local at the top menu"
         ));
     }
     propose_key_for(preset, None, None, None, stdin, stdout, store)
@@ -548,6 +636,162 @@ fn propose_jev_key_with(
     )
 }
 
+/// The Clef-flash path: Cloudflare's decision model through an Ollama server
+/// (local and keyless, or a remote host behind `OLLAMA_API_KEY`) or through
+/// Workers AI (a Cloudflare account id and API token). The account id is not
+/// a secret: it is stored in the preset's base URL, the token in the global
+/// config's `remote_keys` like every other key.
+/// The OpenAI path: one key source (OPENAI_API_KEY, platform.openai.com)
+/// and one Decisions-capable model today (gpt-6-luna, per OpenAI's Decisions
+/// guide), so the flow is a single key prompt that stores the preset and
+/// its default model — no provider or model menu.
+fn propose_openai_key(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    propose_key_for(
+        crate::decide_remote::Preset::Openai,
+        None,
+        None,
+        None,
+        stdin,
+        stdout,
+        |preset, key, model, base| {
+            if let Some(key) = key {
+                crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+            }
+            crate::config_cmd::set_classify_remote_model(preset, model, base)
+        },
+    )
+}
+fn propose_clef_key(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    propose_clef_key_with(stdin, stdout, |preset, key, model, base| {
+        if let Some(key) = key {
+            crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+        }
+        crate::config_cmd::set_classify_remote_model(preset, model, base)
+    })
+}
+
+/// One answered prompt line, trimmed; EOF reads as blank.
+fn prompt_line(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+    prompt: &str,
+) -> Result<String, String> {
+    write!(stdout, "{prompt}").map_err(|e| e.to_string())?;
+    stdout.flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    stdin
+        .read_line(&mut line)
+        .map_err(|e| format!("read answer: {e}"))?;
+    Ok(line.trim().to_string())
+}
+
+fn propose_clef_key_with(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+    store: impl FnOnce(
+        crate::decide_remote::Preset,
+        Option<&str>,
+        Option<String>,
+        Option<&str>,
+    ) -> Result<(), String>,
+) -> Result<(), String> {
+    use crate::decide_clef::{CLOUDFLARE_DEFAULT_BASE, DEFAULT_MODEL, OLLAMA_DEFAULT_BASE};
+    let io = |e: std::io::Error| e.to_string();
+    writeln!(stdout, "Clef-flash host:").map_err(io)?;
+    writeln!(
+        stdout,
+        "  [1] Ollama — a server you run (`ollama pull clef-flash`, Ollama 0.35.1 or later); no key for a local one"
+    )
+    .map_err(io)?;
+    writeln!(
+        stdout,
+        "  [2] Cloudflare — Workers AI behind your Cloudflare account id and API token"
+    )
+    .map_err(io)?;
+    let host = prompt_line(stdin, stdout, "Host [1]> ")?;
+    match host.as_str() {
+        "" | "1" => {
+            let base = prompt_line(
+                stdin,
+                stdout,
+                &format!("Ollama base URL [{OLLAMA_DEFAULT_BASE}]> "),
+            )?;
+            let base = (!base.is_empty() && base != OLLAMA_DEFAULT_BASE).then_some(base);
+            let key = prompt_line(
+                stdin,
+                stdout,
+                "OLLAMA_API_KEY (only for a remote Ollama host, stored in the global Pixel config, never printed; blank for none)> ",
+            )?;
+            let preset = crate::decide_remote::Preset::ClefOllama;
+            store(
+                preset,
+                (!key.is_empty()).then_some(key.as_str()),
+                None,
+                base.as_deref(),
+            )?;
+            writeln!(
+                stdout,
+                "classify engine: remote ({}) — model {DEFAULT_MODEL}{}; run `ollama pull {DEFAULT_MODEL}` if it is not pulled yet",
+                preset.display(),
+                if key.is_empty() { "" } else { ", key stored" }
+            )
+            .map_err(io)
+        }
+        "2" => {
+            let account = prompt_line(stdin, stdout, "Cloudflare account id> ")?;
+            if account.is_empty() || !account.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(
+                    "the Cloudflare account id is alphanumeric (dashboard → Workers AI → account id)"
+                        .to_string(),
+                );
+            }
+            writeln!(stdout, "Clef model:").map_err(io)?;
+            writeln!(stdout, "  [1] {DEFAULT_MODEL} — 9B, latency-first").map_err(io)?;
+            writeln!(stdout, "  [2] clef — 27B, more accurate").map_err(io)?;
+            let model = match prompt_line(stdin, stdout, "Model [1]> ")?.as_str() {
+                "" | "1" => DEFAULT_MODEL.to_string(),
+                "2" => "clef".to_string(),
+                custom => custom.to_string(),
+            };
+            let key = prompt_line(
+                stdin,
+                stdout,
+                "Cloudflare API token with Workers AI access (stored in the global Pixel config, never printed)> ",
+            )?;
+            let preset = crate::decide_remote::Preset::ClefCloudflare;
+            let base = format!("{CLOUDFLARE_DEFAULT_BASE}/accounts/{account}");
+            store(
+                preset,
+                (!key.is_empty()).then_some(key.as_str()),
+                Some(model),
+                Some(&base),
+            )?;
+            if key.is_empty() {
+                writeln!(
+                    stdout,
+                    "classify engine: remote ({}) selected, no token stored — set CLOUDFLARE_API_TOKEN or run `pixel config remote-key {} -` before classifying",
+                    preset.display(),
+                    preset.display()
+                )
+            } else {
+                writeln!(
+                    stdout,
+                    "classify engine: remote ({}) — token stored",
+                    preset.display()
+                )
+            }
+            .map_err(io)
+        }
+        other => Err(format!("unknown Clef-flash host {other:?} (1 or 2)")),
+    }
+}
+
 /// Where the OpenCode subscription serves Jev: the zen host, which proxies
 /// TypeSafe's `/v1/systemone` — verified against the live API (`jev-1.13-free`
 /// answers there; `zen/go/v1` chat rejects every jev model).
@@ -618,6 +862,9 @@ pub fn setup_local(stdout: &mut dyn std::io::Write) -> Result<(), String> {
 trait LocalSetupRuntime {
     fn local_root(&mut self) -> Result<PathBuf, String>;
     fn exists(&self, path: &std::path::Path) -> bool;
+    /// Create a directory (and parents) that the setup needs but the ollaya
+    /// installer does not make — the model store `ollaya pull` writes into.
+    fn create_dir(&mut self, path: &std::path::Path) -> Result<(), String>;
     /// The unpack support the ollaya installer needs, observed on this
     /// machine: `zstd (command present?)`, the platform, and the parsed
     /// `/etc/os-release` when the platform ships one.
@@ -653,6 +900,11 @@ impl LocalSetupRuntime for SystemLocalSetup {
     #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
     fn exists(&self, path: &std::path::Path) -> bool {
         path.exists()
+    }
+
+    #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
+    fn create_dir(&mut self, path: &std::path::Path) -> Result<(), String> {
+        std::fs::create_dir_all(path).map_err(|e| format!("create {}: {e}", path.display()))
     }
 
     #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
@@ -748,6 +1000,13 @@ fn setup_local_with(
         crate::decide_ollaya::DEFAULT_MODEL
     )
     .map_err(|e| e.to_string())?;
+    // `ollaya pull` writes into `OLLAYA_MODELS` but does not create it, and
+    // the ollaya installer does not make it either — on a fresh environment
+    // the pull fails with "No such file or directory" without this. The pull
+    // also expects the `blobs/` and `manifests/` subdirectories to exist.
+    runtime.create_dir(&models)?;
+    runtime.create_dir(&models.join("blobs"))?;
+    runtime.create_dir(&models.join("manifests"))?;
     let bin_str = bin.to_string_lossy().into_owned();
     runtime.run(
         &bin_str,
@@ -755,8 +1014,47 @@ fn setup_local_with(
             "pull".to_string(),
             crate::decide_ollaya::DEFAULT_MODEL.to_string(),
         ],
-        &[("OLLAYA_MODELS".to_string(), models_str.clone())],
+        &[
+            ("OLLAYA_MODELS".to_string(), models_str.clone()),
+            ("OLLAYA_HOST".to_string(), "127.0.0.1:11435".to_string()),
+        ],
     )?;
+
+    // Verify the pull wrote the model into the managed store, not into some
+    // other location picked up by a pre-existing Ollaya server. Ollaya stores
+    // models Ollama-style under `models/manifests/<registry>/<namespace>/<name>/<tag>`,
+    // not as a top-level `models/<name>:<tag>` directory, so check the manifest
+    // that `ollaya pull` actually writes. If the model is missing, recording
+    // the launch would silently select a local engine that has nothing to serve.
+    let (model_name, tag) = crate::decide_ollaya::DEFAULT_MODEL
+        .split_once(':')
+        .unwrap_or((crate::decide_ollaya::DEFAULT_MODEL, "latest"));
+    let manifest_candidates = [
+        models
+            .join("manifests")
+            .join("ollaya.dev")
+            .join("library")
+            .join(model_name)
+            .join(tag),
+        models
+            .join("manifests")
+            .join("registry.ollama.ai")
+            .join("library")
+            .join(model_name)
+            .join(tag),
+    ];
+    let model_dir = manifest_candidates[0].clone();
+    if !manifest_candidates
+        .iter()
+        .any(|candidate| runtime.exists(candidate))
+    {
+        return Err(format!(
+            "ollaya pull reported success but the model manifest {} was not found under {}; \
+             the pull may have written to a different store",
+            model_dir.display(),
+            models.display(),
+        ));
+    }
 
     let launch = json!({
         "base": crate::decide_ollaya::DEFAULT_BASE,
@@ -1012,6 +1310,48 @@ use std::time::Duration;
 mod tests {
     use super::*;
 
+    struct ScopedHome {
+        path: PathBuf,
+        saved: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ScopedHome {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let lock = crate::ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let path = std::env::temp_dir().join(format!(
+                "pixel-openai-setup-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).unwrap();
+            let saved = std::env::var_os("HOME");
+            // SAFETY: ENV_LOCK is held until Drop restores HOME.
+            unsafe { std::env::set_var("HOME", &path) };
+            Self {
+                path,
+                saved,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for ScopedHome {
+        fn drop(&mut self) {
+            // SAFETY: ENV_LOCK is still held and HOME is restored before it drops.
+            unsafe {
+                match &self.saved {
+                    Some(home) => std::env::set_var("HOME", home),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
     /// No-op raw-mode seam: test stdin is a cursor, never a terminal.
     struct FakeRaw;
 
@@ -1036,6 +1376,13 @@ mod tests {
         runs: Vec<RunInvocation>,
         launch: Option<Value>,
         engine_set: bool,
+        created_dirs: Vec<PathBuf>,
+        /// When set, `create_dir` fails with this message — the failure path.
+        create_dir_error: Option<String>,
+        /// Snapshot of `created_dirs` captured when the pull command runs,
+        /// so the test can assert the three required paths existed at pull
+        /// time (issue #407).
+        pull_snapshot: Option<Vec<PathBuf>>,
     }
 
     impl LocalSetupRuntime for FakeLocalSetup {
@@ -1044,7 +1391,26 @@ mod tests {
         }
 
         fn exists(&self, path: &std::path::Path) -> bool {
-            path == self.root.join("bin").join("ollaya") && self.binary_exists
+            let bin_path = self.root.join("bin").join("ollaya");
+            // Recognise the model store and its known subdirectories so the
+            // post-pull verification passes (issue #407).
+            if path == bin_path && self.binary_exists {
+                return true;
+            }
+            self.created_dirs
+                .iter()
+                .any(|d| d == path || path.starts_with(d))
+        }
+
+        fn create_dir(&mut self, path: &std::path::Path) -> Result<(), String> {
+            // The fake does not run a real `ollaya pull`, so the model store only
+            // needs to be recorded: the policy under test is that the directory
+            // is created before the pull is invoked.
+            if let Some(error) = &self.create_dir_error {
+                return Err(error.clone());
+            }
+            self.created_dirs.push(path.to_path_buf());
+            Ok(())
         }
 
         fn unpack_environment(&self) -> UnpackEnvironment {
@@ -1061,6 +1427,12 @@ mod tests {
             args: &[String],
             env: &[(String, String)],
         ) -> Result<(), String> {
+            // Snapshot `created_dirs` when the pull command runs so the test
+            // verifies the three model-store paths existed at pull time
+            // (issue #407).
+            if args.first().is_some_and(|a| a == "pull") {
+                self.pull_snapshot = Some(self.created_dirs.clone());
+            }
             self.runs
                 .push((program.to_string(), args.to_vec(), env.to_vec()));
             self.install_done = true;
@@ -1217,8 +1589,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_setup_rejects_jev_and_local_as_chat_providers() {
-        for provider in ["jev", "local"] {
+    fn remote_setup_rejects_jev_clef_and_local_as_chat_providers() {
+        for provider in ["jev", "local", "clef-ollama", "clef-cloudflare"] {
             let mut input = std::io::Cursor::new(format!("{provider}\n").into_bytes());
             let mut output = Vec::new();
             let error = propose_remote_key_with(&mut input, &mut output, |_, _, _, _| {
@@ -1266,6 +1638,112 @@ mod tests {
                 ))
             );
             assert!(!String::from_utf8(output).unwrap().contains("oc-key"));
+        }
+    }
+
+    type Stored = Option<(
+        crate::decide_remote::Preset,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>;
+
+    fn run_clef_setup(input: &str) -> (Result<(), String>, Stored, String) {
+        let mut stored: Stored = None;
+        let mut output = Vec::new();
+        let result = propose_clef_key_with(
+            &mut std::io::Cursor::new(input.as_bytes().to_vec()),
+            &mut output,
+            |preset, value, model, base| {
+                stored = Some((
+                    preset,
+                    value.map(str::to_string),
+                    model,
+                    base.map(str::to_string),
+                ));
+                Ok(())
+            },
+        );
+        (result, stored, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn clef_setup_stores_a_keyless_local_ollama_with_the_default_base() {
+        for input in ["\n\n\n", "1\nhttp://127.0.0.1:11434\n\n"] {
+            let (result, stored, output) = run_clef_setup(input);
+            result.unwrap();
+            assert_eq!(
+                stored,
+                Some((crate::decide_remote::Preset::ClefOllama, None, None, None))
+            );
+            assert!(output.contains("ollama pull clef-flash"), "{output}");
+            assert!(!output.contains("key stored"), "{output}");
+        }
+    }
+
+    #[test]
+    fn clef_setup_stores_a_remote_ollama_base_and_key_without_echoing_the_key() {
+        let (result, stored, output) = run_clef_setup("1\nhttps://ollama.example\n  ol-secret \n");
+        result.unwrap();
+        assert_eq!(
+            stored,
+            Some((
+                crate::decide_remote::Preset::ClefOllama,
+                Some("ol-secret".to_string()),
+                None,
+                Some("https://ollama.example".to_string())
+            ))
+        );
+        assert!(output.contains("key stored"), "{output}");
+        assert!(!output.contains("ol-secret"), "{output}");
+    }
+
+    #[test]
+    fn clef_setup_folds_the_cloudflare_account_into_the_stored_base() {
+        for (input, model) in [
+            ("2\nacct123\n\ncf-secret\n", "clef-flash"),
+            ("2\nacct123\n2\ncf-secret\n", "clef"),
+            (
+                "2\nacct123\n@cf/cloudflare/clef-flash\ncf-secret\n",
+                "@cf/cloudflare/clef-flash",
+            ),
+        ] {
+            let (result, stored, output) = run_clef_setup(input);
+            result.unwrap();
+            assert_eq!(
+                stored,
+                Some((
+                    crate::decide_remote::Preset::ClefCloudflare,
+                    Some("cf-secret".to_string()),
+                    Some(model.to_string()),
+                    Some("https://api.cloudflare.com/client/v4/accounts/acct123".to_string())
+                )),
+                "{input:?}"
+            );
+            assert!(output.contains("token stored"), "{output}");
+            assert!(!output.contains("cf-secret"), "{output}");
+        }
+    }
+
+    #[test]
+    fn clef_setup_without_a_cloudflare_token_says_which_variable_to_set() {
+        let (result, stored, output) = run_clef_setup("2\nacct123\n1\n\n");
+        result.unwrap();
+        assert_eq!(stored.unwrap().1, None);
+        assert!(output.contains("no token stored"), "{output}");
+        assert!(output.contains("CLOUDFLARE_API_TOKEN"), "{output}");
+    }
+
+    #[test]
+    fn clef_setup_refuses_a_bad_account_id_or_host_before_storing_anything() {
+        for (input, expected) in [
+            ("2\n\n", "alphanumeric"),
+            ("2\nacct/../x\n", "alphanumeric"),
+            ("3\n", "unknown Clef-flash host"),
+        ] {
+            let (result, stored, _) = run_clef_setup(input);
+            assert!(result.unwrap_err().contains(expected), "{input:?}");
+            assert_eq!(stored, None, "{input:?}");
         }
     }
 
@@ -1415,16 +1893,21 @@ mod tests {
             &mut std::io::Cursor::new(Vec::new()),
             &mut output,
             Some("remote".to_string()),
+            Some(crate::decide_remote::Preset::Deepseek),
             |_| panic!("stored setting must not start local setup"),
             |_, _| panic!("stored setting must not prompt for a key"),
+            |_, _| panic!("stored setting must not run the openai flow"),
             |_, _| panic!("stored setting must not prompt for a jev key"),
+            |_, _| panic!("stored setting must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
         )
         .unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("already configured"));
+        // The menu is always offered: the stored row is pre-highlighted and
+        // the empty answer keeps it rather than skipping the question.
+        assert!(output.contains("kept \"remote\""), "{output}");
         // A stored engine still gets the helpers offer.
         assert!(output.contains("helpers proposed"));
 
@@ -1434,9 +1917,12 @@ mod tests {
             &mut std::io::Cursor::new(Vec::new()),
             &mut output,
             None,
+            None,
             |_| panic!("non-interactive install must not start local setup"),
             |_, _| panic!("non-interactive install must not prompt for a key"),
+            |_, _| panic!("non-interactive install must not run the openai flow"),
             |_, _| panic!("non-interactive install must not prompt for a jev key"),
+            |_, _| panic!("non-interactive install must not prompt for a clef key"),
             |_, _| panic!("non-interactive install must not offer helpers"),
             &mut FakeRaw,
             false,
@@ -1454,9 +1940,12 @@ mod tests {
             &mut std::io::Cursor::new(b"1\n".to_vec()),
             &mut output,
             None,
+            None,
             |stdout| writeln!(stdout, "local setup ran").map_err(|e| e.to_string()),
             |_, _| panic!("local choice must not prompt for a remote key"),
+            |_, _| panic!("local choice must not run the openai flow"),
             |_, _| panic!("local choice must not prompt for a jev key"),
+            |_, _| panic!("local choice must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
@@ -1473,13 +1962,16 @@ mod tests {
             &mut std::io::Cursor::new(b"2\nprovider input\n".to_vec()),
             &mut output,
             None,
+            None,
             |_| panic!("remote choice must not start local setup"),
             |stdin, stdout| {
                 let mut provider = String::new();
                 stdin.read_line(&mut provider).map_err(|e| e.to_string())?;
                 writeln!(stdout, "remote key for {}", provider.trim()).map_err(|e| e.to_string())
             },
+            |_, _| panic!("remote choice must not run the openai flow"),
             |_, _| panic!("remote choice must not prompt for a jev key"),
+            |_, _| panic!("remote choice must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
@@ -1495,9 +1987,33 @@ mod tests {
             &mut std::io::Cursor::new(b"3\n".to_vec()),
             &mut output,
             None,
+            None,
+            |_| panic!("openai choice must not start local setup"),
+            |_, _| panic!("openai choice must not ask for a provider"),
+            |_, stdout| writeln!(stdout, "openai prompt ran").map_err(|e| e.to_string()),
+            |_, _| panic!("openai choice must not prompt for a jev key"),
+            |_, _| panic!("openai choice must not prompt for a clef key"),
+            |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("openai prompt ran"));
+        assert!(output.contains("helpers proposed"));
+
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"4\n".to_vec()),
+            &mut output,
+            None,
+            None,
             |_| panic!("jev choice must not start local setup"),
             |_, _| panic!("jev choice must not ask for a provider"),
+            |_, _| panic!("jev choice must not run the openai flow"),
             |_, stdout| writeln!(stdout, "jev key prompt ran").map_err(|e| e.to_string()),
+            |_, _| panic!("jev choice must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
@@ -1507,6 +2023,27 @@ mod tests {
         assert!(output.contains("jev key prompt ran"));
         assert!(output.contains("helpers proposed"));
 
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"5\n".to_vec()),
+            &mut output,
+            None,
+            None,
+            |_| panic!("clef choice must not start local setup"),
+            |_, _| panic!("clef choice must not ask for a provider"),
+            |_, _| panic!("clef choice must not run the openai flow"),
+            |_, _| panic!("clef choice must not prompt for a jev key"),
+            |_, stdout| writeln!(stdout, "clef prompt ran").map_err(|e| e.to_string()),
+            |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("clef prompt ran"));
+        assert!(output.contains("helpers proposed"));
+
         // Skipping the engine (EOF at both pickers) must not offer helpers.
         let mut output = Vec::new();
         install_step_with(
@@ -1514,9 +2051,12 @@ mod tests {
             &mut std::io::Cursor::new(Vec::new()),
             &mut output,
             None,
+            None,
             |_| panic!("a skipped engine must not start local setup"),
             |_, _| panic!("a skipped engine must not prompt for a key"),
+            |_, _| panic!("a skipped engine must not run the openai flow"),
             |_, _| panic!("a skipped engine must not prompt for a jev key"),
+            |_, _| panic!("a skipped engine must not prompt for a clef key"),
             |_, _| panic!("a skipped engine must not offer helpers"),
             &mut FakeRaw,
             false,
@@ -1525,12 +2065,46 @@ mod tests {
         assert!(String::from_utf8(output).unwrap().contains("skipped"));
     }
 
+    #[test]
+    fn install_step_should_persist_openai_preset_and_supplied_key() {
+        let _home = ScopedHome::new();
+        let key = "sk-test-openai-setup-key";
+        let mut stdin = std::io::Cursor::new(format!("3\n{key}\nn\n"));
+        let mut stdout = Vec::new();
+
+        install_step_with(
+            true,
+            &mut stdin,
+            &mut stdout,
+            None,
+            None,
+            setup_local,
+            propose_remote_key,
+            propose_openai_key,
+            propose_jev_key,
+            propose_clef_key,
+            propose_classify_helpers,
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::config_cmd::classify_remote_preset(),
+            Some(crate::decide_remote::Preset::Openai)
+        );
+        assert_eq!(
+            crate::config_cmd::remote_key(crate::decide_remote::Preset::Openai).as_deref(),
+            Some(key)
+        );
+    }
+
     /// The helpers for a scratch home, with Pi's agent directory at its
     /// default place whatever `$PI_CODING_AGENT_DIR` holds.
     fn helpers_at(home: &Path) -> ClassifyHelpers {
         ClassifyHelpers::at(
             home,
-            pixel_install::ClassifyPiPackage::with_agent_dir(home, None, PI_CLASSIFY_EXTENSION),
+            pixel_setup::ClassifyPiPackage::with_agent_dir(home, None, PI_CLASSIFY_EXTENSION),
         )
     }
 
@@ -1570,7 +2144,7 @@ mod tests {
         assert!(!home.join(".devin").exists());
         // The tools ship as Pixel's own Pi package, declared beside the
         // user's packages; nothing lands in Pi's `extensions/`.
-        let package = home.join(pixel_install::CLASSIFY_PACKAGE_DIR);
+        let package = home.join(pixel_setup::CLASSIFY_PACKAGE_DIR);
         assert_eq!(
             fs::read_to_string(package.join("extensions/pixel-classify-files.ts")).unwrap(),
             PI_CLASSIFY_EXTENSION
@@ -1632,7 +2206,7 @@ mod tests {
             fs::read_to_string(home.join(".pi/agent/settings.json")).unwrap(),
             "{ not json"
         );
-        assert!(!home.join(pixel_install::CLASSIFY_PACKAGE_DIR).exists());
+        assert!(!home.join(pixel_setup::CLASSIFY_PACKAGE_DIR).exists());
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -1818,6 +2392,9 @@ mod tests {
             runs: Vec::new(),
             launch: None,
             engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
         };
         let mut output = Vec::new();
 
@@ -1845,6 +2422,13 @@ mod tests {
                 crate::decide_ollaya::DEFAULT_MODEL.to_string()
             ]
         );
+        assert!(
+            runtime.runs[2]
+                .2
+                .iter()
+                .any(|(k, v)| k == "OLLAYA_HOST" && v == "127.0.0.1:11435"),
+            "pull must set OLLAYA_HOST to target the managed server"
+        );
         let launch = runtime.launch.unwrap();
         assert_eq!(
             launch["argv"],
@@ -1856,6 +2440,118 @@ mod tests {
         );
         assert!(runtime.engine_set);
         assert!(String::from_utf8(output).unwrap().contains("auto-start"));
+    }
+
+    /// The model store must exist before `ollaya pull` runs: the ollaya
+    /// installer does not create it and `ollaya pull` does not either, so on
+    /// a fresh environment the pull fails with "No such file or directory"
+    /// unless the setup creates it first (issue #407).
+    #[test]
+    fn local_setup_creates_the_model_store_before_the_pull() {
+        let root = PathBuf::from("/pixel-test/ollaya");
+        let mut runtime = FakeLocalSetup {
+            root: root.clone(),
+            binary_exists: false,
+            installer_creates_binary: true,
+            unpack: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            unpack_after: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            install_done: false,
+            runs: Vec::new(),
+            launch: None,
+            engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
+        };
+        let mut output = Vec::new();
+
+        setup_local_with(&mut runtime, &mut output).unwrap();
+
+        // The model store is created, with the exact path the recorded
+        // launch's OLLAYA_MODELS points at, plus the blobs/ and manifests/
+        // subdirectories that `ollaya pull` expects to already exist.
+        assert_eq!(
+            runtime.created_dirs,
+            vec![
+                root.join("models"),
+                root.join("models/blobs"),
+                root.join("models/manifests")
+            ]
+        );
+        // The pull runs after the create_dir call (the pull is the third
+        // run: curl, sh, pull).
+        assert_eq!(runtime.runs.len(), 3);
+        assert_eq!(runtime.runs[2].1[0], "pull");
+        // Snapshot of created_dirs at pull time must contain the three
+        // required model-store paths (issue #407).
+        let snapshot = runtime
+            .pull_snapshot
+            .as_ref()
+            .expect("pull_snapshot must be set");
+        assert!(
+            snapshot.contains(&root.join("models")),
+            "pull must see models/ created"
+        );
+        assert!(
+            snapshot.contains(&root.join("models/blobs")),
+            "pull must see models/blobs/ created"
+        );
+        assert!(
+            snapshot.contains(&root.join("models/manifests")),
+            "pull must see models/manifests/ created"
+        );
+        let launch = runtime.launch.unwrap();
+        assert_eq!(
+            launch["env"]["OLLAYA_MODELS"],
+            json!(root.join("models").display().to_string())
+        );
+    }
+
+    /// A create_dir failure stops the flow before the pull: a model store
+    /// that cannot be created must not silently produce a broken install.
+    #[test]
+    fn local_setup_reports_a_model_store_that_cannot_be_created() {
+        let root = PathBuf::from("/pixel-test/ollaya");
+        let mut runtime = FakeLocalSetup {
+            root: root.clone(),
+            binary_exists: true,
+            installer_creates_binary: false,
+            unpack: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            unpack_after: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            install_done: false,
+            runs: Vec::new(),
+            launch: None,
+            engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: Some(
+                "create /pixel-test/ollaya/models: Permission denied".to_string(),
+            ),
+            pull_snapshot: None,
+        };
+
+        let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
+
+        assert!(error.contains("create"), "{error}");
+        // The failing create_dir stops the flow: no pull, no launch recorded.
+        assert!(runtime.runs.is_empty());
+        assert!(runtime.launch.is_none());
+        assert!(!runtime.engine_set);
     }
 
     #[test]
@@ -1878,6 +2574,9 @@ mod tests {
             runs: Vec::new(),
             launch: None,
             engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
         };
 
         let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
@@ -1978,6 +2677,9 @@ mod tests {
             runs: Vec::new(),
             launch: None,
             engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
         };
         let mut output = Vec::new();
 
@@ -2016,6 +2718,9 @@ mod tests {
             runs: Vec::new(),
             launch: None,
             engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
         };
 
         let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
@@ -2040,6 +2745,9 @@ mod tests {
             runs: Vec::new(),
             launch: None,
             engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
         };
 
         let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();

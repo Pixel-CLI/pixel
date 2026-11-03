@@ -17,7 +17,7 @@ issue the way GitHub itself understands.
   merges, and `board-sync.yml` reads the same link. A PR that does only part
   of an issue writes `Refs #<number>` instead, so the issue stays open; one
   that closes several lists each (`Closes #1, closes #2`). The branch,
-  commit subjects and the `changelog.d/` fragment may name the issue too;
+  commit subjects and the `.github/changelog.d/` fragment may name the issue too;
   the pull request is one artefact of the task, not the task itself.
 - **The board follows the PR lifecycle, automatically.** The `Status` field
   on project 3 of every issue the PR closes is set from the pull request
@@ -40,3 +40,83 @@ issue the way GitHub itself understands.
   emergency revert may go without an issue; its PR body then has no closing
   keyword and says in a line why no issue was needed. Everything else links
   its issue as above.
+
+## An issue an agent can pick up
+
+When creating or updating an issue, make the following clear. Scale the
+detail to the work: a small fix can cover these points in one paragraph;
+no fixed set of headings is required.
+
+- **Problem and outcome.** What fails or is missing, and what should be
+  true afterwards. Separate observed evidence from suspected causes.
+- **Remaining scope.** Name the unit of work and useful exclusions. An
+  epic links its executable children and states what remains at the parent
+  level; split independently reviewable work before assigning it as one task.
+- **Dependencies and decisions.** Link prerequisites by issue number and
+  say what they must deliver before this work can proceed. State which open
+  decisions the agent may investigate and resolve, and which need a
+  maintainer's decision.
+- **Acceptance and evidence.** Give observable completion criteria and
+  the proof expected (a regression test, CLI output, a report or a capture).
+  For a measured improvement, name the metric, pinned baseline, comparison
+  command and meaningful success threshold, with regression guards where
+  relevant (`measuring.md`). If the threshold is unknown, make establishing
+  it an explicit investigation outcome before promising an implementation.
+- **Starting points.** Link the useful reproduction, report, command,
+  file or symbol. Include the source revision when the evidence depends on
+  it; a complete implementation plan is not required.
+
+When picking an issue, recheck its claims and linked dependencies against
+the current code and PR state. Investigate missing technical details;
+clarify a missing product decision or conflicting acceptance criteria
+before making a dependent change.
+
+When work lands or an issue is split, rewrite the current remaining scope,
+dependencies and acceptance at the top. Keep superseded plans and numbers
+under a clearly marked historical section, so they cannot be mistaken for
+current instructions. Link child issues directly rather than by an informal
+label such as "child 0".
+
+## Install side-build & remote smoke (item #4, sub-task openai-install-smoke)
+
+Recorded procedure, verified live on 2026-10-07:
+
+1. `pixel self-update --dev --repo . --build "cargo build --profile
+   dev-release -p pixel-cli"` — green (~1.2s rebuild, installs
+   `target/dev-release/pixel` to `~/.local/bin/pixel-dev`).
+2. `pixel-dev build-index --history .` (fresh, 2413 commits, 100% diff
+   coverage) then `pixel-dev setup --repo .` — 8 green, 0 yellow, 0 red.
+3. Enter the key at a non-echoing prompt, then pipe it to Pixel's config
+   command (the key is neither a command argument nor printed back):
+
+   ```sh
+   read -rs 'openai_key?OpenAI API key: '
+   printf '\n'
+   printf '%s' "$openai_key" | pixel-dev config remote-key openai -
+   unset openai_key
+   ```
+
+   This writes the key to `~/.pixel/config.yaml` (never the repo).
+4. Live smoke: `pixel-dev classify 'Choose the letter that comes first in
+   the alphabet.' --context 'Classify the text.' --label a --label b
+   --remote-preset openai --engine remote --json` returned
+   `probs {a:0.94, b:0.06}`, `snapshot.provider=openai`,
+   `model=gpt-6-luna` (the openai preset's default model).
+
+Findings from the smoke (candidate edits live in `crates/`, not here):
+
+- The `openai` preset posts to `https://api.openai.com/v1/decisions`
+  (OpenAI's Decisions shape), not `/chat/completions`; a Decisions
+  `refusal` answer surfaces as
+  `remote decisions refused the decision: (no reason given)`.
+- The key itself is valid (`GET /v1/models` → 200; chat completions
+  work), but the account has Decisions access only on `gpt-6-luna`:
+  every other model id (gpt-4o, gpt-5, gpt-5.1, gpt-6.1-sol, …)
+  returns 404 `model_not_found` on `/v1/decisions`.
+- Vague input (`'smoke test'` + context `t`) makes `gpt-6-luna` return a
+  Decisions refusal with no reason; a well-posed question returns a
+  proper `probabilities` distribution. Consider a clearer error hint
+  (input too vague / model lacks Decisions access) in
+  `crates/pixel/src/decide_remote.rs`.
+5. `pixel-dev doctor . --fix --fail-on yellow --skip 'install.*' --skip
+   repo.codex-hook-review` — 17 checks ran, 17 green, 0 yellow, 0 red.

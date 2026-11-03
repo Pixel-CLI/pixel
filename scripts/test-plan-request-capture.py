@@ -16,10 +16,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location('observed', Path(__file__).with_name('bench-plan-observed-corpus.py'))
+spec = importlib.util.spec_from_file_location('observed', Path(__file__).parent / 'bench' / 'bench-plan-observed-corpus.py')
 observed = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(observed)
-RECORDER = Path(__file__).with_name('record-plan-request.py').resolve()
+RECORDER = (Path(__file__).parent / 'bench' / 'record-plan-request.py').resolve()
 record_spec = importlib.util.spec_from_file_location('recorder', RECORDER)
 recorder = importlib.util.module_from_spec(record_spec)
 record_spec.loader.exec_module(recorder)

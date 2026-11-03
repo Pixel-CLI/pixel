@@ -11,6 +11,7 @@
 
 pub mod ask;
 pub mod code_chunks;
+pub mod code_resident;
 pub mod code_search;
 pub mod code_vectors;
 pub mod embed;
@@ -28,9 +29,7 @@ pub mod vector;
 use std::path::{Path, PathBuf};
 
 /// Corpus root: `$PIXEL_RECALL_DIR`, else `~/.local/share/pixel/recall`.
-/// Falls back to the legacy `~/.local/share/gitpixel/recall` path if it
-/// already exists (migration compat). Created on demand with owner-only
-/// permissions — this directory concentrates every transcript on the machine.
+/// Created on demand with owner-only permissions — this directory concentrates every transcript on the machine.
 pub fn recall_dir() -> PathBuf {
     recall_dir_from(
         std::env::var("PIXEL_RECALL_DIR").ok(),
@@ -46,15 +45,7 @@ fn recall_dir_from(override_dir: Option<String>, home: Option<String>) -> PathBu
         return PathBuf::from(dir);
     }
     let home = home.unwrap_or_else(|| ".".to_string());
-    let new_path = PathBuf::from(&home).join(".local/share/pixel/recall");
-    // Migration: if the new path doesn't exist but the legacy gitpixel path
-    // does, keep using the legacy path so existing users don't lose their
-    // corpus. New users get the new path.
-    let legacy_path = PathBuf::from(&home).join(".local/share/gitpixel/recall");
-    if !new_path.exists() && legacy_path.exists() {
-        return legacy_path;
-    }
-    new_path
+    PathBuf::from(&home).join(".local/share/pixel/recall")
 }
 
 /// Ensure the corpus root exists with mode 0700.
@@ -84,35 +75,21 @@ pub fn vectors_dir() -> PathBuf {
 /// Embedding model cache — shared across rebuilds, never inside a repo.
 pub fn models_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let new_path = PathBuf::from(&home).join(".local/share/pixel/models");
-    // Migration: use legacy path if it exists and the new one doesn't.
-    let legacy_path = PathBuf::from(&home).join(".local/share/gitpixel/models");
-    if !new_path.exists() && legacy_path.exists() {
-        return legacy_path;
-    }
-    new_path
+    PathBuf::from(&home).join(".local/share/pixel/models")
 }
-
-/// The marker releases up to 0.4.0 left in [`models_dir`] after any potion
-/// download. It names the last repository downloaded, so the models sharing
-/// the directory overwrote each other's.
-pub const LEGACY_POTION_MARKER: &str = "potion.ok";
 
 /// The marker a finished download of the potion model `repo` leaves under
 /// `models`: one per repository, since several share the directory (the
-/// daemon's `potion-code-64M-v2`, `search-meaning`'s `potion-code-16M-v2`,
+/// code search's `potion-code-16M-v2` shared with the daemon, and
 /// transcript recall's multilingual model).
 pub fn potion_marker(models: &Path, repo: &str) -> PathBuf {
     models.join(format!("potion-{}.ok", repo.replace('/', "--")))
 }
 
 /// Whether the potion model `repo` finished a download under `models`: its
-/// own marker, or the legacy shared one while it still names `repo`, so an
-/// upgrade does not download it again.
+/// own marker is there.
 pub fn potion_cached(models: &Path, repo: &str) -> bool {
     potion_marker(models, repo).is_file()
-        || std::fs::read_to_string(models.join(LEGACY_POTION_MARKER))
-            .is_ok_and(|content| content.trim() == repo)
 }
 
 #[cfg(test)]
@@ -153,18 +130,6 @@ mod potion_marker_tests {
     }
 
     #[test]
-    fn the_legacy_marker_should_count_only_for_the_repository_it_names() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(LEGACY_POTION_MARKER),
-            format!("{CODE_64M}\n"),
-        )
-        .unwrap();
-        assert!(potion_cached(dir.path(), CODE_64M));
-        assert!(!potion_cached(dir.path(), CODE_16M));
-    }
-
-    #[test]
     fn recall_dir_should_read_the_override_then_home() {
         {
             let _guard = crate::testutil::RECALL_DIR_ENV
@@ -199,10 +164,6 @@ mod potion_marker_tests {
         let h = home.path().to_string_lossy().into_owned();
         let fresh = home.path().join(".local/share/pixel/recall");
         assert_eq!(recall_dir_from(Some(String::new()), Some(h.clone())), fresh);
-        let legacy = home.path().join(".local/share/gitpixel/recall");
-        std::fs::create_dir_all(&legacy).unwrap();
-        assert_eq!(recall_dir_from(None, Some(h.clone())), legacy);
-        std::fs::create_dir_all(&fresh).unwrap();
         assert_eq!(recall_dir_from(None, Some(h)), fresh);
     }
 }
@@ -282,5 +243,20 @@ pub(crate) mod testutil {
         store
             .replace_session(&session, &turns, source_session_id, &state())
             .expect("replace_session")
+    }
+}
+
+#[cfg(test)]
+mod audited_path_contract_tests {
+    #[test]
+    fn models_should_live_in_the_shared_user_cache_outside_the_repository() {
+        let actual = super::models_dir();
+        assert!(actual.ends_with(".local/share/pixel/models"));
+        assert_eq!(actual.parent().unwrap().file_name().unwrap(), "pixel");
+        let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+        assert_eq!(
+            actual.strip_prefix(std::path::Path::new(&home)).unwrap(),
+            std::path::Path::new(".local/share/pixel/models")
+        );
     }
 }

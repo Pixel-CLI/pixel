@@ -28,7 +28,7 @@
 //! missing, truncated or altered is an error the caller reports, never a
 //! silent skip; the next write rebuilds the store from the vectors in hand.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -249,6 +249,16 @@ impl Store {
         write_atomically(&self.dir, MANIFEST, &bytes)?;
         self.remove_unlisted(&next);
         Ok(())
+    }
+
+    /// The rows the manifest names across every segment, `None` when the
+    /// store has no readable manifest. No lock is taken and no segment file
+    /// is opened: the manifest is replaced atomically, so a lock-free read
+    /// sees a whole one, old or new. Enough for a "is anything warm" probe,
+    /// not for a load that must count rows under a writer.
+    pub(crate) fn manifest_rows(&self) -> Option<u64> {
+        let manifest = self.read_manifest().ok()??;
+        Some(manifest.rows() as u64)
     }
 
     /// The lock file, locked shared or `exclusive`; released when dropped.
@@ -505,14 +515,17 @@ mod tests {
         let loaded = store.load(&namespace(), 2, &all(&[1]));
         assert!(loaded.vectors.is_empty() && loaded.errors.is_empty());
         assert!(!store.dir.exists(), "a load writes nothing");
-        let vectors = HashMap::from([(1, vec![0.1f32, -2.5e-8]), (2, vec![3.0, 4.0])]);
+        let vectors = HashMap::from_iter([(1, vec![0.1f32, -2.5e-8]), (2, vec![3.0, 4.0])]);
         assert!(
             store
                 .save(&namespace(), 2, &[1, 2], &vectors, 0, false)
                 .unwrap()
         );
         let loaded = store.load(&namespace(), 2, &all(&[1, 7]));
-        assert_eq!(loaded.vectors, HashMap::from([(1, vec![0.1f32, -2.5e-8])]));
+        assert_eq!(
+            loaded.vectors,
+            HashMap::from_iter([(1, vec![0.1f32, -2.5e-8])])
+        );
         assert_eq!(loaded.stored_rows, 2);
         assert!(loaded.errors.is_empty());
         // Another namespace or dimension sees none of it.
@@ -652,7 +665,7 @@ mod tests {
                 // An intact file of another shape and the same byte length:
                 // 1 row × (16 + 4·20) = 2 rows × (16 + 4·8). Only the
                 // header tells it from the two rows the entry announces.
-                let other = HashMap::from([(4, vec![4.0; 20])]);
+                let other = HashMap::from_iter([(4, vec![4.0; 20])]);
                 let written = store
                     .write_segment(&namespace(), 20, &[4], &other)
                     .unwrap()
@@ -673,8 +686,10 @@ mod tests {
         for (label, damage) in damages {
             let (_dir, store) = store();
             let ns = namespace();
-            let vectors: HashMap<ChunkKey, Vec<f32>> =
-                [1, 2, 3].map(|key| (key, vec![key as f32; 8])).into();
+            let vectors: HashMap<ChunkKey, Vec<f32>> = [1, 2, 3]
+                .map(|key| (key, vec![key as f32; 8]))
+                .into_iter()
+                .collect();
             store
                 .commit_with(&ns, 8, &[1], &vectors, false, &mut || {})
                 .unwrap();

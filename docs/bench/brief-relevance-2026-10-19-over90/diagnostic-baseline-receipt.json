@@ -1,0 +1,27 @@
+{
+  "command": [
+    "rtk",
+    "bypass",
+    "python3",
+    "-I",
+    "/Users/livio/Documents/pixel-worktrees/brief-over-90/scripts/bench/tool-census/score_brief.py",
+    "--root",
+    "/tmp/pixel-brief-over-90/baseline-root",
+    "--bin",
+    "/tmp/pixel-brief-coverage-evidence/target/dev-release/pixel",
+    "--label",
+    "baseline45-412d302f",
+    "--probe-home",
+    "/tmp/pixel-brief-over-90/baseline-home",
+    "--questions",
+    "/Users/livio/Documents/pixel-worktrees/brief-over-90/eval/brief-bench/questions.jsonl",
+    "--out",
+    "/tmp/pixel-brief-over-90/runs",
+    "--route",
+    "hook"
+  ],
+  "log": "/tmp/pixel-brief-over-90/baseline45-412d302f.log",
+  "started_unix": 1792410260.538166,
+  "ended_unix": 1792410354.013613,
+  "exit_code": 1
+}

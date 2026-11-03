@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+/// The fixture's "built" binary: an ELF header, since `self-update` refuses
+/// to install a file that does not start like an executable.
+const CANDIDATE: &[u8] = b"\x7fELF candidate fixture bytes\n";
+
 struct Fixture(PathBuf);
 
 impl Fixture {
@@ -17,11 +21,7 @@ impl Fixture {
         for path in ["target/release", "runtime", "home", "other"] {
             std::fs::create_dir_all(root.join(path)).unwrap();
         }
-        std::fs::write(
-            root.join("target/release/pixel"),
-            b"candidate fixture bytes\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("target/release/pixel"), CANDIDATE).unwrap();
         Self(root)
     }
 
@@ -185,7 +185,7 @@ fn upgrade_shutdown_is_scoped_to_selected_repository() {
     );
     assert_eq!(
         std::fs::read(fixture.0.join("installed/pixel")).unwrap(),
-        b"candidate fixture bytes\n"
+        CANDIDATE
     );
 }
 
@@ -284,7 +284,7 @@ fn upgrade_reports_unresponsive_daemon_without_claiming_completion() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         std::fs::read(fixture.0.join("installed/pixel")).unwrap(),
-        b"candidate fixture bytes\n"
+        CANDIDATE
     );
 }
 
@@ -319,10 +319,7 @@ fn upgrade_without_install_path_replaces_the_pixel_on_path() {
         stderr.contains("(first pixel on PATH)"),
         "must say why the path was chosen: {stderr}"
     );
-    assert_eq!(
-        std::fs::read(&managed).unwrap(),
-        b"candidate fixture bytes\n"
-    );
+    assert_eq!(std::fs::read(&managed).unwrap(), CANDIDATE);
     assert_eq!(
         std::fs::read(&shim).unwrap(),
         b"old bytes\n",
@@ -512,10 +509,7 @@ fn upgrade_writes_a_mise_install_when_install_path_is_explicit() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("refusing"), "{stderr}");
     assert!(stderr.contains("Upgrade complete"), "{stderr}");
-    assert_eq!(
-        std::fs::read(&installed).unwrap(),
-        b"candidate fixture bytes\n"
-    );
+    assert_eq!(std::fs::read(&installed).unwrap(), CANDIDATE);
 }
 
 /// The refusal tells the user to run `--dry-run` to see where an upgrade
@@ -560,7 +554,7 @@ fn upgrade_dev_installs_pixel_dev_and_leaves_pixel_alone() {
     assert!(!stderr.contains("warning:"), "{stderr}");
     assert_eq!(
         std::fs::read(fixture.0.join("home/.local/bin/pixel-dev")).unwrap(),
-        b"candidate fixture bytes\n"
+        CANDIDATE
     );
     assert!(!fixture.0.join("home/.local/bin/pixel").exists());
     assert_eq!(std::fs::read(&installed).unwrap(), b"mise 0.2.4 bytes\n");
