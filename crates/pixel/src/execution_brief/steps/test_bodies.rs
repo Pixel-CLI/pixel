@@ -12,9 +12,11 @@
 //! cut at its closing line and at 40 lines. A case scores by the subject
 //! words its name (3x) and body carry (a token that is the word or a simple
 //! inflection of it), each weighted by how few cases carry it; cases under
-//! half the best score, and ranges the brief already quotes, are left out. A
-//! prompt that names one option (`--exec`) keeps only the cases that prove
-//! that exact option. Read-only, deterministic, at most 9 000 characters.
+//! half the best score and ranges the brief already quotes are left out.
+//! Cases named by the brief's `path:line name` inventory bypass that lexical
+//! cutoff and rank first. A prompt that names one option (`--exec`) still
+//! keeps only cases that prove that exact option. Read-only, deterministic,
+//! at most 9 000 characters.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
@@ -97,6 +99,10 @@ static MENTIONED: LazyLock<Regex> = LazyLock::new(|| {
 });
 static QUOTED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^### (\S+?):(\d+)-(\d+)").expect("the quoted-range pattern is a literal")
+});
+static NAMED_TEST: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^(\S+):(\d+)\s+(.+)$")
+        .expect("the named-test pattern is a literal")
 });
 
 /// `word` lowercased with one derivational or plural ending cut.
@@ -301,6 +307,20 @@ fn quoted_ranges(brief: &str) -> BTreeMap<&str, Vec<(usize, usize)>> {
     got
 }
 
+/// Test functions the brief already names, paired with their source path.
+fn named_tests(brief: &str) -> BTreeSet<(&str, usize, &str)> {
+    NAMED_TEST
+        .captures_iter(brief)
+        .filter_map(|captures| {
+            Some((
+                captures.get(1)?.as_str(),
+                captures[2].parse().ok()?,
+                captures.get(3)?.as_str(),
+            ))
+        })
+        .collect()
+}
+
 /// A file of cases: its lines and its cases.
 struct Parsed {
     lines: Vec<String>,
@@ -318,6 +338,7 @@ impl Parsed {
 
 /// A case that may be quoted, with its score and its file's rank.
 struct Candidate<'a> {
+    listed: bool,
     score: f64,
     rank: usize,
     path: &'a str,
@@ -454,6 +475,7 @@ fn quotes(ctx: &Ctx, tracked: &[String], words: &[String]) -> Vec<String> {
     }
 
     let have = quoted_ranges(ctx.brief);
+    let listed = named_tests(ctx.brief);
     let option = requested_option(ctx.prompt);
     let mut df: BTreeMap<&str, usize> = words.iter().map(|word| (word.as_str(), 0)).collect();
     let mut total = 0_usize;
@@ -490,12 +512,19 @@ fn quotes(ctx: &Ctx, tracked: &[String], words: &[String]) -> Vec<String> {
             }
             let text = file.text(*first, *last);
             let exact = exact_option_case(name, option.as_deref(), &text);
+            let already_named = listed.iter().any(|(listed_path, line, listed_name)| {
+                let title_matches = *listed_name == name
+                    || listed_name
+                        .strip_prefix(name.as_str())
+                        .is_some_and(|suffix| suffix.starts_with(" — "));
+                *listed_path == path && title_matches && (*first..=*last).contains(line)
+            });
             let (body, title) = (tokens(&text), tokens(name));
             let support = words
                 .iter()
                 .filter(|word| carries(&title, word) || carries(&body, word))
                 .count();
-            if support < words.len().min(2) && !exact {
+            if support < words.len().min(2) && !exact && !already_named {
                 continue;
             }
             let mut score: f64 = words
@@ -509,8 +538,9 @@ fn quotes(ctx: &Ctx, tracked: &[String], words: &[String]) -> Vec<String> {
             if exact {
                 score = score.max(1.0);
             }
-            if score > 0.0 {
+            if score > 0.0 || already_named {
                 candidates.push(Candidate {
+                    listed: already_named,
                     score,
                     rank,
                     path,
@@ -522,8 +552,9 @@ fn quotes(ctx: &Ctx, tracked: &[String], words: &[String]) -> Vec<String> {
         }
     }
     candidates.sort_by(|x, y| {
-        y.score
-            .total_cmp(&x.score)
+        y.listed
+            .cmp(&x.listed)
+            .then(y.score.total_cmp(&x.score))
             .then(x.rank.cmp(&y.rank))
             .then(x.path.cmp(y.path))
             .then(x.first.cmp(&y.first))
@@ -542,8 +573,13 @@ fn quotes(ctx: &Ctx, tracked: &[String], words: &[String]) -> Vec<String> {
         }
     }
     // The subject's tests, not every test that says "prompt".
-    if let Some(best) = candidates.first().map(|c| c.score) {
-        candidates.retain(|c| c.score >= 0.5 * best);
+    let best = candidates
+        .iter()
+        .map(|candidate| candidate.score)
+        .max_by(f64::total_cmp)
+        .unwrap_or(0.0);
+    if best > 0.0 {
+        candidates.retain(|candidate| candidate.listed || candidate.score >= 0.5 * best);
     }
 
     let mut blocks = Vec::new();

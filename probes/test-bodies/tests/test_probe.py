@@ -168,6 +168,98 @@ fn test_uses_command_override() {
         out = run(root, "where are the tests for the exec option")
         self.assertEqual(headers(out), ["### tests/options.rs:2-5 — test test_uses_command_override"])
 
+        root = repo({"tests/options.rs": '''
+#[test]
+fn test_exec() {
+    run(&["--exec", "echo", "{}"]).assert_stdout("one.txt");
+}
+
+#[test]
+fn test_exec_batch() {
+    run(&["--exec-batch", "echo", "{}"]).assert_stdout("one.txt");
+}
+'''})
+        brief = "\n".join([
+            "### tests matching packet (2 found)",
+            "tests/options.rs:2 test_exec",
+            "tests/options.rs:7 test_exec_batch",
+        ])
+        out = run(root, "where are the tests for the exec option", brief)
+        self.assertEqual(headers(out), ["### tests/options.rs:2-5 — test test_exec"])
+
+    def test_listed_tests_survive_ranking_while_other_matches_keep_the_relative_cutoff(self):
+        root = repo({"tests/options.rs": '''
+#[test]
+fn internal_variant() {
+    run_variant("alpha").assert_code(1);
+}
+
+#[test]
+fn edge_branch() {
+    run_variant("beta").assert_code(2);
+}
+
+#[test]
+fn test_cache_expiration_behaviors_and_assertions() {
+    run_cache_expiration().assert_expired_after_limit();
+}
+
+#[test]
+fn test_cache_is_not_visible_after_reload() {
+    reload_cache().assert_expired();
+}
+'''})
+        brief = "\n".join([
+            "### tests of cache state",
+            "tests/options.rs:2 internal_variant",
+            "tests/options.rs:7 edge_branch",
+        ])
+        out = run(root, "where are the tests for cache expiration behaviors and assertions", brief)
+        self.assertIn("internal_variant", out)
+        self.assertIn("edge_branch", out)
+        self.assertIn("test_cache_expiration_behaviors_and_assertions", out)
+        self.assertNotIn("test_cache_is_not_visible_after_reload", out)
+
+    def test_a_high_scoring_listed_case_does_not_lower_the_unlisted_cutoff(self):
+        source = """def test_cache_expiration_behaviors_and_assertions():
+    run_cache_expiration().assert_expired_after_limit()
+
+def test_cache_reload_expiration():
+    reload_cache().assert_expired()
+"""
+        root = repo({"tests/test_cache.py": source})
+        brief = "tests/test_cache.py:1 test_cache_expiration_behaviors_and_assertions — assertion\n"
+        out = run(root, "where are the tests for cache expiration behaviors and assertions", brief)
+        self.assertIn("test_cache_expiration_behaviors_and_assertions", out)
+        self.assertNotIn("test_cache_reload_expiration", out)
+
+    def test_multiword_javascript_title_named_by_brief_survives_lexical_ranking(self):
+        root = repo({"tests/ui.test.js": "it('keeps query values', () => {\n  expect(renderQuery()).toEqual('x=1');\n});\n"})
+        brief = "tests/ui.test.js:1 keeps query values — expect(renderQuery()).toEqual('x=1')"
+        out = run(root, "where are the tests for orphan handling", brief)
+        self.assertEqual(headers(out), ["### tests/ui.test.js:1-3 — test keeps query values"])
+
+    def test_inventory_line_selects_only_one_duplicate_javascript_title(self):
+        source = """it('keeps query values', () => {
+    expect(renderQuery()).toEqual('x=1');
+});
+
+it('keeps query values', () => {
+    expect(renderQuery()).toEqual('unrelated');
+});
+"""
+        root = repo({"tests/ui.test.js": source})
+        brief = "tests/ui.test.js:1 keeps query values — expect(renderQuery()).toEqual('x=1')\n"
+        out = run(root, "where are the tests for orphan handling", brief)
+        self.assertIn("### tests/ui.test.js:1-3", out)
+        self.assertNotIn("unrelated", out)
+
+    def test_a_javascript_title_with_an_em_dash_matches_the_full_inventory_title(self):
+        root = repo({"tests/ui.test.js": "it('keeps query — values', () => {\n  expect(renderQuery()).toEqual('x=1');\n});\n"})
+        brief = "tests/ui.test.js:1 keeps query — values — expect(renderQuery()).toEqual('x=1')\n"
+        out = run(root, "where are the tests for orphan handling", brief)
+        self.assertEqual(headers(out), ["### tests/ui.test.js:1-3 — test keeps query — values"])
+
     def test_a_js_case_ends_at_its_closing_line_and_the_spec_file_is_found_by_its_path(self):
         spec = ("describe('undo', () => {\n  it('restores the deleted shape on undo', () => {\n    del(shape);\n"
                 "    undo();\n    expect(shapes()).toContain(shape);\n    // The observable behaviours stay stable.\n  });\n\n  it('keeps the colour', () => {\n"
