@@ -152,6 +152,13 @@ def quoted_ranges(brief):
     return got
 
 
+def listed_tests(brief):
+    """Test names in the upstream path:line inventory, paired with their source path."""
+    return {(path, int(line), name) for path, line, name in re.findall(
+        r"^(\S+):(\d+)\s+(.+)$", brief, re.M
+    )}
+
+
 MAX_BYTES = 2_000_000
 
 
@@ -201,6 +208,7 @@ def main():
         if len(files) == 16:
             break
     have = quoted_ranges(brief)
+    listed = listed_tests(brief)
     exact_option = requested_option(prompt)
     cands = []
     df = {w: 0 for w in words}
@@ -225,29 +233,32 @@ def main():
                 continue
             case_text = " ".join(lines[a - 1:b])
             exact_option_match = exact_option_case(name, exact_option, case_text)
+            already_named = any(path == rel and (title == name or title.startswith(name + " — "))
+                                and a <= line <= b
+                                for path, line, title in listed)
             body, title = tokens(case_text), tokens(name)
             support = [w for w in words if carries(title, w) or carries(body, w)]
-            if len(support) < min(2, len(words)) and not exact_option_match:
+            if len(support) < min(2, len(words)) and not exact_option_match and not already_named:
                 continue
             score = sum(idf[w] * (3 * carries(title, w) + carries(body, w)) for w in words)
             if exact_option_match:
                 score = max(score, 1.0)
-            if score <= 0:
+            if score <= 0 and not already_named:
                 continue
-            cands.append((-score, rank, rel, a, b, name))
-    cands.sort()
+            cands.append((already_named, -score, rank, rel, a, b, name))
+    cands.sort(key=lambda candidate: (not candidate[0], *candidate[1:]))
     if exact_option is not None:
-        titled = [candidate for candidate in cands if exact_option_case(candidate[5], exact_option)]
+        titled = [candidate for candidate in cands if exact_option_case(candidate[6], exact_option)]
         if titled:
             cands = titled
         else:
             cands = [candidate for candidate in cands if exact_option_case(
-                candidate[5], exact_option, " ".join(parsed[candidate[2]][0][candidate[3]-1:candidate[4]]))]
+                candidate[6], exact_option, " ".join(parsed[candidate[3]][0][candidate[4]-1:candidate[5]]))]
     if cands:
-        best = -cands[0][0]
-        cands = [c for c in cands if -c[0] >= 0.5 * best]   # the subject's tests, not every test that says "prompt"
+        best = max((-candidate[1] for candidate in cands), default=0)
+        cands = [candidate for candidate in cands if candidate[0] or -candidate[1] >= 0.5 * best]
     out, size = [], 0
-    for _s, _r, rel, a, b, name in cands:
+    for _listed, _s, _r, rel, a, b, name in cands:
         block = [f"### {rel}:{a}-{b} — test {name[:80]}"] + [f"{k}| {lines_k[:160]}" for k, lines_k in
                                                             ((k, parsed[rel][0][k - 1]) for k in range(a, b + 1))]
         text = "\n".join(block)

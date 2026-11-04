@@ -1715,6 +1715,11 @@ An unjudged prompt can use matching probes. A relevance-closed gate permits only
 explicit silence, disabled briefs, and unindexed repositories remain off. Recovery can supply an otherwise empty
 brief without changing its logged relevance verdict. The shipped set includes caller/test evidence, the bodies of the
 test cases a tests question asks about, complete flow bodies, stop-condition evidence, setting application sites, commit patches, and Cargo-member overviews.
+For test-body retrieval, inventories emitted earlier in the brief use `path:line test-name — assertion` entries. The probe
+matches a body by source path, declaration line and title, allowing an explicitly inventoried test to survive the lexical
+relevance cutoff while preserving the normal score cutoff for every other test. Inventory matching does not bypass the
+exact-option filter, so a listed test must still match an explicitly selected operation. This is evidence selection, not
+an assertion that the inventory or retrieved tests are exhaustive.
 Experimental directories are not automatically shipped; the installer tests assert the exact allowlist.
 `probes::merge` folds what they print into the brief: `drop: <regex>` removes the brief's blocks whose header
 matches, `first: <regex>` moves them to the front, lead blocks go before the brief's and append blocks after, one

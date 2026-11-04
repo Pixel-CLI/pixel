@@ -137,6 +137,80 @@ fn a_range_the_brief_already_quotes_is_not_quoted_again() {
 }
 
 #[test]
+fn already_named_cases_survive_ranking_without_keeping_weak_unlisted_matches() {
+    let tests = "#[test]
+fn internal_variant() {
+    run_variant(\"alpha\").assert_code(1);
+}
+
+#[test]
+fn edge_branch() {
+    run_variant(\"beta\").assert_code(2);
+}
+
+#[test]
+fn test_cache_expiration_behaviors_and_assertions() {
+    run_cache_expiration().assert_expired_after_limit();
+}
+
+#[test]
+fn test_cache_reload_expiration() {
+    reload_cache().assert_expired();
+}
+
+#[test]
+fn test_cache_is_not_visible_after_reload() {
+    reload_cache().assert_expired();
+}
+";
+    let dir = repo(&[("tests/options.rs", tests)]);
+    let brief = "### tests of cache state\ntests/options.rs:2 internal_variant\ntests/options.rs:7 edge_branch\ntests/options.rs:12 test_cache_expiration_behaviors_and_assertions\n";
+    let out = ask(
+        dir.path(),
+        "where are the tests for cache expiration behaviors and assertions",
+        brief,
+    );
+    assert!(out.contains("internal_variant"), "{out}");
+    assert!(out.contains("edge_branch"), "{out}");
+    assert!(out.contains("test_cache_expiration_behaviors_and_assertions"), "{out}");
+    assert!(!out.contains("test_cache_is_not_visible_after_reload"), "{out}");
+    assert!(!out.contains("test_cache_reload_expiration"), "{out}");
+}
+
+#[test]
+fn an_existing_multiword_javascript_test_title_bypasses_lexical_ranking() {
+    let tests = "it('keeps query values', () => {\n  expect(renderQuery()).toEqual('x=1');\n});\nit('keeps query values', () => {\n  expect(renderQuery()).toEqual('unrelated');\n});\n";
+    let dir = repo(&[("tests/ui.test.js", tests)]);
+    let brief = "### tests of query state\ntests/ui.test.js:1 keeps query values — expect(renderQuery()).toEqual('x=1')\n";
+    let out = ask(dir.path(), "where are the tests for orphan handling", brief);
+    assert_eq!(
+        headers(&out),
+        ["### tests/ui.test.js:1-3 — test keeps query values"]
+    );
+}
+
+#[test]
+fn a_javascript_title_containing_an_em_dash_matches_its_full_inventory_title() {
+    let tests = "it('keeps query — values', () => {\n  expect(renderQuery()).toEqual('x=1');\n});\n";
+    let dir = repo(&[("tests/ui.test.js", tests)]);
+    let brief = "tests/ui.test.js:1 keeps query — values — expect(renderQuery()).toEqual('x=1')\n";
+    let out = ask(dir.path(), "where are the tests for orphan handling", brief);
+    assert_eq!(
+        headers(&out),
+        ["### tests/ui.test.js:1-3 — test keeps query — values"]
+    );
+}
+
+#[test]
+fn a_rust_inventory_line_selects_only_the_matching_duplicate_test_name() {
+    let tests = "#[test]\nfn shared_name() {\n    route_redirect().assert_location();\n}\n\n#[test]\nfn shared_name() {\n    parse_unrelated().assert_value();\n}\n";
+    let dir = repo(&[("tests/duplicates.rs", tests)]);
+    let brief = "### tests matching redirect\ntests/duplicates.rs:2 shared_name\n";
+    let out = ask(dir.path(), "where are the tests for orphan handling", brief);
+    assert_eq!(headers(&out), ["### tests/duplicates.rs:1-4 — test shared_name"]);
+}
+
+#[test]
 fn a_test_file_the_brief_names_is_read_before_the_others() {
     let other = "def test_redirect_cookie():\n    assert redirect_cookie\n";
     let dir = repo(&[
@@ -178,6 +252,14 @@ fn test_exec_batch() {
     assert_eq!(headers(&exact), ["### tests/options.rs:2-6 — test test_exec"]);
     assert!(exact.contains("--exec\", \"echo\""), "{exact}");
     assert!(!exact.contains("test_exec_batch"), "{exact}");
+
+    let named = ask(
+        dir.path(),
+        "where are the integration tests for the exec option and what behaviours do they cover",
+        "### tests matching packet (2 found)\ntests/options.rs:2 test_exec\ntests/options.rs:8 test_exec_batch\n",
+    );
+    assert_eq!(headers(&named), ["### tests/options.rs:2-6 — test test_exec"]);
+    assert!(!named.contains("test_exec_batch"), "{named}");
 
     let batch = ask(
         dir.path(),
