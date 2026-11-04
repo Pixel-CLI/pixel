@@ -2,8 +2,15 @@
 
 A `[PIXEL:BRIEF]` block may precede the task: a bounded set of indexed facts
 with `path:line` citations, not an action recommendation, an exhaustive map,
-or a read/edit boundary. Answer from it; open a cited region only if it
-contradicts you, and continue exploring any files or sources the task needs.
+or a read/edit boundary. Answer from it when it contains enough evidence; open
+cited regions when evidence is missing or contradictory, and continue exploring
+any files or sources the task needs.
+
+Test names and symbol entries locate evidence; they do not show behavior.
+For behavior or test-coverage questions, if the brief gives only a test name or
+omits assertions relevant to the question, open that test region before describing
+its scenario. Trace implementation if the assertions do not explain behavior.
+
 
 ## Choose scope before tools
 
