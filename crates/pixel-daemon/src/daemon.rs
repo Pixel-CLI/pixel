@@ -14,7 +14,7 @@
 //! is several git commands of up to 120 s each) delays every request queued
 //! behind it, until reads move to replicas (#1087).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -42,6 +42,9 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// fires, and a test loop auto-starts one daemon every few seconds: at the
 /// full `IDLE_TIMEOUT` hundreds pile up and hold gigabytes of RAM.
 const TEMP_IDLE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+/// Maximum distinct paths retained between watcher drains. Beyond this, a
+/// full filesystem reconciliation is smaller and safer than keeping events.
+const MAX_WATCHER_PATHS: usize = 4096;
 
 fn idle_timeout_for(root: &Path, configured: Duration, temp_dir: Option<&Path>) -> Duration {
     match temp_dir {
@@ -300,11 +303,7 @@ enum Msg {
     Request(Request, Reply),
     /// The listener failed; the loop exits as it did on an accept error.
     AcceptFailed,
-    Fs(notify::Event),
-    /// A `notify` callback error, forwarded to the loop (which queues it for
-    /// the corpus) so a watch that stopped reporting is counted and logged
-    /// instead of dropped on the callback thread.
-    WatcherError(String),
+    WatchEvents,
     /// The background watch registration finished: the guard that keeps the
     /// watch alive and what it covers, or why it could not be set up.
     WatchReady(Result<(WatchGuard, WatchReport), String>),
@@ -315,12 +314,209 @@ enum Msg {
     Requeue(Request, Reply),
 }
 
+#[derive(Default)]
+struct WatchState {
+    paths: BTreeMap<PathBuf, bool>,
+    created_dirs: BTreeSet<PathBuf>,
+    git_moved: bool,
+    rescan: bool,
+    error: Option<String>,
+    wake_queued: bool,
+}
+
+#[derive(Default)]
+struct WatchBatch {
+    paths: BTreeMap<PathBuf, bool>,
+    created_dirs: BTreeSet<PathBuf>,
+    git_moved: bool,
+    rescan: bool,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct WatchChanges {
+    pending: BTreeMap<PathBuf, bool>,
+    created: BTreeSet<PathBuf>,
+    flush_at: Option<Instant>,
+    first_pending_at: Option<Instant>,
+}
+
+/// Coalesces watcher callbacks before they enter the loop's request channel.
+#[derive(Clone)]
+struct WatchIngress {
+    root: PathBuf,
+    tx: mpsc::Sender<Msg>,
+    state: Arc<Mutex<WatchState>>,
+}
+
+impl WatchIngress {
+    fn new(root: PathBuf, tx: mpsc::Sender<Msg>) -> Self {
+        Self {
+            root,
+            tx,
+            state: Arc::default(),
+        }
+    }
+
+    fn event(&self, event: notify::Event) {
+        let rescan = event.need_rescan();
+        let git_moved = moves_head(&self.root, &event);
+        let ignored = matches!(
+            event.kind,
+            notify::EventKind::Access(_)
+                | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+        );
+        let removed = matches!(event.kind, notify::EventKind::Remove(_));
+        let may_create_dirs = matches!(
+            event.kind,
+            notify::EventKind::Create(_)
+                | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+        );
+        let relevant = rescan
+            || git_moved
+            || (!ignored
+                && event
+                    .paths
+                    .iter()
+                    .any(|path| !ignored_event_path(&self.root, path)));
+        if !relevant {
+            return;
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.git_moved |= git_moved;
+        let event_overflow = !ignored && !state.rescan && event.paths.len() > MAX_WATCHER_PATHS;
+        if rescan || event_overflow {
+            state.rescan = true;
+            state.paths.clear();
+            state.created_dirs.clear();
+        } else if !ignored && !state.rescan {
+            for path in event.paths {
+                if ignored_event_path(&self.root, &path) {
+                    continue;
+                }
+                state.paths.insert(path.clone(), removed);
+                if may_create_dirs {
+                    state.created_dirs.insert(path);
+                }
+                if state.paths.len() > MAX_WATCHER_PATHS {
+                    state.rescan = true;
+                    state.paths.clear();
+                    state.created_dirs.clear();
+                    break;
+                }
+            }
+        }
+        self.wake(&mut state);
+    }
+
+    fn error(&self, error: String) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.error = Some(error);
+        state.rescan = true;
+        state.paths.clear();
+        state.created_dirs.clear();
+        self.wake(&mut state);
+    }
+
+    fn wake(&self, state: &mut WatchState) {
+        if !state.wake_queued {
+            state.wake_queued = true;
+            let _ = self.tx.send(Msg::WatchEvents);
+        }
+    }
+
+    fn take(&self) -> WatchBatch {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.wake_queued = false;
+        WatchBatch {
+            paths: std::mem::take(&mut state.paths),
+            created_dirs: std::mem::take(&mut state.created_dirs),
+            git_moved: std::mem::take(&mut state.git_moved),
+            rescan: std::mem::take(&mut state.rescan),
+            error: state.error.take(),
+        }
+    }
+}
+
+fn ignored_event_path(root: &Path, path: &Path) -> bool {
+    let root_git_exclude = path
+        .strip_prefix(root)
+        .is_ok_and(|relative| relative == Path::new(".git/info/exclude"));
+    let judged = path.strip_prefix(root).unwrap_or(path);
+    !root_git_exclude
+        && judged.components().any(|component| match component {
+            Component::Normal(name) => is_ignored_dir(name),
+            _ => false,
+        })
+}
+
+fn collect_watch_events(
+    ingress: &WatchIngress,
+    service: &mut dyn Corpus,
+    watcher: &mut Option<WatchGuard>,
+    rescan_watch_when_ready: &mut bool,
+    changes: &mut WatchChanges,
+) {
+    let batch = ingress.take();
+    if let Some(error) = batch.error {
+        service.watcher_error(&error);
+    }
+    if batch.git_moved {
+        service.git_moved();
+    }
+    let mut rescan = batch.rescan;
+    if !rescan {
+        for dir in batch.created_dirs.into_iter().filter(|dir| dir.is_dir()) {
+            changes.created.insert(dir);
+            if changes.created.len() > MAX_WATCHER_PATHS {
+                rescan = true;
+                break;
+            }
+        }
+    }
+    let mut recorded = false;
+    if !rescan {
+        for (path, removed) in batch.paths {
+            if path.is_dir() {
+                continue;
+            }
+            changes
+                .pending
+                .insert(path.clone(), removed || !path.exists());
+            recorded = true;
+            if changes.pending.len() > MAX_WATCHER_PATHS {
+                rescan = true;
+                break;
+            }
+        }
+    }
+    if rescan {
+        changes.pending.clear();
+        changes.created.clear();
+        changes.flush_at = None;
+        changes.first_pending_at = None;
+        if let Some(watch) = watcher {
+            if let Err(error) = watch.reconcile() {
+                service.watcher_error(&error);
+            }
+        } else {
+            *rescan_watch_when_ready = true;
+        }
+        service.watcher_rescan();
+        return;
+    }
+    if recorded {
+        arm_flush(&mut changes.flush_at, &mut changes.first_pending_at);
+    }
+}
+
 /// What the loop hands the writer, in the order it decided it. The writer
 /// runs one job at a time, so the order the loop sees (a watcher batch, then
 /// the request that followed it) is the order the corpus sees.
 enum Job {
     /// A watcher batch.
     Apply(Vec<(PathBuf, bool)>),
+    WatchRescan,
     Serve(Request, Reply),
     GitMoved,
     WatcherError(String),
@@ -332,7 +528,10 @@ impl Job {
     /// The job changes what a read answers (the index, or HEAD and the
     /// branch a snapshot names): no read may overtake it.
     fn refreshes(&self) -> bool {
-        matches!(self, Job::Apply(_) | Job::GitMoved | Job::WatchReady(_))
+        matches!(
+            self,
+            Job::Apply(_) | Job::WatchRescan | Job::GitMoved | Job::WatchReady(_)
+        )
     }
 }
 
@@ -342,13 +541,22 @@ pub(crate) const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// A registered watch, alive for as long as the loop holds it.
 trait Watch: Send {
     /// Start watching `dir`, a directory that appeared after registration,
-    /// and the directories under it that are not ignored; return the files
-    /// already inside, whose creation no watch could see.
+    /// and the directories under it that are not ignored; return the bounded
+    /// file list already inside, whose creation no watch could see.
     ///
     /// # Errors
     ///
     /// The backend refused a watch (an exhausted inotify `max_user_watches`).
-    fn extend(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String>;
+    fn extend(&mut self, dir: &Path) -> Result<WatchExtension, String>;
+    fn reconcile(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct WatchExtension {
+    files: Vec<PathBuf>,
+    overflowed: bool,
 }
 
 /// Keeps a registered watch alive for as long as the loop holds it.
@@ -383,8 +591,7 @@ pub struct WatchReport {
 /// channel. Runs off the serving thread, so a slow registration never delays
 /// an answer (11 515 `node_modules` directories once made a repository wait
 /// 11 to 28 s for its first one).
-type Registrar =
-    Box<dyn FnOnce(Vec<PathBuf>, mpsc::Sender<Msg>) -> Result<Registered, String> + Send>;
+type Registrar = Box<dyn FnOnce(Vec<PathBuf>, WatchIngress) -> Result<Registered, String> + Send>;
 
 /// A corpus a daemon can serve: the repo `Service`, or the machine-wide
 /// transcript recall service. The transport (socket, watcher, debounce,
@@ -437,6 +644,9 @@ pub trait Corpus {
     /// Periodic maintenance, called every `sweep_interval` from the loop
     /// thread (default: nothing).
     fn sweep(&mut self) {}
+    /// Rebuild the corpus's watched state after the backend reports lost
+    /// events or ingress exceeds its bounded path budget (default: nothing).
+    fn watcher_rescan(&mut self) {}
     /// The watch is registered and reporting, as `report` describes. Changes
     /// made while it was being set up were not observed, so a corpus that can
     /// list its changed files re-reads them here (default: nothing).
@@ -488,6 +698,22 @@ impl Corpus for Service {
 
     fn watcher_error(&mut self, error: &str) {
         self.note_watcher_error(error);
+    }
+
+    fn watcher_rescan(&mut self) {
+        let root = Service::root(self).to_path_buf();
+        let mut paths = pixel_index::index::policy_file_paths(&root);
+        paths.extend(self.admitted_paths());
+        let changes: Vec<(PathBuf, bool)> = paths
+            .into_iter()
+            .map(|relative| {
+                let abs = root.join(relative);
+                let removed = !abs.exists();
+                (abs, removed)
+            })
+            .collect();
+        self.apply_changes(&changes);
+        self.catch_up_head();
     }
 
     fn git_moved(&mut self) {
@@ -634,14 +860,10 @@ pub fn run_corpus(service: impl Corpus) -> Result<(), ServeError> {
 /// The platform watcher, forwarding events and backend errors into the
 /// loop's channel.
 #[cfg_attr(test, mutants::skip)] // adapter over the notify backend; the loop's handling is tested
-fn forwarding_watcher(tx: mpsc::Sender<Msg>) -> Result<notify::RecommendedWatcher, String> {
-    notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        let msg = match res {
-            Ok(ev) => Msg::Fs(ev),
-            Err(error) => Msg::WatcherError(error.to_string()),
-        };
-        // The only send failure is a dropped receiver: the loop is exiting.
-        let _ = tx.send(msg);
+fn forwarding_watcher(ingress: WatchIngress) -> Result<notify::RecommendedWatcher, String> {
+    notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
+        Ok(event) => ingress.event(event),
+        Err(error) => ingress.error(error.to_string()),
     })
     .map_err(|e| format!("watcher init: {e}"))
 }
@@ -653,8 +875,8 @@ struct RecursiveWatch(
 );
 
 impl Watch for RecursiveWatch {
-    fn extend(&mut self, _dir: &Path) -> Result<Vec<PathBuf>, String> {
-        Ok(Vec::new())
+    fn extend(&mut self, _dir: &Path) -> Result<WatchExtension, String> {
+        Ok(WatchExtension::default())
     }
 }
 
@@ -663,9 +885,9 @@ impl Watch for RecursiveWatch {
 #[cfg_attr(test, mutants::skip)] // adapter over the notify backend; the loop's handling is tested
 fn register_recursive_watch(
     paths: Vec<PathBuf>,
-    tx: mpsc::Sender<Msg>,
+    ingress: WatchIngress,
 ) -> Result<Registered, String> {
-    let mut watcher = forwarding_watcher(tx)?;
+    let mut watcher = forwarding_watcher(ingress)?;
     for path in &paths {
         watcher
             .watch(path, RecursiveMode::Recursive)
@@ -685,19 +907,66 @@ fn register_recursive_watch(
 struct PrunedWatch {
     watcher: notify::RecommendedWatcher,
     roots: Vec<PathBuf>,
+    dirs: BTreeMap<PathBuf, (u64, u64)>,
 }
 
 impl Watch for PrunedWatch {
-    fn extend(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String> {
+    fn extend(&mut self, dir: &Path) -> Result<WatchExtension, String> {
         let Some(root) = self.roots.iter().find(|root| dir.starts_with(root)) else {
-            return Ok(Vec::new());
+            return Ok(WatchExtension::default());
         };
         if ignored_below(root, dir) || !dir.is_dir() {
-            return Ok(Vec::new());
+            return Ok(WatchExtension::default());
         }
         let tree = unignored_tree(dir, true);
-        watch_each(&mut self.watcher, &tree.dirs)?;
-        Ok(tree.files)
+        for dir in watch_each(&mut self.watcher, &tree.dirs)? {
+            if let Some(identity) = directory_identity(&dir) {
+                self.dirs.insert(dir, identity);
+            }
+        }
+        Ok(WatchExtension {
+            files: tree.files,
+            overflowed: tree.files_overflow,
+        })
+    }
+
+    fn reconcile(&mut self) -> Result<(), String> {
+        let current: BTreeMap<PathBuf, (u64, u64)> = pruned_watch_dirs(&self.roots)
+            .into_iter()
+            .filter_map(|dir| directory_identity(&dir).map(|identity| (dir, identity)))
+            .collect();
+        let replaced: Vec<PathBuf> = self
+            .dirs
+            .iter()
+            .filter(|(path, identity)| current.get(*path) != Some(*identity))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for dir in replaced {
+            if let Err(error) = self.watcher.unwatch(&dir)
+                && !matches!(error.kind, notify::ErrorKind::WatchNotFound)
+                && !vanished(&error)
+            {
+                return Err(format!("unwatch {}: {error}", dir.display()));
+            }
+            self.dirs.remove(&dir);
+        }
+        let missing: Vec<PathBuf> = current
+            .iter()
+            .filter(|(path, identity)| self.dirs.get(*path) != Some(*identity))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for dir in missing {
+            match self.watcher.watch(&dir, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    if let Some(identity) = current.get(&dir) {
+                        self.dirs.insert(dir, *identity);
+                    }
+                }
+                Err(error) if vanished(&error) => {}
+                Err(error) => return Err(format!("watch {}: {error}", dir.display())),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -708,17 +977,23 @@ impl Watch for PrunedWatch {
 /// fails, leaving the daemon without live updates. The `.git` directories
 /// of `GIT_WATCHED_DIRS` are watched as well.
 #[cfg_attr(test, mutants::skip)] // the walk and the extension are tested; this joins them to the backend
-fn register_pruned_watch(paths: Vec<PathBuf>, tx: mpsc::Sender<Msg>) -> Result<Registered, String> {
-    let mut watcher = forwarding_watcher(tx)?;
+fn register_pruned_watch(paths: Vec<PathBuf>, ingress: WatchIngress) -> Result<Registered, String> {
+    let mut watcher = forwarding_watcher(ingress.clone())?;
     let dirs = pruned_watch_dirs(&paths);
     let watched = watch_each(&mut watcher, &dirs)?;
     let git_dir = paths.iter().any(|root| dirs.contains(&root.join(".git")));
+    let dir_count = watched.len();
+    let watched: BTreeMap<PathBuf, (u64, u64)> = watched
+        .into_iter()
+        .filter_map(|path| directory_identity(&path).map(|identity| (path, identity)))
+        .collect();
     Ok(Registered {
         guard: Box::new(PrunedWatch {
             watcher,
             roots: paths,
+            dirs: watched.into_iter().collect(),
         }),
-        dirs: watched,
+        dirs: dir_count,
         recursive: false,
         git_dir,
     })
@@ -746,12 +1021,12 @@ const GIT_WATCHED_DIRS: [&str; 3] = ["", "info", "logs"];
 
 /// Add one non-recursive watch per directory in a single backend commit;
 /// return how many hold one. A directory removed since the walk is skipped.
-fn watch_each(watcher: &mut impl Watcher, dirs: &[PathBuf]) -> Result<usize, String> {
+fn watch_each(watcher: &mut impl Watcher, dirs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut paths = watcher.paths_mut();
-    let mut watched = 0;
+    let mut watched = Vec::with_capacity(dirs.len());
     for dir in dirs {
         match paths.add(dir, RecursiveMode::NonRecursive) {
-            Ok(()) => watched += 1,
+            Ok(()) => watched.push(dir.clone()),
             Err(error) if vanished(&error) => {}
             Err(error) => return Err(format!("watch {}: {error}", dir.display())),
         }
@@ -777,6 +1052,8 @@ struct Tree {
     dirs: Vec<PathBuf>,
     /// The regular files in those directories, when asked for.
     files: Vec<PathBuf>,
+    /// More files existed than the bounded extension list can retain.
+    files_overflow: bool,
 }
 
 /// Walk `top` without descending into an ignored directory.
@@ -784,6 +1061,7 @@ fn unignored_tree(top: &Path, with_files: bool) -> Tree {
     let mut tree = Tree {
         dirs: vec![top.to_path_buf()],
         files: Vec::new(),
+        files_overflow: false,
     };
     let mut stack = vec![top.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -800,7 +1078,11 @@ fn unignored_tree(top: &Path, with_files: bool) -> Tree {
                     stack.push(entry.path());
                 }
             } else if with_files && kind.is_file() {
-                tree.files.push(entry.path());
+                if tree.files.len() < MAX_WATCHER_PATHS {
+                    tree.files.push(entry.path());
+                } else {
+                    tree.files_overflow = true;
+                }
             }
         }
     }
@@ -866,6 +1148,7 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
     );
 
     let (tx, rx) = mpsc::channel::<Msg>();
+    let ingress = WatchIngress::new(root.clone(), tx.clone());
     let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
     let busy = Arc::new(Busy::default());
     let replicas: Option<Vec<Box<dyn ReadReplica>>> =
@@ -883,6 +1166,7 @@ fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), 
         pong: service.pong(),
         tx: tx.clone(),
         rx,
+        ingress,
         writer: Queued::new(service.root().to_path_buf(), jobs_tx, Arc::clone(&busy)),
         readers,
     };
@@ -910,6 +1194,7 @@ struct Lane {
     pong: Option<Response>,
     tx: mpsc::Sender<Msg>,
     rx: mpsc::Receiver<Msg>,
+    ingress: WatchIngress,
     writer: Queued,
     /// Answer reads while the writer is busy.
     readers: Readers,
@@ -923,6 +1208,7 @@ fn run_writer(service: &mut dyn Corpus, jobs: &mpsc::Receiver<Job>, busy: &Busy)
         let apply = job.refreshes();
         match job {
             Job::Apply(batch) => service.apply_changes(&batch),
+            Job::WatchRescan => service.watcher_rescan(),
             Job::Serve(req, reply) => {
                 // The client may have gone: its answer has nowhere to go.
                 let response = if reply.expired() {
@@ -1027,6 +1313,10 @@ impl Corpus for Queued {
         self.send(Job::Sweep);
     }
 
+    fn watcher_rescan(&mut self) {
+        self.send(Job::WatchRescan);
+    }
+
     fn watch_ready(&mut self, report: &WatchReport) {
         self.send(Job::WatchReady(*report));
     }
@@ -1054,6 +1344,7 @@ fn run_loop(lane: Lane) {
         pong,
         tx,
         rx,
+        ingress,
         writer: mut service,
         readers,
     } = lane;
@@ -1067,14 +1358,15 @@ fn run_loop(lane: Lane) {
     // through the same channel: a watch that stopped reporting is exactly
     // the failure that leaves the index stale, so it must not be dropped.
     let mut watcher: Option<WatchGuard> = None;
-    // Directories created since the last pass, extended into the watch
-    // (held until it is registered).
-    let mut created: Vec<PathBuf> = Vec::new();
+    let mut rescan_watch_when_ready = false;
+    // Directories created since the last pass and pending content changes.
+    let mut changes = WatchChanges::default();
     if !watch_paths.is_empty() {
+        let watch_ingress = ingress.clone();
         let tx_watch = tx.clone();
         std::thread::spawn(move || {
             let started = Instant::now();
-            let ready = register(watch_paths, tx_watch.clone()).map(|registered| {
+            let ready = register(watch_paths, watch_ingress).map(|registered| {
                 let report = WatchReport {
                     dirs: registered.dirs,
                     recursive: registered.recursive,
@@ -1088,17 +1380,13 @@ fn run_loop(lane: Lane) {
     }
     drop(tx);
 
-    // absolute path -> removed?
-    let mut pending: BTreeMap<PathBuf, bool> = BTreeMap::new();
-    let mut flush_at: Option<Instant> = None;
-    let mut first_pending_at = None;
     let mut last_activity = Instant::now();
     let mut shutdown = false;
     let mut next_sweep = sweep_every.map(|every| Instant::now() + every);
 
     // Compared on every pass: a directory swapped in at the same path must
     // stop this daemon as surely as a deleted one.
-    let opened_root = root_identity(&root);
+    let opened_root = directory_identity(&root);
     let idle_timeout = idle_timeout_for(
         &root,
         IDLE_TIMEOUT,
@@ -1109,7 +1397,7 @@ fn run_loop(lane: Lane) {
         let idle_left = idle_timeout
             .checked_sub(now.duration_since(last_activity))
             .unwrap_or(Duration::ZERO);
-        let timeout = match flush_at {
+        let timeout = match changes.flush_at {
             Some(at) => at.saturating_duration_since(now).min(idle_left),
             None => idle_left,
         }
@@ -1139,41 +1427,39 @@ fn run_loop(lane: Lane) {
                         Msg::Request(req, reply) => requests.push((req, reply)),
                         Msg::Requeue(req, reply) => service.serve(req, reply),
                         Msg::AcceptFailed | Msg::WriterGone => failed = true,
-                        Msg::Fs(ev) => {
-                            if moves_head(&root, &ev) {
-                                service.git_moved();
-                            }
-                            note_event(
-                                &root,
-                                &ev,
-                                &mut pending,
-                                &mut flush_at,
-                                &mut first_pending_at,
-                            );
-                            created.extend(created_dirs(&ev));
-                        }
-                        Msg::WatcherError(error) => service.watcher_error(&error),
+                        Msg::WatchEvents => collect_watch_events(
+                            &ingress,
+                            &mut service,
+                            &mut watcher,
+                            &mut rescan_watch_when_ready,
+                            &mut changes,
+                        ),
                         Msg::WatchReady(ready) => {
                             watcher = watch_ready(&mut service, ready);
+                            reconcile_watch_when_ready(
+                                &mut service,
+                                &mut watcher,
+                                &mut rescan_watch_when_ready,
+                            );
                         }
                     }
                 }
                 extend_watch(
                     watcher.as_mut(),
-                    &mut created,
+                    &mut changes.created,
                     &mut service,
-                    &mut pending,
-                    &mut flush_at,
-                    &mut first_pending_at,
+                    &mut changes.pending,
+                    &mut changes.flush_at,
+                    &mut changes.first_pending_at,
                 );
                 // Queue the debounced batch ahead of the requests: the
                 // debounce coalesces bursts between requests, it must not
                 // let a request read the index from before a mutation.
                 flush_pending(
                     &mut service,
-                    &mut pending,
-                    &mut flush_at,
-                    &mut first_pending_at,
+                    &mut changes.pending,
+                    &mut changes.flush_at,
+                    &mut changes.first_pending_at,
                 );
                 for (req, reply) in requests {
                     // Nothing after a shutdown is served; dropping `reply`
@@ -1200,40 +1486,40 @@ fn run_loop(lane: Lane) {
                 break;
             }
             Ok(Msg::Requeue(req, reply)) => service.serve(req, reply),
-            Ok(Msg::Fs(ev)) => {
-                if moves_head(&root, &ev) {
-                    service.git_moved();
-                }
-                note_event(
-                    &root,
-                    &ev,
-                    &mut pending,
-                    &mut flush_at,
-                    &mut first_pending_at,
+            Ok(Msg::WatchEvents) => collect_watch_events(
+                &ingress,
+                &mut service,
+                &mut watcher,
+                &mut rescan_watch_when_ready,
+                &mut changes,
+            ),
+            Ok(Msg::WatchReady(ready)) => {
+                watcher = watch_ready(&mut service, ready);
+                reconcile_watch_when_ready(
+                    &mut service,
+                    &mut watcher,
+                    &mut rescan_watch_when_ready,
                 );
-                created.extend(created_dirs(&ev));
             }
-            Ok(Msg::WatcherError(error)) => service.watcher_error(&error),
-            Ok(Msg::WatchReady(ready)) => watcher = watch_ready(&mut service, ready),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         extend_watch(
             watcher.as_mut(),
-            &mut created,
+            &mut changes.created,
             &mut service,
-            &mut pending,
-            &mut flush_at,
-            &mut first_pending_at,
+            &mut changes.pending,
+            &mut changes.flush_at,
+            &mut changes.first_pending_at,
         );
 
-        if let Some(at) = flush_at
+        if let Some(at) = changes.flush_at
             && Instant::now() >= at
         {
             flush_pending(
                 &mut service,
-                &mut pending,
-                &mut flush_at,
-                &mut first_pending_at,
+                &mut changes.pending,
+                &mut changes.flush_at,
+                &mut changes.first_pending_at,
             );
         }
 
@@ -1295,6 +1581,23 @@ fn watch_ready(
             None
         }
     }
+}
+
+fn reconcile_watch_when_ready(
+    service: &mut dyn Corpus,
+    watcher: &mut Option<WatchGuard>,
+    needed: &mut bool,
+) {
+    if !*needed {
+        return;
+    }
+    let Some(watch) = watcher else {
+        return;
+    };
+    if let Err(error) = watch.reconcile() {
+        service.watcher_error(&error);
+    }
+    *needed = false;
 }
 
 /// Accept connections on a blocking listener and give each one a connection
@@ -1439,9 +1742,9 @@ fn stop_acceptor(
     acceptor.join().is_ok()
 }
 
-/// The `(device, inode)` of the served root when it is a directory, `None`
-/// when it is gone or is no longer a directory.
-fn root_identity(root: &Path) -> Option<(u64, u64)> {
+/// The `(device, inode)` of an existing directory, `None` when it is gone or
+/// is no longer a directory.
+fn directory_identity(root: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(root)
         .ok()
@@ -1456,67 +1759,7 @@ fn root_identity(root: &Path) -> Option<(u64, u64)> {
 /// that no longer exists at that path, so the loop exits and releases the
 /// socket, pid and lock; the next hook starts a daemon on the new tree.
 fn root_replaced(root: &Path, opened: Option<(u64, u64)>) -> bool {
-    opened.is_none() || root_identity(root) != opened
-}
-
-/// Record one watcher event as a pending change, when it is one.
-///
-/// A read is not: `notify`'s inotify backend (the Linux one) reports an
-/// `Access` event for every open (IN_OPEN) and read-only close
-/// (IN_CLOSE_NOWRITE) of a watched file, so the daemon's own extraction pass
-/// — or any `cat`, editor or grep — would mark every file it read as
-/// changed, and the batch the loop applies before the next request would
-/// move the index counters for a repository nobody edited. Metadata-only
-/// events (a `chmod`, a `touch`) cannot change an answer either. Every event
-/// that can change content (create, modify data or name, remove) is still
-/// recorded.
-fn record_event(root: &Path, ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) -> bool {
-    if matches!(
-        ev.kind,
-        notify::EventKind::Access(_)
-            | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
-    ) {
-        return false;
-    }
-    let mut recorded = false;
-    for path in &ev.paths {
-        let root_git_exclude = path
-            .strip_prefix(root)
-            .is_ok_and(|relative| relative == Path::new(".git/info/exclude"));
-        // Only the components below the root: a repository that lives under
-        // `~/.cache/` or `~/code/build/` is not itself ignored (#1194). A
-        // path outside the root is judged whole, as before.
-        let judged = path.strip_prefix(root).unwrap_or(path);
-        if !root_git_exclude
-            && judged.components().any(|c| match c {
-                Component::Normal(name) => is_ignored_dir(name),
-                _ => false,
-            })
-        {
-            continue;
-        }
-        if path.is_dir() {
-            continue;
-        }
-        let removed = matches!(ev.kind, notify::EventKind::Remove(_)) || !path.exists();
-        // A later create/modify wins over an earlier remove and vice versa.
-        pending.insert(path.clone(), removed);
-        recorded = true;
-    }
-    recorded
-}
-
-/// Only recorded events move the quiet deadline, capped from the first pending event.
-fn note_event(
-    root: &Path,
-    ev: &notify::Event,
-    pending: &mut BTreeMap<PathBuf, bool>,
-    flush_at: &mut Option<Instant>,
-    first_pending_at: &mut Option<Instant>,
-) {
-    if record_event(root, ev, pending) {
-        arm_flush(flush_at, first_pending_at);
-    }
+    opened.is_none() || directory_identity(root) != opened
 }
 
 /// An event that moved HEAD or a branch of the repository at `root`: a
@@ -1550,26 +1793,13 @@ fn arm_flush(flush_at: &mut Option<Instant>, first_pending_at: &mut Option<Insta
     *flush_at = Some((now + DEBOUNCE).min(first + MAX_PENDING_WAIT));
 }
 
-/// The directories an event created or moved in: a per-directory watch does
-/// not see inside them until it is extended to them.
-fn created_dirs(ev: &notify::Event) -> Vec<PathBuf> {
-    if !matches!(
-        ev.kind,
-        notify::EventKind::Create(_)
-            | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-    ) {
-        return Vec::new();
-    }
-    ev.paths.iter().filter(|p| p.is_dir()).cloned().collect()
-}
-
 /// Extend the watch to the directories created since the last call, and
 /// record the files already inside them as pending changes: they were
 /// written before any watch could see them. Without a watch yet, the
 /// directories wait for it.
 fn extend_watch(
     watch: Option<&mut WatchGuard>,
-    created: &mut Vec<PathBuf>,
+    created: &mut BTreeSet<PathBuf>,
     service: &mut impl Corpus,
     pending: &mut BTreeMap<PathBuf, bool>,
     flush_at: &mut Option<Instant>,
@@ -1579,16 +1809,36 @@ fn extend_watch(
         return;
     };
     let mut recorded = false;
+    let mut needs_rescan = false;
     for dir in std::mem::take(created) {
         match watch.extend(&dir) {
-            Ok(files) => {
-                for file in files {
+            Ok(extension) => {
+                if extension.overflowed {
+                    needs_rescan = true;
+                    continue;
+                }
+                for file in extension.files {
+                    if pending.len() >= MAX_WATCHER_PATHS && !pending.contains_key(&file) {
+                        needs_rescan = true;
+                        break;
+                    }
                     pending.insert(file, false);
                     recorded = true;
                 }
             }
             Err(error) => service.watcher_error(&error),
         }
+    }
+    if needs_rescan {
+        pending.clear();
+        created.clear();
+        *flush_at = None;
+        *first_pending_at = None;
+        if let Err(error) = watch.reconcile() {
+            service.watcher_error(&error);
+        }
+        service.watcher_rescan();
+        return;
     }
     if recorded {
         arm_flush(flush_at, first_pending_at);
@@ -1865,8 +2115,8 @@ mod tests {
 
     /// A watch that covers nothing: the loop tests drive events by hand.
     impl Watch for () {
-        fn extend(&mut self, _dir: &Path) -> Result<Vec<PathBuf>, String> {
-            Ok(Vec::new())
+        fn extend(&mut self, _dir: &Path) -> Result<WatchExtension, String> {
+            Ok(WatchExtension::default())
         }
     }
 
@@ -2162,7 +2412,7 @@ mod tests {
             .add_path(path)
         };
         let started = Instant::now();
-        events.send(Msg::Fs(changed(source.clone()))).unwrap();
+        events.event(changed(source.clone()));
         let (stop, stopped) = mpsc::channel();
         let noise_path = noise.map(|path| root.join(path));
         let emitter = std::thread::spawn(move || {
@@ -2172,9 +2422,7 @@ mod tests {
                     if stopped.recv_timeout(Duration::from_millis(25)).is_ok() {
                         return;
                     }
-                    if events.send(Msg::Fs(changed(path.clone()))).is_err() {
-                        return;
-                    }
+                    events.event(changed(path.clone()));
                 }
             }
         });
@@ -2241,36 +2489,262 @@ mod tests {
         let (_root_scratch, root) = scratch_root("note-event");
         let file = root.join("a.rs");
         std::fs::write(&file, "fn a() {}\n").unwrap();
-        let mut pending = BTreeMap::new();
-        let mut flush_at = None;
-        let mut first_pending_at = None;
+        let (tx, rx) = mpsc::channel();
+        let ingress = WatchIngress::new(root.clone(), tx);
+        let mut corpus = StubCorpus(root.clone());
+        let mut watcher = None;
+        let mut rescan_watch_when_ready = false;
+        let mut changes = WatchChanges::default();
 
         let read = notify::Event::new(EventKind::Access(AccessKind::Any)).add_path(file.clone());
-        note_event(
-            &root,
-            &read,
-            &mut pending,
-            &mut flush_at,
-            &mut first_pending_at,
+        ingress.event(read);
+        assert_eq!(rx.try_iter().count(), 0, "reads do not wake the loop");
+        collect_watch_events(
+            &ingress,
+            &mut corpus,
+            &mut watcher,
+            &mut rescan_watch_when_ready,
+            &mut changes,
         );
-        assert_eq!(flush_at, None);
+        assert_eq!(changes.flush_at, None);
 
         let before = Instant::now();
         let create = notify::Event::new(EventKind::Create(CreateKind::File)).add_path(file.clone());
-        note_event(
-            &root,
-            &create,
-            &mut pending,
-            &mut flush_at,
-            &mut first_pending_at,
+        ingress.event(create);
+        collect_watch_events(
+            &ingress,
+            &mut corpus,
+            &mut watcher,
+            &mut rescan_watch_when_ready,
+            &mut changes,
         );
-        assert_eq!(pending.get(&file), Some(&false));
-        let at = flush_at.expect("a pending change starts the debounce");
+        assert_eq!(changes.pending.get(&file), Some(&false));
+        let at = changes
+            .flush_at
+            .expect("a pending change starts the debounce");
         assert!(
             at >= before + DEBOUNCE,
             "the debounce must wait DEBOUNCE from now"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn watcher_ingress_should_bound_retained_paths_after_a_burst() {
+        use notify::event::{DataChange, ModifyKind};
+
+        let (_scratch, root) = scratch_root("watcher-burst");
+        let (tx, rx) = mpsc::channel();
+        let ingress = WatchIngress::new(root.clone(), tx);
+        let event_count = MAX_WATCHER_PATHS * 4;
+        let mut path_bytes = 0;
+        let started = Instant::now();
+        for index in 0..event_count {
+            let path = root.join(format!("burst-{index}.rs"));
+            path_bytes += path.as_os_str().to_string_lossy().len();
+            ingress.event(
+                notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    .add_path(path),
+            );
+        }
+        let elapsed = started.elapsed();
+        let state = ingress.state.lock().unwrap();
+        let queued = rx.try_iter().count();
+        eprintln!(
+            "watcher-burst events={event_count} raw_path_bytes={path_bytes} retained_paths={} wake_messages={queued} elapsed_ms={}",
+            state.paths.len(),
+            elapsed.as_millis()
+        );
+        assert!(
+            state.rescan,
+            "a burst over the path cap requests reconciliation"
+        );
+        assert_eq!(
+            state.paths.len(),
+            0,
+            "overflow releases every retained path"
+        );
+        assert_eq!(queued, 1, "many callbacks queue one loop wake");
+    }
+
+    #[test]
+    fn watcher_pending_should_bound_paths_across_ingress_drains() {
+        use notify::event::{DataChange, ModifyKind};
+
+        struct RescanCorpus {
+            root: PathBuf,
+            rescans: usize,
+        }
+
+        impl Corpus for RescanCorpus {
+            fn root(&self) -> &Path {
+                &self.root
+            }
+
+            fn handle(&mut self, _req: Request) -> Response {
+                failure_response("stub", "stub corpus")
+            }
+
+            fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+
+            fn watcher_rescan(&mut self) {
+                self.rescans += 1;
+            }
+        }
+
+        let (_scratch, root) = scratch_root("watcher-pending-cap");
+        let (tx, rx) = mpsc::channel();
+        let ingress = WatchIngress::new(root.clone(), tx);
+        let mut corpus = RescanCorpus {
+            root: root.clone(),
+            rescans: 0,
+        };
+        let mut watcher = None;
+        let mut rescan_watch_when_ready = false;
+        let mut changes = WatchChanges::default();
+
+        for index in 0..=MAX_WATCHER_PATHS {
+            ingress.event(
+                notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    .add_path(root.join(format!("drained-{index}.rs"))),
+            );
+            assert!(matches!(rx.try_recv(), Ok(Msg::WatchEvents)));
+            collect_watch_events(
+                &ingress,
+                &mut corpus,
+                &mut watcher,
+                &mut rescan_watch_when_ready,
+                &mut changes,
+            );
+        }
+
+        assert_eq!(corpus.rescans, 1);
+        assert!(rescan_watch_when_ready);
+        assert!(changes.pending.is_empty());
+        assert!(changes.created.is_empty());
+        assert_eq!(changes.flush_at, None);
+        assert_eq!(changes.first_pending_at, None);
+    }
+
+    #[test]
+    #[ignore = "manual baseline/candidate watcher retention measurement"]
+    fn watcher_ingress_memory_measurement() {
+        use notify::event::{DataChange, ModifyKind};
+
+        const EVENT_COUNT: usize = 200_000;
+        let (_scratch, root) = scratch_root("watcher-memory-measurement");
+        let (tx, rx) = mpsc::channel();
+        let ingress = WatchIngress::new(root.clone(), tx);
+        let mut path_bytes = 0;
+        let started = Instant::now();
+        for index in 0..EVENT_COUNT {
+            let path = root.join(format!("burst-{index}.rs"));
+            path_bytes += path.as_os_str().to_string_lossy().len();
+            ingress.event(
+                notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    .add_path(path),
+            );
+        }
+        let elapsed = started.elapsed();
+        let state = ingress.state.lock().unwrap();
+        let queued_messages = rx.try_iter().count();
+        eprintln!(
+            "watcher-memory candidate events={EVENT_COUNT} raw_path_bytes={path_bytes} retained_paths={} retained_path_bytes={} wake_messages={queued_messages} elapsed_ms={}",
+            state.paths.len(),
+            state
+                .paths
+                .keys()
+                .map(|path| path.as_os_str().to_string_lossy().len())
+                .sum::<usize>(),
+            elapsed.as_millis()
+        );
+        assert!(state.rescan, "the burst should request a full rescan");
+        assert_eq!(state.paths.len(), 0);
+        assert_eq!(queued_messages, 1);
+    }
+
+    #[test]
+    fn backend_rescan_without_paths_should_recover_and_keep_events_arriving_during_scan() {
+        use notify::event::{DataChange, Flag, ModifyKind};
+
+        struct ScanCorpus {
+            root: PathBuf,
+            ingress: WatchIngress,
+            rescans: usize,
+        }
+
+        impl Corpus for ScanCorpus {
+            fn root(&self) -> &Path {
+                &self.root
+            }
+
+            fn handle(&mut self, _req: Request) -> Response {
+                failure_response("stub", "stub corpus")
+            }
+
+            fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+
+            fn watcher_rescan(&mut self) {
+                self.rescans += 1;
+                self.ingress.event(
+                    notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(
+                        DataChange::Any,
+                    )))
+                    .add_path(self.root.join("during-scan.rs")),
+                );
+            }
+        }
+
+        struct ReconcileWatch(Arc<AtomicUsize>);
+
+        impl Watch for ReconcileWatch {
+            fn extend(&mut self, _dir: &Path) -> Result<WatchExtension, String> {
+                Ok(WatchExtension::default())
+            }
+
+            fn reconcile(&mut self) -> Result<(), String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let (_scratch, root) = scratch_root("watcher-rescan-flag");
+        let (tx, rx) = mpsc::channel();
+        let ingress = WatchIngress::new(root.clone(), tx);
+        let mut corpus = ScanCorpus {
+            root: root.clone(),
+            ingress: ingress.clone(),
+            rescans: 0,
+        };
+        ingress.event(notify::Event::new(notify::EventKind::Other).set_flag(Flag::Rescan));
+        let mut watcher = None;
+        let mut rescan_watch_when_ready = false;
+        let mut changes = WatchChanges::default();
+        collect_watch_events(
+            &ingress,
+            &mut corpus,
+            &mut watcher,
+            &mut rescan_watch_when_ready,
+            &mut changes,
+        );
+        assert_eq!(corpus.rescans, 1, "an empty-path backend overflow rescans");
+        assert!(
+            rescan_watch_when_ready,
+            "rescan before WatchReady is remembered"
+        );
+        let followup = ingress.take();
+        assert!(followup.paths.contains_key(&root.join("during-scan.rs")));
+        assert_eq!(
+            rx.try_iter().count(),
+            2,
+            "the scan's event gets its own wake"
+        );
+
+        let reconciles = Arc::new(AtomicUsize::new(0));
+        watcher = Some(Box::new(ReconcileWatch(Arc::clone(&reconciles))));
+        reconcile_watch_when_ready(&mut corpus, &mut watcher, &mut rescan_watch_when_ready);
+        assert_eq!(reconciles.load(Ordering::SeqCst), 1);
+        assert!(!rescan_watch_when_ready);
     }
 
     /// With its socket gone nothing can wake the accept thread, so stopping
@@ -2411,51 +2885,50 @@ mod tests {
         std::fs::create_dir_all(root.join(".pixel")).unwrap();
         let ignored = root.join(".pixel/actions.jsonl");
         std::fs::write(&ignored, "{}\n").unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let ingress = WatchIngress::new(root.clone(), tx);
 
         for kind in [
             notify::EventKind::Access(AccessKind::Open(AccessMode::Read)),
             notify::EventKind::Access(AccessKind::Close(AccessMode::Read)),
             notify::EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
         ] {
-            let mut pending = BTreeMap::new();
-            record_event(
-                &root,
-                &notify::Event::new(kind).add_path(file.clone()),
-                &mut pending,
+            ingress.event(notify::Event::new(kind).add_path(file.clone()));
+            assert!(
+                ingress.take().paths.is_empty(),
+                "{kind:?} must not look like a change"
             );
-            assert!(pending.is_empty(), "{kind:?} must not look like a change");
         }
 
-        let mut pending = BTreeMap::new();
         for kind in [
             notify::EventKind::Create(CreateKind::File),
             notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)),
             notify::EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Any)),
         ] {
-            record_event(
-                &root,
-                &notify::Event::new(kind).add_path(file.clone()),
-                &mut pending,
+            ingress.event(notify::Event::new(kind).add_path(file.clone()));
+            assert_eq!(
+                ingress.take().paths.get(&file),
+                Some(&false),
+                "{kind:?} is a change"
             );
-            assert_eq!(pending.get(&file), Some(&false), "{kind:?} is a change");
         }
-        record_event(
-            &root,
-            &notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::File))
+        ingress.event(
+            notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::File))
                 .add_path(file.clone()),
-            &mut pending,
         );
-        assert_eq!(pending.get(&file), Some(&true), "a removal is a removal");
+        assert_eq!(
+            ingress.take().paths.get(&file),
+            Some(&true),
+            "a removal is a removal"
+        );
         // The ignored-tree rule survives the content filter: `.pixel` state
         // is the daemon's own churn, never a source change.
-        record_event(
-            &root,
-            &notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+        ingress.event(
+            notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
                 .add_path(ignored.clone()),
-            &mut pending,
         );
         assert!(
-            !pending.contains_key(&ignored),
+            !ingress.take().paths.contains_key(&ignored),
             ".pixel state is not a source change"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -2466,7 +2939,7 @@ mod tests {
     /// the trees below its root are judged. Before #1194 every event of such
     /// a repository was dropped, and nothing reached the index or the graph.
     #[test]
-    fn record_event_should_judge_only_the_components_below_the_root() {
+    fn watcher_ingress_should_judge_only_components_below_the_root() {
         use notify::event::{DataChange, ModifyKind};
 
         let (_base_scratch, base) = scratch_root("ignored-ancestor");
@@ -2482,8 +2955,10 @@ mod tests {
                 notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
                     .add_path(source.clone())
                     .add_path(below.clone());
-            let mut pending = BTreeMap::new();
-            assert!(record_event(&root, &event, &mut pending), "under {parent}");
+            let (tx, _rx) = mpsc::channel();
+            let ingress = WatchIngress::new(root.clone(), tx);
+            ingress.event(event);
+            let pending = ingress.take().paths;
             assert_eq!(pending.get(&source), Some(&false), "under {parent}");
             assert!(
                 !pending.contains_key(&below),
@@ -2510,8 +2985,10 @@ mod tests {
                 .add_path(root_exclude.clone())
                 .add_path(object.clone())
                 .add_path(nested_exclude.clone());
-        let mut pending = BTreeMap::new();
-        record_event(&root, &event, &mut pending);
+        let (tx, _rx) = mpsc::channel();
+        let ingress = WatchIngress::new(root.clone(), tx);
+        ingress.event(event);
+        let pending = ingress.take().paths;
 
         assert_eq!(pending.get(&root_exclude), Some(&false));
         assert!(!pending.contains_key(&object), ".git objects stay excluded");
@@ -2925,6 +3402,85 @@ mod tests {
             .map_or(0, Vec::len)
     }
 
+    #[test]
+    fn watcher_overflow_should_reconcile_edits_directories_renames_and_deletions() {
+        use notify::event::{DataChange, ModifyKind};
+
+        let (_scratch, root) = scratch_root("watcher-reconcile");
+        let deleted = root.join("deleted.rs");
+        let renamed = root.join("before.rs");
+        std::fs::write(&deleted, "fn deleted_unique_marker() {}\n").unwrap();
+        std::fs::write(&renamed, "fn stale_unique_marker() {}\n").unwrap();
+        let mut service = Service::open(&root).unwrap();
+        assert_eq!(search_hits(&mut service, "deleted_unique_marker"), 1);
+        assert_eq!(search_hits(&mut service, "stale_unique_marker"), 1);
+        assert!(service.handle(Request::Graph { if_stale: false }).ok);
+
+        std::fs::remove_file(&deleted).unwrap();
+        let moved = root.join("after.rs");
+        std::fs::rename(&renamed, &moved).unwrap();
+        std::fs::write(&moved, "fn fresh_rename_unique_marker() {}\n").unwrap();
+        let nested = root.join("new/subtree");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("new.rs"),
+            "fn fresh_directory_unique_marker() {}\n",
+        )
+        .unwrap();
+
+        let (tx, _rx) = mpsc::channel();
+        let ingress = WatchIngress::new(root.clone(), tx);
+        for index in 0..=MAX_WATCHER_PATHS {
+            ingress.event(
+                notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    .add_path(root.join(format!("overflow-{index}.rs"))),
+            );
+        }
+        let mut watcher = None;
+        let mut rescan_watch_when_ready = false;
+        let mut changes = WatchChanges::default();
+        collect_watch_events(
+            &ingress,
+            &mut service,
+            &mut watcher,
+            &mut rescan_watch_when_ready,
+            &mut changes,
+        );
+
+        assert!(
+            rescan_watch_when_ready,
+            "overflow before WatchReady is remembered"
+        );
+        assert_eq!(search_hits(&mut service, "deleted_unique_marker"), 0);
+        assert_eq!(search_hits(&mut service, "stale_unique_marker"), 0);
+        assert_eq!(search_hits(&mut service, "fresh_rename_unique_marker"), 1);
+        assert_eq!(
+            search_hits(&mut service, "fresh_directory_unique_marker"),
+            1
+        );
+        let fresh_symbol = service.handle(Request::Symbol {
+            name: "fresh_rename_unique_marker".into(),
+            stale_ok: false,
+        });
+        assert!(fresh_symbol.ok, "{fresh_symbol:?}");
+        assert_eq!(
+            fresh_symbol.data()["symbols"][0]["name"],
+            "fresh_rename_unique_marker"
+        );
+        let stale_symbol = service.handle(Request::Symbol {
+            name: "stale_unique_marker".into(),
+            stale_ok: false,
+        });
+        assert!(stale_symbol.ok, "{stale_symbol:?}");
+        assert!(
+            stale_symbol.data()["symbols"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "removed symbols must not remain in the graph: {stale_symbol:?}"
+        );
+    }
+
     /// Edits made before the watch was live reach no event: `watch_ready`
     /// re-reads what `git status` lists, so a modified, a new and a deleted
     /// file are all current afterwards.
@@ -3311,6 +3867,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn unignored_tree_should_bound_files_while_walking_all_directories() {
+        let (_root_scratch, root) = scratch_root("unignored-tree-file-cap");
+        let subtree = root.join("subtree");
+        std::fs::create_dir_all(subtree.join("nested")).unwrap();
+        for index in 0..=MAX_WATCHER_PATHS {
+            std::fs::write(subtree.join(format!("file-{index}.rs")), "x").unwrap();
+        }
+
+        let tree = unignored_tree(&subtree, true);
+
+        assert_eq!(tree.files.len(), MAX_WATCHER_PATHS);
+        assert!(tree.files_overflow);
+        assert!(tree.dirs.contains(&subtree));
+        assert!(tree.dirs.contains(&subtree.join("nested")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn extension_overflow_should_rescan_and_still_extend_remaining_directories() {
+        struct RescanCorpus {
+            root: PathBuf,
+            rescans: Arc<AtomicUsize>,
+        }
+
+        impl Corpus for RescanCorpus {
+            fn root(&self) -> &Path {
+                &self.root
+            }
+            fn handle(&mut self, _req: Request) -> Response {
+                failure_response("stub", "stub corpus")
+            }
+            fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+            fn watcher_rescan(&mut self) {
+                self.rescans.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct OverflowingWatch {
+            extensions: Arc<AtomicUsize>,
+            reconciles: Arc<AtomicUsize>,
+        }
+
+        impl Watch for OverflowingWatch {
+            fn extend(&mut self, _dir: &Path) -> Result<WatchExtension, String> {
+                let index = self.extensions.fetch_add(1, Ordering::SeqCst);
+                Ok(WatchExtension {
+                    files: vec![PathBuf::from(format!("inside-{index}.rs"))],
+                    overflowed: index == 0,
+                })
+            }
+
+            fn reconcile(&mut self) -> Result<(), String> {
+                self.reconciles.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let (_scratch, root) = scratch_root("extension-overflow");
+        let extensions = Arc::new(AtomicUsize::new(0));
+        let reconciles = Arc::new(AtomicUsize::new(0));
+        let rescans = Arc::new(AtomicUsize::new(0));
+        let mut watch: WatchGuard = Box::new(OverflowingWatch {
+            extensions: Arc::clone(&extensions),
+            reconciles: Arc::clone(&reconciles),
+        });
+        let mut created = [root.join("first"), root.join("second")]
+            .into_iter()
+            .collect();
+        let mut pending = BTreeMap::from([(root.join("existing.rs"), false)]);
+        let mut flush_at = Some(Instant::now());
+        let mut first_pending_at = flush_at;
+        let mut corpus = RescanCorpus {
+            root,
+            rescans: Arc::clone(&rescans),
+        };
+
+        extend_watch(
+            Some(&mut watch),
+            &mut created,
+            &mut corpus,
+            &mut pending,
+            &mut flush_at,
+            &mut first_pending_at,
+        );
+
+        assert_eq!(extensions.load(Ordering::SeqCst), 2);
+        assert_eq!(reconciles.load(Ordering::SeqCst), 1);
+        assert_eq!(rescans.load(Ordering::SeqCst), 1);
+        assert!(pending.is_empty());
+        assert!(created.is_empty());
+        assert!(flush_at.is_none());
+        assert!(first_pending_at.is_none());
+    }
+
     /// `.git` is pruned, but its `info/exclude` is an ignore-control file the
     /// event filter keeps, so its directory is watched on its own.
     #[test]
@@ -3338,30 +3989,67 @@ mod tests {
     }
 
     #[test]
-    fn created_dirs_should_take_existing_directories_from_create_and_rename_events() {
+    fn watcher_ingress_should_collect_created_dirs_from_create_and_rename_events() {
+        use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode};
+
         let (_root_scratch, root) = mixed_tree("created-dirs");
         let dir = root.join("src/a");
         let file = root.join("top.rs");
+        let (tx, _rx) = mpsc::channel();
+        let ingress = WatchIngress::new(root.clone(), tx);
+        let mut corpus = StubCorpus(root.clone());
+        let mut watcher = None;
+        let mut rescan_watch_when_ready = false;
+        let mut changes = WatchChanges::default();
         let event = |kind| {
             notify::Event::new(kind)
                 .add_path(dir.clone())
                 .add_path(file.clone())
         };
-        let create = event(notify::EventKind::Create(notify::event::CreateKind::Folder));
-        assert_eq!(created_dirs(&create), std::slice::from_ref(&dir));
-        let renamed = event(notify::EventKind::Modify(notify::event::ModifyKind::Name(
-            notify::event::RenameMode::To,
-        )));
-        assert_eq!(created_dirs(&renamed), std::slice::from_ref(&dir));
-        let modified = event(notify::EventKind::Modify(notify::event::ModifyKind::Data(
-            notify::event::DataChange::Any,
-        )));
-        assert!(
-            created_dirs(&modified).is_empty(),
-            "a data change creates nothing"
+        ingress.event(event(notify::EventKind::Create(CreateKind::Folder)));
+        collect_watch_events(
+            &ingress,
+            &mut corpus,
+            &mut watcher,
+            &mut rescan_watch_when_ready,
+            &mut changes,
         );
-        let removed = event(notify::EventKind::Remove(notify::event::RemoveKind::Folder));
-        assert!(created_dirs(&removed).is_empty());
+        assert_eq!(changes.created, BTreeSet::from([dir.clone()]));
+
+        changes.created.clear();
+        ingress.event(event(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::To,
+        ))));
+        collect_watch_events(
+            &ingress,
+            &mut corpus,
+            &mut watcher,
+            &mut rescan_watch_when_ready,
+            &mut changes,
+        );
+        assert_eq!(changes.created, BTreeSet::from([dir.clone()]));
+
+        changes.created.clear();
+        ingress.event(event(notify::EventKind::Modify(ModifyKind::Data(
+            DataChange::Any,
+        ))));
+        collect_watch_events(
+            &ingress,
+            &mut corpus,
+            &mut watcher,
+            &mut rescan_watch_when_ready,
+            &mut changes,
+        );
+        assert!(changes.created.is_empty(), "a data change creates nothing");
+        ingress.event(event(notify::EventKind::Remove(RemoveKind::Folder)));
+        collect_watch_events(
+            &ingress,
+            &mut corpus,
+            &mut watcher,
+            &mut rescan_watch_when_ready,
+            &mut changes,
+        );
+        assert!(changes.created.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3410,9 +4098,12 @@ mod tests {
     }
 
     impl Watch for ExtendingWatch {
-        fn extend(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String> {
+        fn extend(&mut self, dir: &Path) -> Result<WatchExtension, String> {
             let _ = self.extended.send(dir.to_path_buf());
-            Ok(std::mem::take(&mut self.files))
+            Ok(WatchExtension {
+                files: std::mem::take(&mut self.files),
+                overflowed: false,
+            })
         }
     }
 
@@ -3438,7 +4129,7 @@ mod tests {
             let event =
                 notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
                     .add_path(created);
-            tx.send(Msg::Fs(event)).unwrap();
+            tx.event(event);
             Ok(Registered {
                 guard: Box::new(ExtendingWatch { extended, files }),
                 dirs: 1,
@@ -3536,6 +4227,54 @@ mod tests {
             seen,
             "the file in the late directory never reached the corpus"
         );
+    }
+
+    #[test]
+    fn pruned_watch_reconcile_should_follow_a_recreated_directory_at_the_same_path() {
+        let (_scratch, root) = scratch_root("pruned-recreated-dir");
+        let replaced = root.join("src/replaced");
+        std::fs::create_dir_all(&replaced).unwrap();
+        let initial = replaced.join("file.rs");
+        std::fs::write(&initial, "fn initial_marker() {}\n").unwrap();
+        let mut service = Service::open(&root).unwrap();
+        assert_eq!(search_hits(&mut service, "initial_marker"), 1);
+
+        let (tx, rx) = mpsc::channel();
+        let ingress = WatchIngress::new(root.clone(), tx);
+        let mut registered = register_pruned_watch(vec![root.clone()], ingress.clone()).unwrap();
+        std::fs::remove_dir_all(&replaced).unwrap();
+        std::fs::create_dir_all(&replaced).unwrap();
+        std::fs::write(&initial, "fn before_second_edit_marker() {}\n").unwrap();
+        registered.guard.reconcile().unwrap();
+        service.watcher_rescan();
+        assert_eq!(search_hits(&mut service, "before_second_edit_marker"), 1);
+
+        std::fs::write(&initial, "fn after_second_edit_marker() {}\n").unwrap();
+        let mut watcher = Some(registered.guard);
+        let mut changes = WatchChanges::default();
+        let mut rescan_watch_when_ready = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if rx.recv_timeout(Duration::from_millis(100)).is_ok() {
+                collect_watch_events(
+                    &ingress,
+                    &mut service,
+                    &mut watcher,
+                    &mut rescan_watch_when_ready,
+                    &mut changes,
+                );
+                flush_pending(
+                    &mut service,
+                    &mut changes.pending,
+                    &mut changes.flush_at,
+                    &mut changes.first_pending_at,
+                );
+                if search_hits(&mut service, "after_second_edit_marker") == 1 {
+                    return;
+                }
+            }
+        }
+        panic!("second edit in the recreated directory did not reach the index");
     }
 
     #[test]

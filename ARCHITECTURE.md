@@ -345,8 +345,16 @@ new text. `search` uses the published candidate index but scans current file
 contents: the generation label does not promise historical source bytes.
 Without the flag nothing changes; a daemon
 that predates it ignores the field and answers after the batch, so a client
-reads the envelope, not its own flag, and `PROTOCOL_VERSION` stays. The watcher debounces
-filesystem events and refreshes the index and graph for changed files
+reads the envelope, not its own flag, and `PROTOCOL_VERSION` stays. The
+watcher coalesces filesystem events at ingress by path and caps both its
+retained paths and the loop's debounce buffer at `MAX_WATCHER_PATHS` (4,096);
+the ingress sends one loop wake while a batch is pending. A backend rescan
+signal or overflow at either buffer discards pending deltas, reconciles the
+corpus from its authoritative sources, and repairs pruned directory watches;
+events arriving during the rescan form the next batch. These caps cover the
+pre-writer path buffers; the shared ordered writer-job queue remains a separate
+queue with its existing semantics.
+Normal batches debounce and refresh the index and graph for changed files
 (`Service::refresh_files`) without stopping the replicas: it stages the
 index batch under the index's read lock (`IndexSet::stage_refresh`: the
 policy verdict and the disk reads) and writes the graph rows in their open
