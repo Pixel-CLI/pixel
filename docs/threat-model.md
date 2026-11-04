@@ -594,12 +594,19 @@ boundary it crosses.
   a slow client holds only its own connection thread, and
   `MAX_CONN_THREADS` (32) bounds those, further connections waiting in the
   listener's backlog;
+  `WatchIngress` coalesces filesystem notifications by path, caps both its
+  path map and the loop's debounce buffer at `MAX_WATCHER_PATHS` (4,096), and
+  reduces the loop wake queue to one marker. Overflow triggers an authoritative
+  corpus rescan and repairs pruned directory watches; backend rescan flags use
+  the same path.
   `IDLE_TIMEOUT` ends an unused daemon; the CLI falls back to in-process
   execution when the daemon does not answer.
 - **Status**: Partial.
 - **Residual**: there is no write timeout on replies, and long ops (a sync of
-  several 120 s git calls) block every other client of that root. Only a
-  same-user process can do this (T1).
+  several 120 s git calls) block every other client of that root. The shared
+  writer-job queue is still unbounded; this watcher change caps only the
+  ingress and debounce path buffers. Only a same-user client can reach the
+  daemon socket (T1).
 
 ### T4. Version skew between CLI and daemon (T, B4)
 

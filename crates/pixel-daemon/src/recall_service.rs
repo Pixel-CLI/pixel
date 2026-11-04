@@ -541,6 +541,15 @@ impl Corpus for RecallService {
     fn sweep(&mut self) {
         self.sweep_recent();
     }
+
+    fn watcher_rescan(&mut self) {
+        let agents: std::collections::BTreeSet<&'static str> = self
+            .sources
+            .iter()
+            .map(|source| source.adapter.agent())
+            .collect();
+        self.refresh_agents(&agents);
+    }
 }
 
 #[cfg(test)]

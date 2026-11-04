@@ -259,7 +259,7 @@ fn default_corpus_should_watch_its_root_and_do_nothing_on_sweep_or_ready() {
 #[test]
 fn root_replaced_should_follow_the_opened_directory_not_the_path() {
     let (_root_scratch, root) = tempfile_root("root-replaced");
-    let opened = root_identity(&root);
+    let opened = directory_identity(&root);
     assert!(opened.is_some());
     assert!(!root_replaced(&root, opened), "the same directory");
     assert!(
@@ -269,7 +269,11 @@ fn root_replaced_should_follow_the_opened_directory_not_the_path() {
 
     let file = root.join("plain");
     std::fs::write(&file, "x").unwrap();
-    assert_eq!(root_identity(&file), None, "a file is not a servable root");
+    assert_eq!(
+        directory_identity(&file),
+        None,
+        "a file is not a servable root"
+    );
 
     let old = root.with_extension("old");
     let _ = std::fs::remove_dir_all(&old);
@@ -284,7 +288,7 @@ fn root_replaced_should_follow_the_opened_directory_not_the_path() {
 }
 
 #[test]
-fn record_event_should_skip_directories_and_mark_a_vanished_path_removed() {
+fn watcher_ingress_should_skip_directories_and_mark_a_vanished_path_removed() {
     use notify::event::{DataChange, ModifyKind};
     let (_root_scratch, root) = tempfile_root("record-dir");
     let dir = root.join("src");
@@ -293,14 +297,26 @@ fn record_event_should_skip_directories_and_mark_a_vanished_path_removed() {
     let event = notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
         .add_path(dir.clone())
         .add_path(gone.clone());
-    let mut pending = BTreeMap::new();
-    record_event(&root, &event, &mut pending);
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let ingress = WatchIngress::new(root.clone(), tx);
+    ingress.event(event);
+    let mut corpus = EchoCorpus::new();
+    let mut watcher = None;
+    let mut rescan_watch_when_ready = false;
+    let mut changes = WatchChanges::default();
+    collect_watch_events(
+        &ingress,
+        &mut corpus,
+        &mut watcher,
+        &mut rescan_watch_when_ready,
+        &mut changes,
+    );
     assert!(
-        !pending.contains_key(&dir),
+        !changes.pending.contains_key(&dir),
         "a directory has no content of its own"
     );
     assert_eq!(
-        pending.get(&gone),
+        changes.pending.get(&gone),
         Some(&true),
         "a modify for a path that no longer exists is a removal"
     );
