@@ -907,7 +907,7 @@ fn register_recursive_watch(
 struct PrunedWatch {
     watcher: notify::RecommendedWatcher,
     roots: Vec<PathBuf>,
-    dirs: BTreeMap<PathBuf, (u64, u64)>,
+    dirs: BTreeSet<PathBuf>,
 }
 
 impl Watch for PrunedWatch {
@@ -920,9 +920,7 @@ impl Watch for PrunedWatch {
         }
         let tree = unignored_tree(dir, true);
         for dir in watch_each(&mut self.watcher, &tree.dirs)? {
-            if let Some(identity) = directory_identity(&dir) {
-                self.dirs.insert(dir, identity);
-            }
+            self.dirs.insert(dir);
         }
         Ok(WatchExtension {
             files: tree.files,
@@ -931,17 +929,8 @@ impl Watch for PrunedWatch {
     }
 
     fn reconcile(&mut self) -> Result<(), String> {
-        let current: BTreeMap<PathBuf, (u64, u64)> = pruned_watch_dirs(&self.roots)
-            .into_iter()
-            .filter_map(|dir| directory_identity(&dir).map(|identity| (dir, identity)))
-            .collect();
-        let replaced: Vec<PathBuf> = self
-            .dirs
-            .iter()
-            .filter(|(path, identity)| current.get(*path) != Some(*identity))
-            .map(|(path, _)| path.clone())
-            .collect();
-        for dir in replaced {
+        // Paths can be recreated with the same identity; reset all watches.
+        while let Some(dir) = self.dirs.first().cloned() {
             if let Err(error) = self.watcher.unwatch(&dir)
                 && !matches!(error.kind, notify::ErrorKind::WatchNotFound)
                 && !vanished(&error)
@@ -950,17 +939,10 @@ impl Watch for PrunedWatch {
             }
             self.dirs.remove(&dir);
         }
-        let missing: Vec<PathBuf> = current
-            .iter()
-            .filter(|(path, identity)| self.dirs.get(*path) != Some(*identity))
-            .map(|(path, _)| path.clone())
-            .collect();
-        for dir in missing {
+        for dir in pruned_watch_dirs(&self.roots) {
             match self.watcher.watch(&dir, RecursiveMode::NonRecursive) {
                 Ok(()) => {
-                    if let Some(identity) = current.get(&dir) {
-                        self.dirs.insert(dir, *identity);
-                    }
+                    self.dirs.insert(dir);
                 }
                 Err(error) if vanished(&error) => {}
                 Err(error) => return Err(format!("watch {}: {error}", dir.display())),
@@ -983,10 +965,7 @@ fn register_pruned_watch(paths: Vec<PathBuf>, ingress: WatchIngress) -> Result<R
     let watched = watch_each(&mut watcher, &dirs)?;
     let git_dir = paths.iter().any(|root| dirs.contains(&root.join(".git")));
     let dir_count = watched.len();
-    let watched: BTreeMap<PathBuf, (u64, u64)> = watched
-        .into_iter()
-        .filter_map(|path| directory_identity(&path).map(|identity| (path, identity)))
-        .collect();
+    let watched: BTreeSet<PathBuf> = watched.into_iter().collect();
     Ok(Registered {
         guard: Box::new(PrunedWatch {
             watcher,

@@ -4,7 +4,7 @@
 
 The baseline is upstream `main` at `9dd036279766e1454a135543e3c1566f9fbc97ea`.
 The candidate is that base plus the Rust diff with SHA-256
-`43620c973429bee6b0bc7b23d61c794b4e849af99603bec807936bb07fb68ae9`.
+`ac8d309a5ddbe6c27ce1495bd2b0a975a31d62e1497fa10da5cfe95bc05264b8`.
 The runs were on `Darwin 27.0.0 arm64`.
 
 To reproduce the source identity on this branch, run:
@@ -63,18 +63,18 @@ Cargo was not included in the timed processes.
 | Retained event/path entries after burst | 200,000 | 0 paths |
 | Retained path-string bytes after burst | 23,688,890 | 0 |
 | Loop wake messages | 200,000 | 1 |
-| Run 1 elapsed / max RSS | 106 ms / 120,995,840 B | 1,017 ms / 11,059,200 B |
-| Run 2 elapsed / max RSS | 360 ms / 120,995,840 B | 739 ms / 11,042,816 B |
-| Run 3 elapsed / max RSS | 116 ms / 121,028,608 B | 1,841 ms / 11,026,432 B |
-| Median elapsed | 116 ms | 1,017 ms |
-| Maximum RSS range | 120,995,840–121,028,608 B | 11,026,432–11,059,200 B |
+| Run 1 elapsed / max RSS | 106 ms / 120,995,840 B | 668 ms / 11,124,736 B |
+| Run 2 elapsed / max RSS | 360 ms / 120,995,840 B | 527 ms / 11,124,736 B |
+| Run 3 elapsed / max RSS | 116 ms / 121,028,608 B | 459 ms / 11,091,968 B |
+| Median elapsed | 116 ms | 527 ms |
+| Maximum RSS range | 120,995,840–121,028,608 B | 11,091,968–11,124,736 B |
 
-The maximum RSS range is about 90.9% lower for this isolated event-retention
-workload. The candidate median elapsed time was 8.8 times the baseline median
-in these runs, with substantial scheduling variance in both arms. The
-measurement includes constructing event values and executing the respective
-callback ingestion path. It does not measure a live OS watcher, corpus scan
-latency, total daemon RSS, or long-running daemon behavior.
+The maximum RSS range is about 90.8% lower for this isolated event-retention
+workload. The candidate median elapsed time was 4.5 times the baseline median
+in these runs. The measurement includes constructing event values and
+executing the respective callback ingestion path. It does not measure a live
+OS watcher, corpus scan latency, total daemon RSS, or long-running daemon
+behavior.
 
 ## Scope of the bound
 
@@ -82,8 +82,9 @@ The implementation caps the callback ingress map, loop debounce buffer, and
 file paths retained while extending a watch through a newly created subtree at
 4,096 distinct paths. The subtree walk continues establishing directory
 watches after its file-list cap, then overflow clears deltas and requests an
-authoritative corpus rescan. The pruned watcher repairs only directory paths
-whose device/inode identity changed. Regression tests cover backend overflow
+authoritative corpus rescan. The pruned watcher re-registers the current
+directory tree on authoritative rescan, including directories recreated at
+paths that may reuse device/inode identity. Regression tests cover backend overflow
 with no paths, repeated ingress drains overflowing the debounce buffer, an
 oversized created subtree, changes arriving during rescan, index and graph
 freshness after edit/rename/delete, and a recreated directory receiving a
