@@ -1202,7 +1202,7 @@ fn prompt_packet_guidance_allows_exploration_beyond_candidates() {
     assert!(
         prompt.contains("not an action recommendation") && prompt.contains("a read/edit boundary")
     );
-    assert!(prompt.contains("continue exploring any files or"));
+    assert!(prompt.contains("any files or sources the task needs."));
 }
 
 /// Every heading and paragraph of a deployed prompt occurs once: a repeated
