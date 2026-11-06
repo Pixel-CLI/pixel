@@ -98,7 +98,7 @@ jobs:
           toolchain: nightly
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2
         with:
           tool: cargo-fuzz@0.13.2
           # install-action ships no manifest for cargo-fuzz: build it from
@@ -109,7 +109,7 @@ jobs:
       # applies the same deny.toml (advisories, licences, sources,
       # duplicates) to what the fuzz build compiles and runs.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2
         with:
           tool: cargo-deny
 
