@@ -906,7 +906,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca64ada7d0ad74737f45609542930cd5813fcb453b3f72ecb4255d8bd6fe4604"
 dependencies = [
  "hf-hub 0.5.0",
- "ndarray 0.17.2",
+ "ndarray",
  "ort",
  "safetensors 0.8.0",
  "serde",
@@ -1899,18 +1899,19 @@ dependencies = [
 
 [[package]]
 name = "model2vec-rs"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ca11a52a52721b3305bd03ee42d66d8026f54f00235b81746662f2b25a743f1"
+checksum = "51020c65a18a206a4158aa354db49de672da7b1feab5b8213896bd54d03acb17"
 dependencies = [
  "anyhow",
  "half",
  "hf-hub 0.4.3",
- "ndarray 0.15.6",
  "safetensors 0.5.3",
  "serde",
  "serde_json",
  "tokenizers 0.21.4",
+ "unicode-normalization",
+ "unicode_categories",
  "ureq 2.12.1",
 ]
 
@@ -1998,19 +1999,6 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
-]
-
-[[package]]
-name = "ndarray"
-version = "0.15.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adb12d4e967ec485a5f71c6311fe28158e9d6f4bc4a447b474184d0f91a8fa32"
-dependencies = [
- "matrixmultiply",
- "num-complex",
- "num-integer",
- "num-traits",
- "rawpointer",
 ]
 
 [[package]]
@@ -2244,7 +2232,7 @@ version = "2.0.0-rc.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4336a1e2b38848325241c72889086886004e589b7c74f335e60a8e8db5138a0b"
 dependencies = [
- "ndarray 0.17.2",
+ "ndarray",
  "ort-sys",
  "smallvec",
  "tracing",
