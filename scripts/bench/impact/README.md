@@ -6,6 +6,7 @@ Run from the repository root, with two committed revisions:
 python3 scripts/bench/impact/compare.py --base BASE_SHA --candidate HEAD --output /tmp/impact-results
 ```
 
+Use a new output directory so previous evidence cannot be overwritten.
 Requires Cargo, Python 3.10+, and the workspace's cached Cargo dependencies
 (`cargo fetch --locked` if needed). Each arm compiles the exact `impact.rs`
 from its revision into one optimized binary, using the current checkout's
