@@ -8,7 +8,7 @@
 //!
 //! - stdout is JSON and nothing else: one document per line (a single
 //!   document for most commands, NDJSON for `search`), no prose, no notes;
-//! - human-facing notes (graph build announcements, caveats) go to stderr;
+//! - successful JSON commands emit no human-facing notes on stderr;
 //! - a failing command exits non-zero and writes the reason to stderr. Under
 //!   `--json` stdout carries one failure envelope (`ok: false`, `error.code`,
 //!   the same reason) so a parser reads the code instead of the prose; in
@@ -105,6 +105,12 @@ fn capped_search(dir: &Path, cap: usize, limit: usize, context: Option<usize>) -
 /// Every non-empty stdout line must parse as a JSON value on its own.
 /// Returns the parsed documents so callers can assert on content.
 fn parse_stdout_lines(out: &Output, what: &str) -> Vec<serde_json::Value> {
+    if out.status.success() {
+        assert!(
+            out.stderr.is_empty(),
+            "{what}: successful JSON must have empty stderr: {out:?}"
+        );
+    }
     let stdout = String::from_utf8(out.stdout.clone())
         .unwrap_or_else(|e| panic!("{what}: stdout is not UTF-8: {e}"));
     stdout
@@ -128,6 +134,10 @@ fn json_commands_emit_only_json_on_stdout() {
     // (argv, expected top-level keys on the single document)
     let single_doc: &[(&[&str], &[&str])] = &[
         (&["status", ".", "--json"], &[]),
+        (
+            &["scope-task", "fix login_user", ".", "--json", "--regions"],
+            &["targets"],
+        ),
         (&["find-symbol", "login_user", ".", "--json"], &[]),
         (&["impact", "login_user", ".", "--json"], &["epistemics"]),
         (
@@ -1374,4 +1384,46 @@ fn what_changed_should_report_unknown_for_unindexed_changes_and_list_the_paths()
             .into_iter()
             .collect()
     );
+}
+
+#[test]
+fn json_should_stay_quiet_on_cold_refresh_and_repeated_retrieval() {
+    let dir = fixture("quiet-json");
+    let run = |args: &[&str]| {
+        pixel_command()
+            .current_dir(&dir)
+            .args(args)
+            .env("PIXEL_METRICS", "1")
+            .env_remove("PIXEL_TEST")
+            .output()
+            .unwrap()
+    };
+    for turn in 0..3 {
+        std::fs::write(
+            dir.join("src/login.rs"),
+            format!("pub fn login_user() -> u32 {{ {turn} }}\n"),
+        )
+        .unwrap();
+        let out = run(&["what-changed", "--base", "HEAD", "--tests", "--json"]);
+        assert!(out.status.success(), "{out:?}");
+        assert!(out.stderr.is_empty(), "turn {turn}: {out:?}");
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            value["graph_build"].is_object(),
+            "refresh metadata stays in JSON: {value}"
+        );
+        assert_eq!(value["symbols"][0]["name"], "login_user");
+    }
+    let text = run(&["what-changed", "--base", "HEAD", "--tests"]);
+    assert!(text.status.success(), "{text:?}");
+    let stderr = String::from_utf8_lossy(&text.stderr);
+    assert!(
+        stderr.contains("prior calls with identical arguments"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("🟩 pixel what-changed"), "{stderr}");
+    let rebuilt = run(&["rebuild-graph", "--json"]);
+    assert!(rebuilt.status.success(), "{rebuilt:?}");
+    assert!(rebuilt.stderr.is_empty(), "{rebuilt:?}");
+    serde_json::from_slice::<serde_json::Value>(&rebuilt.stdout).unwrap();
 }

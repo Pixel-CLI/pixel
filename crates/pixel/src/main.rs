@@ -2137,10 +2137,10 @@ fn finish_graph_cmd(
     raw_json: bool,
     pretty: impl Fn(&Value) -> Option<String>,
 ) -> Result<(), String> {
-    announce_graph_build(&data);
     if raw_json {
         return print_data(&data, true);
     }
+    announce_graph_build(&data);
     if let Some(cands) = data.get("candidates").and_then(Value::as_array) {
         operation_metrics::observe(&json!({"candidates": cands}));
         eprintln!("ambiguous name — re-run with one of these uids:");
@@ -2544,18 +2544,12 @@ fn write_regions_manifest(root: &Path, task: &str, data: &Value) -> Result<(), S
         pixel_git::nofollow::PRIVATE_MODE,
     )
     .map_err(|e| format!("publish {}: {e}", regions_path.display()))?;
-    eprintln!(
-        "regions manifest active: {} — evidence for orchestration, not an action recommendation",
-        regions_path.display()
-    );
     Ok(())
 }
 
-/// Circuit-breaker guard for retrieval commands. Call at the top of
-/// each guarded command handler. If the breaker fires, prints the
-/// guidance message to stderr and returns `true` (caller should return
-/// early with an error). If the call is allowed, returns `false`.
-fn call_guard_check(command: &str, args: &str) -> bool {
+/// Record retrieval history and show advisory repeat notes in human mode.
+/// JSON callers still contribute to history, but receive no prose on stderr.
+fn call_guard_check(command: &str, args: &str, json: bool) -> bool {
     // Test mode: skip the circuit breaker entirely so integration tests
     // that call pixel search/resolve multiple times don't hit it.
     if std::env::var("PIXEL_TEST").is_ok() {
@@ -2565,7 +2559,9 @@ fn call_guard_check(command: &str, args: &str) -> bool {
     match call_guard::check_and_record(command, args, &cwd) {
         call_guard::CallGuardResult::Allow => false,
         call_guard::CallGuardResult::Warn(msg) => {
-            eprintln!("{msg}");
+            if !json {
+                eprintln!("{msg}");
+            }
             false
         }
     }
@@ -3111,7 +3107,7 @@ fn run_task_aware_search_fallback(
     no_daemon: bool,
     json: bool,
 ) -> Result<bool, String> {
-    call_guard_check("find-code", &format!("{phrase} {}", root.display()));
+    call_guard_check("find-code", &format!("{phrase} {}", root.display()), json);
     if overview_intent::is_overview_prompt(phrase) {
         let repo_root = discover_root(root).unwrap_or_else(|_| root.to_path_buf());
         let answer = overview_intent::overview_answer(&repo_root);
@@ -3236,9 +3232,11 @@ fn run_search_one(
                 return Ok(());
             }
             Err(error) => {
-                eprintln!(
-                    "task-aware find-code fallback unavailable; preserving the exact-search result: {error}"
-                );
+                if !json {
+                    eprintln!(
+                        "task-aware find-code fallback unavailable; preserving the exact-search result: {error}"
+                    );
+                }
             }
         }
     }
@@ -3397,12 +3395,7 @@ fn daemon_ping(root: &Path) -> bool {
 
 fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), String> {
     let report = |message: &str| {
-        if quiet {
-            eprint!("{message}");
-            Ok(())
-        } else {
-            write_stdout(message)
-        }
+        if quiet { Ok(()) } else { write_stdout(message) }
     };
     if foreground {
         return daemon::run(&path).map_err(|e| e.to_string());
@@ -4296,16 +4289,18 @@ fn run() -> Result<(), String> {
             }
     );
     let root = discover_root(&path).or_else(|_| discover_root(Path::new(".")));
-    // `--metrics=off` and `PIXEL_METRICS=0` veto one invocation; the
+    // `--json`, `--metrics=off` and `PIXEL_METRICS=0` hide live reporting; the
     // `metrics` key in `.pixel/config.yaml` (repo, then `~/.pixel/` global)
     // is the persistent opt-out layer beneath them.
+    let json = json_requested(&matches);
     let live = !protected
+        && !json
         && cli.metrics != "off"
         && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0")
         && config_cmd::metrics_enabled(root.as_deref().ok());
     operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
     let release_check = update_notice::enabled(
-        protected,
+        protected || json,
         &command_label,
         std::io::IsTerminal::is_terminal(&std::io::stderr()),
         |name| std::env::var_os(name),
@@ -4610,7 +4605,7 @@ fn run_command(
             fallback_query,
             line_number: _,
         } => {
-            if call_guard_check("search-content", &format!("{pattern} {paths:?}")) {
+            if call_guard_check("search-content", &format!("{pattern} {paths:?}"), json) {
                 return Err("circuit breaker: repeated search calls".to_string());
             }
             if fallback_query.as_deref().is_some_and(str::is_empty) {
@@ -4773,6 +4768,14 @@ fn run_command(
             // regions.json so the two files stay coherent.
             if regions && !no_manifest && !read_only {
                 write_regions_manifest(&root, &task, &data)?;
+                if !json {
+                    eprintln!(
+                        "regions manifest active: {} — evidence for orchestration, not an action recommendation",
+                        root.join(pixel_index::index::SHARD_DIR)
+                            .join("regions.json")
+                            .display()
+                    );
+                }
             } else if !no_manifest && !read_only {
                 let regions_path = root
                     .join(pixel_index::index::SHARD_DIR)
@@ -4787,7 +4790,9 @@ fn run_command(
             } else {
                 finish_graph_cmd(data, json, pretty_targets)?;
             }
-            if let Some(active) = active_tasks {
+            if let Some(active) = active_tasks
+                && !json
+            {
                 eprintln!(
                     "targets manifest active: {} ({active} task(s)) — scoping enforced; run `pixel scope-task --clear` when the task ends",
                     manifest_path.display()
@@ -4946,7 +4951,7 @@ fn run_command(
             budget,
             json,
         } => {
-            if call_guard_check("pack-context", &format!("{uid} {}", path.display())) {
+            if call_guard_check("pack-context", &format!("{uid} {}", path.display()), json) {
                 return Err("circuit breaker: repeated context calls".to_string());
             }
             let data = execute(
@@ -4997,7 +5002,7 @@ fn run_command(
             no_refresh,
             json,
         } => {
-            if call_guard_check("impact", &format!("{uid_or_name} {}", path.display())) {
+            if call_guard_check("impact", &format!("{uid_or_name} {}", path.display()), json) {
                 return Err("circuit breaker: repeated impact calls".to_string());
             }
             let dir = match direction {
@@ -5271,7 +5276,11 @@ fn run_command(
             tests,
             json,
         } => {
-            if call_guard_check("what-changed", &format!("{} {:?}", path.display(), base)) {
+            if call_guard_check(
+                "what-changed",
+                &format!("{} {:?}", path.display(), base),
+                json,
+            ) {
                 return Err("circuit breaker: repeated changes calls".to_string());
             }
             let data = execute(
@@ -5303,13 +5312,15 @@ fn run_command(
         }
         Command::RebuildGraph { path, json } => {
             let v = execute(&path, Request::Graph { if_stale: false }, false)?;
-            eprintln!(
-                "graph built in {} ms -> {}",
-                v.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0),
-                path.join(pixel_index::index::SHARD_DIR)
-                    .join(pixel_daemon::api::GRAPH_DB_FILE)
-                    .display()
-            );
+            if !json {
+                eprintln!(
+                    "graph built in {} ms -> {}",
+                    v.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0),
+                    path.join(pixel_index::index::SHARD_DIR)
+                        .join(pixel_daemon::api::GRAPH_DB_FILE)
+                        .display()
+                );
+            }
             print_data(&v, json)?;
             Ok(())
         }
@@ -5559,7 +5570,7 @@ fn run_command(
             limit,
             json,
         } => {
-            if call_guard_check("find-code", &format!("{phrase} {}", path.display())) {
+            if call_guard_check("find-code", &format!("{phrase} {}", path.display()), json) {
                 return Err("circuit breaker: repeated resolve calls".to_string());
             }
             if overview_intent::is_overview_prompt(&phrase) {
@@ -5834,16 +5845,20 @@ fn run_command(
                     plan.clone(),
                     pixel_setup::config::is_side_build(&exe),
                 );
-                for repair in &left {
-                    eprintln!(
-                        "pixel doctor --fix: left {} to the managed pixel: a pixel-dev side build does not rewrite the home install",
-                        repair.command
-                    );
+                if !json {
+                    for repair in &left {
+                        eprintln!(
+                            "pixel doctor --fix: left {} to the managed pixel: a pixel-dev side build does not rewrite the home install",
+                            repair.command
+                        );
+                    }
                 }
                 let runs: Vec<_> = plan
                     .iter()
                     .map(|repair| {
-                        eprintln!("pixel doctor --fix: running {}", repair.command);
+                        if !json {
+                            eprintln!("pixel doctor --fix: running {}", repair.command);
+                        }
                         pixel_setup::doctor::run_repair(&exe, repair)
                     })
                     .collect();
