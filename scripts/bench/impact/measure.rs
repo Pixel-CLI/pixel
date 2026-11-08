@@ -163,10 +163,10 @@ fn main() {
         }
         let start = Instant::now();
         black_box(query(&graph, &uid, down, depth, true));
-        let repetitions = (20_000_000 / start.elapsed().as_nanos().max(1)).clamp(1, 2000) as u32;
+        let repetitions = (5_000_000 / start.elapsed().as_nanos().max(1)).clamp(1, 2000) as u32;
         let mut samples = Vec::new();
         let mut cpu_samples = Vec::new();
-        for round in 0..41 {
+        for round in 0..161 {
             let mut pair = [0.0; 2];
             let mut cpu_pair = [0.0; 2];
             for index in if round % 2 == 0 { [0, 1] } else { [1, 0] } {

@@ -21,13 +21,13 @@ traversal. Each query includes JSON serialization and the 20-item output cap.
 Setup is excluded. Prepared-statement caches are cleared per query to prevent
 carryover between arms; the connection and SQLite pages stay warm. The harness checks count/file parity and SQL statement
 counts separately from timing, warms both arms, and alternates their order
-across 41 paired batches of approximately 20 ms per arm. Reported p50/p95
+across 161 paired batches of approximately 5 ms per arm. Reported p50/p95
 are percentiles of batch-average query times, not individual tail latency.
 
 Each batch records wall time and this thread's CPU time. CPU time helps
 diagnose scheduling interference without dropping a wall-time regression.
 The exit status rejects either one-sided 95% paired log-ratio interval whose
-upper bound exceeds 1.03 (t critical value 1.685, 40 degrees of freedom).
+upper bound exceeds 1.03 (t critical value 1.655, 160 degrees of freedom).
 This is a declared 3% regression sensitivity, not a claim of identical
 execution time. Keep `samples.jsonl`, `results.json` and `build.log`: the
 results identify the revisions, source hashes, binary hash and compiler.

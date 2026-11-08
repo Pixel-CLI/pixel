@@ -74,11 +74,11 @@ for line in result.stdout.splitlines():
     row = json.loads(line)
     before, after = zip(*row['samples_ns'])
     ratios = [math.log(b / a) for a, b in row['samples_ns']]
-    upper = math.exp(statistics.mean(ratios) + 1.685 * statistics.stdev(ratios) / math.sqrt(len(ratios)))
-    # One-sided 95% paired t interval, df=40; 3% is this lane's sensitivity.
+    upper = math.exp(statistics.mean(ratios) + 1.655 * statistics.stdev(ratios) / math.sqrt(len(ratios)))
+    # One-sided 95% paired t interval, df=160; 3% is this lane's sensitivity.
     cpu_before, cpu_after = zip(*row['cpu_samples_ns'])
     cpu_ratios = [math.log(b / a) for a, b in row['cpu_samples_ns']]
-    cpu_upper = math.exp(statistics.mean(cpu_ratios) + 1.685 * statistics.stdev(cpu_ratios) / math.sqrt(len(cpu_ratios)))
+    cpu_upper = math.exp(statistics.mean(cpu_ratios) + 1.655 * statistics.stdev(cpu_ratios) / math.sqrt(len(cpu_ratios)))
     passed = upper <= 1.03 and cpu_upper <= 1.03
     summary = {'case': row['case'], 'before_p50_ns': statistics.median(before),
                'after_p50_ns': statistics.median(after), 'before_p95_ns': sorted(before)[38],
