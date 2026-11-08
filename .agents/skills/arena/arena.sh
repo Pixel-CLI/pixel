@@ -544,12 +544,23 @@ arm_json() {
       }' "$rollout"
 }
 
+# Add the arm's billed tokens and dollars, read from its transcript.
+# Devin's transcript is one JSON document with no per-request usage: null.
+with_billed() {
+  local rollout billed=null
+  rollout=$(jq -r '.rollout // empty' <<<"$1")
+  if [ -n "$rollout" ] && [ "$AGENT" != devin ]; then
+    billed=$(python3 -I "$SELF_DIR/../../../eval/lib/usage.py" --json "$rollout" | jq '.[]') || billed=null
+  fi
+  jq --argjson billed "$billed" '. + {billed: $billed}' <<<"$1"
+}
+
 collect_receipt() {
   local run_dir=$1 rc_p=$2 rc_n=$3 wall=$4 pj nj ph nh
   ph=$(jq -r .pixel_home "$run_dir/run.json"); nh=$(jq -r .no_pixel_home "$run_dir/run.json")
   AGENT=$(jq -r '.agent // "codex"' "$run_dir/run.json")
-  pj=$(arm_json "$ph" "$rc_p" "$(jq -r '.pixel_ws // empty' "$run_dir/run.json")")
-  nj=$(arm_json "$nh" "$rc_n" "$(jq -r '.no_pixel_ws // empty' "$run_dir/run.json")")
+  pj=$(with_billed "$(arm_json "$ph" "$rc_p" "$(jq -r '.pixel_ws // empty' "$run_dir/run.json")")")
+  nj=$(with_billed "$(arm_json "$nh" "$rc_n" "$(jq -r '.no_pixel_ws // empty' "$run_dir/run.json")")")
   jq --arg wall "$wall" --argjson pixel "$pj" --argjson nopixel "$nj" '
     { run: .run, case: .case, name: .name, prompt: .prompt, commit: .commit,
       pixel_binary_sha256: .pixel_binary_sha256, wall_seconds: ($wall | tonumber),
@@ -580,7 +591,8 @@ summarize() {
     "                     pixel | no-pixel",
     "tool calls        \(.arms.pixel | calls) | \(.arms["no-pixel"] | calls)",
     "tokens            \(.arms.pixel | tok) | \(.arms["no-pixel"] | tok)",
-    "agent seconds     \(.arms.pixel.codex_seconds // "n/a") | \(.arms["no-pixel"].codex_seconds // "n/a")",
+    "billed $          \(.arms.pixel.billed.usd // "n/a") | \(.arms["no-pixel"].billed.usd // "n/a")",
+    "agent seconds    \(.arms.pixel.codex_seconds // "n/a") | \(.arms["no-pixel"].codex_seconds // "n/a")",
     "tool calls in order:",
     (.arms | to_entries[] | .key as $k | .value.tool_calls | to_entries[] | "  [\($k)] \(.key + 1). \(.value.call | .[0:150])"),
     "answers:",

@@ -138,6 +138,30 @@ class UnitContracts(unittest.TestCase):
         self.assertEqual(metrics["pixel_calls"], 1)
         self.assertIsNone(metrics["input_tokens"])
 
+    def test_billed_usage_prices_each_kind_of_token(self):
+        out = subprocess.run([sys.executable, "-I", str(EVAL / "lib/usage.py"), "--self-test"],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_a_codex_row_is_priced_from_its_recorded_model(self):
+        def score_with(model):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "scenarios").mkdir()
+                (root / "results").mkdir()
+                (root / "scenarios/s.json").write_text('{"must": []}')
+                usage = {"input_tokens": 1_000_000, "cached_input_tokens": 400_000, "output_tokens": 1_000_000}
+                (root / "results/s-a.codex.jsonl").write_text("\n".join(json.dumps(event) for event in [
+                    {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+                    {"type": "turn.completed", "usage": usage}]) + "\n")
+                (root / "results/s-a.codex.run.json").write_text(json.dumps({"model": model}))
+                return subprocess.run([sys.executable, str(EVAL / "score.py"), "--results", str(root / "results"),
+                                       "--scenarios-dir", str(root / "scenarios")], capture_output=True, text=True)
+        priced = score_with("gpt-6.1-sol")
+        self.assertEqual(priced.returncode, 0, priced.stderr)
+        self.assertIn("11.24", priced.stdout)
+        self.assertNotIn("11.24", score_with("unlisted-model").stdout)
+
     def test_the_baseline_settings_disable_an_enabled_pixel_plugin(self):
         settings = {"enabledPlugins": {"pixel@pixel-cli": True, "other@market": True},
                     "hooks": {"SessionStart": [{"hooks": [{"command": "pixel run-hook session-start"}]}]}}

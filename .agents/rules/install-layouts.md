@@ -1,6 +1,6 @@
 ---
 paths:
-  - "crates/pixel-install/**"
+  - "crates/pixel-setup/**"
 ---
 
 # Install Layouts
