@@ -109,7 +109,10 @@ fn main() {
             sql[index] = STATEMENTS.load(Ordering::Relaxed);
             graph
                 .conn_mut()
-                .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None)
+                .trace_v2(
+                    rusqlite::trace::TraceEventCodes::empty(),
+                    None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+                )
                 .unwrap();
         }
         for key in ["counts_by_depth", "affected_files"] {

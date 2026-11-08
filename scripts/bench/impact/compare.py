@@ -14,6 +14,7 @@ import tempfile
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--base', required=True)
+parser.add_argument('--cargo', default='cargo')
 parser.add_argument('--candidate', default='HEAD')
 parser.add_argument('--output', type=Path, required=True)
 args = parser.parse_args()
@@ -54,7 +55,7 @@ serde_json = "1"
 opt-level = 3
 ''')
     target = repo / 'target/impact-bench'
-    command = ['cargo', 'build', '--offline', '--release', '--manifest-path', str(scratch / 'Cargo.toml'), '--target-dir', str(target)]
+    command = [args.cargo, 'build', '--offline', '--release', '--manifest-path', str(scratch / 'Cargo.toml'), '--target-dir', str(target)]
     with (args.output / 'build.log').open('w') as log:
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
     binary = target / 'release/impact-comparison'
