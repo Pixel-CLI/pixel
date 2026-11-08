@@ -80,9 +80,10 @@ for line in result.stdout.splitlines():
     cpu_ratios = [math.log(b / a) for a, b in row['cpu_samples_ns']]
     cpu_upper = math.exp(statistics.mean(cpu_ratios) + 1.655 * statistics.stdev(cpu_ratios) / math.sqrt(len(cpu_ratios)))
     passed = upper <= 1.03 and cpu_upper <= 1.03
+    p95_index = math.ceil(0.95 * len(before)) - 1
     summary = {'case': row['case'], 'before_p50_ns': statistics.median(before),
-               'after_p50_ns': statistics.median(after), 'before_p95_ns': sorted(before)[38],
-               'after_p95_ns': sorted(after)[38], 'ratio_upper_95': upper,
+               'after_p50_ns': statistics.median(after), 'before_p95_ns': sorted(before)[p95_index],
+               'after_p95_ns': sorted(after)[p95_index], 'ratio_upper_95': upper,
                'sql_statements': row['sql_statements'], 'pass': passed,
                'cpu_before_p50_ns': statistics.median(cpu_before),
                'cpu_after_p50_ns': statistics.median(cpu_after), 'cpu_ratio_upper_95': cpu_upper}
