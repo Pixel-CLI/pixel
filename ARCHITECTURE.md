@@ -101,7 +101,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel cycles` | Bounded recursion-cycle enumeration with witnesses and explicit coverage: finds strongly connected components in the call graph (potential recursion cycles) over `Calls` edges only — `HasMethod` ownership is excluded because ownership is not runtime invocation. Bounded by node, edge, time, and component budgets; each reported cycle carries a concrete closed-path witness re-read from the store. The coverage report states whether the enumeration was exhaustive or which budget stopped it, so an incomplete graph is never read as proof of safety |
 | `pixel list-flows` | Discovered execution flows |
 | `pixel list-areas` | Functional-area clusters |
-| `pixel what-changed` | Symbols/flows affected by working-tree changes |
+| `pixel what-changed` | Symbols/flows affected by working-tree changes; a nonempty diff with no changed symbols has `risk: UNKNOWN`, with paths and coverage gaps in `uncovered_changes` and deleted anchors in `unanchored`. A clean diff keeps `LOW` |
 | `pixel rebuild-graph` | Force (re)build of the code graph db |
 | `pixel graph-shadow` | Compare this graph's Rust edges with pixel-mvp's index, or (`--lang ruby`) count what merging its Ruby answer site by site would change (both built in a scratch directory) |
 | `pixel workspace` | Multi-repo registry (`.pixel/workspace.json` members add/remove/list); `--workspace` fans `impact`/`who-calls` out across registered repos with per-repo provenance |

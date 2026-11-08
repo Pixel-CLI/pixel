@@ -1345,3 +1345,33 @@ fn ruby_instance_names_should_work_through_cli_graph_commands() {
         );
     }
 }
+
+#[test]
+fn what_changed_should_report_unknown_for_unindexed_changes_and_list_the_paths() {
+    let dir = fixture("unindexed-risk");
+    std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+    std::fs::write(dir.join(".github/workflows/merge.yml"), "name: merge\n").unwrap();
+    std::fs::write(dir.join("check.sh"), "echo check\n").unwrap();
+    git(&dir, &["add", "."]);
+    let out = pixel(
+        &dir,
+        &["what-changed", "--base", "HEAD", "--tests", "--json"],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["risk"], "UNKNOWN");
+    assert_eq!(value["symbols"], serde_json::json!([]));
+    assert_eq!(value["suggested_tests"], serde_json::json!([]));
+    let paths: std::collections::BTreeSet<_> = value["uncovered_changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| change["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [".github/workflows/merge.yml", "check.sh"]
+            .into_iter()
+            .collect()
+    );
+}

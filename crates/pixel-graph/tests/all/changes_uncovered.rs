@@ -139,6 +139,10 @@ fn an_edit_between_symbols_is_uncovered_at_its_own_lines() {
         "{:?}",
         r.uncovered_changes
     );
+    assert_eq!(
+        r.risk, "UNKNOWN",
+        "a comment-only diff is not a graph risk assessment"
+    );
     assert_eq!(r.uncovered_changes[0].new_lines, Some([2, 2]));
     assert_eq!(r.uncovered_changes[0].old_lines, None);
     assert_eq!(r.uncovered_changes[1].old_lines, Some([2, 2]));
@@ -449,4 +453,67 @@ fn with_no_base_ref_the_old_side_is_read_from_the_index() {
     assert_eq!(names, vec!["staged_only"]);
     assert_eq!(r.unanchored[0].uid, "src/work.ts#staged_only#function");
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn risk_should_be_unknown_only_when_a_nonempty_diff_has_no_changed_symbols() {
+    let root_dir = repo("unassessed-risk");
+    let root = root_dir.path();
+    assert_eq!(
+        report(root, Some("HEAD")).risk,
+        "LOW",
+        "a clean tree is still clean"
+    );
+    let paths = [
+        ".github/workflows/merge.yml",
+        "scripts/check.sh",
+        "notes.md",
+        "fixture.json",
+    ];
+    for path in paths {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "unindexed change\n").unwrap();
+    }
+    git(root, &["add", "."]);
+    let r = report(root, Some("HEAD"));
+    assert_eq!(r.changed_files, 4);
+    assert!(r.symbols.is_empty());
+    assert_eq!(r.risk, "UNKNOWN");
+    assert_eq!(
+        r.envelope_note,
+        "no changed symbols mapped; inspect uncovered_changes and unanchored before assessing risk"
+    );
+    let uncovered: std::collections::BTreeSet<_> = r
+        .uncovered_changes
+        .iter()
+        .map(|change| change.path.as_str())
+        .collect();
+    assert_eq!(uncovered, paths.into_iter().collect());
+    std::fs::write(
+        root.join("src/work.ts"),
+        source_v1().replace("return n + 1", "return n + 11"),
+    )
+    .unwrap();
+    let mixed = report(root, Some("HEAD"));
+    assert_eq!(
+        mixed
+            .symbols
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["keep"]
+    );
+    assert_eq!(
+        mixed.risk, "LOW",
+        "a mapped change retains its computed graph risk"
+    );
+    assert_eq!(
+        mixed
+            .uncovered_changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        paths.into_iter().collect()
+    );
 }
