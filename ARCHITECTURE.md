@@ -254,7 +254,10 @@ Machine-wide:
   Publish recovery schema 2 records the real worktree index path and branch,
   pre-HEAD/index and owned post-staging checksum. Restoration takes Git’s index
   lock and refuses drift; refused snapshots stay durable, while successful
-  commits remove them. Legacy snapshots require manual recovery.
+  commits remove them. Legacy snapshots require manual recovery. Observed-commit
+  retries return the recorded OID; an unattempted requested push remains an explicit
+  incomplete error. Rewrite recovery compares the recorded branch/head and uses
+  a named-ref compare-and-swap, never a reset of whichever branch is current.
 - `~/.local/state/pixel/pr-swarm/`: the repo-local `pr-swarm` reconciler's
   state — `reconcile.log`, `lock/`, `resolve.tsv`, `last-run.jsonl` and
   `watch.pid` (the `watch` loop's claim, the authority on whether one runs) —

@@ -43,7 +43,7 @@ pub struct PublishRecoveryState {
     pub owned_index_checksum: Option<String>,
     pub mode: Option<String>, // "append" | "amend"
     pub resolved_message: Option<String>,
-    /// Hex-encoded raw bytes of `.git/index` as it existed immediately
+    /// Hex-encoded raw bytes of the worktree index as it existed immediately
     /// before this operation touched it. `None` means the index file did
     /// not exist yet (e.g. a truly empty/unborn repo).
     pub pre_index_hex: Option<String>,
@@ -389,8 +389,8 @@ mod tests {
             .unwrap()
             .expect("index should exist after commit");
 
-        // Mutate: stage a new file and commit it (simulating a completed
-        // mutation the recovery restore must fully undo).
+        // A later commit makes the original ownership ambiguous; recovery
+        // must preserve this history and its index.
         std::fs::write(root.join("new.txt"), b"new").unwrap();
         git(root, &["add", "."]);
         git(root, &["commit", "-qm", "mutate"]);
