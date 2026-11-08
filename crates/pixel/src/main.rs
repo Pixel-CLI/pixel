@@ -2667,16 +2667,20 @@ fn search_match_line(m: &Value, json: bool) -> String {
 /// The NDJSON line a `--json` search page ends with: the page state no match
 /// line carries, because a page cut by a cap is otherwise byte-for-byte a
 /// complete answer. `epistemics`/`warnings` are the envelope honesty fields
-/// [`unwrap_response`] folded into the response. Every key is always present
-/// (`null` for the absent ones), so the trailer's size is bounded by its
-/// values alone.
+/// [`unwrap_response`] folded into the response. These keys are always present
+/// (`null` for the absent ones); requested statistics are an optional `stats`
+/// field. The trailer's size is included in the output cap.
 fn search_meta(data: &Value, truncated: bool, next_offset: Option<u64>) -> Value {
-    json!({
+    let mut meta = json!({
         "truncated": truncated,
         "next_offset": next_offset,
         "epistemics": data.get("epistemics").cloned().unwrap_or(Value::Null),
         "warnings": data.get("warnings").cloned().unwrap_or(Value::Null),
-    })
+    });
+    if let Some(stats) = data.get("stats") {
+        meta["stats"] = stats.clone();
+    }
+    meta
 }
 
 /// Whether one more `line` fits: what is already assembled plus the line plus
@@ -3198,7 +3202,7 @@ fn run_search_one(
     // `-g`/`-t` travel with the request: the daemon drops the files they
     // exclude before paging, so `limit`, `offset` and `next_offset` count
     // kept matches here exactly as they do without a filter.
-    let data = execute(
+    let mut data = execute(
         root,
         Request::Search {
             pattern: pattern.to_string(),
@@ -3214,6 +3218,9 @@ fn run_search_one(
         },
         no_daemon,
     )?;
+    if !stats && let Some(object) = data.as_object_mut() {
+        object.remove("stats");
+    }
     let matches = data
         .get("matches")
         .and_then(Value::as_array)
@@ -3301,7 +3308,7 @@ fn run_search_one(
     // stdout-cap cut names a different cap, so the daemon's caps stay in
     // the note there.
     let mut row_cap_warned = false;
-    if page.cap_fired {
+    if !json && page.cap_fired {
         // The `--context` text is added on this side of the daemon's byte
         // cap, so the stdout cap can be what cut this page: name that cap and
         // the offset that resumes the page instead of the daemon's row cap.
@@ -3316,7 +3323,7 @@ fn run_search_one(
             stdout_byte_cap(),
             page.next_offset,
         );
-    } else if page.truncated {
+    } else if !json && page.truncated {
         row_cap_warned = true;
         eprintln!(
             "⚠ results truncated: returned {match_count}; more matches exist (row limit {limit}, byte cap {} bytes). \
@@ -3330,7 +3337,8 @@ fn run_search_one(
     // partial, say so on stderr with the named caps — minus the caps the
     // row-cap warning above already stated. A stdout-cap cut names a
     // different cap, so the daemon's caps stay in the note there.
-    if let Some(e) = data.get("epistemics")
+    if !json
+        && let Some(e) = data.get("epistemics")
         && e.get("lower_bound").and_then(Value::as_bool) == Some(true)
         && let Some(basis) = e.get("basis").and_then(Value::as_str)
         && let Some(note) = bounded_result_note(
@@ -3343,7 +3351,10 @@ fn run_search_one(
     {
         eprintln!("note: bounded result — {note}");
     }
-    if stats && let Some(s) = data.get("stats") {
+    if stats
+        && !json
+        && let Some(s) = data.get("stats")
+    {
         eprintln!(
             "candidates={}{} matches={} elapsed_us={}",
             s.get("candidates").and_then(Value::as_u64).unwrap_or(0),

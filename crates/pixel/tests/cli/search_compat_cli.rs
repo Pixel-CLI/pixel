@@ -209,9 +209,7 @@ fn repeated_search_keeps_executing_and_reports_changed_file() {
                 "before needle"
             }
         );
-        if attempt >= 2 {
-            assert!(String::from_utf8_lossy(&output.stderr).contains("Continuing retrieval."));
-        }
+        assert!(output.stderr.is_empty(), "attempt {attempt}: {output:?}");
     }
 }
 

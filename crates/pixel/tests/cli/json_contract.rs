@@ -305,11 +305,7 @@ fn search_json_page_ends_with_the_state_of_the_page_it_printed() {
         "the page resumes at the first match it did not print: {meta}"
     );
     assert!(meta["epistemics"].is_object(), "{meta}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("stdout cap (PIXEL_OUTPUT_CAP_BYTES)"),
-        "the cut is named on stderr: {stderr}"
-    );
+    assert!(out.stderr.is_empty(), "{out:?}");
 
     // Without `--context` the rows are small enough to fill the cap tightly:
     // the reserved metadata line stays inside the cap too.
@@ -341,7 +337,7 @@ fn search_json_page_ends_with_the_state_of_the_page_it_printed() {
     assert!(meta["next_offset"].is_null(), "{meta}");
 
     // A page the daemon itself capped keeps the daemon's resume offset, and
-    // the stderr line names the daemon's row cap rather than the stdout cap.
+    // the metadata names the daemon's row cap rather than the stdout cap.
     let limited = capped_search(&dir, cap, 5, None);
     assert!(limited.status.success(), "{limited:?}");
     let docs = parse_stdout_lines(&limited, "row-capped search --json");
@@ -349,15 +345,14 @@ fn search_json_page_ends_with_the_state_of_the_page_it_printed() {
     assert_eq!(matches.len(), 5, "{docs:?}");
     assert_eq!(meta["truncated"], true, "{meta}");
     assert_eq!(meta["next_offset"].as_u64(), Some(5), "{meta}");
-    let stderr = String::from_utf8_lossy(&limited.stderr);
     assert!(
-        stderr.contains("row limit 5"),
-        "the daemon's cap is named on stderr: {stderr}"
+        meta["warnings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("row limit 5"),
+        "{meta}"
     );
-    assert!(
-        !stderr.contains("stdout cap"),
-        "the stdout cap did not fire: {stderr}"
-    );
+    assert!(limited.stderr.is_empty(), "{limited:?}");
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1426,4 +1421,18 @@ fn json_should_stay_quiet_on_cold_refresh_and_repeated_retrieval() {
     assert!(rebuilt.status.success(), "{rebuilt:?}");
     assert!(rebuilt.stderr.is_empty(), "{rebuilt:?}");
     serde_json::from_slice::<serde_json::Value>(&rebuilt.stdout).unwrap();
+}
+
+#[test]
+fn json_search_stats_should_stay_in_the_metadata_instead_of_stderr() {
+    let dir = fixture("quiet-json-stats");
+    let out = pixel(
+        &dir,
+        &["search-content", "login_user", ".", "--stats", "--json"],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let docs = parse_stdout_lines(&out, "search --stats --json");
+    let stats = &docs.last().unwrap()["stats"];
+    assert_eq!(stats["matches"], 3);
+    assert!(stats["elapsed_us"].is_u64(), "{stats}");
 }
