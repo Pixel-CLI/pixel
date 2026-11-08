@@ -24,8 +24,8 @@ is narrower: deterministic operation probes and real temporary Git repositories.
 | M8 / P1: rewrite recovery erases later history | After a crash at `reset:done`, a later commit or checkout is followed by retry; unconditional `reset --soft old_head` rewinds the new current branch. | #1390, implemented; validation below |
 | M4 / P2: retry changes completed operation | At `CommitObserved`, retry reads today's HEAD and reports it as the original commit; `push=true` becomes `pushed=false`. At Started with a snapshot, first recovery deletes it; second retry sees no snapshot and executes again. | #1390, implemented; validation below |
 | M5 / P2: wrong ownership domain on retry | `push_with_state` Started resume uses global `state_root()` for its lock, while the journal remains under the supplied root. All journaled operations read admission before locking, permitting a stale phase decision. | #1389, implemented; validation below |
-| M6 / P2: half-created branch | `git branch new target` succeeds, checkout rejects overlapping dirty changes, retry encounters `REF_EXISTS`. | [#1391](https://github.com/Pixel-CLI/pixel/issues/1391), pending regression/fix |
-| M7 / P2: applied fast-forward cannot resume | Process exits after successful merge but before terminal journal write; HEAD is target, yet retry requires the old expected HEAD and returns `STALE_STATE`. | #1391, pending regression/fix |
+| M6 / P2: half-created branch | `git branch new target` succeeds, checkout rejects overlapping dirty changes, retry encounters `REF_EXISTS`; a crash after successful checkout also leaves an unrecognized applied effect. | [#1391](https://github.com/Pixel-CLI/pixel/issues/1391), implemented; validation below |
+| M7 / P2: applied fast-forward cannot resume | Process exits after successful merge but before terminal journal write; HEAD is target, yet retry requires the old expected HEAD and returns `STALE_STATE`. | #1391, implemented; validation below |
 
 P1 means potential corruption of staged intent or branch history. P2 means a
 wrong receipt, missing requested work, or an operation stranded after failure.
@@ -62,15 +62,17 @@ Pixel's lock does not make arbitrary external Git commands transactional. M1/M2/
 Owner: [journal.rs](../crates/pixel-ops/src/journal.rs).
 Key: common-directory identity + request ID; operation/input hash must match.
 States: absent, Started, IndexStaged, CommitObserved, PushStarted,
-RefUpdateStarted, Terminal; unreadable/unsupported data is an error.
+RefUpdateStarted, Terminal; unreadable records/unknown enum values are errors.
+The journal schema_version field is stored but not validated by read_existing.
 
 | From | Event / guard | To / result |
 | --- | --- | --- |
 | Absent | Valid ID, create-new succeeds | Started / Start |
 | Any existing | Different operation or input | Idempotency conflict |
 | Intermediate | Matching request, exclusive ownership | Resume at durable phase |
-| Started | Commit stages / push begins / rewrite begins | IndexStaged / PushStarted / RefUpdateStarted |
-| IndexStaged or RefUpdateStarted | Commit observed durably | CommitObserved |
+| Started | Commit stages / push begins / rewrite, branch or update intent | IndexStaged / PushStarted / RefUpdateStarted |
+| IndexStaged or rewrite RefUpdateStarted | Commit observed durably | CommitObserved |
+| Branch/update RefUpdateStarted | Target applied and acknowledged | Terminal |
 | CommitObserved | Requested push begins | PushStarted |
 | Nonterminal | Persist result after effects | Terminal |
 | Terminal | Matching retry | Replay stored result, no repeated effects |
@@ -136,11 +138,15 @@ Owners: [branch.rs](../crates/pixel-ops/src/branch.rs),
 
 | From | Event / guard | To / result |
 | --- | --- | --- |
-| Branch absent | Valid name/base, safe checkout | Created and checked out together |
+| Branch absent | Valid name/base | Persist resolved target, original HEAD/branch and worktree intent |
+| Branch intent | Checkout succeeds | Created and checked out together; then Terminal |
+| Branch intent on retry | Same worktree, named branch checked out at recorded target | Terminal, original receipt without another checkout |
+| Branch intent on retry, ref absent | Original HEAD/branch still match | Retry checkout using pinned target |
 | Branch already exists | New request | REF_EXISTS; never claim it was checked out |
-| Create/switch refused | Dirty target overlap or Git failure | Prior refs, index and working files retained |
+| Create/switch refused | Checkout safety check rejects dirty target overlap | Prior refs, index and working files retained |
+| Checkout effect then interruption/error | Before Terminal write (including a failing post-checkout hook) | Intent remains; retry validates applied target |
 | Update Started | HEAD=expected, target descendant, dirty paths safe | Record intent, fast-forward, Terminal |
-| Update retry after effect | HEAD=recorded target | Terminal, original from/to receipt |
+| Update retry after effect | Original worktree/branch, HEAD=recorded target | Terminal, original from/to receipt |
 | Update | HEAD unrelated to intent | STALE_STATE |
 | Update | Diverged ancestry or overlapping dirty paths | NON_FAST_FORWARD / UNSUPPORTED_STATE |
 
@@ -339,8 +345,7 @@ clear/compact invalidates sent ranges; resume retains them. Advisory I/O fails o
 
 ## Regression evidence and maintenance
 
-Baseline and fixed runs will be added here with exact commands, revisions and
-results. Do not mark a finding fixed solely because a unit helper passes: exercise
+Baseline and fixed runs below record exact commands, revisions and results. Do not mark a finding fixed solely because a unit helper passes: exercise
 the production entry point, and retain negative controls for drift and busy owners.
 When adding a lifecycle or phase, update its table and its producer/readers in this
 file in the same PR. Existing state-machine tests remain part of normal CI; no
@@ -356,7 +361,7 @@ index/journal/HEAD preservation and a busy result. The stale-lock test holds the
 persistent guard over a dead-owner directory and verifies a contender preserves
 it, then verifies successful exclusive recovery after release. No sleeps.
 
-Fixed ownership candidate: `cargo test -p pixel-ops --no-fail-fast` passed
+Fixed ownership candidate `895599bc`: `cargo test -p pixel-ops --no-fail-fast` passed
 149 unit + 62 integration tests; `cargo clippy -p pixel-ops --all-targets -- -D warnings`
 and `cargo fmt --all -- --check` passed. Full current-head workspace gates run in CI.
 
@@ -372,7 +377,7 @@ snapshot after refusal. A v1 snapshot fails closed for manual recovery. Successf
 commits still remove their snapshots. Raw external ref updates do not honor the
 index lock; this is not a transaction across arbitrary concurrent native Git.
 
-Snapshot layer validation: `cargo test -p pixel-ops --no-fail-fast` passed
+Snapshot layer validation (`e17cdf8a`): `cargo test -p pixel-ops --no-fail-fast` passed
 149 unit + 66 integration tests. `cargo clippy -p pixel-ops --all-targets -- -D warnings`
 and `cargo fmt --all -- --check` passed. This includes native index-lock contention,
 unreadable index rejection and repeated crash recovery. Workspace CI is required.
@@ -388,6 +393,47 @@ checks the recorded branch and pre/reset OID, then compare-and-swaps that named
 ref. A newer commit/other branch is a recovery conflict. Existing reset-window
 recovery still restores the pre-rewrite head and leaves index/worktree untouched.
 
-Identity layer validation: `cargo test -p pixel-ops --no-fail-fast` passed
+Identity layer validation (`4398a687`): `cargo test -p pixel-ops --no-fail-fast` passed
 149 unit + 69 integration tests; `cargo clippy -p pixel-ops --all-targets -- -D warnings`
 and `cargo fmt --all -- --check` passed. Full current-head CI remains required.
+
+### Local transition evidence (#1391)
+
+`cargo test -p pixel-ops should_ --lib --no-fail-fast` at `4398a687` with
+post-effect interruption seams and regressions: 70 passed, 3 failed. Branch
+checkout failure left a ref; applied branch and fast-forward retries returned
+REF_EXISTS and STALE_STATE. Branch now uses Git's atomic create-and-checkout,
+pinning the resolved base in RefUpdateStarted before the effect. Branch/update
+retries validate worktree and branch and acknowledge only the exact applied
+target. Both resolve the base/target before the effect; update retries also support
+abbreviated OIDs and a named target ref that later moves. Legacy Started records without intent still fail closed when HEAD/ref
+already moved; the new code does not guess ownership of older partial effects.
+Negative controls cover later commits, another checkout at the same OID and a
+source ref moving between failed checkout and retry. The abbreviated-OID case
+failed on `7b9d0746` with `cargo test -p pixel-ops update_should_replay_applied_target --lib`;
+the expanded regression also verifies a moving target ref against its pinned OID.
+
+
+Final local-transition validation (the pinned-target follow-up to `7b9d0746` in
+[#1396](https://github.com/Pixel-CLI/pixel/pull/1396)):
+`cargo test -p pixel-ops --no-fail-fast` passed 153 unit + 69 integration tests;
+`cargo clippy -p pixel-ops --all-targets -- -D warnings`,
+`cargo fmt --all -- --check` and `git diff --check` passed.
+Current-head workspace CI validates the PR.
+
+### Delivery and remaining limits
+
+The review stack is inventory ([#1392](https://github.com/Pixel-CLI/pixel/pull/1392)),
+exclusive ownership ([#1393](https://github.com/Pixel-CLI/pixel/pull/1393)),
+snapshot identity ([#1394](https://github.com/Pixel-CLI/pixel/pull/1394)),
+recovery receipts ([#1395](https://github.com/Pixel-CLI/pixel/pull/1395)), then
+branch/update transitions ([#1396](https://github.com/Pixel-CLI/pixel/pull/1396),
+[#1391](https://github.com/Pixel-CLI/pixel/issues/1391)).
+The three linked fix issues cover all eight confirmed baseline violations.
+
+The mutation regressions use deterministic phase probes and real Git effects;
+they do not establish safety against every native Git interleaving, filesystem
+failure or machine power loss. Other lifecycle tables are a source inventory,
+not a claim of exhaustive crash testing. Version-1 recovery snapshots and legacy
+branch/update records with already-applied effects require manual reconciliation.
+No managed installation or mutation-testing campaign is part of this audit.
