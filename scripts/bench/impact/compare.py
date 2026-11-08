@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import statistics
 import subprocess
+import sys
 import tempfile
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -19,9 +20,9 @@ parser.add_argument('--candidate', default='HEAD')
 parser.add_argument('--output', type=Path, required=True)
 args = parser.parse_args()
 repo = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip())
-args.output.mkdir(parents=True, exist_ok=True)
+args.output.mkdir(parents=True)
 source = 'crates/pixel-graph/src/impact.rs'
-identity = {'platform': platform.platform(), 'command': __import__('sys').argv,
+identity = {'platform': platform.platform(), 'command': sys.argv,
             'store_context_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
             'cargo_lock_sha256': hashlib.sha256((repo / 'Cargo.lock').read_bytes()).hexdigest(),
             'harness_sha256': hashlib.sha256(Path(__file__).with_name('measure.rs').read_bytes()).hexdigest()}
@@ -61,9 +62,12 @@ opt-level = 3
     binary = target / 'release/impact-comparison'
     identity['binary_sha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
     identity['rustc'] = subprocess.check_output(['rustc', '--version'], text=True).strip()
-    result = subprocess.run([str(binary)], capture_output=True, text=True, check=True)
+    result = subprocess.run([str(binary)], capture_output=True, text=True)
     (args.output / 'samples.jsonl').write_text(result.stdout)
-assert len(result.stdout.splitlines()) == 10, 'expected all ten fixture results'
+    (args.output / 'measure.stderr').write_text(result.stderr)
+    result.check_returncode()
+if len(result.stdout.splitlines()) != 10:
+    raise RuntimeError('expected all ten fixture results')
 rows = []
 for line in result.stdout.splitlines():
     row = json.loads(line)
