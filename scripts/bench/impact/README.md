@@ -32,3 +32,7 @@ This is a declared 3% regression sensitivity, not a claim of identical
 execution time. Keep `samples.jsonl`, `results.json` and `build.log`: the
 results identify the revisions, source hashes, binary hash and compiler.
 Run with the same revision in both arms to check measurement noise.
+
+`impact-bench.yml` runs that control and the candidate comparison on a dedicated
+GitHub-hosted runner when impact code, this harness or its workflow changes.
+Both results are retained as the `impact-performance` artifact even on failure.
