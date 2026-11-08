@@ -14,6 +14,10 @@ use serde::Serialize;
 
 use crate::store::{EdgeKind, Envelope, GraphStore, StoreError, SymbolRow, Tier};
 
+const PROCESS_LABELS_SQL: &str = "SELECT DISTINCT p.label FROM processes p
+    JOIN process_steps ps ON ps.process_id = p.id
+    WHERE ps.symbol_id = ?1 ORDER BY p.label";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
@@ -141,11 +145,13 @@ pub(crate) fn processes_for_symbol(
     store: &GraphStore,
     symbol_id: i64,
 ) -> Result<Vec<String>, StoreError> {
-    let mut stmt = store.conn().prepare_cached(
-        "SELECT DISTINCT p.label FROM processes p
-         JOIN process_steps ps ON ps.process_id = p.id
-         WHERE ps.symbol_id = ?1 ORDER BY p.label",
-    )?;
+    process_labels(&mut store.conn().prepare(PROCESS_LABELS_SQL)?, symbol_id)
+}
+
+fn process_labels(
+    stmt: &mut rusqlite::Statement<'_>,
+    symbol_id: i64,
+) -> Result<Vec<String>, StoreError> {
     let rows = stmt.query_map(params![symbol_id], |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();
     for r in rows {
@@ -221,6 +227,7 @@ pub fn impact(
     let mut bucket_truncated = [false; 3];
     let mut files: HashSet<i64> = HashSet::default();
     let mut proc_set: BTreeSet<String> = BTreeSet::new();
+    let mut process_statement = None;
 
     while let Some(id) = queue.pop_front() {
         let (depth, path_tier, _) = visited[&id];
@@ -259,7 +266,11 @@ pub fn impact(
             counts[bucket] += 1;
             if let Some(sym) = symbol_by_id(store, nbr)? {
                 files.insert(sym.file_id);
-                let procs = processes_for_symbol(store, sym.id)?;
+                // Prepare lazily: an empty walk does not query process labels.
+                if process_statement.is_none() {
+                    process_statement = Some(store.conn().prepare(PROCESS_LABELS_SQL)?);
+                }
+                let procs = process_labels(process_statement.as_mut().unwrap(), sym.id)?;
                 for p in &procs {
                     proc_set.insert(p.clone());
                 }
