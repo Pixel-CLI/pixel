@@ -21,7 +21,8 @@ is narrower: deterministic operation probes and real temporary Git repositories.
 | M1 / P1: live index/history rollback | Publish A pauses at `journal:index_staged`; duplicate A reads Resume outside the lock and `restore_snapshot` overwrites A's staged index. Rewrite's `RefUpdateStarted` resume likewise resets HEAD without a lock. | [#1389](https://github.com/Pixel-CLI/pixel/issues/1389), implemented; validation below |
 | M2 / P1: two lock owners | Two contenders read one dead `owner.json`; A removes/recreates the directory, then B's stale decision removes A's live directory. `try_recover_stale` has no atomic claim. | #1389, implemented; validation below |
 | M3 / P1: recovery targets wrong index/history | Linked worktree `.git` is a file; `index_path` nevertheless appends `index`. Capture treats its read error as absence. Separately, a retry after another commit/stage/checkout blindly restores the old index and current HEAD. | [#1390](https://github.com/Pixel-CLI/pixel/issues/1390), snapshot fix implemented; validation below |
-| M4 / P2: retry changes completed operation | At `CommitObserved`, retry reads today's HEAD and reports it as the original commit; `push=true` becomes `pushed=false`. At Started with a snapshot, first recovery deletes it; second retry sees no snapshot and executes again. | #1390, receipt fix pending; snapshot retry fixed below |
+| M8 / P1: rewrite recovery erases later history | After a crash at `reset:done`, a later commit or checkout is followed by retry; unconditional `reset --soft old_head` rewinds the new current branch. | #1390, implemented; validation below |
+| M4 / P2: retry changes completed operation | At `CommitObserved`, retry reads today's HEAD and reports it as the original commit; `push=true` becomes `pushed=false`. At Started with a snapshot, first recovery deletes it; second retry sees no snapshot and executes again. | #1390, implemented; validation below |
 | M5 / P2: wrong ownership domain on retry | `push_with_state` Started resume uses global `state_root()` for its lock, while the journal remains under the supplied root. All journaled operations read admission before locking, permitting a stale phase decision. | #1389, implemented; validation below |
 | M6 / P2: half-created branch | `git branch new target` succeeds, checkout rejects overlapping dirty changes, retry encounters `REF_EXISTS`. | [#1391](https://github.com/Pixel-CLI/pixel/issues/1391), pending regression/fix |
 | M7 / P2: applied fast-forward cannot resume | Process exits after successful merge but before terminal journal write; HEAD is target, yet retry requires the old expected HEAD and returns `STALE_STATE`. | #1391, pending regression/fix |
@@ -99,7 +100,7 @@ write it. Inputs include expected HEAD, file fingerprints, amend and push.
 | PushStarted | Push returns success | Terminal, pushed=true |
 | Started / absent | Retry under ownership | May execute fresh |
 | Started or IndexStaged / snapshot | Retry | Restore only owned state; otherwise retain evidence and refuse |
-| CommitObserved | Retry | Preserve recorded OID; honor push intent without recommitting |
+| CommitObserved | Retry | Return recorded OID; if push was requested, explicitly refuse as incomplete and name that OID for a new push request |
 | PushStarted | Retry cannot prove remote outcome | NETWORK_AMBIGUITY; never blindly push |
 
 Invariants: unrelated staged/unstaged/untracked data survives; restore uses the
@@ -161,7 +162,7 @@ Owners: [reconcile.rs](../crates/pixel-ops/src/reconcile.rs),
 | Lease rejected | Re-read remote once | Reclassified result; no blind second push |
 | Rewrite Started | Guards pass; backup ref saved | RefUpdateStarted before reset/commit |
 | RefUpdateStarted | Commit recorded | CommitObserved |
-| RefUpdateStarted | Retry | Restore only the operation's branch under exclusive ownership |
+| RefUpdateStarted | Retry | Require recorded branch and pre/reset HEAD; compare-and-swap that named ref, otherwise retain evidence and refuse |
 | CommitObserved | Optional leased push | PushStarted then Terminal |
 | PushStarted | Retry | Ambiguity rather than force-push |
 
@@ -375,3 +376,18 @@ Snapshot layer validation: `cargo test -p pixel-ops --no-fail-fast` passed
 149 unit + 66 integration tests. `cargo clippy -p pixel-ops --all-targets -- -D warnings`
 and `cargo fmt --all -- --check` passed. This includes native index-lock contention,
 unreadable index rejection and repeated crash recovery. Workspace CI is required.
+
+### Recovery identity evidence (#1390, second layer)
+
+`cargo test -p pixel-ops recovery --no-fail-fast` at `e17cdf8a` plus regressions:
+7 integration cases passed, 3 failed (wrong OID, omitted requested push, rewrite
+rewinding a later commit). Publish now reads its durable observed OID. A requested
+push not yet started stays an explicit incomplete error, naming that OID and a
+new push request as recovery; it is never a successful no-push receipt. Rewrite
+checks the recorded branch and pre/reset OID, then compare-and-swaps that named
+ref. A newer commit/other branch is a recovery conflict. Existing reset-window
+recovery still restores the pre-rewrite head and leaves index/worktree untouched.
+
+Identity layer validation: `cargo test -p pixel-ops --no-fail-fast` passed
+149 unit + 69 integration tests; `cargo clippy -p pixel-ops --all-targets -- -D warnings`
+and `cargo fmt --all -- --check` passed. Full current-head CI remains required.

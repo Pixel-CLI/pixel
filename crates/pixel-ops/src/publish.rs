@@ -332,7 +332,21 @@ fn resume_publish(
         JournalPhase::CommitObserved => {
             // Commit already happened; nothing ambiguous remains.
             recovery_store.remove(&repo_key, &opts.request_id);
-            let new_head = runner.rev_parse_head();
+            let new_head = journal
+                .read(&repo_key, &opts.request_id)
+                .and_then(|record| record.result)
+                .and_then(|result| {
+                    result
+                        .get("head")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .ok_or("GIT_FAILED: observed commit has no recorded OID")?;
+            if opts.push {
+                return Err(format!(
+                    "RECOVERY_CONFLICT: commit {new_head} completed but its requested push was not attempted; push that recorded commit with a new request ID"
+                ));
+            }
             let result = json!({
                 "head": new_head,
                 "published": true,

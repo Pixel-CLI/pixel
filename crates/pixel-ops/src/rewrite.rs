@@ -299,7 +299,7 @@ fn run_body(
 
     // Enter the ambiguous reset+commit window: journal the recovery
     // metadata durably BEFORE mutating. On crash anywhere inside this
-    // window, resume restores `old_head` via `reset --soft` (see
+    // window, resume restores `old_head` only if the recorded branch still matches (see
     // `resume_rewrite`).
     journal.transition(
         request_id,
@@ -445,30 +445,25 @@ fn resume_rewrite(
             run_body(root, opts, request_id, journal, runner, None)
         }
         JournalPhase::RefUpdateStarted => {
-            // Crash inside the reset+commit window. We cannot prove whether
-            // the reset, the commit, both, or neither completed — but every
-            // one of those states is restored by moving the branch back to
-            // the recorded pre-rewrite head with `reset --soft` (worktree
-            // and index are untouched by any of the possible crash states).
-            let record = journal.read(&repo_key, request_id);
-            let old_head = record
-                .as_ref()
-                .and_then(|r| r.result.as_ref())
-                .and_then(|v| v.get("old_head"))
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string)
-                .or_else(|| {
-                    // Belt and braces: the backup ref carries the same OID.
-                    let branch = runner.current_branch()?;
-                    let backup = format!("refs/pixel/rewrite-backup/{branch}");
-                    runner
-                        .run_opt(&["rev-parse", "--verify", "--quiet", &backup])
-                        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-                })
-                .ok_or("GIT_FAILED: crash detected mid-rewrite and no recovery metadata or backup ref found")?;
-            runner
-                .run(&["reset", "--soft", &old_head])
-                .map_err(|e| format!("GIT_FAILED: restore from backup failed: {e}"))?;
+            // Only the recorded branch at the pre-reset or reset head can
+            // still belong to this operation. A later commit is ambiguous.
+            let meta = journal.read(&repo_key, request_id).and_then(|r| r.result)
+                .ok_or("GIT_FAILED: rewrite recovery metadata missing")?;
+            let old_head = meta.get("old_head").and_then(Value::as_str)
+                .ok_or("GIT_FAILED: rewrite recovery old_head missing")?;
+            let branch = meta.get("branch").and_then(Value::as_str)
+                .ok_or("GIT_FAILED: rewrite recovery branch missing")?;
+            let base = meta.get("base_oid").and_then(Value::as_str)
+                .ok_or("GIT_FAILED: rewrite recovery base missing")?;
+            let current = runner.rev_parse_head().ok_or("GIT_FAILED: rewrite recovery HEAD missing")?;
+            if runner.current_branch().as_deref() != Some(branch)
+                || (current != old_head && current != base) {
+                return Err("RECOVERY_CONFLICT: branch or HEAD moved after the interrupted rewrite; backup and journal retained".into());
+            }
+            // Compare-and-swap the named branch, never whichever HEAD a
+            // concurrent checkout happens to select. Index/worktree stay intact.
+            runner.run(&["update-ref", &format!("refs/heads/{branch}"), old_head, &current])
+                .map_err(|e| format!("RECOVERY_CONFLICT: restore branch changed: {e}"))?;
             Err(format!(
                 "GIT_FAILED: crash detected mid-rewrite; branch restored to the \
                  pre-rewrite head {old_head} (backup ref preserved)"

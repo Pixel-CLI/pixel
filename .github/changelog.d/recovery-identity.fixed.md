@@ -1,0 +1,1 @@
+**ops:** Keep interrupted commits tied to their recorded OID and report an unattempted requested push as incomplete. Rewrite recovery refuses later commits or another checked-out branch instead of rewinding them.

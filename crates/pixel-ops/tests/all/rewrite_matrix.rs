@@ -570,3 +570,47 @@ fn duplicate_rewrite_should_not_reset_a_live_owners_head() {
         "1"
     );
 }
+
+#[test]
+fn rewrite_recovery_should_preserve_later_commits_and_other_branches() {
+    for drift in ["commit", "branch"] {
+        let fx = fixture(false);
+        let options = opts(Some("main"), false);
+        let error = rewrite_with_state(
+            fx.work.path(),
+            &options,
+            Some(Box::new(|phase| {
+                if phase == "reset:done" {
+                    Err("interrupted".into())
+                } else {
+                    Ok(())
+                }
+            })),
+            fx.state.path(),
+        )
+        .unwrap_err();
+        assert_eq!(error, "interrupted");
+        match drift {
+            "commit" => {
+                git(fx.work.path(), &["commit", "-qm", "later history"]);
+            }
+            "branch" => {
+                git(fx.work.path(), &["checkout", "-qb", "other"]);
+            }
+            _ => unreachable!(),
+        }
+        let head = git(fx.work.path(), &["rev-parse", "HEAD"]);
+        let index = std::fs::read(fx.work.path().join(".git/index")).unwrap();
+        let retry = rewrite_with_state(fx.work.path(), &options, None, fx.state.path());
+        assert_eq!(
+            git(fx.work.path(), &["rev-parse", "HEAD"]),
+            head,
+            "{drift}: recovery cannot own later history"
+        );
+        assert_eq!(
+            std::fs::read(fx.work.path().join(".git/index")).unwrap(),
+            index
+        );
+        assert!(retry.unwrap_err().starts_with("RECOVERY_CONFLICT:"));
+    }
+}

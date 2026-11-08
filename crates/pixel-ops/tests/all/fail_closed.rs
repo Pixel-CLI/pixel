@@ -447,3 +447,44 @@ fn recovery_should_not_treat_an_unreadable_index_as_absent() {
     std::fs::create_dir(&index).unwrap();
     assert!(pixel_ops::recovery::capture_index_snapshot(root.path()).is_err());
 }
+
+#[test]
+fn recovery_should_return_the_recorded_commit_after_head_moves() {
+    let root = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    init_repo(root.path());
+    std::fs::write(root.path().join("new.txt"), "new\n").unwrap();
+    let opts = publish_options("observed-recovery");
+    interrupt_publish(root.path(), state.path(), &opts, "journal:commit_observed");
+    let original = git(root.path(), &["rev-parse", "HEAD"]);
+    git(
+        root.path(),
+        &["commit", "--allow-empty", "-qm", "another operation"],
+    );
+    let later = git(root.path(), &["rev-parse", "HEAD"]);
+    let result = publish_with_state(root.path(), &opts, None, state.path()).unwrap();
+    assert_eq!(
+        result["head"],
+        original.trim(),
+        "receipt must identify this request's commit"
+    );
+    assert_eq!(git(root.path(), &["rev-parse", "HEAD"]), later);
+}
+
+#[test]
+fn recovery_should_report_an_unattempted_requested_push_as_incomplete() {
+    let root = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    init_repo(root.path());
+    std::fs::write(root.path().join("new.txt"), "new\n").unwrap();
+    let mut opts = publish_options("push-intent-recovery");
+    opts.push = true;
+    interrupt_publish(root.path(), state.path(), &opts, "journal:commit_observed");
+    let committed = git(root.path(), &["rev-parse", "HEAD"]);
+    let error = publish_with_state(root.path(), &opts, None, state.path()).unwrap_err();
+    assert!(
+        error.contains(committed.trim()) && error.contains("push"),
+        "{error}"
+    );
+    assert_eq!(git(root.path(), &["rev-parse", "HEAD"]), committed);
+}
