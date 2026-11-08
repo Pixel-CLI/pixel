@@ -13,16 +13,11 @@
 //!     resume/replay keyed by `request_id`.
 //!   * The recovery store holds a byte-exact snapshot of `.git/index` (plus
 //!     `pre_head`) captured *before* anything is mutated. Its mere presence
-//!     on disk means "we are in an ambiguous window where we cannot prove
-//!     whether `git add`/`git commit` fully applied" — so any resume that
-//!     finds a recovery record restores the exact pre-operation snapshot
-//!     (never touching the worktree) and fails with `GIT_FAILED`, rather
-//!     than guessing by re-running `git add`/`git commit` (which is exactly
-//!     how a naive resume can silently discard a user's own staged work).
-//!     A record that exists but cannot be read is that same window with
-//!     less information: `PublishRecoveryStore::read` returns `Err`
-//!     (`GIT_FAILED`), never `None`, so the retry refuses instead of
-//!     re-running the mutation.
+//!     on disk marks an interrupted mutation. A retry restores only an
+//!     index still owned by the request, under Git's index lock, and refuses
+//!     to rewind HEAD or overwrite later staged work. Recovery evidence is
+//!     retained after refusal, so a second retry cannot execute the request
+//!     afresh. Unreadable and legacy recovery records fail closed.
 //!
 //! Phase order for a fresh run (matches usable-git's crash matrix exactly):
 //!   journal:started → recovery:snapshotted → journal:index_staged →
@@ -147,20 +142,22 @@ fn run_body(
     // anywhere before the commit is durably observed.
     let recovery_store = PublishRecoveryStore::with_state_root(state_root.to_path_buf());
     let mut recovery_state = PublishRecoveryState {
-        schema_version: 1,
+        schema_version: 2,
         request_id: opts.request_id.clone(),
         repo_key: repo_key.clone(),
         phase: RecoveryPhase::Snapshotted,
         pre_head: current_head.clone(),
+        index_path: recovery::index_path(root)?,
+        head_ref: runner.current_branch(),
         files: opts.files.clone(),
-        owned_index_checksum: recovery::index_checksum(root),
+        owned_index_checksum: recovery::index_checksum(root)?,
         mode: Some(if opts.amend {
             "amend".to_string()
         } else {
             "append".to_string()
         }),
         resolved_message: Some(opts.message.clone()),
-        pre_index_hex: recovery::capture_index_snapshot(root),
+        pre_index_hex: recovery::capture_index_snapshot(root)?,
     };
     recovery_store.write(&recovery_state)?;
 
@@ -196,6 +193,10 @@ fn run_body(
             .run(&stage_refs)
             .map_err(|e| format!("git add: {e}"))?;
     }
+
+    // Record the index this operation owns before advertising staging as complete.
+    recovery_state.owned_index_checksum = recovery::index_checksum(root)?;
+    recovery_store.write(&recovery_state)?;
 
     // Journal: index_staged
     journal.transition(&opts.request_id, &repo_key, JournalPhase::IndexStaged, None)?;
@@ -304,7 +305,6 @@ fn resume_publish(
                     // completion before the crash. Restore the exact
                     // pre-operation snapshot and refuse to guess.
                     recovery::restore_snapshot(root, &state)?;
-                    recovery_store.remove(&repo_key, &opts.request_id);
                     Err(format!(
                         "GIT_FAILED: crash detected mid-mutation at recovery phase {:?}; local state restored to the pre-operation snapshot",
                         state.phase
@@ -323,10 +323,10 @@ fn resume_publish(
             // pattern that can silently discard the user's own staged
             // work if the reset sweeps away state a recovery snapshot
             // would have preserved.
-            if let Some(state) = recovery_store.read(&repo_key, &opts.request_id)? {
-                recovery::restore_snapshot(root, &state)?;
-                recovery_store.remove(&repo_key, &opts.request_id);
-            }
+            let state = recovery_store
+                .read(&repo_key, &opts.request_id)?
+                .ok_or("GIT_FAILED: index_staged recovery snapshot missing; no state restored")?;
+            recovery::restore_snapshot(root, &state)?;
             Err("GIT_FAILED: crash detected at index_staged; cannot safely determine whether the commit ran to completion — local state has been restored to the pre-operation snapshot".to_string())
         }
         JournalPhase::CommitObserved => {

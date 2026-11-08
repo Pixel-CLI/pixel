@@ -1023,6 +1023,9 @@ retention remain those described below.
   Journal admission and recovery hold the repository lock. A persistent
   `locks/<hash>.guard` OS lock serializes directory-owner recovery; its inode
   is never unlinked, and live legacy directory owners remain respected.
+  Publish recovery schema 2 binds snapshots to the worktree index and branch,
+  takes Git’s index lock and refuses drift rather than rewinding later history.
+  Legacy/unreadable snapshots are retained for manual recovery.
 - **Status**: Accepted.
 - **Residual**: both are local, best-effort and writable by the same user;
   they help debugging, not forensics.

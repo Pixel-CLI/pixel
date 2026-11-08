@@ -20,8 +20,8 @@ is narrower: deterministic operation probes and real temporary Git repositories.
 | --- | --- | --- |
 | M1 / P1: live index/history rollback | Publish A pauses at `journal:index_staged`; duplicate A reads Resume outside the lock and `restore_snapshot` overwrites A's staged index. Rewrite's `RefUpdateStarted` resume likewise resets HEAD without a lock. | [#1389](https://github.com/Pixel-CLI/pixel/issues/1389), implemented; validation below |
 | M2 / P1: two lock owners | Two contenders read one dead `owner.json`; A removes/recreates the directory, then B's stale decision removes A's live directory. `try_recover_stale` has no atomic claim. | #1389, implemented; validation below |
-| M3 / P1: recovery targets wrong index/history | Linked worktree `.git` is a file; `index_path` nevertheless appends `index`. Capture treats its read error as absence. Separately, a retry after another commit/stage/checkout blindly restores the old index and current HEAD. | [#1390](https://github.com/Pixel-CLI/pixel/issues/1390), pending regression/fix |
-| M4 / P2: retry changes completed operation | At `CommitObserved`, retry reads today's HEAD and reports it as the original commit; `push=true` becomes `pushed=false`. At Started with a snapshot, first recovery deletes it; second retry sees no snapshot and executes again. | #1390, pending regression/fix |
+| M3 / P1: recovery targets wrong index/history | Linked worktree `.git` is a file; `index_path` nevertheless appends `index`. Capture treats its read error as absence. Separately, a retry after another commit/stage/checkout blindly restores the old index and current HEAD. | [#1390](https://github.com/Pixel-CLI/pixel/issues/1390), snapshot fix implemented; validation below |
+| M4 / P2: retry changes completed operation | At `CommitObserved`, retry reads today's HEAD and reports it as the original commit; `push=true` becomes `pushed=false`. At Started with a snapshot, first recovery deletes it; second retry sees no snapshot and executes again. | #1390, receipt fix pending; snapshot retry fixed below |
 | M5 / P2: wrong ownership domain on retry | `push_with_state` Started resume uses global `state_root()` for its lock, while the journal remains under the supplied root. All journaled operations read admission before locking, permitting a stale phase decision. | #1389, implemented; validation below |
 | M6 / P2: half-created branch | `git branch new target` succeeds, checkout rejects overlapping dirty changes, retry encounters `REF_EXISTS`. | [#1391](https://github.com/Pixel-CLI/pixel/issues/1391), pending regression/fix |
 | M7 / P2: applied fast-forward cannot resume | Process exits after successful merge but before terminal journal write; HEAD is target, yet retry requires the old expected HEAD and returns `STALE_STATE`. | #1391, pending regression/fix |
@@ -358,3 +358,20 @@ it, then verifies successful exclusive recovery after release. No sleeps.
 Fixed ownership candidate: `cargo test -p pixel-ops --no-fail-fast` passed
 149 unit + 62 integration tests; `cargo clippy -p pixel-ops --all-targets -- -D warnings`
 and `cargo fmt --all -- --check` passed. Full current-head workspace gates run in CI.
+
+### Snapshot recovery evidence (#1390, first layer)
+
+At `895599bc` plus new tests, `cargo test -p pixel-ops --test all fail_closed::recovery_ --no-fail-fast`
+failed all five cases: wrong linked-worktree index, lost later work, second retry
+re-execution, wrong commit receipt and silently skipped push. This layer fixes the
+first three; the next fixes the two receipt cases. Schema 2 binds the snapshot to
+its actual index path and branch and persists its post-staging checksum. Recovery
+holds native `index.lock`, refuses HEAD/branch/worktree/index drift, and retains the
+snapshot after refusal. A v1 snapshot fails closed for manual recovery. Successful
+commits still remove their snapshots. Raw external ref updates do not honor the
+index lock; this is not a transaction across arbitrary concurrent native Git.
+
+Snapshot layer validation: `cargo test -p pixel-ops --no-fail-fast` passed
+149 unit + 66 integration tests. `cargo clippy -p pixel-ops --all-targets -- -D warnings`
+and `cargo fmt --all -- --check` passed. This includes native index-lock contention,
+unreadable index rejection and repeated crash recovery. Workspace CI is required.

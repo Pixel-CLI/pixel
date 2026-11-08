@@ -19,7 +19,8 @@
 //!     after every cell, and the commit scope (when one lands) is exactly
 //!     the requested files.
 //!   * `git fsck --strict` is clean.
-//!   * No `publish-recovery/**/*.json` record is left behind afterward.
+//!   * Successful requests remove recovery records; refused requests retain
+//!     their evidence so a second retry cannot execute them afresh.
 //!   * For push: non-target remote refs are untouched, a local untracked
 //!     file survives, and a crash at `journal:push_started` surfaces
 //!     `NETWORK_AMBIGUITY` rather than a silent retry.
@@ -28,12 +29,6 @@
 //! inside one test) so a failing cell is individually visible in the test
 //! report instead of aborting the remaining cells silently.
 //!
-//! NOTE: `publish`/`push` resume from `JournalPhase::Started` by re-running
-//! the operation body using the process-global state root helper as a
-//! fallback path. To keep the journal + recovery stores consistent across
-//! the crash and the retry, each test points `XDG_STATE_HOME` at a per-test
-//! tempdir. A process-wide `Mutex` serializes tests so the env-var
-//! manipulation is race-free.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -466,8 +461,22 @@ fn publish_crash_at_phase(phase: &str) {
     // 3. Unrelated state preserved + fsck clean, in every case.
     expect_unrelated_state(root);
 
-    // 4. No leftover recovery records.
-    assert_no_leftover_recovery(&state_root);
+    // 4. Refusal retains evidence and remains a refusal on another retry.
+    if ambiguous {
+        let store = pixel_ops::recovery::PublishRecoveryStore::with_state_root(state_root.clone());
+        let record = store
+            .read(&pixel_ops::repo_identity(root), &opts.request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.pre_index_hex.as_deref(),
+            Some(before.index_hex.as_str())
+        );
+        assert!(publish_with_state(root, &opts, None, &state_root).is_err());
+        assert_eq!(snapshot_local_state(root), before);
+    } else {
+        assert_no_leftover_recovery(&state_root);
+    }
 }
 
 #[test]

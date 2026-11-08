@@ -297,3 +297,153 @@ fn resumed_push_should_contend_on_the_supplied_state_root() {
         true
     );
 }
+
+fn interrupt_publish(root: &Path, state: &Path, opts: &PublishOptions, at: &'static str) {
+    let error = publish_with_state(
+        root,
+        opts,
+        Some(Box::new(move |phase| {
+            if phase == at {
+                Err("interrupted".into())
+            } else {
+                Ok(())
+            }
+        })),
+        state,
+    )
+    .unwrap_err();
+    assert_eq!(error, "interrupted");
+}
+
+fn actual_index(root: &Path) -> PathBuf {
+    PathBuf::from(
+        git(
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        )
+        .trim(),
+    )
+}
+
+#[test]
+fn recovery_should_restore_the_linked_worktrees_index() {
+    let root = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    init_repo(root.path());
+    let wt = root.path().join("linked");
+    git(
+        root.path(),
+        &["worktree", "add", "-qb", "linked", wt.to_str().unwrap()],
+    );
+    std::fs::write(wt.join("new.txt"), "new\n").unwrap();
+    let opts = publish_options("linked-recovery");
+    let before = std::fs::read(actual_index(&wt)).unwrap();
+    let main_before = std::fs::read(actual_index(root.path())).unwrap();
+    interrupt_publish(&wt, state.path(), &opts, "journal:index_staged");
+    let error = publish_with_state(&wt, &opts, None, state.path()).unwrap_err();
+    assert!(error.starts_with("GIT_FAILED:"), "{error}");
+    assert_eq!(
+        std::fs::read(actual_index(&wt)).unwrap(),
+        before,
+        "restoring a linked worktree must use its Git index, not .git/index"
+    );
+    assert_eq!(
+        std::fs::read(actual_index(root.path())).unwrap(),
+        main_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("new.txt")).unwrap(),
+        "new\n"
+    );
+}
+
+#[test]
+fn recovery_should_preserve_work_added_after_an_interruption() {
+    for drift in ["commit", "stage", "branch", "worktree", "index-lock"] {
+        let root = TempDir::new().unwrap();
+        let state = TempDir::new().unwrap();
+        init_repo(root.path());
+        std::fs::write(root.path().join("new.txt"), "new\n").unwrap();
+        let opts = publish_options("drift-recovery");
+        interrupt_publish(root.path(), state.path(), &opts, "journal:index_staged");
+        let mut retry_root = root.path().to_path_buf();
+        match drift {
+            "commit" => {
+                git(root.path(), &["commit", "-qm", "later work"]);
+            }
+            "stage" => {
+                std::fs::write(root.path().join("base.txt"), "later staged\n").unwrap();
+                git(root.path(), &["add", "base.txt"]);
+            }
+            "branch" => {
+                git(root.path(), &["checkout", "-qb", "later"]);
+            }
+            "worktree" => {
+                retry_root = root.path().join("other");
+                git(
+                    root.path(),
+                    &[
+                        "worktree",
+                        "add",
+                        "-qb",
+                        "other",
+                        retry_root.to_str().unwrap(),
+                    ],
+                );
+            }
+            "index-lock" => {
+                std::fs::write(
+                    actual_index(root.path()).with_extension("lock"),
+                    "native owner",
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let head = git(&retry_root, &["rev-parse", "HEAD"]);
+        let index = std::fs::read(actual_index(&retry_root)).unwrap();
+        let result = publish_with_state(&retry_root, &opts, None, state.path());
+        assert_eq!(
+            git(&retry_root, &["rev-parse", "HEAD"]),
+            head,
+            "{drift}: later history must survive"
+        );
+        assert_eq!(
+            std::fs::read(actual_index(&retry_root)).unwrap(),
+            index,
+            "{drift}: later staged intent must survive"
+        );
+        assert!(
+            result.unwrap_err().starts_with("RECOVERY_CONFLICT:"),
+            "{drift}: refuse unowned recovery"
+        );
+    }
+}
+
+#[test]
+fn recovery_should_not_reexecute_a_request_on_its_second_retry() {
+    let root = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    init_repo(root.path());
+    std::fs::write(root.path().join("new.txt"), "new\n").unwrap();
+    let opts = publish_options("repeat-recovery");
+    let head = git(root.path(), &["rev-parse", "HEAD"]);
+    interrupt_publish(root.path(), state.path(), &opts, "recovery:snapshotted");
+    for _ in 0..2 {
+        assert!(
+            publish_with_state(root.path(), &opts, None, state.path()).is_err(),
+            "recovery refusal must not become a fresh mutation on the next retry"
+        );
+        assert_eq!(git(root.path(), &["rev-parse", "HEAD"]), head);
+    }
+}
+
+#[test]
+fn recovery_should_not_treat_an_unreadable_index_as_absent() {
+    let root = TempDir::new().unwrap();
+    init_repo(root.path());
+    let index = actual_index(root.path());
+    std::fs::remove_file(&index).unwrap();
+    std::fs::create_dir(&index).unwrap();
+    assert!(pixel_ops::recovery::capture_index_snapshot(root.path()).is_err());
+}

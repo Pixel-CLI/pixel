@@ -1,0 +1,1 @@
+**ops:** Recover interrupted commits against the actual worktree index, preserving later commits and staged work. Repeated refused retries retain recovery evidence; legacy recovery snapshots fail closed instead of guessing ownership.
