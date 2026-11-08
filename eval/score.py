@@ -24,8 +24,11 @@ the transcript does not carry is null (unknown), never 0.
 Self-contained on purpose: controlled.ts copies this one file to score its
 trials.
 """
-import argparse, hashlib, json, re, shlex, statistics
+import argparse, hashlib, json, re, shlex, statistics, sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import usage as billed_usage
 
 UNKNOWN_USAGE = {"input_tokens": None, "gen_tokens": None, "cache_read_tokens": None,
                  "cache_creation_tokens": None, "cost_usd": None}
@@ -451,6 +454,9 @@ def main():
                     "timed_out", "files_changed", "payload"):
             if key in run:
                 row[key] = run[key]
+        if cli == "codex" and row.get("cost_usd") is None:
+            row["cost_usd"] = billed_usage.codex_exec_usd(
+                row.get("model"), row.get("input_tokens"), row.get("cache_read_tokens"), row.get("gen_tokens"))
         rows.append(row)
     rows.sort(key=lambda r: (r["scenario"], r["arm"], r["cli"], r.get("rep") or 0))
     # table
