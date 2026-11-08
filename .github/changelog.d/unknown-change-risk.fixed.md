@@ -1,0 +1,1 @@
+**graph:** `what-changed` reports `UNKNOWN` risk when a nonempty diff maps to no changed symbols, instead of presenting an unassessed change as `LOW`. Existing coverage fields identify paths that need manual review.

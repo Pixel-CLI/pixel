@@ -852,8 +852,18 @@ pub(crate) fn detect_diffs(
     let d1 = caller_ids.len();
     let nproc = affected_processes.len();
     let lower_bound = !lower_bound_names.is_empty();
-    let risk = change_risk(d1, nproc, lower_bound);
-    let envelope_note = if lower_bound {
+    // No changed anchor means the graph cannot assess the diff. A clean
+    // diff still has no work to assess and keeps its LOW verdict.
+    let unassessed = !file_diffs.is_empty() && symbols.is_empty();
+    let risk = if unassessed {
+        "UNKNOWN".to_string()
+    } else {
+        change_risk(d1, nproc, lower_bound)
+    };
+    let envelope_note = if unassessed {
+        "no changed symbols mapped; inspect uncovered_changes and unanchored before assessing risk"
+            .to_string()
+    } else if lower_bound {
         format!(
             "lower bound: unresolved same-name call sites exist for {}",
             lower_bound_names.into_iter().collect::<Vec<_>>().join(", ")
