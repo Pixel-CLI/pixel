@@ -14,10 +14,11 @@ benchmark of changes to storage, indexing, the daemon, or process startup.
 The generated Cargo project lives outside the checkout; its build cache is
 `target/impact-bench`. No graph files or installed binaries are modified.
 
-Eight in-memory SQLite fixtures cover short chains, wide and branching
+Ten in-memory SQLite fixtures cover empty/single-caller graphs, short chains, wide and branching
 graphs, duplicate call sites, diamonds, cached flows, depth 1 and downstream
 traversal. Each query includes JSON serialization and the 20-item output cap.
-Setup is excluded. The harness checks count/file parity and SQL statement
+Setup is excluded. Prepared-statement caches are cleared per query to prevent
+carryover between arms; the connection and SQLite pages stay warm. The harness checks count/file parity and SQL statement
 counts separately from timing, warms both arms, and alternates their order
 across 41 paired batches of approximately 20 ms per arm. Reported p50/p95
 are percentiles of batch-average query times, not individual tail latency.
