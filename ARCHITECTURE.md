@@ -523,6 +523,10 @@ gets its command list from the CLI parser instead.
    start process ask the new daemon one `meaning` question once it answers.
 3. If the daemon path fails, the CLI opens `Service` in-process and calls
    `handle` directly. Both paths return the same `Envelope`.
+   Symbol arguments first try an exact UID. A pathless Ruby `Owner#method`
+   can then resolve by qualified name, including namespace suffixes, while
+   full UIDs and paths never fall back to names. `#` keeps instance methods
+   distinct from same-named class methods spelled with `.`.
 4. `unwrap_response` turns a failure envelope into an `Err(message)` that
    `main` prints to stderr with exit code 1. Under `--json` the CLI also
    answers on stdout with the failure envelope (`ok: false`, `error.code`,
