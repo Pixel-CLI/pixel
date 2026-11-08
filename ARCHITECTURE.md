@@ -11,6 +11,8 @@ crates, read [docs/threat-model.md](docs/threat-model.md).
 For what callers can rely on (hooks, the brief, classify, metrics, config,
 the daemon wire), read the contracts in [specs/](specs/README.md).
 
+Runtime lifecycle tables, retry invariants and confirmed failures: [state machines](docs/state-machines.md).
+
 ## One-screen summary
 
 ```text
