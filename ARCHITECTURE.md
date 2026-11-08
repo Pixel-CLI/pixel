@@ -258,6 +258,9 @@ Machine-wide:
   retries return the recorded OID; an unattempted requested push remains an explicit
   incomplete error. Rewrite recovery compares the recorded branch/head and uses
   a named-ref compare-and-swap, never a reset of whichever branch is current.
+  Branch creation and fast-forward journal `ref_update_started` intent with
+  worktree/branch identity before Git runs; retries acknowledge the exact target.
+  Branch creation uses one atomic Git create-and-checkout operation.
 - `~/.local/state/pixel/pr-swarm/`: the repo-local `pr-swarm` reconciler's
   state — `reconcile.log`, `lock/`, `resolve.tsv`, `last-run.jsonl` and
   `watch.pid` (the `watch` loop's claim, the authority on whether one runs) —

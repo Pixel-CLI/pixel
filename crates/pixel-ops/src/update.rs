@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use pixel_git::GitRunner;
 
 use crate::durable::{sha256_hex, state_root};
-use crate::journal::{BeginOutcome, JournalOperation, OperationJournal};
+use crate::journal::{BeginOutcome, JournalOperation, JournalPhase, OperationJournal};
 use crate::lock::RepositoryLock;
 use crate::repo::repo_identity;
 
@@ -34,6 +34,15 @@ pub fn update_with_state(
     opts: &UpdateOptions,
     state_root: &Path,
 ) -> Result<Value, String> {
+    update_with_probe(root, opts, state_root, || Ok(()))
+}
+
+fn update_with_probe(
+    root: &Path,
+    opts: &UpdateOptions,
+    state_root: &Path,
+    mut applied: impl FnMut() -> Result<(), String>,
+) -> Result<Value, String> {
     let runner = GitRunner::new(root);
     let repo_key = repo_identity(root);
     let input_hash = sha256_hex(&format!("{}\u{0}{}", opts.expected_head, opts.target_oid));
@@ -49,8 +58,8 @@ pub fn update_with_state(
         &repo_key,
         &input_hash,
     )?;
-    if let BeginOutcome::Replay(result) = outcome {
-        return Ok(result);
+    if let BeginOutcome::Replay(result) = &outcome {
+        return Ok(result.clone());
     }
 
     // Validate refs.
@@ -58,6 +67,26 @@ pub fn update_with_state(
 
     // Check current HEAD matches expected.
     let current_head = runner.rev_parse_head().ok_or("no HEAD")?;
+    let worktree = root.canonicalize().map_err(|e| e.to_string())?;
+    let result = json!({"updated": true, "from": opts.expected_head,
+        "to": opts.target_oid, "fast_forwarded": true});
+    if let BeginOutcome::Resume {
+        phase: JournalPhase::RefUpdateStarted,
+        result: Some(meta),
+    } = &outcome
+    {
+        if meta.get("worktree") != Some(&json!(worktree))
+            || meta.get("branch") != Some(&json!(runner.current_branch()))
+        {
+            return Err(
+                "STALE_STATE: fast-forward intent belongs to another branch/worktree".into(),
+            );
+        }
+        if current_head == opts.target_oid {
+            journal.complete(&opts.request_id, &repo_key, result.clone())?;
+            return Ok(result);
+        }
+    }
     if current_head != opts.expected_head {
         lock.release();
         return Err(format!(
@@ -116,6 +145,14 @@ pub fn update_with_state(
             }
         }
 
+        // Persist intent before Git moves the ref. A retry may acknowledge
+        // this exact target, but cannot adopt a different HEAD or worktree.
+        journal.transition(
+            &opts.request_id,
+            &repo_key,
+            JournalPhase::RefUpdateStarted,
+            Some(json!({"worktree": worktree, "branch": runner.current_branch()})),
+        )?;
         // Perform the fast-forward.
         runner
             .run(&["merge", "--ff-only", &opts.target_oid])
@@ -124,12 +161,8 @@ pub fn update_with_state(
                 format!("git merge --ff-only: {e}")
             })?;
 
-        let result = json!({
-            "updated": true,
-            "from": opts.expected_head,
-            "to": opts.target_oid,
-            "fast_forwarded": true,
-        });
+        applied()?;
+
         journal.complete(&opts.request_id, &repo_key, result.clone())?;
         lock.release();
         Ok(result)
@@ -318,5 +351,57 @@ mod tests {
         };
         let err = update(dir.path(), &opts).unwrap_err();
         assert!(err.contains("NON_FAST_FORWARD"));
+    }
+    #[test]
+    fn update_should_replay_applied_target_but_refuse_unrelated_head_drift() {
+        for drift in ["none", "commit", "branch"] {
+            let root = tempdir().unwrap();
+            let state = tempdir().unwrap();
+            init_repo(root.path());
+            let runner = GitRunner::new(root.path());
+            let expected_head = runner.rev_parse_head().unwrap();
+            std::fs::write(root.path().join("b.txt"), "target").unwrap();
+            runner.run(&["add", "b.txt"]).unwrap();
+            runner.run(&["commit", "-qm", "target"]).unwrap();
+            let target_oid = runner.rev_parse_head().unwrap();
+            runner.run(&["reset", "--hard", &expected_head]).unwrap();
+            let opts = UpdateOptions {
+                expected_head,
+                target_oid,
+                request_id: "applied".into(),
+            };
+            assert_eq!(
+                update_with_probe(root.path(), &opts, state.path(), || Err(
+                    "interrupted".into()
+                ))
+                .unwrap_err(),
+                "interrupted"
+            );
+            if drift == "commit" {
+                runner
+                    .run(&["commit", "--allow-empty", "-qm", "later"])
+                    .unwrap();
+            }
+            if drift == "branch" {
+                runner.run(&["checkout", "-qb", "other"]).unwrap();
+            }
+            let before = runner.rev_parse_head();
+            let result = update_with_probe(root.path(), &opts, state.path(), || {
+                panic!("must not merge twice")
+            });
+            assert_eq!(runner.rev_parse_head(), before);
+            if drift != "none" {
+                assert!(result.unwrap_err().starts_with("STALE_STATE:"));
+            } else {
+                let result = result.unwrap();
+                assert_eq!(result["from"], opts.expected_head);
+                assert_eq!(result["to"], opts.target_oid);
+                assert_eq!(result["fast_forwarded"], true);
+                assert_eq!(
+                    update_with_state(root.path(), &opts, state.path()).unwrap(),
+                    result
+                );
+            }
+        }
     }
 }

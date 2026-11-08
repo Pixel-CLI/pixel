@@ -70,3 +70,9 @@ Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
   batches: the first batch must publish both its generation and envelope
   snapshot. Verified 2026-10-20 (#1203): single-batch tests passed while the
   second batch could still return no brief because its snapshot was missing.
+
+- **Mutation recovery needs live duplicates and linked worktrees.** Verified
+  2026-11: calling the same request from a production phase probe exposed live
+  rollback that crash-only tests missed. Replay after unrelated commits/staging
+  and from a linked worktree too; compare the actual Git index and recorded OID.
+  See `docs/state-machines.md` for the ownership and recovery tables.
