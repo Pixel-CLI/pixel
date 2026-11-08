@@ -197,3 +197,103 @@ fn begin_on_an_existing_record_resumes_or_replays_it() {
         other => panic!("expected Replay, got {other:?}"),
     }
 }
+
+#[test]
+fn duplicate_publish_should_leave_a_live_owners_index_and_journal_untouched() {
+    let root = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    init_repo(root.path());
+    std::fs::write(root.path().join("new.txt"), "new\n").unwrap();
+    let opts = publish_options("live-duplicate");
+    let retry_root = root.path().to_path_buf();
+    let retry_state = state.path().to_path_buf();
+    let retry_opts = opts.clone();
+    let probe = Box::new(move |phase: &str| {
+        if phase == "journal:index_staged" || phase == "journal:commit_observed" {
+            let index = std::fs::read(retry_root.join(".git/index")).unwrap();
+            let record = std::fs::read(journal_record_path(
+                &retry_state,
+                &repo_identity(&retry_root),
+                &retry_opts.request_id,
+            ))
+            .unwrap();
+            let duplicate = publish_with_state(&retry_root, &retry_opts, None, &retry_state);
+            assert_eq!(
+                std::fs::read(retry_root.join(".git/index")).unwrap(),
+                index,
+                "a duplicate request must not roll back the live owner's staged index"
+            );
+            assert_eq!(
+                std::fs::read(journal_record_path(
+                    &retry_state,
+                    &repo_identity(&retry_root),
+                    &retry_opts.request_id,
+                ))
+                .unwrap(),
+                record,
+                "a duplicate must not advance the live journal"
+            );
+            assert_eq!(duplicate.unwrap_err(), "repository is busy");
+        }
+        Ok(())
+    });
+    let result = publish_with_state(root.path(), &opts, Some(probe), state.path()).unwrap();
+    assert_eq!(
+        result["head"],
+        git(root.path(), &["rev-parse", "HEAD"]).trim()
+    );
+    assert_eq!(git(root.path(), &["show", "HEAD:new.txt"]), "new\n");
+    assert_eq!(
+        publish_with_state(root.path(), &opts, None, state.path()).unwrap(),
+        result
+    );
+}
+
+#[test]
+fn resumed_push_should_contend_on_the_supplied_state_root() {
+    use pixel_ops::RepositoryLock;
+    use pixel_ops::push::{PushOptions, push_with_state};
+    let root = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    init_repo(root.path());
+    git(remote.path(), &["init", "--bare", "-q"]);
+    git(
+        root.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    let opts = PushOptions {
+        remote: "origin".into(),
+        refspec: "HEAD:refs/heads/result".into(),
+        request_id: "push-retry-owner".into(),
+        force_with_lease: false,
+    };
+    let error = push_with_state(
+        root.path(),
+        &opts,
+        Some(Box::new(|phase| {
+            if phase == "journal:started" {
+                Err("interrupted".into())
+            } else {
+                Ok(())
+            }
+        })),
+        state.path(),
+    )
+    .unwrap_err();
+    assert_eq!(error, "interrupted");
+    let lock =
+        RepositoryLock::acquire_with_state_root(&repo_identity(root.path()), state.path()).unwrap();
+    let retry = push_with_state(root.path(), &opts, None, state.path());
+    assert_eq!(
+        git(remote.path(), &["for-each-ref", "--format=%(refname)"]),
+        "",
+        "a busy retry must not push under a different lock namespace"
+    );
+    assert_eq!(retry.unwrap_err(), "repository is busy");
+    drop(lock);
+    assert_eq!(
+        push_with_state(root.path(), &opts, None, state.path()).unwrap()["pushed"],
+        true
+    );
+}

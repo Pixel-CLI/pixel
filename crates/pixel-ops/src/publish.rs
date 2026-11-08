@@ -80,6 +80,8 @@ pub fn publish_with_state(
     let input_hash = publish_input_hash(opts);
 
     let journal = OperationJournal::with_state_root(state_root.to_path_buf());
+    let _lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
+        .map_err(|_| "repository is busy".to_string())?;
 
     // Begin — check for existing journal record (crash recovery).
     let outcome = journal.begin(
@@ -98,7 +100,7 @@ pub fn publish_with_state(
     }
 }
 
-/// The full mutation body: acquire the lock, snapshot, stage, commit,
+/// The mutation body, under the caller's lock: snapshot, stage, commit,
 /// optionally push, and complete the journal. Used both for a fresh start
 /// and for resuming from `JournalPhase::Started` with no pending recovery
 /// record (i.e. the crash happened before any durable recovery state was
@@ -113,14 +115,9 @@ fn run_body(
 ) -> Result<Value, String> {
     let repo_key = repo_identity(root);
 
-    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
-        .map_err(|_| "repository is busy".to_string())?;
-
     // Probe: journal:started
     if let Some(p) = probe.as_mut() {
-        p("journal:started").inspect_err(|_| {
-            lock.release();
-        })?;
+        p("journal:started")?;
     }
 
     // STALE_STATE: expected HEAD.
@@ -128,7 +125,6 @@ fn run_body(
     if let Some(expected) = &opts.expected_head
         && current_head.as_deref() != Some(expected.as_str())
     {
-        lock.release();
         return Err(format!(
             "STALE_STATE: expected head {expected}, got {current_head:?}"
         ));
@@ -140,7 +136,6 @@ fn run_body(
     for (path, expected_fp) in &opts.expected_fingerprints {
         let actual_fp = fingerprint::fingerprint_path(root, path);
         if &actual_fp != expected_fp {
-            lock.release();
             return Err(format!(
                 "STALE_STATE: fingerprint mismatch for {path}: expected {expected_fp}, got {actual_fp}"
             ));
@@ -167,15 +162,11 @@ fn run_body(
         resolved_message: Some(opts.message.clone()),
         pre_index_hex: recovery::capture_index_snapshot(root),
     };
-    recovery_store.write(&recovery_state).inspect_err(|_| {
-        lock.release();
-    })?;
+    recovery_store.write(&recovery_state)?;
 
     // Probe: recovery:snapshotted
     if let Some(p) = probe.as_mut() {
-        p("recovery:snapshotted").inspect_err(|_| {
-            lock.release();
-        })?;
+        p("recovery:snapshotted")?;
     }
 
     // Stage the requested paths, or the complete working tree when the CLI
@@ -201,10 +192,9 @@ fn run_body(
     };
     if let Some(stage_args) = stage_args {
         let stage_refs: Vec<&str> = stage_args.iter().map(String::as_str).collect();
-        runner.run(&stage_refs).map_err(|e| {
-            lock.release();
-            format!("git add: {e}")
-        })?;
+        runner
+            .run(&stage_refs)
+            .map_err(|e| format!("git add: {e}"))?;
     }
 
     // Journal: index_staged
@@ -212,23 +202,17 @@ fn run_body(
 
     // Probe: journal:index_staged
     if let Some(p) = probe.as_mut() {
-        p("journal:index_staged").inspect_err(|_| {
-            lock.release();
-        })?;
+        p("journal:index_staged")?;
     }
 
     // Advance the recovery record's phase (the snapshot bytes themselves
     // never change — only the marker of how far we got).
     recovery_state.phase = RecoveryPhase::CommitStarted;
-    recovery_store.write(&recovery_state).inspect_err(|_| {
-        lock.release();
-    })?;
+    recovery_store.write(&recovery_state)?;
 
     // Probe: recovery:commit_started
     if let Some(p) = probe.as_mut() {
-        p("recovery:commit_started").inspect_err(|_| {
-            lock.release();
-        })?;
+        p("recovery:commit_started")?;
     }
 
     // Commit — scope to requested files with pathspec to avoid sweeping
@@ -245,10 +229,9 @@ fn run_body(
         commit_args.extend(opts.files.iter().cloned());
     }
     let arg_refs: Vec<&str> = commit_args.iter().map(String::as_str).collect();
-    runner.run(&arg_refs).map_err(|e| {
-        lock.release();
-        format!("git commit: {e}")
-    })?;
+    runner
+        .run(&arg_refs)
+        .map_err(|e| format!("git commit: {e}"))?;
 
     // Observe the new HEAD.
     let new_head = runner.rev_parse_head();
@@ -266,23 +249,18 @@ fn run_body(
 
     // Probe: journal:commit_observed
     if let Some(p) = probe.as_mut() {
-        p("journal:commit_observed").inspect_err(|_| {
-            lock.release();
-        })?;
+        p("journal:commit_observed")?;
     }
 
     // Push if requested.
     if opts.push {
         journal.transition(&opts.request_id, &repo_key, JournalPhase::PushStarted, None)?;
         if let Some(p) = probe.as_mut() {
-            p("journal:push_started").inspect_err(|_| {
-                lock.release();
-            })?;
+            p("journal:push_started")?;
         }
-        runner.run(&["push"]).map_err(|e| {
-            lock.release();
-            format!("git push: {e}")
-        })?;
+        runner
+            .run(&["push"])
+            .map_err(|e| format!("git push: {e}"))?;
     }
 
     // Complete.
@@ -295,12 +273,9 @@ fn run_body(
 
     // Probe: journal:terminal
     if let Some(p) = probe.as_mut() {
-        p("journal:terminal").inspect_err(|_| {
-            lock.release();
-        })?;
+        p("journal:terminal")?;
     }
 
-    lock.release();
     Ok(result)
 }
 

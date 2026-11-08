@@ -40,6 +40,9 @@ pub fn update_with_state(
 
     let journal = OperationJournal::with_state_root(state_root.to_path_buf());
 
+    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
+        .map_err(|_| "repository is busy".to_string())?;
+
     let outcome = journal.begin(
         &opts.request_id,
         JournalOperation::Update,
@@ -49,9 +52,6 @@ pub fn update_with_state(
     if let BeginOutcome::Replay(result) = outcome {
         return Ok(result);
     }
-
-    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
-        .map_err(|_| "repository is busy".to_string())?;
 
     // Validate refs.
     pixel_git::validate_ref(&opts.target_oid).map_err(|e| e.to_string())?;

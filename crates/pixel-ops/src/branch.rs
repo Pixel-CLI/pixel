@@ -39,6 +39,9 @@ pub fn branch(root: &Path, opts: &BranchOptions) -> Result<Value, String> {
     let state_root = crate::durable::state_root();
     let journal = OperationJournal::with_state_root(state_root.clone());
 
+    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, &state_root)
+        .map_err(|_| "repository is busy".to_string())?;
+
     let outcome = journal.begin(
         &opts.request_id,
         JournalOperation::Branch,
@@ -48,9 +51,6 @@ pub fn branch(root: &Path, opts: &BranchOptions) -> Result<Value, String> {
     if let BeginOutcome::Replay(result) = outcome {
         return Ok(result);
     }
-
-    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, &state_root)
-        .map_err(|_| "repository is busy".to_string())?;
 
     // Validate branch name.
     pixel_git::validate_ref(&opts.name).map_err(|e| e.to_string())?;

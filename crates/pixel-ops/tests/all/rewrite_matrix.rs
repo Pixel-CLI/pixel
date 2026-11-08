@@ -541,3 +541,32 @@ fn rewrite_replay_is_idempotent() {
     );
     assert_eq!(count, "1");
 }
+
+#[test]
+fn duplicate_rewrite_should_not_reset_a_live_owners_head() {
+    let fx = fixture(false);
+    let options = opts(Some("main"), false);
+    let root = fx.work.path().to_path_buf();
+    let state = fx.state.path().to_path_buf();
+    let retry = options.clone();
+    let probe = Box::new(move |phase: &str| {
+        if phase == "reset:done" {
+            let before = git(&root, &["rev-parse", "HEAD"]);
+            let result = rewrite_with_state(&root, &retry, None, &state);
+            assert_eq!(
+                git(&root, &["rev-parse", "HEAD"]),
+                before,
+                "a duplicate must not reset the branch underneath the live rewrite"
+            );
+            assert_eq!(result.unwrap_err(), "repository is busy");
+        }
+        Ok(())
+    });
+    let result =
+        rewrite_with_state(fx.work.path(), &options, Some(probe), fx.state.path()).unwrap();
+    assert_eq!(result["commits_squashed"], 3);
+    assert_eq!(
+        git(fx.work.path(), &["rev-list", "--count", "main..HEAD"]).trim(),
+        "1"
+    );
+}

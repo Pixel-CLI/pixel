@@ -1,0 +1,1 @@
+**ops:** Serialize mutation retries and crash recovery with their original repository lock, preventing duplicate requests from rolling back a live commit or rewrite. Stale lock recovery now has one kernel-locked owner.

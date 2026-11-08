@@ -92,6 +92,8 @@ pub fn rewrite_with_state(
     let input_hash = rewrite_input_hash(opts);
 
     let journal = OperationJournal::with_state_root(state_root.to_path_buf());
+    let _lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
+        .map_err(|_| "repository is busy".to_string())?;
 
     // Same wiring-gap default as `reconcile`: an empty request_id would be
     // rejected outright by the journal; default to a fresh UUID so the op
@@ -112,24 +114,10 @@ pub fn rewrite_with_state(
 
     match outcome {
         BeginOutcome::Replay(result) => Ok(result),
-        BeginOutcome::Resume { phase, .. } => resume_rewrite(
-            root,
-            opts,
-            &request_id,
-            &journal,
-            phase,
-            &runner,
-            state_root,
-        ),
-        BeginOutcome::Start => run_body(
-            root,
-            opts,
-            &request_id,
-            &journal,
-            &runner,
-            state_root,
-            probe,
-        ),
+        BeginOutcome::Resume { phase, .. } => {
+            resume_rewrite(root, opts, &request_id, &journal, phase, &runner)
+        }
+        BeginOutcome::Start => run_body(root, opts, &request_id, &journal, &runner, probe),
     }
 }
 
@@ -139,19 +127,14 @@ fn run_body(
     request_id: &str,
     journal: &OperationJournal,
     runner: &GitRunner,
-    state_root: &Path,
     mut probe: Option<RewriteProbe>,
 ) -> Result<Value, String> {
     let repo_key = repo_identity(root);
 
     pixel_git::validate_ref(&opts.remote).map_err(|e| e.to_string())?;
 
-    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
-        .map_err(|_| "repository is busy".to_string())?;
-
     macro_rules! bail {
         ($e:expr) => {{
-            let _ = lock.release();
             return Err($e);
         }};
     }
@@ -442,7 +425,6 @@ fn run_body(
         bail!(e);
     }
 
-    lock.release();
     Ok(result)
 }
 
@@ -454,14 +436,13 @@ fn resume_rewrite(
     journal: &OperationJournal,
     phase: JournalPhase,
     runner: &GitRunner,
-    state_root: &Path,
 ) -> Result<Value, String> {
     let repo_key = repo_identity(root);
     match phase {
         JournalPhase::Started => {
             // Crash before the mutation window opened (the backup ref may
             // or may not exist, but nothing moved HEAD). Safe to run fresh.
-            run_body(root, opts, request_id, journal, runner, state_root, None)
+            run_body(root, opts, request_id, journal, runner, None)
         }
         JournalPhase::RefUpdateStarted => {
             // Crash inside the reset+commit window. We cannot prove whether

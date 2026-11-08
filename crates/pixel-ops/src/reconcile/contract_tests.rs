@@ -125,18 +125,20 @@ fn resolve_git_dir_should_fall_back_to_dot_git_when_the_file_names_no_gitdir() {
 }
 
 #[test]
-fn reconcile_should_reject_an_unknown_push_mode_after_clearing_stale_conflict_state() {
+fn reconcile_should_preserve_conflict_state_when_validation_refuses_the_attempt() {
     let dir = tempdir().unwrap();
     let state = plant_conflict_state(dir.path());
+    let before = std::fs::read(&state).unwrap();
     let err = reconcile(dir.path(), &opts("always")).unwrap_err();
     assert!(err.starts_with("invalid push value \"always\""), "{err}");
     assert!(
         err.contains("\"auto\"") && err.contains("\"none\""),
         "{err}"
     );
-    assert!(
-        !state.exists(),
-        "a new attempt starts without the stale state"
+    assert_eq!(
+        std::fs::read(&state).unwrap(),
+        before,
+        "a rejected caller does not own the conflict diagnostic"
     );
 }
 

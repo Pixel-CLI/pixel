@@ -245,8 +245,11 @@ Machine-wide:
   `$PIXEL_SNIPER_STATE_ROOT` overrides the state root.
 - `~/.local/state/pixel/` (`$XDG_STATE_HOME/pixel`): `pixel-ops` crash-safety
   state, keyed by a sha256 of the repository: `journals/`, `snapshots/`,
-  `publish-recovery/` and `locks/<hash>.lock/owner.json` (the lock alone is
-  keyed by the canonical git common directory, so every worktree shares it). Guarded git
+  `publish-recovery/`, `locks/<hash>.lock/owner.json` and persistent
+  `locks/<hash>.guard` kernel-lock files. The canonical Git common directory
+  keys both journal and lock, so linked worktrees share ownership. The guard
+  serializes directory recovery; live legacy directory owners still block entry.
+  Journal admission, retries and recovery run inside that ownership interval. Guarded git
   mutations write nothing under `.pixel/` except `reconcile-conflict.json`.
 - `~/.local/state/pixel/pr-swarm/`: the repo-local `pr-swarm` reconciler's
   state — `reconcile.log`, `lock/`, `resolve.tsv`, `last-run.jsonl` and

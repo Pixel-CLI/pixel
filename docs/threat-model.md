@@ -1020,6 +1020,9 @@ retention remain those described below.
   Pixel mutation.
 - **Mitigation**: `actions.jsonl` records each invocation; `pixel-ops`
   journals each guarded mutation under `~/.local/state/pixel/journals/`.
+  Journal admission and recovery hold the repository lock. A persistent
+  `locks/<hash>.guard` OS lock serializes directory-owner recovery; its inode
+  is never unlinked, and live legacy directory owners remain respected.
 - **Status**: Accepted.
 - **Residual**: both are local, best-effort and writable by the same user;
   they help debugging, not forensics.
