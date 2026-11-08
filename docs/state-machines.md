@@ -289,7 +289,7 @@ transcripts are not owned or deleted by these caches.
 Owners: [receipt.rs](../crates/pixel-setup/src/receipt.rs),
 [install.rs](../crates/pixel-setup/src/install.rs),
 [plugin/install.rs](../crates/pixel-plugin/src/install.rs),
-[plugin/config.rs](../crates/pixel-plugin/src/config.rs).
+[plugin/state.rs](../crates/pixel-plugin/src/state.rs).
 
 | From | Event / guard | To / effect |
 | --- | --- | --- |
