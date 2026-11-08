@@ -8,7 +8,7 @@
 //!
 //! - stdout is JSON and nothing else: one document per line (a single
 //!   document for most commands, NDJSON for `search`), no prose, no notes;
-//! - human-facing notes (graph build announcements, caveats) go to stderr;
+//! - successful JSON commands emit no human-facing notes on stderr;
 //! - a failing command exits non-zero and writes the reason to stderr. Under
 //!   `--json` stdout carries one failure envelope (`ok: false`, `error.code`,
 //!   the same reason) so a parser reads the code instead of the prose; in
@@ -105,6 +105,12 @@ fn capped_search(dir: &Path, cap: usize, limit: usize, context: Option<usize>) -
 /// Every non-empty stdout line must parse as a JSON value on its own.
 /// Returns the parsed documents so callers can assert on content.
 fn parse_stdout_lines(out: &Output, what: &str) -> Vec<serde_json::Value> {
+    if out.status.success() {
+        assert!(
+            out.stderr.is_empty(),
+            "{what}: successful JSON must have empty stderr: {out:?}"
+        );
+    }
     let stdout = String::from_utf8(out.stdout.clone())
         .unwrap_or_else(|e| panic!("{what}: stdout is not UTF-8: {e}"));
     stdout
@@ -128,6 +134,10 @@ fn json_commands_emit_only_json_on_stdout() {
     // (argv, expected top-level keys on the single document)
     let single_doc: &[(&[&str], &[&str])] = &[
         (&["status", ".", "--json"], &[]),
+        (
+            &["scope-task", "fix login_user", ".", "--json", "--regions"],
+            &["targets"],
+        ),
         (&["find-symbol", "login_user", ".", "--json"], &[]),
         (&["impact", "login_user", ".", "--json"], &["epistemics"]),
         (
@@ -295,11 +305,7 @@ fn search_json_page_ends_with_the_state_of_the_page_it_printed() {
         "the page resumes at the first match it did not print: {meta}"
     );
     assert!(meta["epistemics"].is_object(), "{meta}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("stdout cap (PIXEL_OUTPUT_CAP_BYTES)"),
-        "the cut is named on stderr: {stderr}"
-    );
+    assert!(out.stderr.is_empty(), "{out:?}");
 
     // Without `--context` the rows are small enough to fill the cap tightly:
     // the reserved metadata line stays inside the cap too.
@@ -331,7 +337,7 @@ fn search_json_page_ends_with_the_state_of_the_page_it_printed() {
     assert!(meta["next_offset"].is_null(), "{meta}");
 
     // A page the daemon itself capped keeps the daemon's resume offset, and
-    // the stderr line names the daemon's row cap rather than the stdout cap.
+    // the metadata names the daemon's row cap rather than the stdout cap.
     let limited = capped_search(&dir, cap, 5, None);
     assert!(limited.status.success(), "{limited:?}");
     let docs = parse_stdout_lines(&limited, "row-capped search --json");
@@ -339,15 +345,14 @@ fn search_json_page_ends_with_the_state_of_the_page_it_printed() {
     assert_eq!(matches.len(), 5, "{docs:?}");
     assert_eq!(meta["truncated"], true, "{meta}");
     assert_eq!(meta["next_offset"].as_u64(), Some(5), "{meta}");
-    let stderr = String::from_utf8_lossy(&limited.stderr);
     assert!(
-        stderr.contains("row limit 5"),
-        "the daemon's cap is named on stderr: {stderr}"
+        meta["warnings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("row limit 5"),
+        "{meta}"
     );
-    assert!(
-        !stderr.contains("stdout cap"),
-        "the stdout cap did not fire: {stderr}"
-    );
+    assert!(limited.stderr.is_empty(), "{limited:?}");
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1374,4 +1379,60 @@ fn what_changed_should_report_unknown_for_unindexed_changes_and_list_the_paths()
             .into_iter()
             .collect()
     );
+}
+
+#[test]
+fn json_should_stay_quiet_on_cold_refresh_and_repeated_retrieval() {
+    let dir = fixture("quiet-json");
+    let run = |args: &[&str]| {
+        pixel_command()
+            .current_dir(&dir)
+            .args(args)
+            .env("PIXEL_METRICS", "1")
+            .env_remove("PIXEL_TEST")
+            .output()
+            .unwrap()
+    };
+    for turn in 0..3 {
+        std::fs::write(
+            dir.join("src/login.rs"),
+            format!("pub fn login_user() -> u32 {{ {turn} }}\n"),
+        )
+        .unwrap();
+        let out = run(&["what-changed", "--base", "HEAD", "--tests", "--json"]);
+        assert!(out.status.success(), "{out:?}");
+        assert!(out.stderr.is_empty(), "turn {turn}: {out:?}");
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            value["graph_build"].is_object(),
+            "refresh metadata stays in JSON: {value}"
+        );
+        assert_eq!(value["symbols"][0]["name"], "login_user");
+    }
+    let text = run(&["what-changed", "--base", "HEAD", "--tests"]);
+    assert!(text.status.success(), "{text:?}");
+    let stderr = String::from_utf8_lossy(&text.stderr);
+    assert!(
+        stderr.contains("prior calls with identical arguments"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("🟩 pixel what-changed"), "{stderr}");
+    let rebuilt = run(&["rebuild-graph", "--json"]);
+    assert!(rebuilt.status.success(), "{rebuilt:?}");
+    assert!(rebuilt.stderr.is_empty(), "{rebuilt:?}");
+    serde_json::from_slice::<serde_json::Value>(&rebuilt.stdout).unwrap();
+}
+
+#[test]
+fn json_search_stats_should_stay_in_the_metadata_instead_of_stderr() {
+    let dir = fixture("quiet-json-stats");
+    let out = pixel(
+        &dir,
+        &["search-content", "login_user", ".", "--stats", "--json"],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let docs = parse_stdout_lines(&out, "search --stats --json");
+    let stats = &docs.last().unwrap()["stats"];
+    assert_eq!(stats["matches"], 3);
+    assert!(stats["elapsed_us"].is_u64(), "{stats}");
 }

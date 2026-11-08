@@ -137,25 +137,6 @@ fn metric_lines(output: &Output) -> Vec<String> {
     blocks
 }
 
-/// `search-content --json` writes one JSON document per line (a match line
-/// per hit, then the envelope). The metrics block must stay on stderr, so
-/// every stdout line is still a non-empty JSON object.
-fn assert_jsonl(output: &Output) {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let documents: Vec<Value> = stdout
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_str::<Value>(line).expect("every stdout line is JSON"))
-        .collect();
-    assert!(
-        !documents.is_empty()
-            && documents
-                .iter()
-                .all(|d| d.as_object().is_some_and(|o| !o.is_empty())),
-        "{stdout}"
-    );
-}
-
 fn short_invocation_id(event: &Value) -> String {
     let id = event["invocation_id"].as_str().unwrap();
     id.split('-').nth(1).map_or_else(
@@ -192,9 +173,9 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
-fn dual_savings_use_recorded_round_trip_policy_without_changing_search_json() {
+fn dual_savings_use_recorded_round_trip_policy_without_changing_search_output() {
     let fixture = Fixture::new();
-    let args = ["search-content", "login_user", ".", "--json", "--no-daemon"];
+    let args = ["search-content", "login_user", ".", "--no-daemon"];
     let baseline = fixture.run(&args);
     assert_success(&baseline);
     let default_event = fixture.events("search-content").pop().unwrap();
@@ -266,7 +247,7 @@ fn concurrent_time_policies_stay_with_their_own_invocations() {
         .map(|policy| {
             let child = fixture
                 .command()
-                .args(["search-content", "login_user", ".", "--json", "--no-daemon"])
+                .args(["search-content", "login_user", ".", "--no-daemon"])
                 .env("PIXEL_METRICS_ROUND_TRIP_MS", policy.to_string())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -284,7 +265,7 @@ fn concurrent_time_policies_stay_with_their_own_invocations() {
     let mut ids = HashSet::new();
     for (policy, output) in outputs {
         assert_success(&output);
-        assert_jsonl(&output);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("login_user"));
         let lines = metric_lines(&output);
         assert_eq!(lines.len(), 1);
         let header = lines[0].lines().next().unwrap();
@@ -315,7 +296,7 @@ fn time_history_preserves_assumptions_legacy_unavailability_and_exact_lines() {
     for ms in [1000, 3500] {
         let output = fixture
             .command()
-            .args(["search-content", "login_user", ".", "--json", "--no-daemon"])
+            .args(["search-content", "login_user", ".", "--no-daemon"])
             .env("PIXEL_METRICS_ROUND_TRIP_MS", ms.to_string())
             .output()
             .unwrap();
@@ -366,8 +347,7 @@ fn search_json_is_identical_with_reporting_on_off_and_env_off() {
     let args = ["search-content", "login_user", ".", "--json", "--no-daemon"];
     let on = fixture.run(&args);
     assert_success(&on);
-    let lines = metric_lines(&on);
-    assert_eq!(lines.len(), 1, "{on:?}");
+    assert!(on.stderr.is_empty(), "{on:?}");
     assert!(String::from_utf8_lossy(&on.stdout).contains("login_user"));
     for line in String::from_utf8_lossy(&on.stdout).lines() {
         serde_json::from_str::<Value>(line).unwrap();
@@ -376,12 +356,8 @@ fn search_json_is_identical_with_reporting_on_off_and_env_off() {
     assert_eq!(events.len(), 1, "search must finalize only one record");
     let event = &events[0];
     assert_eq!(event["outcome"], "ok");
-    assert_eq!(
-        event["metrics"]["output_bytes"],
-        on.stdout.len() + on.stderr.len() - lines[0].len() - 2
-    );
-    assert_eq!(event["metrics"]["reporting_bytes"], lines[0].len() + 2);
-    assert_metric_identity(&lines[0], event);
+    assert_eq!(event["metrics"]["output_bytes"], on.stdout.len());
+    assert_eq!(event["metrics"]["reporting_bytes"], 0);
     assert!(
         event["metrics"]["evidence"]["distinct_files"]
             .as_u64()
@@ -686,7 +662,6 @@ fn capped_search_marks_only_returned_evidence_partial() {
         ".",
         "--limit",
         "1",
-        "--json",
         "--no-daemon",
     ]);
     assert_success(&output);
@@ -704,52 +679,26 @@ fn capped_search_marks_only_returned_evidence_partial() {
 }
 
 #[test]
-fn operation_error_precedes_metrics_and_preserves_failure() {
+fn json_failure_should_keep_its_diagnostic_without_a_metrics_footer() {
     let fixture = Fixture::new();
     let output = fixture.run(&["search-content", "(", ".", "--json", "--no-daemon"]);
     assert!(!output.status.success());
-    // The failure is machine-readable on stdout (the envelope) and explicit on
-    // stderr (the diagnostic, the metrics line, then the diagnostic again so
-    // the last stderr line still names the failure under `| tail`).
-    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(doc["ok"], false, "{output:?}");
-    assert_eq!(doc["error"]["code"], "INVALID_INPUT", "{doc}");
-    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
-    let lines = metric_lines(&output);
-    assert_eq!(lines.len(), 1);
-    assert!(stderr.starts_with("pixel:"), "{stderr}");
-    let (diagnostics, trailer) = stderr
-        .split_once(&format!("\n{}\n", lines[0]))
-        .expect("the metrics block follows the diagnostic");
-    assert!(diagnostics.contains("regex") || diagnostics.contains("pattern"));
+    let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["error"]["code"], "INVALID_INPUT");
     assert_eq!(
-        trailer, diagnostics,
-        "the error is repeated after the block"
+        String::from_utf8_lossy(&output.stderr),
+        format!("pixel: {}\n", doc["error"]["message"].as_str().unwrap())
     );
     let events = fixture.events("search-content");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["outcome"], "error");
-    // Rendered output covers both streams: the failure envelope on stdout and
-    // both copies of the diagnostic on stderr (the metrics line itself is
-    // reporting, not output).
     assert_eq!(
         events[0]["metrics"]["output_bytes"],
-        (output.stdout.len() + diagnostics.len() + trailer.len()) as u64
+        output.stdout.len() + output.stderr.len()
     );
+    assert_eq!(events[0]["metrics"]["reporting_bytes"], 0);
     assert!(events[0]["metrics"]["native_workflow_bytes"].is_null());
-    assert_metric_identity(&lines[0], &events[0]);
-
-    let disabled = fixture.run(&[
-        "--metrics=off",
-        "search-content",
-        "(",
-        ".",
-        "--json",
-        "--no-daemon",
-    ]);
-    assert_eq!(output.status.code(), disabled.status.code());
-    assert_eq!(disabled.stdout, output.stdout);
-    assert_eq!(disabled.stderr, diagnostics.as_bytes());
 }
 
 #[test]
@@ -759,7 +708,7 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
         .map(|_| {
             fixture
                 .command()
-                .args(["search-content", "login_user", ".", "--json", "--no-daemon"])
+                .args(["search-content", "login_user", ".", "--no-daemon"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -779,7 +728,7 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
     assert_eq!(ids.len(), 4);
     for output in outputs {
         assert_success(&output);
-        assert_jsonl(&output);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("login_user"));
         let lines = metric_lines(&output);
         assert_eq!(lines.len(), 1);
         let event = events
@@ -806,9 +755,9 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
 fn action_log_write_failure_does_not_change_success_or_reporting() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.0.join(".pixel/actions.jsonl")).unwrap();
-    let output = fixture.run(&["search-content", "login_user", ".", "--json", "--no-daemon"]);
+    let output = fixture.run(&["search-content", "login_user", ".", "--no-daemon"]);
     assert_success(&output);
-    assert_jsonl(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("login_user"));
     assert_eq!(metric_lines(&output).len(), 1);
     assert!(fixture.0.join(".pixel/actions.jsonl").is_dir());
 }
@@ -833,7 +782,7 @@ fn config_metrics_off_hides_the_footer_until_turned_back_on() {
             .output()
             .unwrap()
     };
-    let search = ["search-content", "login_user", ".", "--json", "--no-daemon"];
+    let search = ["search-content", "login_user", ".", "--no-daemon"];
     let on = run(&search);
     assert_success(&on);
     assert_eq!(metric_lines(&on).len(), 1);
@@ -935,8 +884,7 @@ fn explicit_repository_impact_logs_at_target_and_preserves_json() {
     assert_success(&output);
     let data: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(data["affected_files"].as_u64().unwrap() >= 1, "{data}");
-    let lines = metric_lines(&output);
-    assert_eq!(lines.len(), 1);
+    assert!(output.stderr.is_empty(), "{output:?}");
     let events = fixture.events("impact");
     assert_eq!(events.len(), 1);
     assert!(
@@ -1019,7 +967,7 @@ fn graph_text_and_json_account_for_same_returned_files() {
             events[1]["metrics"]["output_bytes"]
         );
         assert_eq!(metric_lines(&text_output).len(), 1);
-        assert_eq!(metric_lines(&json_output).len(), 1);
+        assert!(json_output.stderr.is_empty(), "{json_output:?}");
     }
 }
 
@@ -1174,27 +1122,21 @@ fn daemon_reindex_reports_actual_nested_index_counts() {
     assert_eq!(metric_lines(&reindexed).len(), 1);
 }
 
-/// `prepare-repo --json` reports an already-running daemon on stderr
-/// (`daemon_start` in quiet mode, through `eprint!`): that line is rendered
-/// output too, and `output_bytes` must count it like any stderr line.
+/// Readiness reports the daemon state in JSON without adding a prose line.
 #[test]
-fn quiet_daemon_report_counts_as_rendered_output() {
+fn json_daemon_report_should_only_account_for_the_json_answer() {
     let fixture = Fixture::new();
     assert_success(&fixture.run(&["daemon", "start"]));
     let out = fixture.run(&["prepare-repo", "--json", "."]);
-    // Stop before assertions so a failed one never leaves a daemon behind.
     assert_success(&fixture.run(&["daemon", "stop"]));
     assert_success(&out);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("daemon already running"), "{stderr}");
-    let lines = metric_lines(&out);
-    assert_eq!(lines.len(), 1, "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+    let data: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(data["daemon"], "running");
     let events = fixture.events("prepare-repo");
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(
-        events[0]["metrics"]["output_bytes"],
-        out.stdout.len() + out.stderr.len() - lines[0].len() - 2
-    );
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["metrics"]["output_bytes"], out.stdout.len());
+    assert_eq!(events[0]["metrics"]["reporting_bytes"], 0);
 }
 
 /// A slow `actions.jsonl` line is only diagnosable when it says how the
@@ -1273,12 +1215,12 @@ fn action_log_records_how_each_request_was_served() {
 /// No-policy commands keep a compact identity line and a recorded gap.
 /// Applicable comparisons still explain a one-step baseline or capped evidence.
 #[test]
-fn live_blocks_state_every_absent_comparison_and_keep_json_stdout_clean() {
+fn live_blocks_state_every_absent_comparison_in_human_mode() {
     let fixture = Fixture::new();
 
-    let status = fixture.run(&["status", ".", "--json"]);
+    let status = fixture.run(&["status", "."]);
     assert_success(&status);
-    serde_json::from_slice::<Value>(&status.stdout).unwrap();
+    assert!(String::from_utf8_lossy(&status.stdout).contains("index"));
     assert!(!String::from_utf8_lossy(&status.stdout).contains("🟩 pixel "));
     let block = &metric_lines(&status)[0];
     assert_eq!(block.lines().count(), 1, "{block}");
@@ -1291,7 +1233,7 @@ fn live_blocks_state_every_absent_comparison_and_keep_json_stdout_clean() {
 
     // A one-step baseline (no saved round trip) states the gap instead of
     // omitting the time row.
-    let one_step = fixture.run(&["what-changed", "--json"]);
+    let one_step = fixture.run(&["what-changed"]);
     assert_success(&one_step);
     serde_json::from_slice::<Value>(&one_step.stdout).unwrap();
     let block = &metric_lines(&one_step)[0];
@@ -1305,7 +1247,7 @@ fn live_blocks_state_every_absent_comparison_and_keep_json_stdout_clean() {
 
     let capped = fixture
         .command()
-        .args(["repo-map", ".", "--json"])
+        .args(["what-changed"])
         .env("PIXEL_OUTPUT_CAP_BYTES", "1")
         .output()
         .unwrap();
@@ -1319,7 +1261,7 @@ fn live_blocks_state_every_absent_comparison_and_keep_json_stdout_clean() {
         block.contains("├─ § unavailable: the rendered output cap hid the evidence"),
         "{block}"
     );
-    let event = fixture.events("repo-map").pop().unwrap();
+    let event = fixture.events("what-changed").pop().unwrap();
     assert_eq!(event["metrics"]["comparison_gap"], "output_truncated");
     assert!(event["metrics"]["native_workflow_bytes"].is_null());
 }

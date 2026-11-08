@@ -67,8 +67,12 @@ counts) and estimates are always labelled apart.
 
 - **CLI:** after the result, on stderr, `🟩 pixel <command> ❀ <ms> ❀ #<id>` and
   the `tokens saved (workflow estimate)` and `saved (sequential estimate)` rows
-  (`⏱`/`§` rows). JSON stdout is untouched; on failure the `pixel: <error>` line
-  is repeated last.
+  (`⏱`/`§` rows) in human mode; on failure the `pixel: <error>` line
+  is repeated last. `--json` suppresses the live block, graph refresh notices
+  and repeat-call notes. Accounting still reaches the action log, graph refresh
+  metadata stays in JSON, and failed commands retain their stderr diagnostic.
+  Search caps remain in the NDJSON metadata; `--stats --json` puts statistics
+  there too instead of printing them on stderr.
 - **Hooks:** a delivered brief adds a user-only `systemMessage`
   `🟩 pixel prompt-submit ❀ <ms>ms` (only the first part of a split brief, and
   only when a brief was actually delivered); it is never part of the model's
