@@ -177,7 +177,7 @@ jobs:
       # toolchain, so no host musl-tools/perl/make are needed.
       - name: Install cross
         if: runner.os == 'Linux' && steps.dup.outputs.duplicate != 'true'
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2
         with:
           # The version release-build.yml pins.
           tool: cross@0.2.5
