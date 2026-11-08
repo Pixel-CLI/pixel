@@ -63,7 +63,7 @@ opt-level = 3
     identity['rustc'] = subprocess.check_output(['rustc', '--version'], text=True).strip()
     result = subprocess.run([str(binary)], capture_output=True, text=True, check=True)
     (args.output / 'samples.jsonl').write_text(result.stdout)
-assert len(result.stdout.splitlines()) == 8, 'expected all eight fixture results'
+assert len(result.stdout.splitlines()) == 10, 'expected all ten fixture results'
 rows = []
 for line in result.stdout.splitlines():
     row = json.loads(line)

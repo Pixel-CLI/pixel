@@ -16,6 +16,8 @@ fn trace(_: rusqlite::trace::TraceEvent<'_>) {
 }
 
 fn query(store: &GraphStore, uid: &str, down: bool, depth: u32, old: bool) -> Vec<u8> {
+    // Neither arm inherits prepared statements left by the other arm.
+    store.conn().flush_prepared_statement_cache();
     if old {
         let direction = if down {
             before::Direction::Downstream
@@ -34,6 +36,8 @@ fn query(store: &GraphStore, uid: &str, down: bool, depth: u32, old: bool) -> Ve
 }
 fn main() {
     for (name, nodes, fan, copies, flows, depth, down) in [
+        ("empty", 1, 1, 1, false, 3, false),
+        ("single-caller", 2, 1, 1, false, 3, false),
         ("chain", 4, 1, 1, false, 3, false),
         ("wide", 1001, 1000, 1, false, 3, false),
         ("branching", 585, 8, 1, false, 3, false),
@@ -119,6 +123,8 @@ fn main() {
             assert_eq!(outputs[0][key], outputs[1][key], "{name}: {key}");
         }
         let expected = match name {
+            "empty" => [0, 0, 0],
+            "single-caller" => [1, 0, 0],
             "chain" | "downstream" => [1, 1, 1],
             "wide" => [1000, 0, 0],
             "branching" | "cached-flows" => [8, 64, 512],
