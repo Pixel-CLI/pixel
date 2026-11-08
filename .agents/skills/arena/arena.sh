@@ -592,7 +592,7 @@ summarize() {
     "tool calls        \(.arms.pixel | calls) | \(.arms["no-pixel"] | calls)",
     "tokens            \(.arms.pixel | tok) | \(.arms["no-pixel"] | tok)",
     "billed $          \(.arms.pixel.billed.usd // "n/a") | \(.arms["no-pixel"].billed.usd // "n/a")",
-    "agent seconds    \(.arms.pixel.codex_seconds // "n/a") | \(.arms["no-pixel"].codex_seconds // "n/a")",
+    "agent seconds     \(.arms.pixel.codex_seconds // "n/a") | \(.arms["no-pixel"].codex_seconds // "n/a")",
     "tool calls in order:",
     (.arms | to_entries[] | .key as $k | .value.tool_calls | to_entries[] | "  [\($k)] \(.key + 1). \(.value.call | .[0:150])"),
     "answers:",

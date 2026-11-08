@@ -162,6 +162,12 @@ class UnitContracts(unittest.TestCase):
         self.assertIn("11.24", priced.stdout)
         self.assertNotIn("11.24", score_with("unlisted-model").stdout)
 
+    def test_the_scorer_runs_when_copied_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = shutil.copy(EVAL / "score.py", tmp)
+            out = subprocess.run([sys.executable, "-I", copy, "--help"], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
     def test_the_baseline_settings_disable_an_enabled_pixel_plugin(self):
         settings = {"enabledPlugins": {"pixel@pixel-cli": True, "other@market": True},
                     "hooks": {"SessionStart": [{"hooks": [{"command": "pixel run-hook session-start"}]}]}}
