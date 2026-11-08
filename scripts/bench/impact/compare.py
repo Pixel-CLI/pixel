@@ -52,6 +52,7 @@ rusqlite = {{ version = "0.41", features = ["trace"] }}
 rustc-hash = "1"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
+libc = "0.2"
 [profile.release]
 opt-level = 3
 ''')
@@ -75,13 +76,18 @@ for line in result.stdout.splitlines():
     ratios = [math.log(b / a) for a, b in row['samples_ns']]
     upper = math.exp(statistics.mean(ratios) + 1.685 * statistics.stdev(ratios) / math.sqrt(len(ratios)))
     # One-sided 95% paired t interval, df=40; 3% is this lane's sensitivity.
-    passed = upper <= 1.03
+    cpu_before, cpu_after = zip(*row['cpu_samples_ns'])
+    cpu_ratios = [math.log(b / a) for a, b in row['cpu_samples_ns']]
+    cpu_upper = math.exp(statistics.mean(cpu_ratios) + 1.685 * statistics.stdev(cpu_ratios) / math.sqrt(len(cpu_ratios)))
+    passed = upper <= 1.03 and cpu_upper <= 1.03
     summary = {'case': row['case'], 'before_p50_ns': statistics.median(before),
                'after_p50_ns': statistics.median(after), 'before_p95_ns': sorted(before)[38],
                'after_p95_ns': sorted(after)[38], 'ratio_upper_95': upper,
-               'sql_statements': row['sql_statements'], 'pass': passed}
+               'sql_statements': row['sql_statements'], 'pass': passed,
+               'cpu_before_p50_ns': statistics.median(cpu_before),
+               'cpu_after_p50_ns': statistics.median(cpu_after), 'cpu_ratio_upper_95': cpu_upper}
     rows.append(summary)
-    print(f"{'PASS' if passed else 'FAIL'} {row['case']}: median {summary['before_p50_ns']/1000:.1f} -> {summary['after_p50_ns']/1000:.1f} us; ratio upper95={upper:.4f}")
+    print(f"{'PASS' if passed else 'FAIL'} {row['case']}: median {summary['before_p50_ns']/1000:.1f} -> {summary['after_p50_ns']/1000:.1f} us; wall upper95={upper:.4f}, CPU upper95={cpu_upper:.4f}")
 identity['results'] = rows
 (args.output / 'results.json').write_text(json.dumps(identity, indent=2) + '\n')
 print(f"{sum(row['pass'] for row in rows)}/{len(rows)} cases within the declared 3% regression sensitivity; SQL counts identical.")
