@@ -1318,3 +1318,30 @@ fn pack_context_resolves_a_bare_name_and_names_the_recovery_when_it_fails() {
         "{out:?}"
     );
 }
+
+#[test]
+fn ruby_instance_names_should_work_through_cli_graph_commands() {
+    let dir = fixture("ruby-qualified-name");
+    std::fs::write(
+        dir.join("owner.rb"),
+        "module Mod\n  class Owner\n    def run; 1; end\n    def caller; run; end\n  end\nend\n",
+    )
+    .unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "Ruby fixture"]);
+    for (command, pointer) in [
+        ("who-calls", "/symbol/uid"),
+        ("impact", "/target"),
+        ("find-symbol", "/symbols/0/uid"),
+        ("pack-context", "/symbol/uid"),
+    ] {
+        let out = pixel(&dir, &[command, "Mod::Owner#run", "--json"]);
+        assert!(out.status.success(), "{command}: {out:?}");
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            value.pointer(pointer).unwrap(),
+            "owner.rb#Mod::Owner#run#method",
+            "{command}"
+        );
+    }
+}

@@ -155,8 +155,8 @@ impl From<Halt> for Failure {
 
 /// Resolve one `--from`/`--to` argument to a symbol row.
 ///
-/// A `#` makes it a uid: looked up verbatim, never ranked, and a uid that
-/// names nothing is [`wire::Reason::SymbolNotFound`] — never an absence of
+/// A uid is looked up verbatim, never ranked. A pathless Ruby `Owner#method`
+/// can fall back to a qualified name; a missing full uid is [`wire::Reason::SymbolNotFound`] — never an absence of
 /// path. A bare name auto-resolves only on an exact unique match within
 /// `scope`; two or more candidates are reported with their uids so the
 /// caller can re-ask precisely.
@@ -172,7 +172,12 @@ pub fn resolve_argument(
         }))
     };
     if value.contains('#') {
-        return store.symbol_by_uid(value)?.ok_or_else(not_found);
+        if let Some(symbol) = store.symbol_by_uid(value)? {
+            return Ok(symbol);
+        }
+        if pixel_graph::store::qualified_leaf(value).is_none() {
+            return Err(not_found());
+        }
     }
     // The scope goes into the query, never over its result: see
     // [`GraphStore::symbols_by_name`] for why narrowing a capped page lets

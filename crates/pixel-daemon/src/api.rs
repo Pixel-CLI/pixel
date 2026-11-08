@@ -5404,7 +5404,7 @@ enum Resolved {
     Many(Vec<SymbolRow>),
 }
 
-/// `uid_or_name` protocol: '#' means uid; otherwise a name, with the
+/// Look up a uid verbatim, then a pathless qualified or bare name, with the
 /// disambiguation protocol (`{candidates: [...], hint}`) on ambiguity.
 ///
 /// A qualified name (`ActionLog::finish`, `Builder.finish`) resolves
@@ -5414,15 +5414,17 @@ enum Resolved {
 /// learns the lookup that answers.
 fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, String> {
     if uid_or_name.contains('#') {
-        return store
+        if let Some(symbol) = store
             .symbol_by_uid(uid_or_name)
             .map_err(|e| e.to_string())?
-            .map(Resolved::One)
-            .ok_or_else(|| {
-                format!(
-                    "no symbol with uid {uid_or_name:?}; run `pixel find-symbol <name>` to list uids"
-                )
-            });
+        {
+            return Ok(Resolved::One(symbol));
+        }
+        if pixel_graph::store::qualified_leaf(uid_or_name).is_none() {
+            return Err(format!(
+                "no symbol with uid {uid_or_name:?}; run `pixel find-symbol <name>` to list uids"
+            ));
+        }
     }
     let syms = store
         .symbols_named(uid_or_name, None, 50)
@@ -8281,6 +8283,67 @@ mod tests {
         let in_process = impact_on_graph(&store, "ActionLog::finish", "upstream", Some(2)).unwrap();
         assert_eq!(in_process["target"], action_log);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ruby_method_names_should_resolve_on_every_route_without_reinterpreting_uids() {
+        let (_scratch, root) = tmpdir("ruby-qualified-names");
+        std::fs::write(root.join("owner.rb"), "module Mod\n  class Owner\n    def run; 1; end\n    def caller; run; end\n    def self.run; 2; end\n  end\nend\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "Ruby fixture"]);
+        let mut svc = Service::open(&root).unwrap();
+        let uid = "owner.rb#Mod::Owner#run#method";
+        for name in ["Owner#run", "Mod::Owner#run", uid] {
+            let uses = svc.handle(Request::Uses {
+                uid_or_name: name.into(),
+                role: "callers".into(),
+                offset: None,
+                stale_ok: false,
+            });
+            assert!(uses.ok, "{uses:?}");
+            assert_eq!(uses.data()["symbol"]["uid"], uid, "{uses:?}");
+            let impact = svc.handle(Request::Impact {
+                uid_or_name: name.into(),
+                direction: "upstream".into(),
+                depth: Some(1),
+                stale_ok: false,
+            });
+            assert!(impact.ok, "{impact:?}");
+            assert_eq!(impact.data()["target"], uid);
+        }
+        let found = svc.handle(Request::Symbol {
+            name: "Mod::Owner#run".into(),
+            stale_ok: false,
+        });
+        assert!(found.ok, "{found:?}");
+        assert_eq!(found.data()["symbols"].as_array().unwrap().len(), 1);
+        assert_eq!(found.data()["symbols"][0]["uid"], uid);
+        let store = GraphStore::open_read_only(&svc.graph_db_path()).unwrap();
+        assert_eq!(
+            impact_on_graph(&store, "Owner#run", "upstream", Some(1)).unwrap()["target"],
+            uid
+        );
+        assert_eq!(
+            crate::evaluate::resolve_argument(&store, "from", "Owner#run", None)
+                .unwrap()
+                .uid,
+            uid
+        );
+        for name in [
+            "missing.rb#Mod::Owner#run#method",
+            "dir/Owner#run",
+            r"dir\Owner#run",
+            "Owner##run",
+        ] {
+            assert!(resolve_symbol(&store, name).is_err(), "{name}");
+            assert!(
+                crate::evaluate::resolve_argument(&store, "from", name, None).is_err(),
+                "{name}"
+            );
+        }
+        let miss = resolve_symbol(&store, "Absent#run").err().unwrap();
+        assert!(miss.contains("pixel find-symbol run"), "{miss}");
     }
 
     #[test]

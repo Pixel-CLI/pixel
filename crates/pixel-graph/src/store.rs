@@ -370,11 +370,15 @@ pub struct JsxElementRow {
 /// The last segment of a qualified name (`finish` for `ActionLog::finish`
 /// or `Builder.finish`), or `None` when `name` is not qualified.
 ///
-/// A name is qualified when `::` or `.` splits it into at least two
+/// A name is qualified when `::`, `.` or Ruby's `#` splits it into at least two
 /// non-empty segments; `Foo.`, `::finish` and `a..b` are not, so a stray
 /// separator never turns into a search for an empty name.
 pub fn qualified_leaf(name: &str) -> Option<&str> {
-    let mut segments = name.split("::").flat_map(|part| part.split('.'));
+    // A path or a full uid must never become a qualified-name fallback.
+    if name.contains(['/', '\\']) || name.matches('#').count() > 1 {
+        return None;
+    }
+    let mut segments = name.split("::").flat_map(|part| part.split(['.', '#']));
     let first = segments.next()?;
     let mut leaf = None;
     for segment in segments {
@@ -1523,6 +1527,8 @@ impl GraphStore {
     /// name that ends the input matches too, so a module path the graph
     /// does not record (`pixel_actionlog::ActionLog::finish`) still finds
     /// `ActionLog::finish`; the overlap is always at least `Owner.leaf`.
+    /// Ruby `Owner#leaf` preserves the instance-method separator, so it
+    /// cannot select a same-named class method (`Owner.leaf`).
     pub fn symbols_named(
         &self,
         name: &str,
