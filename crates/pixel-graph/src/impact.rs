@@ -141,7 +141,7 @@ pub(crate) fn processes_for_symbol(
     store: &GraphStore,
     symbol_id: i64,
 ) -> Result<Vec<String>, StoreError> {
-    let mut stmt = store.conn().prepare(
+    let mut stmt = store.conn().prepare_cached(
         "SELECT DISTINCT p.label FROM processes p
          JOIN process_steps ps ON ps.process_id = p.id
          WHERE ps.symbol_id = ?1 ORDER BY p.label",
