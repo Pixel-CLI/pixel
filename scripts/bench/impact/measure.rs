@@ -15,6 +15,19 @@ fn trace(_: rusqlite::trace::TraceEvent<'_>) {
     STATEMENTS.fetch_add(1, Ordering::Relaxed);
 }
 
+fn cpu_time_ns() -> u128 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: time is writable and initialized; the clock reads this thread's CPU time.
+    assert_eq!(
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+        0
+    );
+    time.tv_sec as u128 * 1_000_000_000 + time.tv_nsec as u128
+}
+
 fn query(store: &GraphStore, uid: &str, down: bool, depth: u32, old: bool) -> Vec<u8> {
     // Neither arm inherits prepared statements left by the other arm.
     store.conn().flush_prepared_statement_cache();
@@ -152,21 +165,26 @@ fn main() {
         black_box(query(&graph, &uid, down, depth, true));
         let repetitions = (20_000_000 / start.elapsed().as_nanos().max(1)).clamp(1, 2000) as u32;
         let mut samples = Vec::new();
+        let mut cpu_samples = Vec::new();
         for round in 0..41 {
             let mut pair = [0.0; 2];
+            let mut cpu_pair = [0.0; 2];
             for index in if round % 2 == 0 { [0, 1] } else { [1, 0] } {
+                let cpu_start = cpu_time_ns();
                 let start = Instant::now();
                 for _ in 0..repetitions {
                     black_box(query(&graph, &uid, down, depth, index == 0));
                 }
                 pair[index] = start.elapsed().as_nanos() as f64 / f64::from(repetitions);
+                cpu_pair[index] = (cpu_time_ns() - cpu_start) as f64 / f64::from(repetitions);
             }
             samples.push(pair);
+            cpu_samples.push(cpu_pair);
         }
         println!(
             "{}",
             serde_json::json!({"case": name, "nodes": nodes, "repetitions": repetitions,
-            "sql_statements": sql, "samples_ns": samples})
+                "sql_statements": sql, "samples_ns": samples, "cpu_samples_ns": cpu_samples})
         );
     }
 }

@@ -7,7 +7,7 @@ python3 scripts/bench/impact/compare.py --base BASE_SHA --candidate HEAD --outpu
 ```
 
 Use a new output directory so previous evidence cannot be overwritten.
-Requires Cargo, Python 3.10+, and the workspace's cached Cargo dependencies
+Requires macOS or Linux, Cargo, Python 3.10+, and the workspace's cached Cargo dependencies
 (`cargo fetch --locked` if needed). Each arm compiles the exact `impact.rs`
 from its revision into one optimized binary, using the current checkout's
 store and dependency versions. This isolates changes to impact; it is not a
@@ -24,7 +24,9 @@ counts separately from timing, warms both arms, and alternates their order
 across 41 paired batches of approximately 20 ms per arm. Reported p50/p95
 are percentiles of batch-average query times, not individual tail latency.
 
-The exit status rejects a one-sided 95% paired log-ratio interval whose
+Each batch records wall time and this thread's CPU time. CPU time helps
+diagnose scheduling interference without dropping a wall-time regression.
+The exit status rejects either one-sided 95% paired log-ratio interval whose
 upper bound exceeds 1.03 (t critical value 1.685, 40 degrees of freedom).
 This is a declared 3% regression sensitivity, not a claim of identical
 execution time. Keep `samples.jsonl`, `results.json` and `build.log`: the
