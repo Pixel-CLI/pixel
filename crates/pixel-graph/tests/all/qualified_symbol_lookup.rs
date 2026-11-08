@@ -155,7 +155,7 @@ fn qualified_leaf_needs_two_non_empty_segments() {
 fn ruby_instance_names_should_select_the_owner_without_selecting_class_methods() {
     let store = store_with(&[
         ("owner.rb", "run", "Mod::Owner#run"),
-        ("owner.rb", "run", "Mod::Owner.run"),
+        ("class_owner.rb", "run", "Mod::Owner.run"),
         ("other.rb", "run", "Mod::Other#run"),
     ]);
     for name in ["Mod::Owner#run", "Owner#run", "Mod.Owner#run"] {
@@ -167,7 +167,7 @@ fn ruby_instance_names_should_select_the_owner_without_selecting_class_methods()
     }
     assert_eq!(
         uids(&store, "Mod::Owner.run", None),
-        vec!["owner.rb#Mod::Owner.run#method"]
+        vec!["class_owner.rb#Mod::Owner.run#method"]
     );
     for name in [
         "owner.rb#Mod::Owner#run#method",
