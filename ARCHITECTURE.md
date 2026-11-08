@@ -1790,6 +1790,12 @@ form. The step no longer matches the `probes/cand-j-stop-cause/probe` script, wh
 
 ## Testing and gates
 
+`impact-bench.yml` compares changed impact code or its benchmark on a dedicated
+GitHub-hosted runner. It checks the same-revision control and PR head against
+the PR base with shared storage/dependencies, retaining raw wall/CPU timings,
+SQL counts and source identities as the `impact-performance` artifact. The
+manual command and 3% sensitivity are in `scripts/bench/impact/README.md`.
+
 The `pixel-bench` wire benchmark calls the production bounded reader and compares
 split/whole response framing. Normal daemon responses already use one write;
 that comparison measures framing variants, not an end-to-end daemon speedup.
