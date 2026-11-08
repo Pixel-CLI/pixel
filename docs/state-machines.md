@@ -361,7 +361,7 @@ index/journal/HEAD preservation and a busy result. The stale-lock test holds the
 persistent guard over a dead-owner directory and verifies a contender preserves
 it, then verifies successful exclusive recovery after release. No sleeps.
 
-Fixed ownership candidate: `cargo test -p pixel-ops --no-fail-fast` passed
+Fixed ownership candidate `895599bc`: `cargo test -p pixel-ops --no-fail-fast` passed
 149 unit + 62 integration tests; `cargo clippy -p pixel-ops --all-targets -- -D warnings`
 and `cargo fmt --all -- --check` passed. Full current-head workspace gates run in CI.
 
@@ -377,7 +377,7 @@ snapshot after refusal. A v1 snapshot fails closed for manual recovery. Successf
 commits still remove their snapshots. Raw external ref updates do not honor the
 index lock; this is not a transaction across arbitrary concurrent native Git.
 
-Snapshot layer validation: `cargo test -p pixel-ops --no-fail-fast` passed
+Snapshot layer validation (`e17cdf8a`): `cargo test -p pixel-ops --no-fail-fast` passed
 149 unit + 66 integration tests. `cargo clippy -p pixel-ops --all-targets -- -D warnings`
 and `cargo fmt --all -- --check` passed. This includes native index-lock contention,
 unreadable index rejection and repeated crash recovery. Workspace CI is required.
@@ -393,7 +393,7 @@ checks the recorded branch and pre/reset OID, then compare-and-swaps that named
 ref. A newer commit/other branch is a recovery conflict. Existing reset-window
 recovery still restores the pre-rewrite head and leaves index/worktree untouched.
 
-Identity layer validation: `cargo test -p pixel-ops --no-fail-fast` passed
+Identity layer validation (`4398a687`): `cargo test -p pixel-ops --no-fail-fast` passed
 149 unit + 69 integration tests; `cargo clippy -p pixel-ops --all-targets -- -D warnings`
 and `cargo fmt --all -- --check` passed. Full current-head CI remains required.
 
@@ -405,17 +405,21 @@ checkout failure left a ref; applied branch and fast-forward retries returned
 REF_EXISTS and STALE_STATE. Branch now uses Git's atomic create-and-checkout,
 pinning the resolved base in RefUpdateStarted before the effect. Branch/update
 retries validate worktree and branch and acknowledge only the exact applied
-target. Legacy Started records without intent still fail closed when HEAD/ref
+target. Both resolve the base/target before the effect; update retries also support
+abbreviated OIDs and a named target ref that later moves. Legacy Started records without intent still fail closed when HEAD/ref
 already moved; the new code does not guess ownership of older partial effects.
 Negative controls cover later commits, another checkout at the same OID and a
-source ref moving between failed checkout and retry.
+source ref moving between failed checkout and retry. The abbreviated-OID case
+failed on `7b9d0746` with `cargo test -p pixel-ops update_should_replay_applied_target --lib`;
+the expanded regression also verifies a moving target ref against its pinned OID.
 
 
-Local-transition validation: `cargo test -p pixel-ops --no-fail-fast` passed
-152 unit + 69 integration tests before the final negative-control additions.
-The final `cargo test -p pixel-ops should_ --lib --no-fail-fast` passed all 74
-selected cases (79 filtered); Clippy with `--all-targets -- -D warnings` and
-`cargo fmt --all -- --check` passed. Current-head workspace CI validates the PR.
+Final local-transition validation (the pinned-target follow-up to `7b9d0746` in
+[#1396](https://github.com/Pixel-CLI/pixel/pull/1396)):
+`cargo test -p pixel-ops --no-fail-fast` passed 153 unit + 69 integration tests;
+`cargo clippy -p pixel-ops --all-targets -- -D warnings`,
+`cargo fmt --all -- --check` and `git diff --check` passed.
+Current-head workspace CI validates the PR.
 
 ### Delivery and remaining limits
 
@@ -423,7 +427,8 @@ The review stack is inventory ([#1392](https://github.com/Pixel-CLI/pixel/pull/1
 exclusive ownership ([#1393](https://github.com/Pixel-CLI/pixel/pull/1393)),
 snapshot identity ([#1394](https://github.com/Pixel-CLI/pixel/pull/1394)),
 recovery receipts ([#1395](https://github.com/Pixel-CLI/pixel/pull/1395)), then
-branch/update transitions ([#1391](https://github.com/Pixel-CLI/pixel/issues/1391)).
+branch/update transitions ([#1396](https://github.com/Pixel-CLI/pixel/pull/1396),
+[#1391](https://github.com/Pixel-CLI/pixel/issues/1391)).
 The three linked fix issues cover all eight confirmed baseline violations.
 
 The mutation regressions use deterministic phase probes and real Git effects;

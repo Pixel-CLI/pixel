@@ -70,7 +70,7 @@ fn update_with_probe(
     let worktree = root.canonicalize().map_err(|e| e.to_string())?;
     let result = json!({"updated": true, "from": opts.expected_head,
         "to": opts.target_oid, "fast_forwarded": true});
-    if let BeginOutcome::Resume {
+    let target = if let BeginOutcome::Resume {
         phase: JournalPhase::RefUpdateStarted,
         result: Some(meta),
     } = &outcome
@@ -82,11 +82,25 @@ fn update_with_probe(
                 "STALE_STATE: fast-forward intent belongs to another branch/worktree".into(),
             );
         }
-        if current_head == opts.target_oid {
+        let target = meta
+            .get("target")
+            .and_then(Value::as_str)
+            .ok_or("STALE_STATE: fast-forward intent target missing")?;
+        if current_head == target {
             journal.complete(&opts.request_id, &repo_key, result.clone())?;
             return Ok(result);
         }
-    }
+        target.to_owned()
+    } else {
+        let target = runner
+            .run(&[
+                "rev-parse",
+                "--verify",
+                &format!("{}^{{commit}}", opts.target_oid),
+            ])
+            .map_err(|e| format!("git resolve fast-forward target: {e}"))?;
+        String::from_utf8_lossy(&target).trim().to_owned()
+    };
     if current_head != opts.expected_head {
         lock.release();
         return Err(format!(
@@ -97,7 +111,7 @@ fn update_with_probe(
 
     // Check if target is a descendant of HEAD (fast-forward possible).
     let merge_base = runner
-        .run_opt(&["merge-base", &opts.expected_head, &opts.target_oid])
+        .run_opt(&["merge-base", &opts.expected_head, &target])
         .unwrap_or_default();
     let merge_base = String::from_utf8_lossy(&merge_base).trim().to_string();
 
@@ -121,7 +135,7 @@ fn update_with_probe(
             // reasoning: an undetermined changed-path set must not be read
             // as "nothing changed".
             let changes = runner
-                .diff_name_status_or_err(&opts.expected_head, &opts.target_oid)
+                .diff_name_status_or_err(&opts.expected_head, &target)
                 .map_err(|e| {
                     lock.release();
                     format!(
@@ -151,15 +165,15 @@ fn update_with_probe(
             &opts.request_id,
             &repo_key,
             JournalPhase::RefUpdateStarted,
-            Some(json!({"worktree": worktree, "branch": runner.current_branch()})),
+            Some(
+                json!({"worktree": worktree, "branch": runner.current_branch(), "target": target}),
+            ),
         )?;
         // Perform the fast-forward.
-        runner
-            .run(&["merge", "--ff-only", &opts.target_oid])
-            .map_err(|e| {
-                lock.release();
-                format!("git merge --ff-only: {e}")
-            })?;
+        runner.run(&["merge", "--ff-only", &target]).map_err(|e| {
+            lock.release();
+            format!("git merge --ff-only: {e}")
+        })?;
 
         applied()?;
 
@@ -354,7 +368,7 @@ mod tests {
     }
     #[test]
     fn update_should_replay_applied_target_but_refuse_unrelated_head_drift() {
-        for drift in ["none", "commit", "branch"] {
+        for drift in ["none", "abbreviated", "moving-ref", "commit", "branch"] {
             let root = tempdir().unwrap();
             let state = tempdir().unwrap();
             init_repo(root.path());
@@ -365,9 +379,14 @@ mod tests {
             runner.run(&["commit", "-qm", "target"]).unwrap();
             let target_oid = runner.rev_parse_head().unwrap();
             runner.run(&["reset", "--hard", &expected_head]).unwrap();
+            runner.run(&["branch", "target", &target_oid]).unwrap();
             let opts = UpdateOptions {
                 expected_head,
-                target_oid,
+                target_oid: match drift {
+                    "abbreviated" => target_oid[..12].to_owned(),
+                    "moving-ref" => "target".into(),
+                    _ => target_oid.clone(),
+                },
                 request_id: "applied".into(),
             };
             assert_eq!(
@@ -377,6 +396,11 @@ mod tests {
                 .unwrap_err(),
                 "interrupted"
             );
+            if drift == "moving-ref" {
+                runner
+                    .run(&["update-ref", "refs/heads/target", &opts.expected_head])
+                    .unwrap();
+            }
             if drift == "commit" {
                 runner
                     .run(&["commit", "--allow-empty", "-qm", "later"])
@@ -390,10 +414,14 @@ mod tests {
                 panic!("must not merge twice")
             });
             assert_eq!(runner.rev_parse_head(), before);
-            if drift != "none" {
+            if drift == "commit" || drift == "branch" {
                 assert!(result.unwrap_err().starts_with("STALE_STATE:"));
             } else {
                 let result = result.unwrap();
+                assert_eq!(
+                    runner.rev_parse_head().as_deref(),
+                    Some(target_oid.as_str())
+                );
                 assert_eq!(result["from"], opts.expected_head);
                 assert_eq!(result["to"], opts.target_oid);
                 assert_eq!(result["fast_forwarded"], true);
