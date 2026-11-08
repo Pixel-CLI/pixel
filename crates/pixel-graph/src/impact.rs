@@ -374,7 +374,9 @@ pub fn impact(
     } else {
         String::new()
     };
-    let mut summary = format!("{}: ", target.name);
+    // Room for the fixed report text and decimal counts; names/notes may grow it.
+    let mut summary = String::with_capacity(256);
+    write!(summary, "{}: ", target.name).expect("writing to a String cannot fail");
     for (index, count) in counts.iter().enumerate() {
         let depth = index as u32 + 1;
         if index > 0 {
