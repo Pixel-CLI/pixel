@@ -118,6 +118,24 @@ fn main() {
         for key in ["counts_by_depth", "affected_files"] {
             assert_eq!(outputs[0][key], outputs[1][key], "{name}: {key}");
         }
+        let expected = match name {
+            "chain" | "downstream" => [1, 1, 1],
+            "wide" => [1000, 0, 0],
+            "branching" | "cached-flows" => [8, 64, 512],
+            "duplicates" => [128, 0, 0],
+            "diamond" => [32, 32, 0],
+            "depth-one" => [8, 0, 0],
+            _ => unreachable!(),
+        };
+        assert_eq!(outputs[0]["counts_by_depth"], serde_json::json!(expected));
+        if flows {
+            assert!(
+                !outputs[0]["affected_processes"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         assert_eq!(sql[0], sql[1], "{name}: SQL work changed");
         for _ in 0..10 {
             for old in [true, false] {
