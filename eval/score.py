@@ -28,7 +28,10 @@ import argparse, hashlib, json, re, shlex, statistics, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-import usage as billed_usage
+try:
+    import usage as billed_usage
+except ImportError:  # copied alone by controlled.ts: Codex cost stays unknown
+    billed_usage = None
 
 UNKNOWN_USAGE = {"input_tokens": None, "gen_tokens": None, "cache_read_tokens": None,
                  "cache_creation_tokens": None, "cost_usd": None}
@@ -454,7 +457,7 @@ def main():
                     "timed_out", "files_changed", "payload"):
             if key in run:
                 row[key] = run[key]
-        if cli == "codex" and row.get("cost_usd") is None:
+        if billed_usage and cli == "codex" and row.get("cost_usd") is None:
             row["cost_usd"] = billed_usage.codex_exec_usd(
                 row.get("model"), row.get("input_tokens"), row.get("cache_read_tokens"), row.get("gen_tokens"))
         rows.append(row)
