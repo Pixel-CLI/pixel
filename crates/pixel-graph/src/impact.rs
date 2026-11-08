@@ -4,8 +4,9 @@
 //! Impact analysis — BFS over `calls` edges, depth-bucketed blast radius with
 //! an epistemic envelope so "0 callers" is distinguishable from "resolver gave up".
 
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::{BTreeSet, VecDeque};
+use std::fmt::Write;
 use std::str::FromStr;
 
 use rusqlite::params;
@@ -67,6 +68,9 @@ pub struct ImpactReport {
     pub d1_will_break: Vec<ImpactItem>,
     pub d2_likely_affected: Vec<ImpactItem>,
     pub d3_may_need_tests: Vec<ImpactItem>,
+    /// Examined depths, from 1 through this value. Later count slots are
+    /// compatibility placeholders, not evidence that no symbols exist.
+    pub searched_depth: u32,
     pub counts_by_depth: [u64; 3],
     pub affected_files: u64,
     pub affected_processes: Vec<String>,
@@ -204,11 +208,11 @@ pub fn impact(
         .ok_or_else(|| StoreError::Sql(rusqlite::Error::QueryReturnedNoRows))?;
     let max_depth = max_depth.clamp(1, 3);
 
-    let mut visited: HashSet<i64> = HashSet::default();
-    visited.insert(target.id);
-    // (symbol_id, depth, tier of the edge that reached it)
-    let mut queue: VecDeque<(i64, u32, Tier)> = VecDeque::new();
-    queue.push_back((target.id, 0, Tier::Exact));
+    // Shortest depth, strongest complete path at that depth, listed item.
+    // FIFO traversal finishes every parent before expanding its children.
+    let mut visited: HashMap<i64, (u32, Tier, Option<usize>)> = HashMap::default();
+    visited.insert(target.id, (0, Tier::Exact, None));
+    let mut queue = VecDeque::from([target.id]);
 
     let mut buckets: [Vec<ImpactItem>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     let mut counts: [u64; 3] = [0, 0, 0];
@@ -218,7 +222,8 @@ pub fn impact(
     let mut files: HashSet<i64> = HashSet::default();
     let mut proc_set: BTreeSet<String> = BTreeSet::new();
 
-    while let Some((id, depth, _)) = queue.pop_front() {
+    while let Some(id) = queue.pop_front() {
+        let (depth, path_tier, _) = visited[&id];
         if depth >= max_depth {
             continue;
         }
@@ -231,11 +236,26 @@ pub fn impact(
                 Direction::Upstream => e.src_id,
                 Direction::Downstream => e.dst_id,
             };
-            if !visited.insert(nbr) {
-                continue;
-            }
             let d = depth + 1;
             let bucket = (d - 1) as usize;
+            let tier = if path_tier == Tier::Exact && e.tier == Tier::Exact {
+                Tier::Exact
+            } else {
+                Tier::Probable
+            };
+            let visit = match visited.entry(nbr) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let (seen_depth, seen_tier, item) = entry.get_mut();
+                    if *seen_depth == d && *seen_tier == Tier::Probable && tier == Tier::Exact {
+                        *seen_tier = Tier::Exact;
+                        if let Some(index) = *item {
+                            buckets[bucket][index].tier = tier.as_str().to_string();
+                        }
+                    }
+                    continue;
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => entry.insert((d, tier, None)),
+            };
             counts[bucket] += 1;
             if let Some(sym) = symbol_by_id(store, nbr)? {
                 files.insert(sym.file_id);
@@ -244,19 +264,20 @@ pub fn impact(
                     proc_set.insert(p.clone());
                 }
                 if buckets[bucket].len() < limit_per_depth {
+                    visit.2 = Some(buckets[bucket].len());
                     buckets[bucket].push(ImpactItem {
                         uid: sym.uid,
                         name: sym.name,
                         path: file_path_by_id(store, sym.file_id)?,
                         line: sym.start_line,
-                        tier: e.tier.as_str().to_string(),
+                        tier: tier.as_str().to_string(),
                         processes: procs,
                     });
                 } else {
                     bucket_truncated[bucket] = true;
                 }
             }
-            queue.push_back((nbr, d, e.tier));
+            queue.push_back(nbr);
         }
     }
 
@@ -319,7 +340,9 @@ pub fn impact(
 
     let d1 = counts[0];
     let nproc = affected_processes.len();
-    let base = risk_level(d1, nproc);
+    // Discovered processes are optional cached context populated by list-flows;
+    // query history must not affect impact's structural risk assessment.
+    let base = risk_level(d1, 0);
     // An upstream walk that resolved no caller cannot rank the change: an
     // empty caller set is as consistent with "unused" as with "reached only
     // through a reference class the index does not record", so ranking it
@@ -340,12 +363,22 @@ pub fn impact(
     } else {
         String::new()
     };
-    let summary = format!(
-        "{}: {} at depth 1, {} at depth 2, {} at depth 3 ({}) across {} files, {} processes; risk {}{}{}",
-        target.name,
-        counts[0],
-        counts[1],
-        counts[2],
+    let mut summary = format!("{}: ", target.name);
+    for (index, count) in counts.iter().enumerate() {
+        let depth = index as u32 + 1;
+        if index > 0 {
+            summary.push_str(", ");
+        }
+        if depth <= max_depth {
+            write!(summary, "{count} at depth {depth}")
+        } else {
+            write!(summary, "depth {depth} not searched")
+        }
+        .expect("writing to a String cannot fail");
+    }
+    write!(
+        summary,
+        " ({}) across {} files, {} cached processes; risk {}{}{}",
         direction.as_str(),
         files.len(),
         nproc,
@@ -359,7 +392,8 @@ pub fn impact(
             String::new()
         },
         ref_suffix
-    );
+    )
+    .expect("writing to a String cannot fail");
 
     let [d1_will_break, d2_likely_affected, d3_may_need_tests] = buckets;
     Ok(ImpactReport {
@@ -371,6 +405,7 @@ pub fn impact(
         d1_will_break,
         d2_likely_affected,
         d3_may_need_tests,
+        searched_depth: max_depth,
         counts_by_depth: counts,
         affected_files: files.len() as u64,
         affected_processes,
@@ -772,5 +807,215 @@ mod tests {
         assert_eq!(report.counts_by_depth, [1, 0, 0]);
         assert_eq!(report.risk, "LOW");
         assert!(report.risk_note.is_none());
+    }
+
+    fn graph(edges: &[(usize, usize, Tier)], direction: Direction) -> GraphStore {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let file = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        let ids: Vec<_> = ["target", "left", "right", "join", "outer"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| sym(&store, file, name, i as u32 + 1, i as u32 + 1))
+            .collect();
+        for (line, &(from, to, tier)) in edges.iter().enumerate() {
+            let (src, dst) = match direction {
+                Direction::Upstream => (to, from),
+                Direction::Downstream => (from, to),
+            };
+            store
+                .insert_edge(&EdgeRow {
+                    src_id: ids[src],
+                    dst_id: ids[dst],
+                    kind: EdgeKind::Calls,
+                    tier,
+                    site_line: line as u32 + 1,
+                    receiver: None,
+                    callee: None,
+                })
+                .unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn impact_should_propagate_the_weakest_hop_in_each_direction() {
+        for direction in [Direction::Upstream, Direction::Downstream] {
+            for tiers in [
+                [Tier::Exact, Tier::Exact, Tier::Exact],
+                [Tier::Probable, Tier::Exact, Tier::Exact],
+                [Tier::Exact, Tier::Probable, Tier::Exact],
+                [Tier::Exact, Tier::Exact, Tier::Probable],
+            ] {
+                let store = graph(
+                    &[(0, 1, tiers[0]), (1, 3, tiers[1]), (3, 4, tiers[2])],
+                    direction,
+                );
+                let report = impact(&store, "src/a.ts#target#function", direction, 3, 20).unwrap();
+                assert_eq!(report.counts_by_depth, [1, 1, 1]);
+                for (depth, bucket) in [
+                    &report.d1_will_break,
+                    &report.d2_likely_affected,
+                    &report.d3_may_need_tests,
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let expected = if tiers[..=depth].contains(&Tier::Probable) {
+                        "probable"
+                    } else {
+                        "exact"
+                    };
+                    assert_eq!(
+                        bucket[0].tier, expected,
+                        "{direction:?}, {tiers:?}, depth {depth}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn impact_should_keep_strongest_shortest_paths_before_expanding_them() {
+        for direction in [Direction::Upstream, Direction::Downstream] {
+            for reverse in [false, true] {
+                for shortcut in [false, true] {
+                    let mut edges = vec![
+                        (0, 1, Tier::Probable),
+                        (0, 2, Tier::Exact),
+                        (1, 3, Tier::Exact),
+                        (2, 3, Tier::Exact),
+                        (3, 4, Tier::Exact),
+                        (4, 0, Tier::Exact),
+                        (0, 0, Tier::Exact),
+                    ];
+                    if shortcut {
+                        edges.push((0, 3, Tier::Probable));
+                    }
+                    if reverse {
+                        edges.reverse();
+                    }
+                    let store = graph(&edges, direction);
+                    let report =
+                        impact(&store, "src/a.ts#target#function", direction, 3, 20).unwrap();
+                    let buckets = [
+                        &report.d1_will_break,
+                        &report.d2_likely_affected,
+                        &report.d3_may_need_tests,
+                    ];
+                    let expected = if shortcut { "probable" } else { "exact" };
+                    for name in ["join", "outer"] {
+                        let item = buckets
+                            .iter()
+                            .flat_map(|items| items.iter())
+                            .find(|item| item.name == name)
+                            .unwrap();
+                        assert_eq!(
+                            item.tier, expected,
+                            "{direction:?}, reverse {reverse}, shortcut {shortcut}, {name}"
+                        );
+                    }
+                    assert_eq!(
+                        report.counts_by_depth,
+                        if shortcut { [3, 1, 0] } else { [2, 1, 1] }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn impact_should_combine_duplicate_sites_even_when_the_output_is_capped() {
+        for direction in [Direction::Upstream, Direction::Downstream] {
+            for tiers in [[Tier::Probable, Tier::Exact], [Tier::Exact, Tier::Probable]] {
+                let store = graph(
+                    &[(0, 1, tiers[0]), (0, 1, tiers[1]), (1, 3, Tier::Exact)],
+                    direction,
+                );
+                for limit in [0, 1, 20] {
+                    let report =
+                        impact(&store, "src/a.ts#target#function", direction, 3, limit).unwrap();
+                    assert_eq!(report.counts_by_depth, [1, 1, 0]);
+                    assert_eq!(report.truncated, limit == 0);
+                    if limit > 0 {
+                        assert_eq!(report.d1_will_break[0].tier, "exact");
+                        assert_eq!(report.d2_likely_affected[0].tier, "exact");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn impact_should_keep_risk_stable_when_flows_are_discovered() {
+        let mut store = graph(&[(0, 1, Tier::Exact)], Direction::Upstream);
+        let left = store
+            .symbol_by_uid("src/a.ts#left#function")
+            .unwrap()
+            .unwrap();
+        for i in 0..9 {
+            let entry = sym(&store, left.file_id, &format!("entry{i}"), 10 + i, 10 + i);
+            call(&store, entry, left.id);
+        }
+        let before = impact(
+            &store,
+            "src/a.ts#target#function",
+            Direction::Upstream,
+            3,
+            20,
+        )
+        .unwrap();
+        assert_eq!(before.risk, "LOW");
+        assert!(before.affected_processes.is_empty());
+        crate::process::discover(&mut store, 6, 3, 3, 100).unwrap();
+        let after = impact(
+            &store,
+            "src/a.ts#target#function",
+            Direction::Upstream,
+            3,
+            20,
+        )
+        .unwrap();
+        assert_eq!(
+            after.affected_processes.len(),
+            9,
+            "flow context remains available"
+        );
+        assert_eq!(after.counts_by_depth, [1, 9, 0]);
+        assert_eq!(
+            after.risk, "LOW",
+            "query history must not change structural risk"
+        );
+    }
+
+    #[test]
+    fn impact_should_distinguish_unsearched_depths_from_empty_ones() {
+        for direction in [Direction::Upstream, Direction::Downstream] {
+            let store = graph(&[(0, 1, Tier::Exact), (1, 3, Tier::Exact)], direction);
+            for (requested, searched, counts) in [
+                (0, 1, [1, 0, 0]),
+                (1, 1, [1, 0, 0]),
+                (2, 2, [1, 1, 0]),
+                (3, 3, [1, 1, 0]),
+                (4, 3, [1, 1, 0]),
+            ] {
+                let report =
+                    impact(&store, "src/a.ts#target#function", direction, requested, 20).unwrap();
+                let json = serde_json::to_value(&report).unwrap();
+                assert_eq!(json["searched_depth"], searched);
+                assert_eq!(report.counts_by_depth, counts);
+                assert!(
+                    !report.truncated,
+                    "a depth bound is distinct from an output cap"
+                );
+                for depth in 1..=3 {
+                    let phrase = if depth > searched {
+                        format!("depth {depth} not searched")
+                    } else {
+                        format!("{} at depth {depth}", counts[depth as usize - 1])
+                    };
+                    assert!(report.summary.contains(&phrase), "{}", report.summary);
+                }
+            }
+        }
     }
 }

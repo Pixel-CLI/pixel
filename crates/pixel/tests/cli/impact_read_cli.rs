@@ -75,6 +75,13 @@ fn impact_read_existing_graph_preserves_depth_direction_and_epistemics() {
     let before = std::fs::read(database(&dir)).unwrap();
     let direct = success(&query(&dir, "leaf", &["--depth", "1"]));
     assert_eq!(direct["counts_by_depth"], serde_json::json!([1, 0, 0]));
+    assert_eq!(direct["searched_depth"], 1);
+    assert!(
+        direct["summary"]
+            .as_str()
+            .unwrap()
+            .contains("depth 2 not searched")
+    );
     assert_eq!(direct["d1_will_break"][0]["name"], "caller");
     assert_eq!(direct["d1_will_break"][0]["path"], "src/example.ts");
     assert_eq!(direct["d1_will_break"][0]["line"], 2);
@@ -98,6 +105,7 @@ fn impact_read_existing_graph_preserves_depth_direction_and_epistemics() {
         &["--depth", "3"],
     ));
     assert_eq!(full["counts_by_depth"], serde_json::json!([1, 1, 1]));
+    assert_eq!(full["searched_depth"], 3);
     assert_eq!(full["d3_may_need_tests"][0]["name"], "entry");
     let down = success(&query(
         &dir,
