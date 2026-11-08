@@ -171,6 +171,8 @@ fn ruby_instance_names_should_select_the_owner_without_selecting_class_methods()
     );
     for name in [
         "owner.rb#Mod::Owner#run#method",
+        "rust:nowhere.rs#ghost",
+        "C:Owner#run",
         "src/Owner#run",
         r"src\Owner#run",
         "Owner##run",

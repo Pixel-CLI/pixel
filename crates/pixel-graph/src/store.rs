@@ -375,7 +375,10 @@ pub struct JsxElementRow {
 /// separator never turns into a search for an empty name.
 pub fn qualified_leaf(name: &str) -> Option<&str> {
     // A path or a full uid must never become a qualified-name fallback.
-    if name.contains(['/', '\\']) || name.matches('#').count() > 1 {
+    if name.contains(['/', '\\'])
+        || name.matches('#').count() > 1
+        || name.split("::").any(|part| part.contains(':'))
+    {
         return None;
     }
     let mut segments = name.split("::").flat_map(|part| part.split(['.', '#']));
