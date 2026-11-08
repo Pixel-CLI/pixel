@@ -306,10 +306,6 @@ pub fn reconcile_with_hooks(
         ));
     }
 
-    // Clear any stale conflict state from a previous reconcile attempt.
-    // If this call finds a new conflict, it will write a fresh state file.
-    clear_conflict_state(root);
-
     // Validate BEFORE any journal/lock/git work — a bad value must be a
     // structured error, never a silent don't-push. The normalized mode is
     // also what gets hashed, so "never" and "none" replay identically.
@@ -346,6 +342,9 @@ pub fn reconcile_with_hooks(
         opts.request_id.clone()
     };
 
+    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, &state_root)
+        .map_err(|_| "repository is busy".to_string())?;
+
     let outcome = journal.begin(
         &request_id,
         JournalOperation::Update,
@@ -356,8 +355,8 @@ pub fn reconcile_with_hooks(
         return Ok(result);
     }
 
-    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, &state_root)
-        .map_err(|_| "repository is busy".to_string())?;
+    // Only a new/resumed owner may replace the conflict diagnostic.
+    clear_conflict_state(root);
 
     // Snapshot current state.
     let head = runner.rev_parse_head().ok_or("no HEAD")?;

@@ -18,11 +18,11 @@ is narrower: deterministic operation probes and real temporary Git repositories.
 
 | ID / impact | Reachable baseline execution and violated invariant | Fix group / status |
 | --- | --- | --- |
-| M1 / P1: live index/history rollback | Publish A pauses at `journal:index_staged`; duplicate A reads Resume outside the lock and `restore_snapshot` overwrites A's staged index. Rewrite's `RefUpdateStarted` resume likewise resets HEAD without a lock. | [#1389](https://github.com/Pixel-CLI/pixel/issues/1389), pending regression/fix |
-| M2 / P1: two lock owners | Two contenders read one dead `owner.json`; A removes/recreates the directory, then B's stale decision removes A's live directory. `try_recover_stale` has no atomic claim. | #1389, pending regression/fix |
+| M1 / P1: live index/history rollback | Publish A pauses at `journal:index_staged`; duplicate A reads Resume outside the lock and `restore_snapshot` overwrites A's staged index. Rewrite's `RefUpdateStarted` resume likewise resets HEAD without a lock. | [#1389](https://github.com/Pixel-CLI/pixel/issues/1389), implemented; validation below |
+| M2 / P1: two lock owners | Two contenders read one dead `owner.json`; A removes/recreates the directory, then B's stale decision removes A's live directory. `try_recover_stale` has no atomic claim. | #1389, implemented; validation below |
 | M3 / P1: recovery targets wrong index/history | Linked worktree `.git` is a file; `index_path` nevertheless appends `index`. Capture treats its read error as absence. Separately, a retry after another commit/stage/checkout blindly restores the old index and current HEAD. | [#1390](https://github.com/Pixel-CLI/pixel/issues/1390), pending regression/fix |
 | M4 / P2: retry changes completed operation | At `CommitObserved`, retry reads today's HEAD and reports it as the original commit; `push=true` becomes `pushed=false`. At Started with a snapshot, first recovery deletes it; second retry sees no snapshot and executes again. | #1390, pending regression/fix |
-| M5 / P2: wrong ownership domain on retry | `push_with_state` Started resume uses global `state_root()` for its lock, while the journal remains under the supplied root. All journaled operations read admission before locking, permitting a stale phase decision. | #1389, pending regression/fix |
+| M5 / P2: wrong ownership domain on retry | `push_with_state` Started resume uses global `state_root()` for its lock, while the journal remains under the supplied root. All journaled operations read admission before locking, permitting a stale phase decision. | #1389, implemented; validation below |
 | M6 / P2: half-created branch | `git branch new target` succeeds, checkout rejects overlapping dirty changes, retry encounters `REF_EXISTS`. | [#1391](https://github.com/Pixel-CLI/pixel/issues/1391), pending regression/fix |
 | M7 / P2: applied fast-forward cannot resume | Process exits after successful merge but before terminal journal write; HEAD is target, yet retry requires the old expected HEAD and returns `STALE_STATE`. | #1391, pending regression/fix |
 
@@ -33,6 +33,9 @@ representable enum combinations. The fixes and failing/passing tests are recorde
 here as they are implemented; an open PR is not a merged or deployed fix.
 
 ## 1. Repository ownership (implicit)
+
+A persistent `locks/<hash>.guard` kernel lock now owns the directory protocol;
+release removes only the owned directory, never the guard inode.
 
 Owner: [lock.rs](../crates/pixel-ops/src/lock.rs),
 [repo.rs](../crates/pixel-ops/src/repo.rs).
@@ -341,3 +344,17 @@ the production entry point, and retain negative controls for drift and busy owne
 When adding a lifecycle or phase, update its table and its producer/readers in this
 file in the same PR. Existing state-machine tests remain part of normal CI; no
 local or manually triggered mutation campaign is required or run by this audit.
+
+### Ownership regression evidence (#1389)
+
+`cargo test -p pixel-ops --test all fail_closed:: --no-fail-fast` on baseline
+`7d113211` plus regressions: 3 passed, 2 failed. The duplicate publish changed the
+staged index; the busy push created `refs/heads/result` remotely. Fixed regressions
+call the real entry points from the live publish/rewrite probe; they assert exact
+index/journal/HEAD preservation and a busy result. The stale-lock test holds the
+persistent guard over a dead-owner directory and verifies a contender preserves
+it, then verifies successful exclusive recovery after release. No sleeps.
+
+Fixed ownership candidate: `cargo test -p pixel-ops --no-fail-fast` passed
+149 unit + 62 integration tests; `cargo clippy -p pixel-ops --all-targets -- -D warnings`
+and `cargo fmt --all -- --check` passed. Full current-head workspace gates run in CI.

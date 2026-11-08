@@ -5,6 +5,7 @@
 //!
 //! Port of usable-git's `repository-lock.ts`. Uses a directory + owner.json
 //! pattern: `mkdir` is atomic, so only one process can create the lock dir.
+//! A persistent kernel lock serializes directory acquisition and recovery.
 //! Stale lock recovery: if the owning PID is dead, the lock is removed and
 //! acquisition retries once.
 
@@ -32,6 +33,7 @@ pub struct RepositoryBusyError;
 
 pub struct RepositoryLock {
     lock_dir: PathBuf,
+    guard: fs::File,
     token: String,
     acquired: bool,
 }
@@ -51,11 +53,18 @@ impl RepositoryLock {
         let locks_dir = state_root.join("locks");
         ensure_dir(&locks_dir).map_err(|_| RepositoryBusyError)?;
         let lock_dir = locks_dir.join(format!("{}.lock", sha256_hex(common_directory)));
+        // This inode is never unlinked: otherwise waiters could lock an old
+        // inode while a new caller locks its replacement. Keep the directory
+        // owner too, so a live caller from an older binary still excludes us.
+        let guard_path = locks_dir.join(format!("{}.guard", sha256_hex(common_directory)));
+        let guard = pixel_git::nofollow::open_lock(&guard_path).map_err(|_| RepositoryBusyError)?;
+        guard.try_lock().map_err(|_| RepositoryBusyError)?;
         let token = uuid::Uuid::new_v4().to_string();
 
         match Self::try_acquire(&lock_dir, &token, common_directory) {
             Ok(()) => Ok(Self {
                 lock_dir,
+                guard,
                 token,
                 acquired: true,
             }),
@@ -65,6 +74,7 @@ impl RepositoryLock {
                     match Self::try_acquire(&lock_dir, &token, common_directory) {
                         Ok(()) => Ok(Self {
                             lock_dir,
+                            guard,
                             token,
                             acquired: true,
                         }),
@@ -134,6 +144,7 @@ impl RepositoryLock {
             let _ = fs::remove_dir_all(&self.lock_dir);
         }
         self.acquired = false;
+        let _ = self.guard.unlock();
     }
 }
 
@@ -147,7 +158,7 @@ impl Drop for RepositoryLock {
 fn is_pid_alive(pid: u32) -> bool {
     // SAFETY: kill(pid, 0) is a standard POSIX signal-0 probe.
     let ret = unsafe { libc::kill(pid as i32, 0) };
-    ret == 0
+    ret == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn iso_now() -> String {
@@ -224,6 +235,38 @@ mod tests {
         // Should recover and acquire.
         let mut lock = RepositoryLock::acquire_with_state_root(common, dir.path()).unwrap();
         lock.release();
+    }
+
+    #[test]
+    fn stale_recovery_should_not_remove_a_directory_claimed_by_another_recoverer() {
+        let dir = tempdir().unwrap();
+        let common = "/test/recovery-race/.git";
+        let locks = dir.path().join("locks");
+        ensure_dir(&locks).unwrap();
+        let lock_dir = locks.join(format!("{}.lock", sha256_hex(common)));
+        plant_dead_owner(&lock_dir, common);
+        let owner_before = fs::read(lock_dir.join("owner.json")).unwrap();
+        let guard =
+            pixel_git::nofollow::open_lock(&locks.join(format!("{}.guard", sha256_hex(common))))
+                .unwrap();
+        guard.try_lock().unwrap();
+        assert!(RepositoryLock::acquire_with_state_root(common, dir.path()).is_err());
+        assert_eq!(fs::read(lock_dir.join("owner.json")).unwrap(), owner_before);
+        guard.unlock().unwrap();
+        let owner = RepositoryLock::acquire_with_state_root(common, dir.path()).unwrap();
+        assert!(owner.acquired);
+        assert!(RepositoryLock::acquire_with_state_root(common, dir.path()).is_err());
+    }
+
+    fn plant_dead_owner(path: &Path, common: &str) {
+        fs::create_dir(path).unwrap();
+        let owner = LockOwner {
+            pid: i32::MAX as u32,
+            token: "dead-owner".into(),
+            acquired_at: "0".into(),
+            common_directory: common.into(),
+        };
+        fs::write(path.join("owner.json"), serde_json::to_vec(&owner).unwrap()).unwrap();
     }
 
     #[test]

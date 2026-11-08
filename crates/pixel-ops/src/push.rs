@@ -143,6 +143,8 @@ pub fn push_with_state(
     let input_hash = push_input_hash(opts);
 
     let journal = OperationJournal::with_state_root(state_root.to_path_buf());
+    let _lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
+        .map_err(|_| "repository is busy".to_string())?;
 
     let outcome = journal.begin(
         &opts.request_id,
@@ -159,24 +161,14 @@ pub fn push_with_state(
         BeginOutcome::Start => {}
     }
 
-    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
-        .map_err(|_| "repository is busy".to_string())?;
-
     // Probe: journal:started
     if let Some(p) = probe.as_mut() {
-        p("journal:started").inspect_err(|_| {
-            lock.release();
-        })?;
+        p("journal:started")?;
     }
 
     // Validate remote ref.
-    pixel_git::validate_ref(&opts.remote).map_err(|e| {
-        lock.release();
-        e.to_string()
-    })?;
-    validate_refspec(&opts.refspec).inspect_err(|_| {
-        lock.release();
-    })?;
+    pixel_git::validate_ref(&opts.remote).map_err(|e| e.to_string())?;
+    validate_refspec(&opts.refspec)?;
 
     // OID of the ref being pushed (not HEAD).
     let source_oid = resolve_source_oid(&runner, &opts.refspec).ok_or("no HEAD")?;
@@ -191,25 +183,20 @@ pub fn push_with_state(
 
     // Probe: journal:push_started
     if let Some(p) = probe.as_mut() {
-        p("journal:push_started").inspect_err(|_| {
-            lock.release();
-        })?;
+        p("journal:push_started")?;
     }
 
     // Build push args.
     let args = build_push_args(&runner, opts);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    runner.run(&arg_refs).map_err(|e| {
-        lock.release();
-        format!("git push: {e}")
-    })?;
+    runner
+        .run(&arg_refs)
+        .map_err(|e| format!("git push: {e}"))?;
 
     // Probe: remote:returned
     if let Some(p) = probe.as_mut() {
-        p("remote:returned").inspect_err(|_| {
-            lock.release();
-        })?;
+        p("remote:returned")?;
     }
 
     let result = json!({
@@ -222,12 +209,9 @@ pub fn push_with_state(
 
     // Probe: journal:terminal
     if let Some(p) = probe.as_mut() {
-        p("journal:terminal").inspect_err(|_| {
-            lock.release();
-        })?;
+        p("journal:terminal")?;
     }
 
-    lock.release();
     Ok(result)
 }
 
@@ -296,18 +280,9 @@ fn continue_push_after_begin(
     runner: &GitRunner,
 ) -> Result<Value, String> {
     let repo_key = repo_identity(root);
-    let state_root = state_root();
 
-    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, &state_root)
-        .map_err(|_| "repository is busy".to_string())?;
-
-    pixel_git::validate_ref(&opts.remote).map_err(|e| {
-        lock.release();
-        e.to_string()
-    })?;
-    validate_refspec(&opts.refspec).inspect_err(|_| {
-        lock.release();
-    })?;
+    pixel_git::validate_ref(&opts.remote).map_err(|e| e.to_string())?;
+    validate_refspec(&opts.refspec)?;
 
     let source_oid = resolve_source_oid(runner, &opts.refspec).ok_or("no HEAD")?;
 
@@ -321,10 +296,9 @@ fn continue_push_after_begin(
     let args = build_push_args(runner, opts);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    runner.run(&arg_refs).map_err(|e| {
-        lock.release();
-        format!("git push: {e}")
-    })?;
+    runner
+        .run(&arg_refs)
+        .map_err(|e| format!("git push: {e}"))?;
 
     let result = json!({
         "pushed": true,
@@ -333,7 +307,7 @@ fn continue_push_after_begin(
         "refspec": opts.refspec,
     });
     journal.complete(&opts.request_id, &repo_key, result.clone())?;
-    lock.release();
+
     Ok(result)
 }
 
