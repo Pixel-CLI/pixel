@@ -251,6 +251,10 @@ Machine-wide:
   serializes directory recovery; live legacy directory owners still block entry.
   Journal admission, retries and recovery run inside that ownership interval. Guarded git
   mutations write nothing under `.pixel/` except `reconcile-conflict.json`.
+  Publish recovery schema 2 records the real worktree index path and branch,
+  pre-HEAD/index and owned post-staging checksum. Restoration takes Git’s index
+  lock and refuses drift; refused snapshots stay durable, while successful
+  commits remove them. Legacy snapshots require manual recovery.
 - `~/.local/state/pixel/pr-swarm/`: the repo-local `pr-swarm` reconciler's
   state — `reconcile.log`, `lock/`, `resolve.tsv`, `last-run.jsonl` and
   `watch.pid` (the `watch` loop's claim, the authority on whether one runs) —

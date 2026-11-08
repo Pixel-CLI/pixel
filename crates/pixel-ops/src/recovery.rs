@@ -4,19 +4,15 @@
 //! Publish recovery store — long-lived recovery state for `publish` so
 //! crashes can resume. Port of usable-git's `publish-recovery.ts`.
 //!
-//! The recovery store captures the pre-mutation state (HEAD, a byte-exact
-//! `.git/index` snapshot, files being committed) so that a crashed publish
-//! can be restored to its exact pre-operation state on retry. Any resume
-//! that finds a recovery record on disk is, by construction, resuming into
-//! a window where it is impossible to prove whether the underlying git
-//! mutation (`git add`, `git commit`) fully applied, partially applied, or
-//! never ran at all — so the safe behavior is always: restore the raw
-//! index bytes (and HEAD, if it moved) back to the pre-operation snapshot,
-//! delete the recovery record, and surface `GIT_FAILED` rather than guess.
-//! A record that exists but cannot be read is that same window with less
-//! information: [`PublishRecoveryStore::read`] returns `Err`, never `None`,
-//! so the caller refuses the retry instead of re-running the mutation.
+//! Schema 2 records the actual worktree index path, branch, pre-HEAD and
+//! exact pre-index bytes. The owned checksum advances after staging. Recovery
+//! takes Git's index lock and restores only an unchanged pre-HEAD/branch/index
+//! ownership tuple; later history or staged intent is never rolled back.
+//! A refused request retains its snapshot so repeated retries remain refused.
+//! Legacy or unreadable records fail closed; they are never treated as absent.
 
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +37,8 @@ pub struct PublishRecoveryState {
     pub repo_key: String,
     pub phase: RecoveryPhase,
     pub pre_head: Option<String>,
+    pub index_path: PathBuf,
+    pub head_ref: Option<String>,
     pub files: Vec<String>,
     pub owned_index_checksum: Option<String>,
     pub mode: Option<String>, // "append" | "amend"
@@ -115,7 +113,7 @@ impl PublishRecoveryStore {
                 path.display()
             )
         })?;
-        if state.schema_version != 1 {
+        if state.schema_version != 2 {
             return Err(format!(
                 "GIT_FAILED: recovery record has unknown schema_version {} at {}",
                 state.schema_version,
@@ -147,56 +145,108 @@ impl Default for PublishRecoveryStore {
     }
 }
 
-/// Capture the git index checksum (sha256 of `.git/index`).
-pub fn index_checksum(repo_root: &Path) -> Option<String> {
-    let bytes = std::fs::read(index_path(repo_root)).ok()?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Some(hex::encode(hasher.finalize()))
+/// Capture the worktree's index checksum, failing closed on unreadable state.
+pub fn index_checksum(repo_root: &Path) -> Result<Option<String>, String> {
+    Ok(read_index(&index_path(repo_root)?)?.map(|bytes| checksum(&bytes)))
 }
 
-fn index_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(".git").join("index")
+fn checksum(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
-/// Capture a byte-exact, restorable snapshot of `.git/index` as it exists
-/// right now. Returns `None` if the index file does not exist yet.
-pub fn capture_index_snapshot(repo_root: &Path) -> Option<String> {
-    std::fs::read(index_path(repo_root)).ok().map(hex::encode)
+pub(crate) fn index_path(repo_root: &Path) -> Result<PathBuf, String> {
+    let out = GitRunner::new(repo_root)
+        .run(&["rev-parse", "--path-format=absolute", "--git-path", "index"])
+        .map_err(|e| format!("GIT_FAILED: resolve worktree index: {e}"))?;
+    let path = PathBuf::from(String::from_utf8_lossy(&out).trim());
+    let parent = path
+        .parent()
+        .ok_or("GIT_FAILED: index has no parent")?
+        .canonicalize()
+        .map_err(|e| format!("GIT_FAILED: resolve index directory: {e}"))?;
+    Ok(parent.join(path.file_name().ok_or("GIT_FAILED: index has no name")?))
 }
 
-/// Restore `.git/index` to exactly the bytes captured by
-/// `capture_index_snapshot`, and move `HEAD` back to `pre_head` if it has
-/// since advanced. Never touches the worktree, so unrelated pending edits
-/// (staged, unstaged, or untracked) in the worktree survive untouched —
-/// only the index (staged intent) and HEAD (commit history) are restored.
+fn read_index(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("GIT_FAILED: read worktree index: {e}")),
+    }
+}
+
+/// Capture exact index bytes; only NotFound means an unborn/absent index.
+pub fn capture_index_snapshot(repo_root: &Path) -> Result<Option<String>, String> {
+    Ok(read_index(&index_path(repo_root)?)?.map(hex::encode))
+}
+
+/// Restore only index state still attributable to this interrupted request.
+/// HEAD drift is ambiguous: retain the evidence and never rewind later history.
 pub fn restore_snapshot(repo_root: &Path, state: &PublishRecoveryState) -> Result<(), String> {
-    let path = index_path(repo_root);
-    match &state.pre_index_hex {
-        Some(hex_bytes) => {
-            let bytes = hex::decode(hex_bytes).map_err(|e| {
-                format!("GIT_FAILED: corrupt recovery snapshot (bad index hex): {e}")
-            })?;
-            write_durably(&path, &bytes)
-                .map_err(|e| format!("GIT_FAILED: failed to restore .git/index: {e}"))?;
-        }
-        None => {
-            // No index existed before this operation started — remove
-            // whatever partial index exists now.
-            let _ = std::fs::remove_file(&path);
+    struct IndexLock(Option<PathBuf>);
+    impl Drop for IndexLock {
+        fn drop(&mut self) {
+            if let Some(path) = &self.0 {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
-
-    if let Some(pre_head) = &state.pre_head {
-        let runner = GitRunner::new(repo_root);
-        let current_head = runner.rev_parse_head();
-        if current_head.as_deref() != Some(pre_head.as_str()) {
-            runner
-                .run(&["update-ref", "HEAD", pre_head])
-                .map_err(|e| format!("GIT_FAILED: failed to restore HEAD to {pre_head}: {e}"))?;
-        }
+    let conflict = || {
+        "RECOVERY_CONFLICT: worktree, branch, HEAD or index changed since the interrupted commit; recovery retained".to_string()
+    };
+    let path = index_path(repo_root)?;
+    let runner = GitRunner::new(repo_root);
+    if path != state.index_path
+        || runner.current_branch() != state.head_ref
+        || runner.rev_parse_head() != state.pre_head
+    {
+        return Err(conflict());
     }
-
+    // Respect native Git's index lock as well as Pixel's repository lock.
+    let lock_path = path.with_file_name(format!(
+        "{}.lock",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&lock_path)
+        .map_err(|e| format!("RECOVERY_CONFLICT: lock worktree index: {e}"))?;
+    let mut lock = IndexLock(Some(lock_path.clone()));
+    let original = state
+        .pre_index_hex
+        .as_ref()
+        .map(hex::decode)
+        .transpose()
+        .map_err(|e| format!("GIT_FAILED: corrupt recovery snapshot (bad index hex): {e}"))?;
+    let current = read_index(&path)?;
+    let current_checksum = current.as_deref().map(checksum);
+    if current != original && current_checksum != state.owned_index_checksum {
+        return Err(conflict());
+    }
+    // No ref mutation belongs to index recovery. Recheck after taking index.lock.
+    if runner.current_branch() != state.head_ref || runner.rev_parse_head() != state.pre_head {
+        return Err(conflict());
+    }
+    match original {
+        Some(bytes) => {
+            file.write_all(&bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|e| format!("GIT_FAILED: write restored index: {e}"))?;
+            std::fs::rename(&lock_path, &path)
+                .map_err(|e| format!("GIT_FAILED: publish restored index: {e}"))?;
+            lock.0 = None;
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("GIT_FAILED: remove restored index: {e}")),
+        },
+    }
+    std::fs::File::open(path.parent().unwrap())
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| format!("GIT_FAILED: sync restored index: {e}"))?;
     Ok(())
 }
 
@@ -207,11 +257,13 @@ mod tests {
 
     fn make_state(phase: RecoveryPhase) -> PublishRecoveryState {
         PublishRecoveryState {
-            schema_version: 1,
+            schema_version: 2,
             request_id: "test-req".to_string(),
             repo_key: "/test/repo".to_string(),
             phase,
             pre_head: Some("abc123".to_string()),
+            index_path: PathBuf::from("/test/repo/.git/index"),
+            head_ref: Some("main".into()),
             files: vec!["a.txt".to_string()],
             owned_index_checksum: Some("deadbeef".to_string()),
             mode: Some("append".to_string()),
@@ -246,7 +298,7 @@ mod tests {
         assert!(store.read("/test/repo", "missing").unwrap().is_none());
 
         let mut bumped = make_state(RecoveryPhase::Snapshotted);
-        bumped.schema_version = 2;
+        bumped.schema_version = 1;
         store.write(&bumped).unwrap();
         let err = store.read("/test/repo", "test-req").unwrap_err();
         assert!(err.contains("GIT_FAILED"), "{err}");
@@ -325,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_snapshot_reverts_index_bytes_and_head() {
+    fn restore_snapshot_should_refuse_to_rewind_a_later_commit() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         init_repo(root);
@@ -333,7 +385,9 @@ mod tests {
         git(root, &["add", "."]);
         git(root, &["commit", "-qm", "base"]);
         let pre_head = git(root, &["rev-parse", "HEAD"]);
-        let pre_index = capture_index_snapshot(root).expect("index should exist after commit");
+        let pre_index = capture_index_snapshot(root)
+            .unwrap()
+            .expect("index should exist after commit");
 
         // Mutate: stage a new file and commit it (simulating a completed
         // mutation the recovery restore must fully undo).
@@ -344,29 +398,26 @@ mod tests {
         assert_ne!(pre_head, post_head);
 
         let state = PublishRecoveryState {
-            schema_version: 1,
+            schema_version: 2,
             request_id: "r1".to_string(),
             repo_key: "k".to_string(),
             phase: RecoveryPhase::CommitStarted,
             pre_head: Some(pre_head.clone()),
+            index_path: index_path(root).unwrap(),
+            head_ref: GitRunner::new(root).current_branch(),
             files: vec!["new.txt".to_string()],
             owned_index_checksum: None,
             mode: None,
             resolved_message: None,
             pre_index_hex: Some(pre_index),
         };
-        restore_snapshot(root, &state).unwrap();
-
+        let before_index = std::fs::read(index_path(root).unwrap()).unwrap();
+        let error = restore_snapshot(root, &state).unwrap_err();
+        assert!(error.starts_with("RECOVERY_CONFLICT:"), "{error}");
+        assert_eq!(git(root, &["rev-parse", "HEAD"]), post_head);
         assert_eq!(
-            git(root, &["rev-parse", "HEAD"]),
-            pre_head,
-            "HEAD must be restored"
-        );
-        let restored_index = std::fs::read(root.join(".git").join("index")).unwrap();
-        let expected_index = hex::decode(state.pre_index_hex.unwrap()).unwrap();
-        assert_eq!(
-            restored_index, expected_index,
-            "index bytes must be byte-identical"
+            std::fs::read(index_path(root).unwrap()).unwrap(),
+            before_index
         );
     }
 
@@ -376,7 +427,10 @@ mod tests {
     fn index_checksum_hashes_the_git_index_and_changes_when_it_does() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        assert_eq!(index_checksum(root), None, "no repository yet");
+        assert!(
+            index_checksum(root).is_err(),
+            "cannot identify a non-repository index"
+        );
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .arg("-C")
@@ -393,16 +447,18 @@ mod tests {
         git(&["init", "-q"]);
         std::fs::write(root.join("a.txt"), b"a\n").unwrap();
         git(&["add", "a.txt"]);
-        let first = index_checksum(root).expect("index exists after add");
+        let first = index_checksum(root)
+            .unwrap()
+            .expect("index exists after add");
         assert_eq!(first.len(), 64);
         assert!(first.chars().all(|c| c.is_ascii_hexdigit()), "{first}");
         assert_eq!(
-            index_checksum(root).as_deref(),
+            index_checksum(root).unwrap().as_deref(),
             Some(first.as_str()),
             "stable"
         );
         std::fs::write(root.join("b.txt"), b"b\n").unwrap();
         git(&["add", "b.txt"]);
-        assert_ne!(index_checksum(root).unwrap(), first);
+        assert_ne!(index_checksum(root).unwrap().unwrap(), first);
     }
 }
