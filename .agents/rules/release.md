@@ -26,3 +26,16 @@ Always loaded: the only sanctioned release path.
   release before publishing the advisory and embargoed threat-model details.
   A protection exception needs explicit maintainer authorization and verified
   restoration; a refused client merge is handed off, not retried blindly.
+
+## Missing Rust CodeQL configuration (verified 2026-11)
+
+A PR can remain `BLOCKED` with green required jobs when the aggregate
+`CodeQL` check reports a missing `/language:rust` configuration: `codeql.yml`
+excludes Rust from `pull_request` runs but includes it on manual dispatch.
+Before proposing an admin bypass, run `gh workflow run codeql.yml --ref
+<branch>` for the recorded PR head and watch that run in the background.
+Confirm its `headSha` still equals the PR head, then recheck the aggregate
+CodeQL verdict and mergeability; dispatch success alone is not sufficient.
+Verified during 0.11.0: run 42544490355 on #1407's `e3455be6` cleared the
+missing-configuration block, and the normal merge succeeded. Actual alerts
+or a failed scan still need triage; this does not authorize bypassing them.
