@@ -1,1 +1,0 @@
-**ops:** Failed branch checkout no longer leaves a half-created ref. Branch and fast-forward retries recognize their exact applied target after interruption, while refusing unrelated branch or HEAD changes.

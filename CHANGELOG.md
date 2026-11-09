@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-09
+
+Pixel 0.11.0 improves graph risk reporting and recovery after interrupted repository operations. JSON consumers must handle the new `UNKNOWN` risk value from `what-changed` when a diff cannot be assessed.
+
+### Highlights
+
+- More reliable impact confidence and risk, with searched-depth reporting and Ruby instance-method lookup.
+- Interrupted commits, branch changes and retries preserve operation identity and later work.
+- Successful JSON retrieval stays quiet on stderr, and daemon watchers retain bounded pending paths.
+
+### Changed
+- **index, graph:** Build text-index shards in chunks with disk spill runs and stream full graph builds in bounded batches. Remove the index size cap without changing the shard format. ([#1366](https://github.com/Pixel-CLI/pixel/pull/1366), [#1368](https://github.com/Pixel-CLI/pixel/pull/1368))
+
+### Fixed
+- **classify:** Verify downloaded Ollaya models at their manifest path so successful installations are recognized. ([#1367](https://github.com/Pixel-CLI/pixel/pull/1367))
+- **brief:** Include test cases already named in the brief despite weak lexical scores, while preserving exact-option filtering. ([#1377](https://github.com/Pixel-CLI/pixel/pull/1377))
+- **daemon:** Bound retained watcher paths and reconcile after event overflow. ([#1376](https://github.com/Pixel-CLI/pixel/pull/1376))
+- **graph:** Make impact risk independent of cached flows, propagate confidence across complete shortest paths, retain stronger duplicate evidence, and report which depths were searched. ([#1402](https://github.com/Pixel-CLI/pixel/pull/1402))
+- **ops:** Failed branch checkout no longer leaves a half-created ref. Branch and fast-forward retries recognize their exact applied target after interruption, while refusing unrelated branch or HEAD changes. ([#1396](https://github.com/Pixel-CLI/pixel/pull/1396))
+- **metrics:** Preserve the complete invocation identity in live headers so concurrent commands cannot be correlated with another action record through a colliding timestamp suffix. ([#1404](https://github.com/Pixel-CLI/pixel/pull/1404))
+- **skill:** The Pixel skill now treats test and symbol names as navigation, and asks agents to read relevant assertions when the brief omits them. A fixed-brief Requests benchmark found a source-grounded improvement in all three runs, with higher token and cost totals. See [the benchmark](https://github.com/Pixel-CLI/pixel/blob/v0.11.0/docs/bench/pixel-skill-retrieval.md); it measures skill use after invocation, not an integrated brief-plus-skill change. (#1375) ([#1378](https://github.com/Pixel-CLI/pixel/pull/1378))
+- **cli:** `--json` suppresses graph refresh notices, repeat-call notes and the live metrics footer, keeping successful retrieval parseable even when stderr is merged into stdout. Graph metadata and action-log metrics remain available; failures still print diagnostics. ([#1399](https://github.com/Pixel-CLI/pixel/pull/1399))
+- **ops:** Keep interrupted commits tied to their recorded OID and report an unattempted requested push as incomplete. Rewrite recovery refuses later commits or another checked-out branch instead of rewinding them. ([#1395](https://github.com/Pixel-CLI/pixel/pull/1395))
+- **ops:** Serialize mutation retries and crash recovery with their original repository lock, preventing duplicate requests from rolling back a live commit or rewrite. Stale lock recovery now has one kernel-locked owner. ([#1393](https://github.com/Pixel-CLI/pixel/pull/1393))
+- **graph:** Resolve Ruby `Owner#method` and `Mod::Owner#method` in symbol lookup, callers, impact, context and path evaluation, while preserving exact UID lookup and class-method separation. ([#1397](https://github.com/Pixel-CLI/pixel/pull/1397))
+- **graph:** `what-changed` reports `UNKNOWN` risk when a nonempty diff maps to no changed symbols, instead of presenting an unassessed change as `LOW`. Existing coverage fields identify paths that need manual review. ([#1398](https://github.com/Pixel-CLI/pixel/pull/1398))
+- **ops:** Recover interrupted commits against the actual worktree index, preserving later commits and staged work. Repeated refused retries retain recovery evidence; legacy recovery snapshots fail closed instead of guessing ownership. ([#1394](https://github.com/Pixel-CLI/pixel/pull/1394))
+
 ## [0.10.0] - 2026-10-30
 
 0.10.0 moves the brief's probes into Pixel itself and makes the brief harder to lose. Seventeen probes now run as Rust steps inside the brief instead of starting Python, `rg` or `pixel` once each; a low relevance score no longer silences a brief; and every hook `pixel setup` writes fails open. New commands report what the briefs did and edit Pixel's settings, and optional edit hooks name the callers an edit would strand.
