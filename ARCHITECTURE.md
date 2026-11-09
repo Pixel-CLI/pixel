@@ -489,6 +489,16 @@ Invariants enforced by `Service::handle`:
   (`SnapshotInfo::compact`), so an untracked `vendor/bundle` of 15 000 paths
   does not inflate a `symbol` answer to 240 KB.
 
+`impact` reports the strongest complete path among shortest call paths: any
+probable hop makes that path probable; an exact alternative at the same
+depth upgrades it before its children are expanded. `searched_depth` names
+the examined depths (1–3); later `counts_by_depth` slots remain zero for
+compatibility and are not searched, as the summary states. Output-list caps
+remain separate from this traversal bound. Risk uses direct-call counts and
+the unresolved-call envelope, independently of the optional cached process
+context populated by `list-flows`. The shared risk helper still uses process
+counts for `what-changed`; that command's assessment is a separate contract.
+
 Adding an op is one variant on `pixel_proto::Op`, one arm in
 `Service::dispatch` and one entry in `pixel_proto::SESSION_CAPABILITIES`.
 Unit tests in `pixel-proto` check both: `op_name_matches_serde_tag` (the
