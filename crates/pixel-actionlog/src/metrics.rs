@@ -282,21 +282,8 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
     // makes whether a savings row exists depend on its own emitted size.
     let payload_tok = metrics.output_bytes as f64 / 4.0;
     let id = event.invocation_id.as_deref().unwrap_or("legacy");
-    let short_id: String = id.split('-').nth(1).map_or_else(
-        || id.to_owned(),
-        |s| {
-            s.chars()
-                .rev()
-                .take(6)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect()
-        },
-    );
-
     // Line 1: identity header.
-    let header = format!("🟩 pixel {command} ❀ {duration_ms:.1}ms ❀ #{short_id}");
+    let header = format!("🟩 pixel {command} ❀ {duration_ms:.1}ms ❀ #{id}");
 
     // Commands without a comparison policy only need identity and duration.
     // Keep the gap in the record, and let actual evidence take precedence.
@@ -1052,13 +1039,38 @@ mod tests {
     }
 
     #[test]
+    fn metrics_should_preserve_identity_when_timestamp_suffixes_collide() {
+        let ids = [
+            "101-123456abcdef-0",
+            "102-123456abcdef-0",
+            "101-123456abcdef-1",
+            "101-123457abcdef-0",
+        ];
+        for (index, id) in ids.iter().enumerate() {
+            let mut event = ActionEvent::new("search-content", ".").with_metrics(
+                OperationMetrics::new(Duration::from_millis(3), 156 + index as u64, None),
+            );
+            event.invocation_id = Some((*id).to_owned());
+            let line = event.finalize_metrics_line().unwrap();
+            assert_eq!(
+                line.lines().next().unwrap(),
+                format!("🟩 pixel search-content ❀ 3.0ms ❀ #{id}")
+            );
+            let metrics = event.metrics.as_ref().unwrap();
+            assert_eq!(metrics.output_bytes, 156 + index as u64);
+            assert_eq!(metrics.reporting_bytes, line.len() as u64 + 2);
+            assert_eq!(event.finalize_metrics_line().unwrap(), line);
+        }
+    }
+
+    #[test]
     fn metrics_should_render_only_identity_when_no_policy_applies() {
         let metrics = OperationMetrics::new(Duration::from_millis(3), 100, None)
             .with_comparison_gap(ComparisonGap::NoPolicy);
         let mut event = ActionEvent::new("setup", ".").with_metrics(metrics);
         event.invocation_id = Some("test-abcdef".to_owned());
         let line = event.finalize_metrics_line().unwrap();
-        assert_eq!(line, "🟩 pixel setup ❀ 3.0ms ❀ #abcdef");
+        assert_eq!(line, "🟩 pixel setup ❀ 3.0ms ❀ #test-abcdef");
         assert_eq!(
             event.metrics.as_ref().unwrap().reporting_bytes,
             line.len() as u64 + 2
