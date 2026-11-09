@@ -1026,7 +1026,10 @@ mod tests {
                     } else {
                         format!("{} at depth {depth}", counts[depth as usize - 1])
                     };
-                    assert!(report.summary.contains(&phrase), "{}", report.summary);
+                    assert!(
+                        report.summary.contains(&phrase),
+                        "{direction:?}, requested depth {requested}, summary slot {depth}"
+                    );
                 }
             }
         }
