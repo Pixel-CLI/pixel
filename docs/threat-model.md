@@ -179,9 +179,20 @@ refuses a final-component symlink and anything over `MAX_FILE_BYTES`
 (4 MiB). `pixel-graph` parses each file with tree-sitter
 (`pixel_graph::extract::extract_file`) under the same 4 MiB cap, cancels any
 parse still running after `PARSE_BUDGET` (3 s; the file then contributes no
-rows), skips files with a NUL in their first `BINARY_SNIFF_BYTES`, and stops at
-`DEFAULT_GRAPH_MAX_FILES` (50 000). Git-anchored shards read committed blobs
-through `git cat-file` rather than the filesystem.
+rows), skips files with a NUL in their first `BINARY_SNIFF_BYTES`, and streams full graph builds in bounded batches without a total file-count
+cap. Git-anchored shards read committed blobs through `git cat-file` rather
+than the filesystem.
+
+The text-index shard builder hashes files in chunks and spills sorted gram
+hash/file-ID pairs to `$XDG_CACHE_HOME/pixel/spill` or
+`$HOME/.cache/pixel/spill` (`pixel_index::cache::spill_dir`), falling back to
+the system temporary directory when the cache directory is unavailable.
+`ShardBuilder::spill_run` uses `sidecar::private_dir` and exclusive
+`create_new` opens; `SpillFile` removes its file on drop. These temporary
+files sit outside the shard cache so cache eviction cannot delete an active
+build's runs. Bounded buffers limit retained build memory, but total disk
+usage and build duration still grow with repository size; a killed process
+can leave spill files behind.
 
 ### 3.5 Sidecar files under `.pixel/` (B1)
 
