@@ -201,6 +201,12 @@ Machine-wide:
   Trust hashing uses the same traversal and retains one descriptor per
   source directory through its globally sorted read. The digest byte
   encoding is unchanged, so unchanged plugins retain their trust records.
+- `$XDG_CACHE_HOME/pixel/spill` or `~/.cache/pixel/spill`: temporary sorted
+  gram-hash/file-ID runs written by `pixel-index::ShardBuilder` while building
+  shards, outside the shard cache so eviction cannot remove active runs.
+  `cache::spill_dir` resolves this directory; when unavailable, the builder
+  falls back to the system temporary directory. `SpillFile` removes each run
+  on drop; abrupt termination can leave files behind.
 - `~/.local/share/pixel/flows/`: saved flows, written by the `pixel-flow`
   plugin (`$PIXEL_FLOW_DIR` overrides); the core only reads it (`plan_cmd::flow_dir`).
 - `~/.local/share/pixel/pi-package/`: the Pi package `pixel setup` writes
@@ -598,6 +604,11 @@ fields merged in, not the raw envelope. Anything that needs the full
 envelope talks to the daemon socket directly.
 
 ## Indexes and freshness
+
+- Full text-index builds hash input in 4096-file chunks and spill sorted runs
+  once the pair buffer reaches `DEFAULT_RUN_PAIRS`, then merge them into the
+  unchanged shard format. Full graph builds stream bounded batches without
+  a total file-count cap; per-file size and parse-time limits still apply.
 
 - The text index is git-anchored: base shards correspond to a commit, delta
   shards to changes since, and an overlay covers the dirty working tree.
