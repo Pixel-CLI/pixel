@@ -528,8 +528,8 @@ fn metrics_record_line_with_result(payload: &Value, response: Option<&Value>) ->
                 })
         })
         .collect();
-    // A shortened ID can collide, and a compound result can contain more
-    // than one footer. Neither identifies a unique invocation.
+    // Duplicate records or a compound result with several footers do not
+    // identify a unique invocation.
     if response.is_some() && matching.len() != 1 {
         return None;
     }
@@ -1201,7 +1201,7 @@ mod tests {
         let line =
             metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs")))
                 .unwrap();
-        assert!(line.contains("#000002"), "{line}");
+        assert!(line.contains("#x-000002"), "{line}");
     }
 
     #[test]
@@ -1223,7 +1223,7 @@ mod tests {
         let line =
             metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs")))
                 .unwrap();
-        assert!(line.contains("#000002"), "{line}");
+        assert!(line.contains("#x-000002"), "{line}");
     }
 
     #[test]
@@ -1286,6 +1286,12 @@ mod tests {
             1_000,
         );
         payload["tool_response"] = serde_json::json!({"output": second});
+        assert_eq!(
+            metrics_hook_response(Some(Provider::Codex), &payload),
+            Some(serde_json::json!({"systemMessage": second}))
+        );
+        // A genuinely duplicated identity/header must still be rejected.
+        fixture.record_interval("impact", "impact src/login.rs", "one-123456", start, 1_000);
         assert_eq!(metrics_hook_response(Some(Provider::Codex), &payload), None);
     }
 

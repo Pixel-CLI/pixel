@@ -1714,7 +1714,7 @@ live-host duplicate suppression. Chat relay remains a separately verifiable
 boundary.
 
 Codex's metrics hook requires the finalized record's exact identity header
-(command, duration and short invocation ID) as a complete string line in the
+(command, duration and complete process/time/sequence invocation ID) as a complete string line in the
 current `tool_response`, together with the command-argument and effective-cwd
 match. It rejects legacy records without an ID, colliding headers and results
 with several matching footers. Without that evidence it emits nothing: an

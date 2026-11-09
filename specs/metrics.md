@@ -93,7 +93,7 @@ each relay matches its own invocation.
 | Provider | Relay |
 |---|---|
 | `claude` | `PostToolUse` (matcher `Bash`) `systemMessage` |
-| `codex` | `systemMessage` only when the record's exact identity header (command, duration, short id) is a whole line of this `tool_response` and command and cwd match; legacy records without an id, colliding headers and several matching footers are rejected; silent otherwise |
+| `codex` | `systemMessage` only when the record's exact identity header (command, duration, full invocation id) is a whole line of this `tool_response` and command and cwd match; legacy records without an id, colliding headers and several matching footers are rejected; silent otherwise |
 | `antigravity` | `PostToolUse` stores the line per `stepIdx` in the conversation's artifact directory and returns `{}`; `--event post-invocation` delivers it once as an `ephemeralMessage` and clears it |
 | `pi` | `systemMessage`, shown by the package to the user only |
 | `devin` | accepted by `run-hook metrics`, but `pixel setup` registers no metrics hook for Devin (`hooks.md`); its prompt-submit line asks the model to repeat it once |

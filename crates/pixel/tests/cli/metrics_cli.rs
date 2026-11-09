@@ -137,22 +137,6 @@ fn metric_lines(output: &Output) -> Vec<String> {
     blocks
 }
 
-fn short_invocation_id(event: &Value) -> String {
-    let id = event["invocation_id"].as_str().unwrap();
-    id.split('-').nth(1).map_or_else(
-        || id.to_owned(),
-        |s| {
-            s.chars()
-                .rev()
-                .take(6)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect()
-        },
-    )
-}
-
 fn assert_metric_identity(block: &str, event: &Value) {
     let header = block.lines().next().unwrap();
     assert!(
@@ -163,7 +147,7 @@ fn assert_metric_identity(block: &str, event: &Value) {
         "unexpected metric header: {header}"
     );
     assert!(
-        header.ends_with(&format!(" ❀ #{}", short_invocation_id(event))),
+        header.ends_with(&format!(" ❀ #{}", event["invocation_id"].as_str().unwrap())),
         "unexpected metric header: {header}"
     );
 }
@@ -269,11 +253,9 @@ fn concurrent_time_policies_stay_with_their_own_invocations() {
         let lines = metric_lines(&output);
         assert_eq!(lines.len(), 1);
         let header = lines[0].lines().next().unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|event| { header.ends_with(&format!("#{}", short_invocation_id(event))) })
-        );
+        assert!(events.iter().any(|event| {
+            header.ends_with(&format!("#{}", event["invocation_id"].as_str().unwrap()))
+        }));
         let event = events
             .iter()
             .find(|event| event["metrics"]["time_estimate"]["round_trip_ms"] == policy)
@@ -731,14 +713,20 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
         assert!(String::from_utf8_lossy(&output.stdout).contains("login_user"));
         let lines = metric_lines(&output);
         assert_eq!(lines.len(), 1);
-        let event = events
+        let matching: Vec<_> = events
             .iter()
-            .find(|event| {
+            .filter(|event| {
                 lines[0].lines().next().is_some_and(|header| {
-                    header.ends_with(&format!("#{}", short_invocation_id(event)))
+                    header.ends_with(&format!("#{}", event["invocation_id"].as_str().unwrap()))
                 })
             })
-            .expect("each live metrics block must identify its own action record");
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "each metrics block must identify exactly one action record"
+        );
+        let event = matching[0];
         assert_metric_identity(&lines[0], event);
         // `output_bytes` prices every rendered stream, so it counts a stderr
         // line a concurrent index rebuild may add (a note), not only stdout;
