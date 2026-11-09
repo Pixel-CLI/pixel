@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+name: Impact performance
+on:
+  pull_request:
+    paths:
+      - "crates/pixel-graph/src/impact.rs"
+      - "scripts/bench/impact/**"
+      - ".github/workflows/impact-bench.yml"
+
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: Paired impact latency
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Same-revision control
+        run: python3 scripts/bench/impact/compare.py --base "$BASE_SHA" --candidate "$BASE_SHA" --output "$RUNNER_TEMP/impact-control"
+      - name: Compare the PR head
+        if: ${{ !cancelled() }}
+        run: python3 scripts/bench/impact/compare.py --base "$BASE_SHA" --candidate "$HEAD_SHA" --output "$RUNNER_TEMP/impact-candidate"
+      - name: Upload measurements
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: impact-performance
+          path: |
+            ${{ runner.temp }}/impact-control
+            ${{ runner.temp }}/impact-candidate
+          if-no-files-found: error
