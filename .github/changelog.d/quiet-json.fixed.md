@@ -1,1 +1,0 @@
-**cli:** `--json` suppresses graph refresh notices, repeat-call notes and the live metrics footer, keeping successful retrieval parseable even when stderr is merged into stdout. Graph metadata and action-log metrics remain available; failures still print diagnostics.
