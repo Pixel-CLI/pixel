@@ -75,6 +75,9 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("install.codex-hook-review", None),
     entry("install.antigravity", FIX_INSTALL),
     entry("install.claude-hooks", FIX_INSTALL),
+    // `pixel setup` does not remove what earlier releases wrote (#965): the
+    // outcome names each file and entry, and deleting them is the user's edit.
+    entry("install.leftovers", None),
     // The setup step is interactive and needs the user at a terminal, so
     // the check names it in the message but leaves `--fix` out of it.
     entry("web-search.provider", None),
@@ -450,6 +453,15 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             Ok((status, detail, Remedy::Catalogue))
         },
     );
+
+    runner.record("install.leftovers", || {
+        Ok(leftovers_check(&crate::leftovers::find(
+            &home,
+            &codex_home,
+            &pi_paths.agent_dir,
+            &exe,
+        )))
+    });
 
     // Which web search provider the installed `pixel` resolves to, read
     // straight from the environment and the global config file — never
@@ -861,6 +873,48 @@ enum Remedy {
     Catalogue,
     /// No command: nothing to repair, or another check carries the fix.
     Manual,
+}
+
+/// The verdict over what earlier releases left in the agents' configuration:
+/// green on none, else yellow with every file and entry named. No command
+/// repairs it, since `pixel setup` leaves those files' older content alone.
+fn leftovers_check(
+    found: &[crate::leftovers::Leftover],
+) -> (CheckStatus, DoctorCheckDetail, Remedy) {
+    if found.is_empty() {
+        return (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: "no hook or instruction block of an earlier release in the Claude, Codex, Devin or Pi configuration".to_owned(),
+                detail: None,
+            },
+            Remedy::Manual,
+        );
+    }
+    let named: Vec<String> = found
+        .iter()
+        .map(|left| format!("{}: {}", left.path.display(), left.what))
+        .collect();
+    let detail = serde_json::json!({
+        "leftovers": found
+            .iter()
+            .map(|left| serde_json::json!({
+                "path": left.path.display().to_string(),
+                "what": left.what,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    (
+        CheckStatus::Yellow,
+        DoctorCheckDetail {
+            summary: format!(
+                "left by an earlier release, unused by this one and not removed by `pixel setup`; delete by hand — {}",
+                named.join("; ")
+            ),
+            detail: Some(detail),
+        },
+        Remedy::Manual,
+    )
 }
 
 /// Longest stderr excerpt a check reason quotes from a child process.
@@ -2152,7 +2206,7 @@ mod tests {
             .map(|spec| spec.id)
             .filter(|id| id.starts_with("install."))
             .collect();
-        assert_eq!(home.len(), 5, "the install group as catalogued");
+        assert_eq!(home.len(), 6, "the install group as catalogued");
         let skip = ids(&["install.*"]);
         for spec in CHECKS {
             assert_eq!(

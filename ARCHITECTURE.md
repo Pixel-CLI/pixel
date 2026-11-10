@@ -1119,7 +1119,13 @@ shell wrapper, the `guard`, `composed-guard`, `session-start`,
 `APPEND_SYSTEM.md` block and project guard, OpenCode's `AGENTS.md` block and
 guard plugin, and the zcode, Cursor, Copilot CLI and Warp artifacts. A hook
 verb `pixel run-hook` does not know prints an error on stderr and exits 0, so
-a registration left in an agent's settings cannot block or fail a host. A
+a registration left in an agent's settings cannot block or fail a host.
+`pixel doctor` names three of those leftovers so they do not stay unnoticed
+(`install.leftovers`, yellow, no repair command, `pixel_setup::leftovers`):
+the retired hook verbs in the Claude, Devin and Codex hook files, the
+`<!-- pixel:managed:begin -->` block in Codex's `developer_instructions`, and
+the same block in Pi's `APPEND_SYSTEM.md`. An agent reads such a block in
+every session, and it names commands the binary no longer has. A
 panic in a hook's own work exits 0 as well: `task-event` and `metrics` run
 inside `hook_input::exit_0_after`, which catches the unwind, keeps whatever
 response was already printed and adds nothing, so the panic message goes to

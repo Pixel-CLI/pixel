@@ -240,7 +240,7 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
         [
             "pixel doctor --fix: ran 1 repair(s) — 1 fixed, 0 not converged, 0 failed",
             "  [fixed] pixel setup (install.pi-impact, install.claude-hooks)",
-            "pixel doctor: ran 2 check(s), skipped 13 — 2 green, 0 yellow, 0 red",
+            "pixel doctor: ran 2 check(s), skipped 14 — 2 green, 0 yellow, 0 red",
             "",
         ]
         .join("\n")

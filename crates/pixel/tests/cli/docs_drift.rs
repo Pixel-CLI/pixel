@@ -1184,11 +1184,13 @@ fn llms_txt_claims_are_qualified() {
 /// check that does not exist, nor leave out one that judges its agent.
 #[test]
 fn agents_data_checks_should_be_exactly_the_agent_checks_of_doctor() {
-    // Checks on Pixel's own files, which no single agent owns.
+    // Checks on Pixel's own files, which no single agent owns, and the one
+    // that reads several agents' files at once.
     const NOT_AN_AGENT: &[&str] = &[
         "install.agent-prompt",
         "install.rtk-backup",
         "install.legacy-wrappers",
+        "install.leftovers",
     ];
     let data = agents_data();
     let mut named = agents_field(&data, "checks");

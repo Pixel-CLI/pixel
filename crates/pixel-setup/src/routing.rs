@@ -701,9 +701,131 @@ pub(crate) fn pixel_hooks_running_other_binaries(value: &Value, exe: &Path) -> V
     others
 }
 
+/// The word after `run-hook` in every hook verb a release before 0.8
+/// registered and this binary no longer has. It answers each with a usage
+/// error and exit 0, so such an entry launches a process that does nothing.
+const RETIRED_HOOK_WORDS: &[&str] = &[
+    "guard",
+    "composed-guard",
+    "session-start",
+    "prompt-submit",
+    "post-compaction",
+    "post-tool-use",
+];
+
+/// Whether `verb` is exactly one an earlier release wrote: a retired word,
+/// alone or with `--provider <name>`. Anything chained after it is the
+/// user's command, not Pixel's entry.
+fn retired_hook_verb(verb: &str) -> bool {
+    match verb.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [word] | [word, "--provider", _] => RETIRED_HOOK_WORDS.contains(word),
+        _ => false,
+    }
+}
+
+/// The hooks of a settings value that an earlier release registered and
+/// `pixel setup` no longer cleans up (#965), as `Event→verb` lines in the
+/// file's order, for `pixel doctor` to name.
+pub(crate) fn retired_pixel_hooks(value: &Value, exe: &Path) -> Vec<String> {
+    let Some(events) = value.get("hooks").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut retired = Vec::new();
+    for (event, groups) in events {
+        retired.extend(
+            groups
+                .as_array()
+                .into_iter()
+                .flat_map(|groups| commands(groups))
+                .filter_map(|command| pixel_run_hook_verb(command, exe))
+                .filter(|verb| retired_hook_verb(verb))
+                .map(|verb| format!("{event}→{verb}")),
+        );
+    }
+    retired
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hooks `pixel setup` 0.4.0 left in a maintainer's
+    /// `~/.claude/settings.json`, with the home replaced.
+    fn settings_of_0_4_0() -> Value {
+        let hook = |verb: &str| json!({"type":"command","command":format!("'/home/dev/.local/bin/pixel' run-hook {verb}"),"timeout":10});
+        json!({"hooks":{
+            "PostToolUse":[{"matcher":"Edit","hooks":[hook("post-tool-use --provider claude")]}],
+            "SessionStart":[
+                {"hooks":[hook("session-start")]},
+                {"matcher":"compact","hooks":[hook("post-compaction --provider claude")]}
+            ],
+            "UserPromptSubmit":[{"hooks":[hook("prompt-submit --provider claude")]}]
+        }})
+    }
+
+    #[test]
+    fn retired_hooks_should_be_named_per_event_in_file_order() {
+        let exe = Path::new("/usr/local/bin/pixel");
+        assert_eq!(
+            retired_pixel_hooks(&settings_of_0_4_0(), exe),
+            [
+                "PostToolUse→post-tool-use --provider claude",
+                "SessionStart→session-start",
+                "SessionStart→post-compaction --provider claude",
+                "UserPromptSubmit→prompt-submit --provider claude",
+            ]
+        );
+        assert_eq!(
+            retired_pixel_hooks(&json!({"theme":"dark"}), exe),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn retired_hooks_should_survive_a_current_setup_and_stay_reported() {
+        let exe = Path::new("/home/dev/.local/bin/pixel");
+        let mut value = settings_of_0_4_0();
+        let before = retired_pixel_hooks(&value, exe);
+        configure_task_events(&mut value, Provider::Claude, exe, 1, false).unwrap();
+        assert!(task_hooks_registered(&value, Provider::Claude, exe));
+        assert_eq!(retired_pixel_hooks(&value, exe), before);
+    }
+
+    #[test]
+    fn retired_hooks_should_be_only_the_exact_verbs_of_earlier_releases() {
+        let exe = Path::new("/usr/local/bin/pixel");
+        let reported = |command: &str| {
+            retired_pixel_hooks(
+                &json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":command}]}]}}),
+                exe,
+            )
+        };
+        for word in RETIRED_HOOK_WORDS {
+            for verb in [(*word).to_owned(), format!("{word} --provider codex")] {
+                assert_eq!(
+                    reported(&format!("pixel run-hook {verb}")),
+                    [format!("Stop→{verb}")]
+                );
+                assert_eq!(
+                    reported(&format!("pixel run-hook {verb} || true")),
+                    [format!("Stop→{verb}")],
+                    "the fail-open tail is not part of the verb"
+                );
+            }
+        }
+        for kept in [
+            "pixel run-hook task-event --provider claude --event stop",
+            "pixel run-hook metrics --provider claude",
+            "pixel run-hook edit-event --provider claude --event pre-edit",
+            "pixel run-hook prompt-submit --provider claude && security-check",
+            "pixel run-hook prompt-submit --part 1/2",
+            "pixel run-hook prompt-submitted",
+            "herdr run-hook session-start",
+            "echo pixel run-hook-guard",
+        ] {
+            assert_eq!(reported(kept), Vec::<String>::new(), "{kept}");
+        }
+    }
 
     #[test]
     fn task_hooks_should_keep_every_group_index_when_setup_runs_again() {
