@@ -1709,15 +1709,21 @@ same cause.
 Ordinary CLI boundaries emit an authoritative metrics line on stderr after the
 result/error without changing JSON stdout. On a failure the `pixel: <error>`
 diagnostic is repeated after that line, so the last stderr line still names the
-failure when a caller reads only the tail. `--metrics=off` and `PIXEL_METRICS=0`
+failure when a caller reads only the tail. The estimate rows under the identity
+header are printed when stderr is a terminal, or anywhere with
+`PIXEL_METRICS=full` (`operation_metrics::shows_estimate_rows`); any other
+stderr gets the header alone (`ActionEvent::finalize_metrics_header`), so a
+model reading an agent's shell result is not handed them, and
+`reporting_bytes` counts what was printed. `--metrics=off` and `PIXEL_METRICS=0`
 disable live reporting (and the repeat), not local accounting. Metrics failures cannot change success or safety behavior.
 Exact-output search compatibility, hooks, protocol streams and statuslines remain
 untouched; a separate host-supported channel is required for their live relay.
 Protected paths lacking output-volume capture retain unavailable volumes rather
 than fabricate counts.
 
-The active prompt instructs an agent to copy the exact line from the same tool-call
-result once, skipping an invocation already relayed by the host. A global latest
+No prompt asks an agent to repeat the line, and the metrics hook answers with
+the user-visible `systemMessage` only, never `additionalContext`: the person
+sees the finalized block, the model does not get it replayed. A global latest
 record is unsafe under concurrency and must never be used. Claude Code, Codex and
 Antigravity use host-supported metrics hooks where available; mock-wrapper tests
 prove command output and stream/exit preservation, not actual model adherence or

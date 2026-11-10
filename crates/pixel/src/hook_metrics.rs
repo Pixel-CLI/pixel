@@ -194,18 +194,6 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
             .map_or_else(|| base.clone(), |path| base.join(path)),
     )
 }
-/// PostToolUse advisory: surface the blast-radius note to the model without a
-/// permission decision (the edit already happened).
-fn post_tool_use_advisory(note: &str) -> serde_json::Value {
-    serde_json::json!({
-        "systemMessage": note,
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": note
-        }
-    })
-}
-
 /// Shell-shaped tools whose `command`/`cmd` input can hold a `pixel` call.
 const METRICS_SHELL_TOOLS: &[&str] = &[
     "Bash",
@@ -393,44 +381,29 @@ fn result_carries_metrics_box(payload: &Value) -> bool {
         .is_some_and(|r| r.to_string().contains("🟩 pixel"))
 }
 
-/// The provider-shaped envelope for a replayed metrics line: Codex uses its
-/// documented `systemMessage` relay.
-fn metrics_relay_response(provider: Option<Provider>, line: &str) -> Value {
-    match provider {
-        // Codex's shell result can carry stderr without surfacing the footer
-        // in the transcript, so PostToolUse uses the documented visible field.
-        // Pi's extension shows `systemMessage` to the user and never to the
-        // model, which already reads the box in the bash result.
-        Some(Provider::Codex | Provider::Pi) => serde_json::json!({"systemMessage": line}),
-        _ => post_tool_use_advisory(line),
-    }
-}
-
-/// The hook's answer. Outside Codex, a box missing from the result is replayed
-/// through the provider's advisory channel. A box already in the result is a
-/// duplicate for the model, so it is dropped, except for Claude Code: its
-/// Bash result carries hidden stderr. Codex requires a unique matching header
-/// from this result before using its user-visible `systemMessage`. Pi
-/// relays like Codex: its extension shows the `systemMessage` to the user
-/// whether or not the bash result holds the box.
+/// The hook's answer: the finalized line in the host's user-visible
+/// `systemMessage`, and never in the model's context. The model has no use
+/// for the estimate rows, so a block missing from the result is shown to the
+/// user and not replayed to the model.
+///
+/// A block already in the result is a duplicate on a host that shows the
+/// result, so it is dropped, except for Claude Code (its Bash result carries
+/// hidden stderr) and Pi (its extension shows the message whether or not the
+/// result holds the block). Codex requires a unique matching header from
+/// this result before it relays anything.
 fn metrics_hook_response(provider: Option<Provider>, payload: &Value) -> Option<Value> {
-    if provider == Some(Provider::Codex) {
+    let line = if provider == Some(Provider::Codex) {
         // The log has no shared Codex tool-use ID. Only a footer in this
         // result can bind a finalized record to this particular call.
-        let response = payload.get("tool_response")?;
-        return metrics_record_line_with_result(payload, Some(response))
-            .map(|line| serde_json::json!({"systemMessage": line}));
-    }
-    if !result_carries_metrics_box(payload) {
-        return metrics_hook_line(payload).map(|line| metrics_relay_response(provider, &line));
-    }
-    matches!(
-        provider,
-        Some(Provider::Claude | Provider::Codex | Provider::Pi)
-    )
-    .then(|| metrics_record_line(payload))
-    .flatten()
-    .map(|line| serde_json::json!({"systemMessage": line}))
+        metrics_record_line_with_result(payload, Some(payload.get("tool_response")?))
+    } else if !result_carries_metrics_box(payload) {
+        metrics_hook_line(payload)
+    } else if matches!(provider, Some(Provider::Claude | Provider::Pi)) {
+        metrics_record_line(payload)
+    } else {
+        None
+    };
+    line.map(|line| serde_json::json!({"systemMessage": line}))
 }
 
 /// Resolve the payload to the metrics line of the invocation it describes,
@@ -1375,12 +1348,18 @@ mod tests {
         let line = metrics_hook_line(&plain).expect("seeded record");
         let mut shown = plain.clone();
         shown["tool_response"] = serde_json::json!({"stdout": "", "stderr": line});
-        // Box missing: the model context replay, for every provider.
-        let advisory = post_tool_use_advisory(&line);
-        for provider in [None, Some(Provider::Claude), Some(Provider::Devin)] {
+        // Box missing: shown to the user, never replayed into the model's
+        // context, whatever the provider.
+        let visible = serde_json::json!({"systemMessage": line});
+        for provider in [
+            None,
+            Some(Provider::Claude),
+            Some(Provider::Devin),
+            Some(Provider::Pi),
+        ] {
             assert_eq!(
                 metrics_hook_response(provider, &plain),
-                Some(advisory.clone())
+                Some(visible.clone())
             );
         }
         assert_eq!(
@@ -1405,6 +1384,51 @@ mod tests {
         shown["tool_input"] = serde_json::json!({"command": "pixel impact other.rs"});
         assert_eq!(metrics_hook_response(Some(Provider::Claude), &shown), None);
         assert_eq!(metrics_hook_response(Some(Provider::Codex), &shown), None);
+    }
+
+    /// The CLI prints the header alone on a stderr that is not a terminal.
+    /// That header still binds the record, and the user gets the whole block,
+    /// estimate rows included, on the hosts that relay a line the result
+    /// already carries.
+    #[test]
+    fn a_result_holding_the_header_alone_relays_the_rows_to_the_user() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("header-only");
+        let mut event =
+            pixel_actionlog::ActionEvent::new("search-content", "search-content login src");
+        event.cwd = fixture.root.display().to_string();
+        event.metrics = Some(pixel_actionlog::OperationMetrics::new(
+            std::time::Duration::from_millis(100),
+            0,
+            Some(pixel_actionlog::WorkflowEvidence {
+                distinct_files: 1,
+                native_commands: 1,
+                ..Default::default()
+            }),
+        ));
+        let header = event
+            .finalize_metrics_header()
+            .expect("an event with metrics");
+        fixture.append_event(event);
+
+        let mut payload = fixture.payload(serde_json::json!("pixel search-content login src"));
+        payload["tool_response"] = serde_json::json!({"stdout": "", "stderr": header});
+        let line = metrics_record_line(&payload).expect("the seeded record");
+        assert_eq!(line.lines().next(), Some(header.as_str()));
+        assert!(
+            line.contains("\n  ├─ ⏱ 95% faster, 100.0ms against ~2000ms estimated\n"),
+            "{line}"
+        );
+        for provider in [Provider::Claude, Provider::Codex, Provider::Pi] {
+            assert_eq!(
+                metrics_hook_response(Some(provider), &payload),
+                Some(serde_json::json!({"systemMessage": line})),
+                "{provider:?}"
+            );
+        }
+        for provider in [None, Some(Provider::Devin)] {
+            assert_eq!(metrics_hook_response(provider, &payload), None);
+        }
     }
 
     /// Pi relays like Codex: always the user-only `systemMessage`, whether or

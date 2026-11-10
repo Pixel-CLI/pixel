@@ -1,0 +1,1 @@
+**opencode:** the OpenCode plugin relays a `pixel` call's footer again. Its pattern expected the six hex characters ids started with before 0.11.0; an id now starts with the process id, so a call from a process id under 100000 was never relayed.

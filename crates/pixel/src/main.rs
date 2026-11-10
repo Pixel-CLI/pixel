@@ -4431,7 +4431,17 @@ fn run() -> Result<(), String> {
         metrics.answer_bytes = Some(operation_metrics::stdout_bytes());
         event = event.with_metrics(metrics);
     }
-    if live && let Some(line) = event.finalize_metrics_line() {
+    let live_line = if !live {
+        None
+    } else if operation_metrics::shows_estimate_rows(
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+        std::env::var_os("PIXEL_METRICS").as_deref(),
+    ) {
+        event.finalize_metrics_line()
+    } else {
+        event.finalize_metrics_header()
+    };
+    if let Some(line) = live_line {
         // A blank record creates a distinct terminal block so transcript UIs
         // cannot visually attach the metrics matrix to command output.
         // Reporting bytes include this separator and the trailing newline.
