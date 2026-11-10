@@ -533,13 +533,11 @@ pub(crate) fn remove_matching_hooks(hooks: &mut Map<String, Value>, remove: impl
 }
 
 /// The PostToolUse group that relays the finalized 🟩 metrics line as hook
-/// output (`systemMessage` for the user, `additionalContext` for the model)
-/// after a shell call — Codex's fallback for the rare host whose tool result
-/// drops the merged stderr its exec layer normally carries. When the tool
-/// result already carries the box, Codex and Devin stay silent while Claude
-/// still gets the line as `systemMessage` only (its Bash result surfaces
-/// stderr the user never sees), so a host that shows stderr does not print it
-/// twice for the model. Codex's own entry lives in `codex_config`.
+/// output after a shell call: `systemMessage`, for the user only, never the
+/// model's context. When the tool result already carries the line, Devin
+/// stays silent while Claude still gets it (its Bash result surfaces stderr
+/// the user never sees, and holds the header alone). Codex's own entry lives
+/// in `codex_config`.
 fn metrics_relay_group(exe: &Path, provider: Provider) -> Value {
     hook_group(
         fail_open(&format!(
