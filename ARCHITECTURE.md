@@ -1663,6 +1663,11 @@ stands in for reading one whole file, so its baseline is that file's size (a
 `stat`, no source read) with no assumed command, and the live line states
 `full read N tok, pixel answer M tok (-X%)` from the file and the stdout answer
 (`answer_bytes`), both floored bytes / 4 as in `scripts/bench/bench-read-savings.sh`.
+`workflow-v3` (`ESTIMATOR_VERSION`) measures a second case: `search-content` prints
+the lines a native search prints, so its baseline is its own stdout answer
+(`native_output_bytes`), with no assumed file read and one native step; the live
+line states `a native search returns the same output, N tok (no saving)` and no
+saved round trip. A search answered by its `--fallback-query` keeps the policy.
 Records keep the version they were written with. Estimates consider only returned evidence/relationships and
 represented native steps. Partial results remain partial; meaningless comparisons
 are unavailable; zero and negative savings are retained. There is no external

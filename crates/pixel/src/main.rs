@@ -3232,6 +3232,7 @@ fn run_search_one(
         operation_metrics::observe(&data);
         match run_task_aware_search_fallback(root, phrase, limit, no_daemon, json) {
             Ok(found) => {
+                operation_metrics::answered_beyond_native();
                 if !found && !json {
                     let cwd = std::env::current_dir().unwrap_or_else(|_| root.to_path_buf());
                     eprintln!("{}", no_match_note(&cwd, root));
