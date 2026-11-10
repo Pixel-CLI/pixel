@@ -102,7 +102,10 @@ the brief, `PIXEL_BRIEF=0` turns it off) and a `PostToolUse` metrics relay,
 and adds the skill under `~/.claude/skills/pixel/`. Foreign hooks are
 preserved. `pixel setup` no longer cleans up what earlier releases registered
 (the `guard`, `session-start`, `prompt-submit`, `post-compaction` and
-`post-tool-use` verbs of `run-hook`): delete those entries by hand. The binary
+`post-tool-use` verbs of `run-hook`): delete those entries by hand. `pixel
+doctor` lists them, with the instruction block an earlier release left in
+Codex's `developer_instructions` or Pi's `APPEND_SYSTEM.md`, under
+`install.leftovers`. The binary
 still answers them with exit 0, so a leftover does not block a tool call. Native
 reads need no Pixel retrieval callback.
 
