@@ -264,6 +264,17 @@ impl ActionEvent {
         }
         format_metrics_line(self)
     }
+
+    /// The identity header alone, for a stream no person reads. An agent's
+    /// shell tool hands stderr to the model, where the estimate rows often
+    /// outweigh the answer; the header is what a relay needs to match the
+    /// call to its record. The record then counts only what was printed.
+    /// The returned string excludes its newline, which is still accounted for.
+    pub fn finalize_metrics_header(&mut self) -> Option<String> {
+        let header = format_metrics_line(self)?.lines().next()?.to_owned();
+        self.metrics.as_mut()?.reporting_bytes = header.len() as u64 + 2;
+        Some(header)
+    }
 }
 
 /// Reproduce the invocation's authoritative line from its finalized record.
@@ -1192,6 +1203,43 @@ mod tests {
         assert!(
             line.contains("unavailable: reason not recorded (record predates gap tracking)"),
             "{line}"
+        );
+    }
+
+    /// A stream no person reads gets the header alone: the record counts
+    /// only those bytes and still replays the whole block for a relay.
+    #[test]
+    fn the_header_alone_is_finalized_with_its_own_byte_count() {
+        let mut event = ActionEvent::new("find-code", ".").with_metrics(OperationMetrics::new(
+            Duration::from_millis(100),
+            0,
+            Some(WorkflowEvidence {
+                distinct_files: 1,
+                native_commands: 1,
+                ..Default::default()
+            }),
+        ));
+        event.invocation_id = Some("42-abc-0".to_owned());
+        let header = event.finalize_metrics_header().unwrap();
+        assert_eq!(header, "🟩 pixel find-code ❀ 100.0ms ❀ #42-abc-0");
+        assert_eq!(
+            event.metrics.as_ref().unwrap().reporting_bytes,
+            header.len() as u64 + 2
+        );
+        let replayed = format_metrics_line(&event).unwrap();
+        assert_eq!(replayed.lines().next(), Some(header.as_str()));
+        assert!(
+            replayed.contains("  ├─ ⏱ 95% faster, 100.0ms against ~2000ms estimated"),
+            "{replayed}"
+        );
+        assert!(
+            replayed.ends_with('─'),
+            "a header-only print leaves no padding to replay: {replayed:?}"
+        );
+        assert_eq!(
+            ActionEvent::new("find-code", ".").finalize_metrics_header(),
+            None,
+            "an event without metrics has no header"
         );
     }
 

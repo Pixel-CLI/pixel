@@ -268,9 +268,28 @@ fn workflow_evidence(command: &str, commands: u64, e: &Evidence) -> WorkflowEvid
     }
 }
 
+/// Whether the live metrics block keeps its estimate rows: on a terminal, or
+/// wherever `PIXEL_METRICS=full` asks for them. Any other stderr (an agent's
+/// shell tool, a pipe, a file) gets the identity header alone, so a model
+/// that reads the stream is not handed rows meant for a person.
+pub fn shows_estimate_rows(stderr_is_terminal: bool, setting: Option<&std::ffi::OsStr>) -> bool {
+    stderr_is_terminal || setting.is_some_and(|value| value == "full")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn estimate_rows_are_for_a_terminal_or_an_explicit_request() {
+        let setting = |value: &'static str| Some(std::ffi::OsStr::new(value));
+        assert!(shows_estimate_rows(true, None));
+        assert!(shows_estimate_rows(true, setting("1")));
+        assert!(!shows_estimate_rows(false, None));
+        assert!(!shows_estimate_rows(false, setting("1")));
+        assert!(!shows_estimate_rows(false, setting("FULL")));
+        assert!(shows_estimate_rows(false, setting("full")));
+    }
     use serde_json::json;
 
     /// A sink that refuses every write with one fixed error kind.
