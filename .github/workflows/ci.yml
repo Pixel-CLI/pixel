@@ -416,7 +416,7 @@ jobs:
       # Prebuilt binary; the profile lives in .config/nextest.toml.
       - name: Install cargo-nextest
         if: ${{ needs.changes.outputs.cargo == 'true' }}
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-nextest
 
@@ -856,7 +856,7 @@ jobs:
       # Prebuilt binary, same pinned installer as nextest above and cross in
       # cross-build.yml.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-deny
 
