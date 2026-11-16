@@ -6,6 +6,8 @@ name = "pixel-plugin"
 version = "0.11.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 [lints]
@@ -13,7 +15,6 @@ workspace = true
 
 [dependencies]
 libc = "0.2"
-mutants = { workspace = true }
 pixel-git = { path = "../pixel-git" }
 regex = "1.13"
 rustix = { version = "1.1", features = ["fs"] }
@@ -23,3 +24,4 @@ thiserror = { workspace = true }
 toml_edit = "0.25.15"
 
 [dev-dependencies]
+mutants = { workspace = true }
