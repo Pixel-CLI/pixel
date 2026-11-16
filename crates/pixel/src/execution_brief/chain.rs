@@ -66,9 +66,7 @@ pub(crate) const BRIEF_ENV: &str = "PIXEL_BRIEF";
 /// caller (the hook's, or the `brief` command's, which OpenCode cuts off sooner),
 /// clamped to what the hook that runs the brief can wait for.
 pub(crate) fn window_for(root: &Path, command: bool) -> Duration {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let home = std::env::var_os("HOME").map_or_default(PathBuf::from);
     let default = if command {
         pixel_setup::config::BRIEF_WINDOW_COMMAND_DEFAULT_MS
     } else {
@@ -1123,8 +1121,7 @@ impl Brief {
         }
         self.receipt
             .as_ref()
-            .map(|receipt| receipt.lines(self.confident()))
-            .unwrap_or_default()
+            .map_or_default(|receipt| receipt.lines(self.confident()))
     }
 
     /// The best chunk's excerpt: the first block cut from a file.
@@ -3058,8 +3055,7 @@ fn try_start_as(
     let seen = session_id
         .as_deref()
         .filter(|_| dedupe)
-        .map(|id| sent::load(&root, id, pixel_task::now_ms()))
-        .unwrap_or_default();
+        .map_or_default(|id| sent::load(&root, id, pixel_task::now_ms()));
     let sent_to = session_id.filter(|_| dedupe).map(|id| (root.clone(), id));
     let context: Option<ContextSource> = session
         .filter(|_| decision_log::enabled(std::env::var(CONTEXT_ENV).ok().as_deref()))
@@ -9150,7 +9146,7 @@ mod tests {
         cut.cut = true;
         for brief in [strong, cut] {
             assert!(brief.read_ranges().is_empty());
-            let text = fit(&brief).map(|(text, _)| text).unwrap_or_default();
+            let text = fit(&brief).map_or_default(|(text, _)| text);
             assert!(!text.contains("read: "), "{text}");
         }
         // Without a range the brief keeps a verification footer.

@@ -280,10 +280,7 @@ fn dead_interactive(
     let fan_in = fan_in_for_files(store, &file_ids)?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        let file = store
-            .file_by_id(r.file_id)?
-            .map(|f| f.path)
-            .unwrap_or_default();
+        let file = store.file_by_id(r.file_id)?.map_or_default(|f| f.path);
         let label = if r.text_content.is_empty() {
             format!("Wire unnamed {} element", r.tag)
         } else {

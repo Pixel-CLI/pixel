@@ -144,7 +144,9 @@ disallowed-types = [
     "std::process::Command",
     "std::process::CommandArgs",
     "std::process::CommandEnvs",
-    "std::process::ExitCode",
+    # Not `ExitCode`: an inert value (`exit`/`abort` above are what end the
+    # process), and since Rust 1.100 the libtest harness of every `lib test`
+    # target returns one, so banning it fails the crate's own test build.
     "std::process::ExitStatus",
     "std::process::Output",
     "std::process::Stdio",

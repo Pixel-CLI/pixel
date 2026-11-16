@@ -235,9 +235,7 @@ pub(crate) fn collect(root: &Path, transcript: Option<&Path>, deadline: Instant)
         .spawn(move || {
             let _ = send.send(dirty_paths(&dirty_root));
         });
-    let recent = transcript
-        .map(|path| transcript_paths(root, path))
-        .unwrap_or_default();
+    let recent = transcript.map_or_default(|path| transcript_paths(root, path));
     let dirty = receive
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .unwrap_or_default();

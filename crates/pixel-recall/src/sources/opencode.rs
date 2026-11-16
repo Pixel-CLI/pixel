@@ -243,8 +243,7 @@ pub(crate) fn oc_parse(
                         let name = pv.get("tool").and_then(Value::as_str).unwrap_or("unknown");
                         let input = pv
                             .pointer("/state/input")
-                            .map(ToString::to_string)
-                            .unwrap_or_default();
+                            .map_or_default(ToString::to_string);
                         let (capped, cut) = cap_text(&input, TOOL_INPUT_CAP);
                         truncated |= cut;
                         if !text.is_empty() {

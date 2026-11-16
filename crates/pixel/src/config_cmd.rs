@@ -164,9 +164,7 @@ fn validate(path: &Path) -> Result<(), String> {
 /// How many `UserPromptSubmit` hooks `pixel setup` registers for the prompt
 /// brief: `brief_parts` from the repository layer, then the global one, else 3.
 pub(crate) fn brief_parts(root: Option<&Path>) -> u8 {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let home = std::env::var_os("HOME").map_or_default(PathBuf::from);
     pixel_setup::config::brief_parts(&home, root)
 }
 
@@ -1269,9 +1267,7 @@ fn run_metrics_with(
                 }
                 Source::Global => format!(
                     "global {}",
-                    global_config_path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default()
+                    global_config_path().map_or_default(|p| p.display().to_string())
                 ),
                 Source::Default => "default (no config sets it)".to_string(),
             };

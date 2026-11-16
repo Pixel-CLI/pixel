@@ -2507,12 +2507,11 @@ impl Service {
             .envelope
             .get("caps")
             .and_then(Value::as_array)
-            .map(|arr| {
+            .map_or_default(|arr| {
                 arr.iter()
                     .filter_map(|c| c.as_str().map(str::to_string))
                     .collect()
-            })
-            .unwrap_or_default();
+            });
 
         let Some(store) = self.graph.as_ref() else {
             let inputs = RegionsInputs {
@@ -2548,8 +2547,7 @@ impl Service {
                     .file_by_id(r.file_id)
                     .ok()
                     .flatten()
-                    .map(|f| f.path)
-                    .unwrap_or_default(),
+                    .map_or_default(|f| f.path),
                 start_line: r.start_line,
                 end_line: r.end_line,
             })
@@ -3678,7 +3676,7 @@ impl Service {
                 0 => {
                     return Err(format!(
                         "no symbol named {name:?}{}",
-                        file.map(|f| format!(" in {f}")).unwrap_or_default()
+                        file.map_or_default(|f| format!(" in {f}"))
                     ));
                 }
                 1 => syms.into_iter().next().unwrap(),
@@ -6318,8 +6316,7 @@ fn rank_search_matches(
         .filter_map(|f| {
             let basename = std::path::Path::new(f)
                 .file_name()
-                .map(|s| s.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
+                .map_or_default(|s| s.to_string_lossy().to_lowercase());
             let matched = words
                 .iter()
                 .filter(|w| !w.is_empty() && basename.contains(w.as_str()))

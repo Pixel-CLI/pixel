@@ -220,7 +220,7 @@ impl Resident {
 
         // Reading, hashing and parsing dominate a build: one file per task,
         // each numbering its tokens under one short hold of the vocabulary.
-        let vocab = Mutex::new(previous.map(|p| p.vocab.clone()).unwrap_or_default());
+        let vocab = Mutex::new(previous.map_or_default(|p| p.vocab.clone()));
         let loaded: Vec<Loaded> = files
             .par_iter()
             .map(|file| load_file(root, file, &reusable, &vocab))
