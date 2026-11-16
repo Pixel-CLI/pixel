@@ -72,7 +72,7 @@ jobs:
       # release here, before anything is built, until it is fixed or accepted
       # with its reason in deny.toml and osv-scanner.toml.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-deny
 
@@ -157,7 +157,7 @@ jobs:
           cat release-notes.md
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           body_path: release-notes.md
           # install.sh ships with the release, not from a branch: main moves
