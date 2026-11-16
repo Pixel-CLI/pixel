@@ -39,7 +39,7 @@ perf script | samply import perf.data
 Gungraun is the maintained successor to iai-callgrind (renamed upstream at
 0.17.0). It reports **executed instruction counts**, not the static
 instruction count of a disassembled function. The Linux
-`instruction-counts.yml` PR lane pins Rust 1.99.0, gungraun 0.20.0 and
+`instruction-counts.yml` PR lane pins Rust 1.100.0, gungraun 0.20.0 and
 Valgrind 3.22.0 on Ubuntu 24.04. Its seven cases call the production
 `read_capped_line_with`, `write_response`, `cosine`, and
 `SparseGramExtractor<Crc32Weigher>::grams` implementations:
