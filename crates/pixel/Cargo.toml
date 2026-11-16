@@ -6,6 +6,8 @@ name = "pixel-cli"
 version = "0.11.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true
@@ -24,7 +26,6 @@ fastembed = ["pixel-recall/fastembed"]
 model2vec = ["pixel-recall/model2vec"]
 
 [dependencies]
-mutants = { workspace = true }
 # Global allocator; see `main.rs`. `default-features = false` keeps the
 # override and secure features (and their build-time C) off.
 mimalloc = { version = "0.1", default-features = false }
@@ -44,7 +45,7 @@ pixel-task = { path = "../pixel-task" }
 pixel-plugin = { path = "../pixel-plugin" }
 # The brief reads a French prompt with pixel-mvp's rules (execution_brief/french.rs).
 mvp-model = { path = "../mvp-model" }
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { workspace = true }
 fs2 = "0.4.3"
 clap = { version = "4.5", features = ["derive"] }
 # `pixel completions <shell>` and `pixel man`, generated from the same clap tree.
@@ -69,6 +70,7 @@ sha2 = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+mutants = { workspace = true }
 # Tests read `website/data/agents.toml` and the workspace `Cargo.toml`
 # (tests/cli/docs_drift.rs).
 tempfile = "3"

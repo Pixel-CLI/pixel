@@ -9,6 +9,8 @@ description = "Shared types of pixel-mvp's index and the Graph read trait; depen
 version = "0.11.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 # Retain the imported lint baseline; tightening it is a separate change.

@@ -6,6 +6,8 @@ name = "pixel-bench"
 version = "0.11.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 [lints]
@@ -16,10 +18,10 @@ default = ["pixel-recall/fastembed", "pixel-recall/model2vec"]
 instruction-counts = ["dep:gungraun"]
 
 [dependencies]
-pixel-index = { path = "../pixel-index" }
 gungraun = { version = "=0.20.0", optional = true }
 
 [dev-dependencies]
+pixel-index = { path = "../pixel-index" }
 criterion = { workspace = true }
 pixel-daemon = { path = "../pixel-daemon" }
 pixel-graph = { path = "../pixel-graph" }
