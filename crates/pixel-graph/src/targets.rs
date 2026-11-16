@@ -104,7 +104,7 @@ pub fn symbol_hits(
             let matched_kw = if is_exact {
                 sym.name.clone()
             } else {
-                matched.first().map(|w| (*w).clone()).unwrap_or_default()
+                matched.first().map_or_default(|w| (*w).clone())
             };
             acc.symbols.push((sym, matched_kw));
         }

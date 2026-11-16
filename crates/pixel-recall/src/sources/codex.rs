@@ -134,8 +134,7 @@ impl SourceAdapter for Adapter {
         let stem = unit
             .path
             .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+            .map_or_default(|s| s.to_string_lossy().to_string());
 
         let mut session = UnifiedSession {
             agent: "codex",
@@ -388,8 +387,7 @@ fn tool_output_text(output: Option<&Value>) -> String {
             .get("output")
             .or_else(|| map.get("content"))
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_default(),
+            .map_or_default(str::to_string),
         _ => String::new(),
     }
 }

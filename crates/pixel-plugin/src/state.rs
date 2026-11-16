@@ -117,12 +117,11 @@ impl Config {
         Ok(doc
             .get("enabled")
             .and_then(Item::as_array)
-            .map(|list| {
+            .map_or_default(|list| {
                 list.iter()
                     .filter_map(|v| v.as_str().map(str::to_owned))
                     .collect()
-            })
-            .unwrap_or_default())
+            }))
     }
 
     pub fn enable(&self, name: &str) -> Result<(), Error> {
@@ -141,12 +140,11 @@ impl Config {
         Ok(doc
             .get("disabled")
             .and_then(Item::as_array)
-            .map(|list| {
+            .map_or_default(|list| {
                 list.iter()
                     .filter_map(|v| v.as_str().map(str::to_owned))
                     .collect()
-            })
-            .unwrap_or_default())
+            }))
     }
 
     pub fn is_disabled(&self, name: &str) -> Result<bool, Error> {

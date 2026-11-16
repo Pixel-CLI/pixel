@@ -35,8 +35,7 @@ pub fn record(step: ServeStep) {
 pub fn take() -> Vec<ServeStep> {
     STEPS
         .lock()
-        .map(|mut steps| std::mem::take(&mut *steps))
-        .unwrap_or_default()
+        .map_or_default(|mut steps| std::mem::take(&mut *steps))
 }
 
 /// Whole milliseconds since `start`.

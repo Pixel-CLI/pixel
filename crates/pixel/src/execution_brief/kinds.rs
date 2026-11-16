@@ -399,8 +399,7 @@ pub(crate) fn map_lines(map: &RepoMap) -> Vec<String> {
                 .collect();
             let lang = languages(&members.iter().map(|&file| file.clone()).collect::<Vec<_>>())
                 .first()
-                .map(|(lang, _)| lang.clone())
-                .unwrap_or_default();
+                .map_or_default(|(lang, _)| lang.clone());
             let name = if area.prefix.is_empty() {
                 "./".to_string()
             } else {

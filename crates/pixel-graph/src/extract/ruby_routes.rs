@@ -225,8 +225,7 @@ impl RouteWalker<'_> {
     }
 
     fn positional<'t>(&self, args: Option<Node<'t>>) -> Vec<Node<'t>> {
-        args.map(named)
-            .unwrap_or_default()
+        args.map_or_default(named)
             .into_iter()
             .filter(|a| !matches!(a.kind(), "pair" | "block_argument"))
             .collect()
@@ -240,8 +239,7 @@ impl RouteWalker<'_> {
         if node.kind() == "call" && node.child_by_field_name("receiver").is_none() {
             let method = node
                 .child_by_field_name("method")
-                .map(|m| self.text(m))
-                .unwrap_or_default();
+                .map_or_default(|m| self.text(m));
             if self.declaration(node, &method, scope, depth) {
                 return;
             }
@@ -414,7 +412,7 @@ impl RouteWalker<'_> {
     fn verb(&mut self, call: Node, verb: &str, scope: &Scope, line: u32) {
         let args = call.child_by_field_name("arguments");
         // `get "path" => "c#a"`: the path and target are a hash pair.
-        let rocket = args.map(named).unwrap_or_default().into_iter().find(|a| {
+        let rocket = args.map_or_default(named).into_iter().find(|a| {
             a.kind() == "pair"
                 && a.child_by_field_name("key")
                     .is_some_and(|k| k.kind() == "string")
@@ -628,7 +626,7 @@ impl RouteWalker<'_> {
 
     /// `mount Engine => "/at"` or `mount Engine, at: "/at"`.
     fn mount(&mut self, args: Option<Node>, scope: &Scope, line: u32) {
-        let all = args.map(named).unwrap_or_default();
+        let all = args.map_or_default(named);
         let (constant, at) = if let Some(pair) = all.iter().find(|a| {
             a.kind() == "pair" && {
                 a.child_by_field_name("key")

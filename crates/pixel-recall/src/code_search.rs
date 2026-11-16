@@ -375,11 +375,7 @@ fn skip_dir(name: &str) -> bool {
 }
 
 fn is_code_file(name: &str) -> bool {
-    let ext = name
-        .rsplit('.')
-        .next()
-        .map(str::to_lowercase)
-        .unwrap_or_default();
+    let ext = name.rsplit('.').next().map_or_default(str::to_lowercase);
     matches!(
         ext.as_str(),
         "rs" | "toml"
@@ -857,9 +853,7 @@ pub(crate) fn chunk_vectors(
         mut vectors,
         stored_rows,
         errors,
-    } = store
-        .map(|store| store.load(namespace, dims, &wanted))
-        .unwrap_or_default();
+    } = store.map_or_default(|store| store.load(namespace, dims, &wanted));
     let rebuild = !errors.is_empty();
     coverage.vector_cache_errors.extend(errors);
     let mut fresh = Vec::new();

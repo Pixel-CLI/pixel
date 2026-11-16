@@ -128,8 +128,7 @@ impl SourceAdapter for Adapter {
         let stem = unit
             .path
             .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+            .map_or_default(|s| s.to_string_lossy().to_string());
         let (is_subagent, parent) = subagent_parent(&unit.path);
         let source_session_id = match &parent {
             Some(p) => format!("{p}/{stem}"),
@@ -284,10 +283,7 @@ fn extract_record(
                                 .get("name")
                                 .and_then(Value::as_str)
                                 .unwrap_or("unknown");
-                            let input = part
-                                .get("input")
-                                .map(ToString::to_string)
-                                .unwrap_or_default();
+                            let input = part.get("input").map_or_default(ToString::to_string);
                             let (capped, truncated) = cap_text(&input, TOOL_INPUT_CAP);
                             any_truncated |= truncated;
                             if !text.is_empty() {

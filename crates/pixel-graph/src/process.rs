@@ -234,9 +234,7 @@ pub fn list(
 
     let mut out = Vec::with_capacity(procs.len());
     for (pid, label, entry_id, step_count) in procs {
-        let entry_uid = symbol_by_id(store, entry_id)?
-            .map(|s| s.uid)
-            .unwrap_or_default();
+        let entry_uid = symbol_by_id(store, entry_id)?.map_or_default(|s| s.uid);
         let mut sstmt = store.conn().prepare(
             "SELECT symbol_id FROM process_steps
                  WHERE process_id = ?1 ORDER BY step LIMIT ?2",

@@ -121,8 +121,7 @@ fn branch_merge_base(runner: &GitRunner) -> Option<String> {
     runner.run_opt(&["remote", "set-head", "origin", "--auto"]);
     let remote_default = runner
         .run_opt(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-        .unwrap_or_default();
+        .map_or_default(|o| String::from_utf8_lossy(&o).trim().to_string());
     let remote_default = if remote_default.is_empty() {
         "origin/main".to_string()
     } else {

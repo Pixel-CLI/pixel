@@ -905,7 +905,7 @@ mod tests {
             params: Value::Null,
         });
         assert!(!recall.ok);
-        let message = recall.error.map(|e| e.message).unwrap_or_default();
+        let message = recall.error.map_or_default(|e| e.message);
         assert!(
             message.contains("unknown recall action 'nope'"),
             "{message}"

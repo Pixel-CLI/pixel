@@ -531,7 +531,7 @@ pub(super) fn boundary(ctx: &Ctx, walk: &mut Walk, prompt: &str, paths: &[String
                 };
                 let declared = Regex::new(&format!(r#""{}"\s*:"#, regex::escape(dependency)))
                     .ok()
-                    .map(|declared| {
+                    .map_or_default(|declared| {
                         manifest
                             .lines
                             .iter()
@@ -539,8 +539,7 @@ pub(super) fn boundary(ctx: &Ctx, walk: &mut Walk, prompt: &str, paths: &[String
                             .filter(|(_, line)| declared.is_match(line))
                             .map(|(i, _)| i + 1)
                             .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                    });
                 let [manifest_line] = declared[..] else {
                     continue;
                 };

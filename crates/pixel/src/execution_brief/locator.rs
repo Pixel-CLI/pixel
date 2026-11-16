@@ -559,8 +559,7 @@ fn term_pattern(term: &str) -> String {
     let mut capital = term.chars();
     let capitalised = capital
         .next()
-        .map(|first| format!("{}{}", first.to_ascii_uppercase(), capital.as_str()))
-        .unwrap_or_default();
+        .map_or_default(|first| format!("{}{}", first.to_ascii_uppercase(), capital.as_str()));
     let start = format!(
         "(?:(?:^|[^A-Za-z])(?i:{lower})|[a-z]{})",
         regex::escape(&capitalised)
@@ -889,8 +888,7 @@ pub(crate) fn pick_terms(candidates: &[String], receipt: Option<&Receipt>) -> Ve
 fn search(evidence: &dyn Evidence, pattern: &str, deadline: Instant) -> Vec<RichHit> {
     evidence
         .grep(pattern, SEARCH_ROWS, deadline)
-        .map(|found| found.hits)
-        .unwrap_or_default()
+        .map_or_default(|found| found.hits)
 }
 
 /// The terms among `terms` that some row carries (in its text or its path).
@@ -1180,8 +1178,7 @@ fn name_segments(terms: &[String]) -> (String, String) {
         let mut chars = term.chars();
         let capital = chars
             .next()
-            .map(|first| format!("{}{}", first.to_ascii_uppercase(), chars.as_str()))
-            .unwrap_or_default();
+            .map_or_default(|first| format!("{}{}", first.to_ascii_uppercase(), chars.as_str()));
         let end = if term.len() >= answer::LONG_STEM {
             ""
         } else {

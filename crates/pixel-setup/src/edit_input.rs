@@ -137,9 +137,7 @@ pub fn targets(
                 .into_iter()
                 .collect(),
         },
-        "apply_patch" => patch_text(input)
-            .map(|patch| patch_targets(patch, read))
-            .unwrap_or_default(),
+        "apply_patch" => patch_text(input).map_or_default(|patch| patch_targets(patch, read)),
         _ => Vec::new(),
     }
 }

@@ -2240,17 +2240,15 @@ fn review_gate_blocked(data: &Value, threshold: u8) -> bool {
 fn pretty_review_gate(d: &Value) -> Option<String> {
     let findings = d.get("findings")?.as_array()?;
     let snapshot = d.get("snapshot");
-    let anchor = snapshot
-        .map(|s| {
-            format!(
-                "{} @ {}",
-                s.get("branch").and_then(Value::as_str).unwrap_or("?"),
-                s.get("head")
-                    .and_then(Value::as_str)
-                    .map_or("?", |h| &h[..h.len().min(7)]),
-            )
-        })
-        .unwrap_or_default();
+    let anchor = snapshot.map_or_default(|s| {
+        format!(
+            "{} @ {}",
+            s.get("branch").and_then(Value::as_str).unwrap_or("?"),
+            s.get("head")
+                .and_then(Value::as_str)
+                .map_or("?", |h| &h[..h.len().min(7)]),
+        )
+    });
     let mut output = String::new();
     if findings.is_empty() {
         let status = if d
@@ -2439,7 +2437,7 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
     let files: Vec<Value> = data
         .get("targets")
         .and_then(Value::as_array)
-        .map(|ts| {
+        .map_or_default(|ts| {
             ts.iter()
                 .map(|t| {
                     serde_json::json!({
@@ -2448,8 +2446,7 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
                     })
                 })
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     let created_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -3020,8 +3017,7 @@ fn group_by_root(paths: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<String>)>, Strin
         let root = discover_root(&abs)?;
         let rel = abs
             .strip_prefix(&root)
-            .map(|r| r.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .map_or_default(|r| r.to_string_lossy().into_owned());
         match groups.iter_mut().find(|(r, _)| *r == root) {
             Some((_, rels)) => {
                 if rel.is_empty() {
@@ -4049,8 +4045,7 @@ fn timings_line(timings: &Value) -> String {
                 .filter_map(|(name, v)| Some((name, v.as_u64()?)))
                 .max_by_key(|&(_, n)| n)
         })
-        .map(|(name, n)| format!(", slowest {} {n} ms", name.trim_end_matches("_ms")))
-        .unwrap_or_default();
+        .map_or_default(|(name, n)| format!(", slowest {} {n} ms", name.trim_end_matches("_ms")));
     format!(
         "timings: total {}, index {} (base {}), graph {} ({}){slowest}",
         ms(&timings["total_ms"]),
@@ -5149,7 +5144,7 @@ fn run_command(
                     let kinds: Vec<String> = f
                         .get("edits")
                         .and_then(Value::as_array)
-                        .map(|es| {
+                        .map_or_default(|es| {
                             es.iter()
                                 .map(|e| {
                                     format!(
@@ -5159,8 +5154,7 @@ fn run_command(
                                     )
                                 })
                                 .collect()
-                        })
-                        .unwrap_or_default();
+                        });
                     output.push_str(&format!("  {path}  ({})\n", kinds.join(", ")));
                 }
                 for s in d.get("skipped")?.as_array()? {
@@ -6309,15 +6303,12 @@ fn run_locate(
             no_daemon,
         )?;
         operations += 1;
-        files = ranked["targets"]
-            .as_array()
-            .map(|targets| {
-                targets
-                    .iter()
-                    .map(|t| json!({"path": t["path"], "tier": t["tier"], "reasons": t["reasons"]}))
-                    .collect()
-            })
-            .unwrap_or_default();
+        files = ranked["targets"].as_array().map_or_default(|targets| {
+            targets
+                .iter()
+                .map(|t| json!({"path": t["path"], "tier": t["tier"], "reasons": t["reasons"]}))
+                .collect()
+        });
         responses.push(ranked);
     }
     responses.push(resolve);
