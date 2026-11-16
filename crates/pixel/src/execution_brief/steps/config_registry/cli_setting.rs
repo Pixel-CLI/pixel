@@ -133,7 +133,7 @@ fn select(repo: &Repo, prompt: &str, deadline: Instant) -> Option<Selected> {
             let name_match = name_method.and_then(|(_, close, open)| {
                 NAME_LITERAL.captures(&body[open..close - 1]).map(|caps| caps[1].to_lowercase())
             });
-            let option_tokens = name_match.map(|name| stems(letters(&name))).unwrap_or_default();
+            let option_tokens = name_match.map_or_default(|name| stems(letters(&name)));
             let overlap = option_tokens.intersection(&prompt_terms).count();
             let mut short_char = None;
             if let Some((_, close, open)) = short_method {

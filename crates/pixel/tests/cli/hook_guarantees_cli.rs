@@ -571,8 +571,7 @@ fn task_event_should_exit_0_with_one_json_line_when_pixel_state_is_broken() {
             .map(|dir| dir.to_string_lossy().into_owned());
         let env: Vec<(&str, &str)> = runtime_dir
             .as_deref()
-            .map(|dir| vec![("TMPDIR", dir), ("XDG_RUNTIME_DIR", dir)])
-            .unwrap_or_default();
+            .map_or_default(|dir| vec![("TMPDIR", dir), ("XDG_RUNTIME_DIR", dir)]);
         for (provider, event) in [
             ("claude", "session-start"),
             ("claude", "prompt-submit"),

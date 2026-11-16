@@ -382,16 +382,13 @@ fn resume_publish(
 fn paths_needing_stage(root: &Path, runner: &GitRunner, files: &[String]) -> Vec<String> {
     let mut ls_args: Vec<&str> = vec!["ls-files", "-z", "--"];
     ls_args.extend(files.iter().map(String::as_str));
-    let in_index: std::collections::BTreeSet<String> = runner
-        .run(&ls_args)
-        .map(|out| {
-            String::from_utf8_lossy(&out)
-                .split('\0')
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let in_index: std::collections::BTreeSet<String> = runner.run(&ls_args).map_or_default(|out| {
+        String::from_utf8_lossy(&out)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    });
     files
         .iter()
         .filter(|path| {

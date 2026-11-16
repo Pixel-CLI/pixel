@@ -280,8 +280,7 @@ impl<'a> TsWalker<'a> {
 
     fn call_args<'b>(&self, node: Node<'b>) -> Vec<Node<'b>> {
         node.child_by_field_name("arguments")
-            .map(each_child)
-            .unwrap_or_default()
+            .map_or_default(each_child)
     }
 
     fn push(&mut self, kind: ConceptKind, raw: String, detail: String, node: Node) {
@@ -388,8 +387,7 @@ impl<'a> TsWalker<'a> {
             .call_args(node)
             .into_iter()
             .find(|a| a.is_named() && !a.is_extra())
-            .map(|a| strip_quotes(&self.text(a)))
-            .unwrap_or_default();
+            .map_or_default(|a| strip_quotes(&self.text(a)));
         let raw = format!("{method} {path}");
         self.push(ConceptKind::Route, raw, format!("{method} {path}"), node);
     }

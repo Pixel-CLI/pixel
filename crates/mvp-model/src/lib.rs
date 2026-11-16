@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-#![forbid(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![forbid(clippy::disallowed_methods, clippy::disallowed_macros)]
+// Since Rust 1.100 the libtest harness that `cargo test` generates returns
+// `std::process::ExitCode`, which `clippy.toml` refuses, and that span-less
+// `main` cannot carry an `allow`. The test build therefore lifts the type
+// ban; the library build (`--all-targets` lints both) still forbids it over
+// every production line, and the methods and macros stay forbidden in both.
+#![cfg_attr(not(test), forbid(clippy::disallowed_types))]
+#![cfg_attr(test, allow(clippy::disallowed_types))]
 //! Shared types of pixel-mvp: file, symbol, edge, provenance, and the
 //! `Graph` read trait (ADR-0013). It depends on nothing and does no I/O.
 //!

@@ -303,13 +303,12 @@ fn table(item: Option<&Item>) -> Option<&dyn TableLike> {
 
 fn strings(item: Option<&Item>) -> Vec<String> {
     item.and_then(Item::as_array)
-        .map(|array| {
+        .map_or_default(|array| {
             array
                 .iter()
                 .filter_map(|value| value.as_str().map(ToString::to_string))
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 fn manifest_path(dir: &str, name: &str) -> String {
@@ -396,8 +395,7 @@ fn npm_member(ctx: &Ctx, dir: &str) -> Result<Option<Member>, NotJson> {
     let keys = |field: &str| -> Vec<String> {
         doc.get(field)
             .and_then(|value| value.as_object())
-            .map(|map| map.keys().cloned().collect())
-            .unwrap_or_default()
+            .map_or_default(|map| map.keys().cloned().collect())
     };
     let deps = ["dependencies", "peerDependencies", "optionalDependencies"]
         .into_iter()
@@ -457,8 +455,7 @@ fn python_member(ctx: &Ctx, dir: &str) -> Option<Member> {
         .collect();
     let mut dev = BTreeMap::new();
     for (_, group) in table(doc.get("dependency-groups"))
-        .map(|groups| groups.iter().collect::<Vec<_>>())
-        .unwrap_or_default()
+        .map_or_default(|groups| groups.iter().collect::<Vec<_>>())
     {
         for spec in strings(Some(group)) {
             dev.insert(dep_name(&spec).to_owned(), false);

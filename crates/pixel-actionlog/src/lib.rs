@@ -132,9 +132,7 @@ impl ActionEvent {
             pid: std::process::id(),
             command: command.into(),
             args: truncate(&args.into(), MAX_ARGS_LEN),
-            cwd: std::env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
+            cwd: std::env::current_dir().map_or_default(|p| p.display().to_string()),
             outcome: Outcome::Ok,
             error: None,
             duration_ms: 0,

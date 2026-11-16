@@ -138,7 +138,7 @@ fn load_calls(calls_path: &Path) -> Vec<CallEntry> {
     };
     v.get("calls")
         .and_then(Value::as_array)
-        .map(|arr| {
+        .map_or_default(|arr| {
             arr.iter()
                 .filter_map(|e| {
                     Some(CallEntry {
@@ -156,7 +156,6 @@ fn load_calls(calls_path: &Path) -> Vec<CallEntry> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 /// Save the call history to `.pixel/calls.json` (atomic tmp + rename).

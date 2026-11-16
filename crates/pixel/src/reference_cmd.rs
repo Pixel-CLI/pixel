@@ -487,7 +487,7 @@ pub fn remove(root: &Path, id: &str, revision: Option<&str>) -> Result<(), Strin
         return Err(format!(
             "reference: no entry found for {}{}",
             id,
-            revision.map(|r| format!(" at {r}")).unwrap_or_default()
+            revision.map_or_default(|r| format!(" at {r}"))
         ));
     }
 

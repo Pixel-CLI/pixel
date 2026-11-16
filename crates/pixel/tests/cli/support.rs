@@ -333,8 +333,7 @@ fn leak_guard_fails_the_test_when_a_daemon_outlives_the_fixture() {
             .unwrap_or_else(|| {
                 payload
                     .downcast_ref::<&str>()
-                    .map(|s| (*s).to_string())
-                    .unwrap_or_default()
+                    .map_or_default(|s| (*s).to_string())
             }),
     };
     assert!(

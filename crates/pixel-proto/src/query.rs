@@ -163,34 +163,28 @@ pub fn locate_candidates(resolve: &serde_json::Value) -> Vec<LocateCandidate> {
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(0)
     };
-    resolve["matches"]
-        .as_array()
-        .map(|matches| {
-            matches
-                .iter()
-                .map(|m| LocateCandidate {
-                    path: m["path"].as_str().unwrap_or_default().to_owned(),
-                    start_line: line(m, "start_line"),
-                    end_line: line(m, "end_line"),
-                    symbol: if m["symbol_kind"].is_string() {
-                        m["raw"].as_str().map(str::to_owned)
-                    } else {
-                        m["owner"].as_str().map(str::to_owned)
-                    },
-                    kind: m["symbol_kind"].as_str().map(str::to_owned),
-                    score: m["score"].as_f64().unwrap_or(0.0),
-                    reasons: m["reasons"]
-                        .as_array()
-                        .map(|r| {
-                            r.iter()
-                                .filter_map(|x| x.as_str().map(str::to_owned))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    resolve["matches"].as_array().map_or_default(|matches| {
+        matches
+            .iter()
+            .map(|m| LocateCandidate {
+                path: m["path"].as_str().unwrap_or_default().to_owned(),
+                start_line: line(m, "start_line"),
+                end_line: line(m, "end_line"),
+                symbol: if m["symbol_kind"].is_string() {
+                    m["raw"].as_str().map(str::to_owned)
+                } else {
+                    m["owner"].as_str().map(str::to_owned)
+                },
+                kind: m["symbol_kind"].as_str().map(str::to_owned),
+                score: m["score"].as_f64().unwrap_or(0.0),
+                reasons: m["reasons"].as_array().map_or_default(|r| {
+                    r.iter()
+                        .filter_map(|x| x.as_str().map(str::to_owned))
+                        .collect()
+                }),
+            })
+            .collect()
+    })
 }
 
 /// The reason `resolve` gives a match that contains the whole phrase
@@ -315,17 +309,14 @@ pub fn looks_like_test_path(path: &str) -> bool {
 
 /// Distinct test files among the callers a `uses` response lists, sorted.
 pub fn caller_test_files(uses: &serde_json::Value) -> Vec<String> {
-    let mut files: Vec<String> = uses["edges"]
-        .as_array()
-        .map(|edges| {
-            edges
-                .iter()
-                .filter_map(|e| e["symbol"]["path"].as_str())
-                .filter(|p| looks_like_test_path(p))
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut files: Vec<String> = uses["edges"].as_array().map_or_default(|edges| {
+        edges
+            .iter()
+            .filter_map(|e| e["symbol"]["path"].as_str())
+            .filter(|p| looks_like_test_path(p))
+            .map(str::to_owned)
+            .collect()
+    });
     files.sort();
     files.dedup();
     files
