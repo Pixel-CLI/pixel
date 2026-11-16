@@ -69,10 +69,7 @@ pub fn error_lines(record: &ErrorRecord, now_ms: i64) -> String {
             loc.push_str(&format!(
                 "  \u{2190} via {}{}",
                 pkg.name,
-                pkg.version
-                    .as_deref()
-                    .map(|v| format!("@{v}"))
-                    .unwrap_or_default()
+                pkg.version.as_deref().map_or_default(|v| format!("@{v}"))
             ));
             if pkg.dup_paths.len() > 1 {
                 loc.push_str(&format!("  [!] {} physical copies", pkg.dup_paths.len()));
@@ -98,11 +95,7 @@ pub fn render_error_list(list: &ErrorList, now_ms: i64) -> String {
 }
 
 fn render_event(event: &EventRecord, now_ms: i64) -> String {
-    let detail = event
-        .data
-        .as_ref()
-        .map(|d| format!("  {d}"))
-        .unwrap_or_default();
+    let detail = event.data.as_ref().map_or_default(|d| format!("  {d}"));
     format!(
         "{:<9} [{}]{}",
         age(now_ms, event.ts),

@@ -403,8 +403,7 @@ pub fn reconcile_with_hooks(
     // this very call performed, never from a value the caller transcribed.
     let upstream_oid = runner
         .run_opt(&["rev-parse", &upstream])
-        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-        .unwrap_or_default();
+        .map_or_default(|o| String::from_utf8_lossy(&o).trim().to_string());
 
     if let Some(hook) = pre_push_hook.as_mut() {
         hook();
@@ -415,8 +414,7 @@ pub fn reconcile_with_hooks(
 
     let merge_base = runner
         .run_opt(&["merge-base", "HEAD", &upstream])
-        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-        .unwrap_or_default();
+        .map_or_default(|o| String::from_utf8_lossy(&o).trim().to_string());
 
     let state = classify_state(ahead, behind);
 
@@ -635,13 +633,12 @@ pub fn reconcile_with_hooks(
                                 // markers in the worktree, then continue.
                                 let unmerged = runner
                                     .run_opt(&["diff", "--name-only", "--diff-filter=U"])
-                                    .map(|b| {
+                                    .map_or_default(|b| {
                                         String::from_utf8_lossy(&b)
                                             .lines()
                                             .map(String::from)
                                             .collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_default();
+                                    });
                                 let mut rebase_resolved = Vec::new();
                                 let mut rebase_unresolved = Vec::new();
                                 for path in &unmerged {
@@ -960,8 +957,7 @@ fn reconcile_into(
     let remote_target = format!("origin/{target}");
     let remote_target_oid = runner
         .run_opt(&["rev-parse", &remote_target])
-        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-        .unwrap_or_default();
+        .map_or_default(|o| String::from_utf8_lossy(&o).trim().to_string());
     if remote_target_oid.is_empty() {
         lock.release();
         return Err(format!(
@@ -972,8 +968,7 @@ fn reconcile_into(
 
     let upstream_oid = runner
         .run_opt(&["rev-parse", &format!("origin/{branch}")])
-        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-        .unwrap_or_default();
+        .map_or_default(|o| String::from_utf8_lossy(&o).trim().to_string());
 
     // ff precondition, checked BEFORE any mutation: the local target must be
     // an ancestor of (or equal to) origin/<target>. The rebased head will sit
@@ -1017,8 +1012,7 @@ fn reconcile_into(
 
     let merge_base = runner
         .run_opt(&["merge-base", "HEAD", &remote_target])
-        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-        .unwrap_or_default();
+        .map_or_default(|o| String::from_utf8_lossy(&o).trim().to_string());
 
     if !git_supports_merge_tree_write_tree(root) {
         // Same gate as plain diverged handling: without merge-tree the clean
@@ -1065,13 +1059,12 @@ fn reconcile_into(
             Err(_) => {
                 let unmerged = runner
                     .run_opt(&["diff", "--name-only", "--diff-filter=U"])
-                    .map(|b| {
+                    .map_or_default(|b| {
                         String::from_utf8_lossy(&b)
                             .lines()
                             .map(String::from)
                             .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                    });
                 let mut rebase_resolved = Vec::new();
                 let mut rebase_unresolved = Vec::new();
                 for path in &unmerged {

@@ -1149,8 +1149,7 @@ impl<'a> Files<'a> {
             } else {
                 self.evidence
                     .files_matching(needle, self.deadline)
-                    .map(|found| found.hits)
-                    .unwrap_or_default()
+                    .map_or_default(|found| found.hits)
             };
             self.searched.insert(needle.to_string(), rows);
         }
@@ -1357,8 +1356,7 @@ fn resolve_targets(input: &Input, evidence: &dyn Evidence, deadline: Instant) ->
                 .as_deref()
                 .filter(|_| alive())
                 .and_then(|symbol| evidence.files_matching(symbol, deadline).ok())
-                .map(|found| found.hits)
-                .unwrap_or_default();
+                .map_or_default(|found| found.hits);
             let stem = region
                 .path
                 .rsplit('/')
@@ -1707,15 +1705,14 @@ fn definition_candidates(
             first,
             last,
         )
-        .map(|block| {
+        .map_or_default(|block| {
             vec![Candidate {
                 priority: MAX_TARGETS + index,
                 order: (index, 0, first),
                 part: Part::Definition,
                 block,
             }]
-        })
-        .unwrap_or_default();
+        });
     }
     if target.matches {
         return match_candidates(index, target, by, files);
@@ -2974,8 +2971,7 @@ mod tests {
                     .rows
                     .iter()
                     .find(|(name, _)| name == anchor)
-                    .map(|(_, rows)| rows.clone())
-                    .unwrap_or_default(),
+                    .map_or_default(|(_, rows)| rows.clone()),
                 capped: false,
             })
         }

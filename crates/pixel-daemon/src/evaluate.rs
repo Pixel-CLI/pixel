@@ -435,8 +435,7 @@ fn content_hash(store: &GraphStore, path: &str) -> String {
         .file_by_path(path)
         .ok()
         .flatten()
-        .map(|f| f.blob_oid)
-        .unwrap_or_default()
+        .map_or_default(|f| f.blob_oid)
 }
 
 fn tier(tier: pixel_graph::store::Tier) -> wire::Tier {
@@ -499,10 +498,8 @@ pub fn halted(
         tiers: args.tiers.tiers(),
     };
     let snapshot = wire::Snapshot {
-        signature: identity.map(|i| i.signature.clone()).unwrap_or_default(),
-        extractor_version: identity
-            .map(|i| i.extractor_version.clone())
-            .unwrap_or_default(),
+        signature: identity.map_or_default(|i| i.signature.clone()),
+        extractor_version: identity.map_or_default(|i| i.extractor_version.clone()),
         generation_coherent: identity.is_some(),
         working_tree_check: if args.at_snapshot {
             wire::WorkingTreeCheck::BeforeOnly

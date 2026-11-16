@@ -153,8 +153,7 @@ impl SourceAdapter for Adapter {
         let stem = unit
             .path
             .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+            .map_or_default(|s| s.to_string_lossy().to_string());
 
         let parent = subagent_parent(&self.sessions_dir, &unit.path);
         let mut session = UnifiedSession {
@@ -340,16 +339,13 @@ fn extract_record(
                                     .get("name")
                                     .and_then(Value::as_str)
                                     .unwrap_or("unknown");
-                                let args = part
-                                    .get("arguments")
-                                    .map(|a| {
-                                        if a.is_string() {
-                                            a.as_str().unwrap_or_default().to_string()
-                                        } else {
-                                            a.to_string()
-                                        }
-                                    })
-                                    .unwrap_or_default();
+                                let args = part.get("arguments").map_or_default(|a| {
+                                    if a.is_string() {
+                                        a.as_str().unwrap_or_default().to_string()
+                                    } else {
+                                        a.to_string()
+                                    }
+                                });
                                 let (capped, truncated) = cap_text(&args, TOOL_INPUT_CAP);
                                 push(
                                     Role::Assistant,

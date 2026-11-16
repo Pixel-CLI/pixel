@@ -796,8 +796,7 @@ fn pasted_task(prompt: &str) -> Option<String> {
 /// word (see [`fold_plural_acronyms`]).
 fn brief_keywords(task: &str) -> Vec<String> {
     pixel_rank::tokenize_task(&fold_plural_acronyms(task))
-        .map(|query| query.keywords)
-        .unwrap_or_default()
+        .map_or_default(|query| query.keywords)
         .into_iter()
         .filter(|word| !CHATTER_WORDS.contains(&word.as_str()))
         .collect()
@@ -1091,52 +1090,43 @@ fn bounded_source_cap(text: &str, caps: &mut BTreeSet<String>) -> String {
 }
 
 fn target_projection(target: &Value, caps: &mut BTreeSet<String>) -> Value {
-    let symbols = target["symbols"]
-        .as_array()
-        .map(|items| {
-            cap_items(items, MAX_SYMBOLS_PER_TARGET, "symbols", caps);
-            bounded_items(items, MAX_SYMBOLS_PER_TARGET, |symbol| {
-                json!({
-                    "kind": symbol["kind"].as_str().unwrap_or("?"),
-                    "name": symbol["name"].as_str().unwrap_or("?"),
-                    "uid": symbol["uid"].as_str().unwrap_or("?"),
-                    "line": symbol["line"].as_u64().unwrap_or(0),
-                })
+    let symbols = target["symbols"].as_array().map_or_default(|items| {
+        cap_items(items, MAX_SYMBOLS_PER_TARGET, "symbols", caps);
+        bounded_items(items, MAX_SYMBOLS_PER_TARGET, |symbol| {
+            json!({
+                "kind": symbol["kind"].as_str().unwrap_or("?"),
+                "name": symbol["name"].as_str().unwrap_or("?"),
+                "uid": symbol["uid"].as_str().unwrap_or("?"),
+                "line": symbol["line"].as_u64().unwrap_or(0),
             })
         })
-        .unwrap_or_default();
-    let evidence = target["evidence"]
-        .as_array()
-        .map(|items| {
-            cap_items(items, MAX_EVIDENCE_PER_TARGET, "evidence", caps);
-            bounded_items(items, MAX_EVIDENCE_PER_TARGET, |item| {
-                json!({
-                    "keyword": item["keyword"].as_str().unwrap_or("?"),
-                    "line": item["line"].as_u64().unwrap_or(0),
-                    "text": bounded_text(
-                        item["text"].as_str().unwrap_or(""),
-                        "evidence text",
-                        MAX_TEXT_CHARS,
-                        caps,
-                    ),
-                })
-            })
-        })
-        .unwrap_or_default();
-    let reasons = target["reasons"]
-        .as_array()
-        .map(|items| {
-            cap_items(items, MAX_EVIDENCE_PER_TARGET, "reasons", caps);
-            bounded_items(items, MAX_EVIDENCE_PER_TARGET, |reason| {
-                Value::from(bounded_text(
-                    reason.as_str().unwrap_or(""),
-                    "reason",
+    });
+    let evidence = target["evidence"].as_array().map_or_default(|items| {
+        cap_items(items, MAX_EVIDENCE_PER_TARGET, "evidence", caps);
+        bounded_items(items, MAX_EVIDENCE_PER_TARGET, |item| {
+            json!({
+                "keyword": item["keyword"].as_str().unwrap_or("?"),
+                "line": item["line"].as_u64().unwrap_or(0),
+                "text": bounded_text(
+                    item["text"].as_str().unwrap_or(""),
+                    "evidence text",
                     MAX_TEXT_CHARS,
                     caps,
-                ))
+                ),
             })
         })
-        .unwrap_or_default();
+    });
+    let reasons = target["reasons"].as_array().map_or_default(|items| {
+        cap_items(items, MAX_EVIDENCE_PER_TARGET, "reasons", caps);
+        bounded_items(items, MAX_EVIDENCE_PER_TARGET, |reason| {
+            Value::from(bounded_text(
+                reason.as_str().unwrap_or(""),
+                "reason",
+                MAX_TEXT_CHARS,
+                caps,
+            ))
+        })
+    });
     json!({
         "path": target_path_value(target).unwrap_or("?"),
         "symbols": symbols,

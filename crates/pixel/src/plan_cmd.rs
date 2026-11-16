@@ -208,7 +208,7 @@ fn saved_flows(dir: &std::path::Path) -> Vec<Value> {
 /// reproducible across runs (filesystem order is not a stable ordering).
 /// A missing or unreadable flow dir is "no flows", never a failure.
 fn auth_flow_names() -> Vec<String> {
-    auth_flow_names_in(&flow_dir().map(|dir| saved_flows(&dir)).unwrap_or_default())
+    auth_flow_names_in(&flow_dir().map_or_default(|dir| saved_flows(&dir)))
 }
 
 fn auth_flow_names_in(flows: &[Value]) -> Vec<String> {

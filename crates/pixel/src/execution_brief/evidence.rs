@@ -914,8 +914,7 @@ fn local_symbols(store: &GraphStore, name: &str) -> Result<Vec<SymbolHit>, Strin
         let path = store
             .file_by_id(row.file_id)
             .map_err(|error| error.to_string())?
-            .map(|file| file.path)
-            .unwrap_or_default();
+            .map_or_default(|file| file.path);
         hits.push(SymbolHit {
             uid: row.uid,
             name: row.name,
@@ -1178,8 +1177,7 @@ fn history_hits(data: &Value) -> Result<Vec<HistoryHit>, String> {
                 .get("subject")
                 .or_else(|| row.get("message"))
                 .and_then(Value::as_str)
-                .map(|s| s.lines().next().unwrap_or("").trim().to_string())
-                .unwrap_or_default();
+                .map_or_default(|s| s.lines().next().unwrap_or("").trim().to_string());
             let text = |key: &str| {
                 row.get(key)
                     .and_then(Value::as_str)

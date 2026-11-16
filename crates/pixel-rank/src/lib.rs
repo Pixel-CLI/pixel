@@ -501,8 +501,7 @@ pub fn semantic_expand(word: &str, language: TaskLanguage) -> Vec<&'static str> 
         .iter()
         .chain(french_relations)
         .find(|(term, _)| *term == word)
-        .map(|(_, related)| related.to_vec())
-        .unwrap_or_default()
+        .map_or_default(|(_, related)| related.to_vec())
 }
 
 /// Expand a list of keywords, returning related terms that are not already

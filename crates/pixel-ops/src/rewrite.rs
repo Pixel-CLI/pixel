@@ -246,13 +246,12 @@ fn run_body(
             "--format=%s",
             &format!("{base_oid}..{old_head}"),
         ])
-        .map(|o| {
+        .map_or_default(|o| {
             String::from_utf8_lossy(&o)
                 .lines()
                 .map(ToString::to_string)
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     let message = opts.message.clone().unwrap_or_else(|| {
         let mut m = format!("squash: {commits_squashed} commits\n");
         for s in &subjects {
@@ -267,8 +266,7 @@ fn run_body(
     let remote_branch_ref = format!("refs/remotes/{}/{}", opts.remote, branch);
     let old_remote_oid = runner
         .run_opt(&["rev-parse", "--verify", "--quiet", &remote_branch_ref])
-        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-        .unwrap_or_default();
+        .map_or_default(|o| String::from_utf8_lossy(&o).trim().to_string());
 
     // Dirty worktree: tolerated (reset --soft never touches worktree or
     // index), but warn — pre-staged changes will be absorbed into the
@@ -566,8 +564,7 @@ fn resolve_base(
         {
             let head_oid = runner
                 .run_opt(&["rev-parse", "HEAD"])
-                .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-                .unwrap_or_default();
+                .map_or_default(|o| String::from_utf8_lossy(&o).trim().to_string());
             let self_tracking = upstream == format!("{remote}/{branch}");
             if !(self_tracking && mb == head_oid) {
                 return Ok(mb);

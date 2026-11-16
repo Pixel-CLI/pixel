@@ -38,7 +38,7 @@ adapter; pick the one that says what the fallback is.
 | `.map(f).unwrap_or_else(g)` | `.map_or_else(g, f)` | the default is computed |
 | `.map(pred).unwrap_or(false)` | `.is_some_and(pred)` / `.is_ok_and(pred)` | a boolean test |
 | `.map(pred).unwrap_or(true)` | `.is_none_or(pred)` | a boolean test that passes on absence |
-| `.map(f).unwrap_or_default()` | keep it | the lint does not cover it |
+| `.map(f).unwrap_or_default()` | `.map_or_default(f)` | the default is `Default::default()` (Clippy 1.100+) |
 
 ```rust
 // no

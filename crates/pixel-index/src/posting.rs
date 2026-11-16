@@ -149,8 +149,7 @@ mod tests {
             lists
                 .iter()
                 .find(|(k, _)| *k == h)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_default()
+                .map_or_default(|(_, v)| v.clone())
         };
         let q = GramQuery::And(vec![GramQuery::Literal(1), GramQuery::Literal(2)]);
         assert_eq!(resolve_query(&q, 5, &lookup), vec![1, 2]);

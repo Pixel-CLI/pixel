@@ -1242,24 +1242,23 @@ fn auto_start_with(
     let argv: Vec<String> = launch
         .get("argv")
         .and_then(Value::as_array)
-        .map(|a| {
+        .map_or_default(|a| {
             a.iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     if argv.is_empty() {
         return Ok(false);
     }
-    let env: Vec<(String, String)> = launch
-        .get("env")
-        .and_then(Value::as_object)
-        .map(|o| {
-            o.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
+    let env: Vec<(String, String)> =
+        launch
+            .get("env")
+            .and_then(Value::as_object)
+            .map_or_default(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            });
     spawn(&argv, &env)?;
     Ok(true)
 }

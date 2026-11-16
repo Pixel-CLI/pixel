@@ -470,13 +470,12 @@ fn member_deps(root: &Path, member: &str) -> (String, BTreeSet<String>, BTreeSet
     let internal = |table: &str| -> BTreeSet<String> {
         doc.get(table)
             .and_then(toml_edit::Item::as_table_like)
-            .map(|deps| {
+            .map_or_default(|deps| {
                 deps.iter()
                     .map(|(dep, _)| dep.to_string())
                     .filter(|dep| is_internal(dep) && *dep != name)
                     .collect()
             })
-            .unwrap_or_default()
     };
     (
         name.clone(),
@@ -712,13 +711,12 @@ fn agents_data() -> toml_edit::DocumentMut {
 /// The strings of an array field, empty when the field is absent.
 fn string_list(item: Option<&toml_edit::Item>) -> Vec<String> {
     item.and_then(toml_edit::Item::as_array)
-        .map(|array| {
+        .map_or_default(|array| {
             array
                 .iter()
                 .map(|v| v.as_str().expect("a list of strings").to_string())
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 /// The `field` list of every agent, concatenated in file order.
