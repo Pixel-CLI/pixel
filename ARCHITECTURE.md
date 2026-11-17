@@ -882,6 +882,13 @@ envelope talks to the daemon socket directly.
 
 `setup --agent` selects one or more `AgentTarget` values by stable name (comma-separated or repeated), with `--yes`. The CLI enables each selected target's existing integrations through `InstallSelection`; unselected targets stay untouched. The CI action forwards `hooks-agent` lists to that interface; `all` preserves automatic setup. Its isolated smoke executes installed Claude and Codex commands separately and together, checking task-bridge receipts and brief output.
 
+Every hook command names the binary by a path that survives package-manager
+upgrades (`install::stable_exe_path`): the PATH entry whose canonical form is
+the running binary (Homebrew's `bin/pixel` symlink, not its `Cellar/<ver>`),
+and under mise the tool's `installs/<tool>/latest/…` alias when `latest` is
+that binary, so `mise upgrade` moves the hooks with it and `mise prune`
+cannot strand them; a pinned older version keeps its versioned path.
+
 Setup and removal edit JSON settings by key, retaining untouched values and their
 formatting. Codex hook writes use the shared atomic settings writer; setup reads
 Codex TOML review state without rewriting it. Gemini and Antigravity use this
@@ -1241,7 +1248,10 @@ search. A `none` at 0.5 or more ends the brief of a weak or plain-language
 prompt (gate `denied`, reason `judge: none (0.93)`, no probe runs); any other
 label only steers the plan (`bugfix`, `refactor` and `review` run `impact`).
 Switched off, unreadable, failed, killed or unconfident, the judge has no
-verdict and the brief goes ahead: it never closes one. Code-shaped prompts do
+verdict and the brief goes ahead: it never closes one. Because that failure is
+silent, `pixel doctor` judges the engine the brief would meet (`classify.engine`,
+computed by `classify::readiness` without opening a connection) and turns yellow
+when the switch is on and no engine answers. Code-shaped prompts do
 not ask it.
 
 A prompt with nothing typed but a `<pasted_content>` block has no shape of its

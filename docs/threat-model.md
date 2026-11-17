@@ -372,7 +372,11 @@ Only setup-created empty directories are pruned; backups
 remain and are listed in the report. Recovery copies are created privately
 and retain the original file's permission bits.
 Hook commands embed the
-absolute binary path, quoted by `routing::quoted_executable`. The binary
+absolute binary path, quoted by `routing::quoted_executable`. Under mise that
+path is the tool's `installs/<tool>/latest` alias when it resolves to the
+running binary, so the hooks follow whatever version mise later installs
+there: the trust placed in that directory is the trust already placed in the
+versioned paths beside it, which the same account can write. The binary
 reaches users through `scripts/release/install.sh` (archive checked against the
 release's `.sha256`), Homebrew, mise, or the `setup-pixel` action (exact
 version, sha256 check). Its opt-in cache contains only rebuildable text shards,

@@ -325,6 +325,51 @@ fn impact_should_name_a_uid_that_matches_nothing() {
     );
 }
 
+/// An agent that builds a uid by hand gets the file and name right and the
+/// qualifier or kind wrong; the error names the uids of that file with the
+/// same name (never another file's), so the retry needs no `find-symbol`.
+#[test]
+fn impact_should_offer_the_same_file_uids_of_a_mistyped_uid() {
+    let (_scratch, root) = tmpdir("impact-near-uid");
+    std::fs::write(
+        root.join("store.rs"),
+        "pub struct Store;\nimpl Store {\n    pub fn insert_edge(&self) {}\n}\npub fn helper() {}\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("other.rs"), "pub fn insert_edge() {}\n").unwrap();
+    git(&root, &["init", "-q"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "init"]);
+    let mut service = Service::open(&root).unwrap();
+    let mut impact = |uid: &str| {
+        err(
+            &mut service,
+            Request::Impact {
+                uid_or_name: uid.into(),
+                direction: "downstream".into(),
+                depth: Some(1),
+
+                stale_ok: false,
+            },
+        )
+    };
+    assert_eq!(
+        impact("store.rs#insert_edge#function"),
+        (
+            "NOT_FOUND".to_string(),
+            "no symbol with uid \"store.rs#insert_edge#function\"; did you mean \"store.rs#Store::insert_edge#method\"".to_string()
+        )
+    );
+    assert_eq!(
+        impact("store.rs#helper#method").1,
+        "no symbol with uid \"store.rs#helper#method\"; did you mean \"store.rs#helper#function\""
+    );
+    assert_eq!(
+        impact("store.rs#absent#function").1,
+        "no symbol with uid \"store.rs#absent#function\"; run `pixel find-symbol <name>` to list uids"
+    );
+}
+
 #[test]
 fn uses_should_page_callers_and_report_callees_with_their_outgoing_uncertainty() {
     let (_scratch, root) = fixture("uses");
@@ -519,7 +564,11 @@ fn rename_should_disambiguate_by_file_and_name_what_it_could_not_find() {
             dry_run: true,
         },
     );
-    assert_eq!(message, "no symbol with uid \"rust:x.rs#ghost\"");
+    assert_eq!(
+        message,
+        "no symbol with uid \"rust:x.rs#ghost\"; run `pixel find-symbol <name>` to list uids",
+        "rename's uid miss carries the same recovery as impact's"
+    );
 
     let (code, message) = err(
         &mut service,
