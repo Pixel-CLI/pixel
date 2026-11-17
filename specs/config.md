@@ -2,7 +2,7 @@
 
 Status: normative for `pixel config` and for how the other specs read
 settings. The commented template a fresh file starts from is
-`crates/pixel/src/config.yaml`; the install-time use of the file is ARCHITECTURE.md,
+`crates/pixel-setup/src/config.yaml`; the install-time use of the file is ARCHITECTURE.md,
 "Agent integration".
 
 ## Layers

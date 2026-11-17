@@ -639,3 +639,25 @@ fn a_registration_line_should_name_default_when_the_global_value_is_unreadable()
         "{parts}"
     );
 }
+
+/// The source `pixel config <key>` names is the layer the value came from: a
+/// repository `brief_parts` the reader skips (not a whole number) leaves the
+/// global value in force, and the line must name the global file, not the
+/// repository's (#1428).
+#[test]
+fn a_setting_read_should_name_the_layer_its_value_came_from() {
+    let home = Scratch::for_test("config", "provenance-home");
+    let repo = repo_with_git("provenance-repo");
+    fs::create_dir_all(home.join(".pixel")).unwrap();
+    fs::create_dir_all(repo.join(".pixel")).unwrap();
+    fs::write(home.join(".pixel/config.yaml"), "brief_parts: 5\n").unwrap();
+    fs::write(repo.join(".pixel/config.yaml"), "brief_parts: many\n").unwrap();
+    let text = stdout(&run(&home, &repo, &["config", "brief_parts"]));
+    assert!(
+        text.starts_with(&format!(
+            "brief_parts: 5 — {}\n",
+            home.join(".pixel/config.yaml").display()
+        )),
+        "{text}"
+    );
+}

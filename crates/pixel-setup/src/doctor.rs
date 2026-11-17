@@ -1209,41 +1209,14 @@ fn env_non_empty(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| v.into_string().ok().is_some_and(|s| !s.is_empty()))
 }
 
-/// The global pixel config as a JSON value: `~/.pixel/config.yaml` parsed
-/// with the same YAML engine the CLI uses, or an empty document when the file
-/// does not exist. The two
-/// scalar keys the check reads never need more than the mapping shape, but a
-/// malformed file is an error rather than a silent `none` — doctor must not
-/// hide a config it cannot read.
+/// The global pixel config as a JSON value: `~/.pixel/config.yaml` read by
+/// [`crate::config_file::load`], the reader `pixel config` and the hooks use,
+/// or an empty document when the file does not exist. Doctor keeps the strict
+/// side of that reader: a malformed file, or a directory where the file
+/// belongs, is an error rather than a silent `none` — doctor must not hide a
+/// config it cannot read.
 pub(crate) fn load_pixel_config(home: &Path) -> std::result::Result<Value, String> {
-    let yaml = home.join(".pixel/config.yaml");
-    if yaml.is_file() {
-        let text =
-            std::fs::read_to_string(&yaml).map_err(|e| format!("read {}: {e}", yaml.display()))?;
-        return parse_pixel_config(&text, &yaml);
-    }
-    Ok(serde_json::json!({}))
-}
-
-/// Parse one pixel config file: `null` (an empty file) reads as an empty
-/// document, anything other than a mapping is an error.
-fn parse_pixel_config(text: &str, path: &Path) -> std::result::Result<Value, String> {
-    let value: Value = serde_saphyr::from_str(text).map_err(|_| {
-        format!(
-            "invalid configuration {}; expected a YAML mapping",
-            path.display()
-        )
-    })?;
-    if value.is_null() {
-        return Ok(serde_json::json!({}));
-    }
-    if !value.is_object() {
-        return Err(format!(
-            "configuration {} must be a mapping",
-            path.display()
-        ));
-    }
-    Ok(value)
+    crate::config_file::load(&crate::config_file::path_in(&home.join(".pixel")))
 }
 
 /// Runs the checks the selection keeps and records each outcome.
@@ -2517,6 +2490,17 @@ mod tests {
         assert!(
             load_pixel_config(&home).is_err(),
             "a malformed config is an error, not a silent none"
+        );
+        // A directory where the file belongs is unreadable, not empty: doctor
+        // reads through the shared reader and keeps its strict policy.
+        std::fs::remove_file(home.join(".pixel/config.yaml")).unwrap();
+        std::fs::create_dir(home.join(".pixel/config.yaml")).unwrap();
+        assert_eq!(
+            load_pixel_config(&home).unwrap_err(),
+            format!(
+                "cannot read configuration {}",
+                home.join(".pixel/config.yaml").display()
+            )
         );
 
         let _ = std::fs::remove_dir_all(dir);

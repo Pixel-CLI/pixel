@@ -1186,10 +1186,11 @@ fn effective(root: Option<&Path>, key: &str, setting: Setting) -> (String, Strin
             (on_off(on).to_owned(), source)
         }
         Setting::BriefParts => {
-            let source = layers(root)
-                .find(|path| read_config_doc(path).is_some_and(|doc| doc.get(key).is_some()))
-                .map_or_else(|| "default".to_owned(), |path| path.display().to_string());
-            (brief_parts(root).to_string(), source)
+            // Value and source from one reading: a layer whose value setup
+            // skips (not a whole number) lends its path to nothing.
+            let home = std::env::var_os("HOME").map_or_default(PathBuf::from);
+            let (count, from) = pixel_setup::config::brief_parts_with_source(&home, root);
+            (count.to_string(), shown_source(from))
         }
     }
 }
@@ -1201,25 +1202,27 @@ fn effective(root: Option<&Path>, key: &str, setting: Setting) -> (String, Strin
 /// [`effective`] reports. It is what setup would register, not what is
 /// installed: whether setup has run is `pixel doctor`'s to say. `None` for a
 /// setting setup does not read, or without a HOME.
-fn registration(key: &str, setting: Setting) -> Option<(String, String)> {
+fn registration(setting: Setting) -> Option<(String, String)> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
-    // The source is the global file only when its value is one setup reads:
-    // setup skips a value of the wrong type and falls back to the default.
-    let (value, readable): (String, fn(&Value) -> bool) = match setting {
-        Setting::BriefParts => (
-            pixel_setup::config::brief_parts(&home, None).to_string(),
-            Value::is_u64,
-        ),
-        Setting::OptIn(_) => (
-            on_off(pixel_setup::config::edit_hooks(&home, None)).to_owned(),
-            Value::is_boolean,
-        ),
+    // Setup reads with no repository; value and source come from one reading,
+    // so a value setup skips names the default, not the file holding it.
+    let (value, from) = match setting {
+        Setting::BriefParts => {
+            let (count, from) = pixel_setup::config::brief_parts_with_source(&home, None);
+            (count.to_string(), from)
+        }
+        Setting::OptIn(_) => {
+            let (on, from) = pixel_setup::config::edit_hooks_with_source(&home, None);
+            (on_off(on).to_owned(), from)
+        }
         Setting::Switch(_) => return None,
     };
-    let source = global_config_path()
-        .filter(|path| read_config_doc(path).is_some_and(|doc| doc.get(key).is_some_and(readable)))
-        .map_or_else(|| "default".to_owned(), |path| path.display().to_string());
-    Some((value, source))
+    Some((value, shown_source(from)))
+}
+
+/// A layer's file as `pixel config` names a source, or `default`.
+fn shown_source(from: Option<PathBuf>) -> String {
+    from.map_or_else(|| "default".to_owned(), |path| path.display().to_string())
 }
 
 /// The note `pixel config <key> <value>` prints about the hooks `pixel setup`
@@ -1282,7 +1285,7 @@ pub fn run_setting(
     let Some(raw) = value else {
         let (current, source) = effective(root.as_deref(), key, setting);
         println!("{key}: {current} — {source}");
-        if let Some((registered, from)) = registration(key, setting) {
+        if let Some((registered, from)) = registration(setting) {
             println!("registered by `pixel setup`: {registered} — {from}");
         }
         return Ok(());
@@ -1310,7 +1313,7 @@ pub fn run_setting(
         };
         println!("note: {source} sets {key}: {current} here and wins{scope}");
     }
-    let registered = registration(key, setting);
+    let registered = registration(setting);
     if let Some(note) = registered.as_ref().and_then(|(value, from)| {
         registration_note(
             key,

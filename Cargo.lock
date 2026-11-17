@@ -2384,7 +2384,6 @@ dependencies = [
  "tree-sitter-python",
  "ureq 3.5.1",
  "xxhash-rust",
- "yaml-edit",
 ]
 
 [[package]]
@@ -2621,6 +2620,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml_edit",
+ "yaml-edit",
 ]
 
 [[package]]

@@ -39,7 +39,7 @@ mod classify_history;
 mod classify_history_cmd;
 mod classify_setup;
 mod config_cmd;
-mod config_file;
+use pixel_setup::config_file;
 mod coverage_cmd;
 mod cycles_cmd;
 mod decide_clef;
