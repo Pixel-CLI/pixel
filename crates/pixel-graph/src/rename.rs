@@ -150,8 +150,10 @@ pub fn plan(
             if edge.callee.as_deref().is_some_and(|c| c != sym.name) {
                 continue;
             }
-            // The edge names the enclosing symbol; its file holds the site.
-            let Some(src) = symbol_by_id(store, edge.src_id) else {
+            // The edge names the enclosing symbol; its file holds the site. A
+            // row the store cannot read fails the rename instead of skipping a
+            // site it should have edited.
+            let Some(src) = store.symbol_by_id(edge.src_id).map_err(|e| e.to_string())? else {
                 continue;
             };
             let Some(path) = files.get(&src.file_id) else {
@@ -688,30 +690,6 @@ fn file_paths(store: &GraphStore) -> Result<BTreeMap<i64, String>, String> {
         .collect())
 }
 
-fn symbol_by_id(store: &GraphStore, id: i64) -> Option<SymbolRow> {
-    store
-        .conn()
-        .query_row(
-            "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
-             FROM symbols WHERE id = ?1",
-            rusqlite::params![id],
-            |r| {
-                Ok(SymbolRow {
-                    id: r.get(0)?,
-                    uid: r.get(1)?,
-                    file_id: r.get(2)?,
-                    name: r.get(3)?,
-                    qualified: r.get(4)?,
-                    kind: crate::store::SymbolKind::parse(&r.get::<_, String>(5)?),
-                    start_line: r.get(6)?,
-                    end_line: r.get(7)?,
-                    sig: r.get(8)?,
-                })
-            },
-        )
-        .ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -953,6 +931,35 @@ mod tests {
         assert!(after.contains("authenticate("), "{after}");
         assert!(after.contains("import { authenticate }"), "{after}");
         assert!(after.contains("// loginUser"), "{after}");
+    }
+
+    /// A broken caller must fail planning, not yield a partial rename that
+    /// changes the definition and import while leaving the call behind.
+    #[test]
+    fn plan_should_fail_on_an_unreadable_caller_rather_than_skip_its_site() {
+        let (dir, store) = fixture();
+        let sym = login_sym(&store);
+        let healthy = plan(&store, dir.path(), &sym, "authenticate").unwrap();
+        let call_lines: Vec<_> = healthy.files["src/caller.ts"]
+            .iter()
+            .filter(|edit| edit.kind == SiteKind::Call)
+            .map(|edit| edit.line)
+            .collect();
+        assert_eq!(call_lines, vec![5], "the healthy plan edits the call");
+        assert_eq!(
+            store
+                .conn()
+                .execute(
+                    "UPDATE symbols SET start_line = 'not a line' WHERE name = 'go'",
+                    [],
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            plan(&store, dir.path(), &sym, "authenticate").unwrap_err(),
+            "graph store: Invalid column type Text at index: 6, name: start_line"
+        );
     }
 
     /// `import { loginUser as auth }` then `auth()`: the import's source

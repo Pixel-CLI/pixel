@@ -170,28 +170,22 @@ fn node(
     depth: usize,
     parent: Option<usize>,
 ) -> Result<Option<FlowNode>, String> {
-    let mut statement = store
-        .conn()
-        .prepare(
-            "SELECT s.uid, s.name, s.kind, s.start_line, s.end_line, f.path
-             FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.id = ?1",
-        )
-        .map_err(sql)?;
-    let mut rows = statement
-        .query_map([id], |row| {
-            Ok(FlowNode {
-                depth,
-                parent,
-                uid: row.get(0)?,
-                name: row.get(1)?,
-                kind: row.get(2)?,
-                start: row.get::<_, i64>(3)?.max(0) as u64,
-                end: row.get::<_, i64>(4)?.max(0) as u64,
-                path: row.get(5)?,
-            })
-        })
-        .map_err(sql)?;
-    rows.next().transpose().map_err(sql)
+    let Some(symbol) = store.symbol_by_id(id).map_err(sql)? else {
+        return Ok(None);
+    };
+    let Some(file) = store.file_by_id(symbol.file_id).map_err(sql)? else {
+        return Ok(None);
+    };
+    Ok(Some(FlowNode {
+        depth,
+        parent,
+        uid: symbol.uid,
+        name: symbol.name,
+        kind: symbol.kind.as_str().to_owned(),
+        start: u64::from(symbol.start_line),
+        end: u64::from(symbol.end_line),
+        path: file.path,
+    }))
 }
 
 /// The calls out of `uid`, in the order the source makes them and depth

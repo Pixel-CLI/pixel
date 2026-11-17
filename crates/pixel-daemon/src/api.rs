@@ -25,7 +25,7 @@ use crate::plane::Plane;
 use crate::relevance;
 use pixel_context::estimate_tokens;
 use pixel_facts::FactsStore;
-use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
+use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolRow};
 use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, credential_path, open_regular_bounded};
 use pixel_index::indexset::{
@@ -2800,7 +2800,7 @@ impl Service {
                 source_elided_items += 1;
                 continue;
             }
-            if let Some(other) = symbol_by_id(store, symbol_id) {
+            if let Some(other) = store.symbol_by_id(symbol_id).map_err(|e| e.to_string())? {
                 if validated_context_source(&self.root, store, other.file_id, &files, &mut sources)
                     .is_none()
                 {
@@ -2989,7 +2989,7 @@ impl Service {
         let mut arr = Vec::with_capacity(total_edges.min(EDGE_LIMIT));
         for e in edges.iter().skip(offset).take(EDGE_LIMIT) {
             let other_id = if other_is_src { e.src_id } else { e.dst_id };
-            let other = symbol_by_id(store, other_id);
+            let other = store.symbol_by_id(other_id).map_err(|e| e.to_string())?;
             arr.push(json!({
                 "symbol": other.as_ref().map(|s| symbol_json(s, &files)),
                 "tier": e.tier.as_str(),
@@ -5577,32 +5577,6 @@ fn symbol_json(s: &SymbolRow, files: &HashMap<i64, String>) -> Value {
     })
 }
 
-/// Public-API `GraphStore` has uid/name lookups only; edge rows carry raw
-/// ids, so resolve them through the sanctioned `conn()` escape hatch.
-fn symbol_by_id(store: &GraphStore, id: i64) -> Option<SymbolRow> {
-    store
-        .conn()
-        .query_row(
-            "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
-             FROM symbols WHERE id = ?1",
-            rusqlite::params![id],
-            |r| {
-                Ok(SymbolRow {
-                    id: r.get(0)?,
-                    uid: r.get(1)?,
-                    file_id: r.get(2)?,
-                    name: r.get(3)?,
-                    qualified: r.get(4)?,
-                    kind: SymbolKind::parse(&r.get::<_, String>(5)?),
-                    start_line: r.get(6)?,
-                    end_line: r.get(7)?,
-                    sig: r.get(8)?,
-                })
-            },
-        )
-        .ok()
-}
-
 #[expect(
     dead_code,
     reason = "retained for the full-detail graph response shape while context uses compact edges"
@@ -5617,7 +5591,7 @@ fn edges_by_kind(
     let mut grouped: BTreeMap<&'static str, Vec<Value>> = BTreeMap::new();
     for e in edges {
         let other_id = if other_is_dst { e.dst_id } else { e.src_id };
-        let other = symbol_by_id(store, other_id);
+        let other = store.symbol_by_id(other_id).map_err(|e| e.to_string())?;
         grouped.entry(e.kind.as_str()).or_default().push(json!({
             "symbol": other.as_ref().map(|s| symbol_json(s, files)),
             "tier": e.tier.as_str(),
@@ -5644,7 +5618,7 @@ fn compact_edges(
             break;
         }
         let other_id = if other_is_dst { e.dst_id } else { e.src_id };
-        let other = symbol_by_id(store, other_id);
+        let other = store.symbol_by_id(other_id).map_err(|e| e.to_string())?;
         let entry = if let Some(s) = &other {
             let path = files.get(&s.file_id).cloned().unwrap_or_default();
             if !seen.insert((
@@ -6631,6 +6605,7 @@ fn embedder_step(cached: bool, hinted: bool, opted_in: bool) -> EmbedderStep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pixel_graph::SymbolKind;
     use pixel_graph::Tier;
     use pixel_graph::concept_resolve::{RankedCandidate, Reranker, SignalBundle};
     use pixel_index::verify::MatchLine;
