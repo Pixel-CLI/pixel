@@ -105,7 +105,12 @@ and returns at most `MEANING_MAX_LIMIT` (50) one-line snippets from the
 resident code index (ARCHITECTURE.md, "Daemon and wire contract"). A request
 reads no file, embeds one question and starts no download; the index is built
 on one background thread from the files `search-meaning` would read, under its
-caps (`RESIDENT_MAX_FILES`, 512 KiB per file), and never from a path
+caps (`RESIDENT_MAX_FILES`, 512 KiB per file, and `RESIDENT_MAX_BYTES`
+accounted construction bytes including projected vectors). Files are admitted
+one at a time, exclusions are disclosed in response caps, and vector-cache
+segments are streamed with integrity verification. This bounds accumulated
+index data, not total process RSS (models, allocator/parser scratch and the
+previous publication during refresh are additional). It never reads a path
 `credential_path` names. Repeated edits do not grow it for the daemon's
 lifetime: a rebuild renumbers the token vocabulary from the live chunks once
 the tokens of edited-away text outnumber them (`VOCAB_SLACK`). A same-user client can make the daemon read and

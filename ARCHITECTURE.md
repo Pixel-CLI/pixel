@@ -381,6 +381,21 @@ corpus from its authoritative sources, and repairs pruned directory watches;
 events arriving during the rescan form the next batch. These caps cover the
 pre-writer path buffers; the shared ordered writer-job queue remains a separate
 queue with its existing semantics.
+
+The `meaning` resident index considers at most `RESIDENT_MAX_FILES` files
+and admits them in deterministic path order under `RESIDENT_MAX_BYTES`
+(64 MiB of accounted construction data). Admission counts parsed chunk text,
+projected vectors, metadata and vocabulary before embedding; sources are
+parsed one at a time rather than collecting the whole tree in parallel.
+Unchanged reused chunks count toward the same budget. The first file that
+would exceed it and the remaining sampled files are excluded, and `caps`
+names their count and the budget. A refresh retains the old publication
+while constructing the new one, so this is not a 64 MiB process RSS limit:
+model memory, allocator overhead, one-file parser scratch, cache/embedding
+scratch and overlapping publications are additional. Code-vector cache reads
+stream rows and validate the entire segment hash before publishing the
+requested vectors, rather than loading an arbitrarily large segment.
+
 Normal batches debounce and refresh the index and graph for changed files
 (`Service::refresh_files`) without stopping the replicas: it stages the
 index batch under the index's read lock (`IndexSet::stage_refresh`: the

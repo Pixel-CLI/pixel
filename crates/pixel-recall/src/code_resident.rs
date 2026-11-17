@@ -31,9 +31,7 @@
 
 use rustc_hash::FxHashMap as HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
-
-use rayon::prelude::*;
+use std::sync::Arc;
 
 use crate::code_chunks::named_chunks;
 use crate::code_search::{
@@ -44,11 +42,14 @@ use crate::code_search::{
 use crate::code_vectors::{ChunkKey, Namespace, Store};
 use crate::embed::{EmbedKind, Embedder, embedder_revision};
 
-/// Most eligible files a resident index holds. Measured on this repository,
-/// the index takes 2 022 bytes per chunk at 256 dimensions (29 MB for 14 377
-/// chunks of 851 files), so 5 000 files hold some 170 MB. Above it the index
-/// holds a deterministic sample ([`ResidentStats`]).
+/// Most eligible files a resident index considers. The byte budget also
+/// applies: a file count alone cannot bound large generated sources.
 pub const RESIDENT_MAX_FILES: usize = 5_000;
+
+/// Budget for accounted construction data: parsed text, projected vectors,
+/// chunk metadata and vocabulary. 64 MiB leaves room for the previous index
+/// during refresh and embedding/cache scratch; it is not a process RSS cap.
+pub const RESIDENT_MAX_BYTES: usize = 67_108_864;
 
 /// One ranked hit: the best chunk of a file for the question.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,7 +80,7 @@ pub struct ResidentStats {
     /// More files were eligible than the build's limit: a deterministic
     /// sample of [`ResidentStats::sampled_files`] of them was read.
     pub file_limit_reached: bool,
-    /// Files the build was handed to read: all eligible files, or the sample.
+    /// Files selected before byte admission, including the memory-excluded tail.
     pub sampled_files: usize,
     /// Eligible files left out: unreadable, over [`MAX_FILE_BYTES`], binary
     /// or not UTF-8.
@@ -95,6 +96,12 @@ pub struct ResidentStats {
     pub cached_chunks: usize,
     /// Approximate memory held, in bytes.
     pub bytes: u64,
+    /// Construction data budget, independent of the file-count limit.
+    pub memory_budget_bytes: usize,
+    /// Admitted data charged against the budget, including temporary text.
+    pub build_bytes: usize,
+    /// Remaining sampled files not admitted after the byte budget filled.
+    pub memory_skipped_files: usize,
     /// Failures of the vector store that cost the build its saving, in words.
     pub vector_cache_errors: Vec<String>,
 }
@@ -121,6 +128,9 @@ struct Chunk {
     len: u32,
 }
 
+/// Token hash-table bucket and allocation allowance, beyond its text bytes.
+const TOKEN_OVERHEAD: usize = 40;
+
 /// The tokens of every chunk, numbered. A refresh extends a copy, so the ids
 /// a reused file carries stay valid; the tokens of edited and removed text
 /// stay with them until [`compact`] renumbers the vocabulary from the live
@@ -128,6 +138,7 @@ struct Chunk {
 #[derive(Clone, Default)]
 struct Vocab {
     ids: HashMap<Box<str>, u32>,
+    bytes: usize,
 }
 
 impl Vocab {
@@ -136,6 +147,7 @@ impl Vocab {
             return id;
         }
         let id = u32::try_from(self.ids.len()).expect("fewer than 2^32 distinct tokens");
+        self.bytes += token.len() + TOKEN_OVERHEAD;
         self.ids.insert(token.into_boxed_str(), id);
         id
     }
@@ -203,6 +215,24 @@ impl Resident {
         cache: VectorCache,
         max_files: usize,
     ) -> Result<Self, String> {
+        Self::build_with_budget(
+            root,
+            previous,
+            embedder,
+            cache,
+            max_files,
+            RESIDENT_MAX_BYTES,
+        )
+    }
+
+    fn build_with_budget(
+        root: &Path,
+        previous: Option<&Resident>,
+        embedder: &mut dyn Embedder,
+        cache: VectorCache,
+        max_files: usize,
+        max_bytes: usize,
+    ) -> Result<Self, String> {
         let (files, walk) = collect_files(root, Some(max_files));
         let sampled_files = files.len();
         let (files, credential): (Vec<_>, Vec<_>) = files.into_iter().partition(|file| {
@@ -218,15 +248,10 @@ impl Resident {
             .map(|file| (file.path.as_str(), file))
             .collect();
 
-        // Reading, hashing and parsing dominate a build: one file per task,
-        // each numbering its tokens under one short hold of the vocabulary.
-        let vocab = Mutex::new(previous.map_or_default(|p| p.vocab.clone()));
-        let loaded: Vec<Loaded> = files
-            .par_iter()
-            .map(|file| load_file(root, file, &reusable, &vocab))
-            .collect();
-        let vocab = vocab.into_inner().unwrap_or_else(PoisonError::into_inner);
-
+        // Parse one file at a time: a parallel collect would allocate the
+        // entire sampled tree before the admission decision. Unchanged chunks
+        // stay shared, but still count toward this generation's budget.
+        let mut vocab = previous.map_or_default(|p| p.vocab.clone());
         let mut stats = ResidentStats {
             model_id,
             dims,
@@ -234,11 +259,26 @@ impl Resident {
             file_limit_reached: walk.file_limit_reached,
             sampled_files,
             credential_files: credential.len(),
+            memory_budget_bytes: max_bytes,
             ..ResidentStats::default()
         };
-        let mut kept: Vec<Arc<FileChunks>> = Vec::with_capacity(loaded.len());
+        let mut kept: Vec<Arc<FileChunks>> = Vec::with_capacity(files.len());
         let mut parsed: Vec<ParsedFile> = Vec::new();
-        for file in loaded {
+        let mut payload_bytes = 0usize;
+        for (position, path) in files.iter().enumerate() {
+            let old_tokens = vocab.ids.len();
+            let old_bytes = vocab.bytes;
+            let file = load_file(root, path, &reusable, &mut vocab);
+            let next = payload_bytes.saturating_add(loaded_bytes(&file, dims));
+            if next.saturating_add(vocab.bytes) > max_bytes {
+                // The rejected file must not leave vocabulary behind. Stop at
+                // this deterministic path boundary, without parsing the tail.
+                vocab.ids.retain(|_, id| (*id as usize) < old_tokens);
+                vocab.bytes = old_bytes;
+                stats.memory_skipped_files = files.len() - position;
+                break;
+            }
+            payload_bytes = next;
             match file {
                 Loaded::Skipped => stats.skipped_files += 1,
                 Loaded::Empty => {}
@@ -271,6 +311,7 @@ impl Resident {
         kept.sort_by(|a, b| a.path.cmp(&b.path));
         let (kept, vocab) = compact(kept, vocab);
 
+        stats.build_bytes = payload_bytes.saturating_add(vocab.bytes);
         stats.files = kept.len();
         stats.chunks = kept.iter().map(|file| file.chunks.len()).sum();
         stats.bytes = approximate_bytes(&kept, &vocab);
@@ -406,7 +447,7 @@ fn load_file(
     root: &Path,
     file: &Path,
     reusable: &HashMap<&str, &Arc<FileChunks>>,
-    vocab: &Mutex<Vocab>,
+    vocab: &mut Vocab,
 ) -> Loaded {
     let Ok(bytes) = crate::code_search::read_source(file) else {
         return Loaded::Skipped;
@@ -451,7 +492,6 @@ fn load_file(
     if counted.is_empty() {
         return Loaded::Empty;
     }
-    let mut vocab = vocab.lock().unwrap_or_else(PoisonError::into_inner);
     let chunks = counted
         .into_iter()
         .map(|(chunk, counts)| {
@@ -599,7 +639,7 @@ fn compact(files: Vec<Arc<FileChunks>>, vocab: Vocab) -> (Vec<Arc<FileChunks>>, 
     {
         renumbered[old] = Some(u32::try_from(new).expect("fewer than 2^32 distinct tokens"));
     }
-    let ids = vocab
+    let ids: HashMap<Box<str>, u32> = vocab
         .ids
         .into_iter()
         .filter_map(|(token, old)| renumbered[old as usize].map(|new| (token, new)))
@@ -635,7 +675,8 @@ fn compact(files: Vec<Arc<FileChunks>>, vocab: Vocab) -> (Vec<Arc<FileChunks>>, 
             })
         })
         .collect();
-    (files, Vocab { ids })
+    let bytes = ids.keys().map(|token| token.len() + TOKEN_OVERHEAD).sum();
+    (files, Vocab { ids, bytes })
 }
 
 /// Scale `vector` to unit length; a zero vector is left as it is.
@@ -674,29 +715,54 @@ fn count_of(terms: &[(u32, u32)], id: u32) -> u32 {
         .map_or(0, |index| terms[index].1)
 }
 
-/// The memory `files` and `vocab` hold, counting the payload of each chunk
-/// and a flat overhead per allocation.
-fn approximate_bytes(files: &[Arc<FileChunks>], vocab: &Vocab) -> u64 {
-    const PER_CHUNK_OVERHEAD: usize = 96;
-    const PER_TOKEN_OVERHEAD: usize = 40;
-    let chunks: usize = files
+/// Account the resident payload and per-chunk allocation allowance. Parsed
+/// files are charged for their eventual vectors before the embedder runs.
+fn chunk_bytes(dims: usize, terms: usize, snippet: usize, symbol: usize) -> usize {
+    dims.saturating_mul(4)
+        .saturating_add(terms.saturating_mul(8))
+        .saturating_add(snippet)
+        .saturating_add(symbol)
+        .saturating_add(192) // chunk/Arc/Vec headers and allocation allowance
+}
+
+fn file_bytes(file: &FileChunks) -> usize {
+    file.chunks
         .iter()
-        .flat_map(|file| &file.chunks)
-        .map(|chunk| {
-            chunk.vector.len() * 4
-                + chunk.terms.len() * 8
-                + chunk.snippet.len()
-                + chunk.symbol.as_ref().map_or(0, String::len)
-                + PER_CHUNK_OVERHEAD
+        .fold(file.path.len() + 64, |bytes, chunk| {
+            bytes.saturating_add(chunk_bytes(
+                chunk.vector.len(),
+                chunk.terms.len(),
+                chunk.snippet.len(),
+                chunk.symbol.as_ref().map_or(0, String::len),
+            ))
         })
-        .sum();
-    let paths: usize = files.iter().map(|file| file.path.len() + 32).sum();
-    let tokens: usize = vocab
-        .ids
-        .keys()
-        .map(|key| key.len() + PER_TOKEN_OVERHEAD)
-        .sum();
-    (chunks + paths + tokens) as u64
+}
+
+fn loaded_bytes(file: &Loaded, dims: usize) -> usize {
+    match file {
+        Loaded::Skipped | Loaded::Empty => 0,
+        Loaded::Reused(file) => file_bytes(file),
+        Loaded::Parsed(file) => file
+            .chunks
+            .iter()
+            .fold(file.path.len() + 64, |bytes, chunk| {
+                bytes
+                    .saturating_add(chunk.text.len())
+                    .saturating_add(chunk_bytes(
+                        dims,
+                        chunk.terms.len(),
+                        chunk.snippet.len(),
+                        chunk.symbol.as_ref().map_or(0, String::len),
+                    ))
+            }),
+    }
+}
+
+/// Approximate resident data, excluding model, allocator and parser scratch.
+fn approximate_bytes(files: &[Arc<FileChunks>], vocab: &Vocab) -> u64 {
+    files.iter().fold(vocab.bytes, |bytes, file| {
+        bytes.saturating_add(file_bytes(file))
+    }) as u64
 }
 
 #[cfg(test)]
@@ -1066,6 +1132,156 @@ mod tests {
         assert_eq!(resident.stats().files, 1);
         assert_eq!(resident.stats().skipped_files, 1);
         assert_eq!(paths(&search(&resident, "x", 10)), ["at_cap.md"]);
+    }
+
+    /// A model with an expensive vector must be budgeted before invoking it,
+    /// not after its allocations. This goes through the production default.
+    #[test]
+    fn default_budget_should_reject_projected_vectors_before_embedding() {
+        struct Wide;
+        impl Embedder for Wide {
+            fn model_id(&self) -> &str {
+                "wide"
+            }
+            fn dims(&self) -> usize {
+                RESIDENT_MAX_BYTES / 4
+            }
+            fn embed_batch(&mut self, _: &[&str], _: EmbedKind) -> Result<Vec<Vec<f32>>, String> {
+                panic!("over-budget corpus reached the embedder")
+            }
+        }
+        let dir = tree(&[("a.md", "invoice".into())]);
+        let resident =
+            Resident::build(dir.path(), None, &mut Wide, VectorCache::Disabled, 100).unwrap();
+        assert_eq!(resident.stats().memory_budget_bytes, RESIDENT_MAX_BYTES);
+        assert_eq!(resident.stats().memory_skipped_files, 1);
+        assert_eq!(resident.stats().files, 0);
+        assert_eq!(resident.stats().bytes, 0);
+        assert_eq!(resident.stats().build_bytes, 0);
+        assert_eq!(resident.stats().embedded_chunks, 0);
+    }
+
+    #[test]
+    fn budget_should_accept_exact_cost_and_reject_one_byte_less_without_poisoning_vocabulary() {
+        let dir = tree(&[("a.md", "invoice payment".into())]);
+        let (full, _) = build(dir.path(), None, "fixture-a", VectorCache::Disabled);
+        let cost = full.stats().build_bytes;
+        for (budget, expected) in [(cost, 1), (cost - 1, 0), (0, 0)] {
+            let (mut embedder, passages) = WordEmbedder::new("fixture-a");
+            let limited = Resident::build_with_budget(
+                dir.path(),
+                None,
+                &mut embedder,
+                VectorCache::Disabled,
+                100,
+                budget,
+            )
+            .unwrap();
+            assert_eq!(limited.stats().files, expected);
+            assert_eq!(limited.stats().memory_skipped_files, 1 - expected);
+            assert_eq!(passages.load(Ordering::SeqCst), expected);
+            assert!(limited.stats().build_bytes <= budget);
+            assert!(limited.stats().bytes <= budget as u64);
+            assert_eq!(
+                limited.vocab.ids.len(),
+                if expected == 1 {
+                    full.vocab.ids.len()
+                } else {
+                    0
+                }
+            );
+            if expected == 1 {
+                assert_eq!(
+                    search(&limited, "invoice", 10),
+                    search(&full, "invoice", 10)
+                );
+            }
+        }
+    }
+
+    /// Count reused vectors too, and apply the same cap when an edit grows.
+    /// Repeated rejections must not retain the rejected file's new tokens.
+    #[test]
+    fn budget_should_bound_initial_and_repeated_refreshes_and_disclose_the_tail() {
+        let dir = tree(&[("a.md", "invoice payment".into())]);
+        let (one, _) = build(dir.path(), None, "fixture-a", VectorCache::Disabled);
+        let budget = one.stats().build_bytes;
+        write(dir.path(), "b.md", "invoice payment");
+        let (both, _) = build(dir.path(), None, "fixture-a", VectorCache::Disabled);
+        let (mut reused_embedder, _) = WordEmbedder::new("fixture-a");
+        let reused = Resident::build_with_budget(
+            dir.path(),
+            Some(&both),
+            &mut reused_embedder,
+            VectorCache::Disabled,
+            100,
+            budget + both.vocab.bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            reused.stats().files,
+            1,
+            "reused vectors still spend the budget"
+        );
+        assert_eq!(reused.stats().reused_files, 1);
+        assert_eq!(reused.stats().memory_skipped_files, 1);
+        assert_eq!(paths(&search(&reused, "invoice", 10)), ["a.md"]);
+        write(dir.path(), "b.md", "weather forecast");
+        let (mut embedder, _) = WordEmbedder::new("fixture-a");
+        let mut previous = Resident::build_with_budget(
+            dir.path(),
+            None,
+            &mut embedder,
+            VectorCache::Disabled,
+            100,
+            budget,
+        )
+        .unwrap();
+        assert_eq!(previous.stats().memory_skipped_files, 1);
+        assert_eq!(paths(&search(&previous, "invoice", 10)), ["a.md"]);
+        for generation in 0..4 {
+            write(
+                dir.path(),
+                "b.md",
+                &format!("newtoken{generation} ").repeat(100),
+            );
+            let next = Resident::build_with_budget(
+                dir.path(),
+                Some(&previous),
+                &mut embedder,
+                VectorCache::Disabled,
+                100,
+                budget,
+            )
+            .unwrap();
+            assert_eq!(next.stats().files, 1);
+            assert_eq!(next.stats().reused_files, 1);
+            assert_eq!(next.stats().embedded_chunks, 0);
+            assert_eq!(next.stats().memory_skipped_files, 1);
+            assert!(next.stats().build_bytes <= budget);
+            assert_eq!(next.vocab.ids, one.vocab.ids);
+            previous = next;
+        }
+        write(
+            dir.path(),
+            "a.md",
+            &"oversized changed vocabulary ".repeat(100),
+        );
+        let next = Resident::build_with_budget(
+            dir.path(),
+            Some(&previous),
+            &mut embedder,
+            VectorCache::Disabled,
+            100,
+            budget,
+        )
+        .unwrap();
+        assert_eq!(next.stats().files, 0);
+        assert_eq!(next.stats().memory_skipped_files, 2);
+        assert_eq!(next.stats().bytes, 0);
+        assert_eq!(next.stats().build_bytes, 0);
+        // The old publication stays queryable while the new one is built.
+        assert_eq!(paths(&search(&previous, "invoice", 10)), ["a.md"]);
     }
 
     /// Unreadable text is counted, not silently absent; a blank file is
