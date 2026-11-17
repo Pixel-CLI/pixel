@@ -25,6 +25,7 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::code_vectors::{ChunkKey, Namespace, Store};
@@ -54,6 +55,16 @@ pub struct AskHit {
 
 /// Largest file `ask` and the resident index read, in bytes (512 KiB).
 pub const MAX_FILE_BYTES: usize = 524_288;
+
+/// Read at most the source limit plus one rejection byte, even if a file
+/// grows after opening. Callers reject that sentinel length before parsing.
+pub(crate) fn read_source(file: &Path) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(file)?;
+    let mut bytes = Vec::new();
+    file.take((MAX_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
 
 /// Most files a question without a `--max-files` budget embeds: a guard
 /// against a runaway universe, not a budget. A question searches every
@@ -913,7 +924,7 @@ enum FileRead {
 /// lexical document of a chunk are the same bytes, so the snippet shown for
 /// a file is a chunk the lexical channel scored too.
 fn read_file(root: &Path, file: &Path, terms: &[String]) -> FileRead {
-    let Ok(bytes) = std::fs::read(file) else {
+    let Ok(bytes) = read_source(file) else {
         return FileRead::Skipped;
     };
     if bytes.len() > MAX_FILE_BYTES || bytes.contains(&0) {
@@ -2771,6 +2782,25 @@ mod tests {
         assert_eq!(found(&hits, "src/between.rs").lexical_matches, 1);
         assert_eq!(found(&hits, "dist_js/app.js").lexical_matches, 1);
         assert_eq!(found(&hits, "src/other.rs").lexical_matches, 0);
+    }
+
+    /// Oversized generated files must be rejected without allocating their
+    /// full length. Also pins the sentinel needed to distinguish the boundary.
+    #[test]
+    fn source_read_stops_after_the_rejection_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.json");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(67_108_864).unwrap(); // 64 MiB, sparse
+        let bytes = read_source(&path).unwrap();
+        assert_eq!(bytes.len(), MAX_FILE_BYTES + 1);
+        assert!(bytes.capacity() <= 2 * (MAX_FILE_BYTES + 1));
+        assert!(bytes.iter().all(|&byte| byte == 0));
+        assert!(matches!(
+            read_file(dir.path(), &path, &[]),
+            FileRead::Skipped
+        ));
+        assert!(read_source(&dir.path().join("missing.rs")).is_err());
     }
 
     /// A file of exactly [`MAX_FILE_BYTES`] is searched, one byte more is
