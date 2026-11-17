@@ -225,6 +225,22 @@ pub(crate) fn check_task_hooks(
     ))
 }
 
+/// The key of Codex's `config.toml` where releases before 0.9 kept their
+/// retrieval prompt, inside a managed block.
+const DEVELOPER_INSTRUCTIONS_KEY: &str = "developer_instructions";
+
+/// Bytes of the managed block an earlier release left in
+/// `developer_instructions`, which `pixel setup` no longer writes or removes
+/// (#965) and Codex still reads in every session. `None` without one, and
+/// for a `config.toml` that is missing or does not parse.
+pub(crate) fn retired_instructions_block(codex_home: &Path) -> Option<usize> {
+    read_document(&codex_home.join(CODEX_CONFIG_FILE))
+        .ok()?
+        .get(DEVELOPER_INSTRUCTIONS_KEY)
+        .and_then(Item::as_str)
+        .and_then(crate::leftovers::managed_block_len)
+}
+
 /// The table under `[hooks]` where Codex records each hook's review.
 const HOOK_STATE_TABLE: &str = "state";
 
