@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-17
+
+Pixel 0.12.0 limits memory growth in semantic code indexing and fixes setup and configuration reporting. Building from source now requires Rust 1.100 or newer; prebuilt binaries are unaffected.
+
+### Highlights
+
+- Semantic source reads stop at 512 KiB plus one rejection byte. The resident index budgets construction data at 64 MiB, reports excluded coverage, and streams vector caches. The budget is not a total process RAM limit.
+- Hooks installed through mise follow its `latest` alias, so upgrades and pruning do not leave hooks pointing to an old version.
+- Configuration commands explain which file or environment setting wins and which values `pixel setup` actually registers.
+
+### Changed
+- **build:** every crate now declares `rust-version = "1.100"`, so cargo refuses an older toolchain with a clear message instead of failing mid-compile. ([#1424](https://github.com/Pixel-CLI/pixel/pull/1424))
+- **build:** the minimum supported Rust version is now 1.100 (was 1.99); building from source with `cargo install` or `cargo build` needs Rust 1.100 or newer. Released binaries are unaffected. ([#1422](https://github.com/Pixel-CLI/pixel/pull/1422))
+
+### Fixed
+- **config:** `pixel config metrics` now names `PIXEL_METRICS=0` as the source when the environment silences the live metrics, instead of reporting a file setting that the variable overrides. ([#1432](https://github.com/Pixel-CLI/pixel/pull/1432))
+- **config:** `pixel config brief_parts` now names the file its value came from: a repository value that is not a whole number no longer lends its path to the global count; `pixel doctor` reads `config.yaml` through the same reader as `pixel config` and reports a directory in its place. ([#1430](https://github.com/Pixel-CLI/pixel/pull/1430))
+- **config:** `pixel config edit_hooks` and `brief_parts` now say which layer `pixel setup` registers from: a repository write no longer sends you to a `pixel setup` that ignores it, a repository `edit_hooks on` under a global `off` says setup will not register the hooks, and a read adds the value setup would register. ([#1429](https://github.com/Pixel-CLI/pixel/pull/1429))
+- **graph:** `pixel uses`, `context` and `rename` now fail when the graph cannot read a symbol row, instead of answering with a call from an unnamed symbol (`"symbol": null`) or silently skipping a rename site. ([#1436](https://github.com/Pixel-CLI/pixel/pull/1436))
+- **daemon:** Budget resident semantic construction data at 64 MiB, admit files before embedding, and disclose excluded coverage. Apply the budget on refresh and stream vector-cache segments to avoid whole-segment allocations. ([#1441](https://github.com/Pixel-CLI/pixel/pull/1441))
+- **setup:** under mise, hooks now name the tool's `latest` alias instead of a versioned path, so `mise upgrade` moves them and `mise prune` no longer silences them; `pixel doctor` adds `classify.engine`, yellow when classify is on but no engine answers; a mistyped `impact`/`rename` uid names the same-file uids with that name. ([#1426](https://github.com/Pixel-CLI/pixel/pull/1426))
+- **recall:** Bound source reads to 512 KiB plus a rejection byte before skipping oversized files in semantic search and the resident index, avoiding whole-file allocations for large generated files. ([#1439](https://github.com/Pixel-CLI/pixel/pull/1439))
+
 ## [0.11.0] - 2026-11-09
 
 Pixel 0.11.0 improves graph risk reporting and recovery after interrupted repository operations. JSON consumers must handle the new `UNKNOWN` risk value from `what-changed` when a diff cannot be assessed.
