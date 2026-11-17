@@ -52,7 +52,7 @@ central store. Writing is best effort: a failure never reaches the host.
 ## Estimates
 
 Bytes divided by 4 approximate tokens and include reporting overhead.
-`workflow-v2` (`ESTIMATOR_VERSION`) and `sequential-v1`
+`workflow-v3` (`ESTIMATOR_VERSION`) and `sequential-v1`
 (`TIME_ESTIMATOR_VERSION`: `max(steps - 1, 0) × round_trip_ms - measured
 duration`, 2,000 ms per round trip and `native_command_ms = 0` by default,
 `PIXEL_METRICS_ROUND_TRIP_MS` overrides with an unsigned integer) are
@@ -62,6 +62,17 @@ renders `unavailable: <reason>` and records `comparison_gap` (for example
 `operation_failed`); a baseline that saves nothing renders `no estimated …
 saving`; zero and negative savings are kept. Measured numbers (duration, bytes,
 counts) and estimates are always labelled apart.
+
+Two baselines are measured instead of assumed. `list-signatures` stands in for
+reading one file: its baseline is that file's size (`evidence.known_file_bytes`)
+and its row reads `full read N tok, pixel answer M tok (-X%)`. `search-content`
+prints the lines a native search prints: its baseline is its own answer
+(`evidence.native_output_bytes`, equal to `answer_bytes`), with one native
+command, no assumed file read and no saved round trip, and its row reads `a
+native search returns the same output, N tok (no saving)`. A search answered by
+its `--fallback-query` keeps the policy estimate. Every other command uses the
+policy: 4 KiB per distinct returned file and 1 KiB per native command or
+returned relationship.
 
 ## Live lines
 

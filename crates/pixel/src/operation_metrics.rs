@@ -80,6 +80,8 @@ struct Evidence {
     relationships: HashSet<String>,
     partial: bool,
     gap: Option<ComparisonGap>,
+    /// The answer came from somewhere a native search would not have looked.
+    answer_is_not_native_output: bool,
 }
 static EVIDENCE: Mutex<Option<Evidence>> = Mutex::new(None);
 
@@ -164,6 +166,16 @@ fn collect(value: &Value, evidence: &mut Evidence, depth: usize) {
     }
 }
 
+/// Record that this invocation's answer is not what its native command
+/// prints: an exact search that fell back to the task-aware resolver.
+pub fn answered_beyond_native() {
+    if let Ok(mut slot) = EVIDENCE.lock()
+        && let Some(e) = slot.as_mut()
+    {
+        e.answer_is_not_native_output = true;
+    }
+}
+
 pub fn observe(value: &Value) {
     if let Ok(mut slot) = EVIDENCE.lock()
         && let Some(e) = slot.as_mut()
@@ -200,7 +212,7 @@ pub fn evidence(command: &str, succeeded: bool) -> Result<WorkflowEvidence, Comp
     if let Some(gap) = e.gap {
         return Err(gap);
     }
-    Ok(workflow_evidence(command, commands, e))
+    Ok(workflow_evidence(command, commands, e, stdout_bytes()))
 }
 
 /// Commands whose native equivalent is reading one whole file, no command.
@@ -222,14 +234,38 @@ fn whole_file_bytes(command: &str, files: &HashSet<PathBuf>) -> Option<u64> {
         .map(|meta| meta.len())
 }
 
+/// Commands whose answer is what one native command prints: `search-content`
+/// returns the matching lines a grep returns, so no file read is saved.
+const SAME_OUTPUT_AS_NATIVE: &[&str] = &["search-content"];
+
 /// The baseline of one successful invocation from what its answer returned.
-fn workflow_evidence(command: &str, commands: u64, e: &Evidence) -> WorkflowEvidence {
+///
+/// `answer_bytes` is what the invocation printed on stdout: the whole
+/// baseline of a command whose native equivalent prints the same thing,
+/// unless the answer came from a fallback a native command does not have.
+fn workflow_evidence(
+    command: &str,
+    commands: u64,
+    e: &Evidence,
+    answer_bytes: u64,
+) -> WorkflowEvidence {
     if let Some(bytes) = whole_file_bytes(command, &e.files) {
         return WorkflowEvidence {
             distinct_files: 1,
             relationships: 0,
             native_commands: 0,
             known_file_bytes: Some(bytes),
+            native_output_bytes: None,
+            partial: e.partial,
+        };
+    }
+    if SAME_OUTPUT_AS_NATIVE.contains(&command) && !e.answer_is_not_native_output {
+        return WorkflowEvidence {
+            distinct_files: 0,
+            relationships: 0,
+            native_commands: commands,
+            known_file_bytes: None,
+            native_output_bytes: Some(answer_bytes),
             partial: e.partial,
         };
     }
@@ -264,6 +300,7 @@ fn workflow_evidence(command: &str, commands: u64, e: &Evidence) -> WorkflowEvid
         },
         native_commands: commands,
         known_file_bytes: None,
+        native_output_bytes: None,
         partial: e.partial,
     }
 }
@@ -412,28 +449,79 @@ mod tests {
             relationships: HashSet::from(["callers:x".to_owned()]),
             partial: true,
             gap: None,
+            answer_is_not_native_output: false,
         };
         assert_eq!(
-            workflow_evidence("list-signatures", 1, &e),
+            workflow_evidence("list-signatures", 1, &e, 7),
             WorkflowEvidence {
                 distinct_files: 1,
                 relationships: 0,
                 native_commands: 0,
                 known_file_bytes: Some(41),
+                native_output_bytes: None,
                 partial: true,
             }
         );
         assert_eq!(
-            workflow_evidence("find-code", 1, &e),
+            workflow_evidence("find-code", 1, &e, 7),
             WorkflowEvidence {
                 distinct_files: 1,
                 relationships: 1,
                 native_commands: 1,
                 known_file_bytes: None,
+                native_output_bytes: None,
                 partial: true,
             }
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A search prints the lines a native grep prints, so its baseline is
+    /// its own answer: no matched file counts as a read saved, no
+    /// relationship adds a kilobyte, and the estimate equals the answer.
+    #[test]
+    fn a_search_is_measured_against_its_own_answer() {
+        let e = Evidence {
+            files: HashSet::from([PathBuf::from("a.rs"), PathBuf::from("b.rs")]),
+            relationships: HashSet::from(["callers:x".to_owned()]),
+            partial: true,
+            ..Evidence::default()
+        };
+        let evidence = workflow_evidence("search-content", 1, &e, 173);
+        assert_eq!(
+            evidence,
+            WorkflowEvidence {
+                distinct_files: 0,
+                relationships: 0,
+                native_commands: 1,
+                known_file_bytes: None,
+                native_output_bytes: Some(173),
+                partial: true,
+            }
+        );
+        assert_eq!(evidence.estimated_bytes(), 173);
+    }
+
+    /// An exact search answered by the task-aware fallback did not print what
+    /// a grep prints: it keeps the policy estimate over the files returned.
+    #[test]
+    fn a_search_answered_by_its_fallback_keeps_the_policy_estimate() {
+        let e = Evidence {
+            files: HashSet::from([PathBuf::from("a.rs"), PathBuf::from("b.rs")]),
+            answer_is_not_native_output: true,
+            ..Evidence::default()
+        };
+        assert_eq!(
+            workflow_evidence("search-content", 1, &e, 173),
+            WorkflowEvidence {
+                distinct_files: 2,
+                relationships: 0,
+                native_commands: 1,
+                known_file_bytes: None,
+                native_output_bytes: None,
+                partial: false,
+            }
+        );
     }
 
     fn nested_value(depth: usize) -> serde_json::Value {
@@ -461,9 +549,22 @@ mod tests {
         begin(Path::new("/fixture"));
         observe(&json!({"matches": [{"path": "src/a.rs"}], "truncated": false}));
         let ok = evidence("search-content", true).unwrap();
-        assert_eq!(ok.distinct_files, 1);
+        // The size is whatever this test binary printed so far; its value is
+        // pinned by `a_search_is_measured_against_its_own_answer`.
+        assert!(ok.native_output_bytes.is_some());
+        assert_eq!(ok.distinct_files, 0);
         assert_eq!(ok.native_commands, 1);
         assert!(!ok.partial);
+        // The fallback mark lasts for the invocation and `begin` clears it.
+        answered_beyond_native();
+        let fallback = evidence("search-content", true).unwrap();
+        assert_eq!(fallback.native_output_bytes, None);
+        assert_eq!(fallback.distinct_files, 1);
+        begin(Path::new("/fixture"));
+        let cleared = evidence("search-content", true).unwrap();
+        assert!(cleared.native_output_bytes.is_some());
+        assert_eq!(cleared.distinct_files, 0);
+        observe(&json!({"matches": [{"path": "src/a.rs"}], "truncated": false}));
         assert_eq!(evidence("status", true), Err(ComparisonGap::NoPolicy));
         assert_eq!(
             evidence("search-content", false),

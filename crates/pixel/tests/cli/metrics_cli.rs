@@ -186,10 +186,18 @@ fn dual_savings_use_recorded_round_trip_policy_without_changing_search_output() 
         assert_eq!(output.stdout, baseline.stdout);
         let lines = metric_lines(&output);
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("estimated LLM context saved:"));
-        if expected_ms > 0 {
-            assert!(lines[0].contains("against ~"));
-        }
+        // A search has one native step whatever the policy: the rows claim
+        // neither a saved round trip nor saved context.
+        assert!(
+            lines[0].contains("├─ ⏱ no estimated time saving (baseline has no saved round trip)"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("├─ § a native search returns the same output,"),
+            "{}",
+            lines[0]
+        );
         let event = fixture.events("search-content").pop().unwrap();
         let metrics = &event["metrics"];
         let time = &metrics["time_estimate"];
@@ -261,7 +269,7 @@ fn concurrent_time_policies_stay_with_their_own_invocations() {
             .find(|event| event["metrics"]["time_estimate"]["round_trip_ms"] == policy)
             .unwrap();
         assert!(ids.insert(event["invocation_id"].as_str().unwrap()));
-        assert_eq!(event["metrics"]["time_estimate"]["sequential_steps"], 3);
+        assert_eq!(event["metrics"]["time_estimate"]["sequential_steps"], 1);
         assert!(
             events
                 .iter()
@@ -340,11 +348,11 @@ fn search_json_is_identical_with_reporting_on_off_and_env_off() {
     assert_eq!(event["outcome"], "ok");
     assert_eq!(event["metrics"]["output_bytes"], on.stdout.len());
     assert_eq!(event["metrics"]["reporting_bytes"], 0);
-    assert!(
-        event["metrics"]["evidence"]["distinct_files"]
-            .as_u64()
-            .unwrap()
-            >= 2
+    // The matches are the answer: no matched file counts as a read saved.
+    assert_eq!(event["metrics"]["evidence"]["distinct_files"], 0);
+    assert_eq!(
+        event["metrics"]["evidence"]["native_output_bytes"],
+        on.stdout.len()
     );
 
     let mut disabled_bytes = Vec::new();
@@ -487,7 +495,15 @@ fn an_empty_exact_search_should_run_one_task_aware_find_code_fallback() {
     );
     assert!(!stderr.contains("0 matches under"), "{stderr}");
     assert_eq!(metric_lines(&output).len(), 1, "{stderr}");
-    assert_eq!(fixture.events("search-content").len(), 1);
+    let events = fixture.events("search-content");
+    assert_eq!(events.len(), 1);
+    // The resolver's answer is not what a grep prints: the record keeps the
+    // policy estimate and measures no native output.
+    assert!(events[0]["metrics"]["evidence"]["native_output_bytes"].is_null());
+    assert!(
+        !stderr.contains("a native search returns the same output"),
+        "{stderr}"
+    );
 }
 
 /// When the task-aware fallback also finds nothing, the empty-answer note
@@ -653,7 +669,7 @@ fn capped_search_marks_only_returned_evidence_partial() {
     let events = fixture.events("search-content");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["metrics"]["evidence"]["partial"], true);
-    assert_eq!(events[0]["metrics"]["evidence"]["distinct_files"], 1);
+    assert_eq!(events[0]["metrics"]["evidence"]["distinct_files"], 0);
     assert_eq!(
         events[0]["metrics"]["output_bytes"],
         output.stdout.len() + output.stderr.len() - lines[0].len() - 2
@@ -909,13 +925,13 @@ fn legacy_savings_and_error_details_survive_with_workflow_summary() {
     let summary = workflow_metrics(&fixture);
     assert_eq!(summary["legacy_records"], 1);
     assert!(
-        summary["versions"]["workflow-v2"]["complete"]["operations"]
+        summary["versions"]["workflow-v3"]["complete"]["operations"]
             .as_u64()
             .unwrap()
             >= 1
     );
     assert!(
-        summary["versions"]["workflow-v2"]["unavailable"]["operations"]
+        summary["versions"]["workflow-v3"]["unavailable"]["operations"]
             .as_u64()
             .unwrap()
             >= 1
@@ -1254,6 +1270,39 @@ fn live_blocks_state_every_absent_comparison_in_human_mode() {
     assert!(event["metrics"]["native_workflow_bytes"].is_null());
 }
 
+/// A search prints the lines a grep prints, so its record compares the answer
+/// with itself: the baseline is the stdout byte count, no matched file is
+/// assumed read, and the row claims no saving. Under `workflow-v2` this
+/// fixture's 2-file answer read as a saving against two assumed 4 KiB reads.
+#[test]
+fn a_search_is_measured_against_its_own_stdout_and_claims_no_saving() {
+    let fixture = Fixture::new();
+    let output = fixture.run(&["search-content", "login_user", ".", "--no-daemon"]);
+    assert_success(&output);
+    let answer_bytes = output.stdout.len() as u64;
+    assert!(answer_bytes > 0, "{output:?}");
+    let block = &metric_lines(&output)[0];
+    assert!(
+        block.contains(&format!(
+            "  ├─ § a native search returns the same output, {} tok (no saving)\n",
+            answer_bytes / 4
+        )),
+        "{block}"
+    );
+    assert!(!block.contains("context saved"), "{block}");
+    assert!(!block.contains('%'), "{block}");
+    let event = fixture.events("search-content").pop().unwrap();
+    let metrics = &event["metrics"];
+    assert_eq!(metrics["estimator_version"], "workflow-v3");
+    assert_eq!(metrics["answer_bytes"], answer_bytes);
+    assert_eq!(metrics["native_workflow_bytes"], answer_bytes);
+    assert_eq!(metrics["evidence"]["native_output_bytes"], answer_bytes);
+    assert_eq!(metrics["evidence"]["native_commands"], 1);
+    assert_eq!(metrics["evidence"]["distinct_files"], 0);
+    assert_eq!(metrics["evidence"]["relationships"], 0);
+    assert!(metrics["evidence"]["known_file_bytes"].is_null());
+}
+
 /// The first result a new user sees: `pixel list-signatures` on a large file
 /// states the whole-file read and its own answer, both as UTF-8 bytes / 4
 /// floored (the rule of `scripts/bench/bench-read-savings.sh`), so `wc -c` on the
@@ -1297,7 +1346,7 @@ fn list_signatures_compares_the_measured_file_with_its_stdout_answer() {
     );
     let event = fixture.events("list-signatures").pop().unwrap();
     let metrics = &event["metrics"];
-    assert_eq!(metrics["estimator_version"], "workflow-v2");
+    assert_eq!(metrics["estimator_version"], "workflow-v3");
     assert_eq!(metrics["evidence"]["known_file_bytes"], file_bytes);
     assert_eq!(metrics["evidence"]["native_commands"], 0);
     assert_eq!(metrics["evidence"]["relationships"], 0);
