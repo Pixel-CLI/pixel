@@ -112,6 +112,64 @@ pub fn edit_hooks_with_source(home: &Path, repo: Option<&Path>) -> (bool, Option
         .map_or((false, None), |(on, path)| (on, Some(path)))
 }
 
+/// Environment variable naming a SearXNG base URL (`https://host`, no path).
+pub const WEB_SEARCH_SEARXNG_ENV: &str = "PIXEL_WEB_SEARCH_URL";
+/// Environment variable naming the Perplexity API key.
+pub const WEB_SEARCH_PERPLEXITY_ENV: &str = "PERPLEXITY_API_KEY";
+
+/// Which web-search variables the environment sets, as [`env_is_set`] reads
+/// them. A parameter of [`web_search_provider`] and of doctor's check, so a
+/// test passes its own instead of inheriting the developer's (#1322).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WebSearchEnv {
+    /// [`WEB_SEARCH_SEARXNG_ENV`] is set.
+    pub searxng_url: bool,
+    /// [`WEB_SEARCH_PERPLEXITY_ENV`] is set.
+    pub perplexity_key: bool,
+}
+
+impl WebSearchEnv {
+    /// The two variables as this process sees them.
+    #[cfg_attr(test, mutants::skip)] // one-line adapter over the process environment; `env_is_set` is tested
+    pub fn from_process() -> Self {
+        Self {
+            searxng_url: env_is_set(std::env::var_os(WEB_SEARCH_SEARXNG_ENV)),
+            perplexity_key: env_is_set(std::env::var_os(WEB_SEARCH_PERPLEXITY_ENV)),
+        }
+    }
+}
+
+/// Whether an environment value configures a provider: present, valid UTF-8
+/// and non-empty. A value the CLI cannot read as UTF-8 names no URL or key.
+pub fn env_is_set(value: Option<std::ffi::OsString>) -> bool {
+    value
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| !value.is_empty())
+}
+
+/// The web-search provider `pixel config` and `pixel doctor` report: SearXNG
+/// when its variable or the stored `web_search.searxng_url` is set, else
+/// Perplexity when its variable or `remote_keys.perplexity` is, else `none`
+/// (the public chain). `doc` is the global `config.yaml`; an empty stored
+/// value counts as absent. This is the configuration's answer: the
+/// `pixel-utilities` plugin runs the search and reads the same sources, but
+/// nothing here proves the plugin agrees.
+pub fn web_search_provider(env: WebSearchEnv, doc: &serde_json::Value) -> &'static str {
+    let stored = |section: &str, key: &str| {
+        doc.get(section)
+            .and_then(|section| section.get(key))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    };
+    if env.searxng_url || stored("web_search", "searxng_url") {
+        "searxng"
+    } else if env.perplexity_key || stored("remote_keys", "perplexity") {
+        "perplexity"
+    } else {
+        "none"
+    }
+}
+
 /// Settings key of the time one prompt brief may take.
 pub const BRIEF_WINDOW_KEY: &str = "brief_window_ms";
 /// Environment override of [`BRIEF_WINDOW_KEY`], in milliseconds; it wins over both config layers.
