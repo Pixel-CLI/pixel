@@ -81,7 +81,7 @@ bypassPermissions`. The pixel arm's settings hold only the `UserPromptSubmit` pr
 claude`, `--parts` of them); the no-pixel arm holds none and runs with `PIXEL_BRIEF=0`. The arena accepts Claude's
 folder-trust and bypass-permissions dialogs itself. The receipt is read from the arm's transcript under
 `~/.claude/projects/<workspace path>/`: `tool_use` blocks are the calls, the `hook_additional_context`
-attachments are the brief, tokens are summed per message id. Both arms still load the user's global `CLAUDE.md`.
+attachments are the brief, tokens are summed per message id, and each arm's `billed` holds its tokens by kind and dollars from `eval/lib/usage.py`. Both arms still load the user's global `CLAUDE.md`.
 
 Each `run-set` result carries `timings`: `index_s` (waiting on `set_base`), `clone_settle_s` (copy-on-write clones
 and the daemon settle), `spawn_s` (panes until the agent is ready), `prompt_s`. The distinct repositories of the

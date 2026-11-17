@@ -29,6 +29,10 @@ for name,np,px in rows:
 for a in ('no-pixel','pixel'): print(a, dict(tot[a]))
 np,px=tot['no-pixel'],tot['pixel']
 for k in K+('total','calls','turns'): print(f"{k:30}{np[k]:12,}{px[k]:12,}{100*(px[k]/max(np[k],1)-1):+7.1f}%")
-w={'input_tokens':1,'cache_creation_input_tokens':1.25,'cache_read_input_tokens':0.1,'output_tokens':5}
-cost=lambda c:sum(c[k]*w[k] for k in K)
-print(f"price-weighted (input=1, write=1.25, read=0.1, output=5): {cost(np):,.0f} -> {cost(px):,.0f} ({100*(cost(px)/cost(np)-1):+.1f}%)")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'eval', 'lib'))
+import usage
+usd={a:[usage.session(json.load(open(f))['arms'][a]['rollout'])['usd'] for f in sorted(glob.glob(d+'/*.receipt.json'))] for a in tot}
+if all(v is not None for a in usd for v in usd[a]):
+    b,p=sum(usd['no-pixel']),sum(usd['pixel'])
+    print(f"billed $ (prices {usage.PRICES_AS_OF}): {b:.4f} -> {p:.4f} ({100*(p/b-1):+.1f}%)")
+else: print('billed $: unavailable, a model has no listed price')
