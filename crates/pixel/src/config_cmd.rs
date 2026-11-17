@@ -267,6 +267,14 @@ fn confined_repo_config(root: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// The global `config.yaml`, read leniently: an empty document when it is
+/// absent or unreadable, as the hooks read it.
+pub(crate) fn global_config_doc() -> Value {
+    global_config_path()
+        .and_then(|path| read_config_doc(&path))
+        .unwrap_or_else(|| json!({}))
+}
+
 fn global_config_path() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(|home| crate::config_file::path_in(&PathBuf::from(home).join(".pixel")))
@@ -994,18 +1002,6 @@ pub fn remote_key(preset: crate::decide_remote::Preset) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The SearXNG base URL the web-search setup recorded, if any: the
-/// `PIXEL_WEB_SEARCH_URL` env var wins over it in `pixel web-search`.
-pub fn web_search_searxng_url() -> Option<String> {
-    let path = global_config_path()?;
-    read_config_doc(&path)?
-        .get("web_search")?
-        .get("searxng_url")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
 /// Persist the SearXNG base URL chosen by the web-search setup.
 pub fn set_web_search_searxng_url(url: &str) -> Result<(), String> {
     let path = global_config_path().ok_or("no HOME for the global config")?;
@@ -1031,19 +1027,6 @@ pub fn remove_web_search_searxng_url() -> Result<(), String> {
             }
         }
     })
-}
-
-/// The Perplexity API key the web-search setup stored, under
-/// `remote_keys.perplexity` — the same secret store, in the same 0600
-/// global file, that `pixel config remote-key` writes. Never echoed back.
-pub fn web_search_perplexity_key() -> Option<String> {
-    let path = global_config_path()?;
-    let doc = read_config_doc(&path)?;
-    doc.get("remote_keys")?
-        .get("perplexity")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
 }
 
 /// Persist the Perplexity API key, mirroring `pixel config remote-key`
@@ -1397,6 +1380,17 @@ fn run_metrics_with(
 
 #[cfg(test)]
 mod tests {
+    /// A stored global value as `pixel config` reads it: absent or empty is
+    /// `None`.
+    fn stored(section: &str, key: &str) -> Option<String> {
+        global_config_doc()
+            .get(section)?
+            .get(key)?
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
     #[test]
     fn only_the_settings_pixel_writes_are_settings() {
         assert_eq!(
@@ -2535,7 +2529,7 @@ mod tests {
         validate(&cfg).unwrap();
         remove_web_search_searxng_url().unwrap();
         assert!(
-            web_search_searxng_url().is_none(),
+            stored("web_search", "searxng_url").is_none(),
             "field removed, not emptied"
         );
         // `validate` accepts the removed state — an empty `searxng_url`
@@ -2554,15 +2548,24 @@ mod tests {
         let saved = home_env();
         point_home(&home.0);
 
-        assert!(web_search_searxng_url().is_none(), "nothing stored → unset");
         assert!(
-            web_search_perplexity_key().is_none(),
+            stored("web_search", "searxng_url").is_none(),
+            "nothing stored → unset"
+        );
+        assert!(
+            stored("remote_keys", "perplexity").is_none(),
             "nothing stored → unset"
         );
         set_web_search_searxng_url("https://sx.test").unwrap();
         set_web_search_perplexity_key("pplx-secret").unwrap();
-        assert_eq!(web_search_searxng_url().as_deref(), Some("https://sx.test"));
-        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+        assert_eq!(
+            stored("web_search", "searxng_url").as_deref(),
+            Some("https://sx.test")
+        );
+        assert_eq!(
+            stored("remote_keys", "perplexity").as_deref(),
+            Some("pplx-secret")
+        );
 
         let cfg: Value = serde_saphyr::from_str(
             &std::fs::read_to_string(home.0.join(".pixel/config.yaml")).unwrap(),
@@ -2587,7 +2590,10 @@ mod tests {
         );
         set_web_search_perplexity_key("pplx-secret").unwrap();
 
-        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+        assert_eq!(
+            stored("remote_keys", "perplexity").as_deref(),
+            Some("pplx-secret")
+        );
         let cfg: Value = serde_saphyr::from_str(
             &std::fs::read_to_string(home.0.join(".pixel/config.yaml")).unwrap(),
         )
@@ -2613,8 +2619,14 @@ mod tests {
         );
         set_web_search_searxng_url("https://sx.test").unwrap();
         set_web_search_perplexity_key("pplx-secret").unwrap();
-        assert_eq!(web_search_searxng_url().as_deref(), Some("https://sx.test"));
-        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+        assert_eq!(
+            stored("web_search", "searxng_url").as_deref(),
+            Some("https://sx.test")
+        );
+        assert_eq!(
+            stored("remote_keys", "perplexity").as_deref(),
+            Some("pplx-secret")
+        );
         restore_home(saved);
     }
 
