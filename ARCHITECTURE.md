@@ -320,7 +320,10 @@ versioned contract and is not rewritten by this observational metadata.
 
 `pixel-daemon` exposes one function that matters: `Service::handle(Op) ->
 Envelope<Value>`. The Unix-socket daemon reads one JSON `Op` per line and
-writes one JSON `Envelope` line back. The thread that calls `run_corpus` is
+writes one JSON `Envelope` line back. Between `handle` and the library crates,
+the wrappers of `api.rs`'s `bridge` module are not pass-throughs to fold away:
+they set each op's policy (the impact direction and `IMPACT_LIMIT_PER_DEPTH`,
+the pagination of processes). The thread that calls `run_corpus` is
 the writer: it owns the `Service` and runs one `Job` at a time (`Apply` a
 watcher batch, `Serve` a request, the watch callbacks, a sweep). The loop runs
 on its own thread with the socket, the watcher, the debounce and the idle and
@@ -646,7 +649,13 @@ envelope talks to the daemon socket directly.
   / `apply_tree_delta`). A full rebuild remains the fallback when the db has
   no freshness signature or when the drift exceeds
   `PIXEL_GRAPH_INCREMENTAL_MAX_PCT` percent of the indexed files (default
-  `20`; `0` always rebuilds). The answer's `graph_build` says which path ran
+  `20`; `0` always rebuilds). Whether a stale graph is rebuilt, updated or
+  refused is the daemon's call per op, not `pixel-graph`'s: a graph command
+  rebuilds, while `evaluate` refuses (`GateAction::Stale`: a full rebuild can
+  take minutes and is never a side effect of a question). `pixel-graph`
+  offers the mechanics (`tree_delta`, `update_files_gated` and its
+  `before_commit` hook); the policy, and the lock and publication around it,
+  stay in `pixel-daemon`. The answer's `graph_build` says which path ran
   (`incremental`, `changed_files`, `removed_files`, or `reason`), and the
   stderr notice reads `updated graph.db for N changed file(s)`, `built
   graph.db on first use`, or `rebuilt graph.db: <reason>` (the file on disk
@@ -1623,7 +1632,14 @@ daemon start <root> --warm-meaning` (`spawn_detached`, its own process
 group, no standard streams), which retires a stale daemon and waits for it to
 exit, starts the foreground daemon through `spawn_daemon`, waits for it to
 answer and asks the one question. A prompt that finds no daemon still briefs
-from the index in process; the daemon is for the next one. The hook decides on
+from the index in process; the daemon is for the next one. That in-process
+route reads the index and the graph read-only through
+`execution_brief/evidence.rs`, never through `Service`: `Service::open` builds
+a missing or stale index (`IndexSet::open_or_build`) and its graph ops build
+or update the graph, which a brief must not do. Where both routes answer the
+same question, the shared logic goes into a function both call
+(`pixel_daemon::api::impact_on_graph`), not into routing the brief through
+`Service`. The hook decides on
 a thread of its own and waits `HOOK_BOUND` (100 ms) for the decision at most,
 so a wedged socket costs a start, never the hook; the decision log records
 what came of it (`daemon`: `launched`, `running`, `skipped: …`,
