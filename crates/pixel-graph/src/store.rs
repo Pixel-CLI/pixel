@@ -1482,6 +1482,18 @@ impl GraphStore {
             .optional()?)
     }
 
+    /// The symbol whose row id is `id`, the id an edge or an import names:
+    /// `Ok(None)` when no row has it, `Err` when the row cannot be read.
+    /// A caller that turns the error into `None` reports a broken store as a
+    /// missing symbol.
+    pub fn symbol_by_id(&self, id: i64) -> Result<Option<SymbolRow>> {
+        let sql = format!("SELECT {} FROM symbols WHERE id = ?1", Self::SYMBOL_COLS);
+        Ok(self
+            .conn
+            .query_row(&sql, params![id], Self::row_to_symbol)
+            .optional()?)
+    }
+
     /// The symbols called `name`, optionally only those under `scope`,
     /// capped at `limit`.
     ///
@@ -2848,5 +2860,36 @@ mod tests {
         std::fs::remove_file(real.join(".pixel/graph.v2.db")).unwrap();
         GraphStore::open(&linked_root.join(".pixel/graph.v2.db")).unwrap();
         GraphStore::open_read_only(&linked_root.join(".pixel/graph.v2.db")).unwrap();
+    }
+
+    /// A present id reads its row, an absent one is `Ok(None)`, and a row
+    /// that cannot be read is an error, never a missing symbol (#1435).
+    #[test]
+    fn symbol_by_id_should_tell_an_absent_symbol_from_an_unreadable_row() {
+        let store = GraphStore::open_in_memory().unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "INSERT INTO symbols (id, uid, file_id, name, qualified, kind, start_line, end_line, sig) \
+                 VALUES (1, 'a.rs#run#function', 1, 'run', 'run', 'function', 3, 4, 'fn run()'), \
+                        (2, 'a.rs#broken#function', 1, 'broken', 'broken', 'function', 5, 6, '');\
+                 UPDATE symbols SET start_line = 'not a line' WHERE id = 2;",
+            )
+            .unwrap();
+        let found = store.symbol_by_id(1).unwrap().expect("row 1 exists");
+        assert_eq!(
+            (
+                found.uid.as_str(),
+                found.kind,
+                found.start_line,
+                found.end_line
+            ),
+            ("a.rs#run#function", SymbolKind::Function, 3, 4)
+        );
+        assert!(store.symbol_by_id(3).unwrap().is_none(), "no row 3");
+        assert!(
+            store.symbol_by_id(2).is_err(),
+            "an unreadable row is an error, not an absent symbol"
+        );
     }
 }

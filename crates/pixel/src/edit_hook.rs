@@ -307,15 +307,16 @@ fn callers(store: &GraphStore, symbol: &SymbolRow, file: &str) -> Result<Vec<Cal
         .edges_to(symbol.id, Some(EdgeKind::Calls))
         .map_err(|e| e.to_string())?
     {
-        let (path, holder): (String, String) = store
-            .conn()
-            .query_row(
-                "SELECT f.path, s.qualified FROM symbols s JOIN files f ON f.id = s.file_id \
-                 WHERE s.id = ?1",
-                [edge.src_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|e| e.to_string())?;
+        let caller = store
+            .symbol_by_id(edge.src_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no symbol {} behind a call edge", edge.src_id))?;
+        let path = store
+            .file_by_id(caller.file_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no file {} behind symbol {}", caller.file_id, caller.uid))?
+            .path;
+        let holder = caller.qualified;
         let inside =
             path == file && (symbol.start_line..=symbol.end_line).contains(&edge.site_line);
         if !inside {

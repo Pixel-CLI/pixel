@@ -100,31 +100,9 @@ pub struct ImpactReport {
     pub caps: Vec<String>,
 }
 
-/// Fetch a symbol row by rowid via ad-hoc SQL (store exposes uid/name lookups only).
+/// [`GraphStore::symbol_by_id`], under the name this crate's analyses call.
 pub(crate) fn symbol_by_id(store: &GraphStore, id: i64) -> Result<Option<SymbolRow>, StoreError> {
-    use rusqlite::OptionalExtension;
-    let row = store
-        .conn()
-        .query_row(
-            "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
-             FROM symbols WHERE id = ?1",
-            params![id],
-            |r| {
-                Ok(SymbolRow {
-                    id: r.get(0)?,
-                    uid: r.get(1)?,
-                    file_id: r.get(2)?,
-                    name: r.get(3)?,
-                    qualified: r.get(4)?,
-                    kind: crate::store::SymbolKind::parse(&r.get::<_, String>(5)?),
-                    start_line: r.get(6)?,
-                    end_line: r.get(7)?,
-                    sig: r.get(8)?,
-                })
-            },
-        )
-        .optional()?;
-    Ok(row)
+    store.symbol_by_id(id)
 }
 
 pub(crate) fn file_path_by_id(store: &GraphStore, file_id: i64) -> Result<String, StoreError> {

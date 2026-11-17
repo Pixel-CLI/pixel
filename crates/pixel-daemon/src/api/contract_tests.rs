@@ -1773,3 +1773,35 @@ fn graph_lock_try_acquire_should_be_refused_while_another_holds_it() {
     drop(held);
     assert!(GraphLock::try_acquire(&db).is_some(), "free again");
 }
+
+/// A caller whose symbol row the store cannot read fails the op: the edge
+/// used to come back with `"symbol": null`, which reads as a call from
+/// nowhere rather than a broken graph (#1435).
+#[test]
+fn uses_should_fail_on_an_unreadable_caller_rather_than_print_a_null_symbol() {
+    let (_scratch, root) = fixture("uses-unreadable");
+    let mut service = Service::open(&root).unwrap();
+    let request = || Request::Uses {
+        uid_or_name: "login".into(),
+        role: "callers".into(),
+        offset: None,
+        stale_ok: false,
+    };
+    assert_eq!(
+        ok(&mut service, request())["edges"][0]["symbol"]["name"],
+        "go",
+        "the caller reads before the row is broken"
+    );
+    let store = GraphStore::open(&service.graph_db_path()).unwrap();
+    let broken = store
+        .conn()
+        .execute(
+            "UPDATE symbols SET start_line = 'not a line' WHERE name = 'go'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(broken, 1);
+    drop(store);
+    let (_code, message) = err(&mut service, request());
+    assert!(!message.is_empty(), "the failure names its cause");
+}

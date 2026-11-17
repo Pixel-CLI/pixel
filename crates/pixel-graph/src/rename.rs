@@ -150,8 +150,10 @@ pub fn plan(
             if edge.callee.as_deref().is_some_and(|c| c != sym.name) {
                 continue;
             }
-            // The edge names the enclosing symbol; its file holds the site.
-            let Some(src) = symbol_by_id(store, edge.src_id) else {
+            // The edge names the enclosing symbol; its file holds the site. A
+            // row the store cannot read fails the rename instead of skipping a
+            // site it should have edited.
+            let Some(src) = store.symbol_by_id(edge.src_id).map_err(|e| e.to_string())? else {
                 continue;
             };
             let Some(path) = files.get(&src.file_id) else {
@@ -686,30 +688,6 @@ fn file_paths(store: &GraphStore) -> Result<BTreeMap<i64, String>, String> {
         .into_iter()
         .map(|f| (f.id, f.path))
         .collect())
-}
-
-fn symbol_by_id(store: &GraphStore, id: i64) -> Option<SymbolRow> {
-    store
-        .conn()
-        .query_row(
-            "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
-             FROM symbols WHERE id = ?1",
-            rusqlite::params![id],
-            |r| {
-                Ok(SymbolRow {
-                    id: r.get(0)?,
-                    uid: r.get(1)?,
-                    file_id: r.get(2)?,
-                    name: r.get(3)?,
-                    qualified: r.get(4)?,
-                    kind: crate::store::SymbolKind::parse(&r.get::<_, String>(5)?),
-                    start_line: r.get(6)?,
-                    end_line: r.get(7)?,
-                    sig: r.get(8)?,
-                })
-            },
-        )
-        .ok()
 }
 
 #[cfg(test)]
