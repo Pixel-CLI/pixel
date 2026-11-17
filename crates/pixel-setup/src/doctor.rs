@@ -209,8 +209,9 @@ pub struct DoctorOptions {
     /// plugin directories under `home` (and `repo_root`) and of `$PATH`.
     pub plugins: Option<pixel_plugin::Available>,
     /// Whether `pixel classify` has an engine that answers, as the CLI that
-    /// owns the engines judged it. `None` leaves `classify.engine` out of
-    /// the run: this crate cannot open an engine itself.
+    /// owns the engines judged it. This crate cannot open an engine itself:
+    /// with `None`, `classify.engine` still runs (every catalogued id does)
+    /// and says it was not evaluated.
     pub classify: Option<ClassifyReadiness>,
 }
 
@@ -228,7 +229,18 @@ pub enum ClassifyReadiness {
 /// `classify.engine`: an enabled classifier without an engine fails on
 /// every prompt, and the brief hides it (it falls back to its heuristics),
 /// so nothing but this check says so.
-fn classify_engine_check(readiness: &ClassifyReadiness) -> (CheckStatus, DoctorCheckDetail) {
+fn classify_engine_check(
+    readiness: Option<&ClassifyReadiness>,
+) -> (CheckStatus, DoctorCheckDetail) {
+    let Some(readiness) = readiness else {
+        return (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: "classify engine not evaluated: this caller cannot resolve engines (`pixel doctor` does)".to_string(),
+                detail: Some(serde_json::json!({ "evaluated": false })),
+            },
+        );
+    };
     match readiness {
         ClassifyReadiness::Off => (
             CheckStatus::Green,
@@ -520,9 +532,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         web_search_provider_check(&home)
     });
 
-    if let Some(readiness) = &options.classify {
-        runner.check_status("classify.engine", || Ok(classify_engine_check(readiness)));
-    }
+    runner.check_status("classify.engine", || {
+        Ok(classify_engine_check(options.classify.as_ref()))
+    });
 
     if let Some(root) = &options.repo_root {
         runner.check("repo.task-hook-observations", || {
@@ -2517,7 +2529,7 @@ mod tests {
     fn classify_engine_check_should_flag_an_enabled_classifier_without_an_engine() {
         let error = "remote preset openrouter needs an API key: set OPENROUTER_API_KEY or run `pixel config remote-key openrouter -`";
         let (status, detail) =
-            classify_engine_check(&ClassifyReadiness::Unusable(error.to_string()));
+            classify_engine_check(Some(&ClassifyReadiness::Unusable(error.to_string())));
         assert_eq!(status, CheckStatus::Yellow);
         assert_eq!(
             detail.summary,
@@ -2529,13 +2541,14 @@ mod tests {
             detail.detail.unwrap(),
             serde_json::json!({ "enabled": true, "error": error })
         );
-        let (status, detail) = classify_engine_check(&ClassifyReadiness::Off);
+        let (status, detail) = classify_engine_check(Some(&ClassifyReadiness::Off));
         assert_eq!(
             (status, detail.summary.as_str()),
             (CheckStatus::Green, "classify is off")
         );
-        let (status, detail) =
-            classify_engine_check(&ClassifyReadiness::Ready("local engine at http://x".into()));
+        let (status, detail) = classify_engine_check(Some(&ClassifyReadiness::Ready(
+            "local engine at http://x".into(),
+        )));
         assert_eq!(
             (status, detail.summary.as_str()),
             (
@@ -2545,11 +2558,11 @@ mod tests {
         );
     }
 
-    /// The check runs only when the CLI judged the engine: a library caller
-    /// without that input gets no `classify.engine` line rather than a
-    /// green one it never earned.
+    /// Every catalogued id runs, so a library caller without the CLI's
+    /// readiness still gets a `classify.engine` line, one that says it was
+    /// not evaluated instead of claiming an engine answers.
     #[test]
-    fn doctor_should_report_classify_engine_only_when_given_a_readiness() {
+    fn doctor_should_mark_classify_engine_unevaluated_without_a_readiness() {
         let home = tempfile::tempdir().unwrap();
         let exe = home.path().join("pixel");
         std::fs::write(&exe, b"x").unwrap();
@@ -2563,17 +2576,28 @@ mod tests {
             })
             .unwrap()
         };
-        let ids = |report: &DoctorReport| -> Vec<(String, CheckStatus)> {
+        let lines = |report: &DoctorReport| -> Vec<(String, CheckStatus, serde_json::Value)> {
             report
                 .checks
                 .iter()
-                .map(|c| (c.id.clone(), c.status))
+                .map(|c| (c.id.clone(), c.status, c.detail.clone().unwrap_or_default()))
                 .collect()
         };
-        assert_eq!(ids(&run(None)), vec![]);
         assert_eq!(
-            ids(&run(Some(ClassifyReadiness::Unusable("no key".into())))),
-            vec![("classify.engine".to_string(), CheckStatus::Yellow)]
+            lines(&run(None)),
+            vec![(
+                "classify.engine".to_string(),
+                CheckStatus::Green,
+                serde_json::json!({ "evaluated": false })
+            )]
+        );
+        assert_eq!(
+            lines(&run(Some(ClassifyReadiness::Unusable("no key".into())))),
+            vec![(
+                "classify.engine".to_string(),
+                CheckStatus::Yellow,
+                serde_json::json!({ "enabled": true, "error": "no key" })
+            )]
         );
     }
 
