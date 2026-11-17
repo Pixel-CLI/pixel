@@ -451,6 +451,12 @@ fn caps_for(stats: &ResidentStats, max_files: usize) -> Vec<String> {
             stats.sampled_files, stats.eligible_files
         ));
     }
+    if stats.memory_skipped_files > 0 {
+        caps.push(format!(
+            "resident memory budget ({} bytes of construction data) excluded {} remaining sampled file(s)",
+            stats.memory_budget_bytes, stats.memory_skipped_files
+        ));
+    }
     if stats.skipped_files > 0 {
         caps.push(format!(
             "{} eligible file(s) are not indexed: unreadable, over {} KiB, binary or not UTF-8",
@@ -1189,6 +1195,22 @@ mod tests {
                     .to_string(),
                 "vector cache: segment unreadable; the affected chunks were embedded again"
                     .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn caps_should_disclose_memory_exclusions_independently_of_file_sampling() {
+        let stats = ResidentStats {
+            memory_budget_bytes: 1024,
+            memory_skipped_files: 3,
+            ..ResidentStats::default()
+        };
+        assert_eq!(
+            caps_for(&stats, 5000),
+            [
+                SEMANTIC_LEADS_UNVERIFIED,
+                "resident memory budget (1024 bytes of construction data) excluded 3 remaining sampled file(s)",
             ]
         );
     }

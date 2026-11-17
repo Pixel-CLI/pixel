@@ -1,0 +1,1 @@
+**daemon:** Budget resident semantic construction data at 64 MiB, admit files before embedding, and disclose excluded coverage. Apply the budget on refresh and stream vector-cache segments to avoid whole-segment allocations.

@@ -30,7 +30,7 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -398,32 +398,51 @@ fn read_segment(
     wanted: &HashSet<ChunkKey>,
     out: &mut HashMap<ChunkKey, Vec<f32>>,
 ) -> Result<(), String> {
-    let bytes = fs::read(dir.join(&entry.file)).map_err(|e| {
+    // A cache may have been written by an unbudgeted search over a much
+    // larger tree. Stream it and retain only requested rows; loading the
+    // whole segment would bypass the resident builder's memory budget.
+    let read = || -> std::io::Result<HashMap<ChunkKey, Vec<f32>>> {
+        let file = File::open(dir.join(&entry.file))?;
+        let mut reader = BufReader::new(file);
+        let mut header = [0u8; HEADER_LEN];
+        reader.read_exact(&mut header)?;
+        if header != segment_header(entry.dim, entry.rows) {
+            return Err(std::io::Error::other("header does not match the manifest"));
+        }
+        let mut hash = xxhash_rust::xxh3::Xxh3::new();
+        hash.update(&header);
+        let mut row = vec![0; row_len(entry.dim)];
+        let mut selected = HashMap::default();
+        for _ in 0..entry.rows {
+            reader.read_exact(&mut row)?;
+            hash.update(&row);
+            let key = u128::from_le_bytes(row[..16].try_into().expect("row key"));
+            if wanted.contains(&key) {
+                let vector = row[16..]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|value| f32::from_le_bytes(*value))
+                    .collect();
+                selected.insert(key, vector);
+            }
+        }
+        let mut tail = [0u8; 1];
+        if reader.read(&mut tail)? != 0
+            || format!("seg-{:032x}.vec", hash.digest128()) != entry.file
+        {
+            return Err(std::io::Error::other("segment is truncated or altered"));
+        }
+        Ok(selected)
+    };
+    let selected = read().map_err(|error| {
         format!(
-            "code-vector segment {} named by the manifest is unreadable: {e}",
+            "code-vector segment {} named by the manifest is unreadable: {error}",
             entry.file
         )
     })?;
-    if !bytes.starts_with(&segment_header(entry.dim, entry.rows))
-        || segment_file_name(&bytes) != entry.file
-    {
-        return Err(format!(
-            "code-vector segment {} does not match the manifest (truncated or altered)",
-            entry.file
-        ));
-    }
-    for row in bytes[HEADER_LEN..].chunks_exact(row_len(entry.dim)) {
-        let key = u128::from_le_bytes(row[..16].try_into().expect("a row opens on a 16-byte key"));
-        if wanted.contains(&key) {
-            let vector = row[16..]
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|value| f32::from_le_bytes(*value))
-                .collect();
-            out.insert(key, vector);
-        }
-    }
+    // Do not publish rows from a segment until its entire hash is verified.
+    out.extend(selected);
     Ok(())
 }
 
