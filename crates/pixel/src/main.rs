@@ -4302,8 +4302,10 @@ fn run() -> Result<(), String> {
     let live = !protected
         && !json
         && cli.metrics != "off"
-        && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0")
-        && config_cmd::metrics_enabled(root.as_deref().ok());
+        && config_cmd::metrics_enabled(
+            root.as_deref().ok(),
+            std::env::var("PIXEL_METRICS").ok().as_deref(),
+        );
     operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
     let release_check = update_notice::enabled(
         protected || json,
