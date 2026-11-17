@@ -408,7 +408,7 @@ fn load_file(
     reusable: &HashMap<&str, &Arc<FileChunks>>,
     vocab: &Mutex<Vocab>,
 ) -> Loaded {
-    let Ok(bytes) = std::fs::read(file) else {
+    let Ok(bytes) = crate::code_search::read_source(file) else {
         return Loaded::Skipped;
     };
     if bytes.len() > MAX_FILE_BYTES || bytes.contains(&0) {
@@ -1053,6 +1053,19 @@ mod tests {
         let (resident, _) = build(dir.path(), None, "fixture-a", VectorCache::Disabled);
         assert!(!resident.stats().file_limit_reached);
         assert_eq!(resident.stats().files, 3);
+    }
+
+    #[test]
+    fn build_should_skip_oversized_sources_but_keep_the_exact_size_boundary() {
+        let dir = tree(&[("at_cap.md", "x".repeat(MAX_FILE_BYTES))]);
+        std::fs::File::create(dir.path().join("over.md"))
+            .unwrap()
+            .set_len((MAX_FILE_BYTES + 1) as u64)
+            .unwrap();
+        let (resident, _) = build(dir.path(), None, "fixture-a", VectorCache::Disabled);
+        assert_eq!(resident.stats().files, 1);
+        assert_eq!(resident.stats().skipped_files, 1);
+        assert_eq!(paths(&search(&resident, "x", 10)), ["at_cap.md"]);
     }
 
     /// Unreadable text is counted, not silently absent; a blank file is

@@ -243,6 +243,9 @@ Machine-wide:
   eligibility, vector mappings, first human prompts and derived titles.
   Turn text and lexical indexes stay intact; deleted source transcripts are
   not needed. Custom titles are preserved.
+  Both one-shot code search and the resident semantic index read at most
+  `MAX_FILE_BYTES + 1` bytes per source (512 KiB plus a rejection byte);
+  oversized files are skipped before parsing, even if they grow during a read.
   Code search selects `potion-code-16M-v2` independently of transcript
   preferences. Its offline opener reads cached model bytes directly and
   refuses missing files without contacting Hugging Face.
