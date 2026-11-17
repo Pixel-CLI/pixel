@@ -71,7 +71,9 @@ impl Fixture {
         cmd.current_dir(&self.0)
             .env("HOME", crate::support::neutral_home())
             .env("PIXEL_DAEMON_AUTO_START", "0")
-            .env("PIXEL_METRICS", "1")
+            // Tests capture stderr, which is not a terminal: `full` keeps the
+            // estimate rows these contracts read.
+            .env("PIXEL_METRICS", "full")
             .env_remove("PIXEL_METRICS_ROUND_TRIP_MS")
             .env_remove("PIXEL_TARGETS_MANIFEST");
         cmd
@@ -154,6 +156,62 @@ fn assert_metric_identity(block: &str, event: &Value) {
 
 fn assert_success(output: &Output) {
     assert!(output.status.success(), "{output:?}");
+}
+
+/// An agent's shell tool hands stderr to the model. Without a terminal the
+/// live block is the identity header alone, the record counts those bytes
+/// and nothing else, and stdout is what the full block's run printed.
+#[test]
+fn a_stderr_that_is_not_a_terminal_gets_the_identity_header_alone() {
+    let fixture = Fixture::new();
+    let args = ["search-content", "login_user", ".", "--no-daemon"];
+    let full = fixture.run(&args);
+    assert_success(&full);
+    let full_event = fixture.events("search-content").pop().unwrap();
+    let full_block = metric_lines(&full).pop().unwrap();
+    assert!(
+        full_block.contains("estimated LLM context saved:"),
+        "{full_block}"
+    );
+
+    // A third identical call would add the repeat-call note to stderr, so
+    // the run without the variable searches for another word.
+    for (setting, pattern) in [(Some("1"), "login_user"), (None, "is_empty")] {
+        let mut command = fixture.command();
+        match setting {
+            Some(value) => command.env("PIXEL_METRICS", value),
+            None => command.env_remove("PIXEL_METRICS"),
+        };
+        let output = command
+            .args(["search-content", pattern, ".", "--no-daemon"])
+            .output()
+            .unwrap();
+        assert_success(&output);
+        if pattern == "login_user" {
+            assert_eq!(output.stdout, full.stdout);
+        }
+        let event = fixture.events("search-content").pop().unwrap();
+        let header = format!(
+            "🟩 pixel search-content ❀ {:.1}ms ❀ #{}",
+            event["metrics"]["duration_us"].as_f64().unwrap() / 1000.0,
+            event["invocation_id"].as_str().unwrap()
+        );
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("\n{header}\n"),
+            "PIXEL_METRICS={setting:?}"
+        );
+        assert_eq!(
+            event["metrics"]["reporting_bytes"],
+            header.len() as u64 + 2,
+            "the record counts what was printed"
+        );
+        assert!(
+            event["metrics"]["reporting_bytes"].as_u64()
+                < full_event["metrics"]["reporting_bytes"].as_u64(),
+            "{event} against {full_event}"
+        );
+    }
 }
 
 #[test]

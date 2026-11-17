@@ -68,7 +68,11 @@ counts) and estimates are always labelled apart.
 - **CLI:** after the result, on stderr, `🟩 pixel <command> ❀ <ms> ❀ #<id>` and
   the `tokens saved (workflow estimate)` and `saved (sequential estimate)` rows
   (`⏱`/`§` rows) in human mode; on failure the `pixel: <error>` line
-  is repeated last. `--json` suppresses the live block, graph refresh notices
+  is repeated last. The rows are for a person: they are printed when stderr is
+  a terminal, or anywhere with `PIXEL_METRICS=full`. Any other stderr (an
+  agent's shell tool, a pipe, a file) gets the identity header alone, which is
+  what a relay matches, and the record's `reporting_bytes` counts what was
+  printed. `--json` suppresses the live block, graph refresh notices
   and repeat-call notes. Accounting still reaches the action log, graph refresh
   metadata stays in JSON, and failed commands retain their stderr diagnostic.
   Search caps remain in the NDJSON metadata; `--stats --json` puts statistics
@@ -85,9 +89,11 @@ counts) and estimates are always labelled apart.
 
 ### Relays
 
-Where a host hides a command's stderr, `pixel run-hook metrics` replays the
-finalized line through the host's visible channel after a call that ran
-`pixel`. A global "latest record" is unsafe under concurrency and is never used;
+Where a host hides a command's stderr, or shows only the header a
+non-terminal stderr gets, `pixel run-hook metrics` replays the finalized line,
+rows included, through the host's user-visible channel after a call that ran
+`pixel`. It never answers with `additionalContext`: the line is not replayed
+into the model's context, and no prompt asks the model to repeat it. A global "latest record" is unsafe under concurrency and is never used;
 each relay matches its own invocation.
 
 | Provider | Relay |
@@ -97,7 +103,7 @@ each relay matches its own invocation.
 | `antigravity` | `PostToolUse` stores the line per `stepIdx` in the conversation's artifact directory and returns `{}`; `--event post-invocation` delivers it once as an `ephemeralMessage` and clears it |
 | `pi` | `systemMessage`, shown by the package to the user only |
 | `devin` | accepted by `run-hook metrics`, but `pixel setup` registers no metrics hook for Devin (`hooks.md`); its prompt-submit line asks the model to repeat it once |
-| OpenCode | the plugin posts the brief's stderr block and each `pixel` call's footer as `session.synthetic` messages with `resume: false` |
+| OpenCode | the plugin posts the brief's stderr block and each `pixel` call's footer (its identity header, since the tool's stderr is not a terminal) as `session.synthetic` messages with `resume: false` |
 
 ## `pixel metrics [PATH] [--since 30m|24h|7d|all] [--json]`
 
