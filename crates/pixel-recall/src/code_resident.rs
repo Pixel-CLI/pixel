@@ -1206,6 +1206,26 @@ mod tests {
         let dir = tree(&[("a.md", "invoice payment".into())]);
         let (one, _) = build(dir.path(), None, "fixture-a", VectorCache::Disabled);
         let budget = one.stats().build_bytes;
+        write(dir.path(), "b.md", "invoice payment");
+        let (both, _) = build(dir.path(), None, "fixture-a", VectorCache::Disabled);
+        let (mut reused_embedder, _) = WordEmbedder::new("fixture-a");
+        let reused = Resident::build_with_budget(
+            dir.path(),
+            Some(&both),
+            &mut reused_embedder,
+            VectorCache::Disabled,
+            100,
+            budget,
+        )
+        .unwrap();
+        assert_eq!(
+            reused.stats().files,
+            1,
+            "reused vectors still spend the budget"
+        );
+        assert_eq!(reused.stats().reused_files, 1);
+        assert_eq!(reused.stats().memory_skipped_files, 1);
+        assert_eq!(paths(&search(&reused, "invoice", 10)), ["a.md"]);
         write(dir.path(), "b.md", "weather forecast");
         let (mut embedder, _) = WordEmbedder::new("fixture-a");
         let mut previous = Resident::build_with_budget(

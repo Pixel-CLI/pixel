@@ -662,7 +662,7 @@ mod tests {
     fn damaged_segments_should_be_errors_and_rebuilt_never_skipped() {
         /// Damages the segment `file` and returns the name the error must carry.
         type Damage = fn(&Store, &str) -> String;
-        let damages: [(&str, Damage); 4] = [
+        let damages: [(&str, Damage); 5] = [
             ("missing", |store, file| {
                 fs::remove_file(store.dir.join(file)).unwrap();
                 file.to_string()
@@ -671,6 +671,15 @@ mod tests {
                 let path = store.dir.join(file);
                 let bytes = fs::read(&path).unwrap();
                 fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+                file.to_string()
+            }),
+            ("extended", |store, file| {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(store.dir.join(file))
+                    .unwrap()
+                    .write_all(&[0])
+                    .unwrap();
                 file.to_string()
             }),
             ("altered", |store, file| {
