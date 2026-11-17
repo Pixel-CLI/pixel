@@ -22,6 +22,8 @@ pixel-git = { path = "../pixel-git" }
 pixel-plugin = { path = "../pixel-plugin" }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "2.0"
+# `config_file`: comment-preserving writes of `config.yaml`.
+yaml-edit = { version = "0.3.2", default-features = false }
 serde_json = "1"
 sha2 = { workspace = true }
 thiserror = "2"

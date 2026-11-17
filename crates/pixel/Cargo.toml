@@ -54,7 +54,6 @@ clap_mangen = "0.3"
 serde = "1"
 serde_json = "1"
 serde-saphyr = "2.0"
-yaml-edit = { version = "0.3.2", default-features = false }
 regex = "1.13"
 # The workspace-overview brief step reads manifests (execution_brief/steps/).
 toml_edit = "0.25.15"

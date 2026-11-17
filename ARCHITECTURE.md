@@ -161,7 +161,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `plan.json` | CLI `plan` | The persisted `pixel plan` checklist, so `--status`/`--done`/`--prune` survive a re-plan. |
 | `workspace.json` | CLI `workspace` | The registered member repositories. |
 | `plugins/<name>/` | `pixel-plugin` | Repo plugins: a directory with `pixel-plugin.toml` that someone (or the repository) put there. Read only (its manifest without following a link or blocking, at most 16 KiB), and run only after `pixel plugin trust <name>` recorded the digest of its files in `~/.pixel/trusted.toml`. |
-| `config.yaml` | CLI `config` | Repository-level settings over `~/.pixel/config.yaml`. |
+| `config.yaml` | CLI `config` (read and written through `pixel_setup::config_file`, which `pixel setup` and `pixel doctor` read through too) | Repository-level settings over `~/.pixel/config.yaml`. |
 
 A repository can commit `.pixel/`, links included, so nothing in it is
 trusted by name. The index, graph and history stores, and `index unpack`,
