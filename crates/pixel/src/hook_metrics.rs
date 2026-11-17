@@ -481,23 +481,19 @@ fn metrics_record_line_with_result(payload: &Value, response: Option<&Value>) ->
     let (effective_cwd, effective_cmd) = strip_cd_prefix(&command, &payload_cwd);
     let tool_cwd = canonical(&effective_cwd);
     let invocation = pixel_invocation(effective_cmd)?;
-    // Suppress exactly when the invocation suppressed its own footer: an
-    // effective PIXEL_METRICS of 0 — the inherited env, overridden in
-    // command order by inline `PIXEL_METRICS=` prefixes on the pixel call.
-    if invocation
+    // Suppress exactly when the invocation suppressed its own footer: the
+    // PIXEL_METRICS it saw is the inherited env, overridden in command order
+    // by inline `PIXEL_METRICS=` prefixes on the pixel call, and the
+    // resolution receives that value, not this process's.
+    let metrics_env = invocation
         .metrics_env
-        .or_else(|| std::env::var("PIXEL_METRICS").ok())
-        .as_deref()
-        == Some("0")
-    {
-        return None;
-    }
+        .or_else(|| std::env::var("PIXEL_METRICS").ok());
     if invocation.args.contains("--metrics=off") || invocation.args.contains("--metrics off") {
         return None;
     }
     let root = find_up(&tool_cwd, ".pixel")?;
     // The persistent opt-out applies to the relay exactly as to stderr.
-    if !crate::config_cmd::metrics_enabled(Some(&root)) {
+    if !crate::config_cmd::metrics_enabled(Some(&root), metrics_env.as_deref()) {
         return None;
     }
     let log = pixel_actionlog::ActionLog::path_for_root(&root);

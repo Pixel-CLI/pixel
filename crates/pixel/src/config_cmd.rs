@@ -179,8 +179,11 @@ pub fn overview(path: &Path) -> Result<(), String> {
         println!("repo: {}", path.display());
         validate(&path)?;
     }
-    let (metrics, source) = metrics_resolution(root.as_deref());
-    if std::env::var_os("PIXEL_METRICS").is_some_and(|v| v == "0") {
+    let (metrics, source) = metrics_resolution(
+        root.as_deref(),
+        std::env::var("PIXEL_METRICS").ok().as_deref(),
+    );
+    if source == Source::Env {
         println!("metrics: off (PIXEL_METRICS)");
     } else {
         println!(
@@ -280,29 +283,34 @@ fn global_config_path() -> Option<PathBuf> {
         .map(|home| crate::config_file::path_in(&PathBuf::from(home).join(".pixel")))
 }
 
-/// Effective live-metrics setting for `root`: repo layer first, then the
-/// global configuration, then the on-by-default baseline.
-pub fn metrics_enabled(root: Option<&Path>) -> bool {
-    if let Some(root) = root
-        && let Some(on) = read_metrics(&repo_config_path(root))
-    {
-        return on;
-    }
-    global_config_path()
-        .as_deref()
-        .and_then(read_metrics)
-        .unwrap_or(true)
+/// Effective live-metrics setting for `root`, given the `PIXEL_METRICS`
+/// value `env` the caller's command sees: see [`metrics_resolution`].
+pub fn metrics_enabled(root: Option<&Path>, env: Option<&str>) -> bool {
+    metrics_resolution(root, env).0
 }
 
-/// Which layer produced the effective setting — for `pixel config metrics`.
+/// What decided the live-metrics setting — for `pixel config` and
+/// `pixel config metrics`.
 #[derive(Debug, PartialEq, Eq)]
 enum Source {
+    /// `PIXEL_METRICS=0`.
+    Env,
     Repo,
     Global,
     Default,
 }
 
-fn metrics_resolution(root: Option<&Path>) -> (bool, Source) {
+/// The live-metrics setting for `root` and what decided it. `env` is the
+/// `PIXEL_METRICS` value the caller's command sees, passed in and never read
+/// here: the process's own for the CLI and the hooks, the agent command's for
+/// the metrics relay, where an inline `PIXEL_METRICS=1 pixel …` overrides an
+/// inherited `0` (#1428). `0` turns metrics off whatever the files say; any
+/// other value, or none, leaves it to the repository layer, then the global
+/// one, then on.
+fn metrics_resolution(root: Option<&Path>, env: Option<&str>) -> (bool, Source) {
+    if env == Some("0") {
+        return (false, Source::Env);
+    }
     if let Some(root) = root
         && let Some(on) = read_metrics(&repo_config_path(root))
     {
@@ -1328,8 +1336,12 @@ fn run_metrics_with(
     let root = crate::discover_root(path).ok();
     match value {
         None => {
-            let (on, source) = metrics_resolution(root.as_deref());
+            let (on, source) = metrics_resolution(
+                root.as_deref(),
+                std::env::var("PIXEL_METRICS").ok().as_deref(),
+            );
             let layer = match source {
+                Source::Env => "environment PIXEL_METRICS=0".to_string(),
                 Source::Repo => {
                     format!(
                         "repo {}",
@@ -2683,16 +2695,19 @@ mod tests {
         let repo = home.0.join("repo");
         std::fs::create_dir_all(repo.join(".pixel")).unwrap();
 
-        assert!(metrics_enabled(Some(&repo)), "unset defaults on");
+        assert!(metrics_enabled(Some(&repo), None), "unset defaults on");
 
         write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
-        assert!(!metrics_enabled(Some(&repo)), "repo off wins");
+        assert!(!metrics_enabled(Some(&repo), None), "repo off wins");
 
         write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"on\"}");
         write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
-        assert!(metrics_enabled(Some(&repo)), "repo on overrides global off");
         assert!(
-            !metrics_enabled(Some(&repo.join("no-config-here"))),
+            metrics_enabled(Some(&repo), None),
+            "repo on overrides global off"
+        );
+        assert!(
+            !metrics_enabled(Some(&repo.join("no-config-here")), None),
             "global off applies where no repo layer speaks"
         );
 
@@ -2710,20 +2725,20 @@ mod tests {
         write(&repo.join(".pixel/config.yaml"), "not json");
         write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert!(
-            !metrics_enabled(Some(&repo)),
+            !metrics_enabled(Some(&repo), None),
             "malformed repo falls through to global"
         );
 
         write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"loud\"}");
         assert!(
-            !metrics_enabled(Some(&repo)),
+            !metrics_enabled(Some(&repo), None),
             "unknown value is not a setting"
         );
         write(
             &home.0.join(".pixel/config.yaml"),
             "{\"metrics\": \"off\", \"future\": 1}",
         );
-        assert!(!metrics_enabled(Some(&repo)));
+        assert!(!metrics_enabled(Some(&repo), None));
 
         restore_home(saved);
     }
@@ -2793,10 +2808,10 @@ mod tests {
         let doc: Value = crate::config_file::load(&cfg).unwrap();
         assert_eq!(doc["metrics"], "off");
         assert_eq!(doc["future"]["nested"], true);
-        assert!(!metrics_enabled(Some(&repo)));
+        assert!(!metrics_enabled(Some(&repo), None));
 
         write_metrics(&cfg, true).unwrap();
-        assert!(metrics_enabled(Some(&repo)));
+        assert!(metrics_enabled(Some(&repo), None));
         assert!(
             !cfg.with_extension("json.tmp").exists(),
             "temp file is renamed away"
@@ -2816,33 +2831,62 @@ mod tests {
         std::fs::create_dir_all(repo.join(".pixel")).unwrap();
 
         assert_eq!(
-            metrics_resolution(Some(&repo)),
+            metrics_resolution(Some(&repo), None),
             (true, Source::Default),
             "nothing set → default on"
         );
         assert!(
-            metrics_enabled(None),
+            metrics_enabled(None, None),
             "no repo handle still resolves through the default"
         );
 
         write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert_eq!(
-            metrics_resolution(Some(&repo)),
+            metrics_resolution(Some(&repo), None),
             (false, Source::Global),
             "global off shows up as the global layer"
         );
         assert!(
-            !metrics_enabled(None),
+            !metrics_enabled(None, None),
             "without a repo the global layer is the answer"
         );
 
         write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"on\"}");
         assert_eq!(
-            metrics_resolution(Some(&repo)),
+            metrics_resolution(Some(&repo), None),
             (true, Source::Repo),
             "repo on overrides a global off"
         );
 
+        restore_home(saved);
+    }
+
+    /// The veto comes from the caller (#1428): `0` wins over every file, any
+    /// other value leaves the files in charge, and the process environment is
+    /// never read inside the resolution, so the metrics relay can pass the
+    /// value the agent's own command saw.
+    #[test]
+    fn metrics_resolution_should_take_the_veto_from_the_caller() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let repo = home.0.join("repo");
+        write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"on\"}");
+        // SAFETY: under crate::ENV_LOCK; restored below.
+        unsafe { std::env::set_var("PIXEL_METRICS", "0") };
+        assert_eq!(
+            metrics_resolution(Some(&repo), Some("1")),
+            (true, Source::Repo),
+            "the caller's value is used, not the process's 0"
+        );
+        assert_eq!(
+            metrics_resolution(Some(&repo), Some("0")),
+            (false, Source::Env)
+        );
+        assert_eq!(metrics_resolution(Some(&repo), None), (true, Source::Repo));
+        // SAFETY: paired restore under the same lock.
+        unsafe { std::env::remove_var("PIXEL_METRICS") };
         restore_home(saved);
     }
 

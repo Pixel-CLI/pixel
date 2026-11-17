@@ -85,7 +85,7 @@ Rules of a write:
 | `pixel config classify-engine <engine>` | stored `classify.engine` (`auto`, `local`, `remote`, or a hosted preset) |
 | `pixel config remote-preset <preset> [--model M] [--base U]` | stored remote preset; a `--model` or `--base` left out clears the previous provider's stale choice |
 | `pixel config remote-key <preset> [<key>\|-] [--clear]` | stores, reports (`set`/`unset`) or clears a key in the global file; `-` reads the key from stdin; the key is never printed back |
-| `pixel config metrics [on\|off] [--global]` | reports the effective live-metrics setting and its layer, or persists it; a global write reports a repository layer that contradicts it |
+| `pixel config metrics [on\|off] [--global]` | reports the effective live-metrics setting and what decided it (`environment PIXEL_METRICS=0`, a layer, or the default), or persists it; a global write reports a repository layer that contradicts it |
 
 ## Keys that have no `pixel config <key> <value>` form
 

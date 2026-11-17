@@ -661,3 +661,30 @@ fn a_setting_read_should_name_the_layer_its_value_came_from() {
         "{text}"
     );
 }
+
+/// `pixel config metrics` reports the setting in force: `PIXEL_METRICS=0`
+/// silences the footer whatever the files say, so the read names the
+/// environment as the source instead of a file that is overruled (#1428).
+#[test]
+fn config_metrics_should_name_the_environment_when_pixel_metrics_is_zero() {
+    let home = Scratch::for_test("config", "metrics-env-home");
+    let repo = repo_with_git("metrics-env-repo");
+    stdout(&run(&home, &repo, &["config", "metrics", "on"]));
+    let out = pixel_command()
+        .env("HOME", &*home)
+        .env("PIXEL_METRICS", "0")
+        .env_remove("PIXEL_DAEMON_AUTO_START")
+        .current_dir(&*repo)
+        .args(["config", "metrics"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        stdout(&out),
+        "metrics: off — environment PIXEL_METRICS=0\n",
+        "the repository says on, the environment wins"
+    );
+    assert!(
+        stdout(&run(&home, &repo, &["config", "metrics"])).starts_with("metrics: on — repo "),
+        "without the variable the repository layer decides"
+    );
+}

@@ -1454,13 +1454,13 @@ fn note_event(
 /// Whether the 🟩 prompt-submit line joins the response: the `metrics`
 /// configuration for the payload's repository, vetoed by `PIXEL_METRICS=0`.
 fn metrics_on(provider: TaskProvider, raw: Option<&str>) -> bool {
-    if std::env::var_os("PIXEL_METRICS").is_some_and(|v| v == "0") {
-        return false;
-    }
     let root = raw
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
         .and_then(|payload| crate::discover_root(&payload_cwd(provider, &payload)).ok());
-    crate::config_cmd::metrics_enabled(root.as_deref())
+    crate::config_cmd::metrics_enabled(
+        root.as_deref(),
+        std::env::var("PIXEL_METRICS").ok().as_deref(),
+    )
 }
 
 /// Part 1 of a split brief: finish the brief, store it whole for the other
