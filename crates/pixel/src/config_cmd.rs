@@ -1194,6 +1194,75 @@ fn effective(root: Option<&Path>, key: &str, setting: Setting) -> (String, Strin
     }
 }
 
+/// What `pixel setup` registers for `key`, and the file it reads it from.
+/// Setup reads the hook settings from the global layer only (`install`
+/// calls `pixel_setup::config::edit_hooks` and `brief_parts` with no
+/// repository) and never the environment, so this can differ from what
+/// [`effective`] reports. It is what setup would register, not what is
+/// installed: whether setup has run is `pixel doctor`'s to say. `None` for a
+/// setting setup does not read, or without a HOME.
+fn registration(key: &str, setting: Setting) -> Option<(String, String)> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    // The source is the global file only when its value is one setup reads:
+    // setup skips a value of the wrong type and falls back to the default.
+    let (value, readable): (String, fn(&Value) -> bool) = match setting {
+        Setting::BriefParts => (
+            pixel_setup::config::brief_parts(&home, None).to_string(),
+            Value::is_u64,
+        ),
+        Setting::OptIn(_) => (
+            on_off(pixel_setup::config::edit_hooks(&home, None)).to_owned(),
+            Value::is_boolean,
+        ),
+        Setting::Switch(_) => return None,
+    };
+    let source = global_config_path()
+        .filter(|path| read_config_doc(path).is_some_and(|doc| doc.get(key).is_some_and(readable)))
+        .map_or_else(|| "default".to_owned(), |path| path.display().to_string());
+    Some((value, source))
+}
+
+/// The note `pixel config <key> <value>` prints about the hooks `pixel setup`
+/// registers, after writing `written` to the global layer (`global`) or to
+/// the repository's. `registered` is [`registration`]'s value and source.
+/// A global write is what setup reads, so it asks for `pixel setup`. A
+/// repository write never reaches setup (#1427): it says what it changes
+/// instead, and how to change the registration.
+fn registration_note(
+    key: &str,
+    setting: Setting,
+    global: bool,
+    written: &str,
+    registered: (&str, &str),
+) -> Option<String> {
+    let (value, source) = registered;
+    match (setting, global) {
+        (Setting::BriefParts, true) => {
+            Some("note: run `pixel setup` so the registered hooks carry the new count".to_owned())
+        }
+        (Setting::BriefParts, false) => Some(format!(
+            "note: native hooks keep the {value} parts `pixel setup` registers from the global layer ({source}); \
+             only Pi's package follows this repository value. To change the registered count: \
+             `pixel config {key} {written} --global`, then `pixel setup`"
+        )),
+        (Setting::OptIn(_), true) => {
+            Some("note: run `pixel setup` so the edit hooks are registered or removed".to_owned())
+        }
+        // What is installed is not known here: the global layer says what setup
+        // would register, not whether it ran, nor what an earlier run left.
+        (Setting::OptIn(_), false) if value == "on" => Some(format!(
+            "note: `pixel setup` registers the edit hooks from the global layer ({source}); \
+             once they are installed, this value turns them {written} in this repository"
+        )),
+        (Setting::OptIn(_), false) if written == "on" => Some(format!(
+            "note: `pixel setup` does not register the edit hooks while the global layer has them off ({source}); \
+             this value turns them on here only if an earlier setup left them installed (`pixel doctor` shows it). \
+             To register them: `pixel config {key} on --global`, then `pixel setup`"
+        )),
+        (Setting::OptIn(_), false) | (Setting::Switch(_), _) => None,
+    }
+}
+
 /// `pixel config <key> [<value>] [--global]`: without a value, the value in
 /// force and its source; with one, validate it and write it to the
 /// repository's `config.yaml`, or the global one.
@@ -1213,6 +1282,9 @@ pub fn run_setting(
     let Some(raw) = value else {
         let (current, source) = effective(root.as_deref(), key, setting);
         println!("{key}: {current} — {source}");
+        if let Some((registered, from)) = registration(key, setting) {
+            println!("registered by `pixel setup`: {registered} — {from}");
+        }
         return Ok(());
     };
     let stored = parse_setting(key, setting, raw)?;
@@ -1229,13 +1301,26 @@ pub fn run_setting(
     println!("{key}: {written} — wrote {}", target.display());
     let (current, source) = effective(root.as_deref(), key, setting);
     if current != written {
-        println!("note: {source} sets {key}: {current} here and wins");
+        // The configured count is read at run time by Pi's package alone;
+        // native hooks carry the count setup registered from the global layer.
+        let scope = if setting == Setting::BriefParts {
+            " for Pi's package; native hooks keep the count `pixel setup` registers from the global layer"
+        } else {
+            ""
+        };
+        println!("note: {source} sets {key}: {current} here and wins{scope}");
     }
-    if setting == Setting::BriefParts {
-        println!("note: run `pixel setup` so the registered hooks carry the new count");
-    }
-    if setting == Setting::OptIn(EDIT_HOOKS_ENV) {
-        println!("note: run `pixel setup` so the edit hooks are registered or removed");
+    let registered = registration(key, setting);
+    if let Some(note) = registered.as_ref().and_then(|(value, from)| {
+        registration_note(
+            key,
+            setting,
+            global,
+            &written,
+            (value.as_str(), from.as_str()),
+        )
+    }) {
+        println!("{note}");
     }
     Ok(())
 }
@@ -1379,6 +1464,116 @@ mod tests {
         assert_eq!(shown(&json!(true)), "on");
         assert_eq!(shown(&json!(false)), "off");
         assert_eq!(shown(&json!(5)), "5");
+    }
+
+    /// `pixel setup` reads the hook settings from the global layer only
+    /// (#1427): a global write asks for it, a repository write says what it
+    /// changes, and only a write that changes nothing registered says nothing.
+    #[test]
+    fn a_registration_note_should_follow_the_layer_setup_reads() {
+        /// The setting, whether the write is global, the value written, what
+        /// setup registers and from where, and the note expected.
+        type Case = (
+            Setting,
+            bool,
+            &'static str,
+            (&'static str, &'static str),
+            Option<&'static str>,
+        );
+        let edit = Setting::OptIn(EDIT_HOOKS_ENV);
+        let note = |setting, global, written, registered| {
+            registration_note(
+                if setting == Setting::BriefParts {
+                    BRIEF_PARTS_KEY
+                } else {
+                    EDIT_HOOKS_KEY
+                },
+                setting,
+                global,
+                written,
+                registered,
+            )
+        };
+        let cases: [Case; 9] = [
+            (
+                Setting::BriefParts,
+                true,
+                "6",
+                ("6", "/h/.pixel/config.yaml"),
+                Some("note: run `pixel setup` so the registered hooks carry the new count"),
+            ),
+            (
+                Setting::BriefParts,
+                false,
+                "5",
+                ("3", "default"),
+                Some(
+                    "note: native hooks keep the 3 parts `pixel setup` registers from the global layer (default); \
+                   only Pi's package follows this repository value. To change the registered count: \
+                   `pixel config brief_parts 5 --global`, then `pixel setup`",
+                ),
+            ),
+            (
+                edit,
+                true,
+                "on",
+                ("on", "/h/.pixel/config.yaml"),
+                Some("note: run `pixel setup` so the edit hooks are registered or removed"),
+            ),
+            (
+                edit,
+                true,
+                "off",
+                ("off", "/h/.pixel/config.yaml"),
+                Some("note: run `pixel setup` so the edit hooks are registered or removed"),
+            ),
+            (
+                edit,
+                false,
+                "off",
+                ("on", "/h/.pixel/config.yaml"),
+                Some(
+                    "note: `pixel setup` registers the edit hooks from the global layer (/h/.pixel/config.yaml); \
+                   once they are installed, this value turns them off in this repository",
+                ),
+            ),
+            (
+                edit,
+                false,
+                "on",
+                ("on", "/h/.pixel/config.yaml"),
+                Some(
+                    "note: `pixel setup` registers the edit hooks from the global layer (/h/.pixel/config.yaml); \
+                   once they are installed, this value turns them on in this repository",
+                ),
+            ),
+            (
+                edit,
+                false,
+                "on",
+                ("off", "default"),
+                Some(
+                    "note: `pixel setup` does not register the edit hooks while the global layer has them off (default); \
+                   this value turns them on here only if an earlier setup left them installed (`pixel doctor` shows it). \
+                   To register them: `pixel config edit_hooks on --global`, then `pixel setup`",
+                ),
+            ),
+            (edit, false, "off", ("off", "default"), None),
+            (
+                Setting::Switch("PIXEL_BRIEF"),
+                true,
+                "on",
+                ("on", "default"),
+                None,
+            ),
+        ];
+        for (setting, global, written, registered, expected) in cases {
+            assert_eq!(
+                note(setting, global, written, registered).as_deref(),
+                expected,
+                "{setting:?} global={global} written={written} registered={registered:?}"
+            );
+        }
     }
 
     #[test]

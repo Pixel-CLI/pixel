@@ -343,17 +343,40 @@ fn a_known_setting_should_be_written_to_the_repository_layer_and_read_back() {
         text.contains(&format!("brief_parts: 5 — wrote {}", repo_file.display())),
         "{text}"
     );
-    assert!(text.contains("run `pixel setup`"), "{text}");
+    // Native hooks get their part count from `--part K/N`, written by
+    // `pixel setup` from the global layer only (#1427): a repository count
+    // reaches Pi's package alone, and the note must not send the user to a
+    // `pixel setup` that leaves the count as it was.
+    assert!(
+        text.contains(
+            "note: native hooks keep the 3 parts `pixel setup` registers from the global layer (default); \
+             only Pi's package follows this repository value. To change the registered count: \
+             `pixel config brief_parts 5 --global`, then `pixel setup`\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("so the registered hooks carry the new count"),
+        "{text}"
+    );
     assert_eq!(yaml(&repo_file)["brief_parts"], 5, "a number, not a string");
     assert!(!home.join(".pixel/config.yaml").exists());
     assert_eq!(
         stdout(&run(&home, &repo, &["config", "brief_parts"])),
-        format!("brief_parts: 5 — {}\n", repo_file.display())
+        format!(
+            "brief_parts: 5 — {}\nregistered by `pixel setup`: 3 — default\n",
+            repo_file.display()
+        )
     );
     assert!(stdout(&run(&home, &repo, &["config"])).contains("brief_parts: 5\n"));
 
     stdout(&run(&home, &repo, &["config", "brief", "off"]));
     assert_eq!(yaml(&repo_file)["brief"], false, "a boolean, not a string");
+    // `pixel setup` does not read `brief`: its read has no registration line.
+    assert_eq!(
+        stdout(&run(&home, &repo, &["config", "brief"])),
+        format!("brief: off — {}\n", repo_file.display())
+    );
     assert!(stdout(&run(&home, &repo, &["config"])).contains("brief: false"));
 }
 
@@ -374,11 +397,18 @@ fn a_global_set_should_leave_the_repository_alone_and_name_a_layer_that_wins() {
         text.contains(&format!("brief_parts: 6 — wrote {}", global_file.display())),
         "{text}"
     );
+    // The repository value wins only where the configured count is read at
+    // run time, Pi's package; native hooks carry the global count `pixel
+    // setup` registers, so the global write still asks for `pixel setup`.
     assert!(
         text.contains(&format!(
-            "note: {} sets brief_parts: 2 here and wins",
+            "note: {} sets brief_parts: 2 here and wins for Pi's package; native hooks keep the count `pixel setup` registers from the global layer\n",
             repo_file.display()
         )),
+        "{text}"
+    );
+    assert!(
+        text.contains("note: run `pixel setup` so the registered hooks carry the new count\n"),
         "{text}"
     );
     assert_eq!(yaml(&global_file)["brief_parts"], 6);
@@ -494,4 +524,118 @@ fn edit_hooks_should_be_off_by_default_and_follow_a_written_value() {
     let bad = run(&home, &repo, &["config", "edit_hooks", "maybe"]);
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("edit_hooks takes on or off"));
+}
+
+/// `pixel setup` registers the edit hooks from the global layer only (#1427),
+/// while the hook itself reads the repository layer first. A repository `on`
+/// under a global `off` makes setup register nothing, so the write must not
+/// send the user to a `pixel setup` that changes nothing. It must not claim
+/// the value has no effect either: hooks an earlier setup installed are still
+/// there, and the hook then obeys this value. `pixel config` cannot see what
+/// is installed; it says so and names `pixel doctor`.
+#[test]
+fn a_repository_edit_hooks_on_under_a_global_off_should_name_what_setup_will_not_register() {
+    let home = Scratch::for_test("config", "edit-hooks-repo-on-home");
+    let repo = repo_with_git("edit-hooks-repo-on-repo");
+    let text = stdout(&run(&home, &repo, &["config", "edit_hooks", "on"]));
+    assert!(
+        text.contains(
+            "note: `pixel setup` does not register the edit hooks while the global layer has them off (default); \
+             this value turns them on here only if an earlier setup left them installed (`pixel doctor` shows it). \
+             To register them: `pixel config edit_hooks on --global`, then `pixel setup`\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("so the edit hooks are registered or removed")
+            && !text.contains("no effect"),
+        "neither a pointless `pixel setup` nor an unconditional claim about installed hooks: {text}"
+    );
+    assert_eq!(
+        yaml(&repo.join(".pixel/config.yaml"))["edit_hooks"],
+        true,
+        "the value is still written: the hook reads it once the global layer registers the hooks"
+    );
+    let read = stdout(&run(&home, &repo, &["config", "edit_hooks"]));
+    assert!(
+        read.ends_with("registered by `pixel setup`: off — default\n"),
+        "{read}"
+    );
+}
+
+/// Under a global `on`, setup registers the hooks, and a repository value is
+/// what the hook obeys here: `off` is a working per-repository opt-out. A
+/// global `on` does not prove setup has run, so the note says "once they are
+/// installed".
+#[test]
+fn a_repository_edit_hooks_value_should_say_it_applies_here_when_the_global_layer_registers_them() {
+    let home = Scratch::for_test("config", "edit-hooks-registered-home");
+    let repo = repo_with_git("edit-hooks-registered-repo");
+    let global = home.join(".pixel/config.yaml");
+    stdout(&run(
+        &home,
+        &repo,
+        &["config", "edit_hooks", "on", "--global"],
+    ));
+    for (value, effect) in [("off", "off"), ("on", "on")] {
+        let text = stdout(&run(&home, &repo, &["config", "edit_hooks", value]));
+        assert!(
+            text.contains(&format!(
+                "note: `pixel setup` registers the edit hooks from the global layer ({}); \
+                 once they are installed, this value turns them {effect} in this repository\n",
+                global.display()
+            )),
+            "{value}: {text}"
+        );
+        assert!(!text.contains("does not register"), "{value}: {text}");
+    }
+    let read = stdout(&run(&home, &repo, &["config", "edit_hooks"]));
+    assert!(
+        read.ends_with(&format!(
+            "registered by `pixel setup`: on — {}\n",
+            global.display()
+        )),
+        "{read}"
+    );
+}
+
+/// A repository `off` under a global `off` changes nothing anyone registers,
+/// so it carries no registration note at all.
+#[test]
+fn a_repository_edit_hooks_off_under_a_global_off_should_print_no_registration_note() {
+    let home = Scratch::for_test("config", "edit-hooks-off-off-home");
+    let repo = repo_with_git("edit-hooks-off-off-repo");
+    let text = stdout(&run(&home, &repo, &["config", "edit_hooks", "off"]));
+    assert_eq!(
+        text,
+        format!(
+            "edit_hooks: off — wrote {}\n",
+            repo.join(".pixel/config.yaml").display()
+        )
+    );
+}
+
+/// Setup skips a global value of the wrong type and registers the default, so
+/// the registration line must name `default`, not the file that holds the
+/// unreadable value: value and source come from the same reading.
+#[test]
+fn a_registration_line_should_name_default_when_the_global_value_is_unreadable() {
+    let home = Scratch::for_test("config", "registration-unreadable-home");
+    let repo = repo_with_git("registration-unreadable-repo");
+    fs::create_dir_all(home.join(".pixel")).unwrap();
+    fs::write(
+        home.join(".pixel/config.yaml"),
+        "edit_hooks: maybe\nbrief_parts: many\n",
+    )
+    .unwrap();
+    let edit = stdout(&run(&home, &repo, &["config", "edit_hooks"]));
+    assert!(
+        edit.ends_with("registered by `pixel setup`: off — default\n"),
+        "{edit}"
+    );
+    let parts = stdout(&run(&home, &repo, &["config", "brief_parts"]));
+    assert!(
+        parts.ends_with("registered by `pixel setup`: 3 — default\n"),
+        "{parts}"
+    );
 }

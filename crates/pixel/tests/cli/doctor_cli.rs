@@ -235,12 +235,16 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
     let fixed = doctor_fixing(&home, &repo, &[only[0], only[1], only[2], only[3], "--fix"]);
     assert_eq!(fixed.status.code(), Some(0), "{fixed:?}");
     let text = String::from_utf8(fixed.stdout).unwrap();
+    // Every catalogue check but the two selected is skipped: counted from the
+    // catalogue, so a new check (#1426 added `classify.engine`) does not turn
+    // this test red.
+    let skipped = pixel_setup::doctor::CHECKS.len() - 2;
     assert_eq!(
         text,
         [
             "pixel doctor --fix: ran 1 repair(s) — 1 fixed, 0 not converged, 0 failed",
             "  [fixed] pixel setup (install.pi-impact, install.claude-hooks)",
-            "pixel doctor: ran 2 check(s), skipped 13 — 2 green, 0 yellow, 0 red",
+            &format!("pixel doctor: ran 2 check(s), skipped {skipped} — 2 green, 0 yellow, 0 red"),
             "",
         ]
         .join("\n")
