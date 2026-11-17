@@ -1,1 +1,0 @@
-**config:** `pixel config edit_hooks` and `brief_parts` now say which layer `pixel setup` registers from: a repository write no longer sends you to a `pixel setup` that ignores it, a repository `edit_hooks on` under a global `off` says setup will not register the hooks, and a read adds the value setup would register.

@@ -1,1 +1,0 @@
-**graph:** `pixel uses`, `context` and `rename` now fail when the graph cannot read a symbol row, instead of answering with a call from an unnamed symbol (`"symbol": null`) or silently skipping a rename site.
