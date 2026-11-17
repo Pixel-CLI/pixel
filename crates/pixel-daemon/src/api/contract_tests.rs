@@ -1802,6 +1802,49 @@ fn uses_should_fail_on_an_unreadable_caller_rather_than_print_a_null_symbol() {
         .unwrap();
     assert_eq!(broken, 1);
     drop(store);
-    let (_code, message) = err(&mut service, request());
-    assert!(!message.is_empty(), "the failure names its cause");
+    let (code, message) = err(&mut service, request());
+    assert_eq!(code, "INVALID_INPUT");
+    assert_eq!(
+        message,
+        "graph store: Invalid column type Text at index: 6, name: start_line"
+    );
+}
+
+/// Both directions must reject an unreadable neighbor rather than silently
+/// returning context with a missing caller or callee.
+#[test]
+fn context_should_fail_on_an_unreadable_neighbor_rather_than_omit_it() {
+    for (target, neighbor, direction) in [("login", "go", "incoming"), ("go", "login", "outgoing")]
+    {
+        let (_scratch, root) = fixture("context-unreadable");
+        let mut service = Service::open(&root).unwrap();
+        let request = || Request::Context {
+            uid: target.into(),
+            budget_tokens: Some(4000),
+            stale_ok: false,
+        };
+        assert_eq!(
+            ok(&mut service, request())[direction]["calls"][0]["name"],
+            neighbor,
+            "the neighbor is included before its row is broken"
+        );
+        let store = GraphStore::open(&service.graph_db_path()).unwrap();
+        assert_eq!(
+            store
+                .conn()
+                .execute(
+                    "UPDATE symbols SET start_line = 'not a line' WHERE name = ?1",
+                    [neighbor],
+                )
+                .unwrap(),
+            1
+        );
+        drop(store);
+        let (code, message) = err(&mut service, request());
+        assert_eq!(code, "INVALID_INPUT");
+        assert_eq!(
+            message,
+            "graph store: Invalid column type Text at index: 6, name: start_line"
+        );
+    }
 }

@@ -933,6 +933,35 @@ mod tests {
         assert!(after.contains("// loginUser"), "{after}");
     }
 
+    /// A broken caller must fail planning, not yield a partial rename that
+    /// changes the definition and import while leaving the call behind.
+    #[test]
+    fn plan_should_fail_on_an_unreadable_caller_rather_than_skip_its_site() {
+        let (dir, store) = fixture();
+        let sym = login_sym(&store);
+        let healthy = plan(&store, dir.path(), &sym, "authenticate").unwrap();
+        let call_lines: Vec<_> = healthy.files["src/caller.ts"]
+            .iter()
+            .filter(|edit| edit.kind == SiteKind::Call)
+            .map(|edit| edit.line)
+            .collect();
+        assert_eq!(call_lines, vec![5], "the healthy plan edits the call");
+        assert_eq!(
+            store
+                .conn()
+                .execute(
+                    "UPDATE symbols SET start_line = 'not a line' WHERE name = 'go'",
+                    [],
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            plan(&store, dir.path(), &sym, "authenticate").unwrap_err(),
+            "graph store: Invalid column type Text at index: 6, name: start_line"
+        );
+    }
+
     /// `import { loginUser as auth }` then `auth()`: the import's source
     /// name is rewritten, and the call — an Exact edge since the resolver
     /// follows the alias — writes `auth`, which stays valid. It is neither an
