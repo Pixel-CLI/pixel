@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! Configuration storage: YAML reads and comment-preserving YAML writes.
+//! Configuration storage: YAML reads and comment-preserving YAML writes of
+//! `config.yaml`, the global `~/.pixel/` one and a repository's `.pixel/` one.
+//! The one reader of both layers: the CLI's `pixel config`, the hooks, `pixel
+//! setup` and `pixel doctor` all parse through [`load`], each keeping its own
+//! error policy (a hook reads a malformed file as absent, doctor and writes
+//! refuse it).
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

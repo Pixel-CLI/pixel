@@ -59,17 +59,38 @@ pub const BRIEF_PARTS_MAX: u8 = 8;
 /// `1..=`[`BRIEF_PARTS_MAX`] is clamped into it and a value that is not a
 /// whole number counts as unset; `1` is the single hook of earlier releases.
 pub fn brief_parts(home: &Path, repo: Option<&Path>) -> u8 {
-    repo.into_iter()
-        .chain([home])
-        .find_map(|dir| {
-            crate::doctor::load_pixel_config(dir)
-                .ok()?
-                .get(BRIEF_PARTS_KEY)?
-                .as_u64()
-        })
-        .map_or(BRIEF_PARTS_DEFAULT, |count| {
-            u8::try_from(count.clamp(1, u64::from(BRIEF_PARTS_MAX))).unwrap_or(BRIEF_PARTS_MAX)
-        })
+    brief_parts_with_source(home, repo).0
+}
+
+/// [`brief_parts`] with the `config.yaml` it came from, `None` for the
+/// default. Value and source come from the same reading: a layer whose value
+/// is not a whole number is skipped for both, so it never lends its path to
+/// the next layer's value.
+pub fn brief_parts_with_source(home: &Path, repo: Option<&Path>) -> (u8, Option<PathBuf>) {
+    first_layer(home, repo, BRIEF_PARTS_KEY, serde_json::Value::as_u64).map_or(
+        (BRIEF_PARTS_DEFAULT, None),
+        |(count, path)| {
+            let count =
+                u8::try_from(count.clamp(1, u64::from(BRIEF_PARTS_MAX))).unwrap_or(BRIEF_PARTS_MAX);
+            (count, Some(path))
+        },
+    )
+}
+
+/// The first layer, the repository's when `repo` is given then the global
+/// one, whose `config.yaml` holds `key` with a value `read` accepts, with that
+/// file's path. A layer that cannot be read, or whose value `read` refuses,
+/// counts as unset.
+fn first_layer<T>(
+    home: &Path,
+    repo: Option<&Path>,
+    key: &str,
+    read: impl Fn(&serde_json::Value) -> Option<T>,
+) -> Option<(T, PathBuf)> {
+    repo.into_iter().chain([home]).find_map(|dir| {
+        let value = read(crate::doctor::load_pixel_config(dir).ok()?.get(key)?)?;
+        Some((value, crate::config_file::path_in(&dir.join(".pixel"))))
+    })
 }
 
 /// Settings key of the edit hooks (`pixel config edit_hooks on`): the card
@@ -81,15 +102,72 @@ pub const EDIT_HOOKS_KEY: &str = "edit_hooks";
 /// the global `~/.pixel/config.yaml`. Off when neither says so, and a value
 /// that is not a boolean counts as unset.
 pub fn edit_hooks(home: &Path, repo: Option<&Path>) -> bool {
-    repo.into_iter()
-        .chain([home])
-        .find_map(|dir| {
-            crate::doctor::load_pixel_config(dir)
-                .ok()?
-                .get(EDIT_HOOKS_KEY)?
-                .as_bool()
-        })
-        .unwrap_or(false)
+    edit_hooks_with_source(home, repo).0
+}
+
+/// [`edit_hooks`] with the `config.yaml` it came from, `None` for the default
+/// (off). A value that is not a boolean is skipped for both.
+pub fn edit_hooks_with_source(home: &Path, repo: Option<&Path>) -> (bool, Option<PathBuf>) {
+    first_layer(home, repo, EDIT_HOOKS_KEY, serde_json::Value::as_bool)
+        .map_or((false, None), |(on, path)| (on, Some(path)))
+}
+
+/// Environment variable naming a SearXNG base URL (`https://host`, no path).
+pub const WEB_SEARCH_SEARXNG_ENV: &str = "PIXEL_WEB_SEARCH_URL";
+/// Environment variable naming the Perplexity API key.
+pub const WEB_SEARCH_PERPLEXITY_ENV: &str = "PERPLEXITY_API_KEY";
+
+/// Which web-search variables the environment sets, as [`env_is_set`] reads
+/// them. A parameter of [`web_search_provider`] and of doctor's check, so a
+/// test passes its own instead of inheriting the developer's (#1322).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WebSearchEnv {
+    /// [`WEB_SEARCH_SEARXNG_ENV`] is set.
+    pub searxng_url: bool,
+    /// [`WEB_SEARCH_PERPLEXITY_ENV`] is set.
+    pub perplexity_key: bool,
+}
+
+impl WebSearchEnv {
+    /// The two variables as this process sees them.
+    #[cfg_attr(test, mutants::skip)] // one-line adapter over the process environment; `env_is_set` is tested
+    pub fn from_process() -> Self {
+        Self {
+            searxng_url: env_is_set(std::env::var_os(WEB_SEARCH_SEARXNG_ENV)),
+            perplexity_key: env_is_set(std::env::var_os(WEB_SEARCH_PERPLEXITY_ENV)),
+        }
+    }
+}
+
+/// Whether an environment value configures a provider: present, valid UTF-8
+/// and non-empty. A value the CLI cannot read as UTF-8 names no URL or key.
+pub fn env_is_set(value: Option<std::ffi::OsString>) -> bool {
+    value
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| !value.is_empty())
+}
+
+/// The web-search provider `pixel config` and `pixel doctor` report: SearXNG
+/// when its variable or the stored `web_search.searxng_url` is set, else
+/// Perplexity when its variable or `remote_keys.perplexity` is, else `none`
+/// (the public chain). `doc` is the global `config.yaml`; an empty stored
+/// value counts as absent. This is the configuration's answer: the
+/// `pixel-utilities` plugin runs the search and reads the same sources, but
+/// nothing here proves the plugin agrees.
+pub fn web_search_provider(env: WebSearchEnv, doc: &serde_json::Value) -> &'static str {
+    let stored = |section: &str, key: &str| {
+        doc.get(section)
+            .and_then(|section| section.get(key))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    };
+    if env.searxng_url || stored("web_search", "searxng_url") {
+        "searxng"
+    } else if env.perplexity_key || stored("remote_keys", "perplexity") {
+        "perplexity"
+    } else {
+        "none"
+    }
 }
 
 /// Settings key of the time one prompt brief may take.
@@ -417,6 +495,46 @@ mod tests {
             write_config(home.path(), text);
             assert_eq!(brief_parts(home.path(), None), expected, "{text:?}");
         }
+    }
+
+    /// A layer whose value is skipped must not lend its path to the next
+    /// layer's value: `pixel config` once printed the global count with the
+    /// repository's path when the repository held `brief_parts: many`.
+    #[test]
+    fn a_setting_source_should_be_the_layer_its_value_came_from() {
+        let home = tempfile::TempDir::new().unwrap();
+        let repo = tempfile::TempDir::new().unwrap();
+        let global_file = home.path().join(".pixel/config.yaml");
+        let repo_file = repo.path().join(".pixel/config.yaml");
+        assert_eq!(
+            brief_parts_with_source(home.path(), Some(repo.path())),
+            (BRIEF_PARTS_DEFAULT, None)
+        );
+        assert_eq!(
+            edit_hooks_with_source(home.path(), Some(repo.path())),
+            (false, None)
+        );
+
+        write_config(home.path(), "brief_parts: 5\nedit_hooks: true\n");
+        write_config(repo.path(), "brief_parts: many\nedit_hooks: maybe\n");
+        assert_eq!(
+            brief_parts_with_source(home.path(), Some(repo.path())),
+            (5, Some(global_file.clone()))
+        );
+        assert_eq!(
+            edit_hooks_with_source(home.path(), Some(repo.path())),
+            (true, Some(global_file))
+        );
+
+        write_config(repo.path(), "brief_parts: 2\nedit_hooks: false\n");
+        assert_eq!(
+            brief_parts_with_source(home.path(), Some(repo.path())),
+            (2, Some(repo_file.clone()))
+        );
+        assert_eq!(
+            edit_hooks_with_source(home.path(), Some(repo.path())),
+            (false, Some(repo_file))
+        );
     }
 
     #[test]

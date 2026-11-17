@@ -179,8 +179,11 @@ pub fn overview(path: &Path) -> Result<(), String> {
         println!("repo: {}", path.display());
         validate(&path)?;
     }
-    let (metrics, source) = metrics_resolution(root.as_deref());
-    if std::env::var_os("PIXEL_METRICS").is_some_and(|v| v == "0") {
+    let (metrics, source) = metrics_resolution(
+        root.as_deref(),
+        std::env::var("PIXEL_METRICS").ok().as_deref(),
+    );
+    if source == Source::Env {
         println!("metrics: off (PIXEL_METRICS)");
     } else {
         println!(
@@ -267,34 +270,47 @@ fn confined_repo_config(root: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// The global `config.yaml`, read leniently: an empty document when it is
+/// absent or unreadable, as the hooks read it.
+pub(crate) fn global_config_doc() -> Value {
+    global_config_path()
+        .and_then(|path| read_config_doc(&path))
+        .unwrap_or_else(|| json!({}))
+}
+
 fn global_config_path() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(|home| crate::config_file::path_in(&PathBuf::from(home).join(".pixel")))
 }
 
-/// Effective live-metrics setting for `root`: repo layer first, then the
-/// global configuration, then the on-by-default baseline.
-pub fn metrics_enabled(root: Option<&Path>) -> bool {
-    if let Some(root) = root
-        && let Some(on) = read_metrics(&repo_config_path(root))
-    {
-        return on;
-    }
-    global_config_path()
-        .as_deref()
-        .and_then(read_metrics)
-        .unwrap_or(true)
+/// Effective live-metrics setting for `root`, given the `PIXEL_METRICS`
+/// value `env` the caller's command sees: see [`metrics_resolution`].
+pub fn metrics_enabled(root: Option<&Path>, env: Option<&str>) -> bool {
+    metrics_resolution(root, env).0
 }
 
-/// Which layer produced the effective setting — for `pixel config metrics`.
+/// What decided the live-metrics setting — for `pixel config` and
+/// `pixel config metrics`.
 #[derive(Debug, PartialEq, Eq)]
 enum Source {
+    /// `PIXEL_METRICS=0`.
+    Env,
     Repo,
     Global,
     Default,
 }
 
-fn metrics_resolution(root: Option<&Path>) -> (bool, Source) {
+/// The live-metrics setting for `root` and what decided it. `env` is the
+/// `PIXEL_METRICS` value the caller's command sees, passed in and never read
+/// here: the process's own for the CLI and the hooks, the agent command's for
+/// the metrics relay, where an inline `PIXEL_METRICS=1 pixel …` overrides an
+/// inherited `0` (#1428). `0` turns metrics off whatever the files say; any
+/// other value, or none, leaves it to the repository layer, then the global
+/// one, then on.
+fn metrics_resolution(root: Option<&Path>, env: Option<&str>) -> (bool, Source) {
+    if env == Some("0") {
+        return (false, Source::Env);
+    }
     if let Some(root) = root
         && let Some(on) = read_metrics(&repo_config_path(root))
     {
@@ -994,18 +1010,6 @@ pub fn remote_key(preset: crate::decide_remote::Preset) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The SearXNG base URL the web-search setup recorded, if any: the
-/// `PIXEL_WEB_SEARCH_URL` env var wins over it in `pixel web-search`.
-pub fn web_search_searxng_url() -> Option<String> {
-    let path = global_config_path()?;
-    read_config_doc(&path)?
-        .get("web_search")?
-        .get("searxng_url")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
 /// Persist the SearXNG base URL chosen by the web-search setup.
 pub fn set_web_search_searxng_url(url: &str) -> Result<(), String> {
     let path = global_config_path().ok_or("no HOME for the global config")?;
@@ -1031,19 +1035,6 @@ pub fn remove_web_search_searxng_url() -> Result<(), String> {
             }
         }
     })
-}
-
-/// The Perplexity API key the web-search setup stored, under
-/// `remote_keys.perplexity` — the same secret store, in the same 0600
-/// global file, that `pixel config remote-key` writes. Never echoed back.
-pub fn web_search_perplexity_key() -> Option<String> {
-    let path = global_config_path()?;
-    let doc = read_config_doc(&path)?;
-    doc.get("remote_keys")?
-        .get("perplexity")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
 }
 
 /// Persist the Perplexity API key, mirroring `pixel config remote-key`
@@ -1186,11 +1177,83 @@ fn effective(root: Option<&Path>, key: &str, setting: Setting) -> (String, Strin
             (on_off(on).to_owned(), source)
         }
         Setting::BriefParts => {
-            let source = layers(root)
-                .find(|path| read_config_doc(path).is_some_and(|doc| doc.get(key).is_some()))
-                .map_or_else(|| "default".to_owned(), |path| path.display().to_string());
-            (brief_parts(root).to_string(), source)
+            // Value and source from one reading: a layer whose value setup
+            // skips (not a whole number) lends its path to nothing.
+            let home = std::env::var_os("HOME").map_or_default(PathBuf::from);
+            let (count, from) = pixel_setup::config::brief_parts_with_source(&home, root);
+            (count.to_string(), shown_source(from))
         }
+    }
+}
+
+/// What `pixel setup` registers for `key`, and the file it reads it from.
+/// Setup reads the hook settings from the global layer only (`install`
+/// calls `pixel_setup::config::edit_hooks` and `brief_parts` with no
+/// repository) and never the environment, so this can differ from what
+/// [`effective`] reports. It is what setup would register, not what is
+/// installed: whether setup has run is `pixel doctor`'s to say. `None` for a
+/// setting setup does not read, or without a HOME.
+fn registration(setting: Setting) -> Option<(String, String)> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    // Setup reads with no repository; value and source come from one reading,
+    // so a value setup skips names the default, not the file holding it.
+    let (value, from) = match setting {
+        Setting::BriefParts => {
+            let (count, from) = pixel_setup::config::brief_parts_with_source(&home, None);
+            (count.to_string(), from)
+        }
+        Setting::OptIn(_) => {
+            let (on, from) = pixel_setup::config::edit_hooks_with_source(&home, None);
+            (on_off(on).to_owned(), from)
+        }
+        Setting::Switch(_) => return None,
+    };
+    Some((value, shown_source(from)))
+}
+
+/// A layer's file as `pixel config` names a source, or `default`.
+fn shown_source(from: Option<PathBuf>) -> String {
+    from.map_or_else(|| "default".to_owned(), |path| path.display().to_string())
+}
+
+/// The note `pixel config <key> <value>` prints about the hooks `pixel setup`
+/// registers, after writing `written` to the global layer (`global`) or to
+/// the repository's. `registered` is [`registration`]'s value and source.
+/// A global write is what setup reads, so it asks for `pixel setup`. A
+/// repository write never reaches setup (#1427): it says what it changes
+/// instead, and how to change the registration.
+fn registration_note(
+    key: &str,
+    setting: Setting,
+    global: bool,
+    written: &str,
+    registered: (&str, &str),
+) -> Option<String> {
+    let (value, source) = registered;
+    match (setting, global) {
+        (Setting::BriefParts, true) => {
+            Some("note: run `pixel setup` so the registered hooks carry the new count".to_owned())
+        }
+        (Setting::BriefParts, false) => Some(format!(
+            "note: native hooks keep the {value} parts `pixel setup` registers from the global layer ({source}); \
+             only Pi's package follows this repository value. To change the registered count: \
+             `pixel config {key} {written} --global`, then `pixel setup`"
+        )),
+        (Setting::OptIn(_), true) => {
+            Some("note: run `pixel setup` so the edit hooks are registered or removed".to_owned())
+        }
+        // What is installed is not known here: the global layer says what setup
+        // would register, not whether it ran, nor what an earlier run left.
+        (Setting::OptIn(_), false) if value == "on" => Some(format!(
+            "note: `pixel setup` registers the edit hooks from the global layer ({source}); \
+             once they are installed, this value turns them {written} in this repository"
+        )),
+        (Setting::OptIn(_), false) if written == "on" => Some(format!(
+            "note: `pixel setup` does not register the edit hooks while the global layer has them off ({source}); \
+             this value turns them on here only if an earlier setup left them installed (`pixel doctor` shows it). \
+             To register them: `pixel config {key} on --global`, then `pixel setup`"
+        )),
+        (Setting::OptIn(_), false) | (Setting::Switch(_), _) => None,
     }
 }
 
@@ -1213,6 +1276,9 @@ pub fn run_setting(
     let Some(raw) = value else {
         let (current, source) = effective(root.as_deref(), key, setting);
         println!("{key}: {current} — {source}");
+        if let Some((registered, from)) = registration(setting) {
+            println!("registered by `pixel setup`: {registered} — {from}");
+        }
         return Ok(());
     };
     let stored = parse_setting(key, setting, raw)?;
@@ -1229,13 +1295,26 @@ pub fn run_setting(
     println!("{key}: {written} — wrote {}", target.display());
     let (current, source) = effective(root.as_deref(), key, setting);
     if current != written {
-        println!("note: {source} sets {key}: {current} here and wins");
+        // The configured count is read at run time by Pi's package alone;
+        // native hooks carry the count setup registered from the global layer.
+        let scope = if setting == Setting::BriefParts {
+            " for Pi's package; native hooks keep the count `pixel setup` registers from the global layer"
+        } else {
+            ""
+        };
+        println!("note: {source} sets {key}: {current} here and wins{scope}");
     }
-    if setting == Setting::BriefParts {
-        println!("note: run `pixel setup` so the registered hooks carry the new count");
-    }
-    if setting == Setting::OptIn(EDIT_HOOKS_ENV) {
-        println!("note: run `pixel setup` so the edit hooks are registered or removed");
+    let registered = registration(setting);
+    if let Some(note) = registered.as_ref().and_then(|(value, from)| {
+        registration_note(
+            key,
+            setting,
+            global,
+            &written,
+            (value.as_str(), from.as_str()),
+        )
+    }) {
+        println!("{note}");
     }
     Ok(())
 }
@@ -1257,8 +1336,12 @@ fn run_metrics_with(
     let root = crate::discover_root(path).ok();
     match value {
         None => {
-            let (on, source) = metrics_resolution(root.as_deref());
+            let (on, source) = metrics_resolution(
+                root.as_deref(),
+                std::env::var("PIXEL_METRICS").ok().as_deref(),
+            );
             let layer = match source {
+                Source::Env => "environment PIXEL_METRICS=0".to_string(),
                 Source::Repo => {
                     format!(
                         "repo {}",
@@ -1309,6 +1392,17 @@ fn run_metrics_with(
 
 #[cfg(test)]
 mod tests {
+    /// A stored global value as `pixel config` reads it: absent or empty is
+    /// `None`.
+    fn stored(section: &str, key: &str) -> Option<String> {
+        global_config_doc()
+            .get(section)?
+            .get(key)?
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
     #[test]
     fn only_the_settings_pixel_writes_are_settings() {
         assert_eq!(
@@ -1379,6 +1473,116 @@ mod tests {
         assert_eq!(shown(&json!(true)), "on");
         assert_eq!(shown(&json!(false)), "off");
         assert_eq!(shown(&json!(5)), "5");
+    }
+
+    /// `pixel setup` reads the hook settings from the global layer only
+    /// (#1427): a global write asks for it, a repository write says what it
+    /// changes, and only a write that changes nothing registered says nothing.
+    #[test]
+    fn a_registration_note_should_follow_the_layer_setup_reads() {
+        /// The setting, whether the write is global, the value written, what
+        /// setup registers and from where, and the note expected.
+        type Case = (
+            Setting,
+            bool,
+            &'static str,
+            (&'static str, &'static str),
+            Option<&'static str>,
+        );
+        let edit = Setting::OptIn(EDIT_HOOKS_ENV);
+        let note = |setting, global, written, registered| {
+            registration_note(
+                if setting == Setting::BriefParts {
+                    BRIEF_PARTS_KEY
+                } else {
+                    EDIT_HOOKS_KEY
+                },
+                setting,
+                global,
+                written,
+                registered,
+            )
+        };
+        let cases: [Case; 9] = [
+            (
+                Setting::BriefParts,
+                true,
+                "6",
+                ("6", "/h/.pixel/config.yaml"),
+                Some("note: run `pixel setup` so the registered hooks carry the new count"),
+            ),
+            (
+                Setting::BriefParts,
+                false,
+                "5",
+                ("3", "default"),
+                Some(
+                    "note: native hooks keep the 3 parts `pixel setup` registers from the global layer (default); \
+                   only Pi's package follows this repository value. To change the registered count: \
+                   `pixel config brief_parts 5 --global`, then `pixel setup`",
+                ),
+            ),
+            (
+                edit,
+                true,
+                "on",
+                ("on", "/h/.pixel/config.yaml"),
+                Some("note: run `pixel setup` so the edit hooks are registered or removed"),
+            ),
+            (
+                edit,
+                true,
+                "off",
+                ("off", "/h/.pixel/config.yaml"),
+                Some("note: run `pixel setup` so the edit hooks are registered or removed"),
+            ),
+            (
+                edit,
+                false,
+                "off",
+                ("on", "/h/.pixel/config.yaml"),
+                Some(
+                    "note: `pixel setup` registers the edit hooks from the global layer (/h/.pixel/config.yaml); \
+                   once they are installed, this value turns them off in this repository",
+                ),
+            ),
+            (
+                edit,
+                false,
+                "on",
+                ("on", "/h/.pixel/config.yaml"),
+                Some(
+                    "note: `pixel setup` registers the edit hooks from the global layer (/h/.pixel/config.yaml); \
+                   once they are installed, this value turns them on in this repository",
+                ),
+            ),
+            (
+                edit,
+                false,
+                "on",
+                ("off", "default"),
+                Some(
+                    "note: `pixel setup` does not register the edit hooks while the global layer has them off (default); \
+                   this value turns them on here only if an earlier setup left them installed (`pixel doctor` shows it). \
+                   To register them: `pixel config edit_hooks on --global`, then `pixel setup`",
+                ),
+            ),
+            (edit, false, "off", ("off", "default"), None),
+            (
+                Setting::Switch("PIXEL_BRIEF"),
+                true,
+                "on",
+                ("on", "default"),
+                None,
+            ),
+        ];
+        for (setting, global, written, registered, expected) in cases {
+            assert_eq!(
+                note(setting, global, written, registered).as_deref(),
+                expected,
+                "{setting:?} global={global} written={written} registered={registered:?}"
+            );
+        }
     }
 
     #[test]
@@ -2337,7 +2541,7 @@ mod tests {
         validate(&cfg).unwrap();
         remove_web_search_searxng_url().unwrap();
         assert!(
-            web_search_searxng_url().is_none(),
+            stored("web_search", "searxng_url").is_none(),
             "field removed, not emptied"
         );
         // `validate` accepts the removed state — an empty `searxng_url`
@@ -2356,15 +2560,24 @@ mod tests {
         let saved = home_env();
         point_home(&home.0);
 
-        assert!(web_search_searxng_url().is_none(), "nothing stored → unset");
         assert!(
-            web_search_perplexity_key().is_none(),
+            stored("web_search", "searxng_url").is_none(),
+            "nothing stored → unset"
+        );
+        assert!(
+            stored("remote_keys", "perplexity").is_none(),
             "nothing stored → unset"
         );
         set_web_search_searxng_url("https://sx.test").unwrap();
         set_web_search_perplexity_key("pplx-secret").unwrap();
-        assert_eq!(web_search_searxng_url().as_deref(), Some("https://sx.test"));
-        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+        assert_eq!(
+            stored("web_search", "searxng_url").as_deref(),
+            Some("https://sx.test")
+        );
+        assert_eq!(
+            stored("remote_keys", "perplexity").as_deref(),
+            Some("pplx-secret")
+        );
 
         let cfg: Value = serde_saphyr::from_str(
             &std::fs::read_to_string(home.0.join(".pixel/config.yaml")).unwrap(),
@@ -2389,7 +2602,10 @@ mod tests {
         );
         set_web_search_perplexity_key("pplx-secret").unwrap();
 
-        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+        assert_eq!(
+            stored("remote_keys", "perplexity").as_deref(),
+            Some("pplx-secret")
+        );
         let cfg: Value = serde_saphyr::from_str(
             &std::fs::read_to_string(home.0.join(".pixel/config.yaml")).unwrap(),
         )
@@ -2415,8 +2631,14 @@ mod tests {
         );
         set_web_search_searxng_url("https://sx.test").unwrap();
         set_web_search_perplexity_key("pplx-secret").unwrap();
-        assert_eq!(web_search_searxng_url().as_deref(), Some("https://sx.test"));
-        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+        assert_eq!(
+            stored("web_search", "searxng_url").as_deref(),
+            Some("https://sx.test")
+        );
+        assert_eq!(
+            stored("remote_keys", "perplexity").as_deref(),
+            Some("pplx-secret")
+        );
         restore_home(saved);
     }
 
@@ -2473,16 +2695,19 @@ mod tests {
         let repo = home.0.join("repo");
         std::fs::create_dir_all(repo.join(".pixel")).unwrap();
 
-        assert!(metrics_enabled(Some(&repo)), "unset defaults on");
+        assert!(metrics_enabled(Some(&repo), None), "unset defaults on");
 
         write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
-        assert!(!metrics_enabled(Some(&repo)), "repo off wins");
+        assert!(!metrics_enabled(Some(&repo), None), "repo off wins");
 
         write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"on\"}");
         write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
-        assert!(metrics_enabled(Some(&repo)), "repo on overrides global off");
         assert!(
-            !metrics_enabled(Some(&repo.join("no-config-here"))),
+            metrics_enabled(Some(&repo), None),
+            "repo on overrides global off"
+        );
+        assert!(
+            !metrics_enabled(Some(&repo.join("no-config-here")), None),
             "global off applies where no repo layer speaks"
         );
 
@@ -2500,20 +2725,20 @@ mod tests {
         write(&repo.join(".pixel/config.yaml"), "not json");
         write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert!(
-            !metrics_enabled(Some(&repo)),
+            !metrics_enabled(Some(&repo), None),
             "malformed repo falls through to global"
         );
 
         write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"loud\"}");
         assert!(
-            !metrics_enabled(Some(&repo)),
+            !metrics_enabled(Some(&repo), None),
             "unknown value is not a setting"
         );
         write(
             &home.0.join(".pixel/config.yaml"),
             "{\"metrics\": \"off\", \"future\": 1}",
         );
-        assert!(!metrics_enabled(Some(&repo)));
+        assert!(!metrics_enabled(Some(&repo), None));
 
         restore_home(saved);
     }
@@ -2583,10 +2808,10 @@ mod tests {
         let doc: Value = crate::config_file::load(&cfg).unwrap();
         assert_eq!(doc["metrics"], "off");
         assert_eq!(doc["future"]["nested"], true);
-        assert!(!metrics_enabled(Some(&repo)));
+        assert!(!metrics_enabled(Some(&repo), None));
 
         write_metrics(&cfg, true).unwrap();
-        assert!(metrics_enabled(Some(&repo)));
+        assert!(metrics_enabled(Some(&repo), None));
         assert!(
             !cfg.with_extension("json.tmp").exists(),
             "temp file is renamed away"
@@ -2606,33 +2831,62 @@ mod tests {
         std::fs::create_dir_all(repo.join(".pixel")).unwrap();
 
         assert_eq!(
-            metrics_resolution(Some(&repo)),
+            metrics_resolution(Some(&repo), None),
             (true, Source::Default),
             "nothing set → default on"
         );
         assert!(
-            metrics_enabled(None),
+            metrics_enabled(None, None),
             "no repo handle still resolves through the default"
         );
 
         write(&home.0.join(".pixel/config.yaml"), "{\"metrics\": \"off\"}");
         assert_eq!(
-            metrics_resolution(Some(&repo)),
+            metrics_resolution(Some(&repo), None),
             (false, Source::Global),
             "global off shows up as the global layer"
         );
         assert!(
-            !metrics_enabled(None),
+            !metrics_enabled(None, None),
             "without a repo the global layer is the answer"
         );
 
         write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"on\"}");
         assert_eq!(
-            metrics_resolution(Some(&repo)),
+            metrics_resolution(Some(&repo), None),
             (true, Source::Repo),
             "repo on overrides a global off"
         );
 
+        restore_home(saved);
+    }
+
+    /// The veto comes from the caller (#1428): `0` wins over every file, any
+    /// other value leaves the files in charge, and the process environment is
+    /// never read inside the resolution, so the metrics relay can pass the
+    /// value the agent's own command saw.
+    #[test]
+    fn metrics_resolution_should_take_the_veto_from_the_caller() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let repo = home.0.join("repo");
+        write(&repo.join(".pixel/config.yaml"), "{\"metrics\": \"on\"}");
+        // SAFETY: under crate::ENV_LOCK; restored below.
+        unsafe { std::env::set_var("PIXEL_METRICS", "0") };
+        assert_eq!(
+            metrics_resolution(Some(&repo), Some("1")),
+            (true, Source::Repo),
+            "the caller's value is used, not the process's 0"
+        );
+        assert_eq!(
+            metrics_resolution(Some(&repo), Some("0")),
+            (false, Source::Env)
+        );
+        assert_eq!(metrics_resolution(Some(&repo), None), (true, Source::Repo));
+        // SAFETY: paired restore under the same lock.
+        unsafe { std::env::remove_var("PIXEL_METRICS") };
         restore_home(saved);
     }
 

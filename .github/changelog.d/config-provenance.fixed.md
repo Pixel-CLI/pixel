@@ -1,0 +1,1 @@
+**config:** `pixel config brief_parts` now names the file its value came from: a repository value that is not a whole number no longer lends its path to the global count; `pixel doctor` reads `config.yaml` through the same reader as `pixel config` and reports a directory in its place.

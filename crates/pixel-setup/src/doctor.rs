@@ -213,6 +213,10 @@ pub struct DoctorOptions {
     /// with `None`, `classify.engine` still runs (every catalogued id does)
     /// and says it was not evaluated.
     pub classify: Option<ClassifyReadiness>,
+    /// The web-search variables `web-search.provider` reads. Defaults to the
+    /// process environment; a test passes its own so the developer's
+    /// `PERPLEXITY_API_KEY` cannot change the verdict (#1322).
+    pub web_search_env: Option<crate::config::WebSearchEnv>,
 }
 
 /// What `pixel classify` would meet if the prompt brief ran it now.
@@ -529,7 +533,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         if !plugins.has("web-search") {
             return Ok(web_search_plugin_absent(&plugins));
         }
-        web_search_provider_check(&home)
+        web_search_provider_check(
+            &home,
+            options
+                .web_search_env
+                .unwrap_or_else(crate::config::WebSearchEnv::from_process),
+        )
     });
 
     runner.check_status("classify.engine", || {
@@ -1133,30 +1142,19 @@ fn web_search_plugin_absent(plugins: &pixel_plugin::Available) -> (CheckStatus, 
 
 /// Which web search provider `pixel web-search` resolves to for `home`.
 /// Green when one is configured; yellow, naming the setup command, when the
-/// public chain is the default. The provider is read straight from the
-/// environment and the global config file (`~/.pixel/config.yaml`, or the
-/// legacy JSON) — never from a spawned `pixel`: the doctor contract tests
-/// run the check in-process against the test binary, and a subprocess would
-/// re-enter it with `config overview` as a rogue test filter.
+/// public chain is the default. The provider is read from `env` (the process
+/// environment unless [`DoctorOptions::web_search_env`] says otherwise) and
+/// the global config file (`~/.pixel/config.yaml`) through
+/// [`crate::config::web_search_provider`], the rule `pixel config` uses —
+/// never from a spawned `pixel`: the doctor contract tests run the check
+/// in-process against the test binary, and a subprocess would re-enter it
+/// with `config overview` as a rogue test filter.
 pub(crate) fn web_search_provider_check(
     home: &Path,
-) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
-    web_search_provider_check_with(
-        home,
-        env_non_empty("PIXEL_WEB_SEARCH_URL"),
-        env_non_empty("PERPLEXITY_API_KEY"),
-    )
-}
-
-/// The check with the environment leg made explicit, so a test can drive
-/// the resolution without touching the process environment.
-fn web_search_provider_check_with(
-    home: &Path,
-    searxng_env: bool,
-    perplexity_env: bool,
+    env: crate::config::WebSearchEnv,
 ) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
     let doc = load_pixel_config(home)?;
-    match web_search_provider_from(searxng_env, perplexity_env, &doc) {
+    match crate::config::web_search_provider(env, &doc) {
         "none" => Ok((
             CheckStatus::Yellow,
             DoctorCheckDetail {
@@ -1175,75 +1173,14 @@ fn web_search_provider_check_with(
     }
 }
 
-/// Resolve the provider the same way `pixel web-search` does: SearXNG when
-/// its env var or the stored `web_search.searxng_url` is present, else
-/// Perplexity when `PERPLEXITY_API_KEY` or `remote_keys.perplexity` is,
-/// else `none` (the public chain is the fallback).
-fn web_search_provider_from(searxng_env: bool, perplexity_env: bool, doc: &Value) -> &'static str {
-    let searxng_stored = doc
-        .get("web_search")
-        .and_then(|w| w.get("searxng_url"))
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.is_empty());
-    if searxng_env || searxng_stored {
-        return "searxng";
-    }
-    let perplexity_stored = doc
-        .get("remote_keys")
-        .and_then(|k| k.get("perplexity"))
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.is_empty());
-    if perplexity_env || perplexity_stored {
-        "perplexity"
-    } else {
-        "none"
-    }
-}
-
-/// A non-empty environment value, as the CLI reads it. Mirrors
-/// `web_search::normalize_base`: a value counts only when it is valid UTF-8
-/// and non-empty, so a non-UTF-8 `PIXEL_WEB_SEARCH_URL`/`PERPLEXITY_API_KEY`
-/// does not make `pixel doctor` report a provider `pixel web-search` would
-/// not select.
-fn env_non_empty(name: &str) -> bool {
-    std::env::var_os(name).is_some_and(|v| v.into_string().ok().is_some_and(|s| !s.is_empty()))
-}
-
-/// The global pixel config as a JSON value: `~/.pixel/config.yaml` parsed
-/// with the same YAML engine the CLI uses, or an empty document when the file
-/// does not exist. The two
-/// scalar keys the check reads never need more than the mapping shape, but a
-/// malformed file is an error rather than a silent `none` — doctor must not
-/// hide a config it cannot read.
+/// The global pixel config as a JSON value: `~/.pixel/config.yaml` read by
+/// [`crate::config_file::load`], the reader `pixel config` and the hooks use,
+/// or an empty document when the file does not exist. Doctor keeps the strict
+/// side of that reader: a malformed file, or a directory where the file
+/// belongs, is an error rather than a silent `none` — doctor must not hide a
+/// config it cannot read.
 pub(crate) fn load_pixel_config(home: &Path) -> std::result::Result<Value, String> {
-    let yaml = home.join(".pixel/config.yaml");
-    if yaml.is_file() {
-        let text =
-            std::fs::read_to_string(&yaml).map_err(|e| format!("read {}: {e}", yaml.display()))?;
-        return parse_pixel_config(&text, &yaml);
-    }
-    Ok(serde_json::json!({}))
-}
-
-/// Parse one pixel config file: `null` (an empty file) reads as an empty
-/// document, anything other than a mapping is an error.
-fn parse_pixel_config(text: &str, path: &Path) -> std::result::Result<Value, String> {
-    let value: Value = serde_saphyr::from_str(text).map_err(|_| {
-        format!(
-            "invalid configuration {}; expected a YAML mapping",
-            path.display()
-        )
-    })?;
-    if value.is_null() {
-        return Ok(serde_json::json!({}));
-    }
-    if !value.is_object() {
-        return Err(format!(
-            "configuration {} must be a mapping",
-            path.display()
-        ));
-    }
-    Ok(value)
+    crate::config_file::load(&crate::config_file::path_in(&home.join(".pixel")))
 }
 
 /// Runs the checks the selection keeps and records each outcome.
@@ -1899,7 +1836,6 @@ pub use pixel_daemon::daemon::socket_path as daemon_socket_path;
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::env_non_empty;
     use super::{
         CHECKS, CheckSpec, CheckStatus, ClassifyReadiness, DoctorCheck, DoctorReport,
         PLACEHOLDER_DUMMY, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs,
@@ -1907,10 +1843,18 @@ mod tests {
         judge_repair, load_pixel_config, names_check, normalize_rule_command, one_line,
         probe_daemon_epistemics, render_catalogue, render_repairs, repair_plan, run_repair,
         selected, shell_path_check, spec, split_home_repairs, validate_selection,
-        web_search_provider_check_with, web_search_provider_from,
+        web_search_provider_check,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
+
+    /// The web-search variables a test sets, without touching the process.
+    fn web_env(searxng_url: bool, perplexity_key: bool) -> crate::config::WebSearchEnv {
+        crate::config::WebSearchEnv {
+            searxng_url,
+            perplexity_key,
+        }
+    }
 
     #[test]
     fn task_observations_should_distinguish_registration_from_real_session_events() {
@@ -2405,39 +2349,42 @@ mod tests {
             doc
         };
         assert_eq!(
-            web_search_provider_from(true, false, &stored(false, false)),
+            crate::config::web_search_provider(web_env(true, false), &stored(false, false)),
             "searxng"
         );
         assert_eq!(
-            web_search_provider_from(false, false, &stored(true, false)),
+            crate::config::web_search_provider(web_env(false, false), &stored(true, false)),
             "searxng"
         );
         // A SearXNG env var or stored URL wins over a Perplexity key.
         assert_eq!(
-            web_search_provider_from(true, false, &stored(false, true)),
+            crate::config::web_search_provider(web_env(true, false), &stored(false, true)),
             "searxng"
         );
         assert_eq!(
-            web_search_provider_from(false, false, &stored(true, true)),
+            crate::config::web_search_provider(web_env(false, false), &stored(true, true)),
             "searxng"
         );
         assert_eq!(
-            web_search_provider_from(false, true, &stored(false, false)),
+            crate::config::web_search_provider(web_env(false, true), &stored(false, false)),
             "perplexity"
         );
         assert_eq!(
-            web_search_provider_from(false, false, &stored(false, true)),
+            crate::config::web_search_provider(web_env(false, false), &stored(false, true)),
             "perplexity"
         );
         assert_eq!(
-            web_search_provider_from(false, false, &stored(false, false)),
+            crate::config::web_search_provider(web_env(false, false), &stored(false, false)),
             "none"
         );
         let empty = serde_json::json!({
             "web_search": { "searxng_url": "" },
             "remote_keys": { "perplexity": "" },
         });
-        assert_eq!(web_search_provider_from(false, false, &empty), "none");
+        assert_eq!(
+            crate::config::web_search_provider(web_env(false, false), &empty),
+            "none"
+        );
     }
 
     /// The env wrapper is the one path the resolution tests cannot reach
@@ -2448,7 +2395,9 @@ mod tests {
     fn web_search_env_flags_drive_the_provider_check() {
         let home = tempfile::tempdir().unwrap();
         let provider = || {
-            let (_, check) = super::web_search_provider_check(home.path()).unwrap();
+            let (_, check) =
+                web_search_provider_check(home.path(), crate::config::WebSearchEnv::from_process())
+                    .unwrap();
             check.detail.unwrap()["provider"]
                 .as_str()
                 .unwrap_or("?")
@@ -2517,6 +2466,17 @@ mod tests {
         assert!(
             load_pixel_config(&home).is_err(),
             "a malformed config is an error, not a silent none"
+        );
+        // A directory where the file belongs is unreadable, not empty: doctor
+        // reads through the shared reader and keeps its strict policy.
+        std::fs::remove_file(home.join(".pixel/config.yaml")).unwrap();
+        std::fs::create_dir(home.join(".pixel/config.yaml")).unwrap();
+        assert_eq!(
+            load_pixel_config(&home).unwrap_err(),
+            format!(
+                "cannot read configuration {}",
+                home.join(".pixel/config.yaml").display()
+            )
         );
 
         let _ = std::fs::remove_dir_all(dir);
@@ -2614,12 +2574,12 @@ mod tests {
         let home = dir.join("home");
         std::fs::create_dir_all(home.join(".pixel")).unwrap();
 
-        let (status, detail) = web_search_provider_check_with(&home, false, false).unwrap();
+        let (status, detail) = web_search_provider_check(&home, web_env(false, false)).unwrap();
         assert_eq!(status, CheckStatus::Yellow, "{detail:?}");
         assert_eq!(detail.detail.as_ref().unwrap()["provider"], "none");
         assert!(detail.summary.contains("pixel config setup"), "{detail:?}");
 
-        let (status, detail) = web_search_provider_check_with(&home, false, true).unwrap();
+        let (status, detail) = web_search_provider_check(&home, web_env(false, true)).unwrap();
         assert_eq!(status, CheckStatus::Green, "{detail:?}");
         assert_eq!(detail.detail.as_ref().unwrap()["provider"], "perplexity");
 
@@ -2628,52 +2588,40 @@ mod tests {
             "web_search:\n  searxng_url: https://sx.test\n",
         )
         .unwrap();
-        let (status, detail) = web_search_provider_check_with(&home, false, true).unwrap();
+        let (status, detail) = web_search_provider_check(&home, web_env(false, true)).unwrap();
         assert_eq!(status, CheckStatus::Green, "{detail:?}");
         assert_eq!(detail.detail.as_ref().unwrap()["provider"], "searxng");
 
         std::fs::write(home.join(".pixel/config.yaml"), "web_search: [\n").unwrap();
-        let err = web_search_provider_check_with(&home, false, false)
+        let err = web_search_provider_check(&home, web_env(false, false))
             .expect_err("a malformed config is red");
         assert!(err.contains("invalid configuration"), "{err}");
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// `env_non_empty` drives the env leg of the check: a value counts as
-    /// configured only when it is present, valid UTF-8, and non-empty. The
-    /// stored-config tests go through `web_search_provider_check_with` with
-    /// explicit booleans, so this raw read needs its own cases. A dedicated
-    /// name keeps the `PIXEL_WEB_SEARCH_URL`/`PERPLEXITY_API_KEY` the CLI
-    /// really reads untouched.
+    /// `env_is_set` is how a variable counts as configuring a provider:
+    /// present, UTF-8 and non-empty, the way the CLI reads it, so doctor
+    /// never reports a provider `pixel web-search` would not select. The
+    /// values are passed in: no process environment is read or changed.
     #[test]
-    fn env_non_empty_counts_only_a_present_non_empty_utf8_value() {
+    fn env_is_set_counts_only_a_present_non_empty_utf8_value() {
+        use crate::config::env_is_set;
         use std::os::unix::ffi::OsStringExt;
-        const VAR: &str = "PIXEL_QR_DOCTOR_WEB_SEARCH_PROBE";
-
-        // SAFETY: nextest runs one process per test (this repo's nextest
-        // config leans on exactly that), so the process env below races
-        // with no other test.
-        unsafe { std::env::remove_var(VAR) };
-        assert!(!env_non_empty(VAR), "absent counts as not configured");
-
-        // SAFETY: see the comment above; same isolation guarantees.
-        unsafe { std::env::set_var(VAR, "") };
-        assert!(!env_non_empty(VAR), "empty counts as not configured");
-
-        // SAFETY: see the comment above; same isolation guarantees.
-        unsafe { std::env::set_var(VAR, "https://sx.test") };
-        assert!(env_non_empty(VAR), "non-empty counts as configured");
-
-        // A value the CLI cannot read as UTF-8 is unusable, so it too counts
-        // as not configured rather than selecting a provider.
+        assert!(!env_is_set(None), "absent counts as not configured");
+        assert!(
+            !env_is_set(Some("".into())),
+            "empty counts as not configured"
+        );
+        assert!(
+            env_is_set(Some("https://sx.test".into())),
+            "non-empty counts as configured"
+        );
         let non_utf8 = std::ffi::OsString::from_vec(vec![0xf0, 0x28, 0x8c, 0x28]);
-        // SAFETY: see the comment above; same isolation guarantees.
-        unsafe { std::env::set_var(VAR, non_utf8) };
-        assert!(!env_non_empty(VAR), "non-UTF-8 counts as not configured");
-
-        // SAFETY: see the comment above; same isolation guarantees.
-        unsafe { std::env::remove_var(VAR) };
+        assert!(
+            !env_is_set(Some(non_utf8)),
+            "non-UTF-8 counts as not configured"
+        );
     }
 
     /// A stalled shell must not outlive the probe: `bounded_output` returns
@@ -3267,12 +3215,25 @@ Prose naming `pixel status` is not a table row.
     #[test]
     fn the_web_search_check_should_not_ask_for_a_provider_when_its_plugin_does_not_run() {
         let home = tempfile::tempdir().unwrap();
+        // The verdict must not depend on the developer's environment (#1322):
+        // the options carry the variables, and the process ones are set to
+        // values that would otherwise turn the "nothing configured" case green.
+        // SAFETY: nextest runs one process per test (this repo's nextest
+        // config leans on exactly that), so this races with no other test.
+        unsafe {
+            std::env::set_var(
+                crate::config::WEB_SEARCH_PERPLEXITY_ENV,
+                "pplx-from-the-shell",
+            );
+            std::env::set_var(crate::config::WEB_SEARCH_SEARXNG_ENV, "https://sx.shell");
+        }
         let run = |plugins: pixel_plugin::Available| {
             super::doctor(&super::DoctorOptions {
                 home: Some(home.path().to_path_buf()),
                 executable_path: Some(PathBuf::from("/opt/pixel/pixel")),
                 only: vec!["web-search.provider".into()],
                 plugins: Some(plugins),
+                web_search_env: Some(web_env(false, false)),
                 ..Default::default()
             })
             .unwrap()
@@ -3296,6 +3257,11 @@ Prose naming `pixel status` is not a table row.
                 .summary
                 .contains("no web search provider configured")
         );
+        // SAFETY: as above; the variables this test set are removed.
+        unsafe {
+            std::env::remove_var(crate::config::WEB_SEARCH_PERPLEXITY_ENV);
+            std::env::remove_var(crate::config::WEB_SEARCH_SEARXNG_ENV);
+        }
     }
 
     #[test]

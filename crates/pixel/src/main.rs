@@ -39,7 +39,7 @@ mod classify_history;
 mod classify_history_cmd;
 mod classify_setup;
 mod config_cmd;
-mod config_file;
+use pixel_setup::config_file;
 mod coverage_cmd;
 mod cycles_cmd;
 mod decide_clef;
@@ -4302,8 +4302,10 @@ fn run() -> Result<(), String> {
     let live = !protected
         && !json
         && cli.metrics != "off"
-        && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0")
-        && config_cmd::metrics_enabled(root.as_deref().ok());
+        && config_cmd::metrics_enabled(
+            root.as_deref().ok(),
+            std::env::var("PIXEL_METRICS").ok().as_deref(),
+        );
     operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
     let release_check = update_notice::enabled(
         protected || json,

@@ -19,6 +19,7 @@ pub mod banner;
 pub mod bundled_probes;
 pub mod codex_config;
 pub mod config;
+pub mod config_file;
 pub mod doctor;
 pub mod edit_input;
 pub mod install;
