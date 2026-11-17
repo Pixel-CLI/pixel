@@ -528,23 +528,28 @@ fn edit_hooks_should_be_off_by_default_and_follow_a_written_value() {
 
 /// `pixel setup` registers the edit hooks from the global layer only (#1427),
 /// while the hook itself reads the repository layer first. A repository `on`
-/// under a global `off` therefore registers nothing, and the write must say
-/// so instead of sending the user to a `pixel setup` that changes nothing.
+/// under a global `off` makes setup register nothing, so the write must not
+/// send the user to a `pixel setup` that changes nothing. It must not claim
+/// the value has no effect either: hooks an earlier setup installed are still
+/// there, and the hook then obeys this value. `pixel config` cannot see what
+/// is installed; it says so and names `pixel doctor`.
 #[test]
-fn a_repository_edit_hooks_on_should_say_it_has_no_effect_while_the_global_layer_is_off() {
+fn a_repository_edit_hooks_on_under_a_global_off_should_name_what_setup_will_not_register() {
     let home = Scratch::for_test("config", "edit-hooks-repo-on-home");
     let repo = repo_with_git("edit-hooks-repo-on-repo");
     let text = stdout(&run(&home, &repo, &["config", "edit_hooks", "on"]));
     assert!(
         text.contains(
-            "note: no effect yet: `pixel setup` registers the edit hooks from the global layer only, \
-             where they are off (default); run `pixel config edit_hooks on --global`, then `pixel setup`\n"
+            "note: `pixel setup` does not register the edit hooks while the global layer has them off (default); \
+             this value turns them on here only if an earlier setup left them installed (`pixel doctor` shows it). \
+             To register them: `pixel config edit_hooks on --global`, then `pixel setup`\n"
         ),
         "{text}"
     );
     assert!(
-        !text.contains("so the edit hooks are registered or removed"),
-        "{text}"
+        !text.contains("so the edit hooks are registered or removed")
+            && !text.contains("no effect"),
+        "neither a pointless `pixel setup` nor an unconditional claim about installed hooks: {text}"
     );
     assert_eq!(
         yaml(&repo.join(".pixel/config.yaml"))["edit_hooks"],
@@ -558,8 +563,10 @@ fn a_repository_edit_hooks_on_should_say_it_has_no_effect_while_the_global_layer
     );
 }
 
-/// Under a global `on` the hooks are registered, and a repository value is
-/// what the hook obeys here: `off` is a working per-repository opt-out.
+/// Under a global `on`, setup registers the hooks, and a repository value is
+/// what the hook obeys here: `off` is a working per-repository opt-out. A
+/// global `on` does not prove setup has run, so the note says "once they are
+/// installed".
 #[test]
 fn a_repository_edit_hooks_value_should_say_it_applies_here_when_the_global_layer_registers_them() {
     let home = Scratch::for_test("config", "edit-hooks-registered-home");
@@ -575,12 +582,12 @@ fn a_repository_edit_hooks_value_should_say_it_applies_here_when_the_global_laye
         assert!(
             text.contains(&format!(
                 "note: `pixel setup` registers the edit hooks from the global layer ({}); \
-                 this value turns them {effect} in this repository\n",
+                 once they are installed, this value turns them {effect} in this repository\n",
                 global.display()
             )),
             "{value}: {text}"
         );
-        assert!(!text.contains("no effect yet"), "{value}: {text}");
+        assert!(!text.contains("does not register"), "{value}: {text}");
     }
     let read = stdout(&run(&home, &repo, &["config", "edit_hooks"]));
     assert!(
@@ -605,5 +612,30 @@ fn a_repository_edit_hooks_off_under_a_global_off_should_print_no_registration_n
             "edit_hooks: off — wrote {}\n",
             repo.join(".pixel/config.yaml").display()
         )
+    );
+}
+
+/// Setup skips a global value of the wrong type and registers the default, so
+/// the registration line must name `default`, not the file that holds the
+/// unreadable value: value and source come from the same reading.
+#[test]
+fn a_registration_line_should_name_default_when_the_global_value_is_unreadable() {
+    let home = Scratch::for_test("config", "registration-unreadable-home");
+    let repo = repo_with_git("registration-unreadable-repo");
+    fs::create_dir_all(home.join(".pixel")).unwrap();
+    fs::write(
+        home.join(".pixel/config.yaml"),
+        "edit_hooks: maybe\nbrief_parts: many\n",
+    )
+    .unwrap();
+    let edit = stdout(&run(&home, &repo, &["config", "edit_hooks"]));
+    assert!(
+        edit.ends_with("registered by `pixel setup`: off — default\n"),
+        "{edit}"
+    );
+    let parts = stdout(&run(&home, &repo, &["config", "brief_parts"]));
+    assert!(
+        parts.ends_with("registered by `pixel setup`: 3 — default\n"),
+        "{parts}"
     );
 }

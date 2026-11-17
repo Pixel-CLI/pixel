@@ -1198,17 +1198,26 @@ fn effective(root: Option<&Path>, key: &str, setting: Setting) -> (String, Strin
 /// Setup reads the hook settings from the global layer only (`install`
 /// calls `pixel_setup::config::edit_hooks` and `brief_parts` with no
 /// repository) and never the environment, so this can differ from what
-/// [`effective`] reports. `None` for a setting setup does not read, or
-/// without a HOME.
+/// [`effective`] reports. It is what setup would register, not what is
+/// installed: whether setup has run is `pixel doctor`'s to say. `None` for a
+/// setting setup does not read, or without a HOME.
 fn registration(key: &str, setting: Setting) -> Option<(String, String)> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
-    let value = match setting {
-        Setting::BriefParts => pixel_setup::config::brief_parts(&home, None).to_string(),
-        Setting::OptIn(_) => on_off(pixel_setup::config::edit_hooks(&home, None)).to_owned(),
+    // The source is the global file only when its value is one setup reads:
+    // setup skips a value of the wrong type and falls back to the default.
+    let (value, readable): (String, fn(&Value) -> bool) = match setting {
+        Setting::BriefParts => (
+            pixel_setup::config::brief_parts(&home, None).to_string(),
+            Value::is_u64,
+        ),
+        Setting::OptIn(_) => (
+            on_off(pixel_setup::config::edit_hooks(&home, None)).to_owned(),
+            Value::is_boolean,
+        ),
         Setting::Switch(_) => return None,
     };
     let source = global_config_path()
-        .filter(|path| read_config_doc(path).is_some_and(|doc| doc.get(key).is_some()))
+        .filter(|path| read_config_doc(path).is_some_and(|doc| doc.get(key).is_some_and(readable)))
         .map_or_else(|| "default".to_owned(), |path| path.display().to_string());
     Some((value, source))
 }
@@ -1239,13 +1248,16 @@ fn registration_note(
         (Setting::OptIn(_), true) => {
             Some("note: run `pixel setup` so the edit hooks are registered or removed".to_owned())
         }
+        // What is installed is not known here: the global layer says what setup
+        // would register, not whether it ran, nor what an earlier run left.
         (Setting::OptIn(_), false) if value == "on" => Some(format!(
             "note: `pixel setup` registers the edit hooks from the global layer ({source}); \
-             this value turns them {written} in this repository"
+             once they are installed, this value turns them {written} in this repository"
         )),
         (Setting::OptIn(_), false) if written == "on" => Some(format!(
-            "note: no effect yet: `pixel setup` registers the edit hooks from the global layer only, \
-             where they are off ({source}); run `pixel config {key} on --global`, then `pixel setup`"
+            "note: `pixel setup` does not register the edit hooks while the global layer has them off ({source}); \
+             this value turns them on here only if an earlier setup left them installed (`pixel doctor` shows it). \
+             To register them: `pixel config {key} on --global`, then `pixel setup`"
         )),
         (Setting::OptIn(_), false) | (Setting::Switch(_), _) => None,
     }
@@ -1522,7 +1534,7 @@ mod tests {
                 ("on", "/h/.pixel/config.yaml"),
                 Some(
                     "note: `pixel setup` registers the edit hooks from the global layer (/h/.pixel/config.yaml); \
-                   this value turns them off in this repository",
+                   once they are installed, this value turns them off in this repository",
                 ),
             ),
             (
@@ -1532,7 +1544,7 @@ mod tests {
                 ("on", "/h/.pixel/config.yaml"),
                 Some(
                     "note: `pixel setup` registers the edit hooks from the global layer (/h/.pixel/config.yaml); \
-                   this value turns them on in this repository",
+                   once they are installed, this value turns them on in this repository",
                 ),
             ),
             (
@@ -1541,8 +1553,9 @@ mod tests {
                 "on",
                 ("off", "default"),
                 Some(
-                    "note: no effect yet: `pixel setup` registers the edit hooks from the global layer only, \
-                   where they are off (default); run `pixel config edit_hooks on --global`, then `pixel setup`",
+                    "note: `pixel setup` does not register the edit hooks while the global layer has them off (default); \
+                   this value turns them on here only if an earlier setup left them installed (`pixel doctor` shows it). \
+                   To register them: `pixel config edit_hooks on --global`, then `pixel setup`",
                 ),
             ),
             (edit, false, "off", ("off", "default"), None),
