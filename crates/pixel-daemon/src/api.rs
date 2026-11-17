@@ -3656,10 +3656,10 @@ impl Service {
         }
 
         let sym = if let Some(uid) = uid {
-            store
-                .symbol_by_uid(uid)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("no symbol with uid {uid:?}"))?
+            match store.symbol_by_uid(uid).map_err(|e| e.to_string())? {
+                Some(sym) => sym,
+                None => return Err(uid_not_found(store, uid)?),
+            }
         } else {
             let mut syms = store
                 .symbols_named(name, None, 50)
@@ -5419,9 +5419,7 @@ fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, Str
             return Ok(Resolved::One(symbol));
         }
         if pixel_graph::store::qualified_leaf(uid_or_name).is_none() {
-            return Err(format!(
-                "no symbol with uid {uid_or_name:?}; run `pixel find-symbol <name>` to list uids"
-            ));
+            return Err(uid_not_found(store, uid_or_name)?);
         }
     }
     let syms = store
@@ -5437,6 +5435,59 @@ fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, Str
 /// The not-found error for `name`, whose `find-symbol` hint can answer: a
 /// qualified name that matched nothing would miss again under
 /// `find-symbol`, so the hint searches its leaf, which lists every owner.
+/// The not-found error for a uid that matched no row. A guessed uid usually
+/// has the right file and name but the wrong qualifier or kind
+/// (`store.rs#insert_edge#function` for
+/// `store.rs#GraphStore::insert_edge#method`), so the uids of that file
+/// with the same leaf name are offered: the next call can be the right
+/// one instead of a `find-symbol` round trip. The message keeps its
+/// `no symbol with uid` prefix, which [`classify_error`] maps to
+/// `NOT_FOUND`.
+fn uid_not_found(store: &GraphStore, uid: &str) -> Result<String, String> {
+    let near = same_file_uids(store, uid)?;
+    if near.is_empty() {
+        return Ok(format!(
+            "no symbol with uid {uid:?}; run `pixel find-symbol <name>` to list uids"
+        ));
+    }
+    let near: Vec<String> = near.iter().map(|u| format!("{u:?}")).collect();
+    Ok(format!(
+        "no symbol with uid {uid:?}; did you mean {}",
+        near.join(" or ")
+    ))
+}
+
+/// At most [`NEAR_UID_LIMIT`] uids, sorted, of the symbols in `uid`'s file
+/// whose name is its leaf (`insert_edge` for `GraphStore::insert_edge`).
+fn same_file_uids(store: &GraphStore, uid: &str) -> Result<Vec<String>, String> {
+    let mut parts = uid.split('#');
+    let (Some(path), Some(qualified)) = (parts.next(), parts.next()) else {
+        return Ok(Vec::new());
+    };
+    let leaf = qualified
+        .rsplit("::")
+        .next()
+        .and_then(|last| last.rsplit('.').next())
+        .unwrap_or_default();
+    if path.is_empty() || leaf.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut uids: Vec<String> = store
+        .symbols_named(leaf, None, 50)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|row| row.uid.split('#').next() == Some(path))
+        .map(|row| row.uid)
+        .collect();
+    uids.sort();
+    uids.dedup();
+    uids.truncate(NEAR_UID_LIMIT);
+    Ok(uids)
+}
+
+/// How many same-file uids a not-found uid error offers.
+const NEAR_UID_LIMIT: usize = 3;
+
 fn not_found_hint(name: &str) -> String {
     let search = pixel_graph::store::qualified_leaf(name).unwrap_or(name);
     format!("no symbol named {name:?}; run `pixel find-symbol {search}` to list matching symbols")

@@ -1,0 +1,1 @@
+**setup:** under mise, hooks now name the tool's `latest` alias instead of a versioned path, so `mise upgrade` moves them and `mise prune` no longer silences them; `pixel doctor` adds `classify.engine`, yellow when classify is on but no engine answers; a mistyped `impact`/`rename` uid names the same-file uids with that name.

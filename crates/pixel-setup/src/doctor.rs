@@ -78,6 +78,9 @@ pub const CHECKS: &[CheckSpec] = &[
     // The setup step is interactive and needs the user at a terminal, so
     // the check names it in the message but leaves `--fix` out of it.
     entry("web-search.provider", None),
+    // Two repairs fit (configure the engine, or switch classify off): the
+    // message names both and `--fix` picks neither.
+    entry("classify.engine", None),
     entry("repo.task-hook-observations", None),
     entry("daemon.health", Some("pixel daemon start {root}")),
     entry(
@@ -205,6 +208,71 @@ pub struct DoctorOptions {
     /// The moved commands a plugin runs here. Defaults to a scan of the
     /// plugin directories under `home` (and `repo_root`) and of `$PATH`.
     pub plugins: Option<pixel_plugin::Available>,
+    /// Whether `pixel classify` has an engine that answers, as the CLI that
+    /// owns the engines judged it. This crate cannot open an engine itself:
+    /// with `None`, `classify.engine` still runs (every catalogued id does)
+    /// and says it was not evaluated.
+    pub classify: Option<ClassifyReadiness>,
+}
+
+/// What `pixel classify` would meet if the prompt brief ran it now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClassifyReadiness {
+    /// `classify.enabled` is off: the brief never asks.
+    Off,
+    /// An engine answers, described for the summary (`local engine at …`).
+    Ready(String),
+    /// Classify is on and no engine can answer; the error classify prints.
+    Unusable(String),
+}
+
+/// `classify.engine`: an enabled classifier without an engine fails on
+/// every prompt, and the brief hides it (it falls back to its heuristics),
+/// so nothing but this check says so.
+fn classify_engine_check(
+    readiness: Option<&ClassifyReadiness>,
+) -> (CheckStatus, DoctorCheckDetail) {
+    let Some(readiness) = readiness else {
+        return (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: "classify engine not evaluated: this caller cannot resolve engines (`pixel doctor` does)".to_string(),
+                detail: Some(serde_json::json!({ "evaluated": false })),
+            },
+        );
+    };
+    match readiness {
+        ClassifyReadiness::Off => (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: "classify is off".to_string(),
+                detail: Some(serde_json::json!({ "enabled": false })),
+            },
+        ),
+        ClassifyReadiness::Ready(engine) => (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: format!("classify answers from the {engine}"),
+                detail: Some(serde_json::json!({ "enabled": true, "engine": engine })),
+            },
+        ),
+        ClassifyReadiness::Unusable(error) => (
+            CheckStatus::Yellow,
+            DoctorCheckDetail {
+                summary: format!(
+                    "classify is on but no engine answers, so the prompt brief's intent classifier fails on every prompt: {error} — or run `pixel config classify off`"
+                ),
+                detail: Some(serde_json::json!({ "enabled": true, "error": error })),
+            },
+        ),
+    }
+}
+
+/// Whether a run with this selection includes `id`, so a caller computes
+/// an input such as [`DoctorOptions::classify`] only when it is read.
+#[must_use]
+pub fn selects(only: &[String], skip: &[String], id: &str) -> bool {
+    selected(only, skip, id)
 }
 
 /// Run `pixel doctor`.
@@ -462,6 +530,10 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             return Ok(web_search_plugin_absent(&plugins));
         }
         web_search_provider_check(&home)
+    });
+
+    runner.check_status("classify.engine", || {
+        Ok(classify_engine_check(options.classify.as_ref()))
     });
 
     if let Some(root) = &options.repo_root {
@@ -1829,13 +1901,13 @@ mod tests {
 
     use super::env_non_empty;
     use super::{
-        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, PLACEHOLDER_DUMMY, Repair,
-        RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs, capped, claude_hooks_owner_check,
-        extract_rule_commands, judge_repair, load_pixel_config, names_check,
-        normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
-        render_repairs, repair_plan, run_repair, selected, shell_path_check, spec,
-        split_home_repairs, validate_selection, web_search_provider_check_with,
-        web_search_provider_from,
+        CHECKS, CheckSpec, CheckStatus, ClassifyReadiness, DoctorCheck, DoctorReport,
+        PLACEHOLDER_DUMMY, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs,
+        capped, classify_engine_check, claude_hooks_owner_check, extract_rule_commands,
+        judge_repair, load_pixel_config, names_check, normalize_rule_command, one_line,
+        probe_daemon_epistemics, render_catalogue, render_repairs, repair_plan, run_repair,
+        selected, shell_path_check, spec, split_home_repairs, validate_selection,
+        web_search_provider_check_with, web_search_provider_from,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
@@ -2448,6 +2520,85 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An enabled classifier with no engine is yellow and names both ways
+    /// out (the engine's own error, then `classify off`), because the brief
+    /// swallows the failure on every prompt; off or answering is green.
+    #[test]
+    fn classify_engine_check_should_flag_an_enabled_classifier_without_an_engine() {
+        let error = "remote preset openrouter needs an API key: set OPENROUTER_API_KEY or run `pixel config remote-key openrouter -`";
+        let (status, detail) =
+            classify_engine_check(Some(&ClassifyReadiness::Unusable(error.to_string())));
+        assert_eq!(status, CheckStatus::Yellow);
+        assert_eq!(
+            detail.summary,
+            format!(
+                "classify is on but no engine answers, so the prompt brief's intent classifier fails on every prompt: {error} — or run `pixel config classify off`"
+            )
+        );
+        assert_eq!(
+            detail.detail.unwrap(),
+            serde_json::json!({ "enabled": true, "error": error })
+        );
+        let (status, detail) = classify_engine_check(Some(&ClassifyReadiness::Off));
+        assert_eq!(
+            (status, detail.summary.as_str()),
+            (CheckStatus::Green, "classify is off")
+        );
+        let (status, detail) = classify_engine_check(Some(&ClassifyReadiness::Ready(
+            "local engine at http://x".into(),
+        )));
+        assert_eq!(
+            (status, detail.summary.as_str()),
+            (
+                CheckStatus::Green,
+                "classify answers from the local engine at http://x"
+            )
+        );
+    }
+
+    /// Every catalogued id runs, so a library caller without the CLI's
+    /// readiness still gets a `classify.engine` line, one that says it was
+    /// not evaluated instead of claiming an engine answers.
+    #[test]
+    fn doctor_should_mark_classify_engine_unevaluated_without_a_readiness() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = home.path().join("pixel");
+        std::fs::write(&exe, b"x").unwrap();
+        let run = |classify| {
+            super::doctor(&super::DoctorOptions {
+                executable_path: Some(exe.clone()),
+                home: Some(home.path().to_path_buf()),
+                only: vec!["classify.engine".into()],
+                classify,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let lines = |report: &DoctorReport| -> Vec<(String, CheckStatus, serde_json::Value)> {
+            report
+                .checks
+                .iter()
+                .map(|c| (c.id.clone(), c.status, c.detail.clone().unwrap_or_default()))
+                .collect()
+        };
+        assert_eq!(
+            lines(&run(None)),
+            vec![(
+                "classify.engine".to_string(),
+                CheckStatus::Green,
+                serde_json::json!({ "evaluated": false })
+            )]
+        );
+        assert_eq!(
+            lines(&run(Some(ClassifyReadiness::Unusable("no key".into())))),
+            vec![(
+                "classify.engine".to_string(),
+                CheckStatus::Yellow,
+                serde_json::json!({ "enabled": true, "error": "no key" })
+            )]
+        );
     }
 
     /// The check's verdict over a scratch home: `none` is a yellow

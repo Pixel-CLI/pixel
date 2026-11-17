@@ -5828,11 +5828,15 @@ fn run_command(
                     ))
                 };
             }
+            // The engine probe and key lookup run only when the check does.
+            let classify = pixel_setup::doctor::selects(&only, &skip, "classify.engine")
+                .then(classify::readiness);
             let options = discover_root(&path).map(|root| pixel_setup::doctor::DoctorOptions {
                 repo_root: Some(root),
                 shell,
                 only,
                 skip,
+                classify,
                 ..Default::default()
             });
             let run = |options: &pixel_setup::doctor::DoctorOptions| {

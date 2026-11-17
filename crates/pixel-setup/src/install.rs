@@ -315,7 +315,9 @@ pub(crate) fn install_report(
 /// (`Cellar/pixel/<ver>/bin/pixel`) that dangles after the next upgrade.
 /// Prefer the first PATH entry whose canonical form is this binary, keeping
 /// the symlink path itself; fall back to the canonicalized path when PATH has
-/// no match (uninstalled-location runs, custom `--executable-path`).
+/// no match (uninstalled-location runs, custom `--executable-path`). Under
+/// a mise install either result becomes its `latest` alias when that alias
+/// is this binary (see [`mise_latest_or`]).
 pub fn stable_exe_path(executable_path: PathBuf) -> PathBuf {
     let paths = std::env::var_os("PATH").unwrap_or_default();
     stable_exe_path_in(executable_path, &paths)
@@ -329,7 +331,7 @@ fn stable_exe_path_in(executable_path: PathBuf, paths: &std::ffi::OsStr) -> Path
         return canonical;
     };
     let name = name.to_string_lossy();
-    std::env::split_paths(paths)
+    let found = std::env::split_paths(paths)
         .map(|dir| {
             let dir = if dir.is_absolute() {
                 dir
@@ -342,7 +344,45 @@ fn stable_exe_path_in(executable_path: PathBuf, paths: &std::ffi::OsStr) -> Path
             candidate.is_file()
                 && candidate.canonicalize().ok().as_deref() == Some(canonical.as_path())
         })
-        .unwrap_or(canonical)
+        .unwrap_or_else(|| canonical.clone());
+    mise_latest_or(found, &canonical)
+}
+
+/// `path`, or its `…/mise/installs/<tool>/latest/…` alias when that alias
+/// resolves to `canonical` today. mise keeps each version of a tool under
+/// `installs/<tool>/<version>/`, adds that versioned `bin` to PATH, and
+/// points `latest` at the newest install: a hook written with the version
+/// in its path keeps running the old release after `mise upgrade` and fails
+/// silently (`|| true`) once `mise prune` deletes it, while `latest`
+/// follows the upgrade. A `latest` that resolves elsewhere (an older
+/// version pinned on purpose) leaves `path` as it is.
+fn mise_latest_or(path: PathBuf, canonical: &Path) -> PathBuf {
+    mise_latest_alias(&path)
+        .filter(|alias| alias.canonicalize().ok().as_deref() == Some(canonical))
+        .unwrap_or(path)
+}
+
+/// The same path with the version component after `mise/installs/<tool>/`
+/// replaced by `latest`, or `None` when `path` is not under a mise install
+/// or already names `latest`.
+fn mise_latest_alias(path: &Path) -> Option<PathBuf> {
+    let parts: Vec<_> = path.components().collect();
+    let at = parts
+        .windows(2)
+        .position(|w| w[0].as_os_str() == "mise" && w[1].as_os_str() == "installs")?;
+    let version = at + 3;
+    if version + 1 >= parts.len() || parts[version].as_os_str() == "latest" {
+        return None;
+    }
+    let mut alias = PathBuf::new();
+    for (i, part) in parts.iter().enumerate() {
+        if i == version {
+            alias.push("latest");
+        } else {
+            alias.push(part);
+        }
+    }
+    Some(alias)
 }
 
 /// Replace `path` with `content` in one step: the bytes already there are
@@ -701,6 +741,88 @@ mod stable_exe_path_tests {
             stable_exe_path_in(exe.clone(), &paths),
             exe.canonicalize().unwrap(),
             "an unrelated PATH binary must not be written into hooks"
+        );
+    }
+
+    /// A mise install: `installs/pixel/<version>/bin/pixel` with `latest`
+    /// pointing at `latest_target`; returns (root, versioned binary).
+    #[cfg(unix)]
+    fn mise_tree(versions: &[&str], latest_target: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join(".local/share/mise/installs/pixel");
+        for version in versions {
+            let bin = tool.join(version).join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("pixel"), version.as_bytes()).unwrap();
+        }
+        std::os::unix::fs::symlink(format!("./{latest_target}"), tool.join("latest")).unwrap();
+        let exe = tool.join(versions[0]).join("bin/pixel");
+        (dir, exe)
+    }
+
+    /// Hooks written by a mise-installed pixel must survive `mise upgrade`
+    /// and `mise prune`: the versioned bin on PATH is replaced by `latest`
+    /// when `latest` is this binary.
+    #[cfg(unix)]
+    #[test]
+    fn a_mise_versioned_binary_resolves_to_its_latest_alias() {
+        let (_dir, exe) = mise_tree(&["0.11.0"], "0.11.0");
+        let canonical = exe.canonicalize().unwrap();
+        let paths = std::env::join_paths([canonical.parent().unwrap()]).unwrap();
+        let expected = canonical
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("latest/bin/pixel");
+        assert_eq!(stable_exe_path_in(exe.clone(), &paths), expected);
+        let nowhere = std::env::join_paths([_dir.path()]).unwrap();
+        assert_eq!(
+            stable_exe_path_in(exe, &nowhere),
+            expected,
+            "the canonical fallback is aliased too"
+        );
+    }
+
+    /// A user who pinned an older version keeps it: `latest` names another
+    /// binary, so the versioned path stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_mise_binary_that_is_not_latest_keeps_its_versioned_path() {
+        let (_dir, exe) = mise_tree(&["0.10.0", "0.11.0"], "0.11.0");
+        let canonical = exe.canonicalize().unwrap();
+        let paths = std::env::join_paths([canonical.parent().unwrap()]).unwrap();
+        assert_eq!(stable_exe_path_in(exe, &paths), canonical);
+    }
+
+    #[test]
+    fn mise_latest_alias_replaces_only_the_version_component() {
+        use super::mise_latest_alias;
+        use std::path::Path;
+        assert_eq!(
+            mise_latest_alias(Path::new(
+                "/h/.local/share/mise/installs/pixel/0.11.0/bin/pixel"
+            )),
+            Some(PathBuf::from(
+                "/h/.local/share/mise/installs/pixel/latest/bin/pixel"
+            ))
+        );
+        assert_eq!(
+            mise_latest_alias(Path::new(
+                "/h/.local/share/mise/installs/pixel/latest/bin/pixel"
+            )),
+            None
+        );
+        assert_eq!(
+            mise_latest_alias(Path::new("/opt/homebrew/Cellar/pixel/0.11.0/bin/pixel")),
+            None
+        );
+        assert_eq!(
+            mise_latest_alias(Path::new("/h/mise/installs/pixel/0.11.0")),
+            None,
+            "a path that ends at the version names no binary inside it"
         );
     }
 

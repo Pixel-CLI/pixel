@@ -1315,6 +1315,56 @@ fn resolve_if_warm(
     Ok(crate::classify_setup::ResolvedEngine::Local { base })
 }
 
+/// What `pixel classify` would meet if the prompt brief ran it now (the
+/// brief passes no flag): the engine [`resolve_engine_with`] picks, a remote
+/// one opened as `open_resolved` opens it, which reads the key and sends
+/// nothing. `pixel doctor` reports it as `classify.engine`, since the brief
+/// hides a failing classifier behind its heuristics.
+#[cfg_attr(test, mutants::skip)] // Runtime adapter over the global config, the local probe and the key sources; the policy is `readiness_with`.
+pub fn readiness() -> pixel_setup::doctor::ClassifyReadiness {
+    readiness_with(
+        crate::config_cmd::classify_enabled(),
+        crate::config_cmd::classify_engine(),
+        &crate::classify_setup::local_base(),
+        crate::classify_setup::server_reachable,
+        || {
+            let preset = resolve_remote_preset(None, crate::config_cmd::classify_remote_preset());
+            open_preset_engine(preset, None, RemoteOverrides::Shared)
+                .map(|_| format!("remote preset {}", preset.display()))
+        },
+    )
+}
+
+/// [`readiness`] with its inputs given. A stored `local` engine counts as
+/// ready: classify starts it on demand. Otherwise the local engine is used
+/// only when it already answers, and the remote preset decides the rest.
+fn readiness_with(
+    enabled: Result<bool, String>,
+    stored: Option<String>,
+    local_base: &str,
+    reachable: impl FnOnce(&str) -> bool,
+    remote: impl FnOnce() -> Result<String, String>,
+) -> pixel_setup::doctor::ClassifyReadiness {
+    use pixel_setup::doctor::ClassifyReadiness;
+    match enabled {
+        Ok(false) => return ClassifyReadiness::Off,
+        Err(error) => return ClassifyReadiness::Unusable(error),
+        Ok(true) => {}
+    }
+    let needs_probe = !matches!(stored.as_deref(), Some("local" | "remote"));
+    let available = needs_probe && reachable(local_base);
+    match crate::classify_setup::resolve_engine(None, String::new(), stored, available) {
+        // Without a flag the local base is always `local_base()`, the value
+        // passed in here.
+        crate::classify_setup::ResolvedEngine::Local { .. } => {
+            ClassifyReadiness::Ready(format!("local engine at {local_base}"))
+        }
+        crate::classify_setup::ResolvedEngine::Remote => {
+            remote().map_or_else(ClassifyReadiness::Unusable, ClassifyReadiness::Ready)
+        }
+    }
+}
+
 fn resolve_remote_preset(
     flag: Option<crate::decide_remote::Preset>,
     stored: Option<crate::decide_remote::Preset>,
@@ -1749,6 +1799,57 @@ mod tests {
         let doc = document(&engine, &spec, &probabilities);
         assert_eq!(doc["snapshot"]["confidence"], 0.6);
         assert_eq!(doc["probs"]["yes"], 0.8);
+    }
+
+    /// Doctor's `classify.engine` must judge the engine the brief would
+    /// really meet: off never probes, a stored `local` is ready without a
+    /// probe, `auto` uses a live local engine and otherwise the remote
+    /// preset, whose error (a missing key) is what makes it unusable.
+    #[test]
+    fn readiness_should_follow_the_engine_the_brief_would_resolve() {
+        use pixel_setup::doctor::ClassifyReadiness::{Off, Ready, Unusable};
+        let key_error = || -> Result<String, String> { Err("needs an API key".into()) };
+        let keyed = || -> Result<String, String> { Ok("remote preset openrouter".into()) };
+        let no_remote = || -> Result<String, String> { panic!("remote must not be opened") };
+        let no_probe = |_: &str| -> bool { panic!("local must not be probed") };
+        let base = "http://127.0.0.1:9";
+
+        assert_eq!(
+            readiness_with(Ok(false), None, base, no_probe, no_remote),
+            Off
+        );
+        assert_eq!(
+            readiness_with(Err("bad config".into()), None, base, no_probe, no_remote),
+            Unusable("bad config".into())
+        );
+        assert_eq!(
+            readiness_with(Ok(true), Some("local".into()), base, no_probe, no_remote),
+            Ready(format!("local engine at {base}"))
+        );
+        let mut probed = Vec::new();
+        assert_eq!(
+            readiness_with(
+                Ok(true),
+                Some("auto".into()),
+                base,
+                |b| {
+                    probed.push(b.to_string());
+                    true
+                },
+                no_remote
+            ),
+            Ready(format!("local engine at {base}"))
+        );
+        assert_eq!(probed, vec![base.to_string()]);
+        assert_eq!(
+            readiness_with(Ok(true), None, base, |_| false, key_error),
+            Unusable("needs an API key".into()),
+            "auto without a live local engine falls to the remote preset"
+        );
+        assert_eq!(
+            readiness_with(Ok(true), Some("remote".into()), base, no_probe, keyed),
+            Ready("remote preset openrouter".into())
+        );
     }
 
     #[test]
