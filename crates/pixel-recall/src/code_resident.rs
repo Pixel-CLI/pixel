@@ -1215,7 +1215,7 @@ mod tests {
             &mut reused_embedder,
             VectorCache::Disabled,
             100,
-            budget,
+            budget + both.vocab.bytes,
         )
         .unwrap();
         assert_eq!(
