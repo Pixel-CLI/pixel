@@ -23,7 +23,7 @@ reported with the file's path and the rule, never silently ignored.
 | Form | Does |
 |---|---|
 | `pixel config` | prints the paths of both layers and each effective setting with the layer that set it: `metrics`, `daemon_auto_start`, `brief`, `brief_parts`, `classify.enabled`, `classify.engine`, the web-search provider. Creates no file; prints no secret. |
-| `pixel config <key>` | prints `<key>: <value> — <source>` where the source is an environment variable, a file path or `default` |
+| `pixel config <key>` | prints `<key>: <value> — <source>` where the source is an environment variable, a file path or `default`; for `edit_hooks` and `brief_parts` a second line, `registered by `pixel setup`: <value> — <file or default>`, gives the value setup registers, read from the global layer only |
 | `pixel config <key> <value> [--global] [--path P]` | validates, then writes the repository layer of the repository that contains `P` (default `.`), or the global one with `--global`; then prints `<key>: <value> — wrote <file>` |
 
 The flat settings `pixel config <key> <value>` writes are exactly four:
@@ -48,10 +48,24 @@ Rules of a write:
   as `remote_keys.openai`. `logged_args` records the value of a known setting
   and masks the value of anything else.
 - **Say when it does not take effect.** If a higher layer or the environment wins,
-  the write prints `note: <source> sets <key>: <value> here and wins`. After a
-  `brief_parts` write it prints `note: run `pixel setup` so the registered hooks
-  carry the new count`: the count is the number of hook entries `pixel setup`
-  registers (`hooks.md`), and `pixel doctor` flags a mismatch.
+  the write prints `note: <source> sets <key>: <value> here and wins`. `pixel
+  setup` reads `edit_hooks` and `brief_parts` from the global layer only, so
+  for these two keys the note says what the write changes there:
+  - a global write prints `note: run `pixel setup` so the registered hooks carry
+    the new count` (`brief_parts`, the number of hook entries setup registers,
+    `hooks.md`; `pixel doctor` flags a mismatch) or `… so the edit hooks are
+    registered or removed` (`edit_hooks`);
+  - a repository `brief_parts` write says that native hooks keep the count
+    setup registers from the global layer and only Pi's package follows the
+    repository value, and how to change the registered count (`--global`, then
+    `pixel setup`); a repository layer that wins over a global write is said to
+    win for Pi's package only;
+  - a repository `edit_hooks` write, while the global layer registers the
+    hooks, says the value turns them on or off in this repository (the hook
+    reads the repository layer first, so `off` is a per-repository opt-out);
+    while it does not, an `on` says it has no effect yet and names
+    `pixel config edit_hooks on --global`, then `pixel setup`; an `off` prints
+    no note.
 - **Never write through a link.** A `.pixel` or `config.yaml` that is a symbolic
   link, or a `.pixel` that is not a directory, is refused. The write replaces
   the file through a private temporary file (0600) renamed over it, and keeps
