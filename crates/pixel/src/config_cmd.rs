@@ -1459,6 +1459,15 @@ mod tests {
     /// changes, and only a write that changes nothing registered says nothing.
     #[test]
     fn a_registration_note_should_follow_the_layer_setup_reads() {
+        /// The setting, whether the write is global, the value written, what
+        /// setup registers and from where, and the note expected.
+        type Case = (
+            Setting,
+            bool,
+            &'static str,
+            (&'static str, &'static str),
+            Option<&'static str>,
+        );
         let edit = Setting::OptIn(EDIT_HOOKS_ENV);
         let note = |setting, global, written, registered| {
             registration_note(
@@ -1473,7 +1482,7 @@ mod tests {
                 registered,
             )
         };
-        let cases: [(Setting, bool, &str, (&str, &str), Option<&str>); 9] = [
+        let cases: [Case; 9] = [
             (
                 Setting::BriefParts,
                 true,
