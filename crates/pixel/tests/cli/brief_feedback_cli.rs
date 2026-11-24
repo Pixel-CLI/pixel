@@ -146,6 +146,28 @@ fn strings(value: &Value) -> Vec<&str> {
 }
 
 #[test]
+fn codex_composer_suggestions_skip_retrieval_and_every_part_of_delivery() {
+    let root = indexed("composer");
+    let wrapper = "This is an app-generated request for a suggested next user message. The user did not write this message.";
+    let mut payload = prompt_payload(&root, SESSION);
+    payload["prompt"] = json!(format!("{wrapper} {PROMPT}"));
+    for part in [None, Some("1/2"), Some("2/2")] {
+        let output = hook(&root, "prompt-submit", part, &payload, |_| {});
+        assert!(output.get("hookSpecificOutput").is_none(), "{output}");
+    }
+    assert!(!root.join(".pixel/brief-decisions.jsonl").exists());
+    assert!(log_lines(&root).is_empty());
+
+    // Discussing the wrapper is an ordinary question, even on Codex.
+    payload["prompt"] = json!(format!("{PROMPT} I saw this message: {wrapper}"));
+    hook(&root, "prompt-submit", None, &payload, |_| {});
+    assert_eq!(of_kind(&log_lines(&root), "prompt").len(), 1);
+    payload["prompt"] = json!(format!("{wrapper} {PROMPT}"));
+    hook_as("claude", &root, "prompt-submit", None, &payload, |_| {});
+    assert_eq!(of_kind(&log_lines(&root), "prompt").len(), 2);
+}
+
+#[test]
 fn a_turn_should_join_what_the_brief_injected_to_what_the_agent_read_before_answering() {
     let root = indexed("turn");
     hook(

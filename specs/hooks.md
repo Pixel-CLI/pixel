@@ -112,7 +112,9 @@ does not hold the ledger (`brief.md` is the contract of the block itself).
   `{"decision":"observe","context":<brief>}`. No brief is `{}`.
 - A delivered brief adds `systemMessage` `🟩 pixel prompt-submit ❀ <ms>ms`
   when metrics are on (`metrics.md`); an abstention adds nothing.
-- Every `prompt-submit`, `post-tool-use`, `tool-failure` and `stop` leaves a
+- Codex skips brief generation and delivery for its automatic next-message
+  suggestion wrapper. The task ledger still handles the hook.
+- Each eligible `prompt-submit`, `post-tool-use`, `tool-failure` and `stop` leaves a
   line in `.pixel/brief-feedback.jsonl` after the host has its answer
   (`metrics.md`).
 

@@ -1244,7 +1244,8 @@ host that has a prompt hook: Claude Code, Codex and Devin through
 `PreInvocation`, and Pi through its package (`extensions/pixel-brief.ts`),
 which sends a `brief_only` `task-event` (`start_brief` serves
 `TaskProvider::Pi` only for that marker). OpenCode (`plugins/pixel-brief.js`,
-V2 `prompt` hook) runs `pixel brief` instead. A prompt starts one
+V2 `prompt` hook) runs `pixel brief` instead. Codex composer suggestion requests
+skip retrieval and all parts of brief delivery. A prompt starts one
 by its shape (`brief_signal`), the typed text only, the last paragraph of a
 long untagged paste:
 
