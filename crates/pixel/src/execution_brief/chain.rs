@@ -47,6 +47,7 @@ use super::probes;
 use super::region_pack;
 use super::relevance::{self, Basis, GateInput, RelevanceInput, Tier};
 use super::routes::QuestionKind;
+use super::scoped_calls;
 use super::sent::{self, Seen};
 use super::session_paths::{self, SessionPaths};
 use super::{SOURCE_EXTENSIONS, Signal, brief_signal, names_code};
@@ -410,6 +411,14 @@ pub(crate) trait Evidence: Sync {
     }
     /// Declarations named `name`.
     fn symbols(&self, name: &str, deadline: Instant) -> Result<Vec<SymbolHit>, String>;
+    /// Exact incoming sites of a function nested in the named owner and file.
+    fn scoped_calls(
+        &self,
+        _query: &scoped_calls::Query,
+        _deadline: Instant,
+    ) -> Result<scoped_calls::Answer, String> {
+        Err("scoped call sites unsupported".into())
+    }
     /// Direct callers (impact depth 1) of a uid, or of a bare name.
     fn callers(&self, target: &str, deadline: Instant) -> Result<Vec<CallerHit>, String>;
     /// The bounded body of `hit`'s declaration (`pack-context`), plus the
@@ -819,7 +828,7 @@ fn is_path(anchor: &str) -> bool {
     anchor.contains('/')
 }
 
-fn has_source_extension(token: &str) -> bool {
+pub(super) fn has_source_extension(token: &str) -> bool {
     token
         .rsplit('/')
         .next()
@@ -968,6 +977,8 @@ impl Admission {
 /// What the chain has learned, shared between the worker and the hook.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Brief {
+    /// A scope-bound lookup never falls back to an unqualified homonym.
+    scoped_calls: Option<scoped_calls::Answer>,
     staleness: Staleness,
     /// How the prompt came to be briefed.
     signal: Option<Signal>,
@@ -1220,6 +1231,10 @@ impl Brief {
                 paths.push(path.to_string());
             }
         };
+        if let Some(answer) = &self.scoped_calls {
+            answer.paths.iter().for_each(|path| add(path));
+            return paths;
+        }
         if packed {
             if let Some(pack) = &self.pack {
                 pack.paths().iter().for_each(|path| add(path));
@@ -2870,6 +2885,7 @@ impl Pending {
             prompt: &self.task,
             kind,
             gate_closed,
+            explore: brief.scoped_calls.is_none(),
             deadline: probe_deadline(
                 self.started,
                 self.deadline,
@@ -3219,7 +3235,13 @@ where
     let kicked = starter.map(|start| start());
     let started = Instant::now();
     let deadline = until.map_or(started + window, |until| (started + window).min(until));
+    // Parse the original identifiers and file before French search expansion.
+    let scoped = match signal {
+        Signal::Strong => scoped_calls::Query::parse(&typed),
+        Signal::Weak | Signal::Prose => None,
+    };
     let state = Arc::new(Mutex::new(Brief {
+        scoped_calls: scoped.as_ref().map(|_| scoped_calls::Answer::default()),
         signal: Some(signal),
         // Every rendered pack path gets this line after fitting, including stale notices.
         pack_limit: region_pack::Limit {
@@ -3266,7 +3288,7 @@ where
                 model,
                 context: &context,
             };
-            work(&job, open);
+            work(&job, open, scoped.as_ref());
             edit(&worker, |brief| brief.worked_at = Some(Instant::now()));
             let _ = finished.send(());
         })
@@ -3300,7 +3322,7 @@ struct Job<'a, J> {
 }
 
 /// The worker of one brief: plan, ask, run.
-fn work<F, J>(job: &Job<J>, open: F)
+fn work<F, J>(job: &Job<J>, open: F, scoped: Option<&scoped_calls::Query>)
 where
     F: FnOnce(Instant) -> Box<dyn Evidence>,
     J: Fn(&str, Instant) -> Option<Verdict> + Sync,
@@ -3315,6 +3337,21 @@ where
         model,
         context,
     } = *job;
+    if let Some(query) = scoped {
+        let evidence = open(deadline);
+        let answer = evidence.scoped_calls(query, deadline);
+        edit(state, |brief| {
+            brief.route = Some("local");
+            brief.kind = Some(QuestionKind::Flow);
+            brief.ops = 1;
+            if let Ok(answer) = answer {
+                brief.answered = 1;
+                brief.scoped_calls = Some(answer);
+            }
+            brief.finished = true;
+        });
+        return;
+    }
     if signal == Signal::Strong {
         let plan = Plan::from_typed(typed, has_change_intent(typed), None);
         let evidence = open(deadline);
@@ -3985,6 +4022,15 @@ pub(crate) struct AnswerStats {
 pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
     if brief.silenced || brief.answered == 0 {
         return None;
+    }
+    if let Some(answer) = &brief.scoped_calls {
+        return Some((
+            answer.text.clone(),
+            AnswerStats {
+                answer: answer.verified,
+                ..Default::default()
+            },
+        ));
     }
     let low = brief.tier() == Some(Tier::Low);
     if low && !brief.pack_limit.on() {

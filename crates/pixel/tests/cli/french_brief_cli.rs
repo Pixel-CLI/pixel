@@ -173,3 +173,169 @@ fn the_mapping_should_be_on_when_nothing_turns_it_off() {
     let text = stdout(&output);
     assert!(text.contains(FILE), "{text}");
 }
+
+/// A walkthrough would follow the short file's homonym out to ping. This
+/// question asks for incoming sites of the declaration inside the named owner.
+#[test]
+fn scoped_calls_should_list_only_sites_of_the_requested_nested_function() {
+    let root = Scratch::for_test("french-brief-cli", "scoped-calls");
+    let worker = "src/tasks/worker.mjs";
+    std::fs::create_dir_all(root.join("src/tasks")).unwrap();
+    std::fs::write(
+        root.join(worker),
+        [
+            "export function executeRun(callbacks = []) {",
+            "  const alive = () => true;",
+            "  function emit() { return alive(); }",
+            "  if (!alive()) return;",
+            "  function callback(alive) { return alive(); }",
+            "  for (const alive of callbacks) alive();",
+            "  callbacks.forEach(callback);",
+            "  function defaultRead(fn = alive) { return alive() && fn(); }",
+            "  return alive();",
+            "}",
+            "export function otherTask(alive) { return alive(); }",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.cjs"),
+        [
+            "function ping() { return true; }",
+            "function executeRun() {",
+            "  const alive = () => ping();",
+            "  return alive();",
+            "}",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("duplicate.mjs"),
+        [
+            "function firstScope() {",
+            "  const alive = () => true;",
+            "  return alive();",
+            "}",
+            "function secondScope() {",
+            "  const alive = () => false;",
+            "  return alive();",
+            "}",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("my src/tasks")).unwrap();
+    std::fs::write(
+        root.join("my src/tasks/worker.mjs"),
+        "function executeRun() {\n  const alive = () => true;\n  return alive();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("constructors.js"),
+        [
+            "function run() {",
+            "  function Alive() {}",
+            "  const alive = () => true;",
+            "  function inner(value = alive()) {",
+            "    var alive;",
+            "    return value;",
+            "  }",
+            "  return new Alive(inner());",
+            "}",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("nested.py"),
+        "def run_task():\n    def alive():\n        return alive()\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitignore"), ".pixel/\n").unwrap();
+    git(&root, &["init", "-q"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "fixture"]);
+    let prepare = pixel_command()
+        .args(["prepare-repo", "--no-daemon"])
+        .arg(&*root)
+        .output()
+        .unwrap();
+    assert!(prepare.status.success(), "{prepare:?}");
+    let ask = |prompt: &str| {
+        let out = pixel_command()
+            .current_dir(&*root)
+            .env("PIXEL_BRIEF", "1")
+            .env("PIXEL_BRIEF_PROBES", "1")
+            .args(["brief", "--metrics", "off", prompt, "."])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        stdout(&out)
+    };
+    for prompt in [
+        "Liste tous les appels de la fonction `alive` déclarée dans executeRun (src/tasks/worker.mjs), et seulement celle-là, pas ses homonymes, au format fichier:ligne.",
+        "In src/tasks/worker.mjs, list the calls to `alive` defined in `executeRun`.",
+    ] {
+        let brief = ask(prompt);
+        let sites: Vec<_> = brief
+            .lines()
+            .filter(|line| line.starts_with("src/tasks/worker.mjs:"))
+            .collect();
+        assert_eq!(
+            sites,
+            [
+                "src/tasks/worker.mjs:3",
+                "src/tasks/worker.mjs:4",
+                "src/tasks/worker.mjs:8",
+                "src/tasks/worker.mjs:9"
+            ],
+            "{brief}"
+        );
+        assert!(brief.contains("src/tasks/worker.mjs:2"), "{brief}");
+        assert!(!brief.contains("main.cjs"), "{brief}");
+    }
+    let spaced = ask("Who calls alive defined in executeRun (`my src/tasks/worker.mjs`)?");
+    assert!(
+        spaced
+            .lines()
+            .any(|line| line == "my src/tasks/worker.mjs:3"),
+        "{spaced}"
+    );
+    assert!(
+        !spaced
+            .lines()
+            .any(|line| line.starts_with("src/tasks/worker.mjs:")),
+        "{spaced}"
+    );
+    for (target, expected) in [
+        ("Alive", "constructors.js:8"),
+        ("alive", "constructors.js:4"),
+    ] {
+        let result = ask(&format!(
+            "Who calls {target} defined in run (constructors.js)?"
+        ));
+        let sites: Vec<_> = result
+            .lines()
+            .filter(|line| line.starts_with("constructors.js:"))
+            .collect();
+        assert_eq!(sites, [expected], "{result}");
+    }
+    let python = ask("Who calls alive defined in run_task (nested.py)?");
+    assert!(python.lines().any(|line| line == "nested.py:3"), "{python}");
+    for prompt in [
+        "Liste les appels de `alive` déclarée dans otherTask (src/tasks/worker.mjs).",
+        "Who calls alive defined in secondScope (duplicate.mjs)?",
+        "Who calls alive defined in `executeRun.otherTask` (src/tasks/worker.mjs)?",
+        "Who calls alive defined in executeRun$ (src/tasks/worker.mjs)?",
+        "Who calls alive defined in `executeRun alternative` (src/tasks/worker.mjs)?",
+    ] {
+        let missing = ask(prompt);
+        assert!(missing.contains("could not verify"), "{missing}");
+        assert!(
+            !missing.contains("Exact indexed call sites") && !missing.contains("main.cjs"),
+            "{missing}"
+        );
+    }
+}

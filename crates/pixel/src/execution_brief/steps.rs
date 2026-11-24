@@ -368,6 +368,7 @@ pub(crate) mod testing {
             prompt,
             kind: Some(kind),
             gate_closed: false,
+            explore: true,
             deadline: Instant::now() + Duration::from_secs(10),
             cap: 3 * 9_800,
             max_bytes: None,

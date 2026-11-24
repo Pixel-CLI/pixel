@@ -696,6 +696,21 @@ impl Evidence for Live {
         }
     }
 
+    fn scoped_calls(
+        &self,
+        query: &super::scoped_calls::Query,
+        deadline: Instant,
+    ) -> Result<super::scoped_calls::Answer, String> {
+        self.with_graph(|store| {
+            if Instant::now() >= deadline {
+                return Err("out of time".to_owned());
+            }
+            query
+                .read(store, &self.root, deadline)
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn callers(&self, target: &str, deadline: Instant) -> Result<Vec<CallerHit>, String> {
         let data = match self.route {
             Route::Daemon => self.ask(
