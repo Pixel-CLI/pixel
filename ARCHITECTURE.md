@@ -1644,7 +1644,9 @@ The reads add no brief operation and fail open.
 A request for calls to a function declared in a named owner and file
 (`scoped_calls.rs`) goes directly to the current read-only graph, before
 French search expansion or walkthrough ranking. It checks the declaration’s
-extent against the owner and reads incoming exact call edges by site line.
+extent against the nearest owner and reads incoming exact call edges by site line.
+For a JavaScript or TypeScript local function it verifies direct calls against
+the syntax tree of the indexed source version, excluding shadowed bindings.
 Built-in exploratory probes sit out this lookup. External probes stay eligible.
 
 **Keeping a daemon behind the brief.** Without a daemon the brief has no

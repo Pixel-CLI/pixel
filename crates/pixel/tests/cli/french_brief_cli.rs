@@ -184,13 +184,17 @@ fn scoped_calls_should_list_only_sites_of_the_requested_nested_function() {
     std::fs::write(
         root.join(worker),
         [
-            "export function executeRun() {",
+            "export function executeRun(callbacks = []) {",
             "  const alive = () => true;",
             "  function emit() { return alive(); }",
             "  if (!alive()) return;",
+            "  function callback(alive) { return alive(); }",
+            "  for (const alive of callbacks) alive();",
+            "  callbacks.forEach(callback);",
+            "  function defaultRead(fn = alive) { return alive() && fn(); }",
             "  return alive();",
             "}",
-            "export function otherTask() { return false; }",
+            "export function otherTask(alive) { return alive(); }",
         ]
         .join("\n"),
     )
@@ -220,6 +224,17 @@ fn scoped_calls_should_list_only_sites_of_the_requested_nested_function() {
             "}",
         ]
         .join("\n"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("my src/tasks")).unwrap();
+    std::fs::write(
+        root.join("my src/tasks/worker.mjs"),
+        "function executeRun() {\n  const alive = () => true;\n  return alive();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("nested.py"),
+        "def run_task():\n    def alive():\n        return alive()\n",
     )
     .unwrap();
     std::fs::write(root.join(".gitignore"), ".pixel/\n").unwrap();
@@ -257,16 +272,35 @@ fn scoped_calls_should_list_only_sites_of_the_requested_nested_function() {
             [
                 "src/tasks/worker.mjs:3",
                 "src/tasks/worker.mjs:4",
-                "src/tasks/worker.mjs:5"
+                "src/tasks/worker.mjs:8",
+                "src/tasks/worker.mjs:9"
             ],
             "{brief}"
         );
         assert!(brief.contains("src/tasks/worker.mjs:2"), "{brief}");
         assert!(!brief.contains("main.cjs"), "{brief}");
     }
+    let spaced = ask("Who calls alive defined in executeRun (`my src/tasks/worker.mjs`)?");
+    assert!(
+        spaced
+            .lines()
+            .any(|line| line == "my src/tasks/worker.mjs:3"),
+        "{spaced}"
+    );
+    assert!(
+        !spaced
+            .lines()
+            .any(|line| line.starts_with("src/tasks/worker.mjs:")),
+        "{spaced}"
+    );
+    let python = ask("Who calls alive defined in run_task (nested.py)?");
+    assert!(python.lines().any(|line| line == "nested.py:3"), "{python}");
     for prompt in [
         "Liste les appels de `alive` déclarée dans otherTask (src/tasks/worker.mjs).",
         "Who calls alive defined in secondScope (duplicate.mjs)?",
+        "Who calls alive defined in `executeRun.otherTask` (src/tasks/worker.mjs)?",
+        "Who calls alive defined in executeRun$ (src/tasks/worker.mjs)?",
+        "Who calls alive defined in `executeRun alternative` (src/tasks/worker.mjs)?",
     ] {
         let missing = ask(prompt);
         assert!(missing.contains("could not verify"), "{missing}");

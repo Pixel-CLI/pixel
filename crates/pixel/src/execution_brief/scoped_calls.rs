@@ -4,6 +4,9 @@
 //! Incoming call sites of a declaration the prompt identifies by name, owner
 //! and file. Such a request can be answered by a single published-graph read.
 
+mod javascript;
+
+use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Instant;
 
@@ -19,9 +22,17 @@ static SCOPED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"(?ix)\b(?:calls\s+to|call\s+sites?\s+(?:of|for)|callers\s+of|who\s+calls|qui\s+appelle|appels?\s+(?:de|à))\s+",
         r"(?:(?:(?:the|la|le)\s+)?(?:function|method|fonction|méthode)\s+)?",
-        r"`?(?<target>[a-z_]\w*)`?\s+(?:(?:declared|defined)\s+(?:in|inside)|(?:déclaré|défini)e?\s+dans)\s+",
-        r"`?(?<owner>[a-z_]\w*)\b`?"
+        r"`?(?<target>[a-z_$][\w$]*)`?\s+(?:(?:declared|defined)\s+(?:in|inside)|(?:déclaré|défini)e?\s+dans)\s+",
+        r"(?<owner>`[^`\n]+`|[a-z_$][\w$]*(?:(?:\.|::)[a-z_$][\w$]*)*)(?:\(\))?",
+        r"(?:$|\s|[(),;!?]|\.(?:$|\s))"
     )).expect("literal scoped call-site request")
+});
+
+// Keep quoted paths whole; splitting on spaces can turn a named file
+// into an entirely different, existing repository-relative suffix.
+static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"[`][^`\n]*[`]|"[^"\n]*"|'[^'\n]+'|[^\s()`"\[\]{},;!?]+"#)
+        .expect("literal prompt token pattern")
 });
 
 pub(crate) struct Query {
@@ -41,9 +52,22 @@ impl Query {
     pub(super) fn parse(prompt: &str) -> Option<Self> {
         let mut scopes = SCOPED.captures_iter(prompt);
         let caps = scopes.next()?;
-        let mut files = prompt
-            .split(|c: char| !c.is_alphanumeric() && !matches!(c, '_' | '-' | '.' | '/'))
-            .map(|word| word.trim_end_matches('.'))
+        let mut files = TOKENS
+            .find_iter(prompt)
+            .map(|token| {
+                token
+                    .as_str()
+                    .trim_end_matches('.')
+                    .trim_matches(['`', '"', '\''])
+            })
+            .map(|word| match word.rsplit_once(':') {
+                Some((file, line))
+                    if !line.is_empty() && line.bytes().all(|c| c.is_ascii_digit()) =>
+                {
+                    file
+                }
+                _ => word,
+            })
             .map(|word| word.strip_prefix("./").unwrap_or(word))
             .filter(|word| has_source_extension(word));
         let file = files.next()?;
@@ -57,12 +81,17 @@ impl Query {
         }
         Some(Self {
             target: caps["target"].to_owned(),
-            owner: caps["owner"].to_owned(),
+            owner: caps["owner"].trim_matches('`').to_owned(),
             file: file.to_owned(),
         })
     }
 
-    pub(super) fn read(&self, store: &GraphStore, deadline: Instant) -> store::Result<Answer> {
+    pub(super) fn read(
+        &self,
+        store: &GraphStore,
+        root: &Path,
+        deadline: Instant,
+    ) -> store::Result<Answer> {
         let Some(file) = store.file_by_path(&self.file)? else {
             return Ok(self.unverified());
         };
@@ -76,31 +105,56 @@ impl Query {
         };
         // Same-file homonyms can share a lexical call binding in the graph.
         // A site attributed to either is insufficient evidence in that case.
-        let owner = functions
+        let mut owners = functions
             .filter(|s| {
                 s.id != target.id
                     && s.start_line <= target.start_line
                     && target.end_line <= s.end_line
             })
-            .min_by_key(|s| s.end_line - s.start_line);
-        // With line-only extents two declarations touching the same boundary
-        // may be siblings. Only an unambiguous enclosing range proves scope.
+            .collect::<Vec<_>>();
+        owners.sort_by_key(|s| s.end_line - s.start_line);
+        let Some(&owner) = owners.first() else {
+            return Ok(self.unverified());
+        };
+        // Indentation makes a Python function's final nested definition
+        // share its end line. In brace languages a shared boundary can be
+        // a sibling, and tied owner ranges never prove a unique scope.
         if targets.next().is_some()
-            || !owner.is_some_and(|s| {
-                s.name == self.owner
-                    && s.start_line < target.start_line
-                    && target.end_line < s.end_line
-            })
+            || !(owner.name == self.owner || owner.qualified == self.owner)
+            || owner.start_line == target.start_line
+            || (owner.end_line == target.end_line && file.lang != "python")
+            || owners
+                .get(1)
+                .is_some_and(|s| (s.start_line, s.end_line) == (owner.start_line, owner.end_line))
         {
             return Ok(self.unverified());
         }
+        let lexical = target.kind == SymbolKind::Function
+            && matches!(file.lang.as_str(), "js" | "ts" | "tsx" | "python" | "rust");
+        let direct = if target.kind == SymbolKind::Function
+            && matches!(file.lang.as_str(), "js" | "ts" | "tsx")
+        {
+            let Some(lines) = javascript::sites(root, &file, target, deadline) else {
+                return Ok(self.unverified());
+            };
+            Some(lines)
+        } else {
+            None
+        };
         let mut stmt = store.conn().prepare(
             "SELECT DISTINCT f.path, e.site_line FROM edges e
              JOIN symbols caller ON caller.id = e.src_id JOIN files f ON f.id = caller.file_id
              WHERE e.dst_id = ?1 AND e.kind = 'calls' AND e.tier = 'exact' AND e.site_line > 0
+               AND (NOT ?2 OR (f.id = ?3 AND e.site_line BETWEEN ?4 AND ?5 AND e.receiver IS NULL))
              ORDER BY f.path, e.site_line",
         )?;
-        let mut rows = stmt.query([target.id])?;
+        let mut rows = stmt.query(rusqlite::params![
+            target.id,
+            lexical,
+            file.id,
+            owner.start_line,
+            owner.end_line
+        ])?;
         let mut answer = Answer {
             text: format!(
                 "{BRIEF_TAG}\nDefinition: {}:{} ({} in {})\nExact indexed call sites:",
@@ -111,9 +165,12 @@ impl Query {
         };
         let mut has_sites = false;
         while let Some(row) = rows.next()? {
-            has_sites = true;
             let path: String = row.get(0)?;
             let line: u32 = row.get(1)?;
+            if direct.as_ref().is_some_and(|lines| !lines.contains(&line)) {
+                continue;
+            }
+            has_sites = true;
             let location = format!("\n{path}:{line}");
             if answer.text.len() + location.len() + MORE.len() + SKILL_LINE.len() + 1 > BRIEF_BYTES
                 || Instant::now() >= deadline

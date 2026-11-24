@@ -706,7 +706,7 @@ impl Evidence for Live {
                 return Err("out of time".to_owned());
             }
             query
-                .read(store, deadline)
+                .read(store, &self.root, deadline)
                 .map_err(|error| error.to_string())
         })
     }
