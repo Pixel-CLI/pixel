@@ -1639,6 +1639,12 @@ fn briefed(provider: TaskProvider, payload: &Value) -> bool {
     provider != TaskProvider::Pi || brief_only(provider, payload)
 }
 
+// The host submits this wrapper to predict text for an empty composer.
+const CODEX_COMPOSER_REQUEST: &str = concat!(
+    "This is an app-generated request for a suggested next user message. ",
+    "The user did not write this message."
+);
+
 fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -> Option<String> {
     if !briefed(provider, payload) || event != TaskHookEvent::PromptSubmit {
         return None;
@@ -1650,6 +1656,9 @@ fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -
             }
             antigravity_prompt(payload)
         }
+        TaskProvider::Codex => string(payload, &["prompt"])
+            .filter(|text| !text.trim_start().starts_with(CODEX_COMPOSER_REQUEST))
+            .map(str::to_string),
         _ => string(payload, &["prompt"]).map(str::to_string),
     }
 }
