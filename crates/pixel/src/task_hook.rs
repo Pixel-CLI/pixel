@@ -1353,9 +1353,8 @@ fn note_prompt(
             bytes: text.map_or(0, str::len),
         },
     );
-    if decision_log::append(&path, &line, feedback::MAX_LINES).is_ok() {
-        feedback::worktree::remember(&root, provider.as_str(), session);
-    }
+    let recorded = decision_log::append(&path, &line, feedback::MAX_LINES).is_ok();
+    feedback::worktree::remember(&root, provider.as_str(), session, recorded);
 }
 
 /// The bytes of brief a prompt-submit response carries: the

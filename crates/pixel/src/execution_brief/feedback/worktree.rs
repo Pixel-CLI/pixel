@@ -27,10 +27,15 @@ fn binding(root: &Path, provider: &str, session: &str) -> Option<PathBuf> {
     Some(state.join("brief-turns").join(key))
 }
 
-pub(crate) fn remember(root: &Path, provider: &str, session: &str) {
+pub(crate) fn remember(root: &Path, provider: &str, session: &str, recorded: bool) {
     let Some(path) = binding(root, provider, session) else {
         return;
     };
+    // A prompt that could not be logged still supersedes an earlier binding.
+    // A repository that never logged a prompt needs no routing state.
+    if !recorded && !path.exists() {
+        return;
+    }
     let Some(dir) = path.parent() else { return };
     if sidecar::private_dir(dir).is_ok() {
         crate::brief_parts::prune(dir, SystemTime::now(), MAX_AGE);

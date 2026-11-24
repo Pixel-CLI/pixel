@@ -340,6 +340,52 @@ fn tools_and_stops_follow_the_prompt_across_registered_worktrees() {
 }
 
 #[test]
+fn a_prompt_with_unavailable_feedback_must_not_charge_the_previous_checkout() {
+    let main = indexed("unlogged-linked");
+    let scratch = tempfile::tempdir().unwrap();
+    let tree = scratch.path().join("tree");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            tree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    hook(
+        &main,
+        "prompt-submit",
+        None,
+        &prompt_payload(&main, SESSION),
+        |_| {},
+    );
+    // A failed append at the new prompt must supersede the open turn in main.
+    let blocked = tree.join(".pixel/brief-feedback.jsonl");
+    std::fs::create_dir_all(&blocked).unwrap();
+    hook(
+        &tree,
+        "prompt-submit",
+        None,
+        &prompt_payload(&tree, SESSION),
+        |_| {},
+    );
+    std::fs::remove_dir(blocked).unwrap();
+    hook(
+        &tree,
+        "post-tool-use",
+        None,
+        &tool_payload(&tree, SESSION, "Read", &json!({"file_path":"fixture.txt"})),
+        |_| {},
+    );
+    hook(&main, "stop", None, &stop_payload(&main, SESSION), |_| {});
+    assert!(of_kind(&log_lines(&main), "tool").is_empty());
+    assert!(of_kind(&log_lines(&main), "turn").is_empty());
+    assert_eq!(of_kind(&log_lines(&tree), "tool").len(), 1);
+}
+
+#[test]
 fn the_log_should_hold_paths_and_counts_but_no_prompt_command_output_or_credential() {
     let root = indexed("private");
     hook(
