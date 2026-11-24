@@ -34,6 +34,12 @@ ms (`SHUTDOWN_FLUSH_TIMEOUT`) for the drain, so a late line is lost, not waited
 for. There is no switch that stops this log other than having no repository
 root.
 
+When a session uses linked Git worktrees, tool and stop events follow its
+latest prompt into that checkout's feedback log. File paths are relative to
+the checkout where the tool ran. A routed tool row carries its source
+`worktree` (the checkout hash used by the central brief log). Routing is
+best effort and starts with the first prompt observed by this version.
+
 **`brief-feedback.jsonl`** event kinds: `prompt` (bytes, gate, kind, the
 repository paths injected, best first, at most 32, and the SHA-256 of the typed
 text that joins it to the decision), `part` (bytes each hook part printed, and

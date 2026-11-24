@@ -36,6 +36,8 @@ use serde_json::{Value, json};
 
 use super::decision_log;
 
+pub(crate) mod worktree;
+
 /// File name under the repository's `.pixel` directory.
 pub(crate) const LOG_FILE: &str = "brief-feedback.jsonl";
 /// Lines the log keeps; the oldest go first.
@@ -50,7 +52,7 @@ const LOOKBACK_LINES: usize = 600;
 const MAX_TOOL_CHARS: usize = 64;
 
 /// The log of `root`, whether or not it is switched on.
-fn path_in(root: &Path) -> PathBuf {
+pub(crate) fn path_in(root: &Path) -> PathBuf {
     root.join(pixel_index::index::SHARD_DIR).join(LOG_FILE)
 }
 
@@ -119,14 +121,18 @@ pub(crate) fn tool_line(
     tool: &str,
     write: bool,
     paths: &[String],
+    worktree: Option<String>,
 ) -> String {
-    json!({
+    let mut line = json!({
         "provenance": crate::usage_journal::provenance("hook"),
         "t": "tool", "ts": ts_ms, "session": session_key(session), "provider": provider,
         "tool": tool.chars().take(MAX_TOOL_CHARS).collect::<String>(),
         "write": write, "paths": paths.iter().take(MAX_PATHS).collect::<Vec<_>>(),
-    })
-    .to_string()
+    });
+    if let Some(worktree) = worktree {
+        line["worktree"] = json!(worktree);
+    }
+    line.to_string()
 }
 
 /// The lines a `Stop` adds to the log as it stands (`existing`): the `stop`
@@ -136,7 +142,7 @@ pub(crate) fn stop_lines(existing: &str, ts_ms: u64, session: &str, provider: &s
     let key = session_key(session);
     let mut lines =
         vec![json!({"provenance": crate::usage_journal::provenance("hook"), "t": "stop", "ts": ts_ms, "session": key, "provider": provider}).to_string()];
-    if let Some(turn) = turn_summary(existing, &key, ts_ms) {
+    if let Some(turn) = turn_summary(existing, &key, provider, ts_ms) {
         lines.push(turn.to_string());
     }
     lines
@@ -169,7 +175,7 @@ fn push_unique(out: &mut Vec<String>, path: &str) {
 /// The turn the session `key` has open in `existing`: its last `prompt` line
 /// and the `tool` lines after it, summed up. `None` when no prompt is open
 /// (none was seen, or a `turn` line closed it already).
-pub(crate) fn turn_summary(existing: &str, key: &str, ts_ms: u64) -> Option<Value> {
+pub(crate) fn turn_summary(existing: &str, key: &str, provider: &str, ts_ms: u64) -> Option<Value> {
     let lines: Vec<&str> = existing.lines().collect();
     let from = lines.len().saturating_sub(LOOKBACK_LINES);
     let mut open: Option<(Value, Vec<Value>)> = None;
@@ -177,7 +183,9 @@ pub(crate) fn turn_summary(existing: &str, key: &str, ts_ms: u64) -> Option<Valu
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if value.get("session").and_then(Value::as_str) != Some(key) {
+        if value.get("session").and_then(Value::as_str) != Some(key)
+            || value["provider"] != provider
+        {
             continue;
         }
         if is(&value, "prompt") {
@@ -341,11 +349,27 @@ mod tests {
         let injected = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
         let existing = log(&[
             prompt_line(1, &briefed("s", &injected, 900)),
-            tool_line(2, "s", "codex", "Read", false, &["src/a.rs".to_string()]),
-            tool_line(3, "s", "codex", "Edit", true, &["src/c.rs".to_string()]),
-            tool_line(4, "s", "codex", "Bash", false, &[]),
+            tool_line(
+                2,
+                "s",
+                "codex",
+                "Read",
+                false,
+                &["src/a.rs".to_string()],
+                None,
+            ),
+            tool_line(
+                3,
+                "s",
+                "codex",
+                "Edit",
+                true,
+                &["src/c.rs".to_string()],
+                None,
+            ),
+            tool_line(4, "s", "codex", "Bash", false, &[], None),
         ]);
-        let turn = turn_summary(&existing, &session_key("s"), 9).unwrap();
+        let turn = turn_summary(&existing, &session_key("s"), "codex", 9).unwrap();
         assert_eq!(turn["t"], "turn");
         assert_eq!(turn["decision"], "d1");
         assert_eq!(turn["briefed"], true);
@@ -373,7 +397,7 @@ mod tests {
     #[test]
     fn a_prompt_without_a_brief_is_a_turn_that_was_not_briefed() {
         let existing = log(&[prompt_line(1, &briefed("s", &[], 0))]);
-        let turn = turn_summary(&existing, &session_key("s"), 2).unwrap();
+        let turn = turn_summary(&existing, &session_key("s"), "codex", 2).unwrap();
         assert_eq!(turn["briefed"], false);
         assert_eq!(turn["bytes"], 0);
     }
@@ -395,15 +419,31 @@ mod tests {
         let existing = log(&[
             prompt_line(1, &briefed("one", &injected, 500)),
             prompt_line(2, &briefed("two", &injected, 500)),
-            tool_line(3, "two", "codex", "Read", false, &["src/a.rs".to_string()]),
-            tool_line(4, "two", "codex", "Read", false, &["src/z.rs".to_string()]),
+            tool_line(
+                3,
+                "two",
+                "codex",
+                "Read",
+                false,
+                &["src/a.rs".to_string()],
+                None,
+            ),
+            tool_line(
+                4,
+                "two",
+                "codex",
+                "Read",
+                false,
+                &["src/z.rs".to_string()],
+                None,
+            ),
         ]);
-        let one = turn_summary(&existing, &session_key("one"), 9).unwrap();
+        let one = turn_summary(&existing, &session_key("one"), "codex", 9).unwrap();
         assert_eq!(one["calls"], 0);
-        let two = turn_summary(&existing, &session_key("two"), 9).unwrap();
+        let two = turn_summary(&existing, &session_key("two"), "codex", 9).unwrap();
         assert_eq!(two["calls"], 2);
         assert_eq!(two["overlap"], json!(["src/a.rs"]));
-        assert!(turn_summary(&existing, &session_key("three"), 9).is_none());
+        assert!(turn_summary(&existing, &session_key("three"), "codex", 9).is_none());
     }
 
     #[test]
@@ -411,10 +451,18 @@ mod tests {
         let injected = vec!["src/a.rs".to_string()];
         let existing = log(&[
             prompt_line(1, &briefed("s", &injected, 500)),
-            tool_line(2, "s", "codex", "Read", false, &["src/a.rs".to_string()]),
+            tool_line(
+                2,
+                "s",
+                "codex",
+                "Read",
+                false,
+                &["src/a.rs".to_string()],
+                None,
+            ),
             prompt_line(3, &briefed("s", &injected, 500)),
         ]);
-        let turn = turn_summary(&existing, &session_key("s"), 9).unwrap();
+        let turn = turn_summary(&existing, &session_key("s"), "codex", 9).unwrap();
         assert_eq!(
             turn["calls"], 0,
             "the interrupted prompt's calls are not carried over"
@@ -423,7 +471,7 @@ mod tests {
 
     #[test]
     fn a_line_holds_the_hashed_session_and_never_the_raw_id() {
-        let line = tool_line(1, "raw-session-id", "claude", "Read", false, &[]);
+        let line = tool_line(1, "raw-session-id", "claude", "Read", false, &[], None);
         assert!(!line.contains("raw-session-id"));
         assert!(line.contains(&session_key("raw-session-id")));
         let part = part_line(1, "raw-session-id", "codex", "p", (2, 3), (0, true));

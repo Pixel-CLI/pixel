@@ -249,6 +249,11 @@ Machine-wide:
   Code search selects `potion-code-16M-v2` independently of transcript
   preferences. Its offline opener reads cached model bytes directly and
   refuses missing files without contacting Hugging Face.
+- `$XDG_STATE_HOME/pixel/brief-turns/` (default `~/.local/state/pixel/brief-turns/`)
+  holds the latest prompt checkout hash per Git repository, provider and session.
+  Tool and stop feedback follows that checkout across registered worktrees.
+  Paths on tool rows are still extracted in the checkout that ran the tool.
+  Prompt hooks prune bindings older than seven days.
 - `~/.local/state/pixel/sniper/<project key>/`: the `pixel-session` error sink
   (`errors-v1.sqlite` plus a `project.json` naming the root);
   `$PIXEL_SNIPER_STATE_ROOT` overrides the state root.
