@@ -1332,10 +1332,10 @@ fn note_prompt(
     let Some(session) = brief_session(payload) else {
         return;
     };
-    let Some(path) = crate::discover_root(&payload_cwd(provider, payload))
-        .ok()
-        .and_then(|root| feedback::path_for(&root))
-    else {
+    let Ok(root) = crate::discover_root(&payload_cwd(provider, payload)) else {
+        return;
+    };
+    let Some(path) = feedback::path_for(&root) else {
         return;
     };
     let digest = decision_log::sha256_hex(prompt);
@@ -1353,7 +1353,9 @@ fn note_prompt(
             bytes: text.map_or(0, str::len),
         },
     );
-    let _ = decision_log::append(&path, &line, feedback::MAX_LINES);
+    if decision_log::append(&path, &line, feedback::MAX_LINES).is_ok() {
+        feedback::worktree::remember(&root, provider.as_str(), session);
+    }
 }
 
 /// The bytes of brief a prompt-submit response carries: the
@@ -1408,6 +1410,11 @@ fn note_event(
     };
     let ts = pixel_task::now_ms();
     let provider_name = provider.as_str();
+    let sibling = match event {
+        TaskHookEvent::PromptSubmit => None,
+        _ => feedback::worktree::sibling(&root, provider_name, session),
+    };
+    let path = sibling.as_deref().map_or(path, feedback::path_in);
     let _ = match event {
         TaskHookEvent::PromptSubmit => {
             let Some(prompt) = brief_prompt(provider, event, &payload) else {
@@ -1442,6 +1449,7 @@ fn note_event(
                 tool,
                 mutation(tool, input),
                 &feedback::tool_targets(&root, &cwd, input),
+                sibling.as_ref().map(|_| decision_log::project_id(&root)),
             );
             decision_log::append(&path, &line, feedback::MAX_LINES)
         }

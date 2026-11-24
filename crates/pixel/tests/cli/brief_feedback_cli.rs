@@ -247,6 +247,99 @@ fn an_answer_with_no_tool_call_should_close_a_zero_call_turn() {
 }
 
 #[test]
+fn tools_and_stops_follow_the_prompt_across_registered_worktrees() {
+    let main = indexed("linked");
+    let scratch = tempfile::tempdir().unwrap();
+    let tree = scratch.path().join("linked checkout");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            tree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    std::fs::create_dir(tree.join(".pixel")).unwrap();
+    // This path only exists where the tool ran.
+    std::fs::write(tree.join("linked-only.rs"), "// linked checkout").unwrap();
+    let read = |dir: &Path, session: &str| {
+        tool_payload(dir, session, "Read", &json!({"file_path":"linked-only.rs"}))
+    };
+    hook(
+        &main,
+        "prompt-submit",
+        None,
+        &prompt_payload(&main, SESSION),
+        |_| {},
+    );
+    hook(&tree, "post-tool-use", None, &read(&tree, SESSION), |_| {});
+    hook(
+        &tree,
+        "tool-failure",
+        None,
+        &tool_payload(&tree, SESSION, "Bash", &json!({})),
+        |_| {},
+    );
+    hook(
+        &tree,
+        "post-tool-use",
+        None,
+        &read(&tree, "another-session"),
+        |_| {},
+    );
+    hook_as(
+        "claude",
+        &tree,
+        "post-tool-use",
+        None,
+        &read(&tree, SESSION),
+        |_| {},
+    );
+    hook(&tree, "stop", None, &stop_payload(&tree, SESSION), |_| {});
+    hook(&main, "stop", None, &stop_payload(&main, SESSION), |_| {});
+    let lines = log_lines(&main);
+    let turns = of_kind(&lines, "turn");
+    assert_eq!(turns.len(), 1, "{lines:?}");
+    assert_eq!(turns[0]["calls"], 2);
+    assert_eq!(turns[0]["read"], json!(["linked-only.rs"]));
+    let tools = of_kind(&lines, "tool");
+    assert_eq!(tools.len(), 2);
+    assert_eq!(
+        tools[0]["worktree"],
+        format!(
+            "{:016x}",
+            xxhash_rust::xxh3::xxh3_64(tree.canonicalize().unwrap().to_string_lossy().as_bytes())
+        )
+    );
+    assert_eq!(of_kind(&log_lines(&tree), "tool").len(), 2);
+
+    // The next prompt moves ownership in the reverse direction.
+    hook(
+        &tree,
+        "prompt-submit",
+        None,
+        &prompt_payload(&tree, SESSION),
+        |_| {},
+    );
+    hook(
+        &main,
+        "post-tool-use",
+        None,
+        &tool_payload(&main, SESSION, "Read", &json!({"file_path":"fixture.txt"})),
+        |_| {},
+    );
+    hook(&main, "stop", None, &stop_payload(&main, SESSION), |_| {});
+    let lines = log_lines(&tree);
+    let turns = of_kind(&lines, "turn");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["calls"], 1);
+    assert_eq!(turns[0]["read"], json!(["fixture.txt"]));
+    assert_eq!(of_kind(&log_lines(&main), "turn").len(), 1);
+}
+
+#[test]
 fn the_log_should_hold_paths_and_counts_but_no_prompt_command_output_or_credential() {
     let root = indexed("private");
     hook(
