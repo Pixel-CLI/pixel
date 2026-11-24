@@ -77,6 +77,8 @@ pub(crate) struct Stage<'a> {
     pub(crate) prompt: &'a str,
     pub(crate) kind: Option<&'a str>,
     pub(crate) gate_closed: bool,
+    /// Whether general-purpose built-in probes can add evidence to this answer.
+    pub(crate) explore: bool,
     /// The deadline of the brief's window: no probe outlives it.
     pub(crate) deadline: Instant,
     /// Characters the merged brief may hold.
@@ -129,11 +131,15 @@ fn apply_staged<'a>(
                 || !steps.iter().chain(post).any(|step| step.name == probe.name)
         })
         .collect();
+    // An explicitly scoped caller lookup already read its named declaration.
+    // Keep external probes eligible, but never overlay a general walkthrough.
     let due_in = |registered: &[&'a Step]| -> Vec<&'a Step> {
         registered
             .iter()
             .copied()
-            .filter(|step| step.applies(stage.kind, stage.prompt, stage.gate_closed))
+            .filter(|step| {
+                stage.explore && step.applies(stage.kind, stage.prompt, stage.gate_closed)
+            })
             .filter(|step| !disabled.iter().any(|name| name == step.name))
             .collect()
     };
@@ -625,6 +631,7 @@ mod tests {
             prompt: "where is it",
             kind,
             gate_closed: false,
+            explore: true,
             deadline: Instant::now() + Duration::from_millis(ms),
             cap: 3 * 9_800,
             max_bytes: None,

@@ -1641,6 +1641,12 @@ arrow function is a method of its class in the graph (extractor 25), so a
 walkthrough can start at a handler written that way.
 The reads add no brief operation and fail open.
 
+A request for calls to a function declared in a named owner and file
+(`scoped_calls.rs`) goes directly to the current read-only graph, before
+French search expansion or walkthrough ranking. It checks the declaration’s
+extent against the owner and reads incoming exact call edges by site line.
+Built-in exploratory probes sit out this lookup. External probes stay eligible.
+
 **Keeping a daemon behind the brief.** Without a daemon the brief has no
 `meaning` leads, and a daemon exits after thirty minutes idle or becomes
 unusable when the protocol moves, so the hooks bring one back

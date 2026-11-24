@@ -25,6 +25,7 @@ pub(crate) mod probes;
 pub(crate) mod region_pack;
 pub(crate) mod relevance;
 pub(crate) mod routes;
+mod scoped_calls;
 pub(crate) mod sent;
 pub(crate) mod session_paths;
 mod steps;
@@ -354,9 +355,9 @@ const CODE_QUESTIONS: &[&str] = &[
 
 /// Source extensions that make a token a file name.
 const SOURCE_EXTENSIONS: &[&str] = &[
-    "c", "cpp", "cs", "css", "ex", "exs", "go", "h", "hpp", "html", "java", "js", "json", "jsx",
-    "kt", "lua", "md", "php", "py", "rb", "rs", "sh", "sql", "swift", "toml", "ts", "tsx", "vue",
-    "yaml", "yml",
+    "c", "cjs", "cpp", "cs", "css", "ex", "exs", "go", "h", "hpp", "html", "java", "js", "json",
+    "jsx", "kt", "lua", "md", "mjs", "php", "py", "rb", "rs", "sh", "sql", "swift", "toml", "ts",
+    "tsx", "vue", "yaml", "yml",
 ];
 
 const PASTE_OPEN: &str = "<pasted_content";

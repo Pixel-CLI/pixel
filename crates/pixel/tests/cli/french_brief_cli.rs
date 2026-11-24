@@ -173,3 +173,106 @@ fn the_mapping_should_be_on_when_nothing_turns_it_off() {
     let text = stdout(&output);
     assert!(text.contains(FILE), "{text}");
 }
+
+/// A walkthrough would follow the short file's homonym out to ping. This
+/// question asks for incoming sites of the declaration inside the named owner.
+#[test]
+fn scoped_calls_should_list_only_sites_of_the_requested_nested_function() {
+    let root = Scratch::for_test("french-brief-cli", "scoped-calls");
+    let worker = "src/tasks/worker.mjs";
+    std::fs::create_dir_all(root.join("src/tasks")).unwrap();
+    std::fs::write(
+        root.join(worker),
+        [
+            "export function executeRun() {",
+            "  const alive = () => true;",
+            "  function emit() { return alive(); }",
+            "  if (!alive()) return;",
+            "  return alive();",
+            "}",
+            "export function otherTask() { return false; }",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.cjs"),
+        [
+            "function ping() { return true; }",
+            "function executeRun() {",
+            "  const alive = () => ping();",
+            "  return alive();",
+            "}",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("duplicate.mjs"),
+        [
+            "function firstScope() {",
+            "  const alive = () => true;",
+            "  return alive();",
+            "}",
+            "function secondScope() {",
+            "  const alive = () => false;",
+            "  return alive();",
+            "}",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitignore"), ".pixel/\n").unwrap();
+    git(&root, &["init", "-q"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "fixture"]);
+    let prepare = pixel_command()
+        .args(["prepare-repo", "--no-daemon"])
+        .arg(&*root)
+        .output()
+        .unwrap();
+    assert!(prepare.status.success(), "{prepare:?}");
+    let ask = |prompt: &str| {
+        let out = pixel_command()
+            .current_dir(&*root)
+            .env("PIXEL_BRIEF", "1")
+            .env("PIXEL_BRIEF_PROBES", "1")
+            .args(["brief", "--metrics", "off", prompt, "."])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        stdout(&out)
+    };
+    for prompt in [
+        "Liste tous les appels de la fonction `alive` déclarée dans executeRun (src/tasks/worker.mjs), et seulement celle-là, pas ses homonymes, au format fichier:ligne.",
+        "In src/tasks/worker.mjs, list the calls to `alive` defined in `executeRun`.",
+    ] {
+        let brief = ask(prompt);
+        let sites: Vec<_> = brief
+            .lines()
+            .filter(|line| line.starts_with("src/tasks/worker.mjs:"))
+            .collect();
+        assert_eq!(
+            sites,
+            [
+                "src/tasks/worker.mjs:3",
+                "src/tasks/worker.mjs:4",
+                "src/tasks/worker.mjs:5"
+            ],
+            "{brief}"
+        );
+        assert!(brief.contains("src/tasks/worker.mjs:2"), "{brief}");
+        assert!(!brief.contains("main.cjs"), "{brief}");
+    }
+    for prompt in [
+        "Liste les appels de `alive` déclarée dans otherTask (src/tasks/worker.mjs).",
+        "Who calls alive defined in secondScope (duplicate.mjs)?",
+    ] {
+        let missing = ask(prompt);
+        assert!(missing.contains("could not verify"), "{missing}");
+        assert!(
+            !missing.contains("Exact indexed call sites") && !missing.contains("main.cjs"),
+            "{missing}"
+        );
+    }
+}

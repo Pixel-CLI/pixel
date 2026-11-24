@@ -35,6 +35,12 @@ silence it.
 
 A list that does not fit loses entries and says how many.
 
+When a caller question names a nested function, its enclosing function and one
+source file, the brief gives the declaration and exact indexed call sites as
+`path:line`. It marks omitted sites when the list reaches the output limit.
+If the graph cannot distinguish the declaration, the brief reports that
+uncertainty. A missing or stale graph can leave the request without a brief.
+
 ## Who gets a brief
 
 A prompt gets no brief at all, and the decision record says why (`gate:
