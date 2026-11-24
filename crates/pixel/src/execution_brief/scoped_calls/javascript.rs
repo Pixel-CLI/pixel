@@ -45,9 +45,12 @@ pub(super) fn sites(
             continue;
         }
         let parent = node.parent()?;
-        if parent.kind() == "call_expression"
-            && parent.child_by_field_name("function") == Some(node)
-        {
+        let callee = match parent.kind() {
+            "call_expression" => parent.child_by_field_name("function"),
+            "new_expression" => parent.child_by_field_name("constructor"),
+            _ => None,
+        };
+        if callee == Some(node) {
             calls.push((at, u32::try_from(node.start_position().row + 1).ok()?));
         } else if let Some((binder, scope)) = binding(node) {
             if binder.child_by_field_name("name") == Some(node)
@@ -166,6 +169,13 @@ fn binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
                     "statement_block" | "switch_body" | "for_statement" | "for_in_statement"
                 ))
         })?;
+        // A body-local var is hoisted within the body. Default parameters
+        // are evaluated in the surrounding environment before that body.
+        let scope = if var {
+            scope.child_by_field_name("body").unwrap_or(scope)
+        } else {
+            scope
+        };
         return Some((binder, scope));
     }
     None

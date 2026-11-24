@@ -233,6 +233,22 @@ fn scoped_calls_should_list_only_sites_of_the_requested_nested_function() {
     )
     .unwrap();
     std::fs::write(
+        root.join("constructors.js"),
+        [
+            "function run() {",
+            "  function Alive() {}",
+            "  const alive = () => true;",
+            "  function inner(value = alive()) {",
+            "    var alive;",
+            "    return value;",
+            "  }",
+            "  return new Alive(inner());",
+            "}",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    std::fs::write(
         root.join("nested.py"),
         "def run_task():\n    def alive():\n        return alive()\n",
     )
@@ -293,6 +309,19 @@ fn scoped_calls_should_list_only_sites_of_the_requested_nested_function() {
             .any(|line| line.starts_with("src/tasks/worker.mjs:")),
         "{spaced}"
     );
+    for (target, expected) in [
+        ("Alive", "constructors.js:8"),
+        ("alive", "constructors.js:4"),
+    ] {
+        let result = ask(&format!(
+            "Who calls {target} defined in run (constructors.js)?"
+        ));
+        let sites: Vec<_> = result
+            .lines()
+            .filter(|line| line.starts_with("constructors.js:"))
+            .collect();
+        assert_eq!(sites, [expected], "{result}");
+    }
     let python = ask("Who calls alive defined in run_task (nested.py)?");
     assert!(python.lines().any(|line| line == "nested.py:3"), "{python}");
     for prompt in [
