@@ -410,8 +410,8 @@ V=vx.y.z; D=$(mktemp -d); cd "$D"
 gh release view $V --repo Pixel-CLI/pixel --json isDraft,isPrerelease,isImmutable,body \
   --jq '{isDraft, isPrerelease, isImmutable, body: .body[0:200]}'   # false, false, true, the changelog section (not "See [CHANGELOG.md]")
 gh release download $V --repo Pixel-CLI/pixel
-ls                                                     # 15 assets: 3 archives, 3 checksums, 3 SBOMs, 2 bottles, 2 formulas, installer, bundle
-for f in pixel-v*.tar.gz pixel-v*.cdx.json pixel-*.bottle.tar.gz install.sh; do
+ls                                                     # 18 assets: 3 archives, 3 checksums, 3 SBOMs, 3 symbol archives, 2 bottles, 2 formulas, installer, bundle
+for f in pixel-v*.tar.gz pixel-v*.cdx.json pixel-v*.symbols.tar.xz pixel-*.bottle.tar.gz install.sh; do
   gh attestation verify "$f" --repo Pixel-CLI/pixel --signer-workflow Pixel-CLI/pixel/.github/workflows/release-build.yml || exit "$?"
   gh attestation verify "$f" --repo Pixel-CLI/pixel --signer-workflow Pixel-CLI/pixel/.github/workflows/release-build.yml --bundle "pixel-$V.intoto.jsonl" || exit "$?"
 done
@@ -428,9 +428,9 @@ git -C <repo> rev-list -n 1 $V                         # must equal the `commit:
 gh run view <run-id> --repo Pixel-CLI/pixel         # no ANNOTATIONS section = no no-token/no-changelog warning
 ```
 
-Verify the asset names, not only the count: `release-build.yml` stages 15
-files (3 archives + 3 checksums + 3 SBOMs + 2 bottles + 2 formulas + installer
-+ provenance bundle). Read each SBOM's metadata against its target and
+Verify the asset names, not only the count: `release-build.yml` stages 18
+files (3 archives + 3 checksums + 3 SBOMs + 3 symbol archives + 2 bottles
++ 2 formulas + installer + provenance bundle). Read each SBOM's metadata against its target and
 version; a bundle file alone is not a successful provenance verification.
 Read the full published body against the released changelog section, allowing
 the workflow's VirusTotal addition and recorded editorial corrections. Check
@@ -451,7 +451,7 @@ Report in this shape, and copy it into the record:
 Release vx.y.z: published and verified | NOT verified
 - run <url>: verify ✓, assets (builds + attest) ✓, release ✓, smoke ✓✓✓, virustotal ✓ | notice
 - smoke: asset ✓✓✓, install.sh ✓✓✓ | notice, brew macOS ✓ | skipped, brew Linux bottle ✓✓ | notice
-- assets: 15, 3 SBOMs, provenance online + bundle verified with release-build.yml, 3 checksums OK, formula, bottle and source-archive hashes match, install.sh == tag's, immutable
+- assets: 18, 3 SBOMs, 3 symbol archives, provenance online + bundle verified with release-build.yml, 3 checksums OK, formula, bottle and source-archive hashes match, install.sh == tag's, immutable
 - body: CHANGELOG ## [x.y.z] section + VirusTotal links when enabled + recorded corrections
 - tap: Formula/pixel.rb == release pixel.rb (commit "pixel x.y.z")
 - binary: aarch64-apple-darwin prints pixel x.y.z, commit <sha> == tag
