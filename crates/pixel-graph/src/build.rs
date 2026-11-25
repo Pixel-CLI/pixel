@@ -191,7 +191,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 32: a Go call through a package name (`daemon.Run()`) links the function
 ///    of the directory an import of the calling file ends with, at
 ///    `Probable`, where several packages define the name (#1456).
-pub const EXTRACTOR_VERSION: &str = "32";
+/// 33: a Go package member passed as an argument (`run(start.Run)`) is a
+///    reference to that package's function (#1458).
+pub const EXTRACTOR_VERSION: &str = "33";
 
 /// True iff the graph's rows were written by the current extractor, from
 /// the Rust and Ruby sources the switches ask for now

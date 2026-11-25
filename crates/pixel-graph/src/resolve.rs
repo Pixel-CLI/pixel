@@ -59,6 +59,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use rusqlite::params;
 
+use crate::extract::GO_PACKAGE_REFERENCE;
 use crate::extract::ruby_associations::ASSOCIATION_REFERENCE;
 use crate::extract::ruby_callbacks::{ROUTE_REFERENCE, ReferenceKind, reference_kind};
 use crate::store::{
@@ -525,6 +526,11 @@ impl ResolveIndex {
     /// definitions remain unresolved because their load order is unknown.
     /// Both initial references and stored references replay this rule; ordinary
     /// identifier arguments retain the name/import lookup of [`Self::decide_at`].
+    ///
+    /// A Go package member (`run(start.Run)`, `arg_of` carrying
+    /// [`GO_PACKAGE_REFERENCE`]) is the function of that package
+    /// ([`Self::go_package_match`]) or nothing: the name tiers would link a
+    /// same-name function of a package the argument does not name.
     pub fn decide_reference(
         &self,
         file_id: i64,
@@ -533,6 +539,11 @@ impl ResolveIndex {
         arg_of: Option<&str>,
         site_line: u32,
     ) -> Decision {
+        if let Some(package) = arg_of.and_then(|arg_of| arg_of.strip_prefix(GO_PACKAGE_REFERENCE)) {
+            return self
+                .go_package_match(file_id, package, name)
+                .map_or(Decision::Unresolved, Decision::Probable);
+        }
         let Some(kind) = self.ruby_reference_kind(file_id, arg_of) else {
             return self.decide_at(file_id, name, None, site_line);
         };
@@ -2169,6 +2180,48 @@ mod tests {
             idx.decide_at(main, "Run", Some("worker"), 9),
             Decision::Unresolved
         );
+    }
+
+    /// A function handed over through its package name (`run(start.Run)`)
+    /// is the one of that package or nothing: the sole `Only` of another
+    /// package is not what `start.Only` names, while a bare `Only` argument
+    /// keeps the name tiers.
+    #[test]
+    fn a_go_package_reference_should_name_the_imported_package_or_nothing() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let main = store.replace_file("main.go", "o1", "go").unwrap();
+        let start = store
+            .replace_file("internal/start/start.go", "o2", "go")
+            .unwrap();
+        let daemon = store
+            .replace_file("internal/daemon/cli.go", "o3", "go")
+            .unwrap();
+        let start_run = insert(&store, start, "internal/start/start.go", "Run");
+        let daemon_run = insert(&store, daemon, "internal/daemon/cli.go", "Run");
+        let only = insert(&store, daemon, "internal/daemon/cli.go", "Only");
+        for spec in [
+            "example.com/app/internal/start",
+            "example.com/app/internal/daemon",
+        ] {
+            store.insert_import(main, spec, None, &[]).unwrap();
+        }
+        let idx = ResolveIndex::build(&store).unwrap();
+        let cases = [
+            ("Run", ":go-package start", Decision::Probable(start_run)),
+            ("Run", ":go-package daemon", Decision::Probable(daemon_run)),
+            ("Run", ":go-package worker", Decision::Unresolved),
+            ("Only", ":go-package start", Decision::Unresolved),
+            ("Only", ":go-package daemon", Decision::Probable(only)),
+            ("Only", "run", Decision::Probable(only)),
+            ("Run", "run", Decision::Unresolved),
+        ];
+        for (name, arg_of, want) in cases {
+            assert_eq!(
+                idx.decide_reference(main, None, name, Some(arg_of), 9),
+                want,
+                "{name} as an argument of {arg_of}"
+            );
+        }
     }
 
     #[test]

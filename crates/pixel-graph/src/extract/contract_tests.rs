@@ -282,6 +282,34 @@ fn go_imports_should_list_each_path_unquoted_grouped_or_single() {
     assert!(fx.imports.iter().all(|i| i.bindings.is_empty()));
 }
 
+const GO_VALUE_SRC: &str = r#"package main
+
+import (
+	"example.com/app/internal/start"
+	"os"
+)
+
+func main() {
+	user := load()
+	run(start.Run, user.Name, os.Exit, start.cfg.Hook, load().Run)
+}
+"#;
+
+#[test]
+fn go_should_record_a_package_member_argument_and_no_member_of_a_value() {
+    // `start` and `os` end an import of the file: their members are
+    // functions handed over. `user` is a value, `start.cfg` a field and
+    // `load()` a call: what they carry is data.
+    let fx = extract("main.go", GO_VALUE_SRC);
+    assert_eq!(
+        references(&fx),
+        vec![
+            ("Run".to_string(), Some(":go-package start".to_string())),
+            ("Exit".to_string(), Some(":go-package os".to_string())),
+        ]
+    );
+}
+
 // --- Java --------------------------------------------------------------------
 
 const JAVA_SRC: &str = r#"package com.example;

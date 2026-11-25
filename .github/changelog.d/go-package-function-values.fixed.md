@@ -1,0 +1,1 @@
+**graph:** a Go function handed over through its package name (`run(start.Run)`) is now a reference to that package's function, so `who-calls` and `impact` show where it is passed on. A member of a value (`user.Name`) still records nothing. Existing graphs are rebuilt once.
