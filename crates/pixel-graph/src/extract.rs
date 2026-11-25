@@ -707,7 +707,9 @@ const SELF_RECEIVERS: &[&str] = &["this", "self", "Self"];
 /// - a path (`Self::helper`, `module::func`), which names an item;
 /// - a member access only on a self receiver (`this.onClick`). A member of
 ///   any other value (`user.name`) is data: resolving its property name
-///   against every function of that name linked unrelated code.
+///   against every function of that name linked unrelated code;
+/// - a Go package member (`start.Run`, [`go_package_member`]), recorded
+///   with its package in `arg_of` instead of the receiving callee.
 fn walk_call_arguments(w: &mut Walker, call: Node, arg_of: Option<String>) {
     let Some(args) = call.child_by_field_name("arguments") else {
         return;
@@ -724,6 +726,10 @@ fn walk_call_arguments(w: &mut Walker, call: Node, arg_of: Option<String>) {
         } else {
             arg
         };
+        if let Some((package, name)) = go_package_member(w, arg) {
+            w.push_reference(name, call, Some(format!("{GO_PACKAGE_REFERENCE}{package}")));
+            continue;
+        }
         let name = match arg.kind() {
             "identifier" | "simple_identifier" | "variable" => Some(w.text(arg)),
             "scoped_identifier" => field_text(w, arg, "name"),
@@ -738,6 +744,36 @@ fn walk_call_arguments(w: &mut Walker, call: Node, arg_of: Option<String>) {
             w.push_reference(name, call, arg_of.clone());
         }
     }
+}
+
+/// `arg_of` prefix of a Go package member handed over as a value; the
+/// package name follows (`:go-package start` for `run(start.Run)`). The
+/// resolver reads the package from it (`ResolveIndex::decide_reference`).
+pub(crate) const GO_PACKAGE_REFERENCE: &str = ":go-package ";
+
+/// The `(package, member)` of a Go selector `start.Run` whose operand is a
+/// plain identifier ending an import this file has stated so far (imports
+/// precede every other declaration of a Go file). A member of anything else
+/// (`user.Name`, `start.cfg.Hook`, `load().Run`) is data. A local variable
+/// named like an imported package is read as the package: the resolver
+/// keeps such a reference at `Probable`.
+fn go_package_member(w: &Walker, arg: Node) -> Option<(String, String)> {
+    if arg.kind() != "selector_expression" {
+        return None;
+    }
+    let operand = arg.child_by_field_name("operand")?;
+    if operand.kind() != "identifier" {
+        return None;
+    }
+    let package = w.text(operand);
+    let imported = w
+        .imports
+        .iter()
+        .any(|import| import.spec.rsplit('/').next() == Some(package.as_str()));
+    if !imported {
+        return None;
+    }
+    Some((package, field_text(w, arg, "field")?))
 }
 
 /// Identifier operands of a fallback chain used as a callee: `(x ?? handler)(...)`,

@@ -3,7 +3,9 @@
 
 //! Integration tests for Go calls through a package name (#1456):
 //! `daemon.Run()` names the function `Run` of the package an import of the
-//! calling file points at, whatever other package defines a `Run` too.
+//! calling file points at, whatever other package defines a `Run` too. A
+//! function handed over the same way (`run(start.Run)`, #1458) is a
+//! reference to it.
 
 use std::fs;
 use std::path::Path;
@@ -140,4 +142,95 @@ fn two_functions_of_the_name_in_the_package_should_leave_the_call_unresolved() {
     // this: the graph cannot tell which one a build keeps, and never picks
     // by symbol order.
     assert_eq!(runs_reached_from_main(&db), Vec::new());
+}
+
+const MAIN_VALUE: &str = "package main\n\nimport (\n\t\"example.com/app/internal/daemon\"\n\t\"example.com/app/internal/start\"\n)\n\nfunc main() {\n\tdaemon.Only()\n\trun(start.Run)\n}\n\nfunc run(f func()) { f() }\n";
+
+fn start_run_referenced() -> Vec<(String, EdgeKind, Tier)> {
+    vec![(
+        "internal/start/start.go#Run#function".to_string(),
+        EdgeKind::References,
+        Tier::Probable,
+    )]
+}
+
+/// Rows of `unresolved_calls` naming `Run`, of any kind.
+fn unresolved_runs(db: &Path) -> i64 {
+    GraphStore::open(db)
+        .unwrap()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM unresolved_calls WHERE name = 'Run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_go_function_passed_through_its_package_name_should_be_referenced_by_the_caller() {
+    let root = tempfile::tempdir().unwrap();
+    write(root.path(), "main.go", MAIN_VALUE);
+    write(
+        root.path(),
+        "internal/daemon/cli.go",
+        "package daemon\n\nfunc Run() {}\n\nfunc Only() {}\n",
+    );
+    write(root.path(), "internal/start/start.go", START);
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+
+    // Before #1458 a `pkg.Func` argument was dropped with every other member
+    // access: `main` reached no `Run` at all.
+    assert_eq!(runs_reached_from_main(&db), start_run_referenced());
+
+    write(
+        root.path(),
+        "main.go",
+        &format!("// entry point\n{MAIN_VALUE}"),
+    );
+    update_file(root.path(), &db, "main.go").unwrap();
+    assert_eq!(
+        runs_reached_from_main(&db),
+        start_run_referenced(),
+        "caller rewritten"
+    );
+
+    write(
+        root.path(),
+        "internal/start/start.go",
+        &format!("// Package start boots the app.\n{START}"),
+    );
+    update_file(root.path(), &db, "internal/start/start.go").unwrap();
+    assert_eq!(
+        runs_reached_from_main(&db),
+        start_run_referenced(),
+        "target rewritten"
+    );
+    assert_eq!(unresolved_runs(&db), 0);
+}
+
+#[test]
+fn a_member_of_a_go_value_passed_as_an_argument_should_record_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    write(
+        root.path(),
+        "main.go",
+        "package main\n\nimport \"example.com/app/internal/start\"\n\nfunc main() {\n\tuser := start.Load()\n\trun(user.Run)\n}\n\nfunc run(f func()) { f() }\n",
+    );
+    write(root.path(), "internal/daemon/cli.go", DAEMON);
+    write(
+        root.path(),
+        "internal/start/start.go",
+        "package start\n\ntype User struct{}\n\nfunc Load() User { return User{} }\n",
+    );
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+
+    // `user` is a value: `user.Run` is its method, not the sole function
+    // `Run` the repository happens to define in another package.
+    assert_eq!(runs_reached_from_main(&db), Vec::new());
+    assert_eq!(unresolved_runs(&db), 0);
 }
